@@ -1,0 +1,44 @@
+[
+  {
+    "path": "dist/native/sand-webauthn-signer",
+    "sha256": "83fe5c13ee25fcf6bc9b7a81d19ee122148c933e7b8513688889029b441f8283",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/native/sand-webauthn-signer\nIdentifier=sand-webauthn-signer\nFormat=Mach-O universal (x86_64 arm64)\nCodeDirectory v=20500 size=19840 flags=0x10000(runtime) hashes=609+7 location=embedded\nSignature size=9065\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:55\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=26.2.0\nSealed Resources=none\nInternal requirements count=1 size=180\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/native/sand-webauthn-signer:\n\t/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4201.0.0)\n\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n"
+  },
+  {
+    "path": "dist/native/sand-op-launcher",
+    "sha256": "4202aed5be5aaa1e6d29ab38523e5220894e6c78d5b97b7bbf932047e1f13eca",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/native/sand-op-launcher\nIdentifier=sand-op-launcher\nFormat=Mach-O universal (x86_64 arm64)\nCodeDirectory v=20500 size=508 flags=0x10000(runtime) hashes=5+7 location=embedded\nSignature size=9065\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:55\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=26.2.0\nSealed Resources=none\nInternal requirements count=1 size=176\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/native/sand-op-launcher:\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4201.0.0)\n\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.60.40)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n"
+  },
+  {
+    "path": "dist/deps/sand-notification-settings/build/Release/sand_notification_settings.node",
+    "sha256": "9da116d9f24228ea99cf8840e85e749c668ea1f2934b41ec392c131dfb5a5102",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/sand-notification-settings/build/Release/sand_notification_settings.node\nIdentifier=sand_notification_settings\nFormat=Mach-O thin (x86_64)\nCodeDirectory v=20500 size=550 flags=0x10000(runtime) hashes=11+2 location=embedded\nSignature size=9065\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:54\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=26.2.0\nSealed Resources=none\nInternal requirements count=1 size=188\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/sand-notification-settings/build/Release/sand_notification_settings.node:\n\t/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 4201.0.0)\n\t/System/Library/Frameworks/UserNotifications.framework/Versions/A/UserNotifications (compatibility version 1.0.0, current version 1.0.0, weak)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.67.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4201.0.0)\n\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)\n"
+  },
+  {
+    "path": "dist/deps/tree-sitter-bash/prebuilds/darwin-x64/tree-sitter-bash.node",
+    "sha256": "02ea4749149e3e6819216a71efd7da72cf004b9fbbf40ee924c7f89305e3ee50",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/tree-sitter-bash/prebuilds/darwin-x64/tree-sitter-bash.node\nIdentifier=tree-sitter-bash\nFormat=Mach-O thin (x86_64)\nCodeDirectory v=20500 size=11132 flags=0x10000(runtime) hashes=342+2 location=embedded\nSignature size=9145\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:54\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=14.0.0\nSealed Resources=none\nInternal requirements count=1 size=176\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/tree-sitter-bash/prebuilds/darwin-x64/tree-sitter-bash.node:\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1600.151.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1336.0.0)\n"
+  },
+  {
+    "path": "dist/deps/tree-sitter/build/Release/tree_sitter_runtime_binding.node",
+    "sha256": "2fda100ab230514b849e1e6143d8884f8c47c4023180cc55cf37ca576ee2a2dc",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/tree-sitter/build/Release/tree_sitter_runtime_binding.node\nIdentifier=tree_sitter_runtime_binding\nFormat=Mach-O thin (x86_64)\nCodeDirectory v=20500 size=3751 flags=0x10000(runtime) hashes=111+2 location=embedded\nSignature size=9145\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:54\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=26.2.0\nSealed Resources=none\nInternal requirements count=1 size=188\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/tree-sitter/build/Release/tree_sitter_runtime_binding.node:\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.67.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n"
+  },
+  {
+    "path": "dist/deps/cursor-proclist/build/Release/cursor_proclist.node",
+    "sha256": "1d70840f84bd7ab8f9e7703bdebb3ccd8658753608949864816084580dc9d87d",
+    "signature": "Executable=/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.node\nIdentifier=cursor_proclist\nFormat=Mach-O thin (x86_64)\nCodeDirectory v=20500 size=635 flags=0x10000(runtime) hashes=14+2 location=embedded\nSignature size=9065\nAuthority=Developer ID Application: Anysphere Incorporated (DCNK4UB866)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Oct 11, 2026 at 1:31:54\u202fAM\nInfo.plist=not bound\nTeamIdentifier=DCNK4UB866\nRuntime Version=26.2.0\nSealed Resources=none\nInternal requirements count=1 size=176\n",
+    "verify_exit": 0,
+    "dependencies": "/Applications/Grok Bot.app/Contents/Resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.node:\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.67.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n"
+  }
+]

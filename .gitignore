@@ -1,0 +1,21 @@
+# Runtime profiles and credentials belong outside the retained investigation.
+.env
+.env.*
+!.env.example
+artifacts/runtime-profile/
+vue/*browser*/
+vue/*profile*/
+__pycache__/
+target/
+try-data/
+app/build/
+app/qa/
+
+# Local analysis archives are retained on disk, outside the source history.
+/inputs/
+/artifacts/client/
+/artifacts/formatted/
+/evidence/rea-bundle.json
+/vue/qa/
+/Forge compagnon.app
+.DS_Store

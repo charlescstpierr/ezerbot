@@ -1,0 +1,520 @@
+{
+  "created_at_utc": "2026-10-12T03:05:51.637314+00:00",
+  "user_language": "français",
+  "authorized_work": "Analyse complète et architecture Rust conservées; reprise autorisée le 13 octobre 2026: consolider le socle Rust et les reprises après panne avec sous-agents; puis création d’un beau wrapper, choisi comme app locale, avec les sous-agents",
+  "root": "/Users/cstpierrecharles/Desktop/grokbot-rust",
+  "original_investigation_root": "/Users/cstpierrecharles/grokbot-reconstruction",
+  "original_view": "/Users/cstpierrecharles/.lavish/grokbot/architecture.html",
+  "saved_view": "vue/architecture.html",
+  "original_local_review_url": "http://127.0.0.1:4387/session/1491f4f66df720c6",
+  "next_session_entrypoint": "LIRE_EN_PREMIER.md",
+  "complete_missing_list": "MANQUES_COMPLETS.md",
+  "resume_instructions": "PROCHAINE_SESSION.md",
+  "rust_product_implemented": true,
+  "authenticated_runtime_verified": false,
+  "analysis_graph_complete": false,
+  "input": {
+    "product": "Grok Bot",
+    "version": "0.70.2",
+    "architecture": "macOS x86_64",
+    "installed_path": "/Applications/Grok Bot.app",
+    "saved_copy": "inputs/Grok Bot.app",
+    "asar_sha256": "9fe94a66942f8511281f6d7c80a42432d749284c46e1e26f5b6d2f99b87652b0"
+  },
+  "rea": {
+    "parent_evidence_id": "ev_a8b822a62831e30bd01eb4c4488b36f0bd50cb8ccc41d83e2dcff4e00cf82a4d",
+    "portable_bundle": "evidence/rea-bundle.json",
+    "cached_cli_version": "rea-agents 6.4.0",
+    "cached_cli_at_save": "/Users/cstpierrecharles/.npm/_npx/dea9475797100b20/node_modules/.bin/rea",
+    "mcp_transport": "Transport closed; availability must be rechecked"
+  },
+  "counts": {
+    "extracted_files": 673,
+    "parsed_js_files": 600,
+    "parse_failures": 0,
+    "services": 7,
+    "method_entries": 484,
+    "unique_rpc_type_pairs": 429,
+    "messages": 2313,
+    "enums": 287,
+    "feature_families": 45,
+    "native_asar_contradictions": 6
+  },
+  "known_corrections": [
+    "Prompt-only routines are valid; a skill is optional.",
+    "Realtime voice observed as WSS JSON PCM16 24 kHz, not WebRTC.",
+    "Computer Use helper is outside ASAR, not one of six contradicted companions.",
+    "Teaching, spending/virtual cards and hosted apps are separate required families.",
+    "UI has a direct MessagePort to the coordinator.",
+    "Node VM descriptor evaluation is not inert parsing or proof of a security sandbox."
+  ],
+  "next_recommended_build_phase": "Connect a chosen model/provider to the local wrapper or build the independent control-plane/worker; follow next user instruction",
+  "needs_now_for_rust_build": [
+    "Use installed ~/.cargo/bin toolchain or tools/verify-rust.py",
+    "Dedicated remote/CI still to establish",
+    "Control-plane independent protocol, idempotent command acceptance, durable outbox, simulated worker"
+  ],
+  "needs_later": [
+    "Original authenticated test scenarios",
+    "Model/provider configuration",
+    "Identity and storage services",
+    "Cloud computers and workers",
+    "Connector sandbox accounts and OAuth apps",
+    "Native OS permissions and hardware",
+    "Payment/hosting sandbox providers",
+    "Signing, CI and distribution",
+    "Additional platform artifacts if parity includes them"
+  ],
+  "pending_feature_implementation": [
+    {
+      "id": "boot",
+      "feature": "Démarrage et processus",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "DesktopHost et Coordinator séparés; hello versionné et confiance du caller",
+      "acceptance_to_prove": "Remplacer le renderer sans accepter les réponses d'une ancienne génération",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "ui",
+      "feature": "Interface, composeur et documents",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "Iced, éditeur riche, viewers et adaptateur OS",
+      "acceptance_to_prove": "Mentions, IME, collage, clavier, lecteurs d'écran et grandes conversations",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "auth",
+      "feature": "Connexion et rotation",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "AuthService avec epoch, single-flight et coffre OS",
+      "acceptance_to_prove": "Refresh tardif après logout; retour navigateur périmé"
+    },
+    {
+      "id": "accounts",
+      "feature": "Multi-compte",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "AccountRuntime révocable et caches scoped",
+      "acceptance_to_prove": "Changer de compte pendant send, sync, approval et accès local",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "links",
+      "feature": "Deep links",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Grammaire, canonicalisation, queue et déduplication",
+      "acceptance_to_prove": "Lien avant boot, après reload et vers un bot inaccessible"
+    },
+    {
+      "id": "bots",
+      "feature": "Profils et création de bots",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "BotRegistry, versions et route de run indépendante",
+      "acceptance_to_prove": "Création répétée avec même nonce; changement de rôle et visibilité"
+    },
+    {
+      "id": "sessions",
+      "feature": "Sessions et rooms",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "contract",
+      "planned_rust": "ConversationId scoped par compte, bot et session; membership",
+      "acceptance_to_prove": "Deux humains avec un bot d'équipe ne partagent pas accidentellement une session privée",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "mainbot",
+      "feature": "Bot principal et roster",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Préférences de roster et coordination durable",
+      "acceptance_to_prove": "Bot masqué, épinglé, supprimé et bot principal remplacé"
+    },
+    {
+      "id": "submission",
+      "feature": "Journal d'envoi",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "Journal durable avec nonce, reçu et attente d'écho",
+      "acceptance_to_prove": "Panne avant POST, après acceptation et avant écho; aucun doublon logique",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "replication",
+      "feature": "Snapshots et deltas",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "Génération serveur distincte de ReplicaEpoch et ReplicaSequence",
+      "acceptance_to_prove": "Trou, duplicate, cursorTooOld, corps manquant et changement de source",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "cancel",
+      "feature": "Annulation et nouvelle conversation",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "CancelQueued, cancel RPC, interrupt run et reset conversation distincts",
+      "acceptance_to_prove": "Réponse tardive d'outil après interruption; message accepté conservé",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "agent-engine",
+      "feature": "Moteur d'agent et prompts",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "unknown",
+      "planned_rust": "RunEngine, ModelGateway, checkpoints, budgets et outils",
+      "acceptance_to_prove": "Évaluations de tâches et résultats; pas d'égalité supposée des réponses du modèle"
+    },
+    {
+      "id": "memory",
+      "feature": "Mémoire",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Mémoire avec portée, version, source et budget de contexte",
+      "acceptance_to_prove": "Fact obsolète remplacé; duplication de bot sans mémoire privée copiée"
+    },
+    {
+      "id": "delegation",
+      "feature": "Sous-agents et coordination",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Messages durables avec corrélation, budgets et prévention des cycles",
+      "acceptance_to_prove": "Deux bots actifs, échec du receveur et cycle de délégation"
+    },
+    {
+      "id": "computer",
+      "feature": "Ordinateur cloud partagé",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "documented",
+      "planned_rust": "ComputerManager par compte et volume persistant",
+      "acceptance_to_prove": "Client fermé, update machine et restauration de snapshot"
+    },
+    {
+      "id": "screens",
+      "feature": "Écrans de bot et reprise humaine",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "ScreenLease et ownership des entrées",
+      "acceptance_to_prove": "Deux bots en parallèle; contrôle humain; clic avec lease périmée"
+    },
+    {
+      "id": "tools",
+      "feature": "Registre d'outils",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Capabilities annoncées seulement pour handlers actifs",
+      "acceptance_to_prove": "Descripteur présent mais handler absent produit un refus clair"
+    },
+    {
+      "id": "localexec",
+      "feature": "Daemon local et supervision",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Supervisor, générations, outbox et transports bornés",
+      "acceptance_to_prove": "Ancien PID, changement de compte, credential expiré et reprise de résultat"
+    },
+    {
+      "id": "shell",
+      "feature": "Shell et jobs background",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "ShellService avec politique OS explicite et groupe de processus",
+      "acceptance_to_prove": "Cwd hors scope; kill descendants; sortie volumineuse; budget"
+    },
+    {
+      "id": "files",
+      "feature": "Fichiers et transferts",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Root handles, uploads staged/committed, hashes et quotas",
+      "acceptance_to_prove": "Symlink remplacé, chunk rejoué, fichier grossissant et abandon d'upload"
+    },
+    {
+      "id": "mount",
+      "feature": "Panneau desktop-mount",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Panneau flottant du bot; pas un montage de dossiers",
+      "acceptance_to_prove": "Ouverture, déplacement, fermeture et scope du composeur"
+    },
+    {
+      "id": "approval",
+      "feature": "Approvals et auto-review",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "PolicyService, grant lié au digest et règles admin prioritaires",
+      "acceptance_to_prove": "Commande modifiée, refus, AlwaysAllow, expiration et réponse tardive"
+    },
+    {
+      "id": "secret",
+      "feature": "Formulaires et secrets",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Secret broker et canal hors transcript",
+      "acceptance_to_prove": "Secret absent des logs, mémoire, modèles et export de conversation"
+    },
+    {
+      "id": "webauthn",
+      "feature": "Clé matérielle WebAuthn",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Cérémonie bornée et consentement par challenge",
+      "acceptance_to_prove": "Origin/rpId erronés, PIN tardif, abort et device retiré"
+    },
+    {
+      "id": "onepassword",
+      "feature": "1Password",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Provisioning à commandes fixes et secret sink",
+      "acceptance_to_prove": "Timeout après mint; statut inconnu persisté; scope vault"
+    },
+    {
+      "id": "messages",
+      "feature": "Messages du Mac",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Native broker et registre durable d'effet",
+      "acceptance_to_prove": "Panne après envoi; reprise sans envoi aveugle"
+    },
+    {
+      "id": "mcp",
+      "feature": "MCP et connecteurs",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Manifeste, registry, OAuth broker et révocation",
+      "acceptance_to_prove": "Connexion expirée, tool inconnu, refus scope et déconnexion"
+    },
+    {
+      "id": "skills",
+      "feature": "Skills et plugins",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Bibliothèque versionnée et permissions explicites",
+      "acceptance_to_prove": "Mise à jour de skill, private/team scope et instructions externes"
+    },
+    {
+      "id": "teaching",
+      "feature": "Apprentissage par démonstration",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "DemonstrationSession et draft de skill, save/discard explicites",
+      "acceptance_to_prove": "Start doublé, stop save, stop discard, limite durée, changement de compte et erreur de capture"
+    },
+    {
+      "id": "routines",
+      "feature": "Routines, horaires et triggers",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Prompt autonome ou skill optionnelle; triggers provider et groupes; occurrences durables",
+      "acceptance_to_prove": "Routine sans skill, groupe de listeners, filtres provider, DST, retry après crash et webhook doublé"
+    },
+    {
+      "id": "marketplace",
+      "feature": "Templates et marketplace",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Versions de modèle, provenance et import sans sessions privées",
+      "acceptance_to_prove": "Import public/team, update de modèle, scopes et fichiers exclus"
+    },
+    {
+      "id": "voice",
+      "feature": "Voix, dictée et mémos",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "VoiceSession, audio streaming, transcription et TTS",
+      "acceptance_to_prove": "Reconnect, interruption vocale, epoch audio et fin de mémo"
+    },
+    {
+      "id": "meetings",
+      "feature": "Meetings et capture",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Session de capture consentie et artefacts distincts",
+      "acceptance_to_prove": "Arrêt capture, permission refusée, limites durée et rétention"
+    },
+    {
+      "id": "documents",
+      "feature": "PDF, Office, diagrammes et slides",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Lecteurs/converters isolés et renderer de document",
+      "acceptance_to_prove": "Corpus de formats, fichiers invalides et quotas; génération serveur à concevoir"
+    },
+    {
+      "id": "teams",
+      "feature": "Bots d'équipe, membres et rôles",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "Membership, BotAcl, invitations et catalogue scoped",
+      "acceptance_to_prove": "Membre retiré, rôle modifié, session privée et règle verrouillée"
+    },
+    {
+      "id": "billing",
+      "feature": "Abonnements et usage",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "contract",
+      "planned_rust": "EntitlementService, budget et refus explicite",
+      "acceptance_to_prove": "Plan expiré, quota atteint et usage compté sans détour local"
+    },
+    {
+      "id": "spending",
+      "feature": "Dépenses et cartes virtuelles",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "SpendingService, challenge, grant scoped, ledger et adapter fournisseur",
+      "acceptance_to_prove": "Attestation périmée, montant modifié, plafond concurrent et charge au résultat incertain"
+    },
+    {
+      "id": "hosting",
+      "feature": "Publication et update d'apps hébergées",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "HostingProposal, confirmation/dismissal/update et provider isolé",
+      "acceptance_to_prove": "Version inattendue, confirmation doublée, update interrompue et droit de propriétaire retiré"
+    },
+    {
+      "id": "egress",
+      "feature": "Egress via le bureau et proxy",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Lease de tunnel, contrôle DNS/IP et quotas séparés du proxy",
+      "acceptance_to_prove": "Deux bureaux titulaires, DNS privé, policy indisponible et flux saturé"
+    },
+    {
+      "id": "notifications",
+      "feature": "Notifications et présence",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "NotificationEngine et adaptateur OS",
+      "acceptance_to_prove": "Snapshot rejoué, conversation visible, focus perdu et notification cliquée"
+    },
+    {
+      "id": "cache",
+      "feature": "Caches et paramètres",
+      "implementation_status": "partial_local_core",
+      "original_evidence_status": "static",
+      "planned_rust": "SQLite scoped, migration de schéma et quotas",
+      "acceptance_to_prove": "Cache incompatible, écriture échouée, purge et flush de fermeture",
+      "implementation_note": "Local core/wrapper subset; full original feature acceptance remains pending."
+    },
+    {
+      "id": "updates",
+      "feature": "Updates client et ordinateur",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "static",
+      "planned_rust": "Manifeste signé, staging, expectedVersion et leases de maintenance",
+      "acceptance_to_prove": "Download interrompu, version inattendue, host occupé et rollback"
+    },
+    {
+      "id": "mobile",
+      "feature": "Clients mobiles",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "unknown",
+      "planned_rust": "Réutiliser domain/wire/replica, adapters UI à spécifier",
+      "acceptance_to_prove": "Captures et parité sur vrais artefacts mobiles avant revendication de support"
+    },
+    {
+      "id": "native-internals",
+      "feature": "Internes des helpers natifs",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "unknown",
+      "planned_rust": "Adapters OS audités et helpers reconstruits avec contrats propres",
+      "acceptance_to_prove": "FIDO, permissions notifications, launcher et Messages sur OS réel"
+    },
+    {
+      "id": "closed-backend",
+      "feature": "Fleet, modèles et stockage privés",
+      "implementation_status": "not_implemented",
+      "original_evidence_status": "unknown",
+      "planned_rust": "Control-plane/worker indépendants et garanties documentées",
+      "acceptance_to_prove": "Tests de panne, charge, restauration et évaluations de tâches dans notre système"
+    }
+  ],
+  "presentation_access": {
+    "cua_inventory": {
+      "apps": [],
+      "browsers": []
+    },
+    "previous_native_window_control_error": "macOS -25211: accessibility access refused",
+    "headed_browser_helper": "Dedicated session grokbot-visible successfully loaded target page",
+    "user_visible_opening_confirmed": false,
+    "browser_profile_directory_rule": "Keep profiles outside the artifact directory"
+  },
+  "excluded_transient_data": [
+    "artifacts/runtime-profile",
+    "Chrome visible-browser profile",
+    "desktop screenshots"
+  ],
+  "preserved_data": [
+    "Reports",
+    "Extracted shipped files",
+    "Formatted source copies",
+    "Full REA evidence bundle",
+    "RPC contracts and anchored traces",
+    "Source and dossier verification",
+    "Interactive HTML and relevant QA screenshots",
+    "Full signed shipped application"
+  ],
+  "verification_commands": [
+    "python3 tools/verify-rust.py",
+    "python3 tools/verify-handoff.py --evidence-only",
+    "python3 tools/verify-dossier.py"
+  ],
+  "no_product_test_claims": [
+    "No product CI",
+    "No authenticated original runtime validation",
+    "No deployed Rust services",
+    "No exact whole-product behavior parity demonstrated"
+  ],
+  "updated_at_utc": "2026-10-14T01:48:57.410615+00:00",
+  "rust_implementation_scope": "Eight-crate local core and Mac wrapper: domain, wire, submission-journal, replica, store, session, try, wrapper. Cocoa/WKWebView host and offline HTML/CSS/JS; loopback HTTP, durable simulated transport. No remote model/cloud/auth parity.",
+  "core_validation_report": "evidence/rust-verification.json",
+  "core_report": "reports/orchestration-rust.md",
+  "implemented_orchestration": {
+    "crate": "crates/session",
+    "transport": "synchronous simulated",
+    "snapshot_gate": "crates/replica/src/recovery.rs",
+    "cli_demo": "cargo run --locked -p grokbot-try -- flow --db try-data/flow.sqlite",
+    "real_network_transport": false,
+    "real_model_engine": false,
+    "authenticated_original_runtime_verified": false
+  },
+  "latest_core_validation": {
+    "status": "passed",
+    "verified_at_utc": "2026-10-14T01:37:55.728424+00:00",
+    "passing_tests_including_doctests": 177,
+    "independent_review": "No unresolved confirmed finding after mascot review; offline-fetch mood reproduced, centralized in api(), and verified through real browser recovery."
+  },
+  "full_product_parity": false,
+  "implemented_wrapper": {
+    "crate": "crates/wrapper",
+    "native_host": "app/native/main.m",
+    "ui": "app/ui",
+    "bundle": "app/build/Grokbot.app",
+    "launcher": "Ouvrir Grokbot.command",
+    "report": "reports/wrapper-local.md",
+    "http_validation": "evidence/wrapper-verification.json",
+    "native_validation": "evidence/wrapper-native-verification.json",
+    "browser_validation": "evidence/wrapper-mascot-verification.json",
+    "minimum_macos": "12.3",
+    "data_path": "~/Library/Application Support/Grokbot/workspace.sqlite",
+    "real_model_engine": false,
+    "design": "Ivoire/sauge/terracotta; mascot inspired by original GrokBotMark and app icon, procedural SVG with volume, blink, pointer gaze and submission moods; honors reduced motion",
+    "mascot_module": "app/ui/mascot.js",
+    "mascot_style": "app/ui/mascot.css",
+    "design_report": "reports/mascotte-design.md",
+    "mascot_validation": "evidence/wrapper-mascot-verification.json"
+  },
+  "version_control": {
+    "repository_root": "/Users/cstpierrecharles/Desktop/grokbot-rust",
+    "branch": "main",
+    "remote": null,
+    "original_analysis_archives_tracked": false,
+    "user_authorized_local_commit": true
+  }
+}

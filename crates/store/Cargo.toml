@@ -1,0 +1,16 @@
+[package]
+name = "grokbot-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SQLite du journal d'envoi et de la réplique"
+
+[dependencies]
+grokbot-domain = { workspace = true }
+grokbot-replica = { workspace = true }
+grokbot-submission-journal = { workspace = true }
+grokbot-wire = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

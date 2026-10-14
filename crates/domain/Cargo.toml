@@ -1,0 +1,9 @@
+[package]
+name = "grokbot-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Identités, états et règles pures, sans I/O"
+
+[dependencies]

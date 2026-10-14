@@ -1,0 +1,14 @@
+{
+  "status":"unavailable",
+  "requested_scenario":"Démarrage isolé sans connexion, attente de 1500 ms",
+  "mcp_result":"Transport closed",
+  "cli_result":"Process failed to launch! dans le lanceur Electron de Playwright",
+  "cli_exit_code":1,
+  "runtime_evidence_id":null,
+  "authenticated_scenarios_observed":false,
+  "limitations":[
+    "Aucune observation instrumentée d'exécution ne peut être revendiquée.",
+    "Les fuses du framework désactivent RunAsNode et EnableNodeCliInspectArguments; ils expliquent une incompatibilité plausible avec le lancement instrumenté, sans démontrer à eux seuls chaque cause de l'échec.",
+    "Les signatures et fuses de l'application n'ont pas été modifiés."
+  ]
+}

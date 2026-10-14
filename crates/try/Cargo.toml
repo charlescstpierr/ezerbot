@@ -1,0 +1,21 @@
+[package]
+name = "grokbot-try"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Scénario local pour essayer le journal et la réplique"
+
+[[bin]]
+name = "grokbot-try"
+path = "src/main.rs"
+
+[dependencies]
+grokbot-domain = { workspace = true }
+grokbot-replica = { workspace = true }
+grokbot-store = { workspace = true }
+grokbot-submission-journal = { workspace = true }
+grokbot-session = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

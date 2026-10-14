@@ -1,0 +1,41 @@
+.mascot { display: block; width: 100%; height: 100%; aspect-ratio: 8 / 7; pointer-events: none; }
+.mascot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.mascot-float, .mascot-squish, .mascot-blink { transform-box: fill-box; transform-origin: center; }
+.mascot-float { animation: companion-float 4s ease-in-out infinite; }
+.mascot-squish { animation: companion-breathe 4s ease-in-out infinite; }
+.mascot-blink { animation: companion-blink 4s infinite; transform-origin: center 60%; }
+.mascot-shadow { transform-origin: 164px 252px; animation: companion-shadow 4s ease-in-out infinite; }
+.mascot-cheek, .mascot-smile { opacity: 0; transition: opacity .24s; }
+.mascot[data-reactive="false"] .mascot-float,
+.mascot[data-reactive="false"] .mascot-squish,
+.mascot[data-reactive="false"] .mascot-shadow,
+.mascot[data-reactive="false"] .mascot-blink { animation: none; }
+.mascot[data-mood="attentive"] .mascot-float { animation: companion-listen 3.2s ease-in-out infinite; }
+.mascot[data-mood="working"] .mascot-float { animation: companion-working 1.6s ease-in-out infinite; }
+.mascot[data-mood="working"] .mascot-blink { animation-duration: 3.1s; }
+.mascot[data-mood="uncertain"] .mascot-float { animation: companion-curious 4s ease-in-out infinite; }
+.mascot[data-mood="uncertain"] .mascot-eye-right { transform-box: fill-box; transform-origin: center; transform: rotate(-12deg) scaleY(.76); }
+.mascot[data-mood="happy"] .mascot-float { animation: companion-happy .72s ease-in-out infinite; }
+.mascot[data-mood="happy"] .mascot-cheek { opacity: .44; }
+.mascot[data-mood="happy"] .mascot-smile { opacity: 1; }
+.mascot[data-mood="happy"] .mascot-blink { animation: none; transform: scaleY(.76); }
+.mascot[data-mood="offline"] .mascot-float,
+.mascot[data-mood="offline"] .mascot-squish,
+.mascot[data-mood="offline"] .mascot-shadow { animation: none; }
+.mascot[data-mood="offline"] .mascot-blink { animation: none; transform: scaleY(.65); }
+.mascot[data-mood="offline"] .mascot-shell { opacity: .8; }
+.mascot-greeting:hover .mascot-highlight { stroke-opacity: .95; }
+.mascot-greeting:active .mascot-squish { animation: none; transform: scale(1.04, .95); }
+html[data-mascot-paused="true"] .mascot *, html[data-mascot-paused="true"] .mascot-stage * { animation-play-state: paused !important; }
+@keyframes companion-float { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-7px) rotate(1.8deg); } }
+@keyframes companion-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.018, .983); } }
+@keyframes companion-shadow { 0%, 100% { opacity: 1; transform: scaleX(1); } 50% { opacity: .65; transform: scaleX(.9); } }
+@keyframes companion-blink { 0%, 35%, 39%, 85%, 89%, 100% { transform: scaleY(1); } 37%, 87% { transform: scaleY(.08); } }
+@keyframes companion-listen { 0%, 100% { transform: translateY(-3px) rotate(2deg); } 50% { transform: translateY(-6px) rotate(-1deg); } }
+@keyframes companion-working { 0%, 100% { transform: translateY(-2px) rotate(-5deg); } 50% { transform: translateY(-8px) rotate(5deg); } }
+@keyframes companion-curious { 0%, 100% { transform: translateY(0) rotate(-7deg); } 50% { transform: translateY(-3px) rotate(-3deg); } }
+@keyframes companion-happy { 0%, 100% { transform: translateY(-2px) rotate(-3deg); } 50% { transform: translateY(-13px) rotate(4deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .mascot *, .mascot-stage * { animation: none !important; transition: none !important; }
+  .mascot-greeting:active .mascot-squish { transform: none; }
+}

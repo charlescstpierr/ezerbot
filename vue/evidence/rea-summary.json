@@ -1,0 +1,237 @@
+{
+  "evidence_id": "ev_a285ee38d595a45bafa84e314c107cd5641bbc45115f33ae6e32ec752dccbe11",
+  "parent_evidence_id": "ev_a8b822a62831e30bd01eb4c4488b36f0bd50cb8ccc41d83e2dcff4e00cf82a4d",
+  "artifact": {
+    "path": "/Applications/Grok Bot.app/Contents/Resources/app.asar",
+    "sha256": "9fe94a66942f8511281f6d7c80a42432d749284c46e1e26f5b6d2f99b87652b0"
+  },
+  "summary": {
+    "input_path": "/Applications/Grok Bot.app/Contents/Resources/app.asar",
+    "format": "asar",
+    "root_artifact_sha256": "9fe94a66942f8511281f6d7c80a42432d749284c46e1e26f5b6d2f99b87652b0",
+    "statistics": {
+      "relevant_files": 616,
+      "nested_asar_containers": 0,
+      "text_bytes_read": 41155733,
+      "invalid_utf8_files": 0,
+      "parsed_javascript_files": 600,
+      "visited_ast_nodes": 7074090,
+      "findings": 5340,
+      "modules": 0,
+      "parse_failures": 0
+    },
+    "electron": {
+      "browser_windows": 4,
+      "explicit_web_preferences": 11,
+      "preload_entrypoints": 0,
+      "context_bridge_apis": 6,
+      "exposed_api_members": 0,
+      "ipc": {
+        "operations": 15,
+        "literal_channels": 2,
+        "dynamic_channel_operations": 13,
+        "renderer_transmissions": 5,
+        "renderer_listeners": 4,
+        "main_handlers": 6,
+        "paired_renderer_transmissions": 0,
+        "ambiguous_renderer_transmissions": 0,
+        "unpaired_literal_renderer_transmissions": 1
+      },
+      "sender_validation_observations": 2,
+      "utility_processes": 2,
+      "resolved_utility_entrypoints": 0,
+      "native_addon_bindings": 2,
+      "resolved_native_addon_bindings": 2
+    },
+    "coverage": {
+      "application": {
+        "status": "partial",
+        "truncated": false,
+        "omitted_count": null,
+        "limits": [
+          {
+            "name": "javascript_analysis_parent_result_budget_bytes",
+            "value": 2037419248,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_semantic_result_budget_bytes",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_semantic_result_budget_bytes",
+            "value": 5626,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_worker_heap_limit_bytes",
+            "value": 2172649472,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_worker_timeout_ms",
+            "value": 300000,
+            "unit": "milliseconds"
+          }
+        ]
+      },
+      "semantic": {
+        "status": "partial",
+        "truncated": true,
+        "omitted_nodes": null,
+        "omitted_relations": null,
+        "limits": [
+          {
+            "name": "javascript_analysis_parent_result_budget_bytes",
+            "value": 2037419248,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_semantic_result_budget_bytes",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_semantic_result_budget_bytes",
+            "value": 5626,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_worker_heap_limit_bytes",
+            "value": 2172649472,
+            "unit": "bytes"
+          },
+          {
+            "name": "javascript_analysis_worker_timeout_ms",
+            "value": 300000,
+            "unit": "milliseconds"
+          }
+        ],
+        "families": [
+          {
+            "family": "boundary",
+            "status": "partial",
+            "retained_relations": 45,
+            "omitted_relations": null,
+            "unknown_count": 552
+          },
+          {
+            "family": "call-flow",
+            "status": "partial",
+            "retained_relations": 2511,
+            "omitted_relations": null,
+            "unknown_count": 1968
+          },
+          {
+            "family": "child-process",
+            "status": "partial",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_count": 552
+          },
+          {
+            "family": "closure",
+            "status": "partial",
+            "retained_relations": 2479,
+            "omitted_relations": null,
+            "unknown_count": 552
+          },
+          {
+            "family": "configuration",
+            "status": "partial",
+            "retained_relations": 31,
+            "omitted_relations": null,
+            "unknown_count": 559
+          },
+          {
+            "family": "data-flow",
+            "status": "partial",
+            "retained_relations": 23226,
+            "omitted_relations": null,
+            "unknown_count": 2860
+          },
+          {
+            "family": "event",
+            "status": "partial",
+            "retained_relations": 8,
+            "omitted_relations": null,
+            "unknown_count": 555
+          },
+          {
+            "family": "object-flow",
+            "status": "partial",
+            "retained_relations": 1797,
+            "omitted_relations": null,
+            "unknown_count": 4038
+          },
+          {
+            "family": "promise-ownership",
+            "status": "partial",
+            "retained_relations": 79,
+            "omitted_relations": null,
+            "unknown_count": 585
+          },
+          {
+            "family": "request",
+            "status": "partial",
+            "retained_relations": 5,
+            "omitted_relations": null,
+            "unknown_count": 555
+          },
+          {
+            "family": "resource-lifecycle",
+            "status": "partial",
+            "retained_relations": 0,
+            "omitted_relations": null,
+            "unknown_count": 552
+          },
+          {
+            "family": "timer",
+            "status": "partial",
+            "retained_relations": 5,
+            "omitted_relations": null,
+            "unknown_count": 553
+          }
+        ]
+      },
+      "application_unknowns": 1088,
+      "semantic_unknowns": 13881
+    },
+    "limitation_count": 1105
+  },
+  "limitation_count": 1116,
+  "unknown_count": 1120,
+  "limitations": [
+    "Artifact integrity metadata contradicts observed bytes at dist/deps/cursor-proclist/build/Release/cursor_proclist.node; the observed bytes are untrusted.",
+    "Artifact integrity metadata contradicts observed bytes at dist/deps/sand-notification-settings/build/Release/sand_notification_settings.node; the observed bytes are untrusted.",
+    "Artifact integrity metadata contradicts observed bytes at dist/deps/tree-sitter-bash/prebuilds/darwin-x64/tree-sitter-bash.node; the observed bytes are untrusted.",
+    "Artifact integrity metadata contradicts observed bytes at dist/deps/tree-sitter/build/Release/tree_sitter_runtime_binding.node; the observed bytes are untrusted.",
+    "Artifact integrity metadata contradicts observed bytes at dist/native/sand-op-launcher; the observed bytes are untrusted.",
+    "Artifact integrity metadata contradicts observed bytes at dist/native/sand-webauthn-signer; the observed bytes are untrusted.",
+    "Boundary extraction covers unshadowed JSON/global coercions plus parse and validation method candidates.",
+    "Child-process extraction covers asynchronous node:child_process creation, literal argv/env/stdio options, exit/error listeners, and kill signals.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Configuration extraction covers process.env, process.argv, node:fs reads, and direct logical defaults.",
+    "Dynamic IPC channel expressions remain unresolved and are never paired by textual similarity.",
+    "Electron API identity follows proven lexical module aliases. Reassigned bindings, dynamic selections, and visibly overwritten namespace members are unresolved; missing findings do not establish absence. Arbitrary call side effects and runtime registration are not evaluated.",
+    "Electron relationships are derived from inert syntax; runtime registration, reachability, defaults, and enforcement remain unproven.",
+    "Event extraction covers EventEmitter-style literal registrations, removals, and dispatch candidates; dynamic names remain unknown.",
+    "Function fingerprints are static candidates; equal digests can remain ambiguous and do not prove behavioral equivalence.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Local data flow does not claim control-flow-sensitive reaching definitions or arbitrary dynamic property resolution.",
+    "Native member names are requested by JavaScript syntax and are not verified binary exports in this workflow.",
+    "Promise ownership covers explicit unshadowed Promise construction, static factories, aggregation, chaining, and await syntax only.",
+    "Request extraction covers fetch, WebSocket, node:http/node:https construction, direct option fields, and exact local response consumers.",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/electron-main/main-app.cjs exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/electron-main/main-core.cjs exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/electron-preload/preload.cjs exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/local-exec-daemon/main.cjs exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/node-agent-coordinator/main.cjs exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/renderer/assets/chunk-ToggleIconButton-BxpeBjxt.js exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/renderer/assets/chunk-abnfDiagram-VRR7QNED-DYEEmqwu.js exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/renderer/assets/chunk-agent-avatar-editor-ChMlN9aj.js exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for dist/renderer/assets/chunk-agent-character-picker-DOnG_1af.js exceed the parent's result budget; complete static facts were retained on the file node"
+  ]
+}

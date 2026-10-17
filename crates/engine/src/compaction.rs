@@ -13,8 +13,11 @@
 //! for ANY entry in their conversation. Invalidation erases summary text and all
 //! descendants, retaining ID tombstones so stale saves cannot resurrect it.
 //! When forgetting may race generation, the host MUST snapshot revision before
-//! the model call and use save_with_history_at_revision afterwards. The plain
-//! save APIs require host serialization against source edits/forgetting/reset.
+//! the model call, pass it through SummaryOptions, and use a revision-checked
+//! save afterwards. Plain APIs require host serialization against source edits.
+//! Each reset segment has its own lineage, keyed by its first eligible entry.
+//! Hosts use latest_in_segment, not latest, when selecting a turn's summary.
+//! Only calls explicitly listed as pending pin a boundary; abandoned calls do not.
 use crate::contracts::{
     ContextBudget, Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest, Result, Role,
     Summary, ToolItem,
@@ -25,6 +28,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_SUMMARY_CHARACTERS: usize = 16_000;
+
+/// The host snapshots source_revision before reading history/model generation,
+/// and supplies IDs of genuinely suspended tool calls. Missing-result calls not
+/// listed here are abandoned (e.g. Stop), not indefinitely pending exchanges.
+#[derive(Clone, Debug, Default)]
+pub struct SummaryOptions {
+    pub source_revision: u64,
+    pub pending_call_ids: HashSet<String>,
+    pub budget: ContextBudget,
+}
+
 const STRATEGY: &str = "rolling_complete_tools_v1";
 const INSTRUCTIONS: &str = "Summarize the supplied conversation evidence concisely (at most 16000 \
 characters). Return only the summary, with no tool calls. Merge the previous summary with the new \
@@ -55,12 +69,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
             summary_id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL,
             previous_summary_id TEXT, record TEXT,
+            segment_start_entry_id TEXT NOT NULL,
             coverage_complete INTEGER NOT NULL CHECK(coverage_complete IN (0,1))
         );
         CREATE INDEX IF NOT EXISTS engine_summaries_conversation
             ON engine_summaries(conversation_id, ordinal);
         CREATE INDEX IF NOT EXISTS engine_summaries_parent
             ON engine_summaries(previous_summary_id);
+        CREATE INDEX IF NOT EXISTS engine_summaries_segment
+            ON engine_summaries(conversation_id, segment_start_entry_id, ordinal);
         CREATE TABLE IF NOT EXISTS engine_summary_entries (
             summary_id TEXT NOT NULL REFERENCES engine_summaries(summary_id),
             entry_id TEXT NOT NULL, PRIMARY KEY(summary_id, entry_id)
@@ -80,11 +97,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 /// Strictly above the configured percentage, without rounding estimated tokens
 /// or overflowing percentage multiplication. Defaults: 4 chars/token, 70% of 100k.
 pub fn should_compact(characters: usize, budget: &ContextBudget) -> Result<bool> {
-    let limit = budget
-        .estimated_tokens
-        .checked_mul(budget.characters_per_token)
-        .filter(|limit| *limit > 0)
-        .ok_or_else(|| invalid("context character budget must be positive and not overflow"))?;
+    let limit = character_limit(budget)?;
     if !(1..=100).contains(&budget.compaction_percent) {
         return Err(invalid("compaction percentage must be between 1 and 100"));
     }
@@ -94,8 +107,8 @@ pub fn should_compact(characters: usize, budget: &ContextBudget) -> Result<bool>
 /// Summarize the eligible prefix, leaving at least the final entry verbatim.
 /// `history` contains the previous resume entry and the retained tail; it may
 /// also contain the earlier already summarized prefix. IDs are opaque, ordered
-/// by the slice, never lexically. A boundary cannot split a tool exchange, and
-/// unresolved calls stay in the tail. Images use captions, never old data URLs.
+/// by the slice, never lexically. This compatibility API assumes no calls remain
+/// pending and uses revision zero; concurrent/resumable hosts use the options API.
 /// Failed, incomplete, empty or tool-producing responses never become summaries.
 pub fn summarize(
     gateway: &dyn ModelGateway,
@@ -104,47 +117,76 @@ pub fn summarize(
     history: &[HistoryItem],
     previous: Option<&Summary>,
 ) -> Result<Summary> {
+    summarize_with_options(
+        gateway,
+        model,
+        conversation_id,
+        history,
+        previous,
+        &SummaryOptions::default(),
+    )
+}
+
+/// Bounded, revision-aware summarization. Complete tool exchanges and explicitly
+/// pending calls remain indivisible. Text/captions/tool arguments/results are
+/// capped with markers; if needed, only the largest fitting complete prefix is
+/// summarized. Subsequent calls can compact the remaining source in more chunks.
+pub fn summarize_with_options(
+    gateway: &dyn ModelGateway,
+    model: &str,
+    conversation_id: &str,
+    history: &[HistoryItem],
+    previous: Option<&Summary>,
+    options: &SummaryOptions,
+) -> Result<Summary> {
     if model.trim().is_empty() || conversation_id.trim().is_empty() {
         return Err(invalid("model and conversation ID are required"));
     }
+    let limit = character_limit(&options.budget)?;
     let positions = positions(history)?;
     let start = start(history, &positions, conversation_id, previous)?;
     let exchanges = exchanges(&history[start..])?;
-    let mut cut = history.len().saturating_sub(1);
-    // Retreat through all intersecting exchanges, including crossed/parallel calls.
-    for &(call, output) in exchanges.iter().rev() {
-        if output.is_none_or(|output| start + output >= cut) {
-            cut = cut.min(start + call);
-        }
-    }
-    if cut <= start {
+    let max_cut = safe_cut(
+        history.len() - 1,
+        start,
+        &exchanges,
+        &options.pending_call_ids,
+    );
+    if max_cut <= start {
         return Err(invalid(
             "no complete history prefix is available for compaction",
         ));
     }
-    let mut entries = history[start..cut].to_vec();
-    for entry in &mut entries {
-        for image in &mut entry.images {
-            image.url = None;
+    let entries = history[start..max_cut]
+        .iter()
+        .map(|entry| evidence_entry(entry, &exchanges, &options.pending_call_ids))
+        .collect::<Result<Vec<_>>>()?;
+    // Serialized input accounting is monotone in prefix length. Binary search
+    // avoids repeatedly serializing every growing prefix in a long transcript.
+    let (mut low, mut high) = (0, entries.len() + 1);
+    while low + 1 < high {
+        let middle = low + (high - low) / 2;
+        let input = summary_source(previous, &entries[..middle])?;
+        if crate::context::input_characters(&input)?.saturating_add(INSTRUCTIONS.chars().count())
+            <= limit
+        {
+            low = middle;
+        } else {
+            high = middle;
         }
     }
-    // JSON-quote the evidence and escape delimiters so untrusted tool/caption
-    // text cannot close its envelope. Do not send historical calls as live tools.
-    let evidence = serde_json::to_string(&json!({
-        "previous_summary": previous.map(|summary| &summary.text), "entries": entries,
-    }))?
-    .replace('<', "\\u003c")
-    .replace('>', "\\u003e");
+    let cut = safe_cut(start + low, start, &exchanges, &options.pending_call_ids);
+    if cut <= start {
+        return Err(invalid(
+            "no complete history prefix fits the compaction input budget",
+        ));
+    }
+    let input = summary_source(previous, &entries[..cut - start])?;
+    let evidence = &input.text;
     let request = ModelRequest {
         model: model.into(),
         instructions: INSTRUCTIONS.into(),
-        input: vec![HistoryItem {
-            entry_id: "compaction-source".into(),
-            role: Role::User,
-            text: format!("<summary_source>\n{evidence}\n</summary_source>"),
-            images: Vec::new(),
-            tool_items: Vec::new(),
-        }],
+        input: vec![input.clone()],
         tools: Vec::new(),
         effort: None,
         service_tier: None,
@@ -191,14 +233,102 @@ pub fn summarize(
     // Bind IDs to source content as well as prose/bounds/parent. Regeneration
     // after source redaction gets a new ID even if the model returns identical
     // prose; the original tombstone still rejects stale in-flight results.
-    let digest = Sha256::digest(serde_json::to_vec(&(&summary, &evidence))?);
+    let digest = Sha256::digest(serde_json::to_vec(&(
+        &summary,
+        &evidence,
+        options.source_revision,
+    ))?);
     summary.summary_id = format!("summary_{digest:x}");
     Ok(summary)
 }
 
-/// Compatibility path without coverage. Forgetting must invalidate conservatively.
+fn character_limit(budget: &ContextBudget) -> Result<usize> {
+    budget
+        .estimated_tokens
+        .checked_mul(budget.characters_per_token)
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| invalid("context character budget must be positive and not overflow"))
+}
+
+fn bounded(text: &str) -> String {
+    let count = text.chars().count();
+    if count <= MAX_SUMMARY_CHARACTERS {
+        return text.into();
+    }
+    let marker = format!("\n[truncated; original {count} characters]");
+    let prefix: String = text
+        .chars()
+        .take(MAX_SUMMARY_CHARACTERS - marker.chars().count())
+        .collect();
+    format!("{prefix}{marker}")
+}
+
+fn evidence_entry(
+    entry: &HistoryItem,
+    exchanges: &[Exchange<'_>],
+    pending: &HashSet<String>,
+) -> Result<serde_json::Value> {
+    let tools = entry.tool_items.iter().map(|tool| Ok(match tool {
+        ToolItem::Call { call } => json!({
+            "kind": "call", "call_id": call.call_id, "name": call.name,
+            "arguments": bounded(&serde_json::to_string(&call.arguments)?),
+            "abandoned": exchanges.iter().any(|e| e.call_id == call.call_id && e.output.is_none() && !pending.contains(e.call_id)),
+        }),
+        ToolItem::Output { call_id, output } => json!({
+            "kind": "output", "call_id": call_id,
+            "output": bounded(&match output { serde_json::Value::String(text) => text.clone(), _ => serde_json::to_string(output)? }),
+        }),
+    })).collect::<Result<Vec<_>>>()?;
+    let images: Vec<_> = entry.images.iter().map(|image| json!({
+        "attachment_id": image.attachment_id, "caption": image.caption.as_deref().map(bounded),
+    })).collect();
+    Ok(
+        json!({"entry_id": entry.entry_id, "role": entry.role, "text": bounded(&entry.text), "images": images, "tool_items": tools}),
+    )
+}
+
+fn summary_source(
+    previous: Option<&Summary>,
+    entries: &[serde_json::Value],
+) -> Result<HistoryItem> {
+    // Escape delimiters so quoted tool/caption text cannot close the envelope;
+    // historical calls are evidence, never live function calls to the gateway.
+    let evidence = serde_json::to_string(&json!({
+        "previous_summary": previous.map(|summary| &summary.text), "entries": entries,
+    }))?
+    .replace('<', "\\u003c")
+    .replace('>', "\\u003e");
+    Ok(HistoryItem {
+        entry_id: "compaction-source".into(),
+        role: Role::User,
+        text: format!("<summary_source>\n{evidence}\n</summary_source>"),
+        images: vec![],
+        tool_items: vec![],
+    })
+}
+
+fn safe_cut(
+    mut cut: usize,
+    start: usize,
+    exchanges: &[Exchange<'_>],
+    pending: &HashSet<String>,
+) -> usize {
+    for exchange in exchanges.iter().rev() {
+        let crossing = match exchange.output {
+            Some(output) => start + output >= cut,
+            None => pending.contains(exchange.call_id),
+        };
+        if crossing {
+            cut = cut.min(start + exchange.call);
+        }
+    }
+    cut
+}
+
+/// Compatibility path without source membership or a reset-segment selector.
+/// Use exact saves for turn-aware callers. Forgetting remains conservative.
 pub fn save(conn: &Connection, summary: &Summary) -> Result<()> {
-    save_inner(conn, summary, None)
+    save_inner(conn, summary, None, None)
 }
 
 /// Persist exact coverage using the same eligible history supplied to summarize.
@@ -208,6 +338,17 @@ pub fn save_with_history(
     conn: &Connection,
     summary: &Summary,
     history: &[HistoryItem],
+) -> Result<()> {
+    save_with_history_pending(conn, summary, history, &HashSet::new())
+}
+
+/// Exact save with the same live pending-call IDs used during generation.
+/// Abandoned calls can be summarized; genuinely pending calls must stay verbatim.
+pub fn save_with_history_pending(
+    conn: &Connection,
+    summary: &Summary,
+    history: &[HistoryItem],
+    pending_call_ids: &HashSet<String>,
 ) -> Result<()> {
     validate(summary)?;
     let parent = parent(conn, summary)?;
@@ -229,9 +370,13 @@ pub fn save_with_history(
             "summary must cover a contiguous prefix before its resume entry",
         ));
     }
-    if exchanges(&history[start..])?.iter().any(|&(call, output)| {
-        start + call < resume && output.is_none_or(|output| start + output >= resume)
-    }) {
+    if safe_cut(
+        resume,
+        start,
+        &exchanges(&history[start..])?,
+        pending_call_ids,
+    ) != resume
+    {
         return Err(invalid(
             "summary boundary splits an unfinished tool exchange",
         ));
@@ -240,7 +385,12 @@ pub fn save_with_history(
         .iter()
         .map(|item| item.entry_id.as_str())
         .collect();
-    save_inner(conn, summary, Some(&coverage))
+    save_inner(
+        conn,
+        summary,
+        Some(&coverage),
+        history.first().map(|entry| entry.entry_id.as_str()),
+    )
 }
 
 /// Snapshot before model generation, outside a write transaction. Invalidation
@@ -266,34 +416,81 @@ pub fn save_with_history_at_revision(
     history: &[HistoryItem],
     expected_revision: u64,
 ) -> Result<()> {
+    save_with_history_pending_at_revision(
+        conn,
+        summary,
+        history,
+        &HashSet::new(),
+        expected_revision,
+    )
+}
+
+pub fn save_with_history_pending_at_revision(
+    conn: &Connection,
+    summary: &Summary,
+    history: &[HistoryItem],
+    pending_call_ids: &HashSet<String>,
+    expected_revision: u64,
+) -> Result<()> {
     crate::store::require_transaction(conn)?;
     if revision(conn, &summary.conversation_id)? != expected_revision {
         return Err(invalid("compaction source changed during generation"));
     }
-    save_with_history(conn, summary, history)
+    save_with_history_pending(conn, summary, history, pending_call_ids)
 }
 
-fn save_inner(conn: &Connection, summary: &Summary, coverage: Option<&[&str]>) -> Result<()> {
+fn save_inner(
+    conn: &Connection,
+    summary: &Summary,
+    coverage: Option<&[&str]>,
+    root_segment: Option<&str>,
+) -> Result<()> {
     crate::store::require_transaction(conn)?;
     validate(summary)?;
-    let existing: Option<Option<String>> = conn
+    parent(conn, summary)?;
+    let parent_segment: Option<String> = summary
+        .previous_summary_id
+        .as_ref()
+        .map(|id| {
+            conn.query_row(
+                "SELECT segment_start_entry_id FROM engine_summaries WHERE summary_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+        .transpose()?;
+    let segment = if summary.previous_summary_id.is_some() {
+        parent_segment.as_deref()
+    } else {
+        root_segment
+    };
+    let existing: Option<(Option<String>, String)> = conn
         .query_row(
-            "SELECT record FROM engine_summaries WHERE summary_id=?1",
+            "SELECT record,segment_start_entry_id FROM engine_summaries WHERE summary_id=?1",
             [&summary.summary_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some(record) = existing {
+    if let Some((record, old_segment)) = existing {
         let record = record.ok_or_else(|| invalid("cannot restore an invalidated summary"))?;
-        if serde_json::from_str::<Summary>(&record)? != *summary {
-            return Err(invalid("summary IDs are immutable"));
+        if serde_json::from_str::<Summary>(&record)? != *summary
+            || segment.is_some_and(|segment| segment != old_segment)
+        {
+            return Err(invalid("summary IDs and segments are immutable"));
         }
-        // A compatibility save cannot silently be upgraded to claimed exact
-        // coverage on retry, nor can an exact save lose its membership metadata.
+        // An identical retry never changes membership or moves an older head.
         return Ok(());
     }
-    parent(conn, summary)?;
-    if latest(conn, &summary.conversation_id)?
+    if segment.is_none()
+        && summary.previous_summary_id.is_none()
+        && latest(conn, &summary.conversation_id)?.is_some()
+    {
+        return Err(invalid(
+            "compatibility root requires an unambiguous empty lineage",
+        ));
+    }
+    let segment = segment.unwrap_or(""); // isolated compatibility-only segment
+    if latest_in_segment(conn, &summary.conversation_id, segment)?
         .as_ref()
         .map(|s| &s.summary_id)
         != summary.previous_summary_id.as_ref()
@@ -303,10 +500,10 @@ fn save_inner(conn: &Connection, summary: &Summary, coverage: Option<&[&str]>) -
         ));
     }
     conn.execute(
-        "INSERT INTO engine_summaries(summary_id,conversation_id,previous_summary_id,record,coverage_complete)
-         VALUES (?1,?2,?3,?4,?5)",
+        "INSERT INTO engine_summaries(summary_id,conversation_id,previous_summary_id,record,coverage_complete,segment_start_entry_id)
+         VALUES (?1,?2,?3,?4,?5,?6)",
         params![summary.summary_id, summary.conversation_id, summary.previous_summary_id,
-            serde_json::to_string(summary)?, coverage.is_some()],
+            serde_json::to_string(summary)?, coverage.is_some(), segment],
     )?;
     if let Some(coverage) = coverage {
         let mut insert =
@@ -318,6 +515,8 @@ fn save_inner(conn: &Connection, summary: &Summary, coverage: Option<&[&str]>) -
     Ok(())
 }
 
+/// Compatibility lookup by insertion order across all segments, NOT a selector
+/// for a particular turn/reset. Turn-aware callers must use latest_in_segment.
 pub fn latest(conn: &Connection, conversation_id: &str) -> Result<Option<Summary>> {
     let record: Option<String> = conn
         .query_row(
@@ -327,6 +526,23 @@ pub fn latest(conn: &Connection, conversation_id: &str) -> Result<Option<Summary
             |row| row.get(0),
         )
         .optional()?;
+    record
+        .map(|record| Ok(serde_json::from_str(&record)?))
+        .transpose()
+}
+
+/// Each root is keyed by the first eligible entry following its preceding reset;
+/// descendants inherit this key even when callers provide only the unsummarized
+/// tail. Regenerating a pre-reset turn cannot move a post-reset segment's head.
+pub fn latest_in_segment(
+    conn: &Connection,
+    conversation_id: &str,
+    segment_start_entry_id: &str,
+) -> Result<Option<Summary>> {
+    let record: Option<String> = conn.query_row(
+        "SELECT record FROM engine_summaries WHERE conversation_id=?1 AND segment_start_entry_id=?2 AND record IS NOT NULL ORDER BY ordinal DESC LIMIT 1",
+        params![conversation_id, segment_start_entry_id], |row| row.get(0),
+    ).optional()?;
     record
         .map(|record| Ok(serde_json::from_str(&record)?))
         .transpose()
@@ -476,9 +692,15 @@ fn start(
     Ok(start)
 }
 
-/// Tool ranges in call order, not result order. Unknown/duplicate outputs are
-/// rejected; unresolved calls are represented by None and cannot be summarized.
-fn exchanges(history: &[HistoryItem]) -> Result<Vec<(usize, Option<usize>)>> {
+struct Exchange<'a> {
+    call_id: &'a str,
+    call: usize,
+    output: Option<usize>,
+}
+
+/// Tool ranges in call order, not result order. Missing outputs may represent
+/// either abandoned or suspended calls; the host supplies the live pending set.
+fn exchanges(history: &[HistoryItem]) -> Result<Vec<Exchange<'_>>> {
     let mut calls = HashMap::new();
     let mut outputs = HashSet::new();
     let mut ranges = Vec::new();
@@ -491,7 +713,11 @@ fn exchanges(history: &[HistoryItem]) -> Result<Vec<(usize, Option<usize>)>> {
                     {
                         return Err(invalid("tool call IDs must be unique and nonempty"));
                     }
-                    ranges.push((index, None));
+                    ranges.push(Exchange {
+                        call_id: &call.call_id,
+                        call: index,
+                        output: None,
+                    });
                 }
                 ToolItem::Output { call_id, .. } => {
                     let range = *calls
@@ -500,7 +726,7 @@ fn exchanges(history: &[HistoryItem]) -> Result<Vec<(usize, Option<usize>)>> {
                     if !outputs.insert(call_id) {
                         return Err(invalid("tool output is duplicated"));
                     }
-                    ranges[range].1 = Some(index);
+                    ranges[range].output = Some(index);
                 }
             }
         }
@@ -587,6 +813,46 @@ mod compaction_tests {
             previous,
         )
         .unwrap()
+    }
+    fn generated_options(
+        history: &[HistoryItem],
+        previous: Option<&Summary>,
+        options: &SummaryOptions,
+    ) -> Summary {
+        summarize_with_options(
+            &Gateway::text("Preserved requirements and results."),
+            "model",
+            "conversation",
+            history,
+            previous,
+            options,
+        )
+        .unwrap()
+    }
+    type Snapshot = Vec<(String, Vec<Vec<rusqlite::types::Value>>)>;
+    fn host_snapshot(conn: &Connection) -> Snapshot {
+        let mut names = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('engine_summaries','engine_summary_entries','engine_compaction_revisions','component_versions') ORDER BY name").unwrap();
+        let tables: Vec<String> = names
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        tables
+            .into_iter()
+            .map(|table| {
+                let quoted = table.replace('"', "\"\"");
+                let mut statement = conn
+                    .prepare(&format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))
+                    .unwrap();
+                let columns = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<Vec<rusqlite::types::Value>>>>()
+                    .unwrap();
+                (table, rows)
+            })
+            .collect()
     }
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -690,8 +956,14 @@ mod compaction_tests {
     #[test]
     fn transcript_untouched_after_compaction() {
         let conn = conn();
-        conn.execute_batch("CREATE TABLE transcript(id TEXT PRIMARY KEY, record TEXT NOT NULL)")
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE wrapper_messages(id TEXT PRIMARY KEY, record TEXT NOT NULL);
+            CREATE TABLE run_events(run_id TEXT, seq INTEGER, kind TEXT, payload TEXT);
+            CREATE TABLE engine_run_events(run_id TEXT, seq INTEGER, kind TEXT, payload TEXT);
+            INSERT INTO run_events VALUES ('run',1,'text_delta','{\"text\":\"preserve me\"}');
+            INSERT INTO engine_run_events SELECT * FROM run_events;",
+        )
+        .unwrap();
         let mut history = history(&["old", "call", "result", "current"]);
         history[0].images.push(ImageInput {
             attachment_id: "photo".into(),
@@ -700,28 +972,33 @@ mod compaction_tests {
         });
         history[1].tool_items.push(call("c1"));
         history[2].tool_items.push(output("c1"));
-        let original = history.clone();
         for item in &history {
             conn.execute(
-                "INSERT INTO transcript VALUES (?1,?2)",
+                "INSERT INTO wrapper_messages VALUES (?1,?2)",
                 params![item.entry_id, serde_json::to_string(item).unwrap()],
             )
             .unwrap();
         }
+        let before = host_snapshot(&conn);
+        assert_eq!(before.len(), 3);
         let gateway = Gateway::text("A cat and the tool results.");
         let summary = summarize(&gateway, "model", "conversation", &history, None).unwrap();
         save_exact(&conn, &summary, &history);
-        assert_eq!(history, original);
-        for item in &history {
-            let record: String = conn
-                .query_row(
-                    "SELECT record FROM transcript WHERE id=?1",
-                    [&item.entry_id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(serde_json::from_str::<HistoryItem>(&record).unwrap(), *item);
-        }
+        assert_eq!(host_snapshot(&conn), before);
+        with_tx(&conn, |conn| {
+            invalidate_covering(conn, "conversation", "old")
+        })
+        .unwrap();
+        assert_eq!(host_snapshot(&conn), before);
+        let options = SummaryOptions {
+            source_revision: revision(&conn, "conversation").unwrap(),
+            ..SummaryOptions::default()
+        };
+        let rebuilt = generated_options(&history, None, &options);
+        save_exact(&conn, &rebuilt, &history);
+        assert_eq!(host_snapshot(&conn), before);
+        with_tx(&conn, |conn| invalidate_all(conn, "conversation")).unwrap();
+        assert_eq!(host_snapshot(&conn), before);
         let requests = gateway.requests.lock().unwrap();
         let request = &requests[0];
         assert_eq!(request.model, "model");
@@ -810,9 +1087,13 @@ mod compaction_tests {
         let summary = generated(&history, None);
         assert_eq!(summary.truncation_last_entry_inclusive, "old");
         assert_eq!(summary.resume_from_entry_inclusive, "call-a");
-        history[4].tool_items.clear(); // An unresolved call stays verbatim as well.
+        history[4].tool_items.clear(); // Only a live pending call pins its boundary.
+        let options = SummaryOptions {
+            pending_call_ids: HashSet::from(["b".into()]),
+            ..SummaryOptions::default()
+        };
         assert_eq!(
-            generated(&history, None).resume_from_entry_inclusive,
+            generated_options(&history, None, &options).resume_from_entry_inclusive,
             "call-a"
         );
         // Once every output is before the last entry, the entire exchange fits.
@@ -821,6 +1102,256 @@ mod compaction_tests {
             generated(&history, None).resume_from_entry_inclusive,
             "tail"
         );
+    }
+
+    #[test]
+    fn abandoned_call_does_not_pin_later_compaction() {
+        let conn = conn();
+        let mut history = history(&["u1", "a1", "u2", "a2", "u3", "a3", "u4"]);
+        history[1].tool_items.push(call("abandoned"));
+        let first = generated(&history[..2], None);
+        save_exact(&conn, &first, &history[..2]);
+        for index in 0..40 {
+            history.push(entry(&format!("later-{index}")));
+        }
+        let gateway = Gateway::text("The stopped call never completed.");
+        let next = summarize(&gateway, "model", "conversation", &history, Some(&first)).unwrap();
+        assert_eq!(next.truncation_last_entry_inclusive, "later-38");
+        save_exact(&conn, &next, &history);
+        assert!(gateway.requests.lock().unwrap()[0].input[0]
+            .text
+            .contains("\"abandoned\":true"));
+    }
+
+    #[test]
+    fn live_pending_call_is_retained_and_resumes_with_current_output() {
+        let conn = conn();
+        let mut history = history(&["old", "pending", "later", "current"]);
+        history[1].tool_items.push(call("live"));
+        let options = SummaryOptions {
+            pending_call_ids: HashSet::from(["live".into()]),
+            ..SummaryOptions::default()
+        };
+        let summary = generated_options(&history, None, &options);
+        assert_eq!(summary.truncation_last_entry_inclusive, "old");
+        assert_eq!(summary.resume_from_entry_inclusive, "pending");
+        with_tx(&conn, |conn| {
+            save_with_history_pending_at_revision(
+                conn,
+                &summary,
+                &history,
+                &options.pending_call_ids,
+                options.source_revision,
+            )
+        })
+        .unwrap();
+        let mut forged = summary.clone();
+        forged.summary_id = "unsafe".into();
+        forged.truncation_last_entry_inclusive = "later".into();
+        forged.resume_from_entry_inclusive = "current".into();
+        assert!(with_tx(&conn, |conn| save_with_history_pending(
+            conn,
+            &forged,
+            &history,
+            &options.pending_call_ids
+        ))
+        .is_err());
+        history[3].tool_items.push(output("live"));
+        let request = ContextRequest {
+            run_id: "run".into(),
+            bot_id: "bot".into(),
+            conversation_id: "conversation".into(),
+            trigger: Trigger::UserMessage {
+                message_id: "current".into(),
+                attempt: 0,
+            },
+            current_message: history[3].clone(),
+        };
+        let blocks = [ContextBlock {
+            source: ContextSource::AppContract,
+            priority: 0,
+            budget: 1000,
+            text: "app policy".into(),
+        }];
+        let assembled = crate::context::assemble_input(
+            &request,
+            &blocks,
+            &history,
+            Some(&summary),
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            assembled
+                .input
+                .iter()
+                .map(|entry| entry.entry_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pending", "later", "current"]
+        );
+        assert_eq!(assembled.input[0].tool_items, vec![call("live")]);
+    }
+
+    #[test]
+    fn pre_reset_regeneration_cannot_poison_post_reset_lineage() {
+        let conn = conn();
+        let pre = history(&["u1", "a1", "u2", "a2", "u3"]);
+        let original = generated(&pre, None);
+        save_exact(&conn, &original, &pre);
+        with_tx(&conn, |conn| invalidate_all(conn, "conversation")).unwrap();
+        let options = SummaryOptions {
+            source_revision: revision(&conn, "conversation").unwrap(),
+            ..SummaryOptions::default()
+        };
+        let regen = generated_options(&pre, None, &options);
+        assert_ne!(regen.summary_id, original.summary_id);
+        with_tx(&conn, |conn| {
+            save_with_history_at_revision(conn, &regen, &pre, options.source_revision)
+        })
+        .unwrap();
+        let post = history(&["n1", "b1", "n2", "b2", "n3"]);
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "n1").unwrap(),
+            None
+        );
+        let fresh = generated_options(&post, None, &options);
+        with_tx(&conn, |conn| {
+            save_with_history_at_revision(conn, &fresh, &post, options.source_revision)
+        })
+        .unwrap();
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "u1").unwrap(),
+            Some(regen.clone())
+        );
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "n1").unwrap(),
+            Some(fresh.clone())
+        );
+        // A child saved from only the old segment's unsummarized tail inherits
+        // its root key, even after the post-reset segment has a valid head.
+        let tail = history(&["u3", "a3", "u4"]);
+        let child = generated_options(&tail, Some(&regen), &options);
+        save_exact(&conn, &child, &tail);
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "u1").unwrap(),
+            Some(child)
+        );
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "n1").unwrap(),
+            Some(fresh)
+        );
+    }
+
+    #[test]
+    fn conservative_invalidation_can_regenerate_identical_evidence_and_prose() {
+        let conn = conn();
+        let history = history(&["old", "tail"]);
+        let original = generated(&history, None);
+        with_tx(&conn, |conn| save(conn, &original)).unwrap();
+        with_tx(&conn, |conn| {
+            invalidate_covering(conn, "conversation", "possibly-covered")
+        })
+        .unwrap();
+        let options = SummaryOptions {
+            source_revision: revision(&conn, "conversation").unwrap(),
+            ..SummaryOptions::default()
+        };
+        let regenerated = generated_options(&history, None, &options);
+        assert_eq!(original.text, regenerated.text);
+        assert_ne!(original.summary_id, regenerated.summary_id);
+        with_tx(&conn, |conn| {
+            save_with_history_at_revision(conn, &regenerated, &history, options.source_revision)
+        })
+        .unwrap();
+        assert!(with_tx(&conn, |conn| save(conn, &original)).is_err());
+    }
+
+    #[test]
+    fn multi_megabyte_tool_output_and_other_fields_are_bounded() {
+        let mut history = history(&["old", "call", "result", "tail"]);
+        let huge = "</summary_source>é".repeat(120_000);
+        history[0].text = huge.clone();
+        history[0].images.push(ImageInput {
+            attachment_id: "photo".into(),
+            url: Some("data:image/png;base64,IGNORE".into()),
+            caption: Some(huge.clone()),
+        });
+        history[1].tool_items.push(ToolItem::Call {
+            call: ToolCall {
+                call_id: "big".into(),
+                name: "read".into(),
+                arguments: json!({"large": huge}),
+            },
+        });
+        history[2].tool_items.push(ToolItem::Output {
+            call_id: "big".into(),
+            output: json!("X".repeat(2_000_000)),
+        });
+        let gateway = Gateway::text("The bounded result.");
+        let summary = summarize(&gateway, "model", "conversation", &history, None).unwrap();
+        assert_eq!(summary.resume_from_entry_inclusive, "tail");
+        let requests = gateway.requests.lock().unwrap();
+        let request = &requests[0];
+        let cost = crate::context::input_characters(&request.input[0]).unwrap()
+            + request.instructions.chars().count();
+        assert!(cost <= character_limit(&ContextBudget::default()).unwrap());
+        assert!(request.input[0]
+            .text
+            .contains("[truncated; original 2000000 characters]"));
+        assert!(request.input[0].text.len() < 200_000);
+        assert_eq!(
+            request.input[0].text.matches("</summary_source>").count(),
+            1
+        );
+        assert!(!request.input[0].text.contains("base64"));
+    }
+
+    #[test]
+    fn bounded_input_compacts_a_long_history_in_successive_complete_chunks() {
+        let conn = conn();
+        let history: Vec<_> = (0..40)
+            .map(|index| {
+                let mut entry = entry(&format!("entry-{index}"));
+                entry.text = "é".repeat(1500);
+                entry
+            })
+            .collect();
+        let options = SummaryOptions {
+            budget: ContextBudget {
+                estimated_tokens: 2000,
+                ..ContextBudget::default()
+            },
+            ..SummaryOptions::default()
+        };
+        let mut previous = None;
+        let mut calls = 0;
+        loop {
+            let gateway = Gateway::text("The preserved conversation state.");
+            let summary = summarize_with_options(
+                &gateway,
+                "model",
+                "conversation",
+                &history,
+                previous.as_ref(),
+                &options,
+            )
+            .unwrap();
+            let request = &gateway.requests.lock().unwrap()[0];
+            assert!(
+                crate::context::input_characters(&request.input[0]).unwrap()
+                    + request.instructions.chars().count()
+                    <= 8000
+            );
+            save_exact(&conn, &summary, &history);
+            calls += 1;
+            if summary.resume_from_entry_inclusive == "entry-39" {
+                break;
+            }
+            assert!(calls < 40);
+            previous = Some(summary);
+        }
+        assert!(calls > 1);
     }
 
     #[test]

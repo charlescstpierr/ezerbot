@@ -9,6 +9,13 @@ members = [
   "crates/session",
   "crates/wrapper",
   "crates/try",
+  "crates/skills",
+  "crates/memory",
+  "crates/engine",
+  "crates/forms",
+  "crates/scheduler",
+  "crates/delegation",
+  "crates/attachments",
 ]
 
 [workspace.package]
@@ -20,6 +27,17 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+getrandom = "0.2"
+jiff = "0.2"
+grokbot-skills = { path = "crates/skills" }
+grokbot-memory = { path = "crates/memory" }
+grokbot-engine = { path = "crates/engine" }
+grokbot-forms = { path = "crates/forms" }
+grokbot-scheduler = { path = "crates/scheduler" }
+grokbot-delegation = { path = "crates/delegation" }
+grokbot-attachments = { path = "crates/attachments" }
 grokbot-domain = { path = "crates/domain" }
 grokbot-wire = { path = "crates/wire" }
 grokbot-submission-journal = { path = "crates/submission-journal" }

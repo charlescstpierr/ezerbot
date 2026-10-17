@@ -15,6 +15,13 @@ grokbot-domain = { workspace = true }
 grokbot-store = { workspace = true }
 grokbot-session = { workspace = true }
 grokbot-submission-journal = { workspace = true }
+grokbot-skills = { workspace = true }
+grokbot-memory = { workspace = true }
+grokbot-engine = { workspace = true }
+grokbot-forms = { workspace = true }
+grokbot-scheduler = { workspace = true }
+grokbot-delegation = { workspace = true }
+grokbot-attachments = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }

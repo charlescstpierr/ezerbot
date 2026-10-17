@@ -1,0 +1,15 @@
+[package]
+name = "grokbot-delegation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Graphe et admission des sous-tâches Grokbot"
+
+[dependencies]
+grokbot-domain.workspace = true
+grokbot-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+getrandom.workspace = true

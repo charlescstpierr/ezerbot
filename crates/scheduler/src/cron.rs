@@ -86,6 +86,174 @@ pub fn parse(expression: &str) -> Result<Schedule> {
     })
 }
 
+/// Human-readable French presentation, using the same parser and DOM/DOW OR
+/// semantics as execution. The effective timezone appears exactly once.
+/// This describes a schedule, never predicts its next occurrence.
+pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
+    let (text, zone) = match schedule {
+        Schedule::Once { at } => {
+            let zone = TimeZone::get(time_zone).map_err(invalid)?;
+            let date = Timestamp::from_millisecond(*at)
+                .map_err(invalid)?
+                .to_zoned(zone);
+            (
+                format!("Une fois le {}", date.strftime("%d/%m/%Y à %H:%M:%S")),
+                time_zone,
+            )
+        }
+        Schedule::Every {
+            interval_ms,
+            phase_ms,
+        } => {
+            validate_every(*interval_ms, *phase_ms)?;
+            let duration = readable_duration(*interval_ms);
+            let cadence = if let Some(unit) = duration.strip_prefix("1 ") {
+                format!("Chaque {unit}")
+            } else {
+                format!(
+                    "{} {duration}",
+                    if interval_ms.is_multiple_of(86_400_000) {
+                        "Tous les"
+                    } else {
+                        "Toutes les"
+                    }
+                )
+            };
+            let text = match phase_ms {
+                Some(phase) => format!(
+                    "{cadence}, décalage de {} depuis l’époque UTC",
+                    readable_duration(*phase)
+                ),
+                None => format!("{cadence}, à partir de l’activation"),
+            };
+            (text, time_zone)
+        }
+        Schedule::Cron {
+            expression,
+            time_zone: override_zone,
+        } => {
+            let Schedule::Cron {
+                expression,
+                time_zone: embedded_zone,
+            } = parse(expression)?
+            else {
+                return Err(invalid("a Cron schedule must contain cron syntax"));
+            };
+            let zone = embedded_zone
+                .as_deref()
+                .or(override_zone.as_deref())
+                .unwrap_or(time_zone);
+            TimeZone::get(zone).map_err(invalid)?;
+            let cron = Cron::parse(&expression)?;
+            let [minute, hour, dom, month, dow] = cron.fields;
+            let values = |field: Field, min, max| {
+                (min..=max)
+                    .filter(|v| field.contains(*v))
+                    .collect::<Vec<_>>()
+            };
+            let list = |values: Vec<u32>| {
+                values
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let minutes = values(minute, 0, 59);
+            let hours = values(hour, 0, 23);
+            let time = if minutes.len() == 1 && hours.len() == 1 {
+                format!("à {:02}:{:02}", hours[0], minutes[0])
+            } else if minutes.len() == 60 && hours.len() == 24 {
+                "à chaque minute".into()
+            } else if hours.len() == 24 {
+                format!("à chaque heure, aux minutes {}", list(minutes))
+            } else {
+                format!(
+                    "aux heures {} et aux minutes {}",
+                    list(hours),
+                    list(minutes)
+                )
+            };
+            let weekdays = [
+                "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
+            ];
+            let week = if dow.bits == 0b11_1110 {
+                "du lundi au vendredi".into()
+            } else {
+                let days = values(dow, 0, 6);
+                format!(
+                    "{} {}",
+                    if days.len() == 1 { "le" } else { "les" },
+                    days.iter()
+                        .map(|v| weekdays[*v as usize])
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let days = values(dom, 1, 31);
+            let month_days = format!(
+                "{} {} du mois",
+                if days.len() == 1 { "le" } else { "les jours" },
+                list(days)
+            );
+            let days = match (dom.wildcard, dow.wildcard) {
+                (true, true) => "tous les jours".into(),
+                (true, false) => week,
+                (false, true) => month_days,
+                (false, false) => format!("{month_days} OU {week}"),
+            };
+            let months = if month.wildcard {
+                String::new()
+            } else {
+                let names = [
+                    "",
+                    "janvier",
+                    "février",
+                    "mars",
+                    "avril",
+                    "mai",
+                    "juin",
+                    "juillet",
+                    "août",
+                    "septembre",
+                    "octobre",
+                    "novembre",
+                    "décembre",
+                ];
+                format!(
+                    ", en {}",
+                    values(month, 1, 12)
+                        .iter()
+                        .map(|v| names[*v as usize])
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let text = format!("{days} {time}{months}");
+            return Ok(format!(
+                "{}{} ({zone})",
+                text[..1].to_uppercase(),
+                &text[1..]
+            ));
+        }
+    };
+    Ok(format!("{text} ({zone})"))
+}
+
+fn readable_duration(ms: u64) -> String {
+    for (unit, divisor) in [
+        ("jour", 86_400_000),
+        ("heure", 3_600_000),
+        ("minute", 60_000),
+        ("seconde", 1_000),
+    ] {
+        if ms > 0 && ms.is_multiple_of(divisor) {
+            let n = ms / divisor;
+            return format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
+        }
+    }
+    format!("{ms} millisecondes")
+}
+
 /// The first occurrence strictly after `reference_ms`, or `None` if no future
 /// slot is representable. An expression's zone takes precedence over the
 /// routine's zone (CR13). Absolute one-shots and intervals do not use a zone.
@@ -360,6 +528,44 @@ mod cron_tests {
         assert!(parse("TZ=Not/A_Zone @daily").is_err());
         assert!(parse("TZ=UTC @every 1h").is_err());
         assert!(next_after(&parse("@daily").unwrap(), "invalid", 0).is_err());
+    }
+
+    #[test]
+    fn readable_schedules_keep_calendar_semantics_and_effective_zone() {
+        for (expression, expected) in [
+            ("0 8 * * 1-5", "Du lundi au vendredi à 08:00 (America/Toronto)"),
+            ("@daily", "Tous les jours à 00:00 (America/Toronto)"),
+            ("0 9 * * 7", "Le dimanche à 09:00 (America/Toronto)"),
+            ("0 9 1-7 2 1", "Les jours 1, 2, 3, 4, 5, 6, 7 du mois OU le lundi à 09:00, en février (America/Toronto)"),
+            ("*/15 * * * *", "Tous les jours à chaque heure, aux minutes 0, 15, 30, 45 (America/Toronto)"),
+            ("* * * * *", "Tous les jours à chaque minute (America/Toronto)"),
+            ("TZ=UTC @monthly", "Le 1 du mois à 00:00 (UTC)"),
+        ] {
+            assert_eq!(describe_fr(&parse(expression).unwrap(), "America/Toronto").unwrap(), expected);
+        }
+        let prefixed = Schedule::Cron {
+            expression: "TZ=UTC @daily".into(),
+            time_zone: Some("Europe/Paris".into()),
+        };
+        assert_eq!(
+            describe_fr(&prefixed, "America/Toronto").unwrap(),
+            "Tous les jours à 00:00 (UTC)"
+        );
+        assert_eq!(
+            describe_fr(&parse("@every 1h/0ms").unwrap(), "UTC").unwrap(),
+            "Chaque heure, décalage de 0 millisecondes depuis l’époque UTC (UTC)"
+        );
+        assert_eq!(
+            describe_fr(
+                &Schedule::Once {
+                    at: ms("2025-01-01T13:00:00Z")
+                },
+                "America/Toronto"
+            )
+            .unwrap(),
+            "Une fois le 01/01/2025 à 08:00:00 (America/Toronto)"
+        );
+        assert!(describe_fr(&parse("@daily").unwrap(), "not-a-zone").is_err());
     }
 
     #[test]

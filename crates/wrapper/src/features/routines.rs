@@ -239,43 +239,17 @@ fn principal(ctx: &Context<'_>) -> Result<String, ApiError> {
     Ok(id)
 }
 fn readable_schedule(conn: &Connection, r: &Routine) -> Result<String, ApiError> {
-    Ok(match &r.trigger {
-        Schedule::Cron {
-            expression,
-            time_zone,
-        } => format!(
-            "Cron {expression} — {}",
-            time_zone.as_deref().unwrap_or(&r.time_zone)
-        ),
-        Schedule::Every {
-            interval_ms,
-            phase_ms,
-        } => {
-            let cadence = if interval_ms % 3_600_000 == 0 {
-                format!("toutes les {} heures", interval_ms / 3_600_000)
-            } else if interval_ms % 60_000 == 0 {
-                format!("toutes les {} minutes", interval_ms / 60_000)
-            } else {
-                format!("toutes les {} secondes", *interval_ms as f64 / 1_000.0)
-            };
-            match phase_ms {
-                Some(p) => format!(
-                    "{cadence}, phase de {} secondes depuis l'époque UTC",
-                    *p as f64 / 1_000.0
-                ),
-                None => format!("{cadence}, à partir de l'activation"),
-            }
-        }
-        Schedule::Once { at } => {
-            let (utc,local):(Option<String>,Option<String>)=conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f UTC',?1/1000.0,'unixepoch'),strftime('%Y-%m-%d %H:%M',?1/1000.0,'unixepoch','localtime')",[at],|row|Ok((row.get(0)?,row.get(1)?)))?;
-            format!(
-                "Une fois : {} (heure de cet hôte, {}), soit {}",
-                local.unwrap_or_else(|| "date locale hors plage".into()),
-                local_zone(),
-                utc.unwrap_or_else(|| format!("instant UTC {at} millisecondes Unix"))
-            )
-        }
-    })
+    if let Schedule::Once { at } = &r.trigger {
+        // Preserve the one-shot consent's host-local and absolute UTC evidence.
+        let (utc,local):(Option<String>,Option<String>)=conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f UTC',?1/1000.0,'unixepoch'),strftime('%Y-%m-%d %H:%M',?1/1000.0,'unixepoch','localtime')",[at],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        return Ok(format!(
+            "Une fois : {} (heure de cet hôte, {}), soit {}",
+            local.unwrap_or_else(|| "date locale hors plage".into()),
+            local_zone(),
+            utc.unwrap_or_else(|| format!("instant UTC {at} millisecondes Unix"))
+        ));
+    }
+    Ok(cron::describe_fr(&r.trigger, &r.time_zone)?)
 }
 fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError> {
     let (label, text) = match &r.body {
@@ -285,7 +259,7 @@ fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError>
                 .filter(|s| s.bot_id == r.bot_id && !s.deleted)
                 .ok_or_else(|| ApiError::new(404, "Pinned skill version not found for this bot"))?;
             (
-                format!("Skill {} ({skill_id}, version {version})", s.content.name),
+                format!("Skill {} · version {version}", s.content.name),
                 s.content.body,
             )
         }
@@ -297,22 +271,35 @@ fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError>
     }
     Ok(format!("{label} :\n{text}"))
 }
-fn fenced_data(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(3.max(longest + 1));
-    format!("{fence}text\n{text}\n{fence}")
+fn quoted_data(text: &str) -> String {
+    // Preserve the complete untrusted body as literal, readable quoted text.
+    // Escape Markdown (including HTML, links and fences); no model-authored line
+    // may break out of the preview or masquerade as the host's consent question.
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|line| {
+            let escaped = line.chars().fold(String::new(), |mut out, c| {
+                if c.is_ascii_punctuation() {
+                    out.push('\\');
+                }
+                out.push(c);
+                out
+            });
+            format!("> {escaped}  ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 fn ask_confirmation(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     let conversation = principal(ctx)?;
     let preview = confirmation_body(ctx.connection, r)?;
     let data = format!(
-        "Nom : {}\nIdentifiant : {}\nHoraire : {}\nFuseau : {}\n\n{preview}",
+        "{}\n\n{}\n\n{preview}",
         r.name,
-        r.routine_id,
-        readable_schedule(ctx.connection, r)?,
-        r.time_zone
+        readable_schedule(ctx.connection, r)?
     );
-    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Si plusieurs routines portent ce nom, indiquez son identifiant.",fenced_data(&data));
+    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Pour distinguer des routines de même nom, utilisez le panneau Routines.",quoted_data(&data));
     let existing:Option<String>=ctx.connection.query_row("SELECT m.message_id FROM wrapper_routine_confirmation c JOIN wrapper_conversations v ON v.account_id=?1 AND v.id=c.conversation_id AND v.deleted=0 JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=c.conversation_id AND m.ordinal=c.after_ordinal WHERE c.routine_id=?2 AND c.conversation_id=?3 AND c.confirmed_message_id IS NULL",params![ACCOUNT,r.routine_id,conversation],|row|row.get(0)).optional()?;
     let notice = match existing {
         Some(id) => {
@@ -449,6 +436,8 @@ fn routine_value(conn: &Connection, r: &Routine) -> Result<Value, ApiError> {
         .optional()?;
     let mut value = json!(r);
     value["model_edited_at"] = json!(edited);
+    value["schedule_description"] = json!(cron::describe_fr(&r.trigger, &r.time_zone)
+        .unwrap_or_else(|_| "Horaire indisponible — consultez cette routine.".into()));
     Ok(value)
 }
 fn query(query: &str) -> Result<Value, ApiError> {
@@ -614,7 +603,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
     load().unwrap_or_else(|_| json!({"error":"Routine state unavailable"}))
 }
 // Arbitrary capability entries are not replayed as chat history by the engine.
-// Supply visible pending questions as fenced data to the principal model, also
+// Supply visible pending questions as quoted data to the principal model, also
 // when a routine originated in another bot's conversation.
 pub fn context(
     ctx: &Context<'_>,

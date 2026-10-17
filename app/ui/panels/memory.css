@@ -12,7 +12,6 @@
 .memory-fact { border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
 .memory-fact-choice { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
 .memory-text { font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
-.memory-panel .memory-id { display: block; margin-top: 6px; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; user-select: text; }
 .memory-panel .memory-meta { font-size: 10px; }
 .memory-panel button { font-size: 11px; padding: 8px 10px; }
 .memory-panel button:disabled, .memory-controls:disabled { opacity: .6; }
@@ -22,8 +21,6 @@
 .memory-edit-label { display: block; font-size: 11px; overflow-wrap: anywhere; }
 .memory-editor textarea { display: block; margin-top: 8px; resize: vertical; }
 .memory-editor button { margin: 8px 8px 0 0; }
-.memory-tombstone { font-size: 11px; color: var(--muted); margin: 8px 0; }
-.memory-tombstone .memory-id { display: inline; }
 @media (max-width: 480px) {
   .memory-toolbar > button { flex: 1 1 auto; }
   .memory-select-all { width: 100%; }

@@ -108,7 +108,7 @@
           const owner = panels.state?.bots?.find((item) => item.id === fact.bot_id);
           const scope = fact.scope === "team" ? "Équipe" : "Privé";
           const date = new Date(fact.learned_at);
-          row.append(label, node("code", "memory-id", fact.fact_id), node("p", "memory-meta", `${scope}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || fact.bot_id}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
+          row.append(label, node("p", "memory-meta", `${scope}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || "Bot indisponible"}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
           const actions = node("div", "memory-actions");
           // Models may mutate only their own facts. The user can purge a visible
           // team fact through its owner, including a deleted owner (wrapper r2).
@@ -120,12 +120,7 @@
         history.replaceChildren();
         const tombstones = [...forgotten.values()].filter((fact) => fact.bot_id === bot.id || fact.scope === "team");
         if (tombstones.length) {
-          history.append(node("h4", "", "Oubliés dans cette fenêtre"), node("p", "memory-note", "Identifiants uniquement ; le texte n’est pas conservé ici. Cet historique local disparaît au rechargement."));
-          for (const fact of tombstones) {
-            const row = node("p", "memory-tombstone", "Oublié · ");
-            row.append(node("code", "memory-id", fact.fact_id));
-            history.append(row);
-          }
+          history.append(node("h4", "", "Oubliés dans cette fenêtre"), node("p", "memory-note", `${tombstones.length} ${tombstones.length === 1 ? "fait oublié" : "faits oubliés"}. Le texte et les versions précédentes ne sont pas conservés ici. Ce bilan local disparaît au rechargement.`));
         }
         controls.disabled = busy;
         section.setAttribute("aria-busy", String(busy));
@@ -164,12 +159,12 @@
       }
       function edit(fact) {
         const cancel = openEditor(fact.fact_id);
-        const label = node("label", "memory-edit-label", `Corriger ${fact.fact_id}`);
+        const label = node("label", "memory-edit-label", "Corriger ce fait");
         const input = node("textarea", "text-input");
         input.rows = 3;
         input.value = fact.text;
         label.append(input);
-        const hint = node("p", "memory-note", "1 à 2 000 caractères. Une correction crée un nouvel identifiant, sans changer la portée ni la sensibilité.");
+        const hint = node("p", "memory-note", "1 à 2 000 caractères. Une correction remplace le fait, sans changer sa portée ni sa sensibilité.");
         const save = button("Enregistrer la correction", () => {
           const text = input.value.trim();
           if (!text || [...text].length > 2000) { hint.textContent = "Saisissez entre 1 et 2 000 caractères."; input.focus(); return; }
@@ -182,7 +177,7 @@
             facts = facts.filter((item) => item.fact_id !== fact.fact_id);
             facts.unshift(data.fact);
             selected.delete(fact.fact_id);
-            status.textContent = `Fait corrigé : ${data.fact.fact_id}.`;
+            status.textContent = "Fait corrigé.";
           });
         }, "primary-button");
         // Never submit the enclosing bot-profile form with Cmd/Ctrl+Enter.
@@ -197,7 +192,7 @@
       }
       function confirmForget(fact) {
         const cancel = openEditor(fact.fact_id);
-        editor.append(node("p", "memory-note", `Oublier ${fact.fact_id} et ses versions précédentes ?${fact.scope === "team" ? " Ce fait sera retiré pour tous les bots de l’espace." : ""} Cette action ne réinitialise pas la conversation.`), button("Confirmer l’oubli", () => {
+        editor.append(node("p", "memory-note", `Oublier « ${fact.text} » et ses versions précédentes ?${fact.scope === "team" ? " Ce fait sera retiré pour tous les bots de l’espace." : ""} Cette action ne réinitialise pas la conversation.`), button("Confirmer l’oubli", () => {
           mutate("/api/memory/forget", { bot_id: fact.bot_id, fact_id: fact.fact_id }, (data) => {
             for (const id of data.forgotten) forgotten.set(id, { fact_id: id, bot_id: fact.bot_id, scope: fact.scope });
             facts = facts.filter((item) => !forgotten.has(item.fact_id));

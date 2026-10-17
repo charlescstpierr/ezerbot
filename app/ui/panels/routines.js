@@ -91,9 +91,10 @@
     const dayNames = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"];
     const week = dow.includes("/") ? `${dow} (0/7 = dimanche, 1 = lundi)` : dow.replace(/\d+/g, (n) => dayNames[Number(n)]);
     const days = dom !== "*" && dow !== "*" ? `jour du mois ${dom} OU ${week}` : dom !== "*" ? `jour du mois ${dom}` : dow !== "*" ? week : "tous les jours";
-    return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${time} · ${days} · ${month === "*" ? "tous les mois" : `mois ${month}`}` };
+    return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${time} · ${days}${month === "*" ? "" : ` · mois ${month}`}` };
   }
   function describe(r) {
+    if (r.schedule_description) return r.schedule_description;
     try {
       if (r.trigger.kind === "once") return `Une fois : ${date(r.trigger.at, r.time_zone)} · ${r.time_zone}`;
       const t = r.trigger;
@@ -154,6 +155,8 @@
     botSelect.replaceChildren(...liveBots().map((b) => { const option = node("option", "", b.name); option.value = b.id; return option; }));
     botSelect.value = liveBots().some((b) => b.id === bot) ? bot : liveBots()[0]?.id || "";
     view = "list"; current = null; signature = ""; revision++;
+    // Routines replaces its entry dialog rather than stacking modal backdrops.
+    for (const name of ["bot-dialog", "settings-dialog"]) document.getElementById(name)?.close();
     message(""); dialog.showModal(); renderList();
     void reload();
   }
@@ -184,7 +187,7 @@
     if (!list.length) content.append(node("p", "routines-note", "Aucune routine pour ce bot."));
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
-      row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)), node("code", "routines-id", r.routine_id));
+      row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${item.error}`));
       const actions = node("div", "routines-actions");
@@ -234,9 +237,18 @@
     for (const [value, label] of [["inline_prompt", "Prompt libre"], ["skill_invocation", "Skill · version épinglée"]]) { const opt = node("option", "", label); opt.value = value; kind.append(opt); }
     kind.value = r?.body.kind || "inline_prompt";
     const prompt = field("Instructions de la routine", "textarea"); prompt.rows = 6; prompt.value = r?.body.prompt || "";
-    const skill = field("Identifiant de la skill de ce bot"); skill.value = r?.body.skill_id || "";
+    const skill = field("Skill de ce bot", "select");
+    const availableSkills = panels.state.skills?.by_bot?.[botId()] || [];
+    skill.append(node("option", "", "Choisir une skill")); skill.firstChild.value = "";
+    for (const item of availableSkills) {
+      const option = node("option", "", item.name + (item.name_truncated ? "…" : "")); option.value = item.skill_id; skill.append(option);
+    }
+    if (r?.body.skill_id && !availableSkills.some((item) => item.skill_id === r.body.skill_id)) {
+      const option = node("option", "", pinned?.content.name || "Skill épinglée indisponible"); option.value = r.body.skill_id; skill.append(option);
+    }
+    skill.value = r?.body.skill_id || "";
     const version = field("Version épinglée de la skill"); version.type = "number"; version.min = "1"; version.step = "1"; version.value = String(r?.body.version || 1);
-    const skillHint = node("p", "routines-note", "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour ses identifiants et versions."); fields.append(skillHint);
+    const skillHint = node("p", "routines-note", "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
     for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
@@ -284,7 +296,7 @@
               if (!prompt.value.trim()) throw new Error("Ajoutez des instructions. La requête complète est limitée à 64 Kio, encodage JSON compris.");
               payload.body = { kind: "inline_prompt", prompt: prompt.value };
             } else {
-              if (!skill.value.trim() || !Number.isSafeInteger(Number(version.value)) || Number(version.value) < 1) throw new Error("Indiquez un identifiant et une version entière positive de skill.");
+              if (!skill.value.trim() || !Number.isSafeInteger(Number(version.value)) || Number(version.value) < 1) throw new Error("Choisissez une skill et une version entière positive.");
               payload.body = { kind: "skill_invocation", skill_id: skill.value.trim(), version: Number(version.value) };
             }
           }
@@ -374,9 +386,9 @@
     for (const o of occurrences) {
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`), node("code", "routines-id", o.occurrence_id));
+      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", o.status.reason));
-      if (o.status.run_id) row.append(node("code", "routines-id", o.status.run_id), button("Ouvrir le fil du run", () => openThread(r.conversation_id)));
+      if (o.status.run_id) row.append(button("Ouvrir le fil du run", () => openThread(r.conversation_id)));
       content.append(row);
     }
     if (occurrences.length < h.occurrences.length) content.append(button("Afficher plus d’occurrences", () => showHistory(r, "occurrences")));

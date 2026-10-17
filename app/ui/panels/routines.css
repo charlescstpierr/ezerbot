@@ -14,7 +14,6 @@
 .routines-dialog button:disabled { opacity: .5; cursor: default; }
 .routines-row, .routines-occurrence { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .routines-state { display: inline-block; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 6px; background: var(--soft); margin: 0; }
-.routines-id { display: block; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; margin-top: 6px; }
 .routines-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 .routines-fields > .form-label { margin-top: 16px; }
 .routines-fields .text-input { margin-top: 6px; }

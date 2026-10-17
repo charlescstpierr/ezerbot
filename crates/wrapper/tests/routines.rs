@@ -366,13 +366,65 @@ fn model_confirmation_never_hides_prompt_tails_and_skill_body_is_reviewable() {
         .find(|c| c["id"] == created["confirmation_conversation_id"])
         .unwrap()
         .clone();
-    let shown = chat["messages"].to_string();
-    assert!(shown.contains("FULL_SKILL_BODY"));
-    assert!(shown.contains(skill["content"]["name"].as_str().unwrap()));
-    assert!(shown.contains("toutes les 1 minutes"));
+    let messages = chat["messages"].as_array().unwrap();
+    let shown = messages
+        .iter()
+        .filter_map(|m| m["body"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let literal = shown.replace('\\', "");
+    assert!(literal.contains("FULL_SKILL_BODY"));
+    assert!(literal.contains(skill["content"]["name"].as_str().unwrap()));
+    assert!(literal.contains("Chaque minute"));
     assert!(!shown.contains("interval_ms"));
     assert!(shown.contains("non vérifié"));
-    assert!(shown.contains("```text"));
+    assert!(!shown.contains("```text"));
+    assert!(!literal.contains(skill["skill_id"].as_str().unwrap()));
+    assert!(!literal.contains(created["routine"]["routine_id"].as_str().unwrap()));
+}
+
+#[test]
+fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
+    let mut f = Fixture::new(false);
+    let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte";
+    let created = output(
+        f.app
+            .invoke_tool(
+                "grokbot",
+                "create_routine",
+                json!({
+                    "name":"Météo du matin", "prompt":prompt,
+                    "schedule":"TZ=America/Toronto 0 8 * * 1-5", "time_zone":"Europe/Paris"
+                }),
+            )
+            .unwrap(),
+    );
+    let shown: String = f
+        .db()
+        .query_row("SELECT body FROM wrapper_routine_notices", [], |r| r.get(0))
+        .unwrap();
+    let literal = shown.replace('\\', "");
+    assert!(literal.contains("Du lundi au vendredi à 08:00 (America/Toronto)"));
+    assert_eq!(literal.matches("America/Toronto").count(), 1);
+    assert!(!literal.contains("Europe/Paris"));
+    assert!(!literal.contains("0 8 * * 1-5"));
+    assert!(!literal.contains(created["routine"]["routine_id"].as_str().unwrap()));
+    assert!(!shown.contains("```"));
+    assert!(!shown.contains('\r'));
+    assert!(shown.contains("\\<img"));
+    let preview = shown.split("\n\n").nth(1).unwrap();
+    assert!(preview.lines().all(|line| line.starts_with("> ")));
+    assert!(literal.contains("Tâche proposée :  \n> Donne-moi la météo."));
+    assert!(literal.contains("[secret](https://example.com) <img src=x>"));
+    assert!(shown.contains("\n\nConfirmez-vous son activation ?"));
+    let list = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert_eq!(
+        list["routines"][0]["schedule_description"],
+        "Du lundi au vendredi à 08:00 (America/Toronto)"
+    );
 }
 
 #[test]
@@ -889,9 +941,10 @@ fn one_shot_consent_shows_the_host_local_datetime_and_explicit_utc() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(text.contains(&expected));
-    assert!(text.contains("UTC"));
-    assert!(text.contains(&features::routines::local_zone()));
+    let literal = text.replace('\\', "");
+    assert!(literal.contains(&expected));
+    assert!(literal.contains("UTC"));
+    assert!(literal.contains(&features::routines::local_zone()));
     assert!(result["local_time"].is_string());
 }
 

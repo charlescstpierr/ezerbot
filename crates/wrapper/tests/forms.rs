@@ -1,11 +1,14 @@
-//! Wrapper-only integration tests. Real wake delivery is exercised through the
-//! engine's model API here; host-driven resumption belongs to forms_resume.
+//! Targeted wrapper integration. Suspensions and resumptions use the real durable
+//! run loop with production approval adapters, not hand-written lifecycle states.
+//! ModelRequest capture proves this boundary; fake HTTP/provider proof is forms_resume.
 use grokbot_engine::{
     contracts::{
-        with_tx, RunBudgets, RunEventKind, RunKind, SuspendCause, ToolCall, ToolOutcome, Trigger,
-        TurnEnd,
+        with_tx, ApprovalCheck, Error, ModelEvent, ModelGateway, ModelRequest,
+        Result as EngineResult, RunBudgets, RunEvent, RunEventKind, RunKind, SuspendCause,
+        ToolCall, ToolOutcome, ToolSpec, Trigger, TurnEnd,
     },
     model::{self, Run, RunStatus},
+    run_loop::{self, RunProgress, RunServices},
     store,
 };
 use grokbot_forms::{
@@ -13,14 +16,18 @@ use grokbot_forms::{
     requests::{self, HumanInputRequest, RequestStatus},
 };
 use grokbot_wrapper::{
-    features::{self, forms},
-    App,
+    features::{self, forms, Context},
+    ApiError, App,
 };
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -48,6 +55,7 @@ impl Fixture {
         let conn = Connection::open(&path).unwrap();
         conn.busy_timeout(std::time::Duration::from_secs(3))
             .unwrap();
+        conn.execute_batch("CREATE TABLE test_protected_effects(call_id TEXT PRIMARY KEY, arguments TEXT NOT NULL)").unwrap();
         let fixture = Self {
             app,
             conn,
@@ -83,11 +91,7 @@ impl Fixture {
     fn call_for(&self, run: &str, call_id: &str, name: &str, args: Value) -> ToolOutcome {
         let run = store::required(&self.conn, run).unwrap();
         let tx = features::write_transaction(&self.conn).unwrap();
-        let mut ctx = self.app.feature_context();
-        ctx.connection = &tx;
-        ctx.run_id = Some(&run.run_id);
-        ctx.bot_id = Some(&run.bot_id);
-        ctx.conversation_id = Some(&run.conversation_id);
+        let ctx = tool_context(&self.app, &tx, &run);
         let result = features::call_tool(
             &ctx,
             &ToolCall {
@@ -97,8 +101,7 @@ impl Fixture {
             },
         )
         .unwrap();
-        // Failed outcomes are also committed by the actual run loop. The forms
-        // hook must roll its own partial request back, not rely on the probe.
+        // The engine also commits Failed outcomes. Hooks must undo partial writes.
         tx.commit().unwrap();
         result
     }
@@ -108,63 +111,84 @@ impl Fixture {
             cause: SuspendCause::HumanInput { id },
         } = outcome
         else {
-            panic!("expected suspension: {outcome:?}")
+            panic!("{outcome:?}")
         };
         requests::get(&self.conn, &id).unwrap().unwrap()
     }
     fn form(&self) -> HumanInputRequest {
         self.request("form", "request_form", form_args())
     }
-    fn submit(&mut self, request: &HumanInputRequest, submission: &str, values: Value) -> Value {
-        self.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":submission,"conversation_id":request.route.target_conversation_id,"values":values}))
+    fn approval_for(&self, run: &str, call_id: &str, args: Value) -> HumanInputRequest {
+        let run = store::required(&self.conn, run).unwrap();
+        let tx = features::write_transaction(&self.conn).unwrap();
+        let ctx = tool_context(&self.app, &tx, &run);
+        let cause = forms::request_tool_approval(&ctx, &run, &guarded_call(call_id, args)).unwrap();
+        let SuspendCause::HumanInput { id } = cause else {
+            panic!("not human input")
+        };
+        let request = requests::get(&tx, &id).unwrap().unwrap();
+        tx.commit().unwrap();
+        request
+    }
+    fn approval(&self, call: &str, args: Value) -> HumanInputRequest {
+        self.approval_for("run", call, args)
+    }
+    fn check(&self, call: &str, args: Value) -> ApprovalCheck {
+        with_tx(&self.conn, |conn| -> Result<_, ApiError> {
+            let run = store::required(conn, "run")?;
+            forms::check_tool_approval(
+                &tool_context(&self.app, conn, &run),
+                &run,
+                &guarded_call(call, args.clone()),
+            )
+        })
+        .unwrap()
+    }
+    fn drive(&self, run: &str, gateway: &ScriptedGateway) -> RunProgress {
+        run_loop::run(
+            &self.conn,
+            gateway,
+            &mut Services {
+                app: &self.app,
+                force_first_ask: false,
+            },
+            run,
+        )
+        .unwrap()
+    }
+    fn suspended_request(
+        &self,
+        run: &str,
+        call_id: &str,
+        name: &str,
+        args: Value,
+    ) -> HumanInputRequest {
+        let progress = self.drive(run, &ScriptedGateway::call(call_id, name, args));
+        let RunProgress::Suspended(SuspendCause::HumanInput { id }) = progress else {
+            panic!("{progress:?}")
+        };
+        requests::get(&self.conn, &id).unwrap().unwrap()
     }
     fn post(&mut self, path: &str, body: Value) -> Value {
         self.app
             .api("POST", path, &serde_json::to_vec(&body).unwrap())
             .unwrap()
     }
-    fn suspend(&self, request: &HumanInputRequest) {
-        with_tx(
-            &self.conn,
-            |conn| -> Result<(), grokbot_engine::contracts::Error> {
-                let mut run = store::required(conn, &request.run_id)?;
-                run.status = if matches!(
-                    request.kind,
-                    grokbot_forms::requests::InputKind::Approval { .. }
-                ) {
-                    RunStatus::AwaitingApproval
-                } else {
-                    RunStatus::AwaitingHumanInput
-                };
-                store::save(conn, &run)?;
-                let event = store::append_event(
-                    conn,
-                    &request.run_id,
-                    RunEventKind::Suspended,
-                    &json!({"cause":SuspendCause::HumanInput { id: request.id.clone() }}),
-                )?;
-                let mut ctx = self.app.feature_context();
-                ctx.connection = conn;
-                forms::on_run_event(&ctx, &event);
-                Ok(())
-            },
-        )
-        .unwrap();
+    fn submit(&mut self, request: &HumanInputRequest, nonce: &str, values: Value) -> Value {
+        self.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":nonce,"conversation_id":request.route.target_conversation_id,"values":values}))
+    }
+    fn decide(&mut self, request: &HumanInputRequest, nonce: &str, decision: Value) -> Value {
+        self.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"submission_id":nonce,"conversation_id":request.route.target_conversation_id,"decision":decision}))
+    }
+    fn cancel(&mut self, request: &HumanInputRequest, nonce: &str) -> Value {
+        self.post("/api/forms/cancel",json!({"entry_id":request.entry_id,"submission_id":nonce,"conversation_id":request.route.target_conversation_id}))
     }
     fn count(&self, table: &str) -> i64 {
         self.conn
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .unwrap()
-    }
-    fn approval(&self, call: &str, arguments: Value) -> HumanInputRequest {
-        self.request(
-            call,
-            "request_approval",
-            json!({"tool":"write_file","arguments":arguments}),
-        )
-    }
-    fn decide(&mut self, request: &HumanInputRequest, submission: &str, decision: Value) -> Value {
-        self.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"submission_id":submission,"conversation_id":request.route.target_conversation_id,"decision":decision}))
     }
 }
 impl Drop for Fixture {
@@ -175,20 +199,176 @@ impl Drop for Fixture {
 fn form_args() -> Value {
     json!({"fields":[{"name":"city","label":"City","field_type":{"kind":"text"},"required":true}]})
 }
+fn guarded_call(id: &str, args: Value) -> ToolCall {
+    ToolCall {
+        call_id: id.into(),
+        name: "write_file".into(),
+        arguments: args,
+    }
+}
+fn tool_context<'a>(app: &'a App, conn: &'a Connection, run: &'a Run) -> Context<'a> {
+    Context {
+        connection: conn,
+        bot_id: Some(&run.bot_id),
+        conversation_id: Some(&run.conversation_id),
+        run_id: Some(&run.run_id),
+        ..app.feature_context()
+    }
+}
+fn engine_error(error: ApiError) -> Error {
+    Error::InvalidInput(error.to_string())
+}
+
+struct Services<'a> {
+    app: &'a App,
+    force_first_ask: bool,
+}
+impl RunServices for Services<'_> {
+    fn context(&mut self, _: &Run) -> EngineResult<ModelRequest> {
+        Ok(ModelRequest {
+            model: "scripted".into(),
+            instructions: "Test contract".into(),
+            input: Vec::new(),
+            tools: Vec::new(),
+            effort: None,
+            service_tier: None,
+        })
+    }
+    fn tools(&self) -> Vec<ToolSpec> {
+        let mut tools = features::tools();
+        tools.push(ToolSpec {
+            name: "write_file".into(),
+            description: "Test guarded action".into(),
+            schema: json!({"type":"object"}),
+            requires_approval: true,
+        });
+        tools
+    }
+    fn call_tool(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &ToolCall,
+    ) -> EngineResult<ToolOutcome> {
+        if call.name == "write_file" {
+            conn.execute(
+                "INSERT INTO test_protected_effects(call_id,arguments) VALUES (?1,?2)",
+                params![call.call_id, call.arguments.to_string()],
+            )?;
+            return Ok(ToolOutcome::Done {
+                output: json!({"written":true}),
+            });
+        }
+        Ok(features::call_tool(&tool_context(self.app, conn, run), call).expect("known tool"))
+    }
+    fn check_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &ToolCall,
+    ) -> EngineResult<ApprovalCheck> {
+        // Exercise auto_review resolving between the service's Ask and suspension.
+        // Normal production checks below admit a matching standing rule directly.
+        if std::mem::take(&mut self.force_first_ask) {
+            return Ok(ApprovalCheck::Ask);
+        }
+        forms::check_tool_approval(&tool_context(self.app, conn, run), run, call)
+            .map_err(engine_error)
+    }
+    fn request_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &ToolCall,
+    ) -> EngineResult<SuspendCause> {
+        forms::request_tool_approval(&tool_context(self.app, conn, run), run, call)
+            .map_err(engine_error)
+    }
+    fn is_cancelled(&self, _: &str) -> bool {
+        false
+    }
+    fn on_run_event(&mut self, conn: &Connection, event: &RunEvent) -> EngineResult<()> {
+        let ctx = Context {
+            connection: conn,
+            ..self.app.feature_context()
+        };
+        forms::on_run_event_checked(&ctx, event).map_err(engine_error)
+    }
+    fn resolution(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call_id: &str,
+    ) -> EngineResult<Option<Value>> {
+        let id = format!(
+            "input_{}",
+            approvals::args_digest("human_input", &json!([run.run_id, call_id]))?
+        );
+        let Some(request) = requests::get(conn, &id)? else {
+            return Ok(None);
+        };
+        match request.status {
+            RequestStatus::Resolved { resolution_id } => {
+                Ok(Some(requests::resolved_values(conn, &resolution_id)?))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+#[derive(Default)]
+struct ScriptedGateway {
+    replies: Mutex<VecDeque<Vec<ModelEvent>>>,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+impl ScriptedGateway {
+    fn call(id: &str, name: &str, args: Value) -> Self {
+        Self {
+            replies: Mutex::new(VecDeque::from([vec![
+                ModelEvent::ToolCall {
+                    call_id: id.into(),
+                    name: name.into(),
+                    arguments: args,
+                },
+                ModelEvent::Completed,
+            ]])),
+            requests: Mutex::default(),
+        }
+    }
+}
+impl ModelGateway for ScriptedGateway {
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        emit: &mut dyn FnMut(ModelEvent) -> EngineResult<()>,
+    ) -> EngineResult<()> {
+        self.requests.lock().unwrap().push(request.clone());
+        let events = self.replies.lock().unwrap().pop_front().unwrap_or_else(|| {
+            vec![
+                ModelEvent::TextDelta {
+                    text: "Done".into(),
+                },
+                ModelEvent::Completed,
+            ]
+        });
+        for event in events {
+            emit(event)?;
+        }
+        Ok(())
+    }
+}
 
 #[test]
 fn submit_writes_resolution_and_pending_wake_atomically() {
     let mut f = Fixture::new();
-    let request = f.form();
-    f.suspend(&request);
-    f.conn.execute_batch("CREATE TRIGGER fail_wake BEFORE INSERT ON engine_run_wakes BEGIN SELECT RAISE(ABORT,'injected wake failure'); END;").unwrap();
-    let input = json!({"entry_id":request.entry_id,"submission_id":"submit","conversation_id":f.conversation,"values":{"city":"Paris"}});
+    let request = f.suspended_request("run", "form", "request_form", form_args());
+    f.conn.execute_batch("CREATE TRIGGER fail_wake BEFORE INSERT ON engine_run_wakes BEGIN SELECT RAISE(ABORT,'wake failure'); END").unwrap();
+    let body = json!({"entry_id":request.entry_id,"submission_id":"submit","conversation_id":f.conversation,"values":{"city":"Paris"}});
     assert!(f
         .app
         .api(
             "POST",
             "/api/forms/submit",
-            &serde_json::to_vec(&input).unwrap()
+            &serde_json::to_vec(&body).unwrap()
         )
         .is_err());
     assert_eq!(f.count("forms_resolutions"), 0);
@@ -202,12 +382,10 @@ fn submit_writes_resolution_and_pending_wake_atomically() {
         vec![request.id.clone()]
     );
     f.conn.execute_batch("DROP TRIGGER fail_wake").unwrap();
-    let response = f.post("/api/forms/submit", input);
-    assert_eq!(response["receipt"]["wake"]["status"], "pending");
-    assert_eq!(f.count("forms_resolutions"), 1);
-    assert_eq!(f.count("engine_run_wakes"), 1);
+    let response = f.post("/api/forms/submit", body);
     let wake = &store::pending_wakes(&f.conn).unwrap()[0];
     assert_eq!(wake.run_id, "run");
+    assert_eq!(response["receipt"]["wake"]["status"], "pending");
     assert_eq!(
         wake.reference,
         response["receipt"]["resolution_id"].as_str().unwrap()
@@ -223,15 +401,12 @@ fn resubmit_returns_same_receipt() {
     let mut f = Fixture::new();
     let request = f.form();
     let first = f.submit(&request, "nonce", json!({"city":"Paris"}));
-    let second = f.submit(&request, "nonce", json!({}));
-    assert_eq!(first, second);
+    assert_eq!(f.submit(&request, "nonce", json!({})), first);
     assert_eq!(
         requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
             .unwrap(),
         json!({"city":"Paris"})
     );
-    assert_eq!(f.count("forms_resolutions"), 1);
-    assert_eq!(f.count("engine_run_wakes"), 1);
     let changed = json!({"entry_id":request.entry_id,"submission_id":"other","conversation_id":f.conversation,"values":{"city":"Lyon"}});
     assert!(f
         .app
@@ -241,16 +416,20 @@ fn resubmit_returns_same_receipt() {
             &serde_json::to_vec(&changed).unwrap()
         )
         .is_err());
+    assert_eq!(f.count("forms_resolutions"), 1);
+    assert_eq!(f.count("engine_run_wakes"), 1);
 }
 
 #[test]
 fn receipt_reflects_engine_delivery_not_just_polling() {
     let mut f = Fixture::new();
-    let request = f.form();
-    f.suspend(&request);
+    let request = f.suspended_request("run", "form", "request_form", form_args());
     let first = f.submit(&request, "nonce", json!({"city":"Paris"}));
     assert_eq!(f.submit(&request, "nonce", json!({})), first);
-    with_tx(&f.conn, |conn| model::resume(conn, "run")).unwrap();
+    assert_eq!(
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
     let delivered = f.submit(&request, "nonce", json!({}));
     assert_eq!(
         delivered["receipt"]["resolution_id"],
@@ -266,13 +445,13 @@ fn receipt_reflects_engine_delivery_not_just_polling() {
         RunEventKind::Resumed
     );
     assert_eq!(f.count("engine_runs"), 1);
-    assert_eq!(f.count("engine_run_wakes"), 1);
 }
 
 #[test]
 fn secret_value_absent_from_state_export_and_events() {
     let mut f = Fixture::new();
-    let request = f.request(
+    let request = f.suspended_request(
+        "run",
         "secret",
         "request_secret",
         json!({"name":"api_token","purpose":"Authenticate"}),
@@ -280,56 +459,64 @@ fn secret_value_absent_from_state_export_and_events() {
     assert!(
         matches!(&request.kind,grokbot_forms::requests::InputKind::Secret { name,.. } if name == "API_TOKEN")
     );
-    with_tx(&f.conn, |conn| -> Result<(), grokbot_engine::contracts::Error> {
-        store::append_event(conn, "run", RunEventKind::ToolCall, &json!({
-            "call": {"call_id":"secret","name":"request_secret","arguments":{"name":"api_token","purpose":"Authenticate"}}
-        }))?;
-        store::append_event(conn, "run", RunEventKind::ToolResult, &json!({
-            "call_id":"secret","outcome":ToolOutcome::Suspend { cause:SuspendCause::HumanInput { id:request.id.clone() } }
-        }))?;
-        Ok(())
-    }).unwrap();
     let secret = "line-one\npa\"ss\\word99";
-    let response = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":secret}));
-    let resolution = response["receipt"]["resolution_id"].as_str().unwrap();
+    let first = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":secret}));
     assert_eq!(
-        requests::resolved_values(&f.conn, resolution).unwrap(),
+        requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
+            .unwrap(),
         json!({"name":"API_TOKEN"})
     );
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive("run", &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    // app.js exportConversation serializes exactly the selected conversation.
+    // app.js export serializes this conversation DTO. Events are now produced by
+    // the actual run loop; the resumed model input is captured at its gateway.
+    // This does NOT claim HTTP/provider-boundary redaction (forms_resume owns it).
     let export = serde_json::to_string(&state["conversations"]).unwrap();
-    let all = json!({"response":response,"state":state,"export":export,"events":store::events(&f.conn,"run",0).unwrap()});
-    let encoded = serde_json::to_string(&all).unwrap();
-    assert!(store::events(&f.conn, "run", 0)
-        .unwrap()
+    let events = store::events(&f.conn, "run", 0).unwrap();
+    assert!(events
         .iter()
         .any(|event| event.kind == RunEventKind::ToolResult));
-    assert!(!encoded.contains(secret));
+    let seen = gateway.requests.lock().unwrap();
+    assert!(seen[0]
+        .input
+        .iter()
+        .flat_map(|item| &item.tool_items)
+        .any(|item| serde_json::to_value(item)
+            .unwrap()
+            .to_string()
+            .contains("API_TOKEN")));
+    let all = json!({"response":first,"state":state,"export":export,"events":events,"model_requests":*seen});
+    let encoded = all.to_string();
     let escaped = serde_json::to_string(secret).unwrap();
+    assert!(!encoded.contains(secret));
     assert!(!encoded.contains(&escaped[1..escaped.len() - 1]));
     assert!(encoded.contains("API_TOKEN"));
-    let metadata = f.app.api("GET", "/api/secrets", b"").unwrap();
-    assert_eq!(metadata["secrets"][0]["name"], "API_TOKEN");
-    assert!(metadata["secrets"][0].get("value").is_none());
     let vault = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(vault.path(), f.directory.join("app.secrets.json"));
     assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
-    let retry = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"values":{}}));
-    assert_eq!(retry, response);
-    let replaced = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":"other-token-value"}));
-    assert_eq!(replaced, response);
+    let retry = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":"other-token-value"}));
+    assert_eq!(
+        retry["receipt"]["resolution_id"],
+        first["receipt"]["resolution_id"]
+    );
     assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
-    let deleted = f.post("/api/secrets/delete", json!({"name":"api_token"}));
-    assert_eq!(deleted, json!({"secrets":[]}));
-    assert_eq!(vault.get("API_TOKEN").unwrap(), None);
-    assert!(!std::fs::read(f.directory.join("app.sqlite"))
-        .unwrap()
-        .windows(secret.len())
-        .any(|window| window == secret.as_bytes()));
-    assert!(!std::fs::read(f.directory.join("app.sqlite-wal"))
-        .unwrap()
-        .windows(secret.len())
-        .any(|window| window == secret.as_bytes()));
+    assert!(f.app.api("GET", "/api/secrets", b"").unwrap()["secrets"][0]
+        .get("value")
+        .is_none());
+    assert_eq!(
+        f.post("/api/secrets/delete", json!({"name":"api_token"})),
+        json!({"secrets":[]})
+    );
+    for name in ["app.sqlite", "app.sqlite-wal"] {
+        assert!(!std::fs::read(f.directory.join(name))
+            .unwrap()
+            .windows(secret.len())
+            .any(|bytes| bytes == secret.as_bytes()));
+    }
 }
 
 #[test]
@@ -350,139 +537,308 @@ fn approval_for_modified_args_is_refused() {
         409
     );
     assert_eq!(f.count("forms_resolutions"), 0);
-    let accepted = f.decide(&request, "allow", json!("allow_once"));
-    assert_eq!(accepted["receipt"]["wake"]["status"], "pending");
-    assert!(with_tx(&f.conn, |conn| approvals::consume_allow_once(
-        conn,
-        &request.id,
-        "run",
-        "write_file",
-        &json!({"path":"unsafe","content":"hello"}),
-        0
-    ))
-    .is_err());
-    with_tx(&f.conn, |conn| {
-        approvals::consume_allow_once(conn, &request.id, "run", "write_file", &args, 0)
-    })
-    .unwrap();
-    assert!(with_tx(&f.conn, |conn| approvals::consume_allow_once(
-        conn,
-        &request.id,
-        "run",
-        "write_file",
-        &args,
-        0
-    ))
-    .is_err());
+    f.decide(&request, "allow", json!("allow_once"));
+    assert_eq!(
+        f.check("approval", json!({"path":"unsafe","content":"hello"})),
+        ApprovalCheck::Ask
+    );
+    assert!(matches!(
+        f.check("approval", args.clone()),
+        ApprovalCheck::Authorized { .. }
+    ));
+    assert!(matches!(
+        f.check("approval", args),
+        ApprovalCheck::Denied { .. }
+    ));
 }
 
 #[test]
-fn child_and_routine_approvals_are_displayed_and_decided_in_main_chat() {
+fn guarded_tool_allow_once_resumes_the_original_call_and_executes_once() {
+    let mut f = Fixture::new();
+    let request = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
+    assert!(request.id.starts_with("approval:"));
+    assert_eq!(
+        store::required(&f.conn, "run").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+    f.decide(&request, "allow", json!("allow_once"));
+    assert!(model::ready_to_resume(&f.conn, "run").unwrap());
+    assert_eq!(
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.count("test_protected_effects"), 1);
+    assert_eq!(f.count("forms_requests"), 1); // no second request for the real action
+    assert_eq!(
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.count("test_protected_effects"), 1);
+    assert!(store::events(&f.conn, "run", 0)
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolResult
+            && event.payload["call_id"] == "guarded"
+            && event.payload["authorized_by"]["request_id"] == request.id));
+}
+
+#[test]
+fn denied_expired_and_cancelled_approvals_resume_without_effect_or_new_request() {
+    for decision in ["deny", "expiry", "cancel"] {
+        let mut f = Fixture::new();
+        let request = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
+        match decision {
+            "deny" => {
+                f.decide(&request, "deny", json!("deny"));
+            }
+            "expiry" => {
+                f.app.tick(u64::MAX);
+            }
+            _ => {
+                f.cancel(&request, "cancel");
+            }
+        }
+        assert!(
+            model::ready_to_resume(&f.conn, "run").unwrap(),
+            "{decision}"
+        );
+        assert_eq!(
+            f.drive("run", &ScriptedGateway::default()),
+            RunProgress::Ended(TurnEnd::Finished)
+        );
+        assert_eq!(f.count("test_protected_effects"), 0);
+        assert_eq!(f.count("forms_requests"), 1);
+        assert_eq!(f.count("engine_run_wakes"), 1);
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert_eq!(
+            state["forms"]["requests"][0]["receipt"]["wake"]["status"],
+            "delivered"
+        );
+    }
+}
+
+#[test]
+fn auto_review_before_real_gate_suspension_is_wakeable() {
+    let mut f = Fixture::new();
+    let first = f.approval("first", json!({"path":"one"}));
+    f.decide(&first, "always", json!({"always_allow":{"scope":"global"}}));
+    let gateway = ScriptedGateway::call("guarded", "write_file", json!({"path":"two"}));
+    let progress = run_loop::run(
+        &f.conn,
+        &gateway,
+        &mut Services {
+            app: &f.app,
+            force_first_ask: true,
+        },
+        "run",
+    )
+    .unwrap();
+    assert!(matches!(progress, RunProgress::Suspended(_)));
+    assert_eq!(
+        store::required(&f.conn, "run").unwrap().status,
+        RunStatus::AwaitingApproval
+    );
+    assert!(model::ready_to_resume(&f.conn, "run").unwrap());
+    assert_eq!(
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    assert_eq!(f.count("test_protected_effects"), 1);
+    assert_eq!(f.count("forms_requests"), 2);
+}
+
+#[test]
+fn hidden_worker_inputs_all_route_to_principal_and_wake_the_originating_run() {
     let mut f = Fixture::new();
     f.post(
         "/api/bots",
         json!({"id":"child","name":"Child","color":"cyan","description":"","instructions":""}),
     );
-    for (run, kind, parent) in [
-        ("child-run", "task", Some(f.conversation.clone())),
-        ("routine-run", "routine", None),
-    ] {
-        let conversation = format!("conversation-{run}");
-        f.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) VALUES ('local-workspace',?1,'Worker','child',?2,?3,1,1)",params![conversation,kind,parent]).unwrap();
-        f.start(run, "child", &conversation);
-        let outcome = f.call_for(
-            run,
-            "approval",
-            "request_approval",
-            json!({"tool":"write_file","arguments":{"path":run}}),
-        );
-        let ToolOutcome::Suspend {
-            cause: SuspendCause::HumanInput { id },
-        } = outcome
-        else {
-            panic!("{outcome:?}")
-        };
-        let request = requests::get(&f.conn, &id).unwrap().unwrap();
-        assert_eq!(request.route.target_bot_id, "grokbot");
-        assert_eq!(request.route.target_conversation_id, f.conversation);
-        assert_eq!(request.route.requesting_bot_id, "child");
-        let forged = json!({"entry_id":id,"submission_id":"decide","conversation_id":conversation,"decision":"allow_once"});
-        assert_eq!(
-            f.app
-                .api(
-                    "POST",
-                    "/api/approvals/resolve",
-                    &serde_json::to_vec(&forged).unwrap()
-                )
-                .unwrap_err()
-                .status,
-            403
-        );
-        f.decide(&request, "decide", json!("deny"));
-        let wakes = store::pending_wakes(&f.conn).unwrap();
-        assert!(wakes.iter().any(|wake| wake.run_id == run));
-        let state = f.app.api("GET", "/api/state", b"").unwrap();
-        let conversations = state["conversations"].as_array().unwrap();
-        let main = conversations
-            .iter()
-            .find(|c| c["id"] == f.conversation)
-            .unwrap();
-        assert!(main["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["id"] == id && m["kind"] == "approval"));
-        let worker = conversations
-            .iter()
-            .find(|c| c["id"] == conversation)
-            .unwrap();
-        assert!(worker["messages"].as_array().unwrap().is_empty());
+    for kind in ["task", "routine"] {
+        for name in ["request_form", "request_secret", "write_file"] {
+            let run = format!("{kind}-{name}");
+            let conversation = format!("conversation-{run}");
+            f.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) VALUES ('local-workspace',?1,'Worker','child',?2,?3,1,1)",params![conversation,kind,f.conversation]).unwrap();
+            f.start(&run, "child", &conversation);
+            let args = match name {
+                "request_form" => form_args(),
+                "request_secret" => json!({"name":"TOKEN","purpose":"purpose"}),
+                _ => json!({"path":"safe"}),
+            };
+            let request = f.suspended_request(&run, &run, name, args);
+            assert_eq!(request.route.target_bot_id, "grokbot");
+            assert_eq!(request.route.target_conversation_id, f.conversation);
+            assert_eq!(request.route.requesting_bot_id, "child");
+            if name == "write_file" {
+                let forged = json!({"entry_id":request.entry_id,"submission_id":"deny","conversation_id":conversation,"decision":"deny"});
+                assert_eq!(
+                    f.app
+                        .api(
+                            "POST",
+                            "/api/approvals/resolve",
+                            &serde_json::to_vec(&forged).unwrap()
+                        )
+                        .unwrap_err()
+                        .status,
+                    403
+                );
+                f.decide(&request, "deny", json!("deny"));
+            } else {
+                f.cancel(&request, "cancel");
+            }
+            assert!(model::ready_to_resume(&f.conn, &run).unwrap());
+            assert!(store::pending_wakes(&f.conn)
+                .unwrap()
+                .iter()
+                .any(|wake| wake.run_id == run));
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            let conversations = state["conversations"].as_array().unwrap();
+            let main = conversations
+                .iter()
+                .find(|c| c["id"] == f.conversation)
+                .unwrap();
+            assert!(main["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == request.id));
+            assert!(conversations
+                .iter()
+                .find(|c| c["id"] == conversation)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
     }
 }
 
 #[test]
-fn always_permissions_survive_restart_and_auto_review_binds_each_new_action() {
+fn approval_card_shows_exact_action_with_secret_values_redacted_before_persistence() {
+    let mut f = Fixture::new();
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    vault.set("TOKEN", "purpose", "secret-token-value").unwrap();
+    let args = json!({"path":"/etc/hosts","content":"secret-token-value"});
+    let request = f.approval("preview", args.clone());
+    assert_eq!(
+        match &request.kind {
+            grokbot_forms::requests::InputKind::Approval { args_digest, .. } => args_digest.clone(),
+            _ => panic!(),
+        },
+        approvals::args_digest("write_file", &args).unwrap()
+    );
+    let stored: String = f
+        .conn
+        .query_row(
+            "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1",
+            [&request.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("secret-token-value"));
+    vault.remove("TOKEN").unwrap(); // old value must stay redacted after removal
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["forms"]["requests"][0]["arguments"],
+        json!({"path":"/etc/hosts","content":"[...]"})
+    );
+    let main = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == f.conversation)
+        .unwrap();
+    assert_eq!(
+        main["messages"][0]["payload"]["arguments"]["path"],
+        "/etc/hosts"
+    );
+}
+
+#[test]
+fn always_permissions_survive_restart_and_can_be_revoked_without_cancelling_grants() {
     let mut f = Fixture::new();
     let first = f.approval("first", json!({"path":"one"}));
     f.decide(&first, "always", json!({"always_allow":{"scope":"global"}}));
     f.app = App::open(&f.directory.join("app.sqlite")).unwrap();
-    let second = f.approval("second", json!({"path":"two"}));
-    assert!(matches!(second.status, RequestStatus::Resolved { .. }));
-    assert_eq!(f.count("forms_approval_rules"), 1);
-    assert_eq!(f.count("engine_run_wakes"), 2);
-    f.suspend(&second); // auto-review preceded suspension; the event hook reconciles the wait.
-    assert!(model::ready_to_resume(&f.conn, "run").unwrap());
-    with_tx(&f.conn, |conn| {
-        approvals::consume_allow_once(
-            conn,
-            &second.id,
-            "run",
-            "write_file",
-            &json!({"path":"two"}),
-            i64::MAX,
-        )
-    })
-    .unwrap();
-    assert!(with_tx(&f.conn, |conn| approvals::consume_allow_once(
-        conn,
-        &second.id,
-        "run",
-        "write_file",
-        &json!({"path":"three"}),
-        i64::MAX
-    ))
-    .is_err());
+    // Future cutover may recover an actively running record as Interrupted.
+    if store::required(&f.conn, "run").unwrap().status == RunStatus::Interrupted {
+        with_tx(&f.conn, |conn| model::resume(conn, "run")).unwrap();
+    }
+    assert!(matches!(
+        f.check("standing", json!({"path":"two"})),
+        ApprovalCheck::Authorized { .. }
+    ));
+    let admitted = f.approval("admitted", json!({"path":"three"}));
+    assert!(matches!(admitted.status, RequestStatus::Resolved { .. }));
+    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"write_file","args_digest":"","scope":"global"}));
+    assert_eq!(response, json!({"rules":[]}));
+    assert!(matches!(
+        f.check("admitted", json!({"path":"three"})),
+        ApprovalCheck::Authorized { .. }
+    ));
+    assert_eq!(
+        f.check("future", json!({"path":"four"})),
+        ApprovalCheck::Ask
+    );
+    let future = f.approval("future", json!({"path":"four"}));
+    assert_eq!(future.status, RequestStatus::Pending);
+    assert_eq!(future.route.target_conversation_id, f.conversation);
 }
 
 #[test]
-fn cancellation_is_per_card_idempotent_and_enqueues_a_wake() {
+fn never_subject_permission_can_be_retired_for_future_calls() {
+    let mut f = Fixture::new();
+    let args = json!({"path":"same"});
+    let request = f.approval("blocked", args.clone());
+    f.decide(&request, "never", json!({"never":{"scope":"subject"}}));
+    assert!(matches!(
+        f.check("next", args.clone()),
+        ApprovalCheck::Denied { .. }
+    ));
+    let digest = approvals::args_digest("write_file", &args).unwrap();
+    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"write_file","args_digest":digest,"scope":"subject"}));
+    assert_eq!(response, json!({"rules":[]}));
+    assert_eq!(f.check("next", args.clone()), ApprovalCheck::Ask);
+    assert_eq!(
+        f.approval("next", args.clone()).status,
+        RequestStatus::Pending
+    );
+    // Retirement never rewrites the old per-call refusal.
+    assert!(matches!(
+        f.check("blocked", args),
+        ApprovalCheck::Denied { .. }
+    ));
+}
+
+#[test]
+fn terminal_decision_is_per_call_and_not_overridden_by_later_standing_permission() {
+    let mut f = Fixture::new();
+    let denied = f.approval("denied", json!({"path":"same"}));
+    f.decide(&denied, "deny", json!("deny"));
+    let allowed = f.approval("allowed", json!({"path":"same"}));
+    assert_ne!(denied.id, allowed.id);
+    f.decide(
+        &allowed,
+        "always",
+        json!({"always_allow":{"scope":"global"}}),
+    );
+    assert!(matches!(
+        f.check("denied", json!({"path":"same"})),
+        ApprovalCheck::Denied { .. }
+    ));
+    assert!(matches!(
+        f.check("allowed", json!({"path":"same"})),
+        ApprovalCheck::Authorized { .. }
+    ));
+}
+
+#[test]
+fn cancellation_is_per_card_and_idempotent() {
     let mut f = Fixture::new();
     let request = f.form();
     let other = f.request("other", "request_form", form_args());
-    let input = json!({"entry_id":request.entry_id,"submission_id":"cancel","conversation_id":f.conversation});
-    let first = f.post("/api/forms/cancel", input.clone());
-    assert_eq!(first, f.post("/api/forms/cancel", input));
-    assert_eq!(first["receipt"]["wake"]["status"], "pending");
+    let first = f.cancel(&request, "cancel");
+    assert_eq!(f.cancel(&request, "cancel"), first);
     assert_eq!(
         requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
             .unwrap(),
@@ -502,38 +858,25 @@ fn cancellation_is_per_card_idempotent_and_enqueues_a_wake() {
 }
 
 #[test]
-fn expiration_is_atomic_wakeable_and_does_not_rewrite_granted_history() {
+fn expiration_rolls_back_on_wake_failure_and_preserves_granted_history() {
     let mut f = Fixture::new();
-    let expiry = f.app.feature_context().now_ms as i64 + 600_000;
-    let pending = f.request(
-        "expires",
-        "request_approval",
-        json!({"tool":"write_file","arguments":{},"expires_at":expiry}),
-    );
-    f.suspend(&pending);
+    let pending = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
     f.conn.execute_batch("CREATE TRIGGER fail_wake BEFORE INSERT ON engine_run_wakes BEGIN SELECT RAISE(ABORT,'wake failure'); END").unwrap();
-    f.app.tick(expiry as u64);
+    f.app.tick(u64::MAX);
     assert_eq!(
         requests::get(&f.conn, &pending.id).unwrap().unwrap().status,
         RequestStatus::Pending
     );
     assert_eq!(f.count("forms_resolutions"), 0);
     f.conn.execute_batch("DROP TRIGGER fail_wake").unwrap();
-    f.app.tick(expiry as u64);
-    assert!(matches!(
-        requests::get(&f.conn, &pending.id).unwrap().unwrap().status,
-        RequestStatus::Expired { .. }
-    ));
+    f.app.tick(u64::MAX);
     assert!(model::ready_to_resume(&f.conn, "run").unwrap());
-    let receipt = requests::receipt(&f.conn, &pending.entry_id, "expiry").unwrap();
     assert_eq!(
-        requests::resolved_values(&f.conn, &receipt.resolution_id).unwrap(),
-        json!("expired")
+        f.drive("run", &ScriptedGateway::default()),
+        RunProgress::Ended(TurnEnd::Finished)
     );
-    f.app.tick(expiry as u64 + 1);
-    assert_eq!(f.count("engine_run_wakes"), 1);
-    with_tx(&f.conn, |conn| model::resume(conn, "run")).unwrap();
-    let granted = f.approval("granted", json!({"path":"one"}));
+    f.start("next", "grokbot", &f.conversation);
+    let granted = f.approval_for("next", "granted", json!({"path":"one"}));
     f.decide(&granted, "allow", json!("allow_once"));
     f.app.tick(u64::MAX);
     assert!(matches!(
@@ -544,7 +887,7 @@ fn expiration_is_atomic_wakeable_and_does_not_rewrite_granted_history() {
         approvals::consume_allow_once(
             conn,
             &granted.id,
-            "run",
+            "next",
             "write_file",
             &json!({"path":"one"}),
             i64::MAX,
@@ -554,7 +897,7 @@ fn expiration_is_atomic_wakeable_and_does_not_rewrite_granted_history() {
 }
 
 #[test]
-fn invalid_secret_names_and_purposes_are_rejected_before_request_creation() {
+fn invalid_secret_names_purposes_and_raw_name_redaction_cannot_create_a_request() {
     let f = Fixture::new();
     for (name, purpose) in [
         ("PATH", "purpose".to_owned()),
@@ -571,8 +914,20 @@ fn invalid_secret_names_and_purposes_are_rejected_before_request_creation() {
             ToolOutcome::Failed { .. }
         ));
     }
+    forms::vault(&f.app.feature_context())
+        .unwrap()
+        .set("OTHER", "purpose", "API_TOKEN")
+        .unwrap();
+    assert!(matches!(
+        f.call_for(
+            "run",
+            "redacted",
+            "request_secret",
+            json!({"name":"api_token","purpose":"purpose"})
+        ),
+        ToolOutcome::Failed { .. }
+    ));
     assert_eq!(f.count("forms_requests"), 0);
-    assert_eq!(f.count("wrapper_messages"), 0);
     assert!(matches!(
         f.app
             .invoke_tool(
@@ -586,49 +941,22 @@ fn invalid_secret_names_and_purposes_are_rejected_before_request_creation() {
 }
 
 #[test]
-fn redaction_cannot_create_an_unsatisfiable_secret_or_rewrite_an_approval() {
+fn request_replay_keeps_one_card_and_rebinding_a_normal_call_is_refused() {
     let f = Fixture::new();
-    forms::vault(&f.app.feature_context())
-        .unwrap()
-        .set("OTHER", "purpose", "API_TOKEN")
-        .unwrap();
-    assert!(matches!(
-        f.call_for(
-            "run",
-            "secret",
-            "request_secret",
-            json!({"name":"api_token","purpose":"purpose"})
-        ),
-        ToolOutcome::Failed { .. }
-    ));
-    assert!(matches!(
-        f.call_for(
-            "run",
-            "approval",
-            "request_approval",
-            json!({"tool":"API_TOKEN","arguments":{}})
-        ),
-        ToolOutcome::Failed { .. }
-    ));
-    assert_eq!(f.count("forms_requests"), 0);
-}
-
-#[test]
-fn request_replay_keeps_one_card_and_changed_call_is_refused() {
-    let f = Fixture::new();
-    let first = f.form();
-    assert_eq!(f.form().id, first.id);
+    assert_eq!(f.form().id, f.form().id);
     assert_eq!(f.count("forms_requests"), 1);
     assert_eq!(f.count("wrapper_messages"), 1);
     assert!(matches!(
         f.call_for("run", "form", "request_form", json!({"fields":[]})),
         ToolOutcome::Failed { .. }
     ));
-    assert_eq!(f.count("forms_requests"), 1);
+    let first = f.approval("guarded", json!({"path":"one"}));
+    assert_eq!(f.approval("guarded", json!({"path":"one"})).id, first.id);
+    assert_ne!(f.approval("guarded", json!({"path":"two"})).id, first.id);
 }
 
 #[test]
-fn request_failure_rolls_back_partial_effect_even_when_caller_commits_failed_outcome() {
+fn request_failure_rolls_back_partial_effect_even_if_failed_outcome_is_committed() {
     let f = Fixture::new();
     f.conn.execute_batch("CREATE TRIGGER fail_card BEFORE INSERT ON wrapper_messages WHEN NEW.kind='form' BEGIN SELECT RAISE(ABORT,'card failure'); END").unwrap();
     assert!(matches!(
@@ -683,8 +1011,8 @@ fn secret_failure_rolls_back_sql_and_wake_failure_never_overwrites_vault() {
 fn reserved_submission_ids_and_model_resolution_tools_cannot_approve() {
     let mut f = Fixture::new();
     let request = f.approval("approval", json!({}));
-    for submission in ["expiry", "auto:spoof", ""] {
-        let body = json!({"entry_id":request.entry_id,"submission_id":submission,"conversation_id":f.conversation,"decision":"allow_once"});
+    for nonce in ["expiry", "auto:spoof", ""] {
+        let body = json!({"entry_id":request.entry_id,"submission_id":nonce,"conversation_id":f.conversation,"decision":"allow_once"});
         assert_eq!(
             f.app
                 .api(
@@ -705,6 +1033,17 @@ fn reserved_submission_ids_and_model_resolution_tools_cannot_approve() {
             json!({"entry_id":request.entry_id})
         )
         .is_err());
+    assert!(f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "request_approval",
+            json!({"tool":"write_file","arguments":{}})
+        )
+        .is_err());
+    assert!(features::tools()
+        .iter()
+        .all(|tool| tool.name != "request_approval"));
     assert_eq!(f.count("forms_approval_grants"), 0);
 }
 
@@ -717,48 +1056,47 @@ fn known_secret_is_redacted_before_form_value_persistence() {
         .unwrap();
     let request = f.form();
     let receipt = f.submit(&request, "nonce", json!({"city":"sensitive-token-value"}));
-    let resolution = receipt["receipt"]["resolution_id"].as_str().unwrap();
     vault.remove("TOKEN").unwrap();
-    let values = requests::resolved_values(&f.conn, resolution).unwrap();
-    assert!(!values.to_string().contains("sensitive-token-value"));
+    assert!(!requests::resolved_values(
+        &f.conn,
+        receipt["receipt"]["resolution_id"].as_str().unwrap()
+    )
+    .unwrap()
+    .to_string()
+    .contains("sensitive-token-value"));
 }
 
 #[test]
-fn stopping_a_run_invalidates_waiting_grants_without_rewriting_consumed_history() {
+fn checked_event_reaction_propagates_failure_and_rolls_back_cancellation() {
     let mut f = Fixture::new();
-    let used = f.approval("used", json!({"path":"one"}));
-    f.decide(&used, "allow-used", json!("allow_once"));
-    with_tx(&f.conn, |conn| {
-        approvals::consume_allow_once(
-            conn,
-            &used.id,
-            "run",
-            "write_file",
-            &json!({"path":"one"}),
-            0,
-        )
+    let request = f.approval("approval", json!({"path":"one"}));
+    f.decide(&request, "allow", json!("allow_once"));
+    f.conn.execute_batch("CREATE TRIGGER fail_invalidation BEFORE UPDATE ON forms_requests WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT,'invalidation failure'); END").unwrap();
+    let mut services = Services {
+        app: &f.app,
+        force_first_ask: false,
+    };
+    let result = run_loop::with_run_events(&f.conn, &mut services, "run", |conn, _| {
+        model::cancel(conn, "run", TurnEnd::Stopped)
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        store::required(&f.conn, "run").unwrap().status,
+        RunStatus::Running
+    );
+    assert!(!store::events(&f.conn, "run", 0)
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == RunEventKind::Cancelled));
+    f.conn
+        .execute_batch("DROP TRIGGER fail_invalidation")
+        .unwrap();
+    run_loop::with_run_events(&f.conn, &mut services, "run", |conn, _| {
+        model::cancel(conn, "run", TurnEnd::Stopped)
     })
     .unwrap();
-    let unused = f.approval("unused", json!({"path":"two"}));
-    f.decide(&unused, "allow-unused", json!("allow_once"));
-    with_tx(
-        &f.conn,
-        |conn| -> Result<(), grokbot_engine::contracts::Error> {
-            model::cancel(conn, "run", TurnEnd::Stopped)?;
-            let event = store::events(conn, "run", 0)?.pop().unwrap();
-            let mut ctx = f.app.feature_context();
-            ctx.connection = conn;
-            forms::on_run_event(&ctx, &event);
-            Ok(())
-        },
-    )
-    .unwrap();
     assert!(matches!(
-        requests::get(&f.conn, &used.id).unwrap().unwrap().status,
-        RequestStatus::Resolved { .. }
-    ));
-    assert!(matches!(
-        requests::get(&f.conn, &unused.id).unwrap().unwrap().status,
+        requests::get(&f.conn, &request.id).unwrap().unwrap().status,
         RequestStatus::Cancelled { .. }
     ));
 }

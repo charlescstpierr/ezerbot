@@ -22,3 +22,9 @@ app/qa/
 /Forge compagnon.app
 .DS_Store
 /artifacts/rea-original-profile-*/
+/evidence/remaining-rea-runtime-bundle.json
+/artifacts/releases/
+/evidence/releases/*/rea-*-bundle.json
+/artifacts/public-multibot/
+/artifacts/rea-focus/
+/evidence/multibot-rea-bundle.json

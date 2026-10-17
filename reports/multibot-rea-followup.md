@@ -1,0 +1,17 @@
+# REA : parcours multi-bot et frontière du moteur distant
+
+La passe reprend directement les Evidence REA déjà conservées, puis analyse un module original isolé. Elle complète la lecture de l’interface et de l’hôte dans les [membres et groupes](multibot-membership-paths.md) et les [tours de room](multibot-turn-paths.md). Elle n’exécute pas Grok Bot et ne transforme pas la présence d’une branche en observation après connexion.
+
+Le graphe original est lié à l’ASAR `9fe94a66942f8511281f6d7c80a42432d749284c46e1e26f5b6d2f99b87652b0`, parent `ev_a8b822a62831e30bd01eb4c4488b36f0bd50cb8ccc41d83e2dcff4e00cf82a4d`. La projection des 825 identités de modules est `ev_34ced6a9cf4e03368b9b395bbaa35c8ac779d130da65e7e7d9156788e4a800b1`. Le chunk new-chat-bar y possède une identité d’octets explicite. Sa projection `ev_1f41272c6d1a4df3982501edf86eae6de43cfaa75dca93f0d3aca340c5eda187` conserve les faits statiques, mais signalait que les relations développées dépassaient le budget du parent.
+
+Pour réduire ce trou, un répertoire distinct contient seulement une copie exacte du membre `dist/renderer/assets/chunk-new-chat-bar-BbUMKDJn.js`, soit 33 283 octets, SHA-256 `d3edf99ae9f704b3aa92107879c21eb47d441231d9577aa63c082e988db3a9dc`. Le [manifeste du sous-ensemble](../evidence/multibot-rea-focus-input.json) le relie au manifeste original. Les imports ne sont pas copiés : ce répertoire n’est pas présenté comme l’application complète.
+
+REA conserve l’analyse sous `ev_2f30ca79d9b33451c019ed6c6aebda6245659abf0b1043d1ba09921eda4c5d73`. La [synthèse de la passe](../evidence/multibot-rea-run.json) enregistre la couverture : un fichier parsé, 10 440 nœuds AST et 60 constats; le graphe d’application est complet pour ce sous-ensemble, mais la couverture sémantique reste unknown avec 2 094 inconnues. Ces mesures ne prouvent pas un parcours complet de création de room sur le serveur.
+
+La trace de module `ev_8ad5eb75fe283f8c9d6fc754431dc8e1c2f1fb48507a9d4be10760de06c5820c` suit 19 nœuds et 61 relations dans cette portée. La requête sémantique du littéral `create-group`, `ev_ffa9473489bed7dc5f3623e77df42c4a776f943d361f31b883b223680e3a152c`, ne retrouve pas de seed sous couverture partielle. Le littéral est pourtant présent dans le membre original ancré par le rapport UI. Ce résultat nul ne devient donc pas une preuve d’absence de la fonction.
+
+Le producteur a aussi renvoyé `cleanup_incomplete`. Il n’est pas présenté comme un cycle réussi sans réserve. Le worker nommé par cette erreur a été identifié par PID, parent REA, commande et heure de création, puis arrêté par SIGTERM; son répertoire temporaire vide a été retiré. La [preuve de nettoyage](../evidence/multibot-rea-worker-cleanup.json) conserve l’avant et l’après. Aucun autre processus ou programme cible n’a été arrêté.
+
+Les 15 records de la session sont exportés dans le [bundle portable](../evidence/multibot-rea-bundle.json). Ce bundle reste local, hors Git. Les preuves utilisables pour reconstruire sont donc les IDs et octets des mentions, les commandes explicites de membres et de création, ainsi que les contrats de tours et leurs limites. Le choix du prochain répondant, l’anti-boucle distant et le contexte modèle exact ne sont toujours pas récupérés.
+
+L’objectif produit reste de rendre notre app capable de ces parcours. Le [premier design proposé](../docs/superpowers/specs/2026-10-17-multibot-design.md) n’est pas approuvé : la dernière réponse utilisateur demandait de poursuivre avec REA. Aucune implémentation de ce nouveau moteur n’est revendiquée.

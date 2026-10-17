@@ -27,6 +27,8 @@
 .mascot[data-mood="offline"] .mascot-shadow { animation: none; }
 .mascot[data-mood="offline"] .mascot-blink { animation: none; transform: scaleY(.65); }
 .mascot[data-mood="offline"] .mascot-shell { opacity: .8; }
+.bot-avatar .mascot * { animation: none; }
+.bot-avatar .mascot-shadow { display: none; }
 .mascot-greeting:hover .mascot-highlight { stroke-opacity: .95; }
 .mascot-greeting:active .mascot-squish { animation: none; transform: scale(1.04, .95); }
 html[data-mascot-paused="true"] .mascot *, html[data-mascot-paused="true"] .mascot-stage * { animation-play-state: paused !important; }

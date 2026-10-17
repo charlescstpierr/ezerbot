@@ -66,7 +66,7 @@
 
   <main class="main-panel">
     <header class="topbar">
-      <div class="topbar-title"><button class="icon-button sidebar-toggle" id="sidebar-toggle" aria-label="Ouvrir les conversations" aria-controls="sidebar" aria-expanded="false"><svg class="icon"><use href="#i-menu"/></svg></button><span class="workspace-label" id="workspace-label">Espace personnel</span><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">Nouvelle conversation</h1></div>
+      <div class="topbar-title"><button class="icon-button sidebar-toggle" id="sidebar-toggle" aria-label="Ouvrir les conversations" aria-controls="sidebar" aria-expanded="false"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" id="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">Nouvelle conversation</h1></div>
       <div class="topbar-actions"><span class="mode-badge"><span class="status-dot"></span><span id="mode-badge-text">Local</span></span><button class="icon-button" id="conversation-menu-button" aria-label="Actions de la conversation" aria-expanded="false" aria-controls="conversation-menu" disabled><svg class="icon"><use href="#i-more"/></svg></button></div>
       <div class="popover conversation-menu" id="conversation-menu" hidden>
         <button id="rename-button"><svg class="icon"><use href="#i-edit"/></svg>Renommer</button>
@@ -128,9 +128,10 @@
   <dialog class="dialog bot-dialog" id="bot-dialog" aria-labelledby="bot-dialog-title"><form id="bot-form" novalidate>
     <div class="dialog-header"><div><p class="dialog-eyebrow">VOS BOTS</p><h2 id="bot-dialog-title">Nouveau bot</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div>
     <label class="form-label" for="bot-name">Nom</label><input class="text-input" id="bot-name" maxlength="40" required autocomplete="off" placeholder="Par exemple : Relecteur">
+    <p class="form-label bot-field" id="bot-shape-label">Forme</p><div class="accent-options shape-options" id="bot-shapes" role="group" aria-labelledby="bot-shape-label"></div>
     <p class="form-label bot-field" id="bot-color-label">Couleur</p><div class="accent-options" id="bot-colors" role="group" aria-labelledby="bot-color-label"></div>
-    <label class="form-label bot-field" for="bot-description">Description <small>Ce que les autres voient</small></label><textarea class="text-input" id="bot-description" maxlength="280" rows="2" placeholder="Relit vos textes et propose des tournures plus claires."></textarea>
-    <label class="form-label bot-field" for="bot-instructions">Instructions <small>Comment il se comporte, en privé</small></label><textarea class="text-input" id="bot-instructions" maxlength="8000" rows="6" placeholder="Réponds de façon concise. Signale les phrases trop longues."></textarea>
+    <label class="form-label bot-field" for="bot-description">Présentation <small>Ce que les autres voient</small></label><textarea class="text-input" id="bot-description" maxlength="280" rows="2" placeholder="Relit vos textes et propose des tournures plus claires."></textarea>
+    <label class="form-label bot-field" for="bot-instructions">Personnalité <small>Comment il parle et se comporte. Privé.</small></label><textarea class="text-input" id="bot-instructions" maxlength="8000" rows="6" placeholder="Ex. : Tu parles avec douceur, tu tutoies, tu réponds en trois phrases maximum."></textarea>
     <div class="dialog-footer"><button class="danger-link" type="button" id="bot-delete-button"><svg class="icon"><use href="#i-trash"/></svg>Supprimer</button><button class="secondary-button" type="button" data-close-dialog>Annuler</button><button class="primary-button" type="submit" id="bot-save">Créer le bot</button></div>
   </form></dialog>
   <dialog class="dialog small-dialog" id="bot-delete-dialog" aria-labelledby="bot-delete-title"><div class="dialog-header"><h2 id="bot-delete-title">Supprimer ce bot ?</h2></div><p class="delete-description">Ses conversations restent lisibles et il continue d’y répondre. Vous ne pourrez plus en commencer de nouvelles avec lui.</p><div class="dialog-footer"><button class="secondary-button" data-close-dialog>Annuler</button><button class="danger-button" id="confirm-bot-delete">Supprimer</button></div></dialog>
@@ -149,7 +150,7 @@
         <g class="mascot-float">
           <g class="mascot-squish">
             <path class="mascot-shell" d="M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z" fill="url(#mascot-pearl)"/>
-            <path d="M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z" fill="url(#mascot-glow)"/>
+            <path class="mascot-sheen" d="M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z" fill="url(#mascot-glow)"/>
             <path class="mascot-highlight" d="M72 105C88 71 121 52 157 52" stroke="white" stroke-opacity=".22" stroke-width="2.4" stroke-linecap="round"/>
             <g class="mascot-gaze">
               <g class="mascot-blink">

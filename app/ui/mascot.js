@@ -9,6 +9,27 @@
     attentive: "Prêt pour votre message.", working: "Je garde le fil…",
     uncertain: "On vérifie ensemble.", offline: "Je vous attends ici.",
   };
+  // Chaque silhouette partage le viewBox 320×280 et entoure les yeux, qui ne bougent pas.
+  const shapes = {
+    galet: { label: "Galet",
+      d: "M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z",
+      highlight: "M72 105C88 71 121 52 157 52" },
+    goutte: { label: "Goutte",
+      d: "M166.2 28.3C181.2 22.4 193.9 32.2 203.9 47.8C233.9 92.4 283.8 139.8 276.3 193.3C269.6 240.8 224.4 260.7 161.1 251.8C95.7 242.6 51.8 210.2 58.7 160.7C67.1 101.3 130.1 55.6 148.7 38C153.3 33.6 159.8 30.5 166.2 28.3Z",
+      highlight: "M95.1 117.3C109.2 89 134.3 68.3 154.7 53" },
+    nuage: { label: "Nuage",
+      d: "M254 252L92 252A56 56 0 0 1 78 141.8A16 16 0 0 0 90 126.7A52 52 0 0 1 143.7 76A16 16 0 0 0 157.7 68.6A62 62 0 0 1 263.9 132.6A16 16 0 0 0 272.1 155.4A50 50 0 0 1 254 252Z",
+      highlight: "M104.8 110.7A41 41 0 0 1 128 89.5" },
+    carre: { label: "Carré",
+      d: "M130.5 38.6L196.4 34C244.6 30.6 276.3 58.1 279.6 106.3L283.8 166.2C287.2 214.4 259.7 246.1 211.5 249.4L145.6 254C97.4 257.4 65.7 229.9 62.4 181.7L58.2 121.8C54.8 73.6 82.3 41.9 130.5 38.6Z",
+      highlight: "M72 118.8C72 90.8 90 61.4 125.7 54.9" },
+    fantome: { label: "Fantôme",
+      d: "M65.8 219.6C63.5 175.7 62.5 155.7 61.9 145.7C58.6 81.8 104.2 35.3 165.1 32.2C226.1 29 276.3 70.4 279.6 134.3C280.2 144.3 281.2 164.3 283.5 208.2C284.9 234.2 271.7 250.9 258.5 251.6C244.9 252.3 243.8 232.3 230.2 233C216.6 233.7 217.7 253.7 204.1 254.4C190.5 255.1 189.4 235.2 175.8 235.9C162.2 236.6 163.3 256.6 149.6 257.3C136 258 135 238 121.4 238.7C107.8 239.4 108.8 259.4 95.2 260.1C82 260.8 67.2 245.6 65.8 219.6Z",
+      highlight: "M76.8 122.9C81 88.6 103.5 59.4 138.9 47.5" },
+    etoile: { label: "Étoile",
+      d: "M186.8 37.8L203.1 58.4C212.3 70.1 227 78.6 241.7 80.7L267.8 84.5C293.6 88.3 300.5 103.9 286.1 125.6L271.5 147.5C263.2 159.9 259.7 176.5 262.2 191.1L266.6 217.1C271 242.8 258.3 254.2 233.3 247.1L207.9 240C193.6 236 176.7 237.8 163.5 244.7L140.2 256.9C117.1 269 102.4 260.5 101.3 234.5L100.2 208.1C99.6 193.3 92.7 177.8 82.1 167.4L63.2 149C44.6 130.8 48.2 114.1 72.6 105.1L97.3 95.9C111.2 90.7 123.8 79.4 130.4 66.1L142.1 42.4C153.7 19.1 170.6 17.3 186.8 37.8Z",
+      highlight: "M104 116C110 104 118 96 128 92" },
+  };
   let sequence = 0;
   let context = { connection: "loading", activity: null, pending: null, drafting: false };
   let mood = "loading";
@@ -19,8 +40,17 @@
   let target = { x: 0, y: 0 };
   let destroyed = false;
 
-  function create(reactive = false) {
+  function setShape(node, shape) {
+    const { d, highlight } = shapes[shape] || shapes.galet;
+    node.querySelector(".mascot-shell").setAttribute("d", d);
+    node.querySelector(".mascot-sheen").setAttribute("d", d);
+    node.querySelector(".mascot-highlight").setAttribute("d", highlight);
+    node.dataset.shape = shapes[shape] ? shape : "galet";
+  }
+
+  function create(reactive = false, shape = "galet") {
     const node = template.content.firstElementChild.cloneNode(true);
+    setShape(node, shape);
     const suffix = ++sequence;
     for (const definition of node.querySelectorAll("[id]")) {
       const original = definition.id;
@@ -153,7 +183,7 @@
   document.querySelector("[data-mascot=hero]").addEventListener("click", wave);
   window.addEventListener("pagehide", onPageHide);
   window.addEventListener("pageshow", syncMotion);
-  window.GrokbotMascot = { create, setContext, celebrate, destroy };
+  window.GrokbotMascot = { create, setShape, shapes, setContext, celebrate, destroy };
   syncMotion();
   applyMood();
 })();

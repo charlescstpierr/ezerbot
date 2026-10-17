@@ -10,13 +10,17 @@ import argparse,datetime,hashlib,json,os,plistlib,shutil,socket,subprocess,tempf
 
 ROOT=Path(__file__).resolve().parents[1]
 TARGET=ROOT/'inputs/Grok Bot.app'
-OUT=ROOT/'evidence/original-access-inventory.json'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def run(args):
     p=subprocess.run(args,capture_output=True,text=True,timeout=20)
     return p.returncode,p.stdout,p.stderr
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--launch',action='store_true');a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--launch',action='store_true')
+    ap.add_argument('--out',type=Path,help='New JSON output path; existing evidence is never replaced.')
+    a=ap.parse_args()
+    stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    output=a.out or ROOT/'evidence'/('access-inventory-'+stamp+'.json')
+    assert not output.exists(),'Choose a new output path to preserve historical evidence.'
     value={'schema':1,'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
       'scope':'Selected Grok Bot app, supplied inputs/evidence and availability of local iPhone tools',
       'credentials_or_user_profiles_read':False,'target_executed':False}
@@ -80,8 +84,8 @@ def main():
             except subprocess.TimeoutExpired:p.kill();p.wait(timeout=5)
             value['startup_probe']['cleanup']='terminated-owned-no-cdp-process'
             value['startup_probe']['exit_code']=p.returncode
-    OUT.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
-    print(json.dumps({'evidence':str(OUT.relative_to(ROOT)),'original_active_before':value['process_inventory']['original_active'],
+    with output.open('x') as f:f.write(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
+    print(json.dumps({'evidence':str(output),'original_active_before':value['process_inventory']['original_active'],
       'supplied_captures':len(value['supplied_mobile_or_network_captures']),'devicectl':value['xcrun_devicectl']['available'],
       'iphone_usb_names':value['usb_inventory']['iphone_names'],'startup':value.get('startup_probe')},ensure_ascii=False))
 if __name__=='__main__':main()

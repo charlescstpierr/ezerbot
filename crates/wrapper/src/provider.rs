@@ -113,6 +113,8 @@ pub struct Run {
     pub message: String,
     /// Instructions composées à partir du bot de la conversation.
     pub instructions: String,
+    /// Outils de proposition, en mode strict. Vide pour tout bot sauf le bot par défaut.
+    pub tools: Vec<Value>,
     /// Paires (rôle, texte), de la plus ancienne à la plus récente.
     pub history: Vec<(&'static str, String)>,
     pub model: String,
@@ -421,10 +423,29 @@ fn parse_models(body: &Value) -> Vec<Model> {
         .collect()
 }
 
-/// Un événement du flux Responses, réduit à ce que l'affichage utilise.
+/// Un appel de fonction émis par le modèle, tel que le flux le termine.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ToolCall {
+    /// `item.id` du flux, pour rattacher les fragments d'arguments.
+    pub item_id: String,
+    /// `call_id` : l'identifiant que le modèle donne à l'appel.
+    pub call_id: String,
+    pub name: String,
+    /// Les arguments, en JSON sérialisé.
+    pub arguments: String,
+}
+
+/// Un événement du flux Responses, réduit à ce que l'affichage et les propositions utilisent.
 #[derive(Debug, PartialEq)]
 enum StreamEvent {
     Delta(String),
+    /// `response.function_call_arguments.delta` : un fragment des arguments d'un appel.
+    CallDelta {
+        item_id: String,
+        delta: String,
+    },
+    /// `response.output_item.done` d'un élément `function_call` : l'appel complet.
+    Call(ToolCall),
     Completed,
     Incomplete,
     Failed(Failure),
@@ -438,6 +459,21 @@ fn stream_event(data: &str) -> StreamEvent {
     match event["type"].as_str().unwrap_or_default() {
         "response.output_text.delta" => {
             StreamEvent::Delta(event["delta"].as_str().unwrap_or_default().into())
+        }
+        "response.function_call_arguments.delta" => StreamEvent::CallDelta {
+            item_id: text(&event["item_id"]),
+            delta: text(&event["delta"]),
+        },
+        // `response.output_item.added` et `response.function_call_arguments.done` annoncent le
+        // même appel ; l'élément terminé porte à lui seul `call_id`, `name` et `arguments`.
+        "response.output_item.done" if event["item"]["type"] == "function_call" => {
+            let item = &event["item"];
+            StreamEvent::Call(ToolCall {
+                item_id: text(&item["id"]),
+                call_id: text(&item["call_id"]),
+                name: text(&item["name"]),
+                arguments: text(&item["arguments"]),
+            })
         }
         "response.completed" => StreamEvent::Completed,
         "response.incomplete" => StreamEvent::Incomplete,
@@ -469,7 +505,23 @@ fn request_body(run: &Run, effort: Option<&str>, tier: Option<&str>) -> Value {
     if let Some(tier) = tier {
         body["service_tier"] = json!(tier);
     }
+    if !run.tools.is_empty() {
+        body["tools"] = json!(run.tools);
+    }
     body
+}
+
+/// Ce qu'un flux terminé laisse : des notes à afficher sous la réponse et les appels de fonction.
+#[derive(Default)]
+struct Streamed {
+    notices: Vec<String>,
+    calls: Vec<ToolCall>,
+}
+
+impl Streamed {
+    fn notice(&self) -> Option<String> {
+        (!self.notices.is_empty()).then(|| self.notices.join(" "))
+    }
 }
 
 /// Ramène la réponse du modèle à une ligne courte et propre pour la liste des conversations.
@@ -1069,11 +1121,35 @@ impl Provider {
                     // Compté avant de marquer la réponse terminée : l'interface ne cesse pas de relire.
                     provider.inner.titling.fetch_add(1, Ordering::SeqCst);
                 }
+                let connection = provider.database();
                 let (status, error, kind, notice) = match outcome {
-                    Ok(notice) => ("done", None, None, notice),
+                    Ok(mut streamed) => {
+                        // Les propositions sont enregistrées avant l'état `done` : l'interface les
+                        // voit avec la réponse terminée. Un appel invalide devient une note.
+                        for call in &streamed.calls {
+                            let recorded =
+                                connection.as_ref().map_err(|_| ()).and_then(|connection| {
+                                    crate::record_proposal(
+                                        connection,
+                                        &run.conversation,
+                                        &run.message,
+                                        call,
+                                    )
+                                    .map_err(|_| ())
+                                });
+                            match recorded {
+                                Ok(Some(notice)) => streamed.notices.push(notice),
+                                Ok(None) => {}
+                                Err(()) => streamed.notices.push(
+                                    "Une proposition de bot n’a pas pu être enregistrée.".into(),
+                                ),
+                            }
+                        }
+                        ("done", None, None, streamed.notice())
+                    }
                     Err(failure) => ("failed", Some(failure.message), Some(failure.kind), None),
                 };
-                if let Ok(connection) = provider.database() {
+                if let Ok(connection) = connection {
                     let _ = connection.execute(
                         "UPDATE wrapper_generation SET status = ?4, error = ?5, error_kind = ?6, notice = ?7, updated_at = ?8 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming'",
                         params![ACCOUNT, run.conversation, run.message, status, error, kind, notice, millis()],
@@ -1121,7 +1197,7 @@ impl Provider {
                     StreamEvent::Delta(delta) => text.push_str(&delta),
                     StreamEvent::Completed => break,
                     StreamEvent::Incomplete | StreamEvent::Failed(_) => return None,
-                    StreamEvent::Other => {}
+                    StreamEvent::CallDelta { .. } | StreamEvent::Call(_) | StreamEvent::Other => {}
                 }
                 data.clear();
             }
@@ -1142,14 +1218,15 @@ impl Provider {
         Ok(connection)
     }
 
-    /// Rend une note à afficher sous la réponse quand un réglage a dû être retiré.
-    fn stream(&self, run: &Run, cancel: &AtomicBool) -> Result<Option<String>, Failure> {
+    /// Rend les notes à afficher sous la réponse, par exemple quand un réglage a dû être retiré,
+    /// et les appels de fonction terminés. Un flux annulé rend un résultat vide.
+    fn stream(&self, run: &Run, cancel: &AtomicBool) -> Result<Streamed, Failure> {
         let connection = self
             .database()
             .map_err(|_| Failure::other("Le stockage local est indisponible."))?;
         let mut effort = run.effort.as_deref();
         let mut tier = run.service_tier.as_deref();
-        let mut notices = Vec::new();
+        let mut streamed = Streamed::default();
         let mut refreshed = false;
         let response = loop {
             let token = self.bearer(false)?;
@@ -1173,19 +1250,21 @@ impl Provider {
                 && (param.contains("service_tier") || message.contains("service_tier"))
             {
                 tier = None;
-                notices.push("OpenAI n’accepte pas la vitesse Fast avec cette connexion. La réponse a utilisé la vitesse Standard.");
+                streamed.notices.push("OpenAI n’accepte pas la vitesse Fast avec cette connexion. La réponse a utilisé la vitesse Standard.".into());
             } else if status == 400
                 && effort.is_some()
                 && (param.contains("reasoning") || message.contains("reasoning"))
             {
                 effort = None;
-                notices.push("Ce modèle n’accepte pas ce niveau d’effort. La réponse a utilisé son réglage par défaut.");
+                streamed.notices.push("Ce modèle n’accepte pas ce niveau d’effort. La réponse a utilisé son réglage par défaut.".into());
             } else {
                 return Err(failure(status, &code, &message));
             }
         };
         let mut text = String::new();
         let mut data = String::new();
+        // Fragments d'arguments par élément, au cas où l'élément terminé arriverait sans eux.
+        let mut fragments: HashMap<String, String> = HashMap::new();
         let mut written = Instant::now();
         let save = |text: &str| {
             connection.execute(
@@ -1198,7 +1277,7 @@ impl Provider {
         };
         for line in BufReader::new(response.into_reader()).lines() {
             if cancel.load(Ordering::SeqCst) {
-                return Ok(None);
+                return Ok(Streamed::default());
             }
             let line = line.map_err(|_| interrupted())?;
             if let Some(chunk) = line.strip_prefix("data:") {
@@ -1218,16 +1297,27 @@ impl Provider {
                         written = Instant::now();
                     }
                 }
+                StreamEvent::CallDelta { item_id, delta } => {
+                    fragments.entry(item_id).or_default().push_str(&delta);
+                }
+                StreamEvent::Call(mut call) => {
+                    if call.arguments.is_empty() {
+                        call.arguments = fragments.remove(&call.item_id).unwrap_or_default();
+                    }
+                    streamed.calls.push(call);
+                }
                 StreamEvent::Completed | StreamEvent::Incomplete => {
                     if cancel.load(Ordering::SeqCst) {
-                        return Ok(None);
+                        return Ok(Streamed::default());
                     }
                     save(&text)
                         .map_err(|_| Failure::other("Le stockage local est indisponible."))?;
                     if matches!(event, StreamEvent::Incomplete) {
-                        notices.push("OpenAI a arrêté cette réponse avant la fin.");
+                        streamed
+                            .notices
+                            .push("OpenAI a arrêté cette réponse avant la fin.".into());
                     }
-                    return Ok((!notices.is_empty()).then(|| notices.join(" ")));
+                    return Ok(streamed);
                 }
                 StreamEvent::Failed(failure) => {
                     let _ = save(&text);
@@ -1237,7 +1327,7 @@ impl Provider {
             }
         }
         if cancel.load(Ordering::SeqCst) {
-            return Ok(None);
+            return Ok(Streamed::default());
         }
         // Une réponse ne compte comme terminée qu'après `response.completed`.
         let _ = save(&text);
@@ -1358,11 +1448,76 @@ mod tests {
     }
 
     #[test]
+    fn function_call_events_are_read_as_the_documentation_describes_them() {
+        assert_eq!(
+            stream_event(
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"propose_bot","arguments":""}}"#
+            ),
+            StreamEvent::Other
+        );
+        assert_eq!(
+            stream_event(
+                r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"na"}"#
+            ),
+            StreamEvent::CallDelta {
+                item_id: "fc_1".into(),
+                delta: "{\"na".into()
+            }
+        );
+        assert_eq!(
+            stream_event(
+                r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"arguments":"{}"}"#
+            ),
+            StreamEvent::Other
+        );
+        assert_eq!(
+            stream_event(
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"propose_bot","arguments":"{\"name\":\"X\"}"}}"#
+            ),
+            StreamEvent::Call(ToolCall {
+                item_id: "fc_1".into(),
+                call_id: "call_1".into(),
+                name: "propose_bot".into(),
+                arguments: "{\"name\":\"X\"}".into()
+            })
+        );
+        // Un élément texte terminé n'est pas un appel.
+        assert_eq!(
+            stream_event(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message"}}"#
+            ),
+            StreamEvent::Other
+        );
+    }
+
+    #[test]
+    fn request_body_carries_tools_only_when_the_run_has_some() {
+        let mut run = Run {
+            conversation: "c".into(),
+            message: "m".into(),
+            instructions: String::new(),
+            tools: Vec::new(),
+            history: Vec::new(),
+            model: "gpt-a".into(),
+            effort: None,
+            service_tier: None,
+            retitle: false,
+        };
+        assert!(request_body(&run, None, None).get("tools").is_none());
+        run.tools = vec![json!({"type": "function", "name": "propose_bot", "strict": true})];
+        assert_eq!(
+            request_body(&run, None, None)["tools"][0]["name"],
+            "propose_bot"
+        );
+    }
+
+    #[test]
     fn request_body_follows_the_plan_usage_rules() {
         let run = Run {
             conversation: "c".into(),
             message: "m".into(),
             instructions: "Tu t'appelles Test.".into(),
+            tools: Vec::new(),
             history: vec![
                 ("user", "Bonjour".into()),
                 ("assistant", "Salut".into()),

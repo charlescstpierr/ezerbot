@@ -27,7 +27,8 @@
     "cached_cli_version": "rea-agents 6.4.0",
     "cached_cli_at_save": "/Users/cstpierrecharles/.npm/_npx/dea9475797100b20/node_modules/.bin/rea",
     "mcp_transport": "Transport closed; availability must be rechecked",
-    "continuation_mcp_status": "Working for native metadata and demangling; Hopper/Ghidra/IDA unavailable. Native session closed."
+    "continuation_mcp_status": "Working for native metadata and demangling; Hopper/Ghidra/IDA unavailable. Native session closed.",
+    "latest_mcp_observation_status": "Working: passive original Electron renderer captured through Chromium CDP; historical Playwright/Node-inspector launch failure preserved."
   },
   "counts": {
     "extracted_files": 673,
@@ -482,7 +483,9 @@
     "python3 tools/verify-handoff.py --evidence-only",
     "python3 tools/verify-dossier.py",
     "python3 tools/verify-goal-investigation.py",
-    "python3 tools/verify-communications.py"
+    "python3 tools/verify-communications.py",
+    "python3 tools/verify-original-runtime.py",
+    "python3 tools/verify-remaining-evidence.py"
   ],
   "no_product_test_claims": [
     "No product CI",
@@ -490,7 +493,7 @@
     "No deployed Rust services",
     "No exact whole-product behavior parity demonstrated"
   ],
-  "updated_at_utc": "2026-10-17T04:09:23.212372+00:00",
+  "updated_at_utc": "2026-10-17T04:37:03.636021+00:00",
   "rust_implementation_scope": "Eight-crate local core and Mac wrapper: domain, wire, submission-journal, replica, store, session, try, wrapper. Cocoa/WKWebView host and offline HTML/CSS/JS; loopback HTTP, durable simulated transport. No remote model/cloud/auth parity.",
   "core_validation_report": "evidence/rust-verification.json",
   "core_report": "reports/orchestration-rust.md",
@@ -605,5 +608,63 @@
     "report_links_verified": 754,
     "knowledge_status": "partially_answered",
     "verification_passed": true
+  },
+  "original_startup_runtime_observed": true,
+  "remaining_evidence_investigation": {
+    "status": "in_progress",
+    "report": "reports/remaining-evidence-progress.md",
+    "checklist": "reports/remaining-evidence-checklist.md",
+    "view": ".lavish/remaining-grokbot.html",
+    "reports": [
+      "reports/original-runtime-startup.md",
+      "reports/distribution-mobile-discovery.md",
+      "reports/public-behavior-residual.md",
+      "reports/native-input-residual.md",
+      "reports/release-0712-discovery.md"
+    ],
+    "original_version": "0.70.2",
+    "original_startup_observed": true,
+    "original_authenticated": false,
+    "captured_source_matches": 45,
+    "native_new_symbol_bodies": 29,
+    "public_behavior_findings": 7,
+    "verification": [
+      "evidence/original-runtime-verification.json",
+      "evidence/remaining-evidence-verification.json",
+      "evidence/public-behavior-independent-review.json",
+      "evidence/releases/0.71.2/verification.json"
+    ],
+    "runtime_capture_evidence_id": "ev_c53b22e5265cd881f109292c4a6a6d4ad7a227f9fdeade0565c0105795301e08",
+    "runtime_bundle": "evidence/remaining-rea-runtime-bundle.json",
+    "original_owned_process_cleanup": "terminated",
+    "ios_binary_acquired": false,
+    "server_implementation_acquired": false,
+    "newer_release_investigation": "Official desktop 0.71.2 acquired separately; 668 ASAR members, targeted comparison preserves six native contradictions. No full semantic comparison or target execution.",
+    "portable_view": ".lavish/remaining-grokbot-portable.html",
+    "view_verification": [
+      "evidence/remaining-view-verification.json",
+      "evidence/remaining-served-verification.json"
+    ],
+    "question_statuses": {
+      "server_engine": "unresolved",
+      "context_compaction": "partial",
+      "memory_forgetting": "partial",
+      "interbot": "partial",
+      "crash_effects": "partial",
+      "iphone_native": "partial",
+      "teaching": "partial",
+      "scheduler": "partial",
+      "native_helpers": "partial"
+    },
+    "external_evidence_needed": [
+      "Controlled authenticated test session for observed effects",
+      "Native iOS package or authorized device observation",
+      "Server bodies or correlated server traces for hidden implementation"
+    ],
+    "verification_passed": true,
+    "newer_release_version": "0.71.2",
+    "newer_release_target_executed": false,
+    "newer_release_member_count": 668,
+    "goal_complete": false
   }
 }

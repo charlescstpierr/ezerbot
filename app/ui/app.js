@@ -231,7 +231,7 @@
       button.dataset.conversationId = conversation.id;
       button.title = `${conversation.title} · ${botName(conversation.bot_id)}`;
       if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
-      button.append(botDot(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
+      button.append(botAvatar(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
       if (conversation.messages.some((message) => message.state === "unknown")) button.append(element("span", "pending-indicator"));
       if (conversation.favorite) button.append(icon("star", "icon favorite-indicator"));
       button.addEventListener("click", () => { if (!busy) selectConversation(conversation.id); });
@@ -239,24 +239,35 @@
     }
   }
 
-  function botDot(bot) {
-    const dot = element("span", "bot-dot");
-    dot.setAttribute("aria-hidden", "true");
-    if (bot) dot.dataset.botColor = bot.color;
-    return dot;
+  // Une mascotte immobile ; un bot inconnu garde un galet neutre.
+  function botAvatar(bot) {
+    const avatar = element("span", "bot-avatar");
+    avatar.setAttribute("aria-hidden", "true");
+    if (bot) avatar.dataset.botColor = bot.color;
+    const figure = mascot?.create(false, bot?.shape);
+    if (figure) avatar.append(figure);
+    return avatar;
   }
 
   function renderBots() {
     const chosen = chosenBot();
-    const chips = liveBots().map((bot) => {
+    const chips = liveBots().flatMap((bot) => {
       const chip = element("button", "bot-chip");
       chip.type = "button";
       chip.dataset.botColor = bot.color;
       chip.setAttribute("aria-pressed", String(bot.id === chosen?.id));
       if (bot.description) chip.title = bot.description;
-      chip.append(botDot(bot), element("span", "", bot.name));
+      chip.append(botAvatar(bot), element("span", "", bot.name));
       chip.addEventListener("click", () => { chosenBotId = bot.id; writePreference("grokbot.bot", bot.id); render(); });
-      return chip;
+      if (bot.id !== chosen?.id) return [chip];
+      // Le crayon est un frère de la puce : un bouton ne peut pas en contenir un autre.
+      const edit = element("button", "bot-chip-edit");
+      edit.type = "button";
+      edit.setAttribute("aria-label", `Modifier ${bot.name}`);
+      edit.title = "Modifier la personnalité";
+      edit.append(icon("edit"));
+      edit.addEventListener("click", () => openBotDialog(bot));
+      return [chip, edit];
     });
     const add = element("button", "bot-chip add-bot");
     add.type = "button";
@@ -273,7 +284,7 @@
       edit.type = "button";
       edit.setAttribute("aria-label", `Modifier ${bot.name}`);
       edit.addEventListener("click", () => openBotDialog(bot));
-      row.append(botDot(bot), copy, edit);
+      row.append(botAvatar(bot), copy, edit);
       return row;
     }));
   }
@@ -282,13 +293,14 @@
     closeMenu();
     editingBotId = bot?.id || null;
     if (!bot && !draftBotId) draftBotId = crypto.randomUUID();
-    const values = bot || { name: "", color: chosenBot()?.color || "citron", description: "", instructions: "" };
+    const values = bot || { name: "", color: chosenBot()?.color || "citron", shape: "galet", description: "", instructions: "" };
     $("bot-dialog-title").textContent = bot ? `Modifier ${bot.name}` : "Nouveau bot";
     $("bot-save").textContent = bot ? "Enregistrer" : "Créer le bot";
     $("bot-name").value = values.name;
     $("bot-description").value = values.description;
     $("bot-instructions").value = values.instructions;
     selectBotColor(values.color);
+    selectBotShape(values.shape);
     $("bot-delete-button").hidden = !bot || bot.is_default;
     $("bot-dialog").showModal();
     $("bot-name").focus();
@@ -296,6 +308,11 @@
 
   function selectBotColor(color) {
     $("bot-colors").querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.botColor === color)));
+    $("bot-shapes").dataset.botColor = color;
+  }
+
+  function selectBotShape(shape) {
+    $("bot-shapes").querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.shape === shape)));
   }
 
   function upsertBot(bot) {
@@ -311,6 +328,7 @@
     const values = {
       name,
       color: $("bot-colors").querySelector("[aria-pressed=true]")?.dataset.botColor || "citron",
+      shape: $("bot-shapes").querySelector("[aria-pressed=true]")?.dataset.shape || "galet",
       description: $("bot-description").value.trim(),
       instructions: $("bot-instructions").value.trim(),
     };
@@ -347,8 +365,12 @@
     finally { $("confirm-bot-delete").disabled = false; }
   }
 
+  // Une fabrique stable par forme : le fil ne recrée ses mascottes que si la forme change.
+  const threadMascots = {};
+  function threadMascot(shape) { return threadMascots[shape] ||= () => mascot?.create(false, shape); }
+
   const thread = {
-    createMascot: () => mascot?.create(),
+    createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
     onRegenerate: (message) => generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => signIn(),
@@ -367,10 +389,19 @@
     $("account-avatar").textContent = name.charAt(0).toLocaleUpperCase("fr");
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
-    $("workspace-label").textContent = conversation ? botName(conversation.bot_id) : "Espace personnel";
+    const label = $("workspace-label");
+    label.textContent = conversation ? botName(conversation.bot_id) : "Espace personnel";
+    // Sans conversation, ou pour un bot supprimé, le nom reste un simple texte.
+    label.disabled = !conversation || !bot || bot.deleted;
+    if (label.disabled) label.removeAttribute("title");
+    else label.title = "Modifier la personnalité";
     if (bot) document.querySelector(".main-panel").dataset.botColor = bot.color;
     else delete document.querySelector(".main-panel").dataset.botColor;
-    document.querySelector("[data-mascot=hero]").setAttribute("aria-label", `Faire sourire ${bot?.name || "Grokbot"}`);
+    const hero = document.querySelector("[data-mascot=hero]");
+    hero.setAttribute("aria-label", `Faire sourire ${bot?.name || "Grokbot"}`);
+    // La marque et la barre latérale gardent le galet : c'est l'identité de l'app.
+    for (const node of document.querySelectorAll("[data-mascot=hero] .mascot, [data-mascot=composer] .mascot")) mascot.setShape(node, bot?.shape);
+    thread.createMascot = threadMascot(bot?.shape || "galet");
     $("edit-bot-button").disabled = !bot || bot.deleted;
     document.title = conversation ? `${conversation.title} · Grokbot` : "Grokbot";
     ui.welcome.hidden = hasMessages;
@@ -775,6 +806,7 @@
   });
   $("export-button").addEventListener("click", exportConversation);
   $("edit-bot-button").addEventListener("click", () => { const bot = currentBot(); if (bot) openBotDialog(bot); });
+  $("workspace-label").addEventListener("click", () => { const bot = currentBot(); if (bot && !bot.deleted) openBotDialog(bot); });
   document.querySelectorAll("[data-new-bot]").forEach((button) => button.addEventListener("click", () => openBotDialog(null)));
   // Les pastilles du bot reprennent celles de l'accent, sans leur effet sur l'application.
   $("bot-colors").replaceChildren(...[...document.querySelectorAll("[data-accent-choice]")].map((swatch) => {
@@ -783,6 +815,16 @@
     button.removeAttribute("data-accent-choice");
     button.type = "button";
     button.addEventListener("click", () => selectBotColor(button.dataset.botColor));
+    return button;
+  }));
+  $("bot-shapes").replaceChildren(...Object.entries(mascot?.shapes || {}).map(([shape, { label }]) => {
+    const button = element("button");
+    button.type = "button";
+    button.dataset.shape = shape;
+    const preview = element("span", "bot-avatar");
+    preview.append(mascot.create(false, shape));
+    button.append(preview, element("span", "", label));
+    button.addEventListener("click", () => selectBotShape(shape));
     return button;
   }));
   $("bot-form").addEventListener("submit", saveBot);

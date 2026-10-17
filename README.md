@@ -1,5 +1,13 @@
 # Analyse de Grok Bot et architecture de reconstruction en Rust
 
+L’utilisateur vise désormais la parité fonctionnelle de son app avec Grok Bot. Le [découpage de livraison](reports/app-parity-delivery.md) part de l’app actuelle et la [proposition du premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md) couvre groupes, mentions et délégation dans le fil. Cette proposition est à relire; ce lot n’est pas encore implémenté.
+
+La [nouvelle analyse des membres](reports/multibot-membership-paths.md), les [tours de room](reports/multibot-turn-paths.md) et le [complément REA](reports/multibot-rea-followup.md) approfondissent le `@` dans une conversation existante et les groupes. Les sources produit actuelles sont [conservées séparément](reports/multibot-public-usage.md). `python3 tools/verify-multibot-investigation.py` vérifie la suite sans exécuter la cible.
+
+Le [contrôle local .71](reports/local-cua-path-0712.md), son [consentement par app](reports/local-cua-consent-0712.md) et sa [façade native MCP](reports/native-0712-mcp.md) sont maintenant reliés. L’original .70 possède aussi une [vérification arm64 ciblée](reports/native-arm64-residual.md). Vérifier cette suite avec `python3 tools/verify-local-control-followup.py`.
+
+La [nouvelle passe de preuves](reports/remaining-evidence-progress.md) ajoute un [démarrage original observé](reports/original-runtime-startup.md), l’[identité et la connexion iPhone](reports/distribution-mobile-discovery.md) et les [injections natives après révocation](reports/native-input-residual.md). Les 45 scripts capturés correspondent au manifeste ; 29 corps natifs supplémentaires sont reliés à leurs octets. Les comportements documentés et les observations runtime restent distincts des implémentations serveur absentes.
+
 La [nouvelle enquête sur les communications](reports/communications-investigation.md) couvre les messages entre bots et la continuité iPhone↔Mac, puis affine les inconnues de contexte et d’orchestration. Quatre rapports, 39 constats, 159 extraits et 22 contrats projetés sont conservés, avec [vue navigable](.lavish/communications-grokbot.html) et [vérification](evidence/communications-verification.json). La partie native iOS n’a pas été récupérée; les contrats mobiles ne sont pas présentés comme son implémentation.
 
 Le [goal des neuf sujets](reports/goal-nine-topics.md) ajoute 68 constats et 255 extraits vérifiables sur contexte, mémoire, effets incertains, boucle outils, permissions/secrets, budgets, ressources, démonstrations et traces. [Vue navigable](.lavish/goal-neuf-sujets.html). Les rapports détaillent [contexte/mémoire/apprentissage](reports/goal-context-memory-learning.md), [exécution/autonomie](reports/goal-execution-autonomy.md), [permissions/secrets](reports/goal-permissions-secrets.md) et [ressources/traçabilité](reports/goal-resources-traceability.md). Le [ledger commun](evidence/goal-nine-topics.json) et le [vérificateur](tools/verify-goal-investigation.py) conservent les frontières client/serveur. Aucun runtime original authentifié n'est revendiqué.
@@ -58,7 +66,7 @@ L'inventaire des descripteurs comprend 7 services, 484 entrées de méthodes, 42
 
 Six compagnons natifs présentent des contradictions avec les métadonnées ASAR. Leurs signatures Apple sont valides, mais le statut `observed-untrusted` est conservé. Le helper Computer Use est hors ASAR et ne fait pas partie de ces six contradictions.
 
-Le lancement instrumenté Electron a échoué. Aucun scénario après authentification n'est observé. Les fuses `RunAsNode` et `EnableNodeCliInspectArguments` sont désactivées dans le binaire; leur incompatibilité avec l'instrumentation est une explication plausible, pas une preuve complète de toutes les causes.
+Le lancement instrumenté Electron historique a échoué. Une observation ultérieure par lancement natif et Chromium CDP fonctionne sur un profil neuf : [preuve de démarrage](evidence/original-runtime-verification.json). Aucun scénario après authentification n'est observé. Les fuses `RunAsNode` et `EnableNodeCliInspectArguments` restent désactivées ; elles n’ont pas été modifiées pour cette observation.
 
 ## Preuves réutilisables
 

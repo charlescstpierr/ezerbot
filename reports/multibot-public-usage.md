@@ -1,0 +1,13 @@
+# Groupes et mentions : comportement annoncé
+
+Consultation du 17 octobre 2026. Ces documents décrivent le produit actuel; ils ne prouvent pas l’activation des mêmes options dans les paquets Mac .70 ou .71, ni dans le compte utilisateur. Les [réponses HTTP conservées](../evidence/multibot-public-sources.json) sont vérifiables sans réseau avec `python3 tools/multibot-public-evidence.py`.
+
+La documentation annonce la création d’un groupe depuis New chat avec deux à six bots, puis la possibilité de modifier ses membres. Dans le groupe, une mention choisit le bot sollicité; plusieurs mentions et everyone permettent d’adresser plusieurs membres. Une réponse à un message peut aussi viser son auteur. Les bots peuvent se transmettre du travail de façon asynchrone. Les transmissions bot→groupe sont décrites comme textuelles. Cela ne documente pas une conversion automatique d’un chat privé en groupe lorsqu’on saisit une mention. [Message and collaborate](https://docs.x.ai/grok-bot/chat-and-collaboration).
+
+Une autre page officielle précise la destination visible : les réponses de groupe apparaissent dans le groupe, tandis qu’une transmission directe entre bots peut apparaître dans leurs conversations propres. Elle décrit également une restriction entre certains Team Bots et bots sur l’ordinateur personnel. Ce vocabulaire produit doit être rapproché des gardes effectives du client avant de l’attribuer à une version. [Group chats and Bot-to-Bot messages](https://prod.cursor.com/help/grok-bot/group-chats).
+
+Les documents n’expriment pas exactement la même portée pour la désactivation. La page d’aide présente les instructions aux bots comme moyen de limiter leurs échanges et dit ne pas avoir d’interrupteur. La documentation xAI décrit un réglage d’administration d’équipe. Ces deux affirmations sont conservées; elles n’établissent pas un même contrôle disponible pour tous les comptes. [Aide Cursor](https://prod.cursor.com/help/grok-bot/group-chats), [documentation xAI](https://docs.x.ai/grok-bot/chat-and-collaboration).
+
+Sur téléphone, le parcours annoncé passe par le bouton plus et New Group Chat. L’app permet de gérer les membres et de mentionner les bots du groupe. Ce document ne fournit pas le code natif iOS. [Grok Bot for Mobile](https://docs.x.ai/grok-bot/mobile).
+
+La différence entre mention, membership et tour de réponse doit donc être vérifiée dans les chemins du client et du service. Nos propres décisions de conversion d’un fil existant sont explicitement proposées dans le [design de l’app](../docs/superpowers/specs/2026-10-17-multibot-design.md), sans les présenter comme des faits de l’original.

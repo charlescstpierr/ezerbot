@@ -1,6 +1,16 @@
 # Reprendre le travail
 
+## Objectif produit actuel
+
+L’utilisateur veut pouvoir faire dans son app ce que fait Grok Bot. Il a précisé les échanges entre bots, `@` dans un fil existant et les conversations à plusieurs bots. Lire [app-parity-delivery.md](reports/app-parity-delivery.md) puis la [proposition de premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md). Le code audité a déjà profils et chemin ChatGPT, mais `Conversation` et SQLite rattachent encore le fil à un unique bot. La proposition n’est pas approuvée et aucun code produit de ce lot n’a été écrit pendant cette passe. Préserver les changements concurrents dans app/ui et wrapper.
+
+La nouvelle suite statique [contrôle Mac .71](reports/local-cua-path-0712.md) et les rapports liés se vérifient avec `python3 tools/verify-local-control-followup.py`. Ils établissent la gate, les 14 outils, les queues par conversation, la façade stdio puis le socket companion et la portée du retrait d’app. Un résultat done n’établit pas toujours une action réussie. Le mode natif MCP existait déjà en .70; la composition JavaScript observée est .71.
+
+Dernier steering : « utilise REA », sans approbation du design produit. Lire [multibot-rea-followup.md](reports/multibot-rea-followup.md), [multibot-membership-paths.md](reports/multibot-membership-paths.md) et [multibot-turn-paths.md](reports/multibot-turn-paths.md). Le `@` ne modifie pas les membres dans la chaîne inspectée; Members conserve l’ID de room; nouveau groupe crée une room puis transfère le brouillon. Un nouveau bundle REA de 15 records est conservé. Le focus d’un seul module a une couverture sémantique unknown et un nettoyage producteur initialement incomplet; le worker exact a été arrêté et le répertoire vide retiré. Réutiliser ces preuves au lieu de relancer le même focus. Vérifier avec `python3 tools/verify-multibot-investigation.py`.
+
 ## Dernière passe de rétro-ingénierie
+
+Commencer désormais par [remaining-evidence-progress.md](reports/remaining-evidence-progress.md). Un démarrage original signé a été observé avec un profil neuf et le port CDP Chromium, sans Node Inspector ni Playwright launch : 45 sources capturées correspondent exactement au manifeste. Le processus d’observation et la connexion Chrome dédiée ont été arrêtés. Lire [original-runtime-startup.md](reports/original-runtime-startup.md), [distribution-mobile-discovery.md](reports/distribution-mobile-discovery.md) et [native-input-residual.md](reports/native-input-residual.md). Ne pas répéter l’ancien lancement rejeté ni confondre cet écran sans compte avec les scénarios authentifiés. Vérifier avec `tools/verify-original-runtime.py` et `tools/verify-remaining-evidence.py`.
 
 Lire d’abord [communications-investigation.md](reports/communications-investigation.md) et ses quatre rapports. L’utilisateur a demandé les inconnues restantes, les échanges entre bots, puis la connexion à son iPhone. La passe ajoute grouping/panneau interbot, mentions riches, réponses scoped et rails vocaux, contrats directs/rooms, roster iOS et flux transcript Mac, partage de mémoire par lots, réveil de formulaire et import texte vers skills. `python3 tools/verify-communications.py` vérifie ces preuves; `python3 tools/build-communications-review.py` reconstruit l’index et la vue.
 
@@ -48,7 +58,7 @@ Le wrapper actuel est une coque Cocoa/WKWebView et une interface web hors ligne,
 
 ## Si la suite est une observation de l’original
 
-Préparer un compte et des bots de test, puis observer les parcours après connexion. Le lancement instrumenté précédent a échoué. Il n’existe pas de preuve runtime authentifiée à réutiliser. La présence de fichiers dans le profil temporaire de lancement ne transforme pas cet échec en scénario instrumenté réussi.
+Préparer un compte et des bots de test, puis observer les parcours après connexion. Le démarrage par l’exécutable natif et Chromium CDP fonctionne désormais sur profil neuf ; les preuves réutilisables sont séparées de l’ancien lancement instrumenté échoué. Il n’existe toujours pas de preuve runtime authentifiée à réutiliser. La présence de fichiers dans un profil ne suffit pas : la nouvelle capture conserve un vrai renderer, ses sources et un écran de connexion.
 
 Le MCP REA a répondu `Transport closed`. Le fallback CLI public a répondu `Process failed to launch!`. Les fuses désactivées rendent une incompatibilité plausible; la cause complète n’est pas prouvée. Conserver la signature et les fuses originales.
 

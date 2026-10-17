@@ -109,6 +109,13 @@ try:
         require('same bot id with other content rejected', status == 409)
         status, _, _ = active.request('/api/bots', {**bot_request, 'id': 'other', 'color': 'terracotta'})
         require('unknown bot color rejected', status == 400)
+        require('bot without a shape gets the pebble', created_bot['shape'] == 'galet')
+        shaped = active.json('/api/bots', {'id': 'wrapper-shape-bot', 'name': 'Nuage', 'color': 'cyan', 'shape': 'nuage'})['bot']
+        reshaped = active.json('/api/bots/update', {'id': 'wrapper-shape-bot', 'shape': 'etoile'})['bot']
+        stored = next(bot for bot in active.json('/api/state')['bots'] if bot['id'] == 'wrapper-shape-bot')
+        status, _, _ = active.request('/api/bots', {'id': 'wrapper-shape-other', 'name': 'X', 'color': 'cyan', 'shape': 'cercle'})
+        require('shape round-trips', shaped['shape'] == 'nuage' and reshaped['shape'] == 'etoile' and
+                stored['shape'] == 'etoile' and stored['color'] == 'cyan' and status == 400)
         bot_conversation = active.json('/api/conversations', {'bot_id': 'wrapper-smoke-bot'})['conversation']
         require('conversation created with a chosen bot', bot_conversation['bot_id'] == 'wrapper-smoke-bot')
         status, _, _ = active.request('/api/bots/delete', {'id': 'grokbot'})

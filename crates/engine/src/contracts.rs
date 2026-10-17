@@ -183,7 +183,8 @@ pub struct ToolSpec {
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
-    /// The gateway preserves invalid/truncated JSON as Value::String(raw).
+    /// The gateway preserves invalid/truncated/non-object JSON as Value::String(raw).
+    /// Such strings carry the original provider argument text for faithful replay.
     /// Before check_approval or request_approval, the loop rejects non-object
     /// arguments with a per-call Failed outcome ("invalid arguments"), retaining
     /// the call ID and continuing the turn without asking the user to approve it.

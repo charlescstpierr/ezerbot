@@ -96,6 +96,15 @@ fn validate_input(body: &Value) {
                 );
                 assert!(item["output"].is_string());
             }
+            Some("reasoning") => {
+                assert!(!item["id"].as_str().expect("reasoning ID").is_empty());
+                assert!(!item["encrypted_content"]
+                    .as_str()
+                    .expect("opaque reasoning")
+                    .is_empty());
+                assert_eq!(item["summary"], json!([]));
+                assert!(item.get("role").is_none() && item.get("content").is_none());
+            }
             _ => {
                 let role = item["role"].as_str().expect("message role");
                 let content = &item["content"];
@@ -143,6 +152,7 @@ fn request() -> ModelRequest {
         input: vec![history(Role::User, "Read the review skill")],
         tools: vec![ToolSpec {
             name: "read_skill".into(),
+            description: "Reads one skill body".into(),
             schema: json!({"type": "object", "description": "Reads one skill body", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
             requires_approval: true,
         }],
@@ -248,6 +258,235 @@ fn tool_call_then_output_round_trip() {
         && body["stream"] == true
         && body.get("previous_response_id").is_none()));
     assert!(seen.bearer.iter().all(|token| token == "Bearer access-2"));
+}
+
+#[test]
+fn dedicated_tool_description_overrides_legacy_schema_and_empty_default_falls_back() {
+    let fixture = Fixture::new();
+    let mut request = request();
+    request.tools[0].description = "Dedicated description".into();
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request);
+    request.tools[0].description.clear();
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request);
+    request.tools[0]
+        .schema
+        .as_object_mut()
+        .unwrap()
+        .remove("description");
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request);
+    let seen = fixture.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.bodies[0]["tools"][0]["description"],
+        "Dedicated description"
+    );
+    assert_eq!(
+        seen.bodies[1]["tools"][0]["description"],
+        "Reads one skill body"
+    );
+    assert!(seen.bodies[2]["tools"][0].get("description").is_none());
+}
+
+#[test]
+fn reasoning_round_trip_stays_opaque_before_its_tool_call() {
+    let fixture = Fixture::new();
+    let opaque = "encrypted-provider-state-<not-assistant-text>";
+    let done = json!({"type": "response.output_item.done", "item": {
+        "type": "reasoning", "id": "rs_1", "encrypted_content": opaque, "summary": [],
+    }});
+    fixture.events(&[
+        json!({"type": "response.output_item.added", "item": {"type": "reasoning", "id": "rs_1", "summary": []}}),
+        done.clone(), done,
+        item("response.output_item.done", "fc_1", "call_1", "read_skill", "{\"name\":\"review\"}"),
+        json!({"type": "response.completed"}),
+    ]);
+    let mut request = request();
+    assert_eq!(
+        fixture.collect(&request),
+        [
+            ModelEvent::Reasoning {
+                item_id: "rs_1".into(),
+                encrypted_content: opaque.into()
+            },
+            tool_call("call_1", "read_skill", json!({"name": "review"})),
+            ModelEvent::Completed,
+        ]
+    );
+    let mut assistant = history(Role::Assistant, "");
+    assistant.tool_items = vec![
+        ToolItem::Reasoning {
+            item_id: "rs_1".into(),
+            encrypted_content: opaque.into(),
+        },
+        ToolItem::Call {
+            call: ToolCall {
+                call_id: "call_1".into(),
+                name: "read_skill".into(),
+                arguments: json!({"name": "review"}),
+            },
+        },
+    ];
+    let mut output = history(Role::Tool, "");
+    output.tool_items.push(ToolItem::Output {
+        call_id: "call_1".into(),
+        output: json!("skill body"),
+    });
+    request.input.extend([assistant, output]);
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request);
+    let seen = fixture.server.seen.lock().unwrap();
+    for body in &seen.bodies {
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["store"], false);
+    }
+    let input = &seen.bodies[1]["input"];
+    assert_eq!(
+        input[1],
+        json!({"type": "reasoning", "id": "rs_1", "encrypted_content": opaque, "summary": []})
+    );
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert!(input.as_array().unwrap().iter().all(|item| item
+        .get("content")
+        .is_none_or(|content| !content.to_string().contains(opaque))));
+}
+
+#[test]
+fn reasoning_summary_is_not_text_and_ciphertext_without_id_fails_closed() {
+    let fixture = Fixture::new();
+    fixture.events(&[
+        json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_1", "summary": [{"text": "not assistant text"}]}}),
+        json!({"type": "response.output_text.delta", "delta": "visible answer"}),
+        json!({"type": "response.completed"}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "visible answer".into()
+            },
+            ModelEvent::Completed
+        ]
+    );
+    fixture.events(&[
+        json!({"type": "response.output_item.done", "item": {"type": "reasoning", "encrypted_content": "opaque"}}),
+        json!({"type": "response.completed"}),
+    ]);
+    assert!(matches!(
+        fixture.collect(&request()).as_slice(),
+        [ModelEvent::Failed { .. }]
+    ));
+}
+
+#[test]
+fn reasoning_callback_error_stops_stream_without_fabricated_failure() {
+    let fixture = Fixture::new();
+    fixture.events(&[
+        json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"}}),
+        json!({"type": "response.output_text.delta", "delta": "must not emit"}),
+        json!({"type": "response.completed"}),
+    ]);
+    let mut seen = Vec::new();
+    let error = fixture
+        .provider
+        .stream(&request(), &mut |event| {
+            seen.push(event);
+            Err(Error::InvalidInput("cancelled".into()))
+        })
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    assert_eq!(
+        seen,
+        [ModelEvent::Reasoning {
+            item_id: "rs_1".into(),
+            encrypted_content: "opaque".into()
+        }]
+    );
+}
+
+#[test]
+fn invalid_arguments_keep_raw_transport_and_call_ids_for_per_call_failure() {
+    let fixture = Fixture::new();
+    for raw in ["not JSON", "[]", "", "\"string\"", "null", "1"] {
+        fixture.events(&[
+            item(
+                "response.output_item.done",
+                "fc_bad",
+                "bad",
+                "read_skill",
+                raw,
+            ),
+            item(
+                "response.output_item.done",
+                "fc_good",
+                "good",
+                "read_skill",
+                "{}",
+            ),
+            json!({"type": "response.completed"}),
+        ]);
+        let mut request = request();
+        let events = fixture.collect(&request);
+        assert_eq!(
+            events,
+            [
+                tool_call("bad", "read_skill", json!(raw)),
+                tool_call("good", "read_skill", json!({})),
+                ModelEvent::Completed,
+            ]
+        );
+        let mut assistant = history(Role::Assistant, "");
+        for event in events {
+            if let ModelEvent::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } = event
+            {
+                assistant.tool_items.push(ToolItem::Call {
+                    call: ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    },
+                });
+            }
+        }
+        let mut output = history(Role::Tool, "");
+        output.tool_items = vec![
+            ToolItem::Output {
+                call_id: "bad".into(),
+                output: json!("invalid arguments"),
+            },
+            ToolItem::Output {
+                call_id: "good".into(),
+                output: json!("result"),
+            },
+        ];
+        request.input.extend([assistant, output]);
+        fixture.events(&[json!({"type": "response.completed"})]);
+        fixture.collect(&request);
+        assert_eq!(
+            fixture.server.seen.lock().unwrap().bodies.last().unwrap()["input"][1]["arguments"],
+            raw
+        );
+    }
+    fixture.events(&[
+        item("response.output_item.done", "fc_partial", "partial", "read_skill", "{"),
+        json!({"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}}}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            tool_call("partial", "read_skill", json!("{")),
+            ModelEvent::Incomplete {
+                reason: "max_output_tokens".into()
+            },
+        ]
+    );
 }
 
 #[test]
@@ -402,23 +641,9 @@ fn done_item_alone_and_added_arguments_done_both_complete_one_call() {
 }
 
 #[test]
-fn malformed_and_unfinished_calls_fail_without_becoming_executable() {
+fn unfinished_calls_fail_without_becoming_executable() {
     let fixture = Fixture::new();
     for event in [
-        item(
-            "response.output_item.done",
-            "fc_1",
-            "call_1",
-            "read_skill",
-            "not JSON",
-        ),
-        item(
-            "response.output_item.done",
-            "fc_1",
-            "call_1",
-            "read_skill",
-            "[]",
-        ),
         item(
             "response.output_item.added",
             "fc_1",

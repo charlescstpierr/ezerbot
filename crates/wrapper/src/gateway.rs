@@ -9,8 +9,8 @@
 //! Contract debts for engine cutover: ModelEvent has no notice, error-kind or idle
 //! progress/cancellation channel. Capability downgrades cannot yet show a notice,
 //! Failed loses the provider's reconnect/usage action, and ignored SSE lines cannot
-//! checkpoint cancellation. Reasoning items are not replayed without an encrypted
-//! reasoning field in ModelRequest; only the complete representable history is sent.
+//! checkpoint cancellation. Encrypted reasoning is requested and replayed as opaque
+//! structured provider state, never as text or executable calls.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -69,7 +69,12 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
             input.push(match item {
                 ToolItem::Call { call } => json!({
                     "type": "function_call", "call_id": call.call_id,
-                    "name": call.name, "arguments": serde_json::to_string(&call.arguments)?,
+                    "name": call.name, "arguments": match &call.arguments {
+                        // Non-object/invalid arguments are raw transport markers;
+                        // the loop rejects them per-call before seeking approval.
+                        Value::String(raw) => raw.clone(),
+                        value => serde_json::to_string(value)?,
+                    },
                 }),
                 ToolItem::Output { call_id, output } => json!({
                     "type": "function_call_output", "call_id": call_id,
@@ -78,12 +83,20 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                         other => serde_json::to_string(other)?,
                     },
                 }),
+                ToolItem::Reasoning {
+                    item_id,
+                    encrypted_content,
+                } => json!({
+                    "type": "reasoning", "id": item_id,
+                    "encrypted_content": encrypted_content, "summary": [],
+                }),
             });
         }
     }
     let mut body = json!({
         "model": request.model, "instructions": request.instructions,
         "input": input, "store": false, "stream": true,
+        "include": ["reasoning.encrypted_content"],
     });
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -96,8 +109,10 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                         // ToolSpec permits ordinary JSON schemas, not only OpenAI's strict subset.
                         "strict": false,
                     });
-                    // ToolSpec has no dedicated description field yet.
-                    if let Some(description) = tool.schema["description"].as_str() {
+                    if !tool.description.is_empty() {
+                        function["description"] = json!(tool.description);
+                    } else if let Some(description) = tool.schema["description"].as_str() {
+                        // Retain compatibility with legacy serde-defaulted specs.
                         function["description"] = json!(description);
                     }
                     function
@@ -127,6 +142,7 @@ struct PendingCall {
 struct Events {
     calls: HashMap<String, PendingCall>,
     emitted_ids: HashSet<String>,
+    emitted_reasoning_ids: HashSet<String>,
 }
 
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
@@ -163,6 +179,25 @@ impl Events {
                 if let Some(text) = event["delta"].as_str() {
                     emit(ModelEvent::TextDelta { text: text.into() })?;
                 }
+            }
+            "response.output_item.done" if event["item"]["type"] == "reasoning" => {
+                let item = &event["item"];
+                if let Some(content) = item["encrypted_content"].as_str().filter(|s| !s.is_empty())
+                {
+                    let Some(id) = item["id"].as_str().filter(|s| !s.is_empty()) else {
+                        emit(failed(
+                            "OpenAI a envoyé un raisonnement chiffré sans identifiant.",
+                        ))?;
+                        return Ok(true);
+                    };
+                    if self.emitted_reasoning_ids.insert(id.into()) {
+                        emit(ModelEvent::Reasoning {
+                            item_id: id.into(),
+                            encrypted_content: content.into(),
+                        })?;
+                    }
+                }
+                // Summaries without encrypted state are not assistant text.
             }
             "response.output_item.added" | "response.output_item.done"
                 if event["item"]["type"] == "function_call" =>
@@ -260,12 +295,9 @@ impl Events {
         }
         let arguments = match serde_json::from_str::<Value>(&call.arguments) {
             Ok(value) if value.is_object() => value,
-            _ => {
-                emit(failed(
-                    "Les arguments de l’appel d’outil doivent être un objet JSON valide.",
-                ))?;
-                return Ok(true);
-            }
+            // Preserve the call ID and raw arguments for a per-call failure in
+            // the loop, rather than losing the call or aborting unrelated calls.
+            _ => Value::String(call.arguments.clone()),
         };
         if !self.emitted_ids.insert(call.call_id.clone()) {
             emit(failed(

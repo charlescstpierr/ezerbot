@@ -35,7 +35,9 @@ pub trait RunServices {
     /// a new request; Denied/Expired/Cancelled -> Denied, never ask again. Otherwise
     /// consult bot-scoped standing rules/auto-review or the resolved single-use grant.
     /// Consume AllowOnce via approvals::consume_allow_once here, inside the caller's
-    /// same with_tx as call_tool and its result event. Denied must never execute.
+    /// same with_tx as call_tool and its result event. Persist Authorized { by } in
+    /// that result event for durable authorization provenance after rule revocation.
+    /// auto_review only resolves an already-created request. Denied never executes.
     fn check_approval(
         &mut self,
         conn: &Connection,
@@ -44,8 +46,11 @@ pub trait RunServices {
     ) -> Result<ApprovalCheck>;
     /// Called only for ApprovalCheck::Ask. Idempotent by (run_id, call_id, canonical
     /// tool/argument digest): reuse the same SuspendCause::HumanInput { id } after
-    /// retries/crashes instead of creating another request. Display in the principal
-    /// conversation; the returned cause still belongs to the originating run.
+    /// retries/crashes instead of creating another request. Derive its id (or
+    /// entry_id) deterministically as approval:<sha256> of the serialized tuple;
+    /// look it up with requests::get(id), not just list_for_run plus the digest,
+    /// so identical arguments in distinct calls never share a request/decision.
+    /// Display in the principal conversation; wake the originating run.
     fn request_approval(
         &mut self,
         conn: &Connection,

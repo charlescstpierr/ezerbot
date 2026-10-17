@@ -339,17 +339,24 @@ fn drop_unfinished_calls(history: &mut [HistoryItem], current: &HistoryItem) {
         .collect();
     for item in history.iter_mut().rev() {
         let tools = std::mem::take(&mut item.tool_items);
+        // Opaque reasoning must lead to a retained call in this entry, not an
+        // orphan after cancellation. Removed parallel calls do not break the chain.
+        let mut before_call = false;
         item.tool_items = tools
             .into_iter()
             .rev()
             .filter(|tool| match tool {
                 ToolItem::Output { call_id, .. } => {
                     outputs.insert(call_id.clone());
+                    before_call = false;
                     true
                 }
-                ToolItem::Call { call } => outputs.contains(&call.call_id),
-                // Opaque provider state is retained intact, never rendered as text.
-                ToolItem::Reasoning { .. } => true,
+                ToolItem::Call { call } => {
+                    let keep = outputs.contains(&call.call_id);
+                    before_call |= keep;
+                    keep
+                }
+                ToolItem::Reasoning { .. } => before_call,
             })
             .collect();
         item.tool_items.reverse();
@@ -815,6 +822,67 @@ mod context_tests {
         .unwrap();
         assert_eq!(current.input[0].tool_items, vec![reasoning]);
         assert_eq!(current.input[0].text, request.current_message.text);
+    }
+
+    #[test]
+    fn cancelled_tool_reasoning_is_pruned_with_calls_but_completed_parallel_calls_survive() {
+        let reasoning = |id: &str| ToolItem::Reasoning {
+            item_id: id.into(),
+            encrypted_content: format!("opaque-{id}"),
+        };
+        let mut empty = entry("empty-cancelled", "");
+        empty.role = Role::Assistant;
+        empty.tool_items = vec![reasoning("rs-empty"), call("cancelled-empty")];
+        let mut text = entry("text-cancelled", "keep assistant text");
+        text.role = Role::Assistant;
+        text.tool_items = vec![reasoning("rs-text"), call("cancelled-text")];
+        let mut completed = entry("completed", "");
+        completed.role = Role::Assistant;
+        completed.tool_items = vec![reasoning("rs-done"), call("done"), output("done", "result")];
+        let mut parallel = entry("parallel", "");
+        parallel.role = Role::Assistant;
+        parallel.tool_items = vec![
+            reasoning("rs-parallel-1"),
+            reasoning("rs-parallel-2"),
+            call("cancelled-parallel"),
+            call("parallel-done"),
+            output("parallel-done", "result"),
+        ];
+        let history = [empty, text, completed.clone(), parallel];
+        let before = history.clone();
+        let assembled = assemble_input(
+            &request(),
+            &base(),
+            &history,
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&assembled.input),
+            vec!["text-cancelled", "completed", "parallel", "current"]
+        );
+        assert_eq!(assembled.input[0].text, "keep assistant text");
+        assert!(assembled.input[0].tool_items.is_empty());
+        // Only output bodies are fenced: reasoning and surviving calls stay intact.
+        assert_eq!(
+            assembled.input[1].tool_items[..2],
+            completed.tool_items[..2]
+        );
+        assert_eq!(
+            assembled.input[2].tool_items[..3],
+            [
+                reasoning("rs-parallel-1"),
+                reasoning("rs-parallel-2"),
+                call("parallel-done"),
+            ]
+        );
+        assert_eq!(assembled.input[2].tool_items.len(), 4);
+        assert!(
+            matches!(&assembled.input[2].tool_items[3], ToolItem::Output { call_id, .. } if call_id == "parallel-done")
+        );
+        assert_eq!(history, before);
     }
 
     #[test]

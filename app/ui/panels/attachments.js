@@ -12,6 +12,7 @@
   const types = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]);
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
   const buckets = new Map();
+  const views = new WeakMap();
   let context, tray, list, picker, cooldown = 0, cooldownTimer;
   function backoff(until) {
     if (until <= cooldown) return;
@@ -57,37 +58,49 @@
   function render() {
     if (!list || !context) return;
     const group = bucket();
-    list.replaceChildren(...group.items.map((item) => {
-      const chip = node("li", "attachment-chip");
+    const chips = group.items.map((item) => {
+      if (!views.has(item)) views.set(item, createChip(group, item));
+      const { chip, status, retry } = views.get(item);
       chip.dataset.status = item.upload === "ready" ? item.caption : item.upload;
-      const image = node("img", "attachment-preview");
-      image.src = item.preview;
-      image.alt = `Aperçu de ${item.file.name || "l’image collée"}`;
-      const copy = node("div", "attachment-copy");
-      const name = node("strong", "", item.file.name || "Image collée");
-      name.title = item.file.name || "Image collée";
-      const status = node("span", "attachment-status", captionText(item));
-      status.setAttribute("role", "status");
-      if (item.error) status.title = item.error;
-      copy.append(name, status);
-      if (item.upload === "failed" || item.caption === "failed" || item.caption === "skipped") {
-        const retry = node("button", "attachment-retry", "Réessayer");
-        retry.type = "button";
-        retry.disabled = item.caption === "skipped" && cooldown > Date.now();
-        retry.title = retry.disabled ? "La prédescription est en pause pendant dix minutes." : "Réessayer la préparation de cette image";
-        retry.addEventListener("click", () => {
-          if (item.upload === "failed") upload(group, item);
-          else schedule(group, item, true);
-        });
-        copy.append(retry);
-      }
-      const close = node("button", "attachment-remove", "×");
-      close.type = "button";
-      close.setAttribute("aria-label", `Retirer ${item.file.name || "l’image"}`);
-      close.addEventListener("click", () => remove(group, item));
-      chip.append(image, copy, close);
+      const label = captionText(item);
+      if (status.textContent !== label) status.textContent = label;
+      status.title = item.error || "";
+      retry.hidden = !(item.upload === "failed" || item.caption === "failed" || item.caption === "skipped");
+      retry.disabled = item.caption === "skipped" && cooldown > Date.now();
+      retry.title = retry.disabled ? "La prédescription est en pause pendant dix minutes." : "Réessayer la préparation de cette image";
       return chip;
-    }));
+    });
+    const visible = new Set(chips);
+    for (const child of Array.from(list.children)) if (!visible.has(child)) child.remove();
+    // Do not detach/reappend an unchanged chip: even moving the same node can
+    // blur its focused button in WebKit. Status regions also remain stable.
+    chips.forEach((chip, index) => {
+      if (list.children[index] !== chip) list.insertBefore(chip, list.children[index] || null);
+    });
+  }
+  function createChip(group, item) {
+    const chip = node("li", "attachment-chip");
+    const image = node("img", "attachment-preview");
+    image.src = item.preview;
+    image.alt = `Aperçu de ${item.file.name || "l’image collée"}`;
+    const copy = node("div", "attachment-copy");
+    const name = node("strong", "", item.file.name || "Image collée");
+    name.title = item.file.name || "Image collée";
+    const status = node("span", "attachment-status");
+    status.setAttribute("role", "status");
+    const retry = node("button", "attachment-retry", "Réessayer");
+    retry.type = "button";
+    retry.addEventListener("click", () => {
+      if (item.upload === "failed") upload(group, item);
+      else schedule(group, item, true);
+    });
+    copy.append(name, status, retry);
+    const close = node("button", "attachment-remove", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", `Retirer ${item.file.name || "l’image"}`);
+    close.addEventListener("click", () => remove(group, item));
+    chip.append(image, copy, close);
+    return { chip, status, retry };
   }
 
   // The API requires an existing conversation (wrapper review r1/r2). Create it
@@ -109,6 +122,9 @@
         // If storage is unavailable, do not switch and erase a nonempty draft.
         if (draft) localStorage.setItem(`grokbot.draft.${group.conversation}`, draft);
         if (!panels.openConversation(group.conversation)) throw new Error("Ouvrez la conversation créée pour préparer l’image.");
+        // The shell re-saved this handed-off draft under the new-chat key;
+        // ownership has moved to the conversation, so home must start empty.
+        try { localStorage.removeItem("grokbot.draft.new"); } catch { /* Already saved under the conversation key. */ }
       }
       if (buckets.get(group.key) === group) buckets.delete(group.key);
       group.key = group.conversation;
@@ -120,10 +136,12 @@
 
   function mime(file) {
     if (types.has(file.type)) return file.type;
-    if (file.type && file.type !== "application/octet-stream") return null;
+    if (file.type && !file.type.startsWith("image/") && file.type !== "application/octet-stream") return null;
     return extensions[file.name?.split(".").pop().toLowerCase()] || null;
   }
-  function onFiles(files, _event, ctx) {
+  function onFiles(files, event, ctx) {
+    // Office/iWork copies include a PNG rendition alongside the intended text.
+    if (event?.clipboardData?.getData("text/plain").trim()) return false;
     const candidates = files.filter((file) => mime(file));
     if (!candidates.length) { panels.notify("Joignez une image PNG, JPEG, GIF, WebP ou BMP."); return false; }
     const group = bucket(ctx);
@@ -175,7 +193,7 @@
   }
 
   function signature(ctx) {
-    return JSON.stringify([ctx.draft, ctx.state.preferences?.model || null, Boolean(ctx.state.provider?.connected)]);
+    return JSON.stringify([ctx.draft, ctx.state.preferences?.model || null, Boolean(ctx.state.provider?.connected), Boolean(ctx.state.provider?.models_ready)]);
   }
   function schedule(group, item, retry = false) {
     clearTimeout(item.timer);
@@ -224,6 +242,9 @@
         signal: controller.signal,
       });
       const result = await response.json();
+      // Capacity/catalog refusals precede any claim. Keep polling the same key
+      // with retry=false; the existing DEADLINE bounds this transient wait.
+      if (response.status === 429 || response.status === 409) return;
       if (!response.ok) throw new Error(result.error || "La description n’est pas disponible.");
       if (!present(group, item) || revision !== item.revision) return;
       const status = result.caption?.status;

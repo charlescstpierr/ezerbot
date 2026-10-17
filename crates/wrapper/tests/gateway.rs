@@ -1,6 +1,7 @@
 //! Engine gateway against the shared, scripted Responses server (no live account).
 mod support;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,13 +55,12 @@ impl Fixture {
         }
     }
 
+    fn reply(&self, reply: ScriptedResponse) {
+        self.server.seen.lock().unwrap().responses.push_back(reply);
+    }
+
     fn events(&self, events: &[Value]) {
-        self.server
-            .seen
-            .lock()
-            .unwrap()
-            .responses
-            .push_back(ScriptedResponse::events(events));
+        self.reply(ScriptedResponse::events(events));
     }
 
     fn collect(&self, request: &ModelRequest) -> Vec<ModelEvent> {
@@ -72,7 +72,51 @@ impl Fixture {
                 Ok(())
             })
             .unwrap();
+        // The shared fake server intentionally accepts arbitrary JSON. Validate
+        // the received wire format here rather than treating HTTP 200 as proof.
+        for body in &self.server.seen.lock().unwrap().bodies {
+            validate_input(body);
+        }
         events
+    }
+}
+
+fn validate_input(body: &Value) {
+    let mut calls = HashSet::new();
+    for item in body["input"].as_array().expect("complete input array") {
+        match item["type"].as_str() {
+            Some("function_call") => {
+                calls.insert(item["call_id"].as_str().expect("call ID"));
+                assert!(item["arguments"].is_string());
+            }
+            Some("function_call_output") => {
+                assert!(
+                    calls.contains(item["call_id"].as_str().expect("output call ID")),
+                    "output has no preceding function call: {item}"
+                );
+                assert!(item["output"].is_string());
+            }
+            _ => {
+                let role = item["role"].as_str().expect("message role");
+                let content = &item["content"];
+                assert!(["system", "user", "assistant"].contains(&role));
+                if !content.is_string() {
+                    for part in content.as_array().expect("message content") {
+                        let kind = part["type"].as_str().expect("content type");
+                        if role == "assistant" {
+                            assert!(
+                                ["output_text", "refusal"].contains(&kind),
+                                "assistant input_* content rejected by Responses: {item}"
+                            );
+                        } else {
+                            assert!(
+                                kind == "input_text" || (role == "user" && kind == "input_image")
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -99,7 +143,7 @@ fn request() -> ModelRequest {
         input: vec![history(Role::User, "Read the review skill")],
         tools: vec![ToolSpec {
             name: "read_skill".into(),
-            schema: json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
+            schema: json!({"type": "object", "description": "Reads one skill body", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
             requires_approval: true,
         }],
         effort: Some("high".into()),
@@ -181,10 +225,7 @@ fn tool_call_then_output_round_trip() {
     let first = &seen.bodies[0];
     let second = &seen.bodies[1];
     assert_eq!(second["input"][0], first["input"][0]);
-    assert_eq!(
-        second["input"][1]["content"][0],
-        json!({"type": "input_text", "text": "Reading it now"})
-    );
+    assert_eq!(second["input"][1]["content"], "Reading it now");
     assert_eq!(
         second["input"][2],
         json!({
@@ -199,6 +240,7 @@ fn tool_call_then_output_round_trip() {
     );
     assert_eq!(first["tools"][0]["parameters"], request.tools[0].schema);
     assert_eq!(first["tools"][0]["name"], "read_skill");
+    assert_eq!(first["tools"][0]["description"], "Reads one skill body");
     assert!(first["tools"][0].get("requires_approval").is_none());
     assert_eq!(first["reasoning"]["effort"], "high");
     assert_eq!(first["service_tier"], "priority");
@@ -291,7 +333,8 @@ fn stream_failure_maps_to_failed_event() {
                     text: "Partial".into()
                 },
                 ModelEvent::Failed {
-                    reason: "Model unavailable".into()
+                    reason: "OpenAI a signalé une erreur pendant la réponse : Model unavailable"
+                        .into()
                 },
             ]
         );
@@ -310,10 +353,18 @@ fn incomplete_is_not_completed_and_eof_is_not_success() {
     );
     fixture.events(&[json!({"type": "response.output_text.delta", "delta": "Partial"})]);
     let events = fixture.collect(&request());
-    assert!(matches!(
-        events.as_slice(),
-        [ModelEvent::TextDelta { .. }, ModelEvent::Failed { .. }]
-    ));
+    assert_eq!(
+        events,
+        [
+            ModelEvent::TextDelta {
+                text: "Partial".into()
+            },
+            ModelEvent::Failed {
+                reason: "La réponse a été interrompue avant la fin. Vous pouvez la relancer."
+                    .into()
+            },
+        ]
+    );
 }
 
 #[test]
@@ -529,6 +580,224 @@ fn repeated_unauthorized_is_not_retried_forever() {
     let seen = fixture.server.seen.lock().unwrap();
     assert_eq!(seen.bodies.len(), 2);
     assert_eq!(seen.forms.len(), 1);
+}
+
+#[test]
+fn replay_content_respects_message_roles() {
+    let fixture = Fixture::new();
+    let mut request = request();
+    request.input = vec![
+        history(Role::System, "System policy"),
+        history(Role::Assistant, "Earlier reply"),
+        history(Role::User, "Continue"),
+    ];
+    fixture.events(&[json!({"type": "response.completed"})]);
+    assert_eq!(fixture.collect(&request), [ModelEvent::Completed]);
+    let seen = fixture.server.seen.lock().unwrap();
+    let input = &seen.bodies[0]["input"];
+    assert_eq!(
+        input[0]["content"],
+        json!([{"type": "input_text", "text": "System policy"}])
+    );
+    assert_eq!(
+        input[1],
+        json!({"role": "assistant", "content": "Earlier reply"})
+    );
+    assert_eq!(
+        input[2]["content"],
+        json!([{"type": "input_text", "text": "Continue"}])
+    );
+}
+
+#[test]
+fn non_user_images_are_rejected_before_http() {
+    let fixture = Fixture::new();
+    for role in [Role::Assistant, Role::System, Role::Tool] {
+        let mut request = request();
+        let mut entry = history(role, "");
+        entry.images.push(ImageInput {
+            attachment_id: "invalid-role".into(),
+            url: Some("data:image/png;base64,AA==".into()),
+            caption: Some("An image".into()),
+        });
+        request.input = vec![entry];
+        let gateway: &dyn ModelGateway = &fixture.provider;
+        let mut events = Vec::new();
+        let error = gateway
+            .stream(&request, &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidInput(_)));
+        assert!(events.is_empty());
+    }
+    assert!(fixture.server.seen.lock().unwrap().bodies.is_empty());
+}
+
+#[test]
+fn tool_string_output_is_not_json_quoted() {
+    let fixture = Fixture::new();
+    let mut request = request();
+    let mut call = history(Role::Assistant, "");
+    call.tool_items.push(ToolItem::Call {
+        call: ToolCall {
+            call_id: "call_1".into(),
+            name: "read_skill".into(),
+            arguments: json!({"name": "review"}),
+        },
+    });
+    let mut result = history(Role::Tool, "");
+    let text = "<external_data>\nReview checklist with \"quotes\" and é\n</external_data>";
+    result.tool_items.push(ToolItem::Output {
+        call_id: "call_1".into(),
+        output: json!(text),
+    });
+    request.input.extend([call, result]);
+    fixture.events(&[json!({"type": "response.completed"})]);
+    fixture.collect(&request);
+    assert_eq!(
+        fixture.server.seen.lock().unwrap().bodies[0]["input"][2]["output"],
+        text
+    );
+}
+
+#[test]
+fn service_tier_rejection_retries_without_tier() {
+    for error in [
+        json!({"error": {"param": "service_tier", "message": "Unsupported value"}}),
+        json!({"error": {"message": "Unsupported service_tier"}}),
+    ] {
+        let fixture = Fixture::new();
+        fixture.reply(ScriptedResponse::json(400, error));
+        fixture.events(&[json!({"type": "response.completed"})]);
+        assert_eq!(fixture.collect(&request()), [ModelEvent::Completed]);
+        let seen = fixture.server.seen.lock().unwrap();
+        assert_eq!(seen.bodies.len(), 2);
+        let mut downgraded = seen.bodies[0].clone();
+        assert!(downgraded
+            .as_object_mut()
+            .unwrap()
+            .remove("service_tier")
+            .is_some());
+        assert_eq!(seen.bodies[1], downgraded);
+    }
+}
+
+#[test]
+fn effort_rejection_retries_without_reasoning() {
+    for error in [
+        json!({"error": {"param": "reasoning.effort", "message": "Unsupported value"}}),
+        json!({"error": {"message": "Unsupported reasoning effort"}}),
+    ] {
+        let fixture = Fixture::new();
+        fixture.reply(ScriptedResponse::json(400, error));
+        fixture.events(&[json!({"type": "response.completed"})]);
+        assert_eq!(fixture.collect(&request()), [ModelEvent::Completed]);
+        let seen = fixture.server.seen.lock().unwrap();
+        assert_eq!(seen.bodies.len(), 2);
+        let mut downgraded = seen.bodies[0].clone();
+        assert!(downgraded
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning")
+            .is_some());
+        assert_eq!(seen.bodies[1], downgraded);
+    }
+}
+
+#[test]
+fn capability_fallbacks_share_one_authentication_refresh() {
+    let fixture = Fixture::new();
+    fixture.reply(ScriptedResponse::json(401, json!({"error": "expired"})));
+    fixture.reply(ScriptedResponse::json(
+        400,
+        json!({"error": {"param": "service_tier"}}),
+    ));
+    fixture.reply(ScriptedResponse::json(
+        400,
+        json!({"error": {"param": "reasoning.effort"}}),
+    ));
+    fixture.events(&[json!({"type": "response.completed"})]);
+    assert_eq!(fixture.collect(&request()), [ModelEvent::Completed]);
+    let seen = fixture.server.seen.lock().unwrap();
+    assert_eq!(seen.bodies.len(), 4);
+    assert_eq!(seen.bodies[0], seen.bodies[1]);
+    assert!(seen.bodies[2].get("service_tier").is_none());
+    assert!(seen.bodies[2].get("reasoning").is_some());
+    assert!(seen.bodies[3].get("reasoning").is_none());
+    assert_eq!(seen.forms.len(), 1);
+}
+
+#[test]
+fn fallback_attempts_are_bounded_and_ignore_unrelated_refusals() {
+    for (status, error) in [
+        (
+            400,
+            json!({"error": {"param": "input", "message": "Invalid content"}}),
+        ),
+        (
+            429,
+            json!({"error": {"param": "service_tier", "message": "Rate limited"}}),
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.reply(ScriptedResponse::json(status, error));
+        assert!(matches!(
+            fixture.collect(&request()).as_slice(),
+            [ModelEvent::Failed { .. }]
+        ));
+        assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 1);
+    }
+    let fixture = Fixture::new();
+    for _ in 0..2 {
+        fixture.reply(ScriptedResponse::json(
+            400,
+            json!({"error": {"param": "service_tier"}}),
+        ));
+    }
+    assert!(matches!(
+        fixture.collect(&request()).as_slice(),
+        [ModelEvent::Failed { .. }]
+    ));
+    assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 2);
+}
+
+#[test]
+fn raw_responses_keeps_body_unmodified_and_does_not_downgrade_settings() {
+    let fixture = Fixture::new();
+    let body =
+        json!({"model": "gpt-test", "stream": true, "service_tier": "priority", "input": []});
+    fixture.reply(ScriptedResponse::json(
+        400,
+        json!({"error": {"param": "service_tier"}}),
+    ));
+    assert!(fixture.provider.responses(body.clone()).is_err());
+    assert_eq!(fixture.server.seen.lock().unwrap().bodies, [body]);
+}
+
+#[test]
+fn stream_failures_keep_french_provider_mapping_and_bound_remote_details() {
+    let fixture = Fixture::new();
+    for event in [
+        json!({"type": "response.failed", "response": {"error": {"code": "subscription_sharing_usage_limit_exceeded"}}}),
+        json!({"type": "error", "error": "subscription_sharing_usage_limit_exceeded"}),
+    ] {
+        fixture.events(&[event]);
+        assert!(
+            matches!(fixture.collect(&request()).as_slice(), [ModelEvent::Failed { reason }] if reason.starts_with("Limite d’utilisation atteinte."))
+        );
+    }
+    fixture.events(&[json!({"type": "response.failed", "response": {"error": {"code": "unknown", "message": "é".repeat(5000)}}})]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [ModelEvent::Failed {
+            reason: format!(
+                "OpenAI a signalé une erreur pendant la réponse : {}",
+                "é".repeat(300)
+            ),
+        }]
+    );
 }
 
 #[test]

@@ -323,7 +323,7 @@ fn agent() -> ureq::Agent {
 
 /// Lit le code d'erreur d'une réponse OpenAI. Les refus d'admission n'ont pas toujours la forme
 /// `{"error": {...}}` : ils peuvent renvoyer `{"detail": "..."}` ou `{"error": "code"}`.
-fn error_parts(body: &Value) -> (String, String, String) {
+pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
     let error = &body["error"];
     let code = error["code"]
         .as_str()
@@ -340,7 +340,7 @@ fn error_parts(body: &Value) -> (String, String, String) {
     (code.into(), message.into(), param.into())
 }
 
-fn failure(status: u16, code: &str, message: &str) -> Failure {
+pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
         "subscription_sharing_usage_limit_exceeded" => Failure {
             message: "Limite d’utilisation atteinte. Vérifiez votre abonnement, ou la limite accordée à Grokbot, dans les réglages de ChatGPT.".into(),
@@ -1095,6 +1095,17 @@ impl Provider {
     /// Sends an unmodified Responses body and returns the raw JSON/SSE response.
     /// Authentication is renewed at most once after a 401; other failures are not retried.
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
+        self.responses_with_options(body, false)
+    }
+
+    /// Only the engine adapter opts into the legacy effort/Fast compatibility fallback.
+    /// One authentication refresh is shared across all attempts of this logical request.
+    /// TODO(engine-cutover): ModelEvent needs a notice channel for downgraded settings.
+    fn responses_with_options(
+        &self,
+        mut body: Value,
+        capability_fallback: bool,
+    ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
         let accept = if body["stream"] == true {
             "text/event-stream"
@@ -1108,13 +1119,29 @@ impl Provider {
                 .set("Authorization", &format!("Bearer {token}"))
                 .set("Accept", accept)
                 .send_json(body.clone());
-            let (status, code, message, _) = match attempt {
+            let (status, code, message, param) = match attempt {
                 Ok(response) => return Ok(response),
                 Err(error) => request_failure(error),
             };
             if status == 401 && !refreshed {
                 refreshed = true;
                 token = self.bearer(true)?;
+            } else if capability_fallback
+                && status == 400
+                && (param.contains("service_tier") || message.contains("service_tier"))
+                && body.get("service_tier").is_some()
+            {
+                body.as_object_mut()
+                    .expect("field belongs to an object")
+                    .remove("service_tier");
+            } else if capability_fallback
+                && status == 400
+                && (param.contains("reasoning") || message.contains("reasoning"))
+                && body.get("reasoning").is_some()
+            {
+                body.as_object_mut()
+                    .expect("field belongs to an object")
+                    .remove("reasoning");
             } else if status == 0 {
                 return Err(network_failure());
             } else {
@@ -1376,7 +1403,7 @@ impl grokbot_engine::contracts::ModelGateway for Provider {
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
         let body = crate::gateway::request_body(request)?;
-        match self.responses(body) {
+        match self.responses_with_options(body, true) {
             Ok(response) => {
                 crate::gateway::stream_response(BufReader::new(response.into_reader()), emit)
             }

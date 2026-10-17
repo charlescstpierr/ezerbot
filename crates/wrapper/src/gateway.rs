@@ -5,6 +5,12 @@
 //! on Grok's server is not observable; Responses framing here is our local adapter.
 //! With `store:false`, callers supply the complete history on *every* invocation.
 //! Neither this adapter nor the simulated gateway executes tools or grants approval.
+//!
+//! Contract debts for engine cutover: ModelEvent has no notice, error-kind or idle
+//! progress/cancellation channel. Capability downgrades cannot yet show a notice,
+//! Failed loses the provider's reconnect/usage action, and ignored SSE lines cannot
+//! checkpoint cancellation. Reasoning items are not replayed without an encrypted
+//! reasoning field in ModelRequest; only the complete representable history is sent.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -17,35 +23,47 @@ use serde_json::{json, Value};
 pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     let mut input = Vec::new();
     for entry in &request.input {
+        if entry.role != Role::User && !entry.images.is_empty() {
+            return Err(Error::InvalidInput(
+                "Seuls les messages utilisateur peuvent contenir des images.".into(),
+            ));
+        }
         let role = match entry.role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => {
-                if !entry.text.is_empty() || !entry.images.is_empty() {
+                if !entry.text.is_empty() {
                     return Err(Error::InvalidInput(
-                        "Tool messages must use function_call_output items with a call_id".into(),
+                        "Un résultat d’outil doit utiliser function_call_output avec un call_id."
+                            .into(),
                     ));
                 }
                 "tool"
             }
         };
-        // These are easy-input messages (including replayed assistant messages),
-        // not provider output-message objects with provider-owned IDs/status.
-        let mut content = Vec::new();
-        if !entry.text.is_empty() {
-            content.push(json!({"type": "input_text", "text": entry.text}));
-        }
-        for image in &entry.images {
-            if let Some(caption) = &image.caption {
-                content.push(json!({"type": "input_text", "text": caption}));
+        if entry.role == Role::Assistant {
+            // Keep the legacy, accepted string representation. Responses rejects
+            // input_text (and input_image) as assistant output-message content.
+            if !entry.text.is_empty() {
+                input.push(json!({"role": role, "content": entry.text}));
             }
-            if let Some(url) = &image.url {
-                content.push(json!({"type": "input_image", "image_url": url}));
+        } else {
+            let mut content = Vec::new();
+            if !entry.text.is_empty() {
+                content.push(json!({"type": "input_text", "text": entry.text}));
             }
-        }
-        if !content.is_empty() {
-            input.push(json!({"role": role, "content": content}));
+            for image in &entry.images {
+                if let Some(caption) = &image.caption {
+                    content.push(json!({"type": "input_text", "text": caption}));
+                }
+                if let Some(url) = &image.url {
+                    content.push(json!({"type": "input_image", "image_url": url}));
+                }
+            }
+            if !content.is_empty() {
+                input.push(json!({"role": role, "content": content}));
+            }
         }
         for item in &entry.tool_items {
             input.push(match item {
@@ -55,7 +73,10 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 }),
                 ToolItem::Output { call_id, output } => json!({
                     "type": "function_call_output", "call_id": call_id,
-                    "output": serde_json::to_string(output)?,
+                    "output": match output {
+                        Value::String(text) => text.clone(),
+                        other => serde_json::to_string(other)?,
+                    },
                 }),
             });
         }
@@ -70,11 +91,16 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 .tools
                 .iter()
                 .map(|tool| {
-                    json!({
+                    let mut function = json!({
                         "type": "function", "name": tool.name, "parameters": tool.schema,
                         // ToolSpec permits ordinary JSON schemas, not only OpenAI's strict subset.
                         "strict": false,
-                    })
+                    });
+                    // ToolSpec has no dedicated description field yet.
+                    if let Some(description) = tool.schema["description"].as_str() {
+                        function["description"] = json!(description);
+                    }
+                    function
                 })
                 .collect(),
         );
@@ -103,6 +129,8 @@ struct Events {
     emitted_ids: HashSet<String>,
 }
 
+const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
+
 fn failed(reason: impl Into<String>) -> ModelEvent {
     ModelEvent::Failed {
         reason: reason.into(),
@@ -117,13 +145,15 @@ impl Events {
         emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
     ) -> Result<bool> {
         if data == "[DONE]" {
-            emit(failed("Responses stream ended without a completion event"))?;
+            emit(failed(INTERRUPTED))?;
             return Ok(true);
         }
         let event: Value = match serde_json::from_str(data) {
             Ok(event) => event,
             Err(_) => {
-                emit(failed("Invalid JSON in Responses stream"))?;
+                emit(failed(
+                    "La réponse d’OpenAI contient un événement JSON illisible.",
+                ))?;
                 return Ok(true);
             }
         };
@@ -139,7 +169,9 @@ impl Events {
             {
                 let item = &event["item"];
                 let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
-                    emit(failed("Function call is missing its item ID"))?;
+                    emit(failed(
+                        "OpenAI a envoyé un appel d’outil sans identifiant d’élément.",
+                    ))?;
                     return Ok(true);
                 };
                 let call = self.calls.entry(id.into()).or_default();
@@ -160,7 +192,9 @@ impl Events {
             }
             "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
                 let Some(id) = event["item_id"].as_str().filter(|id| !id.is_empty()) else {
-                    emit(failed("Function arguments are missing their item ID"))?;
+                    emit(failed(
+                        "OpenAI a envoyé des arguments d’outil sans identifiant d’élément.",
+                    ))?;
                     return Ok(true);
                 };
                 let call = self.calls.entry(id.into()).or_default();
@@ -183,7 +217,7 @@ impl Events {
             "response.completed" => {
                 if self.calls.values().any(|call| !call.emitted) {
                     emit(failed(
-                        "Responses completed with an unfinished function call",
+                        "OpenAI a terminé la réponse avec un appel d’outil incomplet.",
                     ))?;
                 } else {
                     emit(ModelEvent::Completed)?;
@@ -194,7 +228,7 @@ impl Events {
                 emit(ModelEvent::Incomplete {
                     reason: event["response"]["incomplete_details"]["reason"]
                         .as_str()
-                        .unwrap_or("Responses output is incomplete")
+                        .unwrap_or("OpenAI a arrêté cette réponse avant la fin.")
                         .into(),
                 })?;
                 return Ok(true);
@@ -205,13 +239,9 @@ impl Events {
                 } else {
                     &event
                 };
-                let reason = source["error"]["message"]
-                    .as_str()
-                    .or_else(|| source["message"].as_str())
-                    .or_else(|| source["error"]["code"].as_str())
-                    .or_else(|| source["code"].as_str())
-                    .unwrap_or("Responses stream failed");
-                emit(failed(reason))?;
+                let (code, message, _) = crate::provider::error_parts(source);
+                let failure = crate::provider::failure(0, &code, &message);
+                emit(failed(failure.message))?;
                 return Ok(true);
             }
             _ => {} // Reasoning, usage and non-function items are not executable tool calls.
@@ -231,12 +261,16 @@ impl Events {
         let arguments = match serde_json::from_str::<Value>(&call.arguments) {
             Ok(value) if value.is_object() => value,
             _ => {
-                emit(failed("Function call arguments must be a JSON object"))?;
+                emit(failed(
+                    "Les arguments de l’appel d’outil doivent être un objet JSON valide.",
+                ))?;
                 return Ok(true);
             }
         };
         if !self.emitted_ids.insert(call.call_id.clone()) {
-            emit(failed("Different function items share the same call ID"))?;
+            emit(failed(
+                "OpenAI a réutilisé le même identifiant pour deux appels d’outil.",
+            ))?;
             return Ok(true);
         }
         emit(ModelEvent::ToolCall {
@@ -258,7 +292,7 @@ pub(crate) fn stream_response(
     for line in reader.lines() {
         let line = match line {
             Ok(line) => line,
-            Err(_) => return emit(failed("Responses stream was interrupted")),
+            Err(_) => return emit(failed(INTERRUPTED)),
         };
         if line.is_empty() {
             if !data.is_empty() {
@@ -275,7 +309,7 @@ pub(crate) fn stream_response(
     if !data.is_empty() && events.dispatch(&data.join("\n"), emit)? {
         return Ok(());
     }
-    emit(failed("Responses stream ended before completion"))
+    emit(failed(INTERRUPTED))
 }
 
 /// Offline mode keeps the existing canned rich-text replies, without inventing tool calls.

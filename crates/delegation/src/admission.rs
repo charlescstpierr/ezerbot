@@ -2,6 +2,10 @@
 //! depth 3, backlog 16. No human approval is required to delegate. These bounds
 //! are reconstruction policy, not a recovered Grok server algorithm (see
 //! `reports/delegation-lifecycle-deep.md` and `server-context-residual.md` RC05).
+//! Nested requests must start immediately or be refused with an inline-work
+//! fallback: a running parent waiting on a queued child would retain its active
+//! slot and could deadlock the workspace. This is local reconstruction policy;
+//! REA does not establish the server's admission/waiting policy.
 //!
 //! `admit` is a decision, not a reservation. Compose it with `graph::create`
 //! or `graph::promote` in a caller-owned IMMEDIATE transaction, then start the
@@ -73,6 +77,13 @@ fn refused(reason: impl Into<String>) -> Admission {
     }
 }
 
+fn nested_capacity_reason(limits: &AdmissionLimits) -> String {
+    format!(
+        "no free delegation slot for a nested delegation (limits {} active, {} per root); do this subtask in the current task",
+        limits.active_workspace, limits.active_per_root
+    )
+}
+
 fn request_refusal(
     conn: &Connection,
     delegation: &Delegation,
@@ -139,8 +150,13 @@ fn queue_plan(conn: &Connection, limits: &AdmissionLimits) -> Result<QueuePlan> 
         } else if plan.capacity.available(&edge.root_run_id, limits) {
             plan.capacity.reserve(&edge.root_run_id);
             plan.ready.push(edge);
+        } else if edge.depth > 1 {
+            plan.refused.push((edge, nested_capacity_reason(limits)));
         }
     }
+    // Rejected legacy requests are not real backlog, even before promotable
+    // persists their terminal status. admit itself remains a read-only decision.
+    plan.queued -= plan.refused.len();
     Ok(plan)
 }
 
@@ -148,6 +164,7 @@ fn queue_plan(conn: &Connection, limits: &AdmissionLimits) -> Result<QueuePlan> 
 /// errors. Active-per-root counts every running descendant of that run root.
 /// Eligible queued requests reserve free slots in insertion order before any
 /// newcomer; retries never jump ahead of earlier eligible queued requests.
+/// Nested requests without an immediate slot are refused, never left queued.
 pub fn admit(
     conn: &Connection,
     delegation: &Delegation,
@@ -179,6 +196,13 @@ pub fn admit(
     }
     let plan = queue_plan(conn, limits)?;
     if existing.is_some() {
+        if let Some((_, reason)) = plan
+            .refused
+            .iter()
+            .find(|(edge, _)| edge.id == delegation.id)
+        {
+            return Ok(refused(reason));
+        }
         return Ok(if plan.ready.iter().any(|edge| edge.id == delegation.id) {
             Admission::Running
         } else {
@@ -187,6 +211,9 @@ pub fn admit(
     }
     if plan.capacity.available(&delegation.root_run_id, limits) {
         return Ok(Admission::Running);
+    }
+    if delegation.depth > 1 {
+        return Ok(refused(nested_capacity_reason(limits)));
     }
     if plan.queued < limits.backlog {
         return Ok(Admission::Queued);
@@ -305,6 +332,97 @@ mod tests {
         let c = running(&conn, nested("c", &b));
         assert!(matches!(submit(&conn, nested("d", &c)),
             Admission::Refused { reason } if reason.contains("depth exceeds 3")));
+    }
+
+    #[test]
+    fn nested_request_is_refused_not_queued_when_full() {
+        let conn = database();
+        let parents: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                let edge = delegation(id, "root");
+                assert_eq!(submit(&conn, edge.clone()), Admission::Running);
+                edge
+            })
+            .collect();
+        for parent in parents {
+            let child = nested(&format!("child-{}", parent.id), &parent);
+            assert!(
+                matches!(submit(&conn, child.clone()), Admission::Refused { reason }
+                if reason == "no free delegation slot for a nested delegation (limits 4 active, 3 per root); do this subtask in the current task")
+            );
+            assert!(graph::get(&conn, &child.id).unwrap().is_none());
+        }
+        assert!(graph::queued(&conn).unwrap().is_empty());
+        assert!(promotable(&conn, &Default::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn nested_delegation_cannot_deadlock_workspace() {
+        let conn = database();
+        let parents: Vec<_> = [("a", "r1"), ("b", "r2"), ("c", "r3"), ("d", "r4")]
+            .into_iter()
+            .map(|(id, root)| {
+                let edge = delegation(id, root);
+                assert_eq!(submit(&conn, edge.clone()), Admission::Running);
+                edge
+            })
+            .collect();
+        for parent in &parents {
+            let child = nested(&format!("child-{}", parent.id), parent);
+            assert!(
+                matches!(submit(&conn, child.clone()), Admission::Refused { reason }
+                if reason.contains("no free delegation slot for a nested delegation")
+                && reason.contains("do this subtask in the current task"))
+            );
+            assert!(graph::get(&conn, &child.id).unwrap().is_none());
+        }
+        assert!(graph::queued(&conn).unwrap().is_empty());
+        assert!(promotable(&conn, &Default::default()).unwrap().is_empty());
+        graph::set_status(&conn, "d", &DelegationStatus::Cancelled).unwrap();
+        // Nesting still works when it can start immediately.
+        let child = nested("child-a", &parents[0]);
+        assert_eq!(submit(&conn, child.clone()), Admission::Running);
+        assert_eq!(
+            graph::get(&conn, &child.id).unwrap().unwrap().status,
+            DelegationStatus::Running
+        );
+    }
+
+    #[test]
+    fn legacy_nested_queue_is_promoted_or_refused_never_left_waiting() {
+        for free_slot in [false, true] {
+            let conn = database();
+            let parent = running(&conn, delegation("a", "root"));
+            running(&conn, delegation("b", "root"));
+            running(&conn, delegation("c", "root"));
+            let mut queued = nested("old-nested", &parent);
+            queued.status = DelegationStatus::Queued;
+            graph::create(&conn, &queued).unwrap();
+            if free_slot {
+                graph::set_status(&conn, "b", &DelegationStatus::Cancelled).unwrap();
+            }
+            let decision = admit(&conn, &queued, &Default::default()).unwrap();
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let ready = promotable(&tx, &Default::default()).unwrap();
+            if free_slot {
+                assert_eq!(decision, Admission::Running);
+                assert_eq!(ready, [queued]);
+                graph::promote(&tx, "old-nested", "run-old-nested", "task:old-nested:run-a")
+                    .unwrap();
+            } else {
+                assert!(matches!(decision, Admission::Refused { reason }
+                    if reason.contains("no free delegation slot for a nested delegation")));
+                assert!(ready.is_empty());
+                assert!(
+                    matches!(graph::get(&tx, "old-nested").unwrap().unwrap().status,
+                    DelegationStatus::Refused { reason }
+                    if reason.contains("do this subtask in the current task"))
+                );
+            }
+            tx.commit().unwrap();
+            assert!(graph::queued(&conn).unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -467,9 +585,7 @@ mod tests {
         let mut orphan = nested("orphan", &parent);
         orphan.status = DelegationStatus::Queued;
         graph::create(&conn, &orphan).unwrap();
-        let mut valid = delegation("valid", "other-root");
-        valid.status = DelegationStatus::Queued;
-        graph::create(&conn, &valid).unwrap();
+        running(&conn, delegation("active", "other-root"));
         // Legacy data: a parent completed without cancelling its queue.
         conn.execute(
             "UPDATE delegation_graph SET status = ?1 WHERE id = 'a'",
@@ -479,6 +595,19 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
+        let limits = AdmissionLimits {
+            active_workspace: 1,
+            backlog: 1,
+            ..Default::default()
+        };
+        let mut valid = delegation("valid", "third-root");
+        // The orphan must not consume backlog even before promotable persists its refusal.
+        assert_eq!(admit(&conn, &valid, &limits).unwrap(), Admission::Queued);
+        assert_eq!(
+            super::submit(&conn, &valid, &limits).unwrap(),
+            Admission::Queued
+        );
+        valid.status = DelegationStatus::Queued;
         let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
         assert_eq!(promotable(&tx, &Default::default()).unwrap(), [valid]);
         assert!(matches!(graph::get(&tx, "orphan").unwrap().unwrap().status,
@@ -500,6 +629,10 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(admit(&conn, &child, &Default::default()),
+            Err(Error::InvalidInput(reason)) if reason.contains("cycle in delegation run lineage")));
+        let mut over_depth = nested("too-deep", &parent);
+        over_depth.depth = 4;
+        assert!(matches!(admit(&conn, &over_depth, &Default::default()),
             Err(Error::InvalidInput(reason)) if reason.contains("cycle in delegation run lineage")));
         assert!(promotable(&conn, &Default::default()).is_err());
         assert_eq!(

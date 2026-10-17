@@ -327,11 +327,15 @@ pub fn bind_child(conn: &Connection, id: &str, run: &str, conversation: &str) ->
 /// Promote an admitted queued request and bind its child in one UPDATE. Call
 /// `admission::promotable`/`admit` and promote in the same IMMEDIATE transaction;
 /// start the child only after commit. This low-level operation does not reserve
-/// capacity separately or choose admission limits.
+/// capacity separately or choose admission limits. Only a still-Running child
+/// link can be replayed successfully; terminal reservations must never restart.
 pub fn promote(conn: &Connection, id: &str, run: &str, conversation: &str) -> Result<Delegation> {
     let mut existing = get(conn, id)?.ok_or_else(|| invalid("unknown delegation"))?;
     if existing.status != DelegationStatus::Queued {
         bind_child(conn, id, run, conversation)?;
+        if existing.status != DelegationStatus::Running {
+            return Err(invalid("delegation is no longer queued or running"));
+        }
         return Ok(existing);
     }
     if conversation.trim().is_empty()
@@ -792,6 +796,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn promote_replay_after_cancel_is_an_error() {
+        for status in [
+            DelegationStatus::Cancelled,
+            DelegationStatus::Done {
+                result: "finished".into(),
+            },
+            DelegationStatus::Failed {
+                reason: "failed".into(),
+            },
+        ] {
+            let conn = database();
+            let mut edge = delegation("a", "root");
+            edge.status = DelegationStatus::Queued;
+            create(&conn, &edge).unwrap();
+            promote(&conn, "a", "run-a", "task:a:root").unwrap();
+            set_status(&conn, "a", &status).unwrap();
+            assert!(matches!(promote(&conn, "a", "run-a", "task:a:root"),
+                Err(Error::InvalidInput(reason)) if reason == "delegation is no longer queued or running"));
+            assert_eq!(get(&conn, "a").unwrap().unwrap().status, status);
+        }
+    }
+
+    #[test]
     fn promotion_link_and_status_roll_back_together() {
         let conn = database();
         let mut edge = delegation("a", "root");
@@ -807,6 +834,15 @@ pub(crate) mod tests {
         });
         assert!(rollback.is_err());
         assert_eq!(get(&conn, "a").unwrap().unwrap(), edge);
+        // A queued reservation may already have IDs. Neither ID can be replaced
+        // by a different run or conversation during promotion.
+        let mut bound = delegation("bound", "root");
+        bound.status = DelegationStatus::Queued;
+        create(&conn, &bound).unwrap();
+        assert!(promote(&conn, "bound", "run-other", "task:bound:root").is_err());
+        assert_eq!(get(&conn, "bound").unwrap().unwrap(), bound);
+        assert!(promote(&conn, "bound", "run-bound", "task:other").is_err());
+        assert_eq!(get(&conn, "bound").unwrap().unwrap(), bound);
         let stored = promote(&conn, "a", "run-a", "task:a:root").unwrap();
         assert_eq!(stored.status, DelegationStatus::Running);
         assert_eq!(stored.child_run_id.as_deref(), Some("run-a"));

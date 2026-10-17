@@ -1,7 +1,7 @@
 {
   "created_at_utc": "2026-10-12T03:05:51.637314+00:00",
   "user_language": "français",
-  "authorized_work": "Analyse complète et architecture Rust conservées; reprise autorisée le 13 octobre 2026: consolider le socle Rust et les reprises après panne avec sous-agents; puis création d’un beau wrapper, choisi comme app locale, avec les sous-agents",
+  "authorized_work": "Analyse complète et architecture Rust conservées; reprise autorisée le 13 octobre 2026: consolider le socle Rust et les reprises après panne avec sous-agents; puis création d’un beau wrapper, choisi comme app locale, avec les sous-agents; puis poursuite de rétro-ingénierie demandée: cronjobs, ordinateurs, fonctions non couvertes, compaction, délégation et runtimes. Goal explicitement demandé : approfondir les neuf sujets importants avec rapports, preuves, synthèse et vue navigable. Poursuite demandée ensuite : inconnues serveur, échanges entre bots, connexion entre le Mac et l’iPhone.",
   "root": "/Users/cstpierrecharles/Desktop/grokbot-rust",
   "original_investigation_root": "/Users/cstpierrecharles/grokbot-reconstruction",
   "original_view": "/Users/cstpierrecharles/.lavish/grokbot/architecture.html",
@@ -26,7 +26,8 @@
     "portable_bundle": "evidence/rea-bundle.json",
     "cached_cli_version": "rea-agents 6.4.0",
     "cached_cli_at_save": "/Users/cstpierrecharles/.npm/_npx/dea9475797100b20/node_modules/.bin/rea",
-    "mcp_transport": "Transport closed; availability must be rechecked"
+    "mcp_transport": "Transport closed; availability must be rechecked",
+    "continuation_mcp_status": "Working for native metadata and demangling; Hopper/Ghidra/IDA unavailable. Native session closed."
   },
   "counts": {
     "extracted_files": 673,
@@ -46,7 +47,23 @@
     "Computer Use helper is outside ASAR, not one of six contradicted companions.",
     "Teaching, spending/virtual cards and hosted apps are separate required families.",
     "UI has a direct MessagePort to the coordinator.",
-    "Node VM descriptor evaluation is not inert parsing or proof of a security sandbox."
+    "Node VM descriptor evaluation is not inert parsing or proof of a security sandbox.",
+    "Speculative summary 70 percent is a compiled fallback, not an observed effective Grok compaction threshold.",
+    "Routine create/update/run-now use gateway; no local crontab established.",
+    "takeControl toggles viewer input; server exclusivity not demonstrated.",
+    "SDK pre_compact and subagent descriptors are not active daemon handlers.",
+    "Subagent monitor cards do not prove isolated screens.",
+    "Description is actively used as Role & Persona constraint in the local voice prompt; full text model system prompt remains absent.",
+    "Task send and acceptance use parent session; task transcript uses a synthetic task session.",
+    "Native x86_64 socket listener calls peer policy before handing the connection to the handler.",
+    "Voice recall is a filtered eight-text projection, distinct from durable memory.",
+    "Reset does not demonstrate durable forgetting.",
+    "MCP timeout can follow an external effect; telemetry completion is not effect idempotence.",
+    "Approval retirement is distinct from cancel; machine ID and generation are not persisted in the approval tuple inspected.",
+    "Native control lease is session-bound in the Mac helper, not proof of cloud screen arbitration.",
+    "Local tool deadlines and queues are not global model autonomy budgets.",
+    "Teach save does not establish a recording-to-skill engine.",
+    "Transport traces can be dropped or unsampled and are not exhaustive causal audits."
   ],
   "next_recommended_build_phase": "Connect a chosen model/provider to the local wrapper or build the independent control-plane/worker; follow next user instruction",
   "needs_now_for_rust_build": [
@@ -463,7 +480,9 @@
   "verification_commands": [
     "python3 tools/verify-rust.py",
     "python3 tools/verify-handoff.py --evidence-only",
-    "python3 tools/verify-dossier.py"
+    "python3 tools/verify-dossier.py",
+    "python3 tools/verify-goal-investigation.py",
+    "python3 tools/verify-communications.py"
   ],
   "no_product_test_claims": [
     "No product CI",
@@ -471,7 +490,7 @@
     "No deployed Rust services",
     "No exact whole-product behavior parity demonstrated"
   ],
-  "updated_at_utc": "2026-10-14T01:48:57.410615+00:00",
+  "updated_at_utc": "2026-10-17T04:09:23.212372+00:00",
   "rust_implementation_scope": "Eight-crate local core and Mac wrapper: domain, wire, submission-journal, replica, store, session, try, wrapper. Cocoa/WKWebView host and offline HTML/CSS/JS; loopback HTTP, durable simulated transport. No remote model/cloud/auth parity.",
   "core_validation_report": "evidence/rust-verification.json",
   "core_report": "reports/orchestration-rust.md",
@@ -516,5 +535,75 @@
     "remote": null,
     "original_analysis_archives_tracked": false,
     "user_authorized_local_commit": true
+  },
+  "investigation_continuation": {
+    "report": "reports/investigation-continuation.md",
+    "view": ".lavish/enquete-grokbot.html",
+    "reports": [
+      "reports/cron-detail.md",
+      "reports/computer-detail.md",
+      "reports/compaction-runtimes.md",
+      "reports/other-capabilities-detail.md",
+      "reports/native-helper-detail.md",
+      "reports/delegation-lifecycle-deep.md",
+      "reports/native-peer-deep.md",
+      "reports/bot-personality-detail.md"
+    ],
+    "verification": "evidence/investigation-detail-verification.json",
+    "authenticated_runtime_verified": false,
+    "native_metadata_inspected": true,
+    "native_bodies_decompiled": false,
+    "scope": "600 shipped JavaScript files and saved macOS helper; backend remains absent",
+    "native_function_bodies_disassembled": 8,
+    "native_decompilation_provider_available": false,
+    "personality_voice_prompt_traced": true,
+    "verification_passed": true,
+    "evidence_reference_windows_verified": 358,
+    "saved_shipped_files_verified": 673,
+    "view_topic_count": 7,
+    "reports_count": 8
+  },
+  "goal_investigation": {
+    "report": "reports/goal-nine-topics.md",
+    "view": ".lavish/goal-neuf-sujets.html",
+    "portable_view": ".lavish/goal-neuf-sujets-portable.html",
+    "aggregate": "evidence/goal-nine-topics.json",
+    "verification": "evidence/goal-verification.json",
+    "browser_verification": "evidence/goal-browser-verification.json",
+    "status": "scoped_analysis_complete",
+    "topics": 9,
+    "reports": 4,
+    "findings": 68,
+    "anchors": 255,
+    "new_native_function_bodies_disassembled": 8,
+    "native_field_offsets_resolved": 6,
+    "target_runtime_verified": false,
+    "rust_changes_performed": false,
+    "server_questions_remain_partial": true,
+    "verification_passed": true,
+    "browser_verification_passed": true,
+    "saved_shipped_files_verified": 673,
+    "report_file_links_verified": 551
+  },
+  "communications_investigation": {
+    "report": "reports/communications-investigation.md",
+    "view": ".lavish/communications-grokbot.html",
+    "aggregate": "evidence/communications-investigation.json",
+    "verification": "evidence/communications-verification.json",
+    "browser_verification": "evidence/communications-browser-verification.json",
+    "reports": 4,
+    "findings": 39,
+    "anchors": 159,
+    "phone": "iPhone",
+    "original_runtime_verified": false,
+    "native_ios_artifact_available": false,
+    "server_engine_recovered": false,
+    "rust_changes_performed": false,
+    "status": "static_evidence_verified",
+    "browser_verified": true,
+    "saved_shipped_files_verified": 673,
+    "report_links_verified": 754,
+    "knowledge_status": "partially_answered",
+    "verification_passed": true
   }
 }

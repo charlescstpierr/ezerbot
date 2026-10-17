@@ -9,6 +9,8 @@ __pycache__/
 target/
 try-data/
 app/build/
+app/web/node_modules/
+.lavish/
 app/qa/
 
 # Local analysis archives are retained on disk, outside the source history.
@@ -19,3 +21,4 @@ app/qa/
 /vue/qa/
 /Forge compagnon.app
 .DS_Store
+/artifacts/rea-original-profile-*/

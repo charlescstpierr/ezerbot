@@ -1,5 +1,21 @@
 # Reprendre le travail
 
+## Dernière passe de rétro-ingénierie
+
+Lire d’abord [communications-investigation.md](reports/communications-investigation.md) et ses quatre rapports. L’utilisateur a demandé les inconnues restantes, les échanges entre bots, puis la connexion à son iPhone. La passe ajoute grouping/panneau interbot, mentions riches, réponses scoped et rails vocaux, contrats directs/rooms, roster iOS et flux transcript Mac, partage de mémoire par lots, réveil de formulaire et import texte vers skills. `python3 tools/verify-communications.py` vérifie ces preuves; `python3 tools/build-communications-review.py` reconstruit l’index et la vue.
+
+Garder les limites : aucune capture native iOS ou connexion directe téléphone–Mac établie; les routes mobiles sont des contrats et les consommateurs Mac. Le serveur qui choisit un pair, enrichit le contexte, compacte, impose les budgets et produit une skill depuis Teach n’est pas livré. La liste des corps ou observations nécessaires est dans les rapports résiduels. Ne pas refaire une analyse globale ni convertir les valeurs de repli 32/70 % en réglages effectifs.
+
+Commencer par [goal-nine-topics.md](reports/goal-nine-topics.md) et ses quatre rapports. La [vue neuf sujets](.lavish/goal-neuf-sujets.html) complète la vue précédente. La passe ajoute 68 constats, 255 extraits et huit corps natifs de leases, sans modifier le produit Rust. `python3 tools/verify-goal-investigation.py` vérifie les preuves; `python3 tools/build-goal-review.py` reconstruit la synthèse et la vue. Les détails natifs sont reproductibles avec `python3 tools/inspect-native-lease.py`.
+
+Précisions à garder : le rappel vocal est une projection de huit textes; reset ne prouve pas un oubli durable; un timeout d'outil peut suivre un effet appliqué; retirement d'approbation et cancel sont distincts; les plafonds locaux ne sont pas les budgets du moteur texte; teach ne prouve pas la création d'une skill; le bail natif du Mac ne prouve pas l'arbitrage du bureau cloud; les traces peuvent être abandonnées ou non échantillonnées. Les neuf sujets restent partiellement répondus au niveau du produit complet.
+
+Lire [investigation-continuation.md](reports/investigation-continuation.md), puis les huit rapports de détail liés. La [vue navigable](.lavish/enquete-grokbot.html) les rassemble. Les preuves incluent désormais personnalité, cycle de délégation et huit corps natifs x86_64 désassemblés. `python3 tools/verify-investigation-detail.py` vérifie les hashes, extraits et liens. `python3 tools/build-investigation-detail.py` reconstruit la vue.
+
+Le MCP REA a fonctionné pour les métadonnées natives et le démanglage. Aucun moteur profond Hopper, Ghidra ou IDA n'était disponible. La session native est fermée. Les preuves sont conservées sur disque. Les erreurs d'instrumentation historiques ne sont pas des résultats de cette passe.
+
+Corrections à garder : 70 % est un repli sans consommateur Grok de compaction établi; les cartes de sous-agents ne prouvent pas un écran isolé; `takeControl` change l'état du viewer sans verrou serveur démontré; création/update/test de routines suivent la gateway; un exécuteur SDK déclaré n'est pas un handler actif. Scheduler et contexte délégué restent inconnus.
+
 ## Objectif et autorisation conservés
 
 L’utilisateur a demandé de rétro-ingénierer Grok Bot afin de concevoir un système équivalent en Rust. Il a choisi explicitement « Analyse complète et architecture Rust ». Il a ensuite demandé de conserver tout le dossier et la liste des manques sur le Bureau, dans `grokbot-rust`.

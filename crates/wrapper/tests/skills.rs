@@ -264,6 +264,70 @@ fn body_replacement_keeps_all_host_managed_upload_fields() {
 }
 
 #[test]
+fn user_frontmatter_stays_visible_editable_and_removable_for_manual_and_model_skills() {
+    use grokbot_skills::library::{self, Origin, SkillContent};
+    let db = Database::new();
+    let mut app = db.open();
+    let body = "---\norigin: Bretagne\nupload-extension: recette\nupload-name: maison\nportions: 4\n---\nCrêpes au beurre salé.";
+    for origin in [Origin::Manual, Origin::Model] {
+        let skill = if origin == Origin::Manual {
+            add(&mut app, "grokbot", "Crêpes bretonnes", body)
+        } else {
+            json!(library::add(
+                app.feature_context().connection,
+                "grokbot",
+                &SkillContent {
+                    name: "Crepes du modèle".into(),
+                    display_name: "Crêpes du modèle".into(),
+                    description: String::new(),
+                    body: body.into(),
+                    origin: origin.clone(),
+                }
+            )
+            .unwrap())
+        };
+        let id = skill["skill_id"].clone();
+        let versions = post(
+            &mut app,
+            "/api/skills/versions",
+            json!({"bot_id":"grokbot", "skill_id":id}),
+        );
+        assert_eq!(versions["versions"][0]["content"]["editable_body"], body);
+        let changed = body
+            .replace("Bretagne", "Normandie")
+            .replace("maison", "familiale")
+            .replace("recette", "notes");
+        let updated = post(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":changed}),
+        );
+        assert_eq!(updated["skill"]["content"]["body"], changed);
+        assert_eq!(updated["skill"]["content"]["origin"], json!(origin));
+        let cleared = post(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "body":"Crêpes sans frontmatter."}),
+        );
+        assert_eq!(
+            cleared["skill"]["content"]["body"],
+            "Crêpes sans frontmatter."
+        );
+        let versions = post(
+            &mut app,
+            "/api/skills/versions",
+            json!({"bot_id":"grokbot", "skill_id":id}),
+        );
+        assert_eq!(versions["versions"][0]["content"]["editable_body"], body);
+        assert_eq!(versions["versions"][1]["content"]["editable_body"], changed);
+        assert_eq!(
+            versions["versions"][2]["content"]["editable_body"],
+            "Crêpes sans frontmatter."
+        );
+    }
+}
+
+#[test]
 fn skills_are_scoped_per_bot() {
     let db = Database::new();
     let mut app = db.open();
@@ -394,6 +458,7 @@ fn context_lists_names_not_bodies() {
         .find(|block| block.source == ContextSource::SkillIndex)
         .unwrap();
     assert!(index.text.contains("review"));
+    assert!(index.text.contains("\"title\":\"Review\""));
     assert!(index.text.contains("A useful skill"));
     assert!(index.text.contains("read_skill"));
     assert!(!index.text.contains("BODY_MUST_NOT_BE_EAGERLY_LOADED"));
@@ -408,6 +473,49 @@ fn context_lists_names_not_bodies() {
     assert!(state["skills"]["by_bot"]["grokbot"][0]
         .get("body")
         .is_none());
+}
+
+#[test]
+fn context_index_includes_human_titles_alongside_legacy_and_fallback_keys() {
+    use grokbot_skills::library::{self, Origin, SkillContent};
+    let db = Database::new();
+    let mut app = db.open();
+    library::add(
+        app.feature_context().connection,
+        "grokbot",
+        &SkillContent {
+            name: "r-sum-express".into(),
+            display_name: "Résumé express".into(),
+            description: String::new(),
+            body: "LEGACY_BODY_NOT_IN_INDEX".into(),
+            origin: Origin::Manual,
+        },
+    )
+    .unwrap();
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"tokyo.md", "content":"# 東京メモ\nIMPORTED_BODY_NOT_IN_INDEX"}]}),
+    );
+    let conversation = conversation(&mut app, "grokbot");
+    let preview = app.context_preview(&conversation).unwrap();
+    let index = preview
+        .iter()
+        .find(|block| block.source == ContextSource::SkillIndex)
+        .unwrap();
+    let records: Vec<Value> = index
+        .text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(records
+        .iter()
+        .any(|record| record["name"] == "r-sum-express" && record["title"] == "Résumé express"));
+    assert!(records
+        .iter()
+        .any(|record| record["name"] == "skill" && record["title"] == "東京メモ"));
+    assert!(!index.text.contains("BODY_NOT_IN_INDEX"));
+    assert!(index.text.chars().count() <= index.budget);
 }
 
 #[test]

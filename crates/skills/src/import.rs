@@ -81,7 +81,8 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
 
     let (header, body) = frontmatter(text).unwrap_or(("", text));
     let front_name = field(header, "name").trim_matches(js_space).to_owned();
-    let has_name = !normalize(&front_name).is_empty();
+    // A human title must not depend on whether it has an ASCII lookup key.
+    let has_name = !front_name.is_empty();
     let fallback = if file_name == "SKILL.md" && parts.len() > 1 {
         parts[parts.len() - 2]
     } else {
@@ -107,7 +108,7 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
         ImportedSkill {
             content: SkillContent {
                 name,
-                display_name: if library::normalize_name(&title).is_empty() {
+                display_name: if title.trim().is_empty() {
                     "skill".into()
                 } else {
                     title.trim().into()
@@ -479,7 +480,7 @@ mod tests {
             ("a.md", "# A\rB\nx", "a"),
             ("a.md", "# A\u{2028}B\nx", "a"),
             ("a.md", "# A\u{2029}B\nx", "a"),
-            ("fallback.md", "---\nname: ???\n---\n# Heading", "heading"),
+            ("fallback.md", "---\nname: ???\n---\n# Heading", "skill"),
             ("☃.txt", "plain body", "skill"),
         ] {
             assert_eq!(convert(&file(path, text)).unwrap().content.name, expected);
@@ -512,6 +513,35 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].skill_id, id);
         assert_eq!(saved[0].version, 2);
+    }
+
+    #[test]
+    fn non_latin_human_titles_are_independent_of_lookup_key_fallbacks() {
+        for (path, text, title) in [
+            ("tokyo.md", "# 東京メモ\nTexte", "東京メモ"),
+            ("russe.md", "---\nname: Наш стиль\n---\nTexte", "Наш стиль"),
+            ("東京メモ/SKILL.md", "Texte", "東京メモ"),
+            ("東京メモ.txt", "Texte", "東京メモ"),
+            ("punctuation.md", "---\nname: ???\n---\nTexte", "???"),
+        ] {
+            let content = convert(&file(path, text)).unwrap().content;
+            assert_eq!(content.display_name, title);
+            assert_eq!(content.name, "skill");
+        }
+        let conn = database();
+        let first = file("russe.md", "---\nname: Наш стиль\n---\nv1");
+        import_batch(&conn, "bot", &[first]).unwrap();
+        let original = library::list(&conn, "bot").unwrap().remove(0);
+        import_batch(
+            &conn,
+            "bot",
+            &[file("russe.md", "---\nname: Наш стиль\n---\nv2")],
+        )
+        .unwrap();
+        let updated = library::list(&conn, "bot").unwrap().remove(0);
+        assert_eq!(updated.skill_id, original.skill_id);
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.content.display_name, "Наш стиль");
     }
 
     #[test]

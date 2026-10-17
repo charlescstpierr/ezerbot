@@ -157,7 +157,7 @@ fn handle(
             let versions: Vec<_> = versions
                 .into_iter()
                 .map(|skill| {
-                    let editable = import::editable_body(&skill.content.body);
+                    let editable = editable_body(&skill.content);
                     let mut value = json!(skill);
                     value["content"]["editable_body"] = json!(editable);
                     value
@@ -215,12 +215,13 @@ fn handle(
                 }
             }
             if let Some(body) = input.body {
-                if body != current.content.body
-                    && body != import::editable_body(&current.content.body)
-                {
+                if body != current.content.body && body != editable_body(&current.content) {
                     validate_body(&body)?;
-                    content.body =
-                        import::preserve_managed_frontmatter(&current.content.body, &body);
+                    content.body = if matches!(current.content.origin, Origin::Upload { .. }) {
+                        import::preserve_managed_frontmatter(&current.content.body, &body)
+                    } else {
+                        body
+                    };
                 }
             }
             // Omitted fields and upload provenance survive manual edits. Do not
@@ -323,6 +324,16 @@ fn manual_content(
         body,
         origin: Origin::Manual,
     })
+}
+
+// Only uploaded documents carry host-managed provenance. Identically named
+// fields in manual/model content belong to its author, not to this host.
+fn editable_body(content: &SkillContent) -> String {
+    if matches!(content.origin, Origin::Upload { .. }) {
+        import::editable_body(&content.body)
+    } else {
+        content.body.clone()
+    }
 }
 
 fn manual_name(name: &str) -> Result<String, ApiError> {
@@ -633,6 +644,9 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     let mut entries = Vec::new();
     for (position, skill) in skills.iter().enumerate() {
         let mut entry = json!({"name":skill["name"]});
+        if skill["display_name"] != skill["name"] {
+            entry["title"] = skill["display_name"].clone();
+        }
         if skill["name_truncated"] == true {
             entry["skill_id"] = skill["skill_id"].clone();
             entry["name_truncated"] = json!(true);

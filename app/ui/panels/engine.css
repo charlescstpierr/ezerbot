@@ -1,0 +1,22 @@
+.gb-engine-card { border: 1px solid var(--line); border-radius: 10px; background: var(--pane); padding: 14px 16px; color: var(--text); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.gb-engine-card details, .gb-engine-card summary { min-width: 0; }
+.gb-engine-card summary { cursor: pointer; }
+.gb-engine-card summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 5px; border-radius: 3px; }
+.gb-engine-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.gb-engine-label { display: inline-block; margin-left: 8px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.gb-engine-card[data-task-status="done"] .gb-engine-label { color: var(--accent-ink); }
+.gb-engine-card[data-task-status="needs_input"] .gb-engine-label { color: var(--warning-text); }
+.gb-engine-details { margin-top: 12px; }
+.gb-engine-card h4 { margin: 12px 0 6px; font-size: 11px; font-weight: 600; }
+.gb-engine-note { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.gb-engine-text { margin: 10px 0 0; white-space: pre-wrap; }
+.gb-engine-data { max-height: 320px; overflow: auto; margin: 8px 0 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; background: var(--soft); color: var(--text); font: 11px/1.65 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; user-select: text; }
+.gb-engine-bounds { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; margin: 12px 0 0; font-size: 11px; }
+.gb-engine-bounds dt { color: var(--muted); }
+.gb-engine-bounds dd { margin: 0; min-width: 0; user-select: text; }
+@media (max-width: 480px) {
+  .gb-engine-card { padding: 12px; }
+  .gb-engine-card summary .gb-engine-label { display: block; margin: 4px 0 0; }
+  .gb-engine-bounds { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .gb-engine-bounds dd { margin-bottom: 6px; }
+}

@@ -1,4 +1,7 @@
-use grokbot_engine::contracts::{ContextSource, ToolOutcome};
+use grokbot_engine::contracts::{
+    ContextBlock, ContextBudget, ContextRequest, ContextSource, HistoryItem, Role, ToolOutcome,
+    Trigger,
+};
 use grokbot_wrapper::{ApiError, App};
 use serde_json::{json, Value};
 use std::{
@@ -983,4 +986,147 @@ fn manual_names_are_bounded_and_normalized_before_noop_comparison() {
         .status,
         409
     );
+}
+
+#[test]
+fn skill_index_survives_actual_engine_framing_without_truncation() {
+    use grokbot_engine::context::{assemble_input, TRUNCATION_MARKER};
+    for (count, description) in [
+        (250, "short description".to_owned()),
+        (30, "\"<\\🦀".repeat(250)),
+    ] {
+        let db = Database::new();
+        let mut app = db.open();
+        for i in 0..count {
+            post(
+                &mut app,
+                "/api/skills",
+                json!({"bot_id":"grokbot", "name":format!("skill-{i:03}"), "description":description, "body":format!("body-{i}")}),
+            );
+        }
+        let conversation = conversation(&mut app, "grokbot");
+        let mut blocks: Vec<_> = app
+            .context_preview(&conversation)
+            .unwrap()
+            .into_iter()
+            .filter(|block| {
+                !matches!(
+                    block.source,
+                    ContextSource::History
+                        | ContextSource::Summary
+                        | ContextSource::CurrentMessage
+                        | ContextSource::AppContract
+                )
+            })
+            .collect();
+        blocks.push(ContextBlock {
+            source: ContextSource::AppContract,
+            priority: 0,
+            budget: 1_000,
+            text: "Application policy remains authoritative.".into(),
+        });
+        let raw = blocks
+            .iter()
+            .find(|block| block.source == ContextSource::SkillIndex)
+            .unwrap()
+            .text
+            .clone();
+        let request = ContextRequest {
+            run_id: "skills-budget-test".into(),
+            bot_id: "grokbot".into(),
+            conversation_id: conversation,
+            trigger: Trigger::UserMessage {
+                message_id: "current".into(),
+                attempt: 0,
+            },
+            current_message: HistoryItem {
+                entry_id: "current".into(),
+                role: Role::User,
+                text: "Use the available skills.".into(),
+                images: vec![],
+                tool_items: vec![],
+            },
+        };
+        let assembled = assemble_input(
+            &request,
+            &blocks,
+            &[],
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        let index = assembled
+            .blocks
+            .iter()
+            .find(|block| block.source == ContextSource::SkillIndex)
+            .unwrap();
+        assert!(index.text.chars().count() <= 8_000);
+        assert!(!index.text.contains(TRUNCATION_MARKER));
+        assert!(index.text.contains("\\\"omitted\\\""));
+        let inside = index.text.strip_suffix("\n</external_data>").unwrap();
+        let quoted_payload = inside.rsplit_once('\n').unwrap().1;
+        let payload: String = serde_json::from_str(quoted_payload).unwrap();
+        assert_eq!(
+            payload, raw,
+            "the actual assembler must retain the complete hook payload"
+        );
+        assert!(payload.ends_with("</skill_index_data>"));
+        let records: Vec<Value> = payload
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let visible = records
+            .iter()
+            .filter(|record| record.get("name").is_some())
+            .count();
+        let omitted = records
+            .iter()
+            .find_map(|record| record["omitted"].as_u64())
+            .unwrap() as usize;
+        assert_eq!(visible + omitted, count);
+    }
+}
+
+#[test]
+fn imported_long_fields_can_be_resubmitted_unchanged_by_full_editor_form() {
+    let db = Database::new();
+    let mut app = db.open();
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{
+            "path":"long.md", "content":format!("---\nname: {}\ndescription: {}\n---\noriginal body", "n".repeat(200), "d".repeat(2_000))
+        }]}),
+    );
+    let original = listing(&mut app, "grokbot")[0].clone();
+    let id = original["skill_id"].clone();
+    let updated = post(&mut app, "/api/skills/update", json!({
+        "bot_id":"grokbot", "skill_id":id, "expected_version":1,
+        "name":original["content"]["name"], "description":original["content"]["description"], "body":"edited body"
+    }))["skill"].clone();
+    assert_eq!(updated["content"]["name"], original["content"]["name"]);
+    assert_eq!(
+        updated["content"]["description"],
+        original["content"]["description"]
+    );
+    assert_eq!(updated["content"]["origin"], original["content"]["origin"]);
+    assert_eq!(updated["content"]["body"], "edited body");
+    let unchanged = post(
+        &mut app,
+        "/api/skills/update",
+        json!({
+            "bot_id":"grokbot", "skill_id":id, "expected_version":2,
+            "name":updated["content"]["name"], "description":updated["content"]["description"], "body":updated["content"]["body"]
+        }),
+    );
+    assert_eq!(unchanged["skill"], updated);
+    let error = request(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "name":"new".repeat(50)}),
+    )
+    .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "name-too-large");
 }

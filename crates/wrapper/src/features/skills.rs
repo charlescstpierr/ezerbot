@@ -36,6 +36,9 @@ use std::collections::BTreeMap;
 empty_hooks!(tick, entry, on_run_event, link_attachments);
 
 const INDEX_BUDGET: usize = 8_000;
+// engine::context::fence's SkillIndex envelope, including the two JSON quotes.
+// The assemble_input integration test guards this shared rendering contract.
+const FENCE_OVERHEAD: usize = 139;
 const MAX_IMPORT_FILES: usize = 1_000;
 const NAME_PREVIEW: usize = 128;
 const DESCRIPTION_PREVIEW: usize = 512;
@@ -191,15 +194,21 @@ fn handle(
                 .ok_or_else(|| ApiError::new(500, "Version courante de skill introuvable."))?;
             let mut content = current.content.clone();
             if let Some(name) = input.name {
-                content.name = manual_name(&name)?;
+                if library::normalize_name(&name) != current.content.name {
+                    content.name = manual_name(&name)?;
+                }
             }
             if let Some(description) = input.description {
-                validate_description(&description)?;
-                content.description = description;
+                if description != current.content.description {
+                    validate_description(&description)?;
+                    content.description = description;
+                }
             }
             if let Some(body) = input.body {
-                validate_body(&body)?;
-                content.body = body;
+                if body != current.content.body {
+                    validate_body(&body)?;
+                    content.body = body;
+                }
             }
             // Omitted fields and upload provenance survive manual edits. Do not
             // reject an unchanged imported body for its added upload frontmatter.
@@ -540,6 +549,19 @@ fn data_line(value: &Value) -> String {
         .replace('>', "\\u003e")
 }
 
+// JSON quoting is additive per character. The assembler re-quotes external
+// blocks, then escapes angle brackets; count that form, excluding its two quotes
+// (already included in FENCE_OVERHEAD), rather than the hook's raw text length.
+fn fenced_len(text: &str) -> usize {
+    serde_json::to_string(text)
+        .expect("strings are JSON serializable")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .chars()
+        .count()
+        - 2
+}
+
 pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
     if ctx.bot_id.is_some_and(|bot| bot != request.bot_id) {
         return Vec::new();
@@ -555,9 +577,10 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     // Reserve an omission marker even when zero names are omitted. Descriptions
     // can use only space left AFTER names, never hide later names alphabetically.
     let mut remaining = INDEX_BUDGET.saturating_sub(
-        text.chars().count()
-            + suffix.chars().count()
-            + data_line(&json!({"omitted":skills.len()})).chars().count(),
+        FENCE_OVERHEAD
+            + fenced_len(&text)
+            + fenced_len(suffix)
+            + fenced_len(&data_line(&json!({"omitted":skills.len()}))),
     );
     let mut entries = Vec::new();
     for (position, skill) in skills.iter().enumerate() {
@@ -566,7 +589,7 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
             entry["skill_id"] = skill["skill_id"].clone();
             entry["name_truncated"] = json!(true);
         }
-        let size = data_line(&entry).chars().count();
+        let size = fenced_len(&data_line(&entry));
         if size <= remaining {
             remaining -= size;
             entries.push((entry, position, size));
@@ -576,7 +599,7 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     for (entry, position, size) in &mut entries {
         let mut detailed = entry.clone();
         detailed["description"] = skills[*position]["description"].clone();
-        let detailed_size = data_line(&detailed).chars().count();
+        let detailed_size = fenced_len(&data_line(&detailed));
         let extra = detailed_size - *size;
         if extra <= remaining {
             remaining -= extra;
@@ -586,6 +609,7 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
     }
     text.push_str(&data_line(&json!({"omitted":omitted})));
     text.push_str(suffix);
+    debug_assert!(FENCE_OVERHEAD + fenced_len(&text) <= INDEX_BUDGET);
     vec![ContextBlock {
         source: ContextSource::SkillIndex,
         priority: priority::SKILLS,

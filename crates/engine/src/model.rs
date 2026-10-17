@@ -127,6 +127,9 @@ pub(crate) fn invalid(message: impl Into<String>) -> Error {
 
 /// Create once per trigger, returning the existing run on retry. Regeneration
 /// supersedes the latest attempt, even if its previous turn already finished.
+/// Concurrent DEFERRED transactions may return SQLITE_BUSY (including a stale
+/// WAL snapshot) or a uniqueness error. The caller must roll back and retry the
+/// WHOLE transaction; retrying a statement within the same snapshot is unsafe.
 pub fn start(conn: &Connection, run: &Run) -> Result<Run> {
     store::require_transaction(conn)?;
     run.validate()?;
@@ -184,6 +187,9 @@ pub fn cancel(conn: &Connection, run_id: &str, end: TurnEnd) -> Result<Run> {
     }
     run.status = RunStatus::Cancelled;
     run.turn_end = Some(end);
+    if run.task_status == Some(TaskStatus::NeedsInput) {
+        run.task_status = Some(TaskStatus::Working);
+    }
     store::save(conn, &run)?;
     store::append_event(
         conn,
@@ -194,10 +200,54 @@ pub fn cancel(conn: &Connection, run_id: &str, end: TurnEnd) -> Result<Run> {
     Ok(run)
 }
 
+fn resume_wakes(conn: &Connection, run: &Run) -> Result<Option<Vec<store::Wake>>> {
+    if run.status == RunStatus::Interrupted {
+        return Ok(Some(Vec::new()));
+    }
+    if !run.status.is_suspended() {
+        return Ok(None);
+    }
+    let references = store::awaiting_references(conn, &run.run_id)?;
+    let wakes: Vec<_> = store::pending_wakes(conn)?
+        .into_iter()
+        .filter(|wake| {
+            wake.run_id == run.run_id
+                && references.contains(&wake.reference)
+                && match run.status {
+                    RunStatus::AwaitingApproval => wake.cause == WakeCause::Approval,
+                    RunStatus::AwaitingChildren => wake.cause == WakeCause::Child,
+                    RunStatus::AwaitingHumanInput => {
+                        matches!(wake.cause, WakeCause::Form | WakeCause::Secret)
+                    }
+                    _ => false,
+                }
+        })
+        .collect();
+    let ready = !references.is_empty()
+        && references
+            .iter()
+            .all(|reference| wakes.iter().any(|wake| &wake.reference == reference));
+    Ok(ready.then_some(wakes))
+}
+
+/// Use this instead of an any-pending-wake check when driving a suspended run.
+/// False means keep waiting, not a failed task. Resume revalidates in its write
+/// transaction; Interrupted is ready but does not consume pending resolutions.
+pub fn ready_to_resume(conn: &Connection, run_id: &str) -> Result<bool> {
+    Ok(resume_wakes(conn, &store::required(conn, run_id)?)?.is_some())
+}
+
 /// Resume the same run, retaining its committed event prefix and budget usage.
 /// A suspended run needs a durable wake; interruption recovery does not. The
 /// Resumed event and all corresponding delivery receipts commit atomically.
 pub fn resume(conn: &Connection, run_id: &str) -> Result<Run> {
+    resume_at(conn, run_id, store::now_ms())
+}
+
+/// Deterministic-clock equivalent of resume. Interruption recovery consumes no
+/// wakes: the run was Running, so queued resolutions still belong to a later
+/// suspension. Children resume together only when every expected child is ready.
+pub fn resume_at(conn: &Connection, run_id: &str, now_ms: i64) -> Result<Run> {
     store::require_transaction(conn)?;
     let mut run = store::required(conn, run_id)?;
     if run.status == RunStatus::Running {
@@ -206,26 +256,13 @@ pub fn resume(conn: &Connection, run_id: &str) -> Result<Run> {
     if run.status != RunStatus::Interrupted && !run.status.is_suspended() {
         return Err(invalid("only interrupted or suspended runs can resume"));
     }
-    let wakes: Vec<_> = store::pending_wakes(conn)?
-        .into_iter()
-        .filter(|wake| {
-            wake.run_id == run_id
-                && match run.status {
-                    RunStatus::AwaitingApproval => wake.cause == WakeCause::Approval,
-                    RunStatus::AwaitingChildren => wake.cause == WakeCause::Child,
-                    RunStatus::AwaitingHumanInput => wake.cause != WakeCause::Child,
-                    _ => true,
-                }
-        })
-        .collect();
-    if run.status.is_suspended() && wakes.is_empty() {
-        return Err(invalid("suspended run has no pending wake"));
-    }
+    let wakes = resume_wakes(conn, &run)?
+        .ok_or_else(|| invalid("suspended run is still waiting for its referenced resolutions"))?;
     run.status = RunStatus::Running;
     if run.task_status == Some(TaskStatus::NeedsInput) {
         run.task_status = Some(TaskStatus::Working);
     }
-    store::save(conn, &run)?;
+    store::save_at(conn, &run, now_ms)?;
     let event = store::append_event(
         conn,
         run_id,
@@ -235,6 +272,17 @@ pub fn resume(conn: &Connection, run_id: &str) -> Result<Run> {
     for wake in wakes {
         store::mark_wake_delivered(conn, &wake.wake_id, event.seq)?;
     }
+    Ok(run)
+}
+
+/// Promote a queued run without charging its queue residence to the budget.
+pub fn set_running_at(conn: &Connection, run_id: &str, now_ms: i64) -> Result<Run> {
+    let mut run = store::required(conn, run_id)?;
+    if run.status != RunStatus::Queued {
+        return Err(invalid("only a queued run can start running"));
+    }
+    run.status = RunStatus::Running;
+    store::save_at(conn, &run, now_ms)?;
     Ok(run)
 }
 

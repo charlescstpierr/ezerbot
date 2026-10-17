@@ -4,8 +4,11 @@
 //! REA `reports/server-orchestration-residual.md` SR01–SR02 establishes pending wake
 //! reconciliation, not a server delivery guarantee. Our receipt is committed with Resumed.
 //! Privacy redaction is the sole exception to append-only event payloads.
+//! On SQLITE_BUSY or a uniqueness race, callers must roll back and retry the
+//! whole transaction, never reuse a stale WAL snapshot (see model::start).
 use crate::contracts::{
-    Result, RunEvent, RunEventKind, TaskStatus, Trigger, TurnEnd, WakeCause, WakeStatus,
+    Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, Trigger, TurnEnd, WakeCause,
+    WakeStatus,
 };
 use crate::model::{invalid, BudgetUsage, Run, RunStatus};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -44,6 +47,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE(trigger_kind, trigger_ref, attempt)
         );
         CREATE INDEX IF NOT EXISTS engine_runs_bot ON engine_runs(bot_id);
+        CREATE INDEX IF NOT EXISTS engine_runs_conversation ON engine_runs(conversation_id, status);
+        CREATE INDEX IF NOT EXISTS engine_runs_status ON engine_runs(status);
+        CREATE TABLE IF NOT EXISTS engine_run_waits (
+            run_id TEXT PRIMARY KEY REFERENCES engine_runs(run_id), refs TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS engine_run_events (
             run_id TEXT NOT NULL REFERENCES engine_runs(run_id), seq INTEGER NOT NULL CHECK(seq > 0),
             kind TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id, seq)
@@ -102,7 +110,7 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<Run>> {
         .transpose()
 }
 
-pub(crate) fn required(conn: &Connection, run_id: &str) -> Result<Run> {
+pub fn required(conn: &Connection, run_id: &str) -> Result<Run> {
     get(conn, run_id)?.ok_or_else(|| invalid(format!("unknown run {run_id}")))
 }
 
@@ -139,14 +147,39 @@ pub(crate) fn latest_attempt(
         .transpose()
 }
 
+/// Latest attempt of this trigger, ignoring the attempt on the supplied DTO.
+pub fn latest_run_for_trigger(conn: &Connection, trigger: &Trigger) -> Result<Option<Run>> {
+    let (kind, reference, _) = trigger_key(trigger);
+    latest_attempt(conn, kind, reference)
+}
+
+pub fn runs_for_conversation(conn: &Connection, conversation_id: &str) -> Result<Vec<Run>> {
+    let mut statement =
+        conn.prepare("SELECT record FROM engine_runs WHERE conversation_id=?1 ORDER BY rowid")?;
+    let rows = statement.query_map([conversation_id], |row| row.get::<_, String>(0))?;
+    rows.map(|record| Ok(serde_json::from_str(&record?)?))
+        .collect()
+}
+
+pub fn runs_with_status(conn: &Connection, status: RunStatus) -> Result<Vec<Run>> {
+    let mut statement =
+        conn.prepare("SELECT record FROM engine_runs WHERE status=?1 ORDER BY rowid")?;
+    let rows = statement.query_map([tag(&status)?], |row| row.get::<_, String>(0))?;
+    rows.map(|record| Ok(serde_json::from_str(&record?)?))
+        .collect()
+}
+
 pub(crate) fn insert(conn: &Connection, run: &Run) -> Result<()> {
     require_transaction(conn)?;
     let (kind, reference, attempt) = trigger_key(&run.trigger);
     conn.execute(
-        "INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record,usage)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![run.run_id, run.bot_id, run.conversation_id, kind, reference, attempt,
-            tag(&run.status)?, serde_json::to_string(run)?],
+            tag(&run.status)?, serde_json::to_string(run)?, serde_json::to_string(&UsageClock {
+                usage: BudgetUsage::default(),
+                active_since: (run.status == RunStatus::Running).then_some(run.started_at),
+            })?],
     )?;
     Ok(())
 }
@@ -155,6 +188,12 @@ pub(crate) fn insert(conn: &Connection, run: &Run) -> Result<()> {
 /// model::start so uniqueness and regeneration cannot be bypassed by an upsert.
 /// Append the matching lifecycle event in the same caller-owned transaction.
 pub fn save(conn: &Connection, run: &Run) -> Result<()> {
+    save_at(conn, run, now_ms())
+}
+
+/// Clock-injected save. Only Running intervals consume duration. An Interrupted
+/// transition preserves the last checkpoint rather than charging unknown downtime.
+pub fn save_at(conn: &Connection, run: &Run, now_ms: i64) -> Result<()> {
     require_transaction(conn)?;
     run.validate()?;
     let old = required(conn, &run.run_id)?;
@@ -172,6 +211,9 @@ pub fn save(conn: &Connection, run: &Run) -> Result<()> {
     let mut superseded = old.clone();
     superseded.status = RunStatus::Cancelled;
     superseded.turn_end = Some(TurnEnd::Superseded);
+    if superseded.task_status == Some(TaskStatus::NeedsInput) {
+        superseded.task_status = Some(TaskStatus::Working);
+    }
     if !old.status.can_transition_to(run.status) && *run != superseded {
         return Err(invalid("invalid run lifecycle transition"));
     }
@@ -181,6 +223,18 @@ pub fn save(conn: &Connection, run: &Run) -> Result<()> {
             && old.task_status != run.task_status)
     {
         return Err(invalid("task conversion or completion cannot be reversed"));
+    }
+    if old.status != run.status {
+        let mut clock = read_clock(conn, &run.run_id)?;
+        if old.status == RunStatus::Running && run.status != RunStatus::Interrupted {
+            clock.usage = clock.at(now_ms);
+        }
+        clock.active_since = (run.status == RunStatus::Running).then_some(now_ms);
+        write_clock(conn, &run.run_id, &clock)?;
+        conn.execute(
+            "DELETE FROM engine_run_waits WHERE run_id=?1",
+            [&run.run_id],
+        )?;
     }
     conn.execute(
         "UPDATE engine_runs SET status=?2, record=?3 WHERE run_id=?1",
@@ -213,6 +267,11 @@ pub fn append_event(
         return Err(invalid(
             "event ignored after interruption or invalid lifecycle change",
         ));
+    }
+    if kind == RunEventKind::Suspended {
+        if let Some(cause) = payload.get("cause") {
+            set_awaiting(conn, run_id, &serde_json::from_value(cause.clone())?)?;
+        }
     }
     let seq: u64 = conn.query_row(
         "INSERT INTO engine_run_events(run_id,seq,kind,payload)
@@ -255,38 +314,142 @@ pub fn events(conn: &Connection, run_id: &str, after_seq: u64) -> Result<Vec<Run
     .collect()
 }
 
-/// Durable counters survive interruption. Elapsed time includes time suspended
-/// or offline; clocks before started_at are clamped rather than underflowing.
-pub fn budget_usage(conn: &Connection, run_id: &str, now_ms: i64) -> Result<BudgetUsage> {
-    let run = required(conn, run_id)?;
-    let usage: String = conn.query_row(
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct UsageClock {
+    #[serde(flatten)]
+    usage: BudgetUsage,
+    /// Optional for pre-clock records: recovery preserves only their checkpoint.
+    #[serde(default)]
+    active_since: Option<i64>,
+}
+
+impl UsageClock {
+    fn at(&self, now_ms: i64) -> BudgetUsage {
+        let mut usage = self.usage.clone();
+        if let Some(since) = self.active_since {
+            usage.elapsed_ms = usage
+                .elapsed_ms
+                .saturating_add(now_ms.saturating_sub(since).max(0) as u64);
+        }
+        usage
+    }
+}
+
+fn read_clock(conn: &Connection, run_id: &str) -> Result<UsageClock> {
+    let encoded: String = conn.query_row(
         "SELECT usage FROM engine_runs WHERE run_id=?1",
         [run_id],
         |row| row.get(0),
     )?;
-    let mut usage: BudgetUsage = serde_json::from_str(&usage)?;
-    usage.elapsed_ms = usage
-        .elapsed_ms
-        .max(now_ms.saturating_sub(run.started_at).max(0) as u64);
-    Ok(usage)
+    Ok(serde_json::from_str(&encoded)?)
+}
+
+fn write_clock(conn: &Connection, run_id: &str, clock: &UsageClock) -> Result<()> {
+    conn.execute(
+        "UPDATE engine_runs SET usage=?2 WHERE run_id=?1",
+        params![run_id, serde_json::to_string(clock)?],
+    )?;
+    Ok(())
+}
+
+/// Checkpoint plus current Running interval only. Queue, human/child waits and
+/// offline time never consume execution budget. Backward clocks are clamped.
+pub fn budget_usage(conn: &Connection, run_id: &str, now_ms: i64) -> Result<BudgetUsage> {
+    let run = required(conn, run_id)?;
+    let clock = read_clock(conn, run_id)?;
+    Ok(if run.status == RunStatus::Running {
+        clock.at(now_ms)
+    } else {
+        clock.usage
+    })
 }
 
 pub fn save_budget_usage(conn: &Connection, run_id: &str, usage: &BudgetUsage) -> Result<()> {
+    save_budget_usage_at(conn, run_id, usage, now_ms())
+}
+
+pub fn save_budget_usage_at(
+    conn: &Connection,
+    run_id: &str,
+    usage: &BudgetUsage,
+    now_ms: i64,
+) -> Result<()> {
     require_transaction(conn)?;
     let run = required(conn, run_id)?;
-    let old = budget_usage(conn, run_id, run.started_at)?;
+    let old = read_clock(conn, run_id)?;
     if run.status != RunStatus::Running
-        || old.model_calls > usage.model_calls
-        || old.tool_calls > usage.tool_calls
-        || old.elapsed_ms > usage.elapsed_ms
+        || old.usage.model_calls > usage.model_calls
+        || old.usage.tool_calls > usage.tool_calls
+        || old.usage.elapsed_ms > usage.elapsed_ms
     {
         return Err(invalid("budget usage must be monotone on a running run"));
     }
+    let mut checkpoint = usage.clone();
+    checkpoint.elapsed_ms = checkpoint.elapsed_ms.max(old.at(now_ms).elapsed_ms);
+    write_clock(
+        conn,
+        run_id,
+        &UsageClock {
+            usage: checkpoint,
+            active_since: Some(old.active_since.unwrap_or(now_ms).max(now_ms)),
+        },
+    )
+}
+
+/// Persist the exact resolution references expected by a suspension. The loop's
+/// Suspended{cause} event invokes this automatically, so existing callers do not
+/// need to change Run DTO construction. Direct state writers must call it too.
+pub fn set_awaiting(conn: &Connection, run_id: &str, cause: &SuspendCause) -> Result<()> {
+    require_transaction(conn)?;
+    let run = required(conn, run_id)?;
+    let references = match cause {
+        SuspendCause::HumanInput { id }
+            if matches!(
+                run.status,
+                RunStatus::AwaitingApproval | RunStatus::AwaitingHumanInput
+            ) =>
+        {
+            vec![id.clone()]
+        }
+        SuspendCause::Children { ids } if run.status == RunStatus::AwaitingChildren => ids.clone(),
+        _ => return Err(invalid("suspension cause does not match run status")),
+    };
+    if references.is_empty()
+        || references.iter().any(String::is_empty)
+        || references
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != references.len()
+    {
+        return Err(invalid("suspension requires nonempty unique references"));
+    }
     conn.execute(
-        "UPDATE engine_runs SET usage=?2 WHERE run_id=?1",
-        params![run_id, serde_json::to_string(usage)?],
+        "INSERT INTO engine_run_waits(run_id,refs) VALUES (?1,?2)
+        ON CONFLICT(run_id) DO UPDATE SET refs=excluded.refs",
+        params![run_id, serde_json::to_string(&references)?],
     )?;
     Ok(())
+}
+
+pub fn awaiting_references(conn: &Connection, run_id: &str) -> Result<Vec<String>> {
+    let encoded: Option<String> = conn
+        .query_row(
+            "SELECT refs FROM engine_run_waits WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    encoded
+        .map(|encoded| Ok(serde_json::from_str(&encoded)?))
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 pub fn enqueue_wake(
@@ -440,19 +603,46 @@ pub fn interrupt_running(conn: &Connection) -> Result<usize> {
     Ok(ids.len())
 }
 
-fn redact_value(value: &mut Value, text: &str) {
-    fn redact_string(value: &str, text: &str) -> String {
-        let replacement = if "[redacted]".contains(text) {
-            ""
-        } else {
-            "[redacted]"
-        };
-        let mut value = value.to_owned();
-        while value.contains(text) {
-            value = value.replace(text, replacement);
+const REDACTED: &str = "[redacted]";
+
+/// Find on the original UTF-8 string, including overlaps; never rescan inserted
+/// markers. Existing markers are sentinels, making short-text redaction repeatable.
+fn redaction_ranges(value: &str, text: &str) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut skip_until = 0;
+    for (start, _) in value.char_indices() {
+        if start < skip_until {
+            continue;
         }
-        value
+        if value[start..].starts_with(REDACTED) {
+            skip_until = start + REDACTED.len();
+            continue;
+        }
+        if !text.is_empty() && value[start..].starts_with(text) {
+            let end = start + text.len();
+            if let Some(last) = ranges.last_mut().filter(|last| start < last.1) {
+                last.1 = last.1.max(end);
+            } else {
+                ranges.push((start, end));
+            }
+        }
     }
+    ranges
+}
+
+fn redact_string(value: &str, text: &str) -> String {
+    let mut redacted = String::new();
+    let mut cursor = 0;
+    for (start, end) in redaction_ranges(value, text) {
+        redacted.push_str(&value[cursor..start]);
+        redacted.push_str(REDACTED);
+        cursor = end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
+}
+
+fn redact_value(value: &mut Value, text: &str) {
     match value {
         Value::String(value) => *value = redact_string(value, text),
         Value::Array(values) => values
@@ -471,41 +661,151 @@ fn redact_value(value: &mut Value, text: &str) {
     }
 }
 
-/// Remove forgotten text from arguments, outputs and display payloads for this
-/// bot only, recursively in decoded JSON (including escaped strings/keys).
-/// Also sanitize persisted task summaries; IDs, event sequence and kinds remain.
-/// Returns the number of changed events, not the number of substring matches.
+fn update_payload(conn: &Connection, run_id: &str, seq: u64, payload: &Value) -> Result<()> {
+    conn.execute(
+        "UPDATE engine_run_events SET payload=?3 WHERE run_id=?1 AND seq=?2",
+        params![run_id, seq, serde_json::to_string(payload)?],
+    )?;
+    Ok(())
+}
+
+fn delta_text(payload: &Value) -> &str {
+    payload
+        .as_str()
+        .or_else(|| payload.get("text").and_then(Value::as_str))
+        .unwrap_or_default()
+}
+
+/// At most one consecutive stream group is held, not the bot's whole journal.
+/// Match across delta boundaries, put one marker in the first covered delta,
+/// and remove only the covered bytes from subsequent deltas. Never change seqs.
+fn redact_deltas(
+    conn: &Connection,
+    run_id: &str,
+    deltas: &[(u64, Value)],
+    text: &str,
+) -> Result<usize> {
+    let joined: String = deltas
+        .iter()
+        .map(|(_, payload)| delta_text(payload))
+        .collect();
+    let ranges = redaction_ranges(&joined, text);
+    let mut offset = 0;
+    let mut changed = 0;
+    for (seq, payload) in deltas {
+        let original = delta_text(payload);
+        let end = offset + original.len();
+        let mut redacted = String::new();
+        let mut cursor = 0;
+        for &(start, stop) in &ranges {
+            if start >= end || stop <= offset {
+                continue;
+            }
+            let local_start = start.saturating_sub(offset);
+            let local_stop = stop.min(end) - offset;
+            redacted.push_str(&original[cursor..local_start]);
+            if start >= offset {
+                redacted.push_str(REDACTED);
+            }
+            cursor = local_stop;
+        }
+        redacted.push_str(&original[cursor..]);
+        let mut sanitized = payload.clone();
+        let streamed = sanitized
+            .as_object_mut()
+            .and_then(|object| object.remove("text"));
+        if sanitized.is_string() {
+            sanitized = Value::String(redacted.clone());
+        } else {
+            redact_value(&mut sanitized, text);
+        }
+        if let Some(mut field) = streamed {
+            if field.is_string() {
+                field = Value::String(redacted);
+            } else {
+                redact_value(&mut field, text);
+            }
+            sanitized["text"] = field;
+        }
+        if sanitized != *payload {
+            update_payload(conn, run_id, *seq, &sanitized)?;
+            changed += 1;
+        }
+        offset = end;
+    }
+    Ok(changed)
+}
+
+/// Bot-scoped privacy exception to append-only payloads. SQL prefilters ordinary
+/// JSON using both raw and escaped text. Streams need a separate sequential scan
+/// because a forgotten phrase may span arbitrary delta boundaries. Task records
+/// are rewritten only when their completed summary actually changes.
 pub fn redact_payloads(conn: &Connection, bot_id: &str, text: &str) -> Result<usize> {
     require_transaction(conn)?;
     if text.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<String> = conn
-        .prepare("SELECT run_id FROM engine_runs WHERE bot_id=?1")?
-        .query_map([bot_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let escaped = serde_json::to_string(text)?;
+    let escaped = &escaped[1..escaped.len() - 1];
     let mut changed = 0;
-    for id in ids {
-        for mut event in events(conn, &id, 0)? {
-            let old = event.payload.clone();
-            redact_value(&mut event.payload, text);
-            if old != event.payload {
-                conn.execute(
-                    "UPDATE engine_run_events SET payload=?3 WHERE run_id=?1 AND seq=?2",
-                    params![id, event.seq, serde_json::to_string(&event.payload)?],
-                )?;
-                changed += 1;
-            }
+    let mut statement = conn.prepare(
+        "SELECT e.run_id,e.seq,e.payload FROM engine_run_events e
+        JOIN engine_runs r ON r.run_id=e.run_id WHERE r.bot_id=?1 AND e.kind!='text_delta'
+        AND (instr(e.payload,?2)>0 OR instr(e.payload,?3)>0)",
+    )?;
+    let mut rows = statement.query(params![bot_id, text, escaped])?;
+    while let Some(row) = rows.next()? {
+        let run_id: String = row.get(0)?;
+        let seq: u64 = row.get(1)?;
+        let mut payload: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
+        let old = payload.clone();
+        redact_value(&mut payload, text);
+        if payload != old {
+            update_payload(conn, &run_id, seq, &payload)?;
+            changed += 1;
         }
-        let mut run = required(conn, &id)?;
+    }
+    let mut statement = conn.prepare(
+        "SELECT e.run_id,e.seq,e.payload FROM engine_run_events e
+        JOIN engine_runs r ON r.run_id=e.run_id WHERE r.bot_id=?1 AND e.kind='text_delta'
+        ORDER BY e.run_id,e.seq",
+    )?;
+    let mut rows = statement.query([bot_id])?;
+    let mut run_id = String::new();
+    let mut deltas = Vec::new();
+    let mut last_seq = 0;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let seq: u64 = row.get(1)?;
+        if id != run_id || seq != last_seq + 1 {
+            changed += redact_deltas(conn, &run_id, &deltas, text)?;
+            deltas.clear();
+        }
+        run_id = id;
+        last_seq = seq;
+        deltas.push((
+            seq,
+            serde_json::from_str::<Value>(&row.get::<_, String>(2)?)?,
+        ));
+    }
+    changed += redact_deltas(conn, &run_id, &deltas, text)?;
+    let mut statement = conn.prepare(
+        "SELECT run_id,record FROM engine_runs WHERE bot_id=?1
+        AND (instr(record,?2)>0 OR instr(record,?3)>0)",
+    )?;
+    let mut rows = statement.query(params![bot_id, text, escaped])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let mut run: Run = serde_json::from_str(&row.get::<_, String>(1)?)?;
         if let Some(TaskStatus::Done { summary }) = &mut run.task_status {
-            let mut value = Value::String(summary.clone());
-            redact_value(&mut value, text);
-            *summary = value.as_str().unwrap().to_owned();
-            conn.execute(
-                "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
-                params![id, serde_json::to_string(&run)?],
-            )?;
+            let sanitized = redact_string(summary, text);
+            if sanitized != *summary {
+                *summary = sanitized;
+                conn.execute(
+                    "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
+                    params![id, serde_json::to_string(&run)?],
+                )?;
+            }
         }
     }
     Ok(changed)
@@ -603,7 +903,7 @@ mod tests {
                 RunEventKind::ToolResult,
                 &json!({"call_id":"committed"}),
             )?;
-            save_budget_usage(
+            save_budget_usage_at(
                 conn,
                 "run",
                 &BudgetUsage {
@@ -611,6 +911,7 @@ mod tests {
                     tool_calls: 1,
                     elapsed_ms: 50,
                 },
+                1000,
             )
         })?;
         let interrupted: Result<()> = with_tx(&conn, |conn| {
@@ -622,7 +923,7 @@ mod tests {
             assert_eq!(interrupt_running(conn)?, 1);
             assert_eq!(interrupt_running(conn)?, 0);
             assert_eq!(required(conn, "run")?.status, RunStatus::Interrupted);
-            let run = model::resume(conn, "run")?;
+            let run = model::resume_at(conn, "run", 2000)?;
             assert_eq!(run.run_id, "run");
             assert_eq!(model::resume(conn, "run")?, run);
             let tail = events(conn, "run", 2)?;
@@ -638,7 +939,7 @@ mod tests {
                 BudgetUsage {
                     model_calls: 2,
                     tool_calls: 1,
-                    elapsed_ms: 1000
+                    elapsed_ms: 50
                 }
             );
             Ok::<_, Error>(())
@@ -656,7 +957,7 @@ mod tests {
                 conn,
                 "run",
                 RunEventKind::Suspended,
-                &json!({"request":"form"}),
+                &json!({"cause": SuspendCause::HumanInput { id: "form".into() }}),
             )?;
             assert!(model::resume(conn, "run").is_err());
             let wake = enqueue_wake(conn, "run", WakeCause::Form, "form")?;
@@ -706,6 +1007,13 @@ mod tests {
             let mut run = required(conn, "run")?;
             run.status = RunStatus::AwaitingApproval;
             save(conn, &run)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::HumanInput {
+                    id: "approval".into(),
+                },
+            )?;
             let wake = enqueue_wake(conn, "run", WakeCause::Child, "child")?;
             assert!(model::resume(conn, "run").is_err());
             model::cancel(conn, "run", TurnEnd::Stopped)?;
@@ -729,6 +1037,13 @@ mod tests {
             let mut run = required(conn, "run")?;
             run.status = RunStatus::AwaitingApproval;
             save(conn, &run)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::HumanInput {
+                    id: "approval".into(),
+                },
+            )?;
             let child = enqueue_wake(conn, "run", WakeCause::Child, "child")?;
             let approval = enqueue_wake(conn, "run", WakeCause::Approval, "approval")?;
             model::resume(conn, "run")?;
@@ -740,6 +1055,13 @@ mod tests {
             run = required(conn, "run")?;
             run.status = RunStatus::AwaitingChildren;
             save(conn, &run)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::Children {
+                    ids: vec!["child".into()],
+                },
+            )?;
             model::resume(conn, "run")?;
             assert!(matches!(
                 wake_status(conn, &child.wake_id)?,
@@ -755,25 +1077,23 @@ mod tests {
     #[test]
     fn store_budget_usage_is_monotone_and_transactional() -> Result<()> {
         let conn = database()?;
+        let usage = BudgetUsage {
+            model_calls: 2,
+            tool_calls: 1,
+            elapsed_ms: 10,
+        };
         with_tx(&conn, |conn| {
-            save_budget_usage(
-                conn,
-                "run",
-                &BudgetUsage {
-                    model_calls: 2,
-                    tool_calls: 1,
-                    elapsed_ms: 10,
-                },
-            )
+            save_budget_usage_at(conn, "run", &usage, 1000)
         })?;
-        assert!(with_tx(&conn, |conn| save_budget_usage(
+        assert!(with_tx(&conn, |conn| save_budget_usage_at(
             conn,
             "run",
-            &BudgetUsage::default()
+            &BudgetUsage::default(),
+            1000
         ))
         .is_err());
         let failed: Result<()> = with_tx(&conn, |conn| {
-            save_budget_usage(
+            save_budget_usage_at(
                 conn,
                 "run",
                 &BudgetUsage {
@@ -781,19 +1101,315 @@ mod tests {
                     tool_calls: 1,
                     elapsed_ms: 20,
                 },
+                1000,
             )?;
             Err(invalid("call did not commit"))
         });
         assert!(failed.is_err());
-        assert_eq!(
-            budget_usage(&conn, "run", 0)?,
-            BudgetUsage {
-                model_calls: 2,
-                tool_calls: 1,
-                elapsed_ms: 10
-            }
-        );
+        assert_eq!(budget_usage(&conn, "run", 0)?, usage);
         Ok(())
+    }
+
+    #[test]
+    fn store_approval_wait_does_not_consume_duration_budget() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            let mut run = required(conn, "run")?;
+            run.status = RunStatus::AwaitingApproval;
+            save_at(conn, &run, 2000)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::HumanInput {
+                    id: "approval".into(),
+                },
+            )?;
+            assert_eq!(budget_usage(conn, "run", 1_000_000)?.elapsed_ms, 1000);
+            enqueue_wake(conn, "run", WakeCause::Approval, "approval")?;
+            model::resume_at(conn, "run", 1_000_000)?;
+            let usage = budget_usage(conn, "run", 1_000_500)?;
+            assert_eq!(usage.elapsed_ms, 1500);
+            assert!(!usage.exhausted(&run.budgets));
+            save_budget_usage_at(conn, "run", &usage, 1_000_500)?;
+            assert_eq!(budget_usage(conn, "run", 1_000_600)?.elapsed_ms, 1600);
+            run = required(conn, "run")?;
+            run.status = RunStatus::AwaitingChildren;
+            save_at(conn, &run, 1_000_600)?;
+            assert_eq!(budget_usage(conn, "run", 2_000_000)?.elapsed_ms, 1600);
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_queued_time_does_not_consume_duration_budget() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        migrate(&conn)?;
+        with_tx(&conn, |conn| {
+            let mut run = sample();
+            run.status = RunStatus::Queued;
+            model::start(conn, &run)?;
+            assert_eq!(budget_usage(conn, "run", 1_000_000)?.elapsed_ms, 0);
+            model::set_running_at(conn, "run", 1_000_000)?;
+            assert_eq!(budget_usage(conn, "run", 1_000_100)?.elapsed_ms, 100);
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_interrupted_resume_keeps_unrelated_wakes_pending() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            let wake = enqueue_wake(conn, "run", WakeCause::Child, "child-b")?;
+            save_budget_usage_at(
+                conn,
+                "run",
+                &BudgetUsage {
+                    elapsed_ms: 50,
+                    ..BudgetUsage::default()
+                },
+                1000,
+            )?;
+            interrupt_running(conn)?;
+            assert_eq!(budget_usage(conn, "run", 1_000_000)?.elapsed_ms, 50);
+            model::resume_at(conn, "run", 1_000_000)?;
+            assert_eq!(wake_status(conn, &wake.wake_id)?, WakeStatus::Pending);
+            assert_eq!(events(conn, "run", 2)?[0].payload["wake_ids"], json!([]));
+            let mut run = required(conn, "run")?;
+            run.status = RunStatus::AwaitingChildren;
+            save_at(conn, &run, 1_000_001)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::Children {
+                    ids: vec!["child-b".into()],
+                },
+            )?;
+            model::resume_at(conn, "run", 2_000_000)?;
+            assert!(matches!(
+                wake_status(conn, &wake.wake_id)?,
+                WakeStatus::Delivered { .. }
+            ));
+            assert_eq!(budget_usage(conn, "run", 2_000_000)?.elapsed_ms, 51);
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_suspensions_match_references_and_wait_for_all_children() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            let mut run = required(conn, "run")?;
+            run.status = RunStatus::AwaitingHumanInput;
+            save_at(conn, &run, 1000)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::HumanInput {
+                    id: "form-a".into(),
+                },
+            )?;
+            let stale = enqueue_wake(conn, "run", WakeCause::Secret, "secret-b")?;
+            assert!(!model::ready_to_resume(conn, "run")?);
+            assert!(model::resume_at(conn, "run", 2000).is_err());
+            enqueue_wake(conn, "run", WakeCause::Form, "form-a")?;
+            model::resume_at(conn, "run", 2000)?;
+            assert_eq!(wake_status(conn, &stale.wake_id)?, WakeStatus::Pending);
+            run = required(conn, "run")?;
+            run.status = RunStatus::AwaitingChildren;
+            save_at(conn, &run, 2000)?;
+            set_awaiting(
+                conn,
+                "run",
+                &SuspendCause::Children {
+                    ids: vec!["a".into(), "b".into()],
+                },
+            )?;
+            let a = enqueue_wake(conn, "run", WakeCause::Child, "a")?;
+            assert!(!model::ready_to_resume(conn, "run")?);
+            assert!(model::resume_at(conn, "run", 3000).is_err());
+            assert_eq!(wake_status(conn, &a.wake_id)?, WakeStatus::Pending);
+            let b = enqueue_wake(conn, "run", WakeCause::Child, "b")?;
+            assert!(model::ready_to_resume(conn, "run")?);
+            model::resume_at(conn, "run", 3000)?;
+            for wake in [a, b] {
+                assert!(matches!(
+                    wake_status(conn, &wake.wake_id)?,
+                    WakeStatus::Delivered { .. }
+                ));
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_redaction_preserves_short_matches_and_merges_overlaps() -> Result<()> {
+        assert_eq!(
+            redact_string("Fred a acheté du pain", "red"),
+            "F[redacted] a acheté du pain"
+        );
+        assert_eq!(redact_string("aaa", "aa"), REDACTED);
+        assert_eq!(redact_string("ééé", "éé"), REDACTED);
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            append_event(
+                conn,
+                "run",
+                RunEventKind::ToolResult,
+                &json!("Fred a acheté du pain"),
+            )?;
+            assert_eq!(redact_payloads(conn, "bot", "red")?, 1);
+            let before: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+            assert_eq!(redact_payloads(conn, "bot", "red")?, 0);
+            assert_eq!(
+                conn.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))?,
+                before
+            );
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_redaction_covers_text_split_across_deltas() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            append_event(
+                conn,
+                "run",
+                RunEventKind::TextDelta,
+                &json!({"text":"Noté : allergique aux ", "safe":true}),
+            )?;
+            append_event(
+                conn,
+                "run",
+                RunEventKind::TextDelta,
+                &json!({"text":"arachides."}),
+            )?;
+            assert_eq!(redact_payloads(conn, "bot", "allergique aux arachides")?, 2);
+            let deltas = events(conn, "run", 1)?;
+            assert_eq!(
+                deltas[0].payload,
+                json!({"text":"Noté : [redacted]", "safe":true})
+            );
+            assert_eq!(deltas[1].payload["text"], ".");
+            assert_eq!((deltas[0].seq, deltas[1].seq), (2, 3));
+            assert_eq!(redact_payloads(conn, "bot", "allergique aux arachides")?, 0);
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_cancelled_task_no_longer_needs_input() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            let mut run = required(conn, "run")?;
+            run.kind = RunKind::Task;
+            run.task_status = Some(TaskStatus::Working);
+            save(conn, &run)?;
+            run.status = RunStatus::AwaitingHumanInput;
+            run.task_status = Some(TaskStatus::NeedsInput);
+            save_at(conn, &run, 1000)?;
+            let cancelled = model::cancel(conn, "run", TurnEnd::Stopped)?;
+            assert_eq!(cancelled.task_status, Some(TaskStatus::Working));
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_concurrent_start_requires_whole_transaction_retry() -> Result<()> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("engine-wal-{}-{nonce}.sqlite", std::process::id()));
+        let first = Connection::open(&path)?;
+        first.pragma_update(None, "journal_mode", "WAL")?;
+        first.busy_timeout(std::time::Duration::from_secs(5))?;
+        migrate(&first)?;
+        let second = Connection::open(&path)?;
+        second.busy_timeout(std::time::Duration::from_secs(5))?;
+        let stale = second.unchecked_transaction()?;
+        stale.query_row("SELECT COUNT(*) FROM engine_runs", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let created = with_tx(&first, |conn| model::start(conn, &sample()))?;
+        let mut retry = sample();
+        retry.run_id = "concurrent-candidate".into();
+        let failure = model::start(&stale, &retry);
+        assert!(
+            matches!(failure, Err(Error::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy)
+        );
+        stale.rollback()?;
+        assert_eq!(
+            with_tx(&second, |conn| model::start(conn, &retry))?,
+            created
+        );
+        assert_eq!(runs_for_conversation(&second, "conversation")?.len(), 1);
+        drop(second);
+        drop(first);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn store_delta_metadata_is_redacted_without_touching_split_markers() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            append_event(
+                conn,
+                "run",
+                RunEventKind::TextDelta,
+                &json!({"text":"[red", "metadata":"Fred"}),
+            )?;
+            append_event(
+                conn,
+                "run",
+                RunEventKind::TextDelta,
+                &json!({"text":"acted]"}),
+            )?;
+            assert_eq!(redact_payloads(conn, "bot", "red")?, 1);
+            let deltas = events(conn, "run", 1)?;
+            assert_eq!(
+                deltas[0].payload,
+                json!({"text":"[red", "metadata":"F[redacted]"})
+            );
+            assert_eq!(deltas[1].payload["text"], "acted]");
+            Ok::<_, Error>(())
+        })
+    }
+
+    #[test]
+    fn store_public_lookups_support_regenerate_stop_and_recovery() -> Result<()> {
+        let conn = database()?;
+        with_tx(&conn, |conn| {
+            let trigger = sample().trigger;
+            assert_eq!(
+                latest_run_for_trigger(conn, &trigger)?.unwrap().run_id,
+                "run"
+            );
+            let mut next = sample();
+            next.run_id = "next".into();
+            next.trigger = Trigger::UserMessage {
+                message_id: "message".into(),
+                attempt: 1,
+            };
+            model::start(conn, &next)?;
+            assert_eq!(
+                latest_run_for_trigger(conn, &trigger)?.unwrap().run_id,
+                "next"
+            );
+            assert_eq!(runs_for_conversation(conn, "conversation")?.len(), 2);
+            assert_eq!(
+                runs_with_status(conn, RunStatus::Running)?[0].run_id,
+                "next"
+            );
+            assert_eq!(
+                runs_with_status(conn, RunStatus::Cancelled)?[0].run_id,
+                "run"
+            );
+            Ok::<_, Error>(())
+        })
     }
 
     #[test]

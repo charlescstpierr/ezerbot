@@ -86,7 +86,7 @@ pub fn routes(
                 })?
             };
             validate_id(bot)?;
-            app.require_bot(bot)?;
+            require_existing_bot(app, bot)?;
             return Ok(ApiResponse::Json(
                 json!({"facts": facts::list_active(&app.connection, bot)?}),
             ));
@@ -101,13 +101,13 @@ pub fn routes(
             "/api/memory" => {
                 let input: List = parse(body)?;
                 validate_id(&input.bot_id)?;
-                app.require_bot(&input.bot_id)?;
+                require_existing_bot(app, &input.bot_id)?;
                 json!({"facts": facts::list_active(&app.connection, &input.bot_id)?})
             }
             "/api/memory/forget" => {
                 let input: Forget = parse(body)?;
                 validate_id(&input.bot_id)?;
-                app.require_bot(&input.bot_id)?;
+                require_existing_bot(app, &input.bot_id)?;
                 let tx = super::write_transaction(&app.connection)?;
                 let output = forget(&tx, &input.bot_id, &input.fact_id)?;
                 tx.commit()?;
@@ -129,7 +129,8 @@ pub fn routes(
                         source: Source::UserStated,
                     },
                     crate::now() as i64,
-                )?;
+                )
+                .map_err(memory_error)?;
                 tx.commit()?;
                 json!({"fact": fact})
             }
@@ -138,7 +139,8 @@ pub fn routes(
                 validate_id(&input.bot_id)?;
                 app.require_bot(&input.bot_id)?;
                 let tx = super::write_transaction(&app.connection)?;
-                let report = promotion::promote(&tx, &input.bot_id, &input.fact_ids)?;
+                let report = promotion::promote(&tx, &input.bot_id, &input.fact_ids)
+                    .map_err(memory_error)?;
                 tx.commit()?;
                 // shared_count deliberately excludes kept_private_count (RC03).
                 json!({"created": report.created, "already_in_team": report.already_in_team,
@@ -149,6 +151,52 @@ pub fn routes(
         };
         Ok(ApiResponse::Json(result))
     })())
+}
+
+/// Deletion prevents enrichment, not reading/purging retained personal data.
+fn require_existing_bot(app: &App, bot: &str) -> Result<(), ApiError> {
+    app.bot(bot)?
+        .ok_or_else(|| ApiError::new(404, "Bot introuvable."))?;
+    Ok(())
+}
+
+fn memory_error(error: grokbot_engine::contracts::Error) -> ApiError {
+    use grokbot_engine::contracts::Error;
+    match error {
+        Error::InvalidInput(reason) => {
+            let (status, message) = match reason.as_str() {
+                "unknown or unavailable fact for correction"
+                | "unknown or unavailable fact for forgetting" => {
+                    (404, "Fait introuvable pour ce bot.")
+                }
+                "unknown or unavailable fact for promotion" => {
+                    (404, "Un fait de ce lot est introuvable ou inactif.")
+                }
+                "a fact needs a bot and nonempty text" | "fact text exceeds 2000 characters" => (
+                    400,
+                    "Le texte d'un fait doit contenir entre 1 et 2 000 caractères.",
+                ),
+                "only active facts can be corrected" => {
+                    (409, "Seul un fait actif peut être corrigé.")
+                }
+                "fact timestamp is exhausted" => {
+                    (409, "La date de ce fait ne permet plus de correction.")
+                }
+                "fact changed during correction; roll back the transaction"
+                | "fact changed during promotion; roll back the transaction" => (
+                    409,
+                    "Ce fait a changé pendant l'action. Rechargez la mémoire puis réessayez.",
+                ),
+                "promotion needs a bot and at most 100 IDs" => (
+                    400,
+                    "La promotion accepte au plus 100 identifiants par lot.",
+                ),
+                _ => (400, "L'action mémoire est invalide."),
+            };
+            ApiError::new(status, message)
+        }
+        other => ApiError::from(other),
+    }
 }
 
 /// State advertises limits, not an unscoped dump of every bot's private facts.
@@ -165,15 +213,17 @@ pub fn tools() -> Vec<ToolSpec> {
     [
         (
             "remember",
-            "Mémorise un fait durable dans la mémoire privée de ce bot. Marque les faits sensibles comme sensibles.",
-            json!({"text": text, "sensitive": {"type": "boolean"}, "source": source}),
+            "Mémorise un fait durable sur l'utilisateur pour ce bot ; sensitive=true pour une donnée personnelle ou secrète, jamais partagée avec l'équipe.",
+            json!({"text": text, "sensitive": {"type": "boolean",
+                "description": "true pour une donnée personnelle ou secrète ; elle ne sera jamais partagée avec l'équipe."}, "source": source}),
             vec!["text", "sensitive", "source"],
         ),
         (
             "correct_fact",
             "Corrige un fait actif appartenant à ce bot en créant un nouveau fait qui remplace l'ancien. Utilise l'identifiant exact de la mémoire.",
-            json!({"fact_id": id, "text": text, "source": source}),
-            vec!["fact_id", "text", "source"],
+            json!({"fact_id": id, "text": text, "source": source,
+                "sensitive": {"type": ["boolean", "null"], "description": "null conserve la sensibilité ; pour la changer, oubliez le fait puis mémorisez-le à nouveau."}}),
+            vec!["fact_id", "text", "source", "sensitive"],
         ),
         (
             "forget_fact",
@@ -207,6 +257,7 @@ struct CorrectArgs {
     fact_id: String,
     text: String,
     source: Option<Source>,
+    sensitive: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,10 +284,25 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
         }
         ctx.connection.execute_batch("SAVEPOINT memory_tool")?;
         let result = tool(ctx, call);
-        if result.is_err() {
-            ctx.connection.execute_batch("ROLLBACK TO memory_tool")?;
+        let cleanup = (|| -> rusqlite::Result<()> {
+            if result.is_err() {
+                ctx.connection.execute_batch("ROLLBACK TO memory_tool")?;
+            }
+            ctx.connection.execute_batch("RELEASE memory_tool")
+        })();
+        if cleanup.is_err() {
+            // No Result error channel exists on this hook. Abort the outer
+            // transaction as an emergency fail-closed fallback: engine event
+            // writes require a transaction, and the caller's commit will fail.
+            // In particular RAISE(ROLLBACK) may already have removed our savepoint.
+            if !ctx.connection.is_autocommit() {
+                ctx.connection.execute_batch("ROLLBACK")?;
+            }
+            return Err(ApiError::new(
+                500,
+                "Stockage mémoire indisponible : transaction annulée.",
+            ));
         }
-        ctx.connection.execute_batch("RELEASE memory_tool")?;
         result
     })();
     Some(match result {
@@ -261,6 +327,25 @@ fn tool(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     match call.name.as_str() {
         "remember" => {
             let args: RememberArgs = tool_args(call)?;
+            let provenance = provenance(ctx, call, args.source)?;
+            if args.text.trim().is_empty() || args.text.chars().count() > facts::MAX_FACT_CHARS {
+                return Err(ApiError::new(
+                    400,
+                    "Le texte d'un fait doit contenir entre 1 et 2 000 caractères.",
+                ));
+            }
+            // RC02 normalizes whitespace when matching proposed facts. Repeated
+            // remember calls must not evict distinct facts from the context.
+            let normalized = normalize(&args.text);
+            if let Some(existing) = facts::list_active(ctx.connection, bot)?
+                .into_iter()
+                .find(|fact| fact.bot_id == bot && normalize(&fact.text) == normalized)
+            {
+                if args.sensitive && !existing.sensitive {
+                    return Err(sensitivity_change());
+                }
+                return Ok(json!({"fact": existing}));
+            }
             let fact = facts::remember(
                 ctx.connection,
                 &Fact {
@@ -268,16 +353,24 @@ fn tool(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
                     bot_id: bot.into(),
                     scope: Scope::Private,
                     text: args.text,
-                    provenance: provenance(ctx, call, args.source)?,
+                    provenance,
                     learned_at: ctx.now_ms.min(i64::MAX as u64) as i64,
                     status: FactStatus::Active,
                     sensitive: args.sensitive,
                 },
-            )?;
+            )
+            .map_err(memory_error)?;
             Ok(json!({"fact": fact}))
         }
         "correct_fact" => {
             let args: CorrectArgs = tool_args(call)?;
+            let owned = owned_fact(ctx.connection, bot, &args.fact_id)?;
+            if args
+                .sensitive
+                .is_some_and(|sensitive| sensitive != owned.sensitive)
+            {
+                return Err(sensitivity_change());
+            }
             let fact = facts::correct(
                 ctx.connection,
                 bot,
@@ -285,7 +378,8 @@ fn tool(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
                 &args.text,
                 &provenance(ctx, call, args.source)?,
                 ctx.now_ms.min(i64::MAX as u64) as i64,
-            )?;
+            )
+            .map_err(memory_error)?;
             Ok(json!({"fact": fact}))
         }
         "forget_fact" => {
@@ -341,10 +435,22 @@ fn provenance(
     })
 }
 
-fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
-    let fact = facts::get(conn, id)?
+fn normalize(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sensitivity_change() -> ApiError {
+    ApiError::new(409, "Pour changer la sensibilité, oubliez ce fait puis mémorisez-le avec la bonne valeur de sensitive.")
+}
+
+fn owned_fact(conn: &Connection, bot: &str, id: &str) -> Result<Fact, ApiError> {
+    facts::get(conn, id)?
         .filter(|fact| fact.bot_id == bot)
-        .ok_or_else(|| ApiError::new(404, "Fait introuvable pour ce bot."))?;
+        .ok_or_else(|| ApiError::new(404, "Fait introuvable pour ce bot."))
+}
+
+fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
+    let fact = owned_fact(conn, bot, id)?;
     if let FactStatus::Superseded { by } = fact.status {
         // Do not report successful forgetting while its active successor remains
         // in context (gb-memory-core-r2 finding 1). Never echo predecessor text.
@@ -353,15 +459,22 @@ fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
             format!("Ce fait a été remplacé par {by}. Utilisez le fait actif."),
         ));
     }
-    let snapshots = facts::forget(conn, bot, id)?;
+    let snapshots = facts::forget(conn, bot, id).map_err(memory_error)?;
     // Snapshots retain text/provenance for gb-memory-forget, never in responses.
     Ok(json!({"forgotten": snapshots.iter().map(|fact| &fact.fact_id).collect::<Vec<_>>()}))
 }
 
 pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
     // Request identity is authoritative, even when the host context is unscoped.
-    let Ok(facts) = facts::list_active(ctx.connection, &request.bot_id) else {
-        return Vec::new();
+    let facts = match facts::list_active(ctx.connection, &request.bot_id) {
+        Ok(facts) => facts,
+        Err(_) => {
+            // Do not print the SQLite/serde error: it might contain fact data.
+            eprintln!("Mémoire indisponible : erreur de stockage local.");
+            return vec![ContextBlock { source: ContextSource::Memory,
+                priority: super::priority::MEMORY, budget: CONTEXT_CHARS,
+                text: "Mémoire indisponible : erreur de stockage local. Ne supposez pas qu'aucun fait n'a été mémorisé.".into() }];
+        }
     };
     if facts.is_empty() {
         return Vec::new();

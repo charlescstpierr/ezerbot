@@ -436,9 +436,9 @@ fn promotion_rejects_oversized_or_bad_batches_without_undoing_earlier_success() 
         "/api/memory/promote",
         json!({"bot_id": "grokbot", "fact_ids": [a["fact_id"]]}),
     );
-    for ids in [
-        vec![b["fact_id"].clone(), json!("missing")],
-        vec![b["fact_id"].clone(); 101],
+    for (ids, status) in [
+        (vec![b["fact_id"].clone(), json!("missing")], 404),
+        (vec![b["fact_id"].clone(); 101], 400),
     ] {
         assert_eq!(
             app.api(
@@ -451,7 +451,7 @@ fn promotion_rejects_oversized_or_bad_batches_without_undoing_earlier_success() 
             )
             .unwrap_err()
             .status,
-            400
+            status
         );
     }
     let conn = Connection::open(db.path()).unwrap();
@@ -508,6 +508,317 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
             spec.schema["required"].as_array().unwrap().len()
         );
     }
+}
+
+#[test]
+fn team_fact_of_deleted_bot_can_still_be_forgotten() {
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let shared = remember(&app, "other", "Shared retained data", false);
+    let private = remember(&app, "other", "Private retained data", true);
+    post(
+        &mut app,
+        "/api/memory/promote",
+        json!({"bot_id": "other", "fact_ids": [shared["fact_id"]]}),
+    );
+    post(&mut app, "/api/bots/delete", json!({"id": "other"}));
+    let conv = conversation(&mut app, "grokbot");
+    assert!(memory_text(&app, &conv).contains("Shared retained data"));
+    assert_eq!(list(&mut app, "other").len(), 2);
+    assert_eq!(
+        post(&mut app, "/api/memory", json!({"bot_id": "other"}))["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for (path, body) in [
+        (
+            "/api/memory/correct",
+            json!({"bot_id": "other", "fact_id": shared["fact_id"], "text": "New data"}),
+        ),
+        (
+            "/api/memory/promote",
+            json!({"bot_id": "other", "fact_ids": [private["fact_id"]]}),
+        ),
+    ] {
+        assert_eq!(
+            app.api("POST", path, body.to_string().as_bytes())
+                .unwrap_err()
+                .status,
+            409
+        );
+    }
+    assert_eq!(
+        app.invoke_tool("other", "remember", json!({"text": "New data"}))
+            .unwrap_err()
+            .status,
+        409
+    );
+    for fact in [shared, private] {
+        post(
+            &mut app,
+            "/api/memory/forget",
+            json!({"bot_id": "other", "fact_id": fact["fact_id"]}),
+        );
+        let conn = Connection::open(db.path()).unwrap();
+        let stored = facts::get(&conn, fact["fact_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, FactStatus::Forgotten);
+        assert!(stored.text.is_empty());
+    }
+    assert!(!memory_text(&app, &conv).contains("Shared retained data"));
+    assert!(list(&mut app, "other").is_empty());
+    assert!(list(&mut app, "grokbot").is_empty());
+}
+
+#[test]
+fn memory_errors_are_french_and_missing_facts_consistently_return_404() {
+    let db = Database::new();
+    let mut app = db.open();
+    for (path, body) in [
+        (
+            "/api/memory/forget",
+            json!({"bot_id": "grokbot", "fact_id": "missing"}),
+        ),
+        (
+            "/api/memory/correct",
+            json!({"bot_id": "grokbot", "fact_id": "missing", "text": "Correction"}),
+        ),
+        (
+            "/api/memory/promote",
+            json!({"bot_id": "grokbot", "fact_ids": ["missing"]}),
+        ),
+    ] {
+        let error = app
+            .api("POST", path, body.to_string().as_bytes())
+            .unwrap_err();
+        assert_eq!(error.status, 404);
+        assert!(error.message.contains("introuvable"));
+        assert!(!error.message.contains("unknown"));
+    }
+    let outcome = app
+        .invoke_tool(
+            "grokbot",
+            "remember",
+            json!({"text": "x".repeat(facts::MAX_FACT_CHARS + 1)}),
+        )
+        .unwrap();
+    match outcome {
+        ToolOutcome::Failed { reason } => assert!(reason.contains("caractères")),
+        _ => panic!("oversized fact must fail"),
+    }
+}
+
+#[test]
+fn remember_deduplicates_whitespace_without_crossing_bots_or_downgrading_sensitivity() {
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let first = remember(&app, "grokbot", " Aime le thé ", false);
+    for text in ["Aime le thé", "Aime\nle\tthé", " Aime   le thé "] {
+        assert_eq!(
+            remember(&app, "grokbot", text, false)["fact_id"],
+            first["fact_id"]
+        );
+    }
+    assert_eq!(list(&mut app, "grokbot").len(), 1);
+    assert_ne!(
+        remember(&app, "other", "Aime le thé", false)["fact_id"],
+        first["fact_id"]
+    );
+    // A sensitive request must not silently resolve to an existing team fact.
+    post(
+        &mut app,
+        "/api/memory/promote",
+        json!({"bot_id": "grokbot", "fact_ids": [first["fact_id"]]}),
+    );
+    assert!(matches!(
+        app.invoke_tool(
+            "grokbot",
+            "remember",
+            json!({"text": "Aime le thé", "sensitive": true})
+        )
+        .unwrap(),
+        ToolOutcome::Failed { .. }
+    ));
+    let secret = remember(&app, "grokbot", "Un fait personnel", true);
+    let replay = remember(&app, "grokbot", "Un fait personnel", false);
+    assert_eq!(replay["fact_id"], secret["fact_id"]);
+    assert_eq!(replay["sensitive"], true);
+    assert_eq!(replay["scope"], "private");
+}
+
+#[test]
+fn correction_refuses_sensitivity_changes_instead_of_sharing_a_secret() {
+    let db = Database::new();
+    let mut app = db.open();
+    let shared = remember(&app, "grokbot", "Non-sensitive team fact", false);
+    post(
+        &mut app,
+        "/api/memory/promote",
+        json!({"bot_id": "grokbot", "fact_ids": [shared["fact_id"]]}),
+    );
+    let private = remember(&app, "grokbot", "Non-sensitive private fact", false);
+    let sensitive = remember(&app, "grokbot", "Sensitive private fact", true);
+    for (fact, flag) in [(&shared, true), (&private, true), (&sensitive, false)] {
+        let outcome = app
+            .invoke_tool(
+                "grokbot",
+                "correct_fact",
+                json!({"fact_id": fact["fact_id"],
+            "text": "Changed sensitive data", "sensitive": flag}),
+            )
+            .unwrap();
+        match outcome {
+            ToolOutcome::Failed { reason } => assert!(reason.contains("sensibilité")),
+            _ => panic!("sensitivity change must not succeed"),
+        }
+    }
+    let unchanged = done(
+        app.invoke_tool(
+            "grokbot",
+            "correct_fact",
+            json!({"fact_id": shared["fact_id"],
+        "text": "Updated non-sensitive fact", "sensitive": null}),
+        )
+        .unwrap(),
+    )["fact"]
+        .clone();
+    assert_eq!(unchanged["scope"], "team");
+    assert_eq!(unchanged["sensitive"], false);
+    let conn = Connection::open(db.path()).unwrap();
+    assert_eq!(facts::list_active(&conn, "grokbot").unwrap().len(), 3);
+    assert!(!facts::list_active(&conn, "grokbot")
+        .unwrap()
+        .iter()
+        .any(|fact| fact.text == "Changed sensitive data"));
+}
+
+#[test]
+fn unavailable_memory_is_signalled_in_context_without_fact_data() {
+    let db = Database::new();
+    let mut app = db.open();
+    let conv = conversation(&mut app, "grokbot");
+    remember(&app, "grokbot", "Private data not for error output", true);
+    Connection::open(db.path())
+        .unwrap()
+        .execute_batch("DROP TABLE memory_facts")
+        .unwrap();
+    let text = memory_text(&app, &conv);
+    assert!(text.contains("Mémoire indisponible"));
+    assert!(!text.contains("Private data"));
+    assert!(!text.contains("memory_facts"));
+}
+
+fn assert_invalid_run_provenance(run_bot: &str, wrong_conversation: bool, journal_call: bool) {
+    use grokbot_engine::{
+        contracts::{RunBudgets, RunEventKind, RunKind, Trigger},
+        model::{self, Run, RunStatus},
+        store,
+    };
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let conv = conversation(&mut app, "grokbot");
+    let conn = Connection::open(db.path()).unwrap();
+    grokbot_engine::migrate(&conn).unwrap();
+    let tx = features::write_transaction(&conn).unwrap();
+    let run = Run {
+        run_id: "invalid-provenance".into(),
+        bot_id: run_bot.into(),
+        conversation_id: if wrong_conversation {
+            "wrong-conversation".into()
+        } else {
+            conv.clone()
+        },
+        trigger: Trigger::UserMessage {
+            message_id: "trigger".into(),
+            attempt: 0,
+        },
+        kind: RunKind::Chat,
+        status: RunStatus::Queued,
+        task_status: None,
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: 100,
+    };
+    model::start(&tx, &run).unwrap();
+    let call = ToolCall {
+        call_id: "untrusted-call".into(),
+        name: "remember".into(),
+        arguments: json!({"text": "Should not be stored"}),
+    };
+    if journal_call {
+        store::append_event(
+            &tx,
+            &run.run_id,
+            RunEventKind::ToolCall,
+            &serde_json::to_value(&call).unwrap(),
+        )
+        .unwrap();
+    }
+    let mut ctx = app.feature_context();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("grokbot");
+    ctx.conversation_id = Some(&conv);
+    ctx.run_id = Some(&run.run_id);
+    assert!(matches!(
+        features::memory::call_tool(&ctx, &call),
+        Some(ToolOutcome::Failed { .. })
+    ));
+    tx.commit().unwrap();
+    assert!(list(&mut app, "grokbot").is_empty());
+    assert!(list(&mut app, "other").is_empty());
+}
+
+#[test]
+fn mismatched_run_provenance_creates_no_fact() {
+    assert_invalid_run_provenance("other", false, true);
+    assert_invalid_run_provenance("grokbot", true, true);
+}
+
+#[test]
+fn missing_journal_call_provenance_creates_no_fact() {
+    assert_invalid_run_provenance("grokbot", false, false);
+}
+
+#[test]
+fn lost_savepoint_cannot_commit_partial_effects() {
+    let db = Database::new();
+    let app = db.open();
+    let old = remember(&app, "grokbot", "Original committed data", false);
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER abort_outer BEFORE UPDATE OF status ON memory_facts
+        WHEN NEW.status = 'superseded' BEGIN SELECT RAISE(ROLLBACK, 'injected rollback'); END;",
+    )
+    .unwrap();
+    let tx = features::write_transaction(&conn).unwrap();
+    let mut ctx = app.feature_context();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("grokbot");
+    let outcome = features::memory::call_tool(
+        &ctx,
+        &ToolCall {
+            call_id: "aborted".into(),
+            name: "correct_fact".into(),
+            arguments: json!({"fact_id": old["fact_id"], "text": "Must not persist"}),
+        },
+    );
+    match outcome {
+        Some(ToolOutcome::Failed { reason }) => assert!(reason.contains("transaction annulée")),
+        _ => panic!("storage failure must fail closed"),
+    }
+    assert!(tx.is_autocommit());
+    assert!(tx.commit().is_err());
+    assert_eq!(facts::list_active(&conn, "grokbot").unwrap().len(), 1);
+    assert_eq!(
+        facts::list_active(&conn, "grokbot").unwrap()[0].text,
+        "Original committed data"
+    );
 }
 
 #[test]

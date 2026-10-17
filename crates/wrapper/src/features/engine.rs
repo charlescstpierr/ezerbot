@@ -1975,7 +1975,27 @@ impl ModelGateway for ProviderGateway<'_> {
 /// exhaustion keep the last visible partial response; a crashed response does not
 /// contaminate the next model call or duplicate a recovered reply (loop r2 §6).
 fn projected_text(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<String> {
+    Ok(projected_parts(conn, run)?
+        .into_iter()
+        .map(|part| part.body)
+        .collect())
+}
+
+#[derive(Serialize)]
+struct ReplyPart {
+    body: String,
+    before: Option<String>,
+}
+
+/// Keep the text on either side of a call separate, without exposing raw events
+/// (notably opaque reasoning). Anchors refer to existing transcript cards, so
+/// historical runs get the same ordering as live runs without rewriting storage.
+fn projected_parts(
+    conn: &Connection,
+    run: &Run,
+) -> grokbot_engine::contracts::Result<Vec<ReplyPart>> {
     let events = store::events(conn, &run.run_id, 0)?;
+    let vault = event_vault(conn)?;
     let completed: HashSet<_> = events
         .iter()
         .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
@@ -1990,8 +2010,24 @@ fn projected_text(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Re
         .iter()
         .rfind(|e| e.kind == RunEventKind::Interrupted)
         .map_or(0, |e| e.seq);
+    let mut parts = Vec::new();
     let mut text = String::new();
     for event in &events {
+        let anchor = event.kind == RunEventKind::ToolCall
+            || (run.kind == RunKind::Task
+                && matches!(
+                    event.kind,
+                    RunEventKind::TaskChanged
+                        | RunEventKind::Suspended
+                        | RunEventKind::TurnEnded
+                        | RunEventKind::Cancelled
+                ));
+        if anchor && !text.is_empty() {
+            parts.push(ReplyPart {
+                body: redact::redact(&vault, &std::mem::take(&mut text))?,
+                before: Some(format!("{}:{}", run.run_id, event.seq)),
+            });
+        }
         if event.kind != RunEventKind::TextDelta {
             continue;
         }
@@ -2004,7 +2040,23 @@ fn projected_text(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Re
             text.push_str(event.payload["text"].as_str().unwrap_or_default());
         }
     }
-    redact::redact(&event_vault(conn)?, &text)
+    if !text.is_empty() {
+        parts.push(ReplyPart {
+            body: redact::redact(&vault, &text)?,
+            before: None,
+        });
+    }
+    // A secret added after these events may straddle two rendered fragments.
+    // Preserve the old whole-reply redaction guarantee, even in that rare case.
+    let joined: String = parts.iter().map(|part| part.body.as_str()).collect();
+    let safe = redact::redact(&vault, &joined)?;
+    if safe != joined {
+        return Ok(vec![ReplyPart {
+            body: safe,
+            before: parts.last().and_then(|part| part.before.clone()),
+        }]);
+    }
+    Ok(parts)
 }
 fn run_reply(
     conn: &Connection,
@@ -2012,7 +2064,8 @@ fn run_reply(
     id: String,
     proposals: Vec<Proposal>,
 ) -> Result<Message, ApiError> {
-    let body = projected_text(conn, run)?;
+    let parts = projected_parts(conn, run)?;
+    let body = parts.iter().map(|part| part.body.as_str()).collect();
     let metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
         "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
         [&run.run_id],
@@ -2037,7 +2090,7 @@ fn run_reply(
         notice: metadata.2,
         proposals,
         kind: "message".into(),
-        payload: Value::Null,
+        payload: json!({"run_id":run.run_id,"parts":parts}),
         attachments: vec![],
     })
 }
@@ -2121,7 +2174,8 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             id,
             "task",
             String::new(),
-            json!({"run_id":run_id,"task_status":run.task_status,"turn_end":run.turn_end,"status":run.status}),
+            json!({"run_id":run_id,"task_status":run.task_status,"turn_end":run.turn_end,"status":run.status,
+                "event_kind":event.kind,"routine":matches!(run.trigger, Trigger::Occurrence { .. })}),
             run.started_at.max(0) as u64,
         ));
     }
@@ -2546,6 +2600,176 @@ impl ModelGateway for RunGateway<'_> {
         Err(Error::InvalidInput(
             "context changed repeatedly; retry this response".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    struct Fixture {
+        app: App,
+        dir: PathBuf,
+        run: Run,
+    }
+    impl Fixture {
+        fn new(trigger: Trigger) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "grokbot-card-projection-{}-{:?}-{}",
+                std::process::id(),
+                std::thread::current().id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let app = App::open(&dir.join("workspace.sqlite")).unwrap();
+            app.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let mut run = Run {
+                run_id: "projection".into(),
+                bot_id: DEFAULT_BOT.id.into(),
+                conversation_id: "cards".into(),
+                trigger,
+                kind: RunKind::Task,
+                status: RunStatus::Queued,
+                task_status: Some(TaskStatus::Working),
+                turn_end: None,
+                budgets: RunBudgets::default(),
+                started_at: 1,
+            };
+            model::start(&app.connection, &run).unwrap();
+            run = model::set_running_at(&app.connection, &run.run_id, 2).unwrap();
+            app.connection.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES ('projection','{}',0,'simulated')", []).unwrap();
+            Self { app, dir, run }
+        }
+        fn event(&mut self, kind: RunEventKind, payload: Value) -> u64 {
+            match kind {
+                RunEventKind::TurnEnded => {
+                    self.run.status = RunStatus::Finished;
+                    self.run.turn_end = Some(TurnEnd::Finished);
+                }
+                RunEventKind::Interrupted => self.run.status = RunStatus::Interrupted,
+                _ if self.run.status == RunStatus::Interrupted => {
+                    self.run.status = RunStatus::Running
+                }
+                _ => {}
+            }
+            store::save(&self.app.connection, &self.run).unwrap();
+            store::append_event(&self.app.connection, &self.run.run_id, kind, &payload)
+                .unwrap()
+                .seq
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self.app.connection.execute_batch("ROLLBACK");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn reply_fragments_follow_calls_and_keep_the_transport_body() {
+        let mut f = Fixture::new(user_trigger("cards", "question", 0));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":0,"text":"Avant. "}),
+        );
+        let call = f.event(RunEventKind::ToolCall, json!({"response":0,"call_id":"a","name":"remember","arguments":{},"reasoning":["opaque-never-render"]}));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":1,"text":"Entre. "}),
+        );
+        let next = f.event(
+            RunEventKind::ToolCall,
+            json!({"response":1,"call_id":"b","name":"complete_task","arguments":{}}),
+        );
+        f.event(RunEventKind::TaskChanged, json!({}));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":2,"text":"Après."}),
+        );
+        let end = f.event(
+            RunEventKind::TurnEnded,
+            json!({"response":2,"turn_end":"finished"}),
+        );
+        f.run.status = RunStatus::Finished;
+        f.run.turn_end = Some(TurnEnd::Finished);
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        assert_eq!(reply.body, "Avant. Entre. Après.");
+        assert_eq!(
+            reply.payload["parts"],
+            json!([
+                {"body":"Avant. ","before":format!("projection:{call}")},
+                {"body":"Entre. ","before":format!("projection:{next}")},
+                {"body":"Après.","before":format!("projection:{end}")}
+            ])
+        );
+        assert!(!reply.payload.to_string().contains("opaque-never-render"));
+    }
+
+    #[test]
+    fn crashed_text_is_not_reintroduced_by_fragment_projection() {
+        let mut f = Fixture::new(user_trigger("cards", "question", 0));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":0,"text":"Crashed"}),
+        );
+        f.event(RunEventKind::Interrupted, json!({}));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":1,"text":"Recovered"}),
+        );
+        f.event(RunEventKind::TurnEnded, json!({"response":1}));
+        f.run.status = RunStatus::Finished;
+        f.run.turn_end = Some(TurnEnd::Finished);
+        assert_eq!(
+            projected_text(&f.app.connection, &f.run).unwrap(),
+            "Recovered"
+        );
+    }
+
+    #[test]
+    fn newly_registered_secret_spanning_fragments_stays_redacted() {
+        let mut f = Fixture::new(user_trigger("cards", "question", 0));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":0,"text":"sensitive-"}),
+        );
+        f.event(RunEventKind::ToolCall, json!({"response":0,"call_id":"a"}));
+        f.event(
+            RunEventKind::TextDelta,
+            json!({"response":1,"text":"value-123"}),
+        );
+        f.event(RunEventKind::TurnEnded, json!({"response":1}));
+        vault(&f.dir.join("workspace.sqlite"))
+            .unwrap()
+            .set("QA_SECRET", "test", "sensitive-value-123")
+            .unwrap();
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        assert_eq!(reply.body, "[...]");
+        assert_eq!(reply.payload["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(reply.payload["parts"][0]["body"], "[...]");
+    }
+
+    #[test]
+    fn routine_snapshot_is_identified_without_claiming_task_success() {
+        let mut f = Fixture::new(Trigger::Occurrence {
+            occurrence_id: "routine".into(),
+        });
+        f.run.status = RunStatus::Finished;
+        f.run.turn_end = Some(TurnEnd::Finished);
+        store::save(&f.app.connection, &f.run).unwrap();
+        let end = f.event(RunEventKind::TurnEnded, json!({"response":0}));
+        let mut ctx = f.app.feature_context();
+        ctx.conversation_id = Some("cards");
+        let card = entry(&ctx, "engine_task", &format!("projection:{end}")).unwrap();
+        assert_eq!(card.payload["routine"], true);
+        assert_eq!(card.payload["task_status"]["status"], "working");
+        assert_eq!(card.payload["event_kind"], "turn_ended");
+        let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
+        assert_eq!(reply.body, "");
+        assert_eq!(reply.payload["parts"], json!([]));
     }
 }
 

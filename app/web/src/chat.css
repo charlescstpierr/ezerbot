@@ -40,12 +40,16 @@
 :where(.gb-markdown, .gb-overlay) :where(svg, img) { display: block; max-width: 100%; }
 :where(.gb-markdown, .gb-overlay) :where(button) { padding: 0; }
 
-.gb-thread { width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 30px 0 22px; display: flex; flex-direction: column; gap: 26px; }
+.gb-thread { --gb-avatar-width: 30px; width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 30px 0 22px; display: flex; flex-direction: column; gap: 26px; }
 .gb-thread .lucide, .gb-composer .lucide { width: 14px; height: 14px; flex: 0 0 auto; stroke-width: 1.8; }
 .gb-icon-button { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; color: var(--subtle); transition: background .15s, color .15s; }
 .gb-icon-button:hover { background: var(--soft); color: var(--text); }
 .gb-tooltip { z-index: 200; padding: 5px 8px; border-radius: 6px; background: var(--text); color: var(--canvas); font-size: 11px; line-height: 1.3; animation: gb-arrive .12s both; }
 .gb-message { min-width: 0; animation: gb-arrive .22s both; }
+/* Card padding is 16px + its 1px border: align its content with reply text. */
+.gb-card-slot { min-width: 0; margin-left: calc(var(--gb-avatar-width) + 12px - 17px); }
+.gb-card-slot > .gb-message { padding-inline: 16px; }
+.gb-card-slot:empty { display: none; }
 .gb-meta { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 7px; }
 .gb-meta strong { font-weight: 600; }
 .gb-meta time { color: var(--subtle); font-size: 11px; }
@@ -58,7 +62,7 @@
 .gb-bubble { max-width: min(560px, 86%); padding: 10px 15px; border-radius: 16px 16px 4px 16px; background: var(--soft); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .gb-assistant { display: flex; gap: 12px; align-items: flex-start; }
-.gb-avatar { display: block; width: 30px; height: 27px; flex: 0 0 auto; margin-top: -2px; }
+.gb-avatar { display: block; width: var(--gb-avatar-width); height: 27px; flex: 0 0 auto; margin-top: -2px; }
 .gb-content { flex: 1; min-width: 0; }
 .gb-markdown { font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
 .gb-markdown a { color: var(--accent-ink); }
@@ -66,6 +70,9 @@
 .gb-markdown :where(h1) { font-size: 1.5em; letter-spacing: -.02em; }
 .gb-markdown :where(h2) { font-size: 1.25em; letter-spacing: -.01em; }
 .gb-markdown :where(h3) { font-size: 1.08em; }
+.gb-markdown [data-streamdown="code-block"][data-gb-overflow]::after { content: "↔ Faites défiler pour voir la suite"; display: block; padding: 2px 4px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.gb-markdown [data-streamdown="code-block-body"] { scrollbar-width: thin; scrollbar-color: var(--muted) var(--canvas); }
+.gb-markdown [data-streamdown="code-block-body"]:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: -2px; }
 
 .gb-typing { align-items: center; }
 .gb-dots { display: inline-flex; gap: 5px; padding: 12px 14px; border-radius: 14px; background: var(--soft); }
@@ -94,7 +101,7 @@ a.gb-retry { text-decoration: none; }
 @keyframes gb-arrive { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes gb-dot { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-4px); opacity: 1; } }
 @media (max-width: 760px) {
-  .gb-thread { width: calc(100% - 32px); padding-top: 24px; gap: 22px; }
+  .gb-thread { --gb-avatar-width: 26px; width: calc(100% - 32px); padding-top: 24px; gap: 22px; }
   .gb-bubble { max-width: 92%; }
   .gb-avatar { width: 26px; height: 23px; }
 }

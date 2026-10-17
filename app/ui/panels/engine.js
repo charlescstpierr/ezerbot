@@ -33,7 +33,9 @@
         for (const message of conversation.messages || []) {
           const payload = message.payload;
           if (message.kind === "task" && payload?.run_id) {
-            latestTasks.set(payload.run_id, message.id);
+            // Status snapshots also occur at TurnEnded. Keep the card at the
+            // last actual task change (e.g. complete_task), not after the answer.
+            if (!latestTasks.has(payload.run_id) || payload.event_kind === "task_changed") latestTasks.set(payload.run_id, message.id);
             runs.set(payload.run_id, { status: payload.status, turn_end: payload.turn_end });
           }
           if (message.kind === "tool" && payload?.run_id && payload.outcome?.status === "suspend") latestSuspensions.set(payload.run_id, message.id);

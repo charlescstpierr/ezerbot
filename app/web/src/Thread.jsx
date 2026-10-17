@@ -8,6 +8,7 @@ import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
+import { orderThread } from "./thread-order.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -167,11 +168,36 @@ function ReplyProblem({ message, actions }) {
 }
 
 function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
+  const content = useRef(null);
   const streaming = message.state === "streaming";
+  useEffect(() => {
+    const root = content.current;
+    if (!root) return;
+    let active = true;
+    const measure = () => {
+      if (!active) return;
+      for (const body of root.querySelectorAll('[data-streamdown="code-block-body"]')) {
+        const overflow = body.scrollWidth > body.clientWidth + 1;
+        body.closest('[data-streamdown="code-block"]')?.toggleAttribute("data-gb-overflow", overflow);
+        body.tabIndex = overflow ? 0 : -1;
+        if (overflow) body.setAttribute("aria-label", "Code — faites défiler horizontalement pour voir la suite");
+        else body.removeAttribute("aria-label");
+        resize.observe(body);
+      }
+    };
+    const resize = new ResizeObserver(measure);
+    const mutations = new MutationObserver(measure);
+    resize.observe(root);
+    mutations.observe(root, { childList: true, subtree: true, characterData: true });
+    document.fonts?.ready.then(measure);
+    measure();
+    return () => { active = false; resize.disconnect(); mutations.disconnect(); };
+  }, [message.body, appearance.key]);
+  if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming}>
       <Mascot create={createMascot} />
-      <div className="gb-content">
+      <div className="gb-content" ref={content}>
         <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>
         {message.body
           ? (
@@ -208,13 +234,14 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
   const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl }), [onCopy, onRegenerate, onSignIn, usageUrl]);
-  const last = messages[messages.length - 1];
+  const ordered = useMemo(() => orderThread(messages), [messages]);
+  const last = ordered[ordered.length - 1];
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
-        {messages.map((message) => {
+        {ordered.map((message) => {
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
-          if (Card) return <Card key={message.id} message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} />;
+          if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
             : <AssistantMessage key={message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />;

@@ -25,9 +25,14 @@ const runLabels = {
 
 export function Card({ message }) {
   const view = useEngine();
-  const { run_id: runId, task_status: task, turn_end: turnEnd, status } = message.payload || {};
-  // The host emits a live snapshot at every task event. Only its last entry
-  // represents the task, at the latest chronological position, not before work.
+  const { run_id: runId, task_status: task, turn_end: turnEnd, status, routine } = message.payload || {};
+  // RR02/RR05 (routine-run-conversation.md) establishes no routine-run task
+  // warning in the original UI. A normal turn ending is not a declared task
+  // completion; omit this redundant card, without relabelling it as success.
+  // Genuine failures, cancellations and explicit completions remain visible.
+  if (routine && status === "finished" && turnEnd === "finished" && task?.status === "working") return null;
+  // Show the latest live status at the task-change call's position, not at the
+  // later turn-end snapshot.
   const latest = view?.latestTask(runId);
   if (latest && latest !== message.id) return null;
   const terminal = ["finished", "failed", "cancelled"].includes(status);

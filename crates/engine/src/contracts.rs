@@ -2,7 +2,7 @@
 //! Times and durations use UTC Unix milliseconds unless a field says otherwise.
 //! Secret values must never be put in these model/transcript-facing types.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -11,6 +11,8 @@ use std::fmt;
 pub enum Error {
     NotImplemented(&'static str),
     InvalidInput(String),
+    Conflict(String),
+    NotFound(String),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
     Io(std::io::Error),
@@ -20,7 +22,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotImplemented(module) => write!(f, "{module} is not implemented yet"),
-            Self::InvalidInput(message) => f.write_str(message),
+            Self::InvalidInput(message) | Self::Conflict(message) | Self::NotFound(message) => {
+                f.write_str(message)
+            }
             Self::Sqlite(error) => error.fmt(f),
             Self::Json(error) => error.fmt(f),
             Self::Io(error) => error.fmt(f),
@@ -135,9 +139,31 @@ pub struct ApprovalRoute {
     pub target_conversation_id: String,
 }
 
+/// The approval gate is consulted before executing a protected tool. Only Ask
+/// creates a user request, routed to the principal conversation via ApprovalRoute.
+/// Denied never executes. Authorized must refer to the same canonical tool/args
+/// digest; consuming AllowOnce and committing the effect share a transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApprovalCheck {
+    Authorized { by: AuthorizedBy },
+    Denied { reason: String },
+    Ask,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthorizedBy {
+    AllowOnce { request_id: String },
+    Rule { rule_id: String },
+    AutoReview { rule_id: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub schema: Value,
     pub requires_approval: bool,
 }
@@ -146,6 +172,9 @@ pub struct ToolSpec {
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
+    /// The gateway preserves invalid/truncated JSON as Value::String(raw).
+    /// The loop rejects non-object arguments with a per-call Failed outcome
+    /// ("invalid arguments"), retaining the call ID and continuing the turn.
     pub arguments: Value,
 }
 
@@ -263,8 +292,19 @@ pub struct ImageInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolItem {
-    Call { call: ToolCall },
-    Output { call_id: String, output: Value },
+    Call {
+        call: ToolCall,
+    },
+    Output {
+        call_id: String,
+        output: Value,
+    },
+    /// Opaque provider state, replayed with function calls when store:false.
+    /// Never render encrypted reasoning as assistant text.
+    Reasoning {
+        item_id: String,
+        encrypted_content: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,7 +372,13 @@ pub enum ModelEvent {
     ToolCall {
         call_id: String,
         name: String,
+        /// Same invalid-JSON representation as ToolCall::arguments.
         arguments: Value,
+    },
+    /// Retain as ToolItem::Reasoning for the next full-input model call.
+    Reasoning {
+        item_id: String,
+        encrypted_content: String,
     },
     Completed,
     Incomplete {
@@ -353,13 +399,56 @@ pub trait ModelGateway: Send + Sync {
     ) -> Result<()>;
 }
 
+/// Read a component's schema version (zero when absent), independently of
+/// PRAGMA user_version. All components share this DDL; the caller owns the transaction.
+pub fn component_version(conn: &Connection, component: &str) -> Result<u32> {
+    ensure_component_versions(conn, component)?;
+    Ok(conn
+        .query_row(
+            "SELECT version FROM component_versions WHERE component = ?1",
+            [component],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Update only the named component. Migration effects and this version write
+/// belong in the same caller-owned transaction.
+pub fn set_component_version(conn: &Connection, component: &str, version: u32) -> Result<()> {
+    ensure_component_versions(conn, component)?;
+    conn.execute(
+        "INSERT INTO component_versions(component, version) VALUES (?1, ?2)
+         ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        rusqlite::params![component, version],
+    )?;
+    Ok(())
+}
+
+fn ensure_component_versions(conn: &Connection, component: &str) -> Result<()> {
+    if component.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "component name must not be empty".into(),
+        ));
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS component_versions (
+            component TEXT PRIMARY KEY, version INTEGER NOT NULL
+        )",
+    )?;
+    Ok(())
+}
+
 /// Run-thread transaction helper. Capability functions themselves never BEGIN/COMMIT.
+/// BEGIN IMMEDIATE takes the write lock up front so busy_timeout applies, instead
+/// of failing a deferred read-to-write upgrade with SQLITE_BUSY_SNAPSHOT in WAL.
 /// Errors (including unwinding) roll back. Nested transactions are rejected by SQLite.
 pub fn with_tx<T, E: From<rusqlite::Error>>(
     conn: &Connection,
     operation: impl FnOnce(&Connection) -> std::result::Result<T, E>,
 ) -> std::result::Result<T, E> {
-    let transaction = conn.unchecked_transaction()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let value = operation(&transaction)?;
     transaction.commit()?;
     Ok(value)
@@ -505,12 +594,261 @@ mod contracts_tests {
             }],
             tools: vec![ToolSpec {
                 name: "read_skill".into(),
+                description: "Read the full body of an available skill".into(),
                 schema: json!({"type": "object"}),
                 requires_approval: false,
             }],
             effort: None,
             service_tier: None,
         });
+    }
+
+    #[test]
+    fn contracts_approval_check_wire_format() {
+        for by in [
+            AuthorizedBy::AllowOnce {
+                request_id: "approval-1".into(),
+            },
+            AuthorizedBy::Rule {
+                rule_id: "rule-1".into(),
+            },
+            AuthorizedBy::AutoReview {
+                rule_id: "review-1".into(),
+            },
+        ] {
+            round_trip(ApprovalCheck::Authorized { by });
+        }
+        round_trip(ApprovalCheck::Denied {
+            reason: "blocked".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(ApprovalCheck::Ask).unwrap(),
+            json!({"status": "ask"})
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalCheck::Authorized {
+                by: AuthorizedBy::Rule {
+                    rule_id: "rule-1".into()
+                }
+            })
+            .unwrap(),
+            json!({"status": "authorized", "by": {"kind": "rule", "rule_id": "rule-1"}})
+        );
+    }
+
+    #[test]
+    fn contracts_ui_wire_keys_are_stable() {
+        assert_eq!(
+            serde_json::to_value(ToolOutcome::Suspend {
+                cause: SuspendCause::HumanInput {
+                    id: "approval-1".into()
+                }
+            })
+            .unwrap(),
+            json!({"status": "suspend", "cause": {"kind": "human_input", "id": "approval-1"}})
+        );
+        assert_eq!(
+            serde_json::to_value(ResumeReceipt {
+                resolution_id: "resolution-1".into(),
+                wake: WakeStatus::Pending
+            })
+            .unwrap(),
+            json!({"resolution_id": "resolution-1", "wake": {"status": "pending"}})
+        );
+        assert_eq!(
+            serde_json::to_value(ResumeReceipt {
+                resolution_id: "resolution-1".into(),
+                wake: WakeStatus::Delivered {
+                    run_id: "run-1".into(),
+                    first_event_seq: 4
+                }
+            })
+            .unwrap(),
+            json!({"resolution_id": "resolution-1", "wake": {
+                "status": "delivered", "run_id": "run-1", "first_event_seq": 4
+            }})
+        );
+    }
+
+    #[test]
+    fn contracts_reasoning_and_invalid_arguments_survive_round_trip() {
+        round_trip(ToolItem::Reasoning {
+            item_id: "reasoning-1".into(),
+            encrypted_content: "opaque".into(),
+        });
+        round_trip(ModelEvent::Reasoning {
+            item_id: "reasoning-1".into(),
+            encrypted_content: "opaque".into(),
+        });
+        round_trip(ToolCall {
+            call_id: "broken-call".into(),
+            name: "read_skill".into(),
+            arguments: json!("{truncated"),
+        });
+        let spec: ToolSpec = serde_json::from_value(json!({
+            "name": "legacy", "schema": {}, "requires_approval": false
+        }))
+        .unwrap();
+        assert_eq!(spec.description, "");
+    }
+
+    #[test]
+    fn contracts_component_versions_are_independent_and_transactional() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        assert_eq!(component_version(&conn, "forms_rules").unwrap(), 0);
+        with_tx(&conn, |conn| -> Result<()> {
+            set_component_version(conn, "forms_rules", 1)?;
+            set_component_version(conn, "skills", 2)
+        })
+        .unwrap();
+        let failed = with_tx(&conn, |conn| -> Result<()> {
+            set_component_version(conn, "forms_rules", 3)?;
+            Err(Error::Conflict("rollback".into()))
+        });
+        assert!(matches!(failed, Err(Error::Conflict(_))));
+        assert_eq!(component_version(&conn, "forms_rules").unwrap(), 1);
+        assert_eq!(component_version(&conn, "skills").unwrap(), 2);
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            7
+        );
+        assert!(component_version(&conn, " ").is_err());
+        assert_eq!(Error::NotFound("missing".into()).to_string(), "missing");
+    }
+
+    struct WalDatabase(std::path::PathBuf);
+
+    impl WalDatabase {
+        fn new() -> Self {
+            let mut random = [0; 8];
+            getrandom::getrandom(&mut random).unwrap();
+            let directory = std::env::temp_dir().join(format!(
+                "grokbot-contracts-{}-{:x}",
+                std::process::id(),
+                u64::from_ne_bytes(random)
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let db = Self(directory);
+            let conn = db.open();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE counter (value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+            )
+            .unwrap();
+            db
+        }
+
+        fn open(&self) -> Connection {
+            let conn = Connection::open(self.0.join("test.sqlite")).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            conn
+        }
+    }
+
+    impl Drop for WalDatabase {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn contracts_with_tx_wal_two_connections_serialize_read_then_write() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let db = WalDatabase::new();
+        let a = db.open();
+        let b = db.open();
+        let (writer_ready, ready) = mpsc::channel();
+        let (read, reader_started) = mpsc::channel();
+        let (committed, writer_committed) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let tx =
+                rusqlite::Transaction::new_unchecked(&b, rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+            tx.execute("UPDATE counter SET value = 1", []).unwrap();
+            writer_ready.send(()).unwrap();
+            // DEFERRED enters the closure while this writer holds the lock and
+            // signals its stale read. IMMEDIATE waits outside the closure, so
+            // the bounded wait expires and this writer commits first.
+            let _ = reader_started.recv_timeout(Duration::from_millis(250));
+            tx.commit().unwrap();
+            committed.send(()).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result: rusqlite::Result<()> = with_tx(&a, |conn| {
+            let value: i64 = conn.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+            let _ = read.send(());
+            writer_committed
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            conn.execute("UPDATE counter SET value = ?1", [value + 1])?;
+            Ok(())
+        });
+        writer.join().unwrap();
+        result.unwrap();
+        assert_eq!(
+            a.query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn contracts_with_tx_wal_eight_threads_read_then_write() {
+        let db = WalDatabase::new();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let conn = db.open();
+                let start = start.clone();
+                std::thread::spawn(move || -> rusqlite::Result<()> {
+                    start.wait();
+                    for _ in 0..50 {
+                        with_tx(&conn, |conn| -> rusqlite::Result<()> {
+                            let value: i64 =
+                                conn.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+                            std::thread::yield_now();
+                            conn.execute("UPDATE counter SET value = ?1", [value + 1])?;
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            db.open()
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            400
+        );
+    }
+
+    #[test]
+    fn contracts_with_tx_rolls_back_after_unwind() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE effects (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: rusqlite::Result<()> = with_tx(&conn, |conn| {
+                conn.execute("INSERT INTO effects VALUES (1)", [])?;
+                panic!("rollback on unwind");
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(conn.is_autocommit());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM effects", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

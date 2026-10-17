@@ -8,9 +8,9 @@
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
 use crate::contracts::{
-    Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest, Result, Role, RunEvent,
-    RunEventKind, RunKind, SuspendCause, TaskStatus, ToolCall, ToolItem, ToolOutcome, ToolSpec,
-    TurnEnd,
+    ApprovalCheck, Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest, Result, Role,
+    RunEvent, RunEventKind, RunKind, SuspendCause, TaskStatus, ToolCall, ToolItem, ToolOutcome,
+    ToolSpec, TurnEnd,
 };
 use crate::model::{self, invalid, Run, RunStatus};
 use crate::store;
@@ -30,17 +30,22 @@ pub trait RunServices {
     /// replayed after commit. Transaction retries may invoke this again after
     /// rollback: use SQLite, not process-local flags, for capability effects.
     fn call_tool(&mut self, conn: &Connection, run: &Run, call: &ToolCall) -> Result<ToolOutcome>;
-    /// Idempotent by (run, call_id, canonical tool/arguments digest). Route every
-    /// request to the principal conversation; only its user or persisted policy
-    /// may allow it. Done means authorized, Failed means denied/expired, and
-    /// Suspend(HumanInput) means pending. On resume this is called again; consume
-    /// AllowOnce in this transaction, atomically with the effect and ToolResult.
+    /// Consult digest-bound standing rules, auto-review and single-use grants
+    /// before suspending. Denied must never execute; Authorized may execute.
+    fn check_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &ToolCall,
+    ) -> Result<ApprovalCheck>;
+    /// Called only for ApprovalCheck::Ask. Display in the principal bot's
+    /// conversation; the returned cause still belongs to the originating run.
     fn request_approval(
         &mut self,
         conn: &Connection,
         run: &Run,
         call: &ToolCall,
-    ) -> Result<ToolOutcome>;
+    ) -> Result<SuspendCause>;
     fn is_cancelled(&self, run_id: &str) -> bool;
     /// Transactional capability reaction: use conn for occurrence updates and
     /// child wakes. Never commit or perform nontransactional external effects.

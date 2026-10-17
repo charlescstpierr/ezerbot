@@ -1,7 +1,7 @@
 /* REA reports/cron-detail.md CR01, CR08–13, CR16–19: per-bot routines,
  * inline prompts, five-field cron (DOM OR DOW), @every phase, explicit timezone,
- * manual cooldown and conversational model confirmation. The editor, durable
- * nonce and missed-range history are local reconstruction, not server REA.
+ * manual cooldown and conversational model confirmation. The editor, page-session
+ * nonce retention and missed-range history are local reconstruction, not server REA.
  * No approval is accepted here: pending model confirmations open the main chat.
  */
 (() => {
@@ -113,6 +113,10 @@
   const botId = () => botSelect.value;
   const items = () => (panels.state.routines?.items || []).filter((item) => item.routine.bot_id === botId()).sort((a, b) => Number(b.routine.enabled) - Number(a.routine.enabled) || a.routine.name.localeCompare(b.routine.name, "fr") || a.routine.routine_id.localeCompare(b.routine.routine_id));
   const tracked = (r) => launches.has(r.routine_id) || histories.get(r.routine_id)?.running;
+  const wantsPolling = () => Boolean(dialog?.open) && (view === "history" || items().some((i) => tracked(i.routine)));
+  // The host only schedules its next poll at the end of refresh(). Changes
+  // caused by a panel-local history read must explicitly rearm that scheduler.
+  function kick() { if (wantsPolling()) void panels.refresh().catch(() => {}); }
   const idBody = (r) => ({ bot_id: r.bot_id, routine_id: r.routine_id });
   const active = (token) => dialog.open && token === revision;
   function message(text, error = false) { status.textContent = text; status.classList.toggle("routines-error", error); }
@@ -168,7 +172,7 @@
       }
       if (active(token)) { signature = ""; renderList(); if (view === "history") await showHistory(current); }
     } catch (error) { if (active(token)) message(`Actualisation impossible : ${error.message}`, true); }
-    finally { reloading = false; }
+    finally { reloading = false; if (active(token)) kick(); }
   }
   function renderList() {
     if (!dialog?.open || view !== "list") return;
@@ -351,6 +355,7 @@
     content.replaceChildren(button("Retour à la liste", back), button("Actualiser l’historique", () => showHistory(r))); message("Chargement de l’historique…");
     try { const h = await readHistory(r); settleLaunch(r); if (active(token)) { message(""); renderHistory(r, h); } }
     catch (error) { if (active(token)) message(`Historique indisponible : ${error.message}`, true); }
+    finally { if (active(token)) kick(); }
   }
   function renderHistory(r, h) {
     const occurrences = h.occurrences.slice().sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || b.occurrence_id.localeCompare(a.occurrence_id)).slice(0, historyLimit);
@@ -397,9 +402,9 @@
       job.unknown = false; job.until = Date.now() + 3000;
       if (active(token)) message("Lancement demandé. Son résultat apparaîtra dans l’historique.");
       await readHistory(r);
-      try { await panels.refresh(); } catch { /* The durable nonce remains. */ }
+      try { await panels.refresh(); } catch { /* The page-session nonce remains available for retry. */ }
     } catch (error) { if (active(token)) message(`Lancement non confirmé : ${error.message} Réessayez avec le même identifiant ; aucun nouveau lancement ne sera créé.`, true); }
-    finally { busy = false; if (active(token)) { signature = ""; renderList(); } }
+    finally { busy = false; if (active(token)) { signature = ""; renderList(); kick(); } }
   }
   async function pollHistory() {
     if (!dialog?.open || busy || reloading || historyLoading || Date.now() - historyAt < 3000) return;
@@ -415,7 +420,7 @@
         try {
           const h = await readHistory(r); settleLaunch(r);
           if (active(token) && view === "history" && current.routine_id === r.routine_id) renderHistory(r, h);
-        } catch (error) { if (active(token)) message(`Historique à actualiser : ${error.message}`, true); }
+        } catch (error) { if (active(token) && view !== "edit") message(`Historique à actualiser : ${error.message}`, true); }
       }
       if (active(token)) { signature = ""; renderList(); }
     } finally { historyLoading = false; }
@@ -438,6 +443,6 @@
       if (!bot) { dialog.close(); panels.notify("Ce bot a été supprimé ; ses routines ne sont plus modifiables ici."); return; }
       renderList(); void pollHistory();
     },
-    wantsPolling: () => Boolean(dialog?.open) && (view === "history" || items().some((i) => tracked(i.routine))),
+    wantsPolling,
   });
 })();

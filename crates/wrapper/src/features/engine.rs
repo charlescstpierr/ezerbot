@@ -2214,7 +2214,7 @@ fn retitle(
 }
 fn clean_title(raw: &str) -> Option<String> {
     let line = raw.lines().find(|s| !s.trim().is_empty())?;
-    let line=line.chars().filter(|c|!c.is_control() && !matches!(*c,'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).collect::<String>();
+    let line=line.chars().map(|c|if c.is_whitespace(){' '}else{c}).filter(|c|!c.is_control() && !matches!(*c,'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).collect::<String>();
     let line = line
         .trim()
         .trim_matches(|c: char| {

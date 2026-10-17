@@ -1,7 +1,15 @@
+//! HTTP host extension contracts, exercised against the actual wrapper process.
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use grokbot_wrapper::{body_limit, validate_headers_for_path, ApiResponse, BODY_LIMIT};
+use serde_json::{json, Value};
+
+static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Running(Child);
 impl Drop for Running {
@@ -77,4 +85,225 @@ fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
     );
     drop(running);
     let _ = std::fs::remove_dir_all(directory);
+}
+
+struct Host {
+    child: Child,
+    directory: PathBuf,
+    url: String,
+}
+
+impl Host {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "grokbot-http-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+            .args(["--port", "0", "--db"])
+            .arg(directory.join("app.sqlite"))
+            .env_remove("GROKBOT_FAKE_OPENAI")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut host = Self {
+            child,
+            directory,
+            url: String::new(),
+        };
+        let mut line = String::new();
+        BufReader::new(host.child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let announcement: Value = serde_json::from_str(&line).expect("host URL announcement");
+        host.url = announcement["url"].as_str().unwrap().to_owned();
+        host
+    }
+
+    fn post(&self, path: &str, content_type: &str, body: &[u8]) -> u16 {
+        status(
+            ureq::post(&format!("{}{path}", self.url))
+                .set("Origin", &self.url)
+                .set("X-Grokbot-Request", "local")
+                .set("Content-Type", content_type)
+                .send_bytes(body),
+        )
+    }
+
+    fn raw_post(&self, path: &str, content_type: &str, framing: &str, body: &[u8]) -> u16 {
+        let address = self.url.strip_prefix("http://").unwrap();
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {}\r\nX-Grokbot-Request: local\r\nContent-Type: {content_type}\r\nConnection: close\r\n{framing}\r\n\r\n", self.url).unwrap();
+        stream.write_all(body).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        response
+            .split_whitespace()
+            .nth(1)
+            .expect("HTTP status")
+            .parse()
+            .unwrap()
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn status(result: Result<ureq::Response, ureq::Error>) -> u16 {
+    match result {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response.status(),
+        Err(error) => panic!("HTTP transport: {error}"),
+    }
+}
+
+#[test]
+fn binary_post_only_allowed_on_attachment_route() {
+    let host = Host::new();
+    let image = b"\x89PNG\r\n\x1a\n\0\xff";
+    // Staging is implemented by the attachments slice; 404 means the host accepted the body.
+    assert_eq!(host.post("/api/attachments", "image/png", image), 404);
+    assert_eq!(
+        host.post("/api/attachments", "IMAGE/JPEG; charset=binary", image),
+        404
+    );
+    for path in [
+        "/api/send",
+        "/api/skills/import",
+        "/api/attachments/other",
+        "/api/attachments/",
+    ] {
+        assert_eq!(host.post(path, "image/png", image), 403, "{path}");
+    }
+    for mime in [
+        "application/octet-stream",
+        "text/plain",
+        "image/",
+        "image/*",
+        "image/png/extra",
+    ] {
+        assert_eq!(host.post("/api/attachments", mime, image), 403, "{mime}");
+    }
+    assert_eq!(
+        host.post("/api/conversations", "application/json", b"{}"),
+        200
+    );
+    let port: u16 = host.url.rsplit(':').next().unwrap().parse().unwrap();
+    let headers = vec![
+        ("Host".into(), format!("127.0.0.1:{port}")),
+        ("X-Grokbot-Request".into(), "local".into()),
+        ("Content-Type".into(), "image/png".into()),
+        ("Origin".into(), "https://foreign.example".into()),
+    ];
+    assert_eq!(
+        validate_headers_for_path(port, "POST", "/api/attachments", &headers)
+            .unwrap_err()
+            .status,
+        403
+    );
+    assert_eq!(
+        validate_headers_for_path(port, "POST", "/api/attachments", &headers[..1])
+            .unwrap_err()
+            .status,
+        403
+    );
+}
+
+#[test]
+fn body_limit_by_route() {
+    let host = Host::new();
+    assert_eq!(body_limit("/api/attachments"), 20 * 1024 * 1024);
+    assert_eq!(body_limit("/api/skills/import"), 16 * 1024 * 1024);
+    for path in [
+        "/api/send",
+        "/api/attachments/one",
+        "/api/skills/import/",
+        "/api/attachments?x=1",
+    ] {
+        assert_eq!(body_limit(path), 64 * 1024);
+    }
+    let body = vec![b' '; BODY_LIMIT + 1];
+    assert_eq!(host.post("/api/attachments", "image/png", &body), 404);
+    assert_eq!(
+        host.post("/api/skills/import", "application/json", &body),
+        404
+    );
+    assert_eq!(
+        host.post("/api/conversations", "application/json", &body),
+        413
+    );
+    for (path, mime) in [
+        ("/api/conversations", "application/json"),
+        ("/api/skills/import", "application/json"),
+        ("/api/attachments", "image/png"),
+    ] {
+        assert_eq!(
+            host.raw_post(
+                path,
+                mime,
+                &format!("Content-Length: {}", body_limit(path) + 1),
+                b""
+            ),
+            413
+        );
+    }
+    // No Content-Length: the bounded reader must also reject oversized chunked bodies.
+    let mut chunked = format!("{:X}\r\n", body.len()).into_bytes();
+    chunked.extend(&body);
+    chunked.extend(b"\r\n0\r\n\r\n");
+    assert_eq!(
+        host.raw_post(
+            "/api/conversations",
+            "application/json",
+            "Transfer-Encoding: chunked",
+            &chunked
+        ),
+        413
+    );
+}
+
+#[test]
+fn bytes_response_keeps_content_type() {
+    let bytes = vec![0, 0xff, b'\n', b'"'];
+    let (actual, mime) = ApiResponse::Bytes {
+        content_type: "image/png".into(),
+        body: bytes.clone(),
+    }
+    .into_parts();
+    assert_eq!(actual, bytes);
+    assert_eq!(mime, "image/png");
+    let (actual, mime) = ApiResponse::Json(json!({"ok": true})).into_parts();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&actual).unwrap(),
+        json!({"ok": true})
+    );
+    assert_eq!(mime, "application/json; charset=utf-8");
+    let host = Host::new();
+    for (path, mime) in [
+        ("/panels.js", "text/javascript; charset=utf-8"),
+        ("/panels.css", "text/css; charset=utf-8"),
+        ("/api/state", "application/json; charset=utf-8"),
+    ] {
+        let response = ureq::get(&format!("{}{path}", host.url)).call().unwrap();
+        assert_eq!(response.header("Content-Type"), Some(mime));
+        assert_eq!(response.header("X-Content-Type-Options"), Some("nosniff"));
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body).unwrap();
+        if path == "/api/state" {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["mode"],
+                "simulated"
+            );
+        }
+    }
 }

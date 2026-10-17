@@ -2,6 +2,7 @@
 """Exercise the actual local HTTP wrapper and its SQLite restart behavior."""
 from pathlib import Path
 from datetime import datetime, timezone
+import argparse
 import json
 import selectors
 import subprocess
@@ -12,6 +13,9 @@ import urllib.error
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / 'target/debug/grokbot-wrapper'
 checks = []
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--report', type=Path, default=ROOT / 'evidence/wrapper-verification.json')
+REPORT = parser.parse_args().report
 
 
 def require(name, condition):
@@ -75,6 +79,11 @@ try:
         for path in ['/', '/styles.css', '/app.js', '/mascot.css', '/mascot.js', '/chat.css', '/chat.js']:
             status, content, _ = active.request(path)
             require(f'offline asset {path}', status == 200 and len(content) > 100)
+        # Empty panel directories intentionally produce valid, empty offline bundles.
+        for path, mime in [('/panels.js', 'text/javascript; charset=utf-8'),
+                           ('/panels.css', 'text/css; charset=utf-8')]:
+            status, _, headers = active.request(path)
+            require(f'offline asset {path}', status == 200 and headers.get('Content-Type') == mime)
         initial = active.json('/api/state')
         require('mode is explicitly simulated', initial['mode'] == 'simulated')
         conversation = active.json('/api/conversations', {'title': 'Conversation de vérification'})['conversation']
@@ -163,6 +172,6 @@ finally:
     if active:
         active.close()
     report['checks'] = checks
-    (ROOT / 'evidence/wrapper-verification.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 print(json.dumps(report, ensure_ascii=False, indent=2))
 raise SystemExit(0 if report['status'] == 'passed' else 1)

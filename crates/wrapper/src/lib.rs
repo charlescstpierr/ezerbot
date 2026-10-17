@@ -4,6 +4,10 @@
 
 mod provider;
 
+/// Model gateway implementations are added independently of the HTTP host.
+#[doc(hidden)]
+pub mod gateway;
+
 pub use provider::{Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};
@@ -26,6 +30,36 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const BODY_LIMIT: usize = 64 * 1024;
+pub const ATTACHMENT_BODY_LIMIT: usize = 20 * 1024 * 1024;
+pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Only the exact upload routes receive a larger budget; other routes stay bounded JSON.
+pub fn body_limit(path: &str) -> usize {
+    match path {
+        "/api/attachments" => ATTACHMENT_BODY_LIMIT,
+        "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
+        _ => BODY_LIMIT,
+    }
+}
+
+/// Feature routes can return binary data without JSON encoding or losing their MIME type.
+#[derive(Debug)]
+pub enum ApiResponse {
+    Json(Value),
+    Bytes { content_type: String, body: Vec<u8> },
+}
+
+impl ApiResponse {
+    pub fn into_parts(self) -> (Vec<u8>, String) {
+        match self {
+            Self::Json(value) => (
+                value.to_string().into_bytes(),
+                "application/json; charset=utf-8".into(),
+            ),
+            Self::Bytes { content_type, body } => (body, content_type),
+        }
+    }
+}
 const ACCOUNT: &str = "local-workspace";
 const DEFAULT_TITLE: &str = "Nouvelle conversation";
 const DEMO_REPLY: &str = "Bien reçu. Ton message est conservé dans cette conversation. Le mode local simule les réponses ; aucun service d'intelligence artificielle n'est connecté.";
@@ -862,6 +896,10 @@ impl App {
         })
     }
 
+    /// Periodic host hook, including while no HTTP request is arriving.
+    /// Feature dispatch will attach scheduler and run wake delivery here.
+    pub fn tick(&mut self, _now_ms: u64) {}
+
     fn model_preferences(&self) -> Result<(Option<String>, Option<String>, bool), ApiError> {
         Ok(self
             .connection
@@ -1201,9 +1239,22 @@ impl App {
             .unwrap_or_else(|| (DEFAULT_THEME.into(), DEFAULT_ACCENT.into())))
     }
 
+    /// HTTP entry point; `api` remains the JSON-only compatibility entry point.
+    pub fn api_response(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<ApiResponse, ApiError> {
+        self.api(method, path, body).map(ApiResponse::Json)
+    }
+
     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
-        if body.len() > BODY_LIMIT {
-            return Err(ApiError::new(413, "La requête dépasse 64 Ko."));
+        if body.len() > body_limit(path) {
+            return Err(ApiError::new(
+                413,
+                "La requête dépasse la limite de cette route.",
+            ));
         }
         match (method, path) {
             ("GET", "/api/state") => {
@@ -1918,9 +1969,19 @@ fn state_name(state: &SubmissionState) -> &'static str {
     }
 }
 
+/// Compatibility validator for JSON-only callers. The host uses the route-aware variant.
 pub fn validate_headers(
     port: u16,
     method: &str,
+    headers: &[(String, String)],
+) -> Result<(), ApiError> {
+    validate_headers_for_path(port, method, "", headers)
+}
+
+pub fn validate_headers_for_path(
+    port: u16,
+    method: &str,
+    path: &str,
     headers: &[(String, String)],
 ) -> Result<(), ApiError> {
     let reject = || {
@@ -1953,12 +2014,15 @@ pub fn validate_headers(
             return Err(reject());
         }
         let content_type = one("content-type")?.ok_or_else(reject)?;
-        if !content_type
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .eq_ignore_ascii_case("application/json")
+        let mime = content_type.split(';').next().unwrap_or("").trim();
+        let image = mime.split_once('/').is_some_and(|(kind, subtype)| {
+            kind.eq_ignore_ascii_case("image")
+                && !subtype.is_empty()
+                && subtype
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'+' | b'.'))
+        });
+        if !mime.eq_ignore_ascii_case("application/json") && !(path == "/api/attachments" && image)
         {
             return Err(reject());
         }

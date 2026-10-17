@@ -1,7 +1,10 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use grokbot_wrapper::{validate_headers, ApiError, App, Provider, BODY_LIMIT};
+use grokbot_wrapper::{
+    body_limit, validate_headers_for_path, ApiError, ApiResponse, App, Provider,
+};
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
@@ -13,6 +16,9 @@ const MASCOT_STYLES: &str = include_str!("../../../app/ui/mascot.css");
 // Built from app/web by `npm run build`.
 const CHAT_SCRIPT: &str = include_str!("../../../app/ui/chat.js");
 const CHAT_STYLES: &str = include_str!("../../../app/ui/chat.css");
+const PANELS_SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.js"));
+const PANELS_STYLES: &str = include_str!(concat!(env!("OUT_DIR"), "/panels.css"));
+const TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Options {
     port: u16,
@@ -55,11 +61,7 @@ fn error(status: u16, message: &str) -> ApiError {
     }
 }
 
-fn payload(
-    request: &mut Request,
-    port: u16,
-    app: &mut App,
-) -> Result<(Vec<u8>, &'static str), ApiError> {
+fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiResponse, ApiError> {
     let method = request.method().as_str().to_owned();
     let path = request.url().to_owned();
     let headers: Vec<_> = request
@@ -67,12 +69,10 @@ fn payload(
         .iter()
         .map(|header| (header.field.as_str().to_string(), header.value.to_string()))
         .collect();
-    validate_headers(port, &method, &headers)?;
-    if request
-        .body_length()
-        .is_some_and(|length| length > BODY_LIMIT)
-    {
-        return Err(error(413, "La requête dépasse 64 Ko."));
+    validate_headers_for_path(port, &method, &path, &headers)?;
+    let limit = body_limit(&path);
+    if request.body_length().is_some_and(|length| length > limit) {
+        return Err(error(413, "La requête dépasse la limite de cette route."));
     }
     if method == "GET" {
         let asset = match path.as_str() {
@@ -83,23 +83,28 @@ fn payload(
             "/mascot.css" => Some((MASCOT_STYLES, "text/css; charset=utf-8")),
             "/chat.js" => Some((CHAT_SCRIPT, "text/javascript; charset=utf-8")),
             "/chat.css" => Some((CHAT_STYLES, "text/css; charset=utf-8")),
+            "/panels.js" => Some((PANELS_SCRIPT, "text/javascript; charset=utf-8")),
+            "/panels.css" => Some((PANELS_STYLES, "text/css; charset=utf-8")),
             _ => None,
         };
         if let Some((content, content_type)) = asset {
-            return Ok((content.as_bytes().to_vec(), content_type));
+            return Ok(ApiResponse::Bytes {
+                content_type: content_type.into(),
+                body: content.as_bytes().to_vec(),
+            });
         }
     }
     let mut body = Vec::new();
     request
         .as_reader()
-        .take((BODY_LIMIT + 1) as u64)
+        .take((limit + 1) as u64)
         .read_to_end(&mut body)
         .map_err(|_| error(400, "Le corps de la requête est illisible."))?;
-    let value = app.api(&method, &path, &body)?;
-    Ok((
-        value.to_string().into_bytes(),
-        "application/json; charset=utf-8",
-    ))
+    // Chunked requests have no declared length. Check again after the bounded read.
+    if body.len() > limit {
+        return Err(error(413, "La requête dépasse la limite de cette route."));
+    }
+    app.api_response(&method, &path, &body)
 }
 
 /// Les builds de développement peuvent viser un faux serveur OpenAI pour essayer l'interface
@@ -130,19 +135,31 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         .port();
     println!("{}", json!({"url": format!("http://127.0.0.1:{port}")}));
     std::io::stdout().flush()?;
-    for mut request in server.incoming_requests() {
+    loop {
+        let request = server.recv_timeout(TICK_INTERVAL)?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        app.tick(now_ms);
+        let Some(mut request) = request else {
+            continue;
+        };
         let is_api = request.url().starts_with("/api/");
         let (status, body, content_type) = match payload(&mut request, port, &mut app) {
-            Ok((body, content_type)) => (200, body, content_type),
+            Ok(response) => {
+                let (body, content_type) = response.into_parts();
+                (200, body, content_type)
+            }
             Err(error) => (
                 error.status,
                 json!({"error": error.message}).to_string().into_bytes(),
-                "application/json; charset=utf-8",
+                "application/json; charset=utf-8".into(),
             ),
         };
         let mut response = Response::from_data(body).with_status_code(StatusCode(status));
         for (name, value) in [
-            ("Content-Type", content_type),
+            ("Content-Type", content_type.as_str()),
             ("Cache-Control", if is_api { "no-store" } else { "no-cache" }),
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
@@ -155,7 +172,6 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             eprintln!("Réponse HTTP interrompue : {error}");
         }
     }
-    Ok(())
 }
 
 fn main() {

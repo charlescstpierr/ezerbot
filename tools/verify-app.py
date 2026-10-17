@@ -61,6 +61,13 @@ try:
         with urllib.request.urlopen(url + endpoint, timeout=10) as response:
             actual = response.read()
         require(f'bundled {source} matches current source', actual == (ROOT / 'app/ui' / source).read_bytes())
+    for extension, separator in [('js', b'\n;\n'), ('css', b'\n')]:
+        expected = b''.join(path.read_bytes() + separator
+                            for path in sorted((ROOT / 'app/ui/panels').glob(f'*.{extension}'))
+                            if path.is_file())
+        with urllib.request.urlopen(url + f'/panels.{extension}', timeout=10) as response:
+            actual = response.read()
+        require(f'bundled panels.{extension} matches current sources', actual == expected)
     with urllib.request.urlopen(url + '/api/state', timeout=10) as response:
         state = json.load(response)
     # Le mode suit la connexion de l'utilisateur : simulé sans compte, ChatGPT une fois connecté.

@@ -1092,6 +1092,37 @@ impl Provider {
         Ok(parse_models(&body))
     }
 
+    /// Sends an unmodified Responses body and returns the raw JSON/SSE response.
+    /// Authentication is renewed at most once after a 401; other failures are not retried.
+    pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
+        let mut token = self.bearer(false)?;
+        let accept = if body["stream"] == true {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let mut refreshed = false;
+        loop {
+            let attempt = agent()
+                .post(&format!("{}/responses", self.inner.endpoints.api))
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Accept", accept)
+                .send_json(body.clone());
+            let (status, code, message, _) = match attempt {
+                Ok(response) => return Ok(response),
+                Err(error) => request_failure(error),
+            };
+            if status == 401 && !refreshed {
+                refreshed = true;
+                token = self.bearer(true)?;
+            } else if status == 0 {
+                return Err(network_failure());
+            } else {
+                return Err(failure(status, &code, &message));
+            }
+        }
+    }
+
     fn run_key(conversation: &str, message: &str) -> String {
         format!("{conversation}\n{message}")
     }

@@ -1,188 +1,14 @@
 //! Le parcours « Sign in with ChatGPT » contre un faux serveur OpenAI : enregistrement, échange du
 //! code, vérification de l'identité, renouvellement, catalogue, réponse en flux et déconnexion.
 
-use std::collections::HashMap;
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{App, Endpoints, Provider};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
-
-// Clé jetable, créée pour ces tests. Elle ne protège rien.
-const SIGNING_KEY: &[u8] = include_bytes!("fixtures/test-signing-key.pem");
-const JWKS: &str = include_str!("fixtures/test-jwks.json");
-const CLIENT: &str = "oaiapp_test";
-
-#[derive(Default)]
-struct Seen {
-    nonce: String,
-    forms: Vec<HashMap<String, String>>,
-    bearer: Vec<String>,
-    bodies: Vec<Value>,
-    revoked: bool,
-}
-
-fn form(body: &str) -> HashMap<String, String> {
-    body.split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key.to_owned(), unescape(value)))
-        .collect()
-}
-
-fn unescape(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() + 1 {
-            out.push(u8::from_str_radix(&value[index + 1..index + 3], 16).unwrap());
-            index += 3;
-        } else {
-            out.push(if bytes[index] == b'+' {
-                b' '
-            } else {
-                bytes[index]
-            });
-            index += 1;
-        }
-    }
-    String::from_utf8(out).unwrap()
-}
-
-fn id_token(issuer: &str, nonce: &str) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("test-key".into());
-    let claims = json!({
-        "iss": issuer, "aud": CLIENT, "sub": "user-1", "email": "vous@exemple.com",
-        "nonce": nonce, "iat": now, "exp": now + 600,
-    });
-    encode(
-        &header,
-        &claims,
-        &EncodingKey::from_rsa_pem(SIGNING_KEY).unwrap(),
-    )
-    .unwrap()
-}
-
-/// Faux serveur d'autorisation et d'API. Le premier jeton d'accès expire aussitôt, ce qui force
-/// un renouvellement avant la première demande.
-fn fake_openai(seen: Arc<Mutex<Seen>>) -> String {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let base = format!(
-        "http://127.0.0.1:{}",
-        server.server_addr().to_ip().unwrap().port()
-    );
-    let issuer = base.clone();
-    std::thread::spawn(move || {
-        for mut request in server.incoming_requests() {
-            let mut body = String::new();
-            request.as_reader().read_to_string(&mut body).unwrap();
-            let bearer = request
-                .headers()
-                .iter()
-                .find(|header| header.field.equiv("Authorization"))
-                .map(|header| header.value.to_string())
-                .unwrap_or_default();
-            let path = request.url().to_owned();
-            let mut seen = seen.lock().unwrap();
-            let (status, content_type, payload) = match path.as_str() {
-                "/jwks" => (200, "application/json", JWKS.to_owned()),
-                "/token" => {
-                    let fields = form(&body);
-                    let refresh = fields["grant_type"] == "refresh_token";
-                    seen.forms.push(fields);
-                    let reply = json!({
-                        "access_token": if refresh { "access-2" } else { "access-1" },
-                        "refresh_token": if refresh { "refresh-2" } else { "refresh-1" },
-                        "id_token": id_token(&issuer, &seen.nonce),
-                        "token_type": "Bearer", "expires_in": if refresh { 3600 } else { 1 },
-                        "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke",
-                    });
-                    (200, "application/json", reply.to_string())
-                }
-                "/revoke" => {
-                    seen.revoked = true;
-                    (200, "application/json", String::new())
-                }
-                "/v1/models" => {
-                    seen.bearer.push(bearer);
-                    let models = json!({"models": [
-                        {"slug": "gpt-test", "display_name": "GPT Test", "description": "Modèle de test", "visibility": "list",
-                         "default_reasoning_level": "medium", "default_reasoning_summary": "none",
-                         "supported_reasoning_levels": [{"effort": "low", "description": "Léger"}, {"effort": "medium", "description": "Équilibré"}, {"effort": "high", "description": "Profond"}],
-                         "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed"}]},
-                        {"slug": "internal", "display_name": "Internal", "visibility": "hide"},
-                    ]});
-                    (200, "application/json", models.to_string())
-                }
-                "/v1/responses" => {
-                    seen.bearer.push(bearer);
-                    let request_body: Value = serde_json::from_str(&body).unwrap();
-                    let fast = request_body.get("service_tier").is_some();
-                    seen.bodies.push(request_body.clone());
-                    if request_body["instructions"]
-                        .as_str()
-                        .unwrap()
-                        .contains("titre")
-                    {
-                        let title = json!({"type": "response.output_text.delta", "delta": "« Salutations en français. »"});
-                        (
-                            200,
-                            "text/event-stream",
-                            format!(
-                                "data: {title}\n\ndata: {}\n\n",
-                                json!({"type": "response.completed"})
-                            ),
-                        )
-                    } else if fast {
-                        let refusal = json!({"error": {"code": "subscription_sharing_unsupported_capability", "message": "unsupported", "param": "service_tier"}});
-                        (400, "application/json", refusal.to_string())
-                    } else {
-                        let events = [
-                            json!({"type": "response.created"}),
-                            json!({"type": "response.output_text.delta", "delta": "Bon"}),
-                            json!({"type": "response.output_text.delta", "delta": "jour **vous**"}),
-                            json!({"type": "response.completed"}),
-                        ];
-                        let stream: String = events
-                            .iter()
-                            .map(|event| {
-                                format!(
-                                    "event: {}\ndata: {event}\n\n",
-                                    event["type"].as_str().unwrap()
-                                )
-                            })
-                            .collect();
-                        (200, "text/event-stream", stream)
-                    }
-                }
-                _ => (404, "text/plain", String::new()),
-            };
-            drop(seen);
-            let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
-            let _ = request.respond(
-                tiny_http::Response::from_string(payload)
-                    .with_status_code(status)
-                    .with_header(header),
-            );
-        }
-    });
-    base
-}
-
-fn wait(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !ready() {
-        assert!(Instant::now() < deadline, "délai dépassé : {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
+use support::{form, wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 
 fn post(app: &mut App, path: &str, body: Value) -> Value {
     app.api("POST", path, body.to_string().as_bytes()).unwrap()
@@ -210,7 +36,8 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     std::fs::create_dir_all(&directory).unwrap();
     let db = directory.join("app.sqlite");
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let base = fake_openai(seen.clone());
+    let server = FakeOpenAi::new(seen.clone());
+    let base = server.base.clone();
     let endpoints = Endpoints {
         authorize: format!("{base}/authorize"),
         token: format!("{base}/token"),
@@ -447,6 +274,60 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     wait("fin du titre du bot", || {
         provider.status()["titling"] == false
     });
+
+    // The raw Responses seam preserves caller input and refreshes only once on a 401.
+    let body = json!({"model": "gpt-test", "stream": true, "store": false,
+        "input": [{"role": "user", "content": "Raw request"}], "tools": []});
+    let unauthorized = || ScriptedResponse::json(401, json!({"error": {"code": "expired"}}));
+    let forms_before = seen.lock().unwrap().forms.len();
+    let bodies_before = seen.lock().unwrap().bodies.len();
+    seen.lock().unwrap().responses.extend([
+        unauthorized(),
+        ScriptedResponse::events(&[json!({"type": "response.completed"})]),
+    ]);
+    let response = provider.responses(body.clone()).unwrap();
+    assert_eq!(response.header("Content-Type"), Some("text/event-stream"));
+    assert!(response
+        .into_string()
+        .unwrap()
+        .contains("response.completed"));
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.forms.len(), forms_before + 1);
+        assert_eq!(&seen.bodies[bodies_before..], &[body.clone(), body.clone()]);
+        assert!(seen.bearer.iter().all(|bearer| bearer == "Bearer access-2"));
+    }
+    let forms_before = seen.lock().unwrap().forms.len();
+    let bodies_before = seen.lock().unwrap().bodies.len();
+    seen.lock()
+        .unwrap()
+        .responses
+        .extend([unauthorized(), unauthorized()]);
+    assert_eq!(provider.responses(body.clone()).unwrap_err().kind, "signin");
+    assert_eq!(seen.lock().unwrap().forms.len(), forms_before + 1);
+    assert_eq!(seen.lock().unwrap().bodies.len(), bodies_before + 2);
+
+    // Non-authentication errors are not retried or silently stripped of caller options.
+    seen.lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::json(
+            400,
+            json!({"error": {"message": "unsupported service_tier", "param": "service_tier"}}),
+        ));
+    assert!(provider.responses(body.clone()).is_err());
+    assert_eq!(seen.lock().unwrap().forms.len(), forms_before + 1);
+    assert_eq!(seen.lock().unwrap().bodies.len(), bodies_before + 3);
+    seen.lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::json(200, json!({"id": "raw"})));
+    let response: Value = provider
+        .responses(json!({"model": "gpt-test", "stream": false}))
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(response, json!({"id": "raw"}));
 
     // Les jetons renouvelés survivent à un redémarrage.
     drop(app);

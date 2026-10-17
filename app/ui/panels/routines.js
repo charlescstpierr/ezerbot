@@ -26,16 +26,30 @@
   };
   const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const aliases = { "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *" };
+  function validZone(zone) {
+    try { new Intl.DateTimeFormat("fr", { timeZone: zone }).format(); }
+    catch { throw new Error(`Fuseau IANA inconnu : ${zone || "(vide)"}.`); }
+    return zone;
+  }
   function duration(text) {
-    let rest = text, total = 0;
+    // Match the scheduler's exact decimal sum, including .5h and fractional
+    // millisecond components which become integral only after addition.
+    let rest = text, total = 0n, scale = 1n;
+    const max = (1n << 128n) - 1n;
     while (rest) {
-      const part = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)/.exec(rest);
-      if (!part) throw new Error("Durée attendue : 1h30m, 10m ou 1d (unités minuscules).");
-      total += Number(part[1]) * { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 }[part[2]];
-      rest = rest.slice(part[0].length);
+      const part = /^(\d+(?:\.\d+)?|\.\d+)(ms|s|m|h|d)/.exec(rest);
+      if (!part) throw new Error("Durée attendue : 1h30m, 10m ou .5h (unités minuscules).");
+      const [whole, decimal = ""] = part[1].split("."), fraction = decimal.replace(/0+$/, "");
+      const digits = `${whole}${fraction}`.replace(/^0+/, "") || "0";
+      if (fraction.length > 38 || digits.length > 39) throw new Error("La précision ou la durée dépasse la limite du moteur.");
+      const componentScale = 10n ** BigInt(fraction.length), nextScale = scale > componentScale ? scale : componentScale;
+      const coefficient = BigInt(digits), multiplier = { ms: 1n, s: 1000n, m: 60000n, h: 3600000n, d: 86400000n }[part[2]];
+      total = total * (nextScale / scale) + coefficient * multiplier * (nextScale / componentScale);
+      if (coefficient > max || total > max) throw new Error("La précision ou la durée dépasse la limite du moteur.");
+      scale = nextScale; rest = rest.slice(part[0].length);
     }
-    if (!Number.isSafeInteger(total)) throw new Error("La durée doit être un nombre entier de millisecondes représentable.");
-    return total;
+    if (total % scale !== 0n || total / scale > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("La durée doit être un nombre entier de millisecondes représentable.");
+    return Number(total / scale);
   }
   function cadence(ms) {
     for (const [unit, divisor] of [["jour(s)", 86400000], ["heure(s)", 3600000], ["minute(s)", 60000], ["seconde(s)", 1000]]) {
@@ -49,8 +63,8 @@
     text = text.trim().replace(/\s+/g, " ");
     const prefix = /^(?:CRON_TZ|TZ)=(\S+) (.+)$/.exec(text);
     if (prefix) { zone = prefix[1]; text = prefix[2]; }
-    new Intl.DateTimeFormat("fr", { timeZone: zone }).format();
-    if (text.startsWith("@every ")) {
+    validZone(zone);
+    if (/^@every /i.test(text)) {
       if (prefix) throw new Error("@every n’accepte pas de préfixe TZ ; utilisez le champ Fuseau.");
       const parts = text.slice(7).split("/");
       if (parts.length > 2 || parts.some((part) => !part)) throw new Error("Intervalle attendu : @every 1h30m ou @every 1h/10m.");
@@ -90,11 +104,15 @@
   }
 
   let dialog, botSelect, content, status, toolbar, view = "list", current = null;
-  let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, historySignature = "", fieldId = 0;
-  const launches = new Map(), histories = new Map();
+  let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
+  let historyLimit = 200, rangeLimit = 200;
+  // Only compact running/nonce summaries survive a history request. The server
+  // currently has no pagination; full responses are transient, not cached.
+  const launches = new Map(), histories = new Map(), historyReads = new Map();
   const liveBots = () => (panels.state.bots || []).filter((b) => !b.deleted);
   const botId = () => botSelect.value;
-  const items = () => (panels.state.routines?.items || []).filter((item) => item.routine.bot_id === botId());
+  const items = () => (panels.state.routines?.items || []).filter((item) => item.routine.bot_id === botId()).sort((a, b) => Number(b.routine.enabled) - Number(a.routine.enabled) || a.routine.name.localeCompare(b.routine.name, "fr") || a.routine.routine_id.localeCompare(b.routine.routine_id));
+  const tracked = (r) => launches.has(r.routine_id) || histories.get(r.routine_id)?.running;
   const idBody = (r) => ({ bot_id: r.bot_id, routine_id: r.routine_id });
   const active = (token) => dialog.open && token === revision;
   function message(text, error = false) { status.textContent = text; status.classList.toggle("routines-error", error); }
@@ -123,7 +141,7 @@
     status = node("p", "routines-note"); status.setAttribute("role", "status");
     content = node("div", "routines-content");
     dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, status, content);
-    dialog.addEventListener("close", () => { revision++; current = null; content.replaceChildren(); });
+    dialog.addEventListener("close", () => { if (!dialog.open) { revision++; current = null; content.replaceChildren(); } });
     (document.getElementById("panels") || document.body).append(dialog);
   }
   function open(bot) {
@@ -136,14 +154,26 @@
     void reload();
   }
   async function reload() {
-    if (busy) return;
-    try { await panels.refresh(); if (dialog.open) { signature = ""; renderList(); if (view === "history") await showHistory(current); } }
-    catch (error) { if (dialog.open) message(`Actualisation impossible : ${error.message}`, true); }
+    if (busy || reloading) return;
+    const token = revision; reloading = true;
+    try {
+      await panels.refresh();
+      // Explicit refresh must repair cached running states too, not only /state.
+      for (const { routine: r } of items()) {
+        if (!active(token) || busy) break;
+        if (histories.has(r.routine_id) || launches.has(r.routine_id)) {
+          try { await readHistory(r); settleLaunch(r); }
+          catch (error) { if (active(token)) message(`Historique à actualiser : ${error.message}`, true); }
+        }
+      }
+      if (active(token)) { signature = ""; renderList(); if (view === "history") await showHistory(current); }
+    } catch (error) { if (active(token)) message(`Actualisation impossible : ${error.message}`, true); }
+    finally { reloading = false; }
   }
   function renderList() {
     if (!dialog?.open || view !== "list") return;
     const list = items();
-    const next = JSON.stringify([list, busy, [...launches], [...histories].map(([id, h]) => [id, h.occurrences])]);
+    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories]]);
     if (signature === next) return;
     signature = next; toolbar.hidden = false; content.replaceChildren();
     if (panels.state.routines?.error) content.append(node("p", "routines-error", panels.state.routines.error));
@@ -155,7 +185,7 @@
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${item.error}`));
       const actions = node("div", "routines-actions");
       actions.append(button("Modifier", () => edit(r)), button(r.enabled ? "Mettre en pause" : "Reprendre…", () => r.enabled ? mutate("/api/routines/pause", idBody(r), "Routine mise en pause.") : reviewResume(r)), button("Historique", () => showHistory(r)), button("Ouvrir le fil", () => openThread(r.conversation_id)));
-      const job = launches.get(r.routine_id), running = histories.get(r.routine_id)?.occurrences.some((o) => ["pending", "running"].includes(o.status.status));
+      const job = launches.get(r.routine_id), running = histories.get(r.routine_id)?.running;
       const run = button(job?.unknown ? "Vérifier / réessayer le lancement" : "Lancer maintenant", () => runNow(r));
       run.disabled = busy || Boolean(running) || Boolean(job && Date.now() < job.until);
       actions.append(run);
@@ -195,7 +225,7 @@
     content.replaceChildren(button("Retour à la liste", back));
     const form = node("form", "routines-editor"), fields = node("fieldset", "routines-fields");
     function field(label, tag = "input") { const wrap = node("label", "form-label", label), input = node(tag, "text-input"); input.id = input.name = `routine-field-${++fieldId}`; wrap.append(input); fields.append(wrap); return input; }
-    const name = field("Nom"); name.value = r?.name || ""; name.maxLength = 160;
+    const name = field("Nom"); name.value = r?.name || ""; name.maxLength = 80;
     const kind = field("Contenu", "select");
     for (const [value, label] of [["inline_prompt", "Prompt libre"], ["skill_invocation", "Skill · version épinglée"]]) { const opt = node("option", "", label); opt.value = value; kind.append(opt); }
     kind.value = r?.body.kind || "inline_prompt";
@@ -220,7 +250,8 @@
       if (mode.value === "once") {
         const at = Date.parse(`${once.value}Z`);
         if (!once.value || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
-        new Intl.DateTimeFormat("fr", { timeZone: zone.value.trim() }).format();
+        if (at <= Date.now()) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
+        validZone(zone.value.trim());
         return { trigger: { kind: "once", at }, zone: zone.value.trim(), text: `Une fois : ${date(at, zone.value.trim())}` };
       }
       return schedule(expression.value, zone.value.trim());
@@ -242,11 +273,11 @@
         event.preventDefault(); if (busy) return;
         try {
           const values = baseline(), p = parsed(), payload = { bot_id: botId() };
-          if (!name.value.trim()) throw new Error("Donnez un nom à la routine.");
+          if (!name.value.trim() || [...name.value.trim()].length > 80) throw new Error("Le nom doit contenir entre 1 et 80 caractères.");
           if (!r || values.name !== initial.name) payload.name = name.value;
           if (!r || ["kind", "prompt", "skill", "version"].some((key) => values[key] !== initial[key])) {
             if (kind.value === "inline_prompt") {
-              if (!prompt.value.trim() || new TextEncoder().encode(prompt.value).length > 256000) throw new Error("Le prompt doit contenir de 1 à 256 000 octets UTF-8.");
+              if (!prompt.value.trim()) throw new Error("Ajoutez des instructions. La requête complète est limitée à 64 Kio, encodage JSON compris.");
               payload.body = { kind: "inline_prompt", prompt: prompt.value };
             } else {
               if (!skill.value.trim() || !Number.isSafeInteger(Number(version.value)) || Number(version.value) < 1) throw new Error("Indiquez un identifiant et une version entière positive de skill.");
@@ -257,6 +288,7 @@
           if (r) Object.assign(payload, { routine_id: r.routine_id, modified_at: r.modified_at, schedule_version: r.schedule_version });
           else payload.enabled = enabled.checked;
           if (r && Object.keys(payload).length === 4) { back(); return; }
+          if (new TextEncoder().encode(JSON.stringify(payload)).length > 65536) throw new Error("La requête complète dépasse 64 Kio (encodage JSON compris). Raccourcissez le prompt ou utilisez une skill épinglée.");
           void mutate(r ? "/api/routines/update" : "/api/routines", payload, r ? "Routine enregistrée." : payload.enabled ? "Routine créée et activée." : "Routine créée en pause. Relisez son contenu avant de la reprendre.");
         } catch (error) { message(error.message, true); }
       });
@@ -285,35 +317,56 @@
       if (active(token)) { view = "list"; current = null; signature = ""; message(success); }
       try { await panels.refresh(); } catch { if (active(token)) message(`${success} Liste à actualiser.`, true); }
     } catch (error) {
-      if (active(token)) message(`Action non confirmée : ${error.message} Vos saisies sont conservées. Actualisez la liste avant de réessayer ; en cas de conflit, revenez à la liste puis rouvrez l’éditeur.`, true);
+      if (active(token)) {
+        const conflict = /Stale routine edit|changé depuis votre lecture|Routine changed|409/i.test(error.message);
+        const uncertain = /connexion.*interrompue|réponse illisible/i.test(error.message);
+        const reason = /schedule never fires|Schedule has no future slot/i.test(error.message) ? "L’horaire n’a plus de créneau futur. Choisissez un instant futur." : error.message;
+        const advice = conflict ? "Revenez à la liste, actualisez puis rouvrez l’éditeur." : uncertain ? "Vérifiez la liste avant de réessayer." : "Corrigez la saisie avant de réessayer.";
+        message(`${conflict ? "Conflit d’édition" : uncertain ? "Action non confirmée" : "Action refusée par le moteur"} : ${reason} Vos saisies sont conservées. ${advice}`, true);
+      }
     } finally {
       busy = false;
       if (active(token)) { if (view === "list") { signature = ""; renderList(); } else lock(); }
     }
   }
+  const pending = (o) => ["pending", "running"].includes(o.status.status);
   async function readHistory(r) {
-    const h = await panels.api(`/api/routines/history?bot_id=${encodeURIComponent(r.bot_id)}&routine_id=${encodeURIComponent(r.routine_id)}`);
-    histories.set(r.routine_id, h); return h;
+    const id = r.routine_id, request = (historyReads.get(id) || 0) + 1;
+    historyReads.set(id, request);
+    const h = await panels.api(`/api/routines/history?bot_id=${encodeURIComponent(r.bot_id)}&routine_id=${encodeURIComponent(id)}`);
+    if (!Array.isArray(h.occurrences) || !Array.isArray(h.missed_ranges)) throw new Error("L’historique du moteur est illisible.");
+    const job = launches.get(id), own = job && h.occurrences.find((o) => o.manual_nonce === job.nonce);
+    if (historyReads.get(id) === request) histories.set(id, { running: h.occurrences.some(pending), total: h.occurrences.length, own: own ? { nonce: own.manual_nonce, status: own.status.status } : null });
+    return h;
   }
-  async function showHistory(r) {
+  function settleLaunch(r) {
+    const job = launches.get(r.routine_id), own = histories.get(r.routine_id)?.own;
+    if (job && own?.nonce === job.nonce && !job.unknown && Date.now() >= job.until && !["pending", "running"].includes(own.status)) launches.delete(r.routine_id);
+  }
+  async function showHistory(r, more = "") {
     if (busy) return;
+    if (!more) { historyLimit = 200; rangeLimit = 200; }
+    else if (more === "occurrences") historyLimit += 200; else rangeLimit += 200;
     const token = ++revision; view = "history"; current = r; toolbar.hidden = true; botSelect.disabled = true; historySignature = "";
     content.replaceChildren(button("Retour à la liste", back), button("Actualiser l’historique", () => showHistory(r))); message("Chargement de l’historique…");
-    try { const h = await readHistory(r); if (active(token)) { message(""); renderHistory(r, h); } }
+    try { const h = await readHistory(r); settleLaunch(r); if (active(token)) { message(""); renderHistory(r, h); } }
     catch (error) { if (active(token)) message(`Historique indisponible : ${error.message}`, true); }
   }
   function renderHistory(r, h) {
-    const next = JSON.stringify([r.routine_id, h]);
+    const occurrences = h.occurrences.slice().sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || b.occurrence_id.localeCompare(a.occurrence_id)).slice(0, historyLimit);
+    const visibleRanges = h.missed_ranges.slice().sort((a, b) => b.from_inclusive - a.from_inclusive).slice(0, rangeLimit);
+    const next = JSON.stringify([r.routine_id, h.occurrences.length, h.missed_ranges.length, occurrences, visibleRanges]);
     if (historySignature === next) return;
     historySignature = next;
     content.replaceChildren(button("Retour à la liste", back), button("Actualiser l’historique", () => showHistory(r)), node("h3", "", r.name));
-    // Ranges first: the individual retained misses may be the oldest (review r2).
+    // Bound DOM work even when the unpaginated server returns years of history.
     const ranges = node("div", "routines-ranges"); ranges.append(node("h4", "", "Plages d’occurrences manquées"));
     if (!h.missed_ranges.length) ranges.append(node("p", "routines-note", "Aucune plage manquée."));
-    for (const range of h.missed_ranges.slice().sort((a, b) => b.from_inclusive - a.from_inclusive)) ranges.append(node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`));
-    content.append(ranges, node("h4", "", "Occurrences (plus récentes en premier)"));
+    for (const range of visibleRanges) ranges.append(node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`));
+    if (visibleRanges.length < h.missed_ranges.length) ranges.append(node("p", "routines-note", `${visibleRanges.length} plages sur ${h.missed_ranges.length}`), button("Afficher plus de plages", () => showHistory(r, "ranges")));
+    content.append(ranges, node("h4", "", `Occurrences : ${occurrences.length} sur ${h.occurrences.length} (plus récentes en premier)`));
     if (!h.occurrences.length) content.append(node("p", "routines-note", "Aucune occurrence."));
-    for (const o of h.occurrences.slice().sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc)) {
+    for (const o of occurrences) {
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
       row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`), node("code", "routines-id", o.occurrence_id));
@@ -321,6 +374,7 @@
       if (o.status.run_id) row.append(node("code", "routines-id", o.status.run_id), button("Ouvrir le fil du run", () => openThread(r.conversation_id)));
       content.append(row);
     }
+    if (occurrences.length < h.occurrences.length) content.append(button("Afficher plus d’occurrences", () => showHistory(r, "occurrences")));
   }
   async function runNow(r) {
     if (busy) return;
@@ -329,12 +383,15 @@
     const token = revision; busy = true; signature = ""; renderList(); message("Vérification du dernier lancement…");
     try {
       const h = await readHistory(r), own = job && h.occurrences.find((o) => o.manual_nonce === job.nonce);
-      if (own) { job.unknown = false; job.until = 0; }
-      if (h.occurrences.some((o) => ["pending", "running"].includes(o.status.status))) { message("Un lancement est déjà en attente ou en cours. Consultez son historique."); return; }
-      if (own) { launches.delete(r.routine_id); message("Le lancement précédent est confirmé dans l’historique. Cliquez à nouveau pour en demander un nouveau."); return; }
+      if (own && job.unknown) {
+        // This click was a retry, not permission to run again after a lost reply.
+        job.unknown = false; job.until = Date.now() + 3000;
+        if (active(token)) message("Le lancement précédent est confirmé dans l’historique.");
+        return;
+      }
+      if (h.occurrences.some(pending)) { if (active(token)) message("Un lancement est déjà en attente ou en cours. Consultez son historique."); return; }
+      if (own) { launches.delete(r.routine_id); job = null; } // A known terminal run must not swallow a new click.
       if (!job) { job = { nonce: crypto.randomUUID(), until: 0, unknown: true }; launches.set(r.routine_id, job); }
-      // Keep this nonce across close/reopen and lost responses. Retrying can
-      // never create a second intent for the same user click (CR16 + local rule).
       job.unknown = true;
       await panels.api("/api/routines/run-now", { ...idBody(r), nonce: job.nonce });
       job.unknown = false; job.until = Date.now() + 3000;
@@ -345,18 +402,23 @@
     finally { busy = false; if (active(token)) { signature = ""; renderList(); } }
   }
   async function pollHistory() {
-    if (!dialog?.open || busy || historyLoading || Date.now() - historyAt < 3000) return;
-    const r = view === "history" ? current : items().map((i) => i.routine).find((r) => launches.has(r.routine_id) || histories.get(r.routine_id)?.occurrences.some((o) => ["pending", "running"].includes(o.status.status)));
-    if (!r) return;
+    if (!dialog?.open || busy || reloading || historyLoading || Date.now() - historyAt < 3000) return;
+    const candidates = new Map(items().map((i) => i.routine).filter(tracked).map((r) => [r.routine_id, r]));
+    if (view === "history" && current) candidates.set(current.routine_id, current);
+    if (!candidates.size) return;
     const token = revision; historyAt = Date.now(); historyLoading = true;
     try {
-      const h = await readHistory(r), job = launches.get(r.routine_id);
-      const own = job && h.occurrences.find((o) => o.manual_nonce === job.nonce);
-      if (own && !job.unknown && Date.now() >= job.until && !["pending", "running"].includes(own.status.status)) launches.delete(r.routine_id);
-      if (active(token)) { if (view === "history") renderHistory(r, h); else { signature = ""; renderList(); } }
-    }
-    catch (error) { if (active(token)) message(`Historique à actualiser : ${error.message}`, true); }
-    finally { historyLoading = false; }
+      // Never let one approval-blocked run starve other routines. A failure of
+      // one history read must not prevent the remaining routines from updating.
+      for (const r of candidates.values()) {
+        if (!active(token) || busy || reloading) break;
+        try {
+          const h = await readHistory(r); settleLaunch(r);
+          if (active(token) && view === "history" && current.routine_id === r.routine_id) renderHistory(r, h);
+        } catch (error) { if (active(token)) message(`Historique à actualiser : ${error.message}`, true); }
+      }
+      if (active(token)) { signature = ""; renderList(); }
+    } finally { historyLoading = false; }
   }
   panels.register({
     id: "routines",
@@ -376,6 +438,6 @@
       if (!bot) { dialog.close(); panels.notify("Ce bot a été supprimé ; ses routines ne sont plus modifiables ici."); return; }
       renderList(); void pollHistory();
     },
-    wantsPolling: () => Boolean(dialog?.open),
+    wantsPolling: () => Boolean(dialog?.open) && (view === "history" || items().some((i) => tracked(i.routine))),
   });
 })();

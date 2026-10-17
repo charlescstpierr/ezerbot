@@ -56,10 +56,38 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             message_id TEXT NOT NULL,
             attachment_id TEXT NOT NULL REFERENCES attachments_staged(id),
             ordinal INTEGER NOT NULL,
-            PRIMARY KEY(message_id, attachment_id),
-            UNIQUE(message_id, ordinal)
+            PRIMARY KEY(conversation_id, message_id, attachment_id),
+            UNIQUE(conversation_id, message_id, ordinal)
         );",
     )?;
+    let scoped: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('attachments_message_links')
+         WHERE name = 'conversation_id' AND pk = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    let upgrade_pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'attachments_message_links_scoped')",
+        [], |row| row.get(0),
+    )?;
+    if !scoped || upgrade_pending {
+        // The caller owns the transaction. The staging table also makes this
+        // copy resumable if a caller ran migration without one and was killed.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS attachments_message_links_scoped (
+                conversation_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                attachment_id TEXT NOT NULL REFERENCES attachments_staged(id),
+                ordinal INTEGER NOT NULL,
+                PRIMARY KEY(conversation_id, message_id, attachment_id),
+                UNIQUE(conversation_id, message_id, ordinal)
+            );
+            INSERT OR IGNORE INTO attachments_message_links_scoped
+                SELECT conversation_id, message_id, attachment_id, ordinal FROM attachments_message_links;
+            DROP TABLE attachments_message_links;
+            ALTER TABLE attachments_message_links_scoped RENAME TO attachments_message_links;",
+        )?;
+    }
     Ok(())
 }
 
@@ -78,7 +106,10 @@ pub fn sniff(bytes: &[u8]) -> Result<ImageType> {
         Ok(ImageType::Webp)
     } else if bytes.len() >= 26
         && bytes.starts_with(b"BM")
-        && u32::from_le_bytes(bytes[2..6].try_into().unwrap()) as usize == bytes.len()
+        && {
+            let declared = u32::from_le_bytes(bytes[2..6].try_into().unwrap()) as usize;
+            declared == 0 || (26..=bytes.len()).contains(&declared)
+        }
         && matches!(
             u32::from_le_bytes(bytes[14..18].try_into().unwrap()),
             12 | 40 | 52 | 56 | 64 | 108 | 124
@@ -115,7 +146,7 @@ fn blob_path(base_path: &Path, sha256: &str) -> Result<PathBuf> {
 }
 
 /// Remove only our regular, hour-old temporary files, never content blobs or
-/// fresh uploads. Also callable at host startup; staging invokes it automatically.
+/// fresh uploads. Also callable at host startup; staging invokes it best-effort.
 pub fn sweep_temporaries(base_path: &Path) -> Result<usize> {
     let cutoff = SystemTime::now() - Duration::from_secs(3_600);
     let entries = match fs::read_dir(blob_directory(base_path)) {
@@ -192,7 +223,7 @@ pub fn stage(conn: &Connection, base_path: &Path, bytes: &[u8], now_ms: i64) -> 
         ));
     }
     let image_type = sniff(bytes)?;
-    sweep_temporaries(base_path)?;
+    let _ = sweep_temporaries(base_path);
     let sha256 = digest(bytes);
     let id = format!("attachment_{sha256}");
     write_blob(&blob_path(base_path, &sha256)?, bytes)?;
@@ -276,17 +307,6 @@ pub fn link_attachments(
             "conversation and message IDs are required".into(),
         ));
     }
-    let other_conversation: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM attachments_message_links
-         WHERE message_id = ?1 AND conversation_id <> ?2)",
-        params![message_id, conversation_id],
-        |row| row.get(0),
-    )?;
-    if other_conversation {
-        return Err(Error::InvalidInput(
-            "message belongs to another conversation".into(),
-        ));
-    }
     for id in ids {
         if get(conn, id)?.is_none() {
             return Err(Error::InvalidInput(format!("attachment not found: {id}")));
@@ -296,21 +316,25 @@ pub fn link_attachments(
         conn.execute(
             "INSERT INTO attachments_message_links(conversation_id, message_id, attachment_id, ordinal)
              SELECT ?1, ?2, ?3, COALESCE(MAX(ordinal) + 1, 0)
-             FROM attachments_message_links WHERE message_id = ?2
-             ON CONFLICT(message_id, attachment_id) DO NOTHING",
+             FROM attachments_message_links WHERE conversation_id = ?1 AND message_id = ?2
+             ON CONFLICT(conversation_id, message_id, attachment_id) DO NOTHING",
             params![conversation_id, message_id, id],
         )?;
     }
     Ok(())
 }
 
-pub fn for_message(conn: &Connection, message_id: &str) -> Result<Vec<Attachment>> {
+pub fn for_message(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<Vec<Attachment>> {
     let mut query = conn.prepare(
         "SELECT a.id, a.sha256, a.image_type, a.byte_length, a.staged_at
          FROM attachments_message_links l JOIN attachments_staged a ON a.id = l.attachment_id
-         WHERE l.message_id = ?1 ORDER BY l.ordinal",
+         WHERE l.conversation_id = ?1 AND l.message_id = ?2 ORDER BY l.ordinal",
     )?;
-    let rows = query.query_map([message_id], attachment_row)?;
+    let rows = query.query_map(params![conversation_id, message_id], attachment_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -355,6 +379,12 @@ mod tests {
         bmp[..2].copy_from_slice(b"BM");
         bmp[2..6].copy_from_slice(&26_u32.to_le_bytes());
         bmp[14..18].copy_from_slice(&12_u32.to_le_bytes());
+        let mut padded_bmp = vec![0; 72];
+        padded_bmp[..2].copy_from_slice(b"BM");
+        padded_bmp[2..6].copy_from_slice(&70_u32.to_le_bytes());
+        padded_bmp[14..18].copy_from_slice(&40_u32.to_le_bytes());
+        let mut zero_size_bmp = padded_bmp.clone();
+        zero_size_bmp[2..6].copy_from_slice(&0_u32.to_le_bytes());
         for (bytes, expected) in [
             (PNG, ImageType::Png),
             (&b"\xff\xd8\xff\xe0"[..], ImageType::Jpeg),
@@ -362,6 +392,8 @@ mod tests {
             (GIF, ImageType::Gif),
             (&b"RIFF\x10\0\0\0WEBPVP8 "[..], ImageType::Webp),
             (bmp.as_slice(), ImageType::Bmp),
+            (padded_bmp.as_slice(), ImageType::Bmp),
+            (zero_size_bmp.as_slice(), ImageType::Bmp),
         ] {
             assert_eq!(sniff(bytes).unwrap(), expected);
             assert!(expected.mime_type().starts_with("image/"));
@@ -459,12 +491,54 @@ mod tests {
         let ids = vec![b.id.clone(), a.id.clone(), b.id.clone()];
         link_attachments(&f.conn, "conversation", "message", &ids).unwrap();
         link_attachments(&f.conn, "conversation", "message", &ids).unwrap();
-        assert_eq!(for_message(&f.conn, "message").unwrap(), vec![b, a.clone()]);
-        assert!(link_attachments(&f.conn, "other", "message", &ids).is_err());
+        assert_eq!(
+            for_message(&f.conn, "conversation", "message").unwrap(),
+            vec![b.clone(), a.clone()]
+        );
+        link_attachments(&f.conn, "other", "message", std::slice::from_ref(&a.id)).unwrap();
+        assert_eq!(
+            for_message(&f.conn, "other", "message").unwrap(),
+            vec![a.clone()]
+        );
+        assert_eq!(
+            for_message(&f.conn, "conversation", "message").unwrap(),
+            vec![b, a.clone()]
+        );
+        assert!(for_message(&f.conn, "unrelated", "message")
+            .unwrap()
+            .is_empty());
         assert!(
             link_attachments(&f.conn, "conversation", "new", &[a.id, "missing".into()]).is_err()
         );
-        assert!(for_message(&f.conn, "new").unwrap().is_empty());
+        assert!(for_message(&f.conn, "conversation", "new")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_message_links_gain_conversation_scoping_without_losing_links() {
+        let f = Fixture::new();
+        let a = stage(&f.conn, &f.base, PNG, 1).unwrap();
+        let b = stage(&f.conn, &f.base, GIF, 2).unwrap();
+        f.conn.execute_batch("DROP TABLE attachments_message_links;
+            CREATE TABLE attachments_message_links (
+                conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                attachment_id TEXT NOT NULL REFERENCES attachments_staged(id), ordinal INTEGER NOT NULL,
+                PRIMARY KEY(message_id, attachment_id), UNIQUE(message_id, ordinal));").unwrap();
+        link_legacy(&f.conn, &a.id);
+        migrate(&f.conn).unwrap();
+        migrate(&f.conn).unwrap();
+        assert_eq!(for_message(&f.conn, "first", "1").unwrap(), vec![a]);
+        link_attachments(&f.conn, "second", "1", std::slice::from_ref(&b.id)).unwrap();
+        assert_eq!(for_message(&f.conn, "second", "1").unwrap(), vec![b]);
+    }
+
+    fn link_legacy(conn: &Connection, attachment_id: &str) {
+        conn.execute(
+            "INSERT INTO attachments_message_links VALUES ('first', '1', ?1, 0)",
+            [attachment_id],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -483,7 +557,9 @@ mod tests {
         link_attachments(&tx, "conversation", "message", std::slice::from_ref(&a.id)).unwrap();
         tx.rollback().unwrap();
         assert!(get(&f.conn, &a.id).unwrap().is_none());
-        assert!(for_message(&f.conn, "message").unwrap().is_empty());
+        assert!(for_message(&f.conn, "conversation", "message")
+            .unwrap()
+            .is_empty());
         // An unreferenced content blob after rollback can be staged again safely.
         assert_eq!(stage(&f.conn, &f.base, PNG, 2).unwrap().id, a.id);
     }

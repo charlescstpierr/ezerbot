@@ -3,9 +3,11 @@
 //! with no additional length cutoff. Debounce and cancellation are host duties;
 //! expired caption leases can be reclaimed here after the 150-second deadline.
 //! RC01's SKIPPED cooldown is global, independent of image, model and draft.
-//! The persistent cache keyed by image/model/context is a reconstruction choice;
-//! captions are deliberately bot-neutral: the host must not add bot identity or
-//! private instructions to the vision prompt. Grok's cache was not recovered.
+//! Persisting that cooldown across restarts is a conservative reconstruction
+//! choice; Grok's in-memory controller resets it when the app restarts.
+//! Cache reuse is limited to conversations that requested the exact context key.
+//! Captions remain bot-neutral: the host must not add bot identity or private
+//! instructions to the vision prompt. Grok's cache itself was not recovered.
 use crate::staging::{digest, valid_digest};
 use grokbot_engine::contracts::{Error, Result, Role};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -48,6 +50,7 @@ pub struct CaptionMessage {
         deserialize_with = "present_marker",
         skip_serializing_if = "Option::is_none"
     )]
+    // Legacy adapter metadata, not a purity marker in Grok's Yye predicate.
     pub branch: Option<Value>,
     #[serde(default = "message_kind")]
     pub kind: String,
@@ -134,6 +137,8 @@ impl CaptionStatus {
         }
     }
 
+    /// Key-local eligibility only. The host must also consult `backoff_until`,
+    /// or call `begin`, which applies the global cooldown atomically.
     pub fn retry_allowed(&self, now_ms: i64) -> bool {
         match self {
             Self::Skipped { retry_after } => now_ms >= *retry_after,
@@ -160,6 +165,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS attachments_precaption_backoff (
             scope TEXT PRIMARY KEY,
             retry_after INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS attachments_caption_uses (
+            conversation_id TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            model TEXT NOT NULL,
+            context_digest TEXT NOT NULL,
+            used_at INTEGER NOT NULL,
+            PRIMARY KEY(conversation_id, sha256, model, context_digest)
         );",
     )?;
     let columns = conn
@@ -179,7 +192,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS attachments_caption_updated ON attachments_caption_cache(updated_at);
-        CREATE TRIGGER IF NOT EXISTS attachments_caption_skipped_insert
+        DROP TRIGGER IF EXISTS attachments_caption_skipped_insert;
+        DROP TRIGGER IF EXISTS attachments_caption_skipped_update;
+        CREATE TRIGGER attachments_caption_skipped_insert
         AFTER INSERT ON attachments_caption_cache
         WHEN json_extract(NEW.status, '$.status') = 'skipped'
         BEGIN
@@ -187,7 +202,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             VALUES ('global', json_extract(NEW.status, '$.retry_after'))
             ON CONFLICT(scope) DO UPDATE SET retry_after = MAX(retry_after, excluded.retry_after);
         END;
-        CREATE TRIGGER IF NOT EXISTS attachments_caption_skipped_update
+        CREATE TRIGGER attachments_caption_skipped_update
         AFTER UPDATE OF status ON attachments_caption_cache
         WHEN json_extract(NEW.status, '$.status') = 'skipped'
         BEGIN
@@ -221,7 +236,6 @@ pub fn project(draft: &str, messages: &[CaptionMessage]) -> Result<PrecaptionCon
                 && m.from_user.is_none()
                 && m.from_agent.is_none()
                 && m.suppressed.is_none()
-                && m.branch.is_none()
                 && m.branched.as_ref() != Some(&Value::Bool(true))
         })
         .take(HUMAN_CONTEXT_MESSAGES)
@@ -300,12 +314,30 @@ pub fn backoff_until(conn: &Connection) -> Result<Option<i64>> {
         .optional()?)
 }
 
-/// Atomically claim a job, returning its completion token. Pending leases expire
-/// at the 150-second deadline, including after an app crash. The global cooldown
-/// check is part of the same write, so blocked new keys do not create cache rows.
-/// No transaction is opened or committed by this function.
-pub fn begin(conn: &Connection, key: &CacheKey, now_ms: i64) -> Result<Option<CaptionClaim>> {
+/// Record this conversation's use of the exact context key on every request,
+/// including cache hits and blocked claims. Then atomically claim a job. Pending
+/// leases expire at 150 seconds, including after an app crash. The global cooldown
+/// check is part of the claim write; blocked new keys do not create cache rows.
+/// The caller owns any transaction spanning the usage record and claim.
+pub fn begin(
+    conn: &Connection,
+    conversation_id: &str,
+    key: &CacheKey,
+    now_ms: i64,
+) -> Result<Option<CaptionClaim>> {
+    if conversation_id.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "conversation ID is required for captioning".into(),
+        ));
+    }
     validate_key(key)?;
+    conn.execute(
+        "INSERT INTO attachments_caption_uses(conversation_id, sha256, model, context_digest, used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(conversation_id, sha256, model, context_digest)
+         DO UPDATE SET used_at = MAX(used_at, excluded.used_at)",
+        params![conversation_id, key.sha256, key.model, key.context_digest, now_ms],
+    )?;
     let mut nonce = [0; 16];
     getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
     let claim = CaptionClaim {
@@ -359,20 +391,28 @@ pub fn finish(
     )? == 1)
 }
 
-/// Resolve a caption after the draft/history have changed, without reconstructing
-/// the original context digest. Only this image/model's completed captions count.
-pub fn latest_ready(conn: &Connection, sha256: &str, model: &str) -> Result<Option<String>> {
-    if !valid_digest(sha256) || model.trim().is_empty() {
+/// Resolve a caption after the draft/history have changed, but only among the
+/// exact context keys requested by this conversation. Another conversation's
+/// private draft/messages must never change this conversation's caption.
+pub fn latest_ready(
+    conn: &Connection,
+    conversation_id: &str,
+    sha256: &str,
+    model: &str,
+) -> Result<Option<String>> {
+    if conversation_id.trim().is_empty() || !valid_digest(sha256) || model.trim().is_empty() {
         return Err(Error::InvalidInput(
-            "invalid image/model for caption lookup".into(),
+            "invalid conversation/image/model for caption lookup".into(),
         ));
     }
     Ok(conn
         .query_row(
-            "SELECT json_extract(status, '$.text') FROM attachments_caption_cache
-         WHERE sha256 = ?1 AND model = ?2 AND json_extract(status, '$.status') = 'ready'
-         ORDER BY updated_at DESC LIMIT 1",
-            params![sha256, model],
+            "SELECT json_extract(c.status, '$.text') FROM attachments_caption_uses u
+         JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+         WHERE u.conversation_id = ?1 AND u.sha256 = ?2 AND u.model = ?3
+             AND json_extract(c.status, '$.status') = 'ready'
+         ORDER BY c.updated_at DESC LIMIT 1",
+            params![conversation_id, sha256, model],
             |row| row.get(0),
         )
         .optional()?)
@@ -404,6 +444,14 @@ mod tests {
     }
     fn ready(text: &str) -> CaptionStatus {
         CaptionStatus::Ready { text: text.into() }
+    }
+    // Existing per-key cases share one explicit conversation; isolation cases
+    // below call the public APIs directly with distinct conversation IDs.
+    fn begin(conn: &Connection, key: &CacheKey, now_ms: i64) -> Result<Option<CaptionClaim>> {
+        super::begin(conn, "conversation", key, now_ms)
+    }
+    fn latest_ready(conn: &Connection, sha256: &str, model: &str) -> Result<Option<String>> {
+        super::latest_ready(conn, "conversation", sha256, model)
     }
 
     #[test]
@@ -443,7 +491,6 @@ mod tests {
         messages.push(serde_json::from_value(serde_json::to_value(human(1)).unwrap()).unwrap());
         for marker in [
             json!({"author": {"type": "user", "id": "current-user"}}),
-            json!({"branch": "thread"}),
             json!({"branched": true}),
             json!({"channel": "slack"}),
             json!({"channelSender": {"id": "sender"}}),
@@ -475,7 +522,6 @@ mod tests {
             "author",
             "fromAgent",
             "from_agent",
-            "branch",
             "channelSender",
             "fromUser",
             "suppressed",
@@ -513,6 +559,127 @@ mod tests {
                 admitted
             );
         }
+    }
+
+    #[test]
+    fn branch_metadata_is_not_a_yye_purity_marker() {
+        for branch in [json!("main"), json!(false), Value::Null] {
+            let mut value = serde_json::to_value(human(0)).unwrap();
+            value["branch"] = branch;
+            let message = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                project("", &[message]).unwrap().human_messages,
+                vec!["human 0"]
+            );
+        }
+    }
+
+    #[test]
+    fn latest_ready_is_scoped_to_conversation() {
+        let conn = connection();
+        let image = digest(b"same image");
+        let b = cache_key(
+            &image,
+            "vision",
+            &project("what is this?", &[human(0)]).unwrap(),
+        )
+        .unwrap();
+        let claim_b = super::begin(&conn, "conversation-b", &b, 100)
+            .unwrap()
+            .unwrap();
+        assert!(finish(&conn, &b, &claim_b, &ready("B caption"), 100).unwrap());
+        let a = cache_key(
+            &image,
+            "vision",
+            &project("A private question", &[human(1)]).unwrap(),
+        )
+        .unwrap();
+        let claim_a = super::begin(&conn, "conversation-a", &a, 200)
+            .unwrap()
+            .unwrap();
+        assert!(finish(
+            &conn,
+            &a,
+            &claim_a,
+            &ready("caption from A's secret context"),
+            200
+        )
+        .unwrap());
+        assert_eq!(
+            super::latest_ready(&conn, "conversation-b", &image, "vision").unwrap(),
+            Some("B caption".into())
+        );
+        assert_eq!(
+            super::latest_ready(&conn, "conversation-a", &image, "vision").unwrap(),
+            Some("caption from A's secret context".into())
+        );
+        assert_eq!(
+            super::latest_ready(&conn, "conversation-c", &image, "vision").unwrap(),
+            None
+        );
+        assert!(super::begin(&conn, "", &a, 300).is_err());
+        assert!(super::latest_ready(&conn, "", &image, "vision").is_err());
+    }
+
+    #[test]
+    fn caption_usage_is_recorded_on_pending_ready_and_global_backoff_refusals() {
+        let conn = connection();
+        let key = key();
+        let claim = super::begin(&conn, "first", &key, 100).unwrap().unwrap();
+        assert!(super::begin(&conn, "pending-reader", &key, 101)
+            .unwrap()
+            .is_none());
+        assert!(finish(
+            &conn,
+            &key,
+            &claim,
+            &ready("shared exact-context caption"),
+            102
+        )
+        .unwrap());
+        assert!(super::begin(&conn, "ready-reader", &key, 103)
+            .unwrap()
+            .is_none());
+        for conversation in ["pending-reader", "ready-reader"] {
+            assert_eq!(
+                super::latest_ready(&conn, conversation, &key.sha256, &key.model).unwrap(),
+                Some("shared exact-context caption".into())
+            );
+        }
+        let blocked = cache_key(
+            &digest(b"other image"),
+            &key.model,
+            &project("draft", &[]).unwrap(),
+        )
+        .unwrap();
+        save(&conn, &key, &CaptionStatus::skipped(200)).unwrap();
+        assert!(super::begin(&conn, "blocked-reader", &blocked, 300)
+            .unwrap()
+            .is_none());
+        assert!(cached(&conn, &blocked).unwrap().is_none());
+        assert!(super::begin(&conn, "blocked-reader", &blocked, 250)
+            .unwrap()
+            .is_none());
+        let used_at: i64 = conn.query_row(
+            "SELECT used_at FROM attachments_caption_uses WHERE conversation_id = 'blocked-reader'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(used_at, 300);
+        let after_backoff = super::begin(&conn, "later-reader", &blocked, 600_200)
+            .unwrap()
+            .unwrap();
+        assert!(finish(
+            &conn,
+            &blocked,
+            &after_backoff,
+            &ready("requested exact context"),
+            600_201
+        )
+        .unwrap());
+        assert_eq!(
+            super::latest_ready(&conn, "blocked-reader", &blocked.sha256, &blocked.model).unwrap(),
+            Some("requested exact context".into())
+        );
     }
 
     #[test]

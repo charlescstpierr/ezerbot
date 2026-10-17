@@ -1,5 +1,7 @@
 # Analyse de Grok Bot et architecture de reconstruction en Rust
 
+Le [calcul candidat des horaires](reports/cron-candidate-replay.md) a été exécuté sur 16 cas datés, dont les deux changements d’heure. Le [suivi des runs](reports/routine-run-conversation.md) sépare modifications de routine et exécutions. Les [cartes mémoire](reports/memory-widget-consumer.md) séparent promotion de faits, reçu au bot et état traité. Les garanties serveur restent explicites dans ces rapports. Vérification hors ligne : `python3 tools/verify-memory-routines-followup.py`.
+
 La [reprise Messages .71](reports/messages-worker-recovery.md), le [chemin natif jusqu’à osascript](reports/native-messages-recovery.md) et les [scénarios REA avec fixtures](reports/messages-worker-slice-replay.md) précisent les pertes de résultat après effet. Le cache reste volatil et aucune garantie de déduplication durable n’est établie. Vérification hors ligne : `python3 tools/verify-messages-recovery-followup.py`.
 
 L’utilisateur vise désormais la parité fonctionnelle de son app avec Grok Bot. Le [découpage de livraison](reports/app-parity-delivery.md) part de l’app actuelle et la [proposition du premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md) couvre groupes, mentions et délégation dans le fil. Cette proposition est à relire; ce lot n’est pas encore implémenté.

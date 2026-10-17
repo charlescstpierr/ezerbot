@@ -8,7 +8,11 @@
 //! {bot_id}, lists active owned/private and workspace/team facts. POST children
 //! /forget, /correct and /promote require bot_id and fact_id/text or fact_ids.
 //! Promotion accepts ONE batch of <=100; earlier successful requests survive a
-//! later failure (RC03). Run-trace redaction is the later gb-memory-forget slice.
+//! later failure (RC03). Forgetting atomically wipes the correction lineage,
+//! redacts run replay/cards and invalidates covering summaries. Regeneration is
+//! lazy, through the engine's next context assembly, never an extra model call
+//! inside a write transaction. This is a local privacy policy, not a recovered
+//! Grok server algorithm (CM12). User-authored transcript entries are unchanged.
 use super::Context;
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::contracts::{
@@ -460,8 +464,119 @@ fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
         ));
     }
     let snapshots = facts::forget(conn, bot, id).map_err(memory_error)?;
-    // Snapshots retain text/provenance for gb-memory-forget, never in responses.
+    // Use every predecessor's original text AND provenance before discarding
+    // the snapshots. A correction may have happened in another conversation.
+    for snapshot in &snapshots {
+        if !snapshot.text.is_empty() {
+            redact_traces(conn, snapshot)?;
+        }
+    }
     Ok(json!({"forgotten": snapshots.iter().map(|fact| &fact.fact_id).collect::<Vec<_>>()}))
+}
+
+/// Redact before the caller commits either the route or the tool result. Team
+/// facts may have been echoed by any bot, including a since-deleted owner. A
+/// private fact must not alter another bot's independent journal.
+fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
+    use grokbot_engine::{compaction, run_loop, store};
+    use std::collections::BTreeSet;
+
+    // remember deduplicates after whitespace normalization (RC02). Its replay
+    // arguments can therefore differ from the retained fact text. Recover only
+    // aliases whose successful result points to this exact fact, not unrelated
+    // calls that happen to have similar prose.
+    let mut statement = conn.prepare(
+        "SELECT json_extract(c.payload,'$.arguments.text') FROM engine_run_events c
+         JOIN engine_run_events o ON o.run_id=c.run_id AND o.kind='tool_result'
+             AND json_extract(o.payload,'$.call_id')=json_extract(c.payload,'$.call_id')
+         WHERE c.kind='tool_call' AND json_extract(c.payload,'$.name') IN ('remember','correct_fact')
+             AND json_extract(o.payload,'$.outcome.output.fact.fact_id')=?1
+             AND json_type(c.payload,'$.arguments.text')='text'",
+    )?;
+    let mut texts = statement
+        .query_map([&fact.fact_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    texts.insert(fact.text.clone());
+    texts.retain(|text| !text.is_empty());
+    let bots = if fact.scope == Scope::Team {
+        let mut statement = conn.prepare(
+            "SELECT bot_id FROM engine_runs UNION SELECT bot_id FROM wrapper_conversations WHERE account_id=?1",
+        )?;
+        let mut bots = statement
+            .query_map([ACCOUNT], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        bots.insert(fact.bot_id.clone());
+        bots
+    } else {
+        BTreeSet::from([fact.bot_id.clone()])
+    };
+    let mut covering = BTreeSet::new();
+    let mut conversations = BTreeSet::new();
+    if let (Some(conversation), Some(entry)) =
+        (&fact.provenance.conversation_id, &fact.provenance.entry_id)
+    {
+        covering.insert((conversation.clone(), entry.clone()));
+    }
+    for bot in bots {
+        let mut statement =
+            conn.prepare("SELECT run_id,conversation_id FROM engine_runs WHERE bot_id=?1")?;
+        let runs = statement
+            .query_map([&bot], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (run, conversation) in runs {
+            // Replay coalesces streamed deltas. A phrase split over two events
+            // is covered by the first entry's ID in a compaction summary.
+            for item in run_loop::replay_items(&store::events(conn, &run, 0)?)? {
+                let value =
+                    serde_json::to_value(&item).map_err(grokbot_engine::contracts::Error::from)?;
+                if texts.iter().any(|text| contains_text(&value, text)) {
+                    covering.insert((conversation.clone(), item.entry_id));
+                }
+            }
+            conversations.insert(conversation);
+        }
+        let mut statement =
+            conn.prepare("SELECT id FROM wrapper_conversations WHERE account_id=?1 AND bot_id=?2")?;
+        conversations.extend(
+            statement
+                .query_map(params![ACCOUNT, bot], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+        // Longest aliases first, before a shorter one can obscure a match.
+        let mut texts = texts.iter().collect::<Vec<_>>();
+        texts.sort_by_key(|text| std::cmp::Reverse(text.len()));
+        for text in texts {
+            store::redact_payloads(conn, &bot, text)?;
+        }
+    }
+    for (conversation, entry) in covering {
+        compaction::invalidate_covering(conn, &conversation, &entry)?;
+    }
+    for conversation in conversations {
+        // Even without a covering summary, memory blocks/readers may already be
+        // in flight. Bump the source revision so the gateway rebuilds them. The
+        // synthetic ID cannot cover modern summaries; legacy unknown-coverage
+        // summaries are conservatively invalidated by the compaction API.
+        compaction::invalidate_covering(
+            conn,
+            &conversation,
+            &format!("forgotten:{}", fact.fact_id),
+        )?;
+    }
+    Ok(())
+}
+
+fn contains_text(value: &Value, text: &str) -> bool {
+    match value {
+        Value::String(value) => value.contains(text),
+        Value::Array(values) => values.iter().any(|value| contains_text(value, text)),
+        Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(text) || contains_text(value, text)),
+        _ => false,
+    }
 }
 
 pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {

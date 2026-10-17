@@ -17,8 +17,9 @@
     // Overlapping refreshes must not turn a proven delivery back into “pending”.
     if (previous?.receipt?.wake?.status === "delivered" && receipt?.wake?.status === "pending"
         && previous.receipt.resolution_id === receipt.resolution_id) return;
-    if (receipt && JSON.stringify(previous?.receipt) !== JSON.stringify(receipt)) {
-      activity.set(request.entry_id, { ...previous, receipt, error: null });
+    if ((receipt && JSON.stringify(previous?.receipt) !== JSON.stringify(receipt))
+        || (previous?.error && request.status?.status !== "pending")) {
+      activity.set(request.entry_id, { ...previous, ...(receipt ? { receipt } : {}), error: null });
       changed();
     }
   }
@@ -27,10 +28,22 @@
   // Removing one affects future reviews, not an action already admitted.
   let settings;
   let rulesKey;
+  let expiryTimer;
+  const pendingApproval = (request) => request.status?.status === "pending"
+    && request.kind?.kind === "approval" && Number.isFinite(request.kind.expires_at);
+  function scheduleExpiry(state) {
+    window.clearTimeout(expiryTimer);
+    const deadlines = (state.forms?.requests || []).filter(pendingApproval).map((request) => request.kind.expires_at);
+    if (!deadlines.length) return;
+    // No polling while a person is thinking. A one-shot check after the next
+    // approval deadline also works when no other shell refresh is scheduled.
+    const delay = Math.min(2147483647, Math.max(1000, Math.min(...deadlines) - Date.now() + 1000));
+    expiryTimer = window.setTimeout(() => { panels.refresh().catch(() => {}); }, delay);
+  }
   function renderRules(state) {
     if (!settings) return;
     const rules = state.forms?.rules || [];
-    const key = JSON.stringify([rules, Boolean(state.forms?.error)]);
+    const key = JSON.stringify([rules, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
     if (key === rulesKey) return;
     rulesKey = key;
     settings.replaceChildren();
@@ -48,21 +61,26 @@
     for (const rule of rules) {
       const row = document.createElement("p");
       const description = document.createElement("span");
-      description.textContent = `${rule.route.requesting_bot_id} · ${rule.tool} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : "Arguments identiques"} `;
+      const botName = state.bots?.find((bot) => bot.id === rule.route.requesting_bot_id)?.name || rule.route.requesting_bot_id;
+      description.textContent = `${botName} · ${rule.tool} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Retirer la règle";
       remove.addEventListener("click", async () => {
         remove.disabled = true;
         try {
-          await panels.api("/api/approvals/rules/revoke", {
+          const response = await panels.api("/api/approvals/rules/revoke", {
             requesting_bot_id: rule.route.requesting_bot_id,
             target_bot_id: rule.route.target_bot_id,
             tool: rule.tool, args_digest: rule.args_digest, scope: rule.scope,
           });
-          await panels.refresh();
-        } catch { panels.notify("Impossible de retirer la règle. Actualisez puis réessayez."); }
-        finally { remove.disabled = false; }
+          renderRules({ ...panels.state, forms: { ...panels.state.forms, rules: response.rules } });
+        } catch {
+          panels.notify("Retrait non confirmé. Actualisez puis réessayez.");
+          return;
+        } finally { remove.disabled = false; }
+        // A failed follow-up read cannot undo an acknowledged rule retirement.
+        await panels.refresh().catch(() => panels.notify("Règle retirée. L’actualisation de l’état reste à faire."));
       });
       row.append(description, remove);
       settings.append(row);
@@ -81,12 +99,14 @@
         }
       }
       renderRules(state);
+      scheduleExpiry(state);
     },
     wantsPolling({ state }) {
       // SR01/SR02: accepted is not proof of resumption. /api/state projects the
       // current receipt without re-sending form fields or any secret value.
       return [...activity.values()].some((item) => item.busy || item.receipt?.wake?.status === "pending")
-        || (state.forms?.requests || []).some((request) => request.status?.status === "pending");
+        || (state.forms?.requests || []).some((request) => request.receipt?.wake?.status === "pending"
+          || (pendingApproval(request) && request.kind.expires_at <= Date.now() + 1000));
     },
     async onCardAction(message, action, detail, context) {
       if (!kinds.has(message.kind) || !action.startsWith("forms.")) return false;
@@ -97,10 +117,12 @@
       }
       const previous = activity.get(request.entry_id);
       if (previous?.busy) return true;
-      // A stable, per-entry ID makes an uncertain network retry idempotent even
-      // after a renderer reload. The server's first resolution always wins.
+      // Retries of one intent stay idempotent, even after a renderer reload.
+      // Opposite decisions and cancel-vs-submit must never replay one another.
+      // Form/secret values are intentionally NOT part of this non-sensitive ID.
+      const intent = action === "forms.decide" ? `${action}:${JSON.stringify(detail?.decision)}` : action;
       const body = {
-        entry_id: request.entry_id, submission_id: `ui:${request.entry_id}`,
+        entry_id: request.entry_id, submission_id: `ui:${request.entry_id}:${intent}`,
         conversation_id: context.conversation.id,
       };
       let path;
@@ -120,10 +142,15 @@
         const response = await panels.api(path, body);
         if (!response.accepted || !response.receipt?.wake) throw new Error("Missing receipt");
         activity.set(request.entry_id, { busy: false, receipt: response.receipt });
-      } catch {
-        // Do not echo an exception or the submitted data (especially a secret).
+      } catch (error) {
+        // api() wraps transport/decoding failures in these fixed shell messages;
+        // other rejections are HTTP errors. Never echo the exception or data.
+        const uncertain = error instanceof TypeError || ["Missing receipt",
+          "La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible.",
+        ].includes(error?.message);
         activity.set(request.entry_id, { ...previous, busy: false,
-          error: "Envoi non confirmé. Actualisez l’état avant de réessayer." });
+          error: uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
+            : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
         delete body.value;
         changed();

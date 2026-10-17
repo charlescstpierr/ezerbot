@@ -33,7 +33,7 @@ export function useHumanInput(message, onAction) {
       return false;
     } finally { lock.current = false; setSending(false); }
   }
-  return { request, receipt, status, pending, busy, error: activity?.error || error, act };
+  return { request, receipt, status, pending, busy, error: status && status !== "pending" ? "" : activity?.error || error, act };
 }
 
 export function HumanInputCard({ message, title, input, children }) {
@@ -42,23 +42,27 @@ export function HumanInputCard({ message, title, input, children }) {
   const wake = receipt?.wake;
   const delivered = wake?.status === "delivered" && typeof wake.run_id === "string" && Number.isInteger(wake.first_event_seq);
   const available = request.entry_id && request.route && request.kind?.kind === message.kind && labels[status];
-  const recorded = message.kind === "approval" ? "Décision enregistrée" : message.kind === "secret" ? "Secret enregistré" : "Réponse enregistrée";
-  const statusLabel = status === "resolved" || (status === "pending" && receipt) ? recorded : labels[status];
+  const recorded = message.kind === "approval" ? "Autorisée" : message.kind === "secret" ? "Secret enregistré" : "Réponse enregistrée";
+  const statusLabel = status === "resolved" ? recorded : status === "pending" && receipt ? "Résolution reçue · Vérification de l’état…" : labels[status];
+  const requesterId = request.route?.requesting_bot_id;
+  const requesterName = window.GrokbotPanels?.state?.bots?.find((bot) => bot.id === requesterId)?.name || requesterId;
+  const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
+    ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
   return (
     <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong></header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">Demande de {request.route.requesting_bot_id} · {statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">Demande de {requesterName} · {statusLabel}</p>
         {children}
         <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}
           {!busy && wake?.status === "pending" && "Le bot reprend…"}
           {!busy && delivered && "Repris"}
-          {!busy && wake?.status === "failed" && `La reprise a échoué${wake.reason ? ` : ${wake.reason}` : "."}`}
+          {!busy && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
         </div>
       </>}
       {error && <p className="mt-2 text-sm text-muted-foreground" role="alert">{error}</p>}
-      {(!available || error || wake?.status === "failed") && <button type="button" className="gb-retry mt-2" disabled={busy} onClick={() => act("forms.refresh")}>Actualiser l’état</button>}
+      {(!available || error) && <button type="button" className="gb-retry mt-2" disabled={busy} onClick={() => act("forms.refresh")}>Actualiser l’état</button>}
     </article>
   );
 }
@@ -93,7 +97,7 @@ export function Card({ message, busy, onAction }) {
               : field.field_type.kind === "boolean"
                 // Required boolean means a value is required, not that it must be true.
                 ? <input type="checkbox" name={`field-${index}`} />
-                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} />}
+                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} pattern={field.required && field.field_type.kind === "text" ? ".*\\S.*" : undefined} />}
           </label>)}
           <div className="flex flex-wrap gap-2"><button className="gb-retry gb-retry-primary" type="submit">Envoyer les réponses</button><button className="gb-retry" type="button" onClick={() => act("forms.cancel")}>Annuler</button></div>
         </fieldset>

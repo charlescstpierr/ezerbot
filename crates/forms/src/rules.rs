@@ -3,8 +3,10 @@
 //! REA `goal-permissions-secrets.md` PS01/PS05: save Always before resolving;
 //! a failed save must fall back to AllowOnce in the approval owner. PS04 orders
 //! never < ask < always. This reconstruction gives any matching Block precedence.
-//! Grants are exact-tool and digest-bound, including Subject/Global labels: this
-//! local contract has no resource/subject selector that could safely broaden them.
+//! PS01 Global grants cover the exact tool across arguments. Subject/Call bind
+//! the digest because no subject extractor exists. Standing rules do not replace
+//! the per-request digest-bound, single-use grant required at dispatch. The host
+//! authenticates principal-conversation consent and owns bot/workspace isolation.
 //! PS06 does not recover the remote natural-language reviewer. Instructions below
 //! are configuration for that reviewer, never substring/glob authorization rules.
 //! All mutations join the caller's transaction; removal does not cancel inflight
@@ -38,8 +40,9 @@ pub struct PermissionRule {
     pub rule_id: String,
     pub tool: String,
     pub scope: RuleScope,
-    /// Required for Allow and Call. A Block with None denies all arguments for
-    /// this exact tool; None is never an unbound standing authorization.
+    /// Required for Call/Subject; Global requires None and covers this exact
+    /// tool across arguments (PS01). A resulting execution grant must still bind
+    /// the current request's digest, not the action that created the rule.
     pub args_digest: Option<String>,
     pub effect: Effect,
     pub created_at: i64,
@@ -85,7 +88,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             created_at INTEGER NOT NULL,
             CHECK(length(trim(rule_id)) > 0 AND length(trim(tool)) > 0),
             CHECK(args_digest IS NULL OR length(trim(args_digest)) > 0),
-            CHECK((effect = 'block' AND scope != 'call') OR args_digest IS NOT NULL)
+            CHECK((scope = 'global' AND args_digest IS NULL)
+               OR (scope != 'global' AND args_digest IS NOT NULL))
         );
         CREATE INDEX IF NOT EXISTS forms_permission_rules_tool ON forms_permission_rules(tool);
         CREATE TABLE IF NOT EXISTS forms_auto_review_config (
@@ -186,10 +190,7 @@ pub fn evaluate_rule(
     let mut allowed = None;
     for rule in list_rules(conn)? {
         if rule.tool != tool
-            || rule
-                .args_digest
-                .as_deref()
-                .is_some_and(|digest| digest != args_digest)
+            || (rule.scope != RuleScope::Global && rule.args_digest.as_deref() != Some(args_digest))
         {
             continue;
         }
@@ -245,10 +246,13 @@ fn nonblank(value: &str, message: &str) -> Result<()> {
 fn validate_rule(rule: &PermissionRule) -> Result<()> {
     nonblank(&rule.rule_id, "rule ID must not be empty")?;
     nonblank(&rule.tool, "tool must not be empty")?;
-    if let Some(digest) = &rule.args_digest {
-        nonblank(digest, "argument digest must not be empty")?;
-    } else if rule.effect == Effect::Allow || rule.scope == RuleScope::Call {
-        return Err(invalid("allow and call rules require an argument digest"));
+    match (rule.scope, &rule.args_digest) {
+        (RuleScope::Global, None) => {}
+        (RuleScope::Global, Some(_)) => {
+            return Err(invalid("global rules must omit the argument digest"));
+        }
+        (_, Some(digest)) => nonblank(digest, "argument digest must not be empty")?,
+        (_, None) => return Err(invalid("call and subject rules require an argument digest")),
     }
     Ok(())
 }
@@ -276,8 +280,8 @@ mod tests {
     }
 
     #[test]
-    fn rules_allow_is_bound_to_tool_and_digest_in_every_scope() {
-        for scope in [RuleScope::Call, RuleScope::Subject, RuleScope::Global] {
+    fn rules_call_and_subject_allow_are_bound_to_tool_and_digest() {
+        for scope in [RuleScope::Call, RuleScope::Subject] {
             let conn = connection();
             let grant = rule("allow", Effect::Allow, scope, Some("digest-a"));
             save_rule(&conn, &grant).unwrap();
@@ -296,11 +300,57 @@ mod tests {
     }
 
     #[test]
+    fn rules_global_allow_covers_new_arguments_but_not_other_tools() {
+        let conn = connection();
+        let grant = rule("global", Effect::Allow, RuleScope::Global, None);
+        save_rule(&conn, &grant).unwrap();
+        for digest in ["digest-a", "digest-b"] {
+            assert_eq!(
+                evaluate(&conn, "delete_skill", digest).unwrap(),
+                Some(Effect::Allow)
+            );
+            assert_eq!(
+                evaluate_rule(&conn, "delete_skill", digest).unwrap(),
+                Some(grant.clone())
+            );
+        }
+        assert_eq!(evaluate(&conn, "other_tool", "digest-a").unwrap(), None);
+        assert!(save_rule(
+            &conn,
+            &rule(
+                "ambiguous",
+                Effect::Allow,
+                RuleScope::Global,
+                Some("digest-a")
+            )
+        )
+        .is_err());
+        assert!(save_rule(
+            &conn,
+            &rule("unbound-subject", Effect::Block, RuleScope::Subject, None)
+        )
+        .is_err());
+        save_rule(
+            &conn,
+            &rule("block", Effect::Block, RuleScope::Subject, Some("digest-b")),
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate(&conn, "delete_skill", "digest-b").unwrap(),
+            Some(Effect::Block)
+        );
+        assert_eq!(
+            evaluate(&conn, "delete_skill", "digest-a").unwrap(),
+            Some(Effect::Allow)
+        );
+    }
+
+    #[test]
     fn rules_block_wins_regardless_of_insertion_order_or_scope() {
         for block_first in [true, false] {
             let conn = connection();
-            let allow = rule("allow", Effect::Allow, RuleScope::Global, Some("digest-a"));
-            let block = rule("block", Effect::Block, RuleScope::Subject, None);
+            let allow = rule("allow", Effect::Allow, RuleScope::Subject, Some("digest-a"));
+            let block = rule("block", Effect::Block, RuleScope::Global, None);
             for rule in if block_first {
                 [&block, &allow]
             } else {

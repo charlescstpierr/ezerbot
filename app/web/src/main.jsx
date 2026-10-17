@@ -14,8 +14,16 @@ window.GrokbotChat = {
   },
 
   // Returns a stand-in for the former <textarea>.
-  mountInput(element, { placeholder, onInput, onSubmit }) {
-    const editor = new Editor({ element, ...editorOptions({ placeholder, onSubmit }), onUpdate: onInput });
+  mountInput(element, { placeholder, onInput, onSubmit, onFiles }) {
+    const options = editorOptions({ placeholder, onSubmit });
+    const editor = new Editor({
+      element, ...options, onUpdate: onInput,
+      editorProps: {
+        ...options.editorProps,
+        handlePaste: (_view, event) => Boolean(onFiles?.(event.clipboardData?.files, event)),
+        handleDrop: (_view, event) => Boolean(onFiles?.(event.dataTransfer?.files, event)),
+      },
+    });
     return {
       get value() { return readText(editor); },
       set value(text) { writeText(editor, text); },

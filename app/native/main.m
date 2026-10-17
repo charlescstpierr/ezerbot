@@ -306,6 +306,25 @@
     return nil;
 }
 
+- (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+ initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completionHandler {
+    // File access is user-mediated and limited to the local workspace, never an external frame.
+    if (webView != self.webView || ![self isWorkspaceURL:frame.request.URL] || self.terminating) {
+        completionHandler(nil);
+        return;
+    }
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = parameters.allowsDirectories ? @"Choisir un dossier" : @"Choisir des fichiers";
+    panel.prompt = @"Choisir";
+    panel.canChooseDirectories = parameters.allowsDirectories;
+    panel.canChooseFiles = !parameters.allowsDirectories;
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection;
+    panel.treatsFilePackagesAsDirectories = NO;
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        completionHandler(result == NSModalResponseOK ? panel.URLs : nil);
+    }];
+}
+
 - (void)webView:(WKWebView *)webView navigationAction:(WKNavigationAction *)action didBecomeDownload:(WKDownload *)download {
     (void)webView;
     (void)action;

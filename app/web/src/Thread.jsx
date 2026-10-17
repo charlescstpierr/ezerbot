@@ -7,6 +7,14 @@ import { Check, Clock, RefreshCw, Square, TriangleAlert } from "lucide-react";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
+import { Card as FallbackCard } from "./cards/fallback.jsx";
+
+// A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
+// Cards receive message, busy, and onAction(action, detail), routed by the shell.
+const cards = new Map(Object.values(import.meta.glob("./cards/*.jsx", { eager: true }))
+  .filter((module) => module.kind && module.Card)
+  .map((module) => [module.kind, module.Card]));
+const chatKinds = new Set([undefined, null, "submission", "reply"]);
 
 const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 const math = createMathPlugin({ singleDollarTextMath: true });
@@ -113,7 +121,18 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
   return (
     <article className="gb-message gb-user" data-message-id={message.id}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
-      <div className="gb-bubble">{message.body}</div>
+      {message.body && <div className="gb-bubble">{message.body}</div>}
+      {message.attachments?.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-2" aria-label="Pièces jointes">
+          {message.attachments.map((attachment) => {
+            const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
+            if (!id) return null;
+            const description = attachment.caption || attachment.name || "Image jointe";
+            const url = `/api/attachments/${encodeURIComponent(id)}`;
+            return <a key={id} href={url} target="_blank" rel="noreferrer"><img className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" /></a>;
+          })}
+        </div>
+      )}
       <footer className="gb-actions">
         {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />Envoyé</span>}
         {["queued", "dispatching"].includes(message.state) && <span className="gb-status">Envoi en cours…</span>}
@@ -183,7 +202,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, usageUrl, createMascot, botName = "Grokbot" }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Grokbot" }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;
@@ -193,10 +212,14 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
-        {messages.map((message) => message.role === "user"
-          ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-          : <AssistantMessage key={message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />)}
-        {busy && last?.role === "user" && <Typing createMascot={createMascot} botName={botName} />}
+        {messages.map((message) => {
+          const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
+          if (Card) return <Card key={message.id} message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} />;
+          return message.role === "user"
+            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
+            : <AssistantMessage key={message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />;
+        })}
+        {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />
       </div>
     </Tooltip.Provider>

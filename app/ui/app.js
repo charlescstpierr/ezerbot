@@ -35,6 +35,81 @@
   const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
+  const panels = new Map();
+  // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
+  // onState(state, context), onCardAction(message, action, detail, context); false passes an action through.
+  // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
+  // composer: mount(container, context), onFiles(files, event, context), onSent({messageId, extras}, context).
+  // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
+  const panelContext = () => ({ state, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
+  function panelError(id, error) { console.warn(`Grokbot panel ${id}:`, error); }
+  function panelCall(panel, hook, ...args) {
+    try {
+      const result = hook?.(...args, panelContext());
+      if (result?.then) result.catch((error) => panelError(panel.id, error));
+      return result;
+    } catch (error) { panelError(panel.id, error); return undefined; }
+  }
+  function mountSection(panel, hook, target, ...args) {
+    if (!hook) return;
+    const container = element("div");
+    container.dataset.panel = panel.id;
+    target.append(container);
+    const content = panelCall(panel, hook, ...args, container);
+    if (content instanceof Node) container.append(content);
+  }
+  function renderBotExtensions(bot) {
+    const target = $("bot-extensions");
+    target.replaceChildren();
+    for (const panel of panels.values()) mountSection(panel, panel.botSection, target, bot);
+  }
+  function sendExtras() {
+    const extras = {};
+    for (const panel of panels.values()) {
+      const fields = panelCall(panel, panel.sendExtras);
+      if (fields && typeof fields === "object" && !fields.then && !Array.isArray(fields)) Object.assign(extras, fields);
+    }
+    return extras;
+  }
+  function composerFiles(files, event) {
+    if (!files?.length) return false;
+    let handled = false;
+    for (const panel of panels.values()) {
+      if (panel.composer?.onFiles && panelCall(panel, panel.composer.onFiles, Array.from(files), event) !== false) handled = true;
+    }
+    if (handled) { event?.preventDefault(); updateComposer(); schedulePoll(); }
+    return handled;
+  }
+  async function cardAction(message, action, detail) {
+    for (const panel of panels.values()) {
+      if (!panel.onCardAction) continue;
+      try {
+        if (await panel.onCardAction(message, action, detail, panelContext()) !== false) return;
+      } catch (error) { panelError(panel.id, error); notify(error.message); return; }
+    }
+  }
+  window.GrokbotPanels = {
+    register(panel) {
+      if (!panel?.id || panels.has(panel.id)) throw new Error(`Duplicate or missing panel id: ${panel?.id}`);
+      panels.set(panel.id, panel);
+      mountSection(panel, panel.settingsSection, $("settings-extensions"));
+      if ($("bot-dialog").open) mountSection(panel, panel.botSection, $("bot-extensions"), botById(editingBotId) || null);
+      panelCall(panel, panel.composer?.mount, $("composer-attachments"));
+      panelCall(panel, panel.onState, state);
+      updateComposer();
+      schedulePoll();
+    },
+    openConversation(id) {
+      if (busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
+      selectConversation(id, true);
+      return true;
+    },
+    draft: () => ui.input?.value || "",
+    get state() { return state; },
+    api, refresh, notify,
+    composerChanged() { updateComposer(); schedulePoll(); },
+  };
+
   function readPreference(key, fallback) {
     try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
   }
@@ -145,7 +220,8 @@
     clearTimeout(pollTimer);
     const live = state.conversations.some((conversation) => streamingMessage(conversation));
     const waiting = provider().signin === "pending" || provider().titling || (provider().connected && !provider().models_ready);
-    if (!live && !waiting) return;
+    const panelWaiting = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.wantsPolling)));
+    if (!live && !waiting && !panelWaiting) return;
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
       try { await refresh(); } catch { /* showConnectionError already told the user. */ }
@@ -180,7 +256,8 @@
     const pending = Boolean(pendingMessage);
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const live = Boolean(streamingMessage());
-    ui.send.disabled = live ? false : busy || !connected || !ui.input.value.trim() || pending || tooLong;
+    const hasAttachments = Boolean(sendExtras().attachments?.length);
+    ui.send.disabled = live ? false : busy || !connected || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong;
     ui.send.dataset.mode = live ? "stop" : "send";
     ui.send.title = live ? "Arrêter la réponse" : "Envoyer le message";
     ui.send.setAttribute("aria-label", live ? "Arrêter la réponse" : busy ? "Envoi en cours" : "Envoyer le message");
@@ -210,6 +287,7 @@
     ui.list.replaceChildren();
     const query = ui.search.value.trim().toLocaleLowerCase("fr");
     const items = state.conversations
+      .filter((item) => item.kind !== "task" && item.kind !== "routine")
       .filter((item) => !favoriteOnly || item.favorite)
       .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => message.body.toLocaleLowerCase("fr").includes(query)))
       .sort((a, b) => timestamp(b.updated_at) - timestamp(a.updated_at));
@@ -302,6 +380,7 @@
     selectBotColor(values.color);
     selectBotShape(values.shape);
     $("bot-delete-button").hidden = !bot || bot.is_default;
+    renderBotExtensions(bot);
     $("bot-dialog").showModal();
     $("bot-name").focus();
   }
@@ -374,6 +453,7 @@
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
     onRegenerate: (message) => generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => signIn(),
+    onCardAction: cardAction,
     usageUrl,
     async onCopy(text) {
       try { await copyText(text); return true; }
@@ -411,6 +491,7 @@
     renderList();
     renderBots();
     renderProvider();
+    for (const panel of panels.values()) panelCall(panel, panel.onState, state);
     updateComposer();
   }
 
@@ -573,6 +654,7 @@
     if (live) { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const body = ui.input.value.trim();
+    const extras = sendExtras();
     let conversation = currentConversation();
     busy = true;
     submissionActivity = "send";
@@ -589,14 +671,14 @@
         writePreference("grokbot.selected", selectedId);
       }
       messageId = crypto.randomUUID();
-      conversation.messages.push({ id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
+      conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       ui.input.value = "";
       removePreference(previousDraftKey);
       removePreference(draftKey());
       render();
       scrollToLatest();
       const response = await api("/api/send", {
-        conversation_id: conversation.id, message_id: messageId, body, simulate_loss: simulateLoss,
+        ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: simulateLoss,
       });
       simulateLoss = false;
       $("simulate-loss").checked = false;
@@ -623,7 +705,11 @@
       busy = false;
       submissionActivity = null;
       render();
-      if (delivered) mascot?.celebrate();
+      if (delivered) {
+        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId, extras });
+        updateComposer();
+        mascot?.celebrate();
+      }
       ui.input.focus();
     }
   }
@@ -656,6 +742,7 @@
     render();
     try {
       const response = await api("/api/send", {
+        ...(message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}),
         conversation_id: conversation.id, message_id: message.id, body: message.body,
       });
       upsertConversation(response.conversation);
@@ -725,6 +812,13 @@
     placeholder: "Qu’avez-vous en tête ?",
     onInput: () => { saveDraft(); updateComposer(); },
     onSubmit: () => { if (!ui.send.disabled && !streamingMessage()) $("composer-form").requestSubmit(); },
+    onFiles: composerFiles,
+  });
+  $("composer-form").addEventListener("dragover", (event) => {
+    if (event.dataTransfer?.types.includes("Files") && [...panels.values()].some((panel) => panel.composer?.onFiles)) event.preventDefault();
+  });
+  $("composer-form").addEventListener("drop", (event) => {
+    if (!event.defaultPrevented) composerFiles(event.dataTransfer?.files, event);
   });
   $("composer-form").addEventListener("submit", sendMessage);
   document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {

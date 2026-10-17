@@ -85,6 +85,11 @@ const ACCOUNT: &str = "local-workspace";
 const DEFAULT_TITLE: &str = "Nouvelle conversation";
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS wrapper_migrations (
+    account_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    PRIMARY KEY (account_id, id)
+);
 CREATE TABLE IF NOT EXISTS wrapper_conversations (
     account_id TEXT NOT NULL,
     id TEXT NOT NULL,
@@ -391,7 +396,7 @@ struct BotTemplate {
 const DEFAULT_BOT: BotTemplate = BotTemplate {
     id: "grokbot",
     version: 1,
-    name: "Grokbot",
+    name: "Ezerbot",
     color: "citron",
     shape: "galet",
     description: "Un petit compagnon curieux et chaleureux, prêt à faire grandir vos idées.",
@@ -549,6 +554,25 @@ fn proposal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
 }
 
 const PROPOSAL_COLUMNS: &str = "id, conversation_id, message_id, kind, bot_id, payload, reason, status, result_bot_id, created_at, updated_at";
+
+/// Migration de nom indépendante du template : personnaliser la couleur ou la personnalité
+/// ne doit pas conserver l'ancien nom. Une marque durable laisse ensuite l'utilisateur libre
+/// de choisir n'importe quel nom, y compris « Grokbot », sans le réécrire au prochain lancement.
+fn migrate_default_bot_name(connection: &Connection) -> Result<(), ApiError> {
+    let tx = connection.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE wrapper_bots SET name = ?3
+         WHERE account_id = ?1 AND id = ?2 AND name = 'Grokbot'
+         AND NOT EXISTS (SELECT 1 FROM wrapper_migrations WHERE account_id = ?1 AND id = 'ezerbot-name-v1')",
+        params![ACCOUNT, DEFAULT_BOT.id, DEFAULT_BOT.name],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO wrapper_migrations (account_id, id) VALUES (?1, 'ezerbot-name-v1')",
+        [ACCOUNT],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
 
 /// Pose le bot par défaut, ou le met à niveau tant que l'utilisateur ne l'a pas modifié.
 fn seed_default_bot(connection: &Connection) -> Result<(), ApiError> {
@@ -754,6 +778,7 @@ impl App {
             }
         }
         seed_default_bot(&connection)?;
+        migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
         features::engine::startup(&connection)?;
         Ok(Self {

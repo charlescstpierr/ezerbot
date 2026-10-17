@@ -24,14 +24,16 @@ Pour reprendre, commencer par [LIRE_EN_PREMIER.md](LIRE_EN_PREMIER.md), [PROCHAI
 
 Ce dossier documente le client Grok Bot 0.70.2 installé sur le Mac et définit une architecture Rust indépendante pour reproduire ses familles fonctionnelles. Il contient les preuves, les contrats, les traces de comportement, les limites et les critères de validation. Quinze crates Rust constituent désormais un socle local, avec orchestration durable et un wrapper Mac utilisable. Le wrapper propose un mode simulé sans connexion et un adaptateur ChatGPT, ainsi que les sept capacités locales décrites ci-dessous. Les services cloud et les connecteurs restent à construire.
 
-## Ouvrir l’application locale
+## Ouvrir Ezerbot, l’application locale
 
-Double-cliquer sur `Ouvrir Grokbot.command` ou sur `app/build/Grokbot.app`. L’app propose les thèmes clair et sombre, les conversations, la recherche, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
+Double-cliquer sur `Ouvrir Ezerbot.command` ou sur `app/build/Ezerbot.app`. L’app propose les thèmes clair et sombre, les conversations, la recherche, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
 
 ```sh
 bash tools/build-app.sh
-open app/build/Grokbot.app
+open app/build/Ezerbot.app
 ```
+
+Le bot principal s’appelle Ezerbot. Au premier lancement après la mise à jour, seul son ancien nom par défaut « Grokbot » est migré : un nom personnalisé et les autres réglages sont conservés. Les identifiants internes (`grokbot-*`, `local.grokbot.workspace`, bot `grokbot`) et le dossier de données `~/Library/Application Support/Grokbot/` restent inchangés.
 
 Le build requiert macOS 12.3 ou ultérieur, les outils de compilation Apple et Rust. Le bundle embarque le moteur Rust et ses ressources hors ligne. Une fine coque Cocoa héberge l’interface HTML dans WKWebView. Le [nouveau design](reports/mascotte-design.md) met la mascotte animée au centre : clignements, regard, saisie et réactions aux envois. Aucun compte Grok n’est connecté. Dans les paramètres, « Continuer avec ChatGPT » permet de choisir un modèle du catalogue du compte; sans connexion, les réponses restent explicitement simulées. L’adaptateur est testé contre un faux serveur OpenAI, pas avec un vrai compte. [Wrapper local](reports/wrapper-local.md) décrit le fonctionnement et les vérifications.
 

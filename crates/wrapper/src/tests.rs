@@ -1110,7 +1110,7 @@ fn fresh_database_has_exactly_the_default_bot_at_its_template_version() {
         ),
         (
             json!("grokbot"),
-            json!("Grokbot"),
+            json!("Ezerbot"),
             json!("citron"),
             json!("galet"),
             json!(true),
@@ -1151,7 +1151,7 @@ fn default_bot_reconciliation_converges_and_never_overwrites_customization() {
     drop(app);
     let mut app = App::open(&db.0).unwrap();
     let bot = app.api("GET", "/api/state", b"").unwrap()["bots"][0].clone();
-    assert_eq!(bot["name"], "Grokbot");
+    assert_eq!(bot["name"], "Ezerbot");
     assert_ne!(bot["instructions"], "Vieux");
 
     // Une copie personnalisée garde ses valeurs, même face à un template plus récent.
@@ -1179,6 +1179,90 @@ fn default_bot_reconciliation_converges_and_never_overwrites_customization() {
         ),
         (json!("Mon Grok"), json!("Parle en vers."), json!(true))
     );
+}
+
+#[test]
+fn main_bot_name_migration_is_idempotent_and_preserves_customization_and_workspace() {
+    for (old_name, customized) in [
+        ("Grokbot", false),
+        ("Grokbot", true),
+        ("Mon assistant", true),
+    ] {
+        let db = Database::new();
+        let mut app = App::open(&db.0).unwrap();
+        // Reconstitue une base de l'ancienne app, sans marque de migration.
+        app.connection
+            .execute("DROP TABLE wrapper_migrations", [])
+            .unwrap();
+        app.connection.execute(
+            "UPDATE wrapper_bots SET name=?1, customized=?2, color='violet', shape='etoile',
+             description='Ma présentation', instructions='Parle en vers.', updated_at=123 WHERE id='grokbot'",
+            rusqlite::params![old_name, customized],
+        ).unwrap();
+        post(
+            &mut app,
+            "/api/bots",
+            json!({"id":"other", "name":"Grokbot", "color":"cyan"}),
+        )
+        .unwrap();
+        let conversation = conversation(&mut app);
+        send(&mut app, &conversation, "Historique à conserver", false);
+        post(
+            &mut app,
+            "/api/preferences",
+            json!({"theme":"light", "accent":"violet"}),
+        )
+        .unwrap();
+        let before = app.api("GET", "/api/state", b"").unwrap();
+        drop(app);
+
+        let mut app = App::open(&db.0).unwrap();
+        let after = app.api("GET", "/api/state", b"").unwrap();
+        let mut expected = before["bots"].clone();
+        if old_name == "Grokbot" {
+            expected[0]["name"] = json!("Ezerbot");
+        }
+        assert_eq!(after["bots"], expected);
+        assert_eq!(after["conversations"], before["conversations"]);
+        assert_eq!(after["preferences"], before["preferences"]);
+        assert_eq!(
+            app.connection
+                .query_row(
+                    "SELECT updated_at FROM wrapper_bots WHERE id='grokbot'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            123
+        );
+        drop(app);
+
+        let mut app = App::open(&db.0).unwrap();
+        assert_eq!(app.api("GET", "/api/state", b"").unwrap()["bots"], expected);
+        // Une décision de nom prise après la migration ne doit plus être réécrite.
+        post(
+            &mut app,
+            "/api/bots/update",
+            json!({"id":"grokbot", "name":"Grokbot"}),
+        )
+        .unwrap();
+        drop(app);
+        let mut app = App::open(&db.0).unwrap();
+        assert_eq!(
+            app.api("GET", "/api/state", b"").unwrap()["bots"][0]["name"],
+            "Grokbot"
+        );
+        assert_eq!(
+            app.connection
+                .query_row(
+                    "SELECT COUNT(*) FROM wrapper_migrations WHERE id='ezerbot-name-v1'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -1488,7 +1572,7 @@ fn model_arguments_are_validated_at_the_boundary_and_recorded_once_per_call_id()
         (
             "call_6",
             "propose_bot_update",
-            json!({"bot_id": "grokbot", "changes": {"name": "Grokbot"}, "reason": "rien"}),
+            json!({"bot_id": "grokbot", "changes": {"name": "Ezerbot"}, "reason": "rien"}),
         ),
     ] {
         let notice = propose(&mut app, &id, "stable-nonce", call, name, arguments);
@@ -1788,7 +1872,7 @@ fn update_proposal_applies_the_changes_or_goes_stale_when_the_bot_moves() {
 fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
     let default = super::Bot {
         id: "grokbot".into(),
-        name: "Grokbot".into(),
+        name: "Ezerbot".into(),
         color: "citron".into(),
         shape: "galet".into(),
         description: String::new(),
@@ -1864,7 +1948,7 @@ fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
         &[default.clone(), other.clone(), gone],
     );
     assert!(instructions.contains("propose_bot_update"));
-    assert!(instructions.ends_with("Bots existants (identifiant : nom — présentation) :\n- grokbot : Grokbot\n- chef : Chef — Cuisine."), "{instructions}");
+    assert!(instructions.ends_with("Bots existants (identifiant : nom — présentation) :\n- grokbot : Ezerbot\n- chef : Chef — Cuisine."), "{instructions}");
     assert!(
         !super::features::engine::compose_instructions(&other, &[default]).contains("propose_bot")
     );

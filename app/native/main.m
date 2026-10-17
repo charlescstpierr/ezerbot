@@ -28,7 +28,7 @@
                                                       NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable |
                                                       NSWindowStyleMaskFullSizeContentView
                                               backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Grokbot";
+    self.window.title = @"Ezerbot";
     self.window.titleVisibility = NSWindowTitleHidden;
     self.window.titlebarAppearsTransparent = YES;
     self.window.minSize = NSMakeSize(820, 560);
@@ -43,16 +43,16 @@
 
 - (void)createMenus {
     NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
-    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Grokbot" action:nil keyEquivalent:@""];
-    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Grokbot"];
-    [appMenu addItemWithTitle:@"À propos de Grokbot" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"Ezerbot" action:nil keyEquivalent:@""];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"Ezerbot"];
+    [appMenu addItemWithTitle:@"À propos d’Ezerbot" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Masquer Grokbot" action:@selector(hide:) keyEquivalent:@"h"];
+    [appMenu addItemWithTitle:@"Masquer Ezerbot" action:@selector(hide:) keyEquivalent:@"h"];
     NSMenuItem *hideOthers = [appMenu addItemWithTitle:@"Masquer les autres" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
     hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [appMenu addItemWithTitle:@"Tout afficher" action:@selector(unhideAllApplications:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Quitter Grokbot" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:@"Quitter Ezerbot" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [mainMenu addItem:appItem];
 
@@ -135,7 +135,7 @@
     [self stopBackend];
     NSUInteger generation = ++self.startupGeneration;
     self.backendURL = nil;
-    [self showStatus:@"Grokbot" detail:@"Ouverture de votre espace local…" failed:NO];
+    [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local…" failed:NO];
     NSFileManager *files = [NSFileManager defaultManager];
     NSError *error = nil;
     NSURL *applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
@@ -169,7 +169,7 @@
         return;
     }
     [self.logHandle seekToEndOfFile];
-    NSString *entry = [NSString stringWithFormat:@"\n[%@] Ouverture de Grokbot\n", [NSDate date]];
+    NSString *entry = [NSString stringWithFormat:@"\n[%@] Ouverture d’Ezerbot\n", [NSDate date]];
     [self.logHandle writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
 
     NSString *enginePath = [[[NSBundle mainBundle] executablePath].stringByDeletingLastPathComponent
@@ -336,13 +336,13 @@
     (void)download;
     (void)response;
     NSSavePanel *panel = [NSSavePanel savePanel];
-    panel.title = @"Exporter l’espace Grokbot";
+    panel.title = @"Exporter l’espace Ezerbot";
     panel.prompt = @"Exporter";
     panel.allowedContentTypes = @[UTTypeJSON];
     panel.canCreateDirectories = YES;
     NSString *filename = suggestedFilename.lastPathComponent;
     panel.nameFieldStringValue = [filename.pathExtension.lowercaseString isEqualToString:@"json"]
-                                  ? filename : @"grokbot-workspace.json";
+                                  ? filename : @"ezerbot-workspace.json";
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
         completionHandler(result == NSModalResponseOK ? panel.URL : nil);
     }];

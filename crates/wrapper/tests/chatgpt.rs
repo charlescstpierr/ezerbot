@@ -57,7 +57,7 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     let url = provider.start_signin().unwrap();
     let query = form(url.split_once('?').unwrap().1);
     assert_eq!(query["client_id"], "dynamic_agent_client");
-    assert_eq!(query["agent_name_hint"], "Grokbot");
+    assert_eq!(query["agent_name_hint"], "Ezerbot");
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["resource"], "https://api.openai.com/v1");
     assert!(query["scope"].contains("chatgpt.tokens.use.direct"));
@@ -81,9 +81,11 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     };
     assert!(callback("wrong-state").is_none());
     assert_eq!(provider.status()["signin"], "pending");
-    assert!(callback(&query["state"])
-        .unwrap()
-        .contains("Connexion réussie"));
+    let callback_page = callback(&query["state"]).unwrap();
+    assert!(callback_page.contains("Connexion réussie"));
+    assert!(callback_page.contains("<title>Ezerbot</title>"));
+    assert!(callback_page.contains("revenir dans Ezerbot"));
+    assert!(!callback_page.contains("Grokbot"));
     wait("connexion", || provider.status()["connected"] == true);
     assert_eq!(provider.status()["email"], "vous@exemple.com");
     {
@@ -227,8 +229,8 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(default_instructions.contains("Tu t'appelles Grokbot."));
-    assert!(!default_instructions.contains("Tu es Grokbot"));
+    assert!(default_instructions.contains("Tu t'appelles Ezerbot."));
+    assert!(!default_instructions.contains("Tu es Ezerbot"));
 
     // Un bot personnalisé : ses instructions sont lues au moment de répondre, même après sa
     // modification puis sa suppression.

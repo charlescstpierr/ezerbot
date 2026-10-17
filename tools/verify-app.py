@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / 'app/build/Grokbot.app'
+APP = ROOT / 'app/build/Ezerbot.app'
 
 
 def verify_ui_regressions():
@@ -136,11 +136,12 @@ def verify_ui_regressions():
   choose('Rédacteur'); cmdN(); $('new-chat').click(); cmdN();
   await until(() => !$('new-chat').disabled);
   check('new-chat and Cmd+N do not persist empty threads', (await saved()).conversations.length === 0);
-  choose('Grokbot');
-  check('welcome chip and breadcrumb agree', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  choose('Ezerbot');
+  check('visible product name and browser title are Ezerbot', document.title === 'Ezerbot' && $('home-link').textContent.trim() === 'ezerbot.' && $('home-link').getAttribute('aria-label') === 'Ezerbot, accueil');
+  check('welcome chip and breadcrumb agree', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot');
   const first = await send('Qui me répond ?');
-  check('R → Cmd+N → G sends to G', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Grokbot');
-  check('reply is rendered as G', $('messages').innerText.includes('Grokbot'));
+  check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');
+  check('reply and conversation page title use Ezerbot', $('messages').innerText.includes('Ezerbot') && document.title.endsWith(' · Ezerbot'));
   await type('Brouillon du fil');
   cmdN(); await type('Brouillon accueil'); cmdN();
   check('repeated new-chat preserves the welcome draft', editor().getText() === 'Brouillon accueil');
@@ -152,13 +153,13 @@ def verify_ui_regressions():
   choose('Rédacteur');
   check('opposite choice updates breadcrumb', chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
   const second = await send('Réponse du rédacteur');
-  check('G → new-chat → R sends to R', second.bot_id === 'qa-redacteur' && $('messages').innerText.includes('Rédacteur'));
+  check('E → new-chat → R sends to R', second.bot_id === 'qa-redacteur' && $('messages').innerText.includes('Rédacteur'));
   check('only sent conversations are persisted', (await saved()).conversations.length === 2);
   check('sent welcome draft is consumed', localStorage.getItem('grokbot.draft.new') === null);
   cmdN();
   check('new-chat restores an empty composer without warning content', empty());
   // Freeze creation to prove a mid-send chip click cannot switch the recipient.
-  choose('Grokbot'); await type('Choix figé pendant l’envoi');
+  choose('Ezerbot'); await type('Choix figé pendant l’envoi');
   const originalFetch = window.fetch;
   let release;
   const gate = new Promise(resolve => { release = resolve; });
@@ -169,7 +170,7 @@ def verify_ui_regressions():
   $('composer-form').requestSubmit();
   check('submitted composer is cleared before awaiting conversation creation', empty());
   choose('Rédacteur');
-  check('bot choice is frozen while send creates its conversation', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  check('bot choice is frozen while send creates its conversation', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot');
   await type('Suite tapée pendant la création');
   release();
   await until(() => !$('new-chat').disabled);
@@ -201,8 +202,8 @@ def verify_ui_regressions():
   await window.GrokbotPanels.refresh();
   window.GrokbotPanels.openConversation(legacy.id);
   check('legacy empty thread shows its actual bot', chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
-  await type('Brouillon ancien'); choose('Grokbot');
-  check('switching a legacy empty thread moves its draft to the chosen bot', localStorage.getItem('grokbot.selected') === '' && editor().getText() === 'Brouillon ancien' && chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  await type('Brouillon ancien'); choose('Ezerbot');
+  check('switching a legacy empty thread moves its draft to the chosen bot', localStorage.getItem('grokbot.selected') === '' && editor().getText() === 'Brouillon ancien' && chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot');
   check('moving a legacy draft removes its old key', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
@@ -214,12 +215,12 @@ def verify_ui_regressions():
   await type('Brouillon accueil A');
   window.GrokbotPanels.openConversation(legacy.id);
   check('sent legacy text is not restored as a duplicate', empty());
-  choose('Grokbot');
+  choose('Ezerbot');
   check('empty legacy draft preserves welcome text and storage', editor().getText() === 'Brouillon accueil A' && localStorage.getItem('grokbot.draft.new') === 'Brouillon accueil A');
   check('empty legacy draft has no residual storage key', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
   // When both drafts contain text, keep both in order and consume the old key.
   window.GrokbotPanels.openConversation(legacy.id);
-  await type('Brouillon ancien B'); choose('Grokbot');
+  await type('Brouillon ancien B'); choose('Ezerbot');
   const merged = 'Brouillon accueil A\nBrouillon ancien B';
   check('two nonempty drafts are preserved without replacement', editor().getText({blockSeparator:'\n'}) === merged && localStorage.getItem('grokbot.draft.new') === merged);
   check('merged legacy draft is moved rather than copied', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
@@ -257,7 +258,7 @@ def verify_ui_regressions():
     const picker = document.querySelector('.attachment-picker'); picker.files = transfer.files;
     picker.dispatchEvent(new Event('change', {bubbles:true}));
   };
-  cmdN(); choose('Grokbot'); await type('Décris cette photo');
+  cmdN(); choose('Ezerbot'); await type('Décris cette photo');
   const beforeImage = (await saved()).conversations.length;
   let allowUpload;
   const uploadGate = new Promise(resolve => { allowUpload = resolve; });
@@ -266,17 +267,17 @@ def verify_ui_regressions():
     return originalFetch(...arguments_);
   };
   await stageImage(); choose('Rédacteur');
-  check('pending image upload already pins the displayed bot', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && Boolean(document.querySelector('.attachment-chip')));
-  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Grokbot'));
+  check('pending image upload already pins the displayed bot', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && Boolean(document.querySelector('.attachment-chip')));
+  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Ezerbot'));
   allowUpload();
   await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
   window.fetch = originalFetch;
   const imageConversationId = localStorage.getItem('grokbot.selected');
   choose('Rédacteur');
-  check('ready staged image cannot be abandoned by a bot chip', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1 && editor().getText() === 'Décris cette photo');
+  check('ready staged image cannot be abandoned by a bot chip', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1 && editor().getText() === 'Décris cette photo');
   document.querySelector('.add-bot').click(); $('bot-name').value = 'Bot image'; $('bot-form').requestSubmit();
   await until(() => !$('bot-dialog').open);
-  check('creating a bot also retains staged image and current recipient', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
+  check('creating a bot also retains staged image and current recipient', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
   check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez l’image jointe'));
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
@@ -351,6 +352,8 @@ report = {
 try:
     with (APP / 'Contents/Info.plist').open('rb') as file:
         info = plistlib.load(file)
+    require('bundle and About display Ezerbot', info['CFBundleName'] == info['CFBundleDisplayName'] == 'Ezerbot')
+    require('bundle identity and executable stay compatible', info['CFBundleIdentifier'] == 'local.grokbot.workspace' and info['CFBundleExecutable'] == 'Grokbot')
     require('minimum macOS version supports dialog and UUID', info['LSMinimumSystemVersion'] == '12.3')
     run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(APP)])
     require('bundle signature verifies', True)

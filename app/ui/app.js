@@ -48,7 +48,7 @@
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
-  function panelError(id, error) { console.warn(`Grokbot panel ${id}:`, error); }
+  function panelError(id, error) { console.warn(`Ezerbot panel ${id}:`, error); }
   function panelCall(panel, hook, ...args) {
     try {
       const result = hook?.(...args, panelContext());
@@ -268,7 +268,7 @@
     ui.bannerText.textContent = "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
     updateComposer();
-    if (error) console.warn("Grokbot local connection:", error.message);
+    if (error) console.warn("Ezerbot local connection:", error.message);
   }
 
   function upsertConversation(conversation) {
@@ -559,15 +559,15 @@
     if (bot) document.querySelector(".main-panel").dataset.botColor = bot.color;
     else delete document.querySelector(".main-panel").dataset.botColor;
     const hero = document.querySelector("[data-mascot=hero]");
-    hero.setAttribute("aria-label", `Faire sourire ${bot?.name || "Grokbot"}`);
+    hero.setAttribute("aria-label", `Faire sourire ${bot?.name || "Ezerbot"}`);
     // La marque et la barre latérale gardent le galet : c'est l'identité de l'app.
     for (const node of document.querySelectorAll("[data-mascot=hero] .mascot, [data-mascot=composer] .mascot")) mascot.setShape(node, bot?.shape);
     thread.createMascot = threadMascot(bot?.shape || "galet");
     $("edit-bot-button").disabled = !bot || bot.deleted;
-    document.title = conversation ? `${conversation.title} · Grokbot` : "Grokbot";
+    document.title = conversation ? `${conversation.title} · Ezerbot` : "Ezerbot";
     ui.welcome.hidden = hasMessages;
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Grokbot", ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -645,7 +645,7 @@
       if (pickerKind === "speed" && !selected?.tiers.length) pickerKind = null;
     } else {
       closePicker();
-      tools.replaceChildren(document.createTextNode(`${currentBot()?.name || "Grokbot"} `), element("span", "composer-local", "Local"));
+      tools.replaceChildren(document.createTextNode(`${currentBot()?.name || "Ezerbot"} `), element("span", "composer-local", "Local"));
     }
     renderPicker();
 
@@ -665,7 +665,7 @@
     if (current.connected) heading.prepend(element("span", "status-dot"));
     copy.append(heading, element("p", "", current.connected ? current.email || "Compte ChatGPT"
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
-      : "Les réponses de Grokbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
+      : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
     const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
     if (current.connected) {
@@ -698,7 +698,7 @@
 
   async function signOut() {
     const response = await providerAction("/api/provider/signout");
-    if (response && !response.revoked) notify("Déconnecté sur ce Mac. OpenAI n’a pas confirmé : vous pouvez retirer Grokbot dans les réglages de ChatGPT.");
+    if (response && !response.revoked) notify("Déconnecté sur ce Mac. OpenAI n’a pas confirmé : vous pouvez retirer Ezerbot dans les réglages de ChatGPT.");
     if (response) await refresh().catch(() => {});
   }
 
@@ -871,7 +871,7 @@
     const url = URL.createObjectURL(blob);
     const anchor = element("a");
     anchor.href = url;
-    anchor.download = `grokbot-${conversation.id}.json`;
+    anchor.download = `ezerbot-${conversation.id}.json`;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bundle="$project_dir/app/build/Grokbot.app"
+bundle="$project_dir/app/build/Ezerbot.app"
 cargo_bin="${CARGO:-$(command -v cargo || true)}"
 if [[ -z "$cargo_bin" && -x "$HOME/.cargo/bin/cargo" ]]; then
   cargo_bin="$HOME/.cargo/bin/cargo"
@@ -21,7 +21,7 @@ cd "$project_dir"
 if [[ -d "$project_dir/app/web/node_modules" ]] && command -v npm >/dev/null; then
   npm --prefix "$project_dir/app/web" run build
 fi
-CARGO_TARGET_DIR="$project_dir/target" "$cargo_bin" build --release --locked -p grokbot-wrapper
+"$cargo_bin" build --release --locked -p grokbot-wrapper
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror -O2 -mmacosx-version-min=12.3 \
   -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers \
@@ -34,8 +34,8 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>Grokbot</string>
   <key>CFBundleIdentifier</key><string>local.grokbot.workspace</string>
-  <key>CFBundleName</key><string>Grokbot</string>
-  <key>CFBundleDisplayName</key><string>Grokbot</string>
+  <key>CFBundleName</key><string>Ezerbot</string>
+  <key>CFBundleDisplayName</key><string>Ezerbot</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

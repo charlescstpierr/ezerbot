@@ -193,7 +193,7 @@ fn main() {
         Err(error) => Err(error),
     };
     if let Err(error) = result {
-        eprintln!("Grokbot Local : {error}");
+        eprintln!("Ezerbot Local : {error}");
         std::process::exit(1);
     }
 }

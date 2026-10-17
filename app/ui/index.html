@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Grokbot</title>
+  <title>Ezerbot</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='14' fill='%2314161a'/%3E%3Cpath d='M8 33C3 24 9 9 21 8C34 7 42 18 42 31C42 41 16 45 8 33Z' fill='%233b404c'/%3E%3Cg fill='%23e6ff3d'%3E%3Crect x='19' y='18' width='5' height='10' rx='2.5' transform='rotate(-20 21 23)'/%3E%3Crect x='31' y='16' width='4' height='9' rx='2' transform='rotate(-20 33 20)'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/mascot.css">
@@ -52,7 +52,7 @@
   <button class="sidebar-scrim" id="sidebar-scrim" aria-label="Fermer la liste des conversations" tabindex="-1"></button>
   <aside class="sidebar" id="sidebar" aria-label="Conversations">
     <div class="brand-row">
-      <a class="brand" href="#" id="home-link" aria-label="Grokbot, accueil"><span class="brand-mascot" data-mascot="brand" aria-hidden="true"></span><span>grokbot<span class="brand-period">.</span></span></a>
+      <a class="brand" href="#" id="home-link" aria-label="Ezerbot, accueil"><span class="brand-mascot" data-mascot="brand" aria-hidden="true"></span><span>ezerbot<span class="brand-period">.</span></span></a>
       <button class="icon-button sidebar-close" id="sidebar-close" aria-label="Fermer la liste"><svg class="icon"><use href="#i-close"/></svg></button>
     </div>
     <button class="new-chat" id="new-chat"><svg class="icon"><use href="#i-plus"/></svg><span>Nouvelle conversation</span><kbd>⌘ N</kbd></button>
@@ -84,7 +84,7 @@
     <section class="chat-scroll" id="chat-scroll" aria-label="Conversation">
       <div class="welcome" id="welcome">
         <div class="mascot-stage">
-          <button class="mascot-greeting" data-mascot="hero" type="button" aria-label="Faire sourire Grokbot" title="Un petit coucou ?"></button>
+          <button class="mascot-greeting" data-mascot="hero" type="button" aria-label="Faire sourire Ezerbot" title="Un petit coucou ?"></button>
         </div>
         <p class="welcome-eyebrow">UN PETIT COMPAGNON, DE GRANDES IDÉES</p>
         <h2>Une idée en tête<span> ?</span></h2>
@@ -126,7 +126,7 @@
     <section class="setting-section"><h3>Application locale</h3><div class="setting-info"><span class="setting-info-icon"><svg class="icon"><use href="#i-shield"/></svg></span><p>Les conversations sont conservées sur ce Mac. Sans connexion à ChatGPT, les réponses sont simulées. Avec la connexion, vos messages sont envoyés à OpenAI.</p></div></section>
     <section class="setting-section"><label class="setting-toggle"><span><strong>Tester une coupure</strong><small>Le prochain envoi attendra une vérification, puis la conversation reprendra.</small></span><input id="simulate-loss" type="checkbox" role="switch"><span class="toggle-track" aria-hidden="true"></span></label></section>
     <section class="setting-section shortcuts"><h3>Raccourcis</h3><div><span>Nouvelle conversation</span><kbd>⌘ N</kbd></div><div><span>Rechercher une conversation</span><kbd>⌘ K</kbd></div><div><span>Envoyer un message</span><kbd>Entrée</kbd></div></section>
-    <div class="dialog-footer"><span class="version-note">Grokbot · application locale</span><button class="primary-button" data-close-dialog>Terminé</button></div>
+    <div class="dialog-footer"><span class="version-note">Ezerbot · application locale</span><button class="primary-button" data-close-dialog>Terminé</button></div>
   </dialog>
 
   <dialog class="dialog small-dialog" id="rename-dialog" aria-labelledby="rename-title"><form id="rename-form"><div class="dialog-header"><h2 id="rename-title">Renommer la conversation</h2><button class="icon-button" type="button" data-close-dialog aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div><label class="form-label" for="rename-input">Nom de la conversation</label><input class="text-input" id="rename-input" maxlength="80" required autocomplete="off"><div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog>Annuler</button><button class="primary-button" type="submit">Enregistrer</button></div></form></dialog>
@@ -144,7 +144,7 @@
   </form></dialog>
   <dialog class="dialog small-dialog" id="bot-delete-dialog" aria-labelledby="bot-delete-title"><div class="dialog-header"><h2 id="bot-delete-title">Supprimer ce bot ?</h2></div><p class="delete-description">Ses conversations restent lisibles et il continue d’y répondre. Vous ne pourrez plus en commencer de nouvelles avec lui.</p><div class="dialog-footer"><button class="secondary-button" data-close-dialog>Annuler</button><button class="danger-button" id="confirm-bot-delete">Supprimer</button></div></dialog>
 
-  <dialog class="dialog small-dialog plan-dialog" id="plan-dialog" aria-labelledby="plan-title"><h2 id="plan-title">Vous utilisez votre abonnement ChatGPT</h2><p class="delete-description">Les réponses de Grokbot comptent dans l’usage de votre abonnement ChatGPT. Vous pouvez le suivre et le limiter dans les réglages de ChatGPT.</p><div class="dialog-footer"><a class="secondary-button" href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Gérer l’utilisation</a><button class="primary-button" id="plan-acknowledge">Compris</button></div></dialog>
+  <dialog class="dialog small-dialog plan-dialog" id="plan-dialog" aria-labelledby="plan-title"><h2 id="plan-title">Vous utilisez votre abonnement ChatGPT</h2><p class="delete-description">Les réponses d’Ezerbot comptent dans l’usage de votre abonnement ChatGPT. Vous pouvez le suivre et le limiter dans les réglages de ChatGPT.</p><div class="dialog-footer"><a class="secondary-button" href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Gérer l’utilisation</a><button class="primary-button" id="plan-acknowledge">Compris</button></div></dialog>
 
   <template id="mascot-template">
     <span class="mascot" data-mood="idle" aria-hidden="true">

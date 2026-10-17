@@ -23,7 +23,7 @@ const SCOPE: &str = "openid profile email offline_access resource.invoke chatgpt
 const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
 const RESOURCE: &str = "https://api.openai.com/v1";
 const REGISTRATION_CLIENT: &str = "dynamic_agent_client";
-const APP_NAME: &str = "Grokbot";
+const APP_NAME: &str = "Ezerbot";
 // La documentation fixe l'hôte 127.0.0.1 et le chemin; seul le port peut varier.
 const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
@@ -317,10 +317,10 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
 pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
         "subscription_sharing_usage_limit_exceeded" => Failure {
-            message: "Limite d’utilisation atteinte. Vérifiez votre abonnement, ou la limite accordée à Grokbot, dans les réglages de ChatGPT.".into(),
+            message: "Limite d’utilisation atteinte. Vérifiez votre abonnement, ou la limite accordée à Ezerbot, dans les réglages de ChatGPT.".into(),
             kind: "limit",
         },
-        "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Grokbot."),
+        "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Ezerbot."),
         "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
         "subscription_sharing_invalid_user" => Failure::signin(),
         _ if status == 401 => Failure::signin(),
@@ -410,7 +410,7 @@ pub struct ToolCall {
 }
 
 fn page(title: &str, detail: &str) -> String {
-    format!("<!doctype html><html lang=\"fr\"><meta charset=\"utf-8\"><title>Grokbot</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#0a0b0d;color:#e6e7ea;font:16px -apple-system,sans-serif\"><main style=\"max-width:420px;padding:24px;text-align:center\"><h1 style=\"font-size:22px\">{title}</h1><p style=\"color:#9a9fa9\">{detail}</p></main></body></html>")
+    format!("<!doctype html><html lang=\"fr\"><meta charset=\"utf-8\"><title>Ezerbot</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#0a0b0d;color:#e6e7ea;font:16px -apple-system,sans-serif\"><main style=\"max-width:420px;padding:24px;text-align:center\"><h1 style=\"font-size:22px\">{title}</h1><p style=\"color:#9a9fa9\">{detail}</p></main></body></html>")
 }
 
 impl Provider {
@@ -640,7 +640,7 @@ impl Provider {
             }
             let outcome = match (query.get("error"), query.get("code")) {
                 (Some(error), _) if error == "access_denied" => Err(
-                    "Vous avez refusé l’accès. Grokbot n’utilise pas votre abonnement.".to_owned(),
+                    "Vous avez refusé l’accès. Ezerbot n’utilise pas votre abonnement.".to_owned(),
                 ),
                 (Some(error), _) => Err(format!("OpenAI a refusé la connexion ({error}).")),
                 (None, Some(code)) => self
@@ -651,7 +651,7 @@ impl Provider {
             let html = match &outcome {
                 Ok(()) => page(
                     "Connexion réussie",
-                    "Vous pouvez fermer cette page et revenir dans Grokbot.",
+                    "Vous pouvez fermer cette page et revenir dans Ezerbot.",
                 ),
                 Err(message) => page("Connexion non terminée", message),
             };
@@ -687,7 +687,7 @@ impl Provider {
             (None, Some(issued)) if issued != REGISTRATION_CLIENT => issued.clone(),
             (None, _) => {
                 return Err(Failure::other(
-                    "OpenAI n’a pas terminé l’enregistrement de Grokbot. Recommencez.",
+                    "OpenAI n’a pas terminé l’enregistrement d’Ezerbot. Recommencez.",
                 ))
             }
             (Some(saved), Some(issued)) if issued != saved => {
@@ -755,7 +755,7 @@ impl Provider {
             Ok(())
         } else {
             // Une identité valide ne suffit pas : sans cette permission, aucune demande ne part.
-            Err(Failure::other("Vous êtes identifié, mais l’utilisation de l’abonnement ChatGPT n’a pas été accordée à Grokbot."))
+            Err(Failure::other("Vous êtes identifié, mais l’utilisation de l’abonnement ChatGPT n’a pas été accordée à Ezerbot."))
         }
     }
 

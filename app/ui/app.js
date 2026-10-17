@@ -36,10 +36,16 @@
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
   const panels = new Map();
+  const panelFailed = Symbol("panel-failed");
+  const botCleanups = [];
+  // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
+  const pendingSends = new Map();
   // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
-  // onState(state, context), onCardAction(message, action, detail, context); false passes an action through.
+  // botSection may return a cleanup function, called before remount and on dialog close.
+  // onState(state, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
   // composer: mount(container, context), onFiles(files, event, context), onSent({messageId, extras}, context).
+  // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
   function panelError(id, error) { console.warn(`Grokbot panel ${id}:`, error); }
@@ -48,7 +54,7 @@
       const result = hook?.(...args, panelContext());
       if (result?.then) result.catch((error) => panelError(panel.id, error));
       return result;
-    } catch (error) { panelError(panel.id, error); return undefined; }
+    } catch (error) { panelError(panel.id, error); return panelFailed; }
   }
   function mountSection(panel, hook, target, ...args) {
     if (!hook) return;
@@ -57,11 +63,30 @@
     target.append(container);
     const content = panelCall(panel, hook, ...args, container);
     if (content instanceof Node) container.append(content);
+    if (typeof content === "function") return () => panelCall(panel, content);
+  }
+  function clearBotExtensions() {
+    for (const cleanup of botCleanups.splice(0)) cleanup();
+    $("bot-extensions").replaceChildren();
+  }
+  function mountBotSection(panel, bot) {
+    const cleanup = mountSection(panel, panel.botSection, $("bot-extensions"), bot);
+    if (cleanup) botCleanups.push(cleanup);
   }
   function renderBotExtensions(bot) {
-    const target = $("bot-extensions");
-    target.replaceChildren();
-    for (const panel of panels.values()) mountSection(panel, panel.botSection, target, bot);
+    clearBotExtensions();
+    for (const panel of panels.values()) mountBotSection(panel, bot);
+  }
+  function observeSavedConversation(conversation) {
+    for (const message of conversation.messages) {
+      const pending = pendingSends.get(message.id);
+      if (!pending) continue;
+      if (!pending.consumed) {
+        pending.consumed = true;
+        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId: message.id, extras: pending.extras });
+      }
+      if (message.state !== "queued") pendingSends.delete(message.id);
+    }
   }
   function sendExtras() {
     const extras = {};
@@ -75,7 +100,9 @@
     if (!files?.length) return false;
     let handled = false;
     for (const panel of panels.values()) {
-      if (panel.composer?.onFiles && panelCall(panel, panel.composer.onFiles, Array.from(files), event) !== false) handled = true;
+      if (!panel.composer?.onFiles) continue;
+      const result = panelCall(panel, panel.composer.onFiles, Array.from(files), event);
+      if (result !== false && result !== panelFailed) handled = true;
     }
     if (handled) { event?.preventDefault(); updateComposer(); schedulePoll(); }
     return handled;
@@ -84,20 +111,26 @@
     for (const panel of panels.values()) {
       if (!panel.onCardAction) continue;
       try {
-        if (await panel.onCardAction(message, action, detail, panelContext()) !== false) return;
-      } catch (error) { panelError(panel.id, error); notify(error.message); return; }
+        if (await panel.onCardAction(message, action, detail, panelContext()) === true) return true;
+      } catch (error) { panelError(panel.id, error); notify(error.message); return false; }
     }
+    notify("Cette action n’est pas disponible.");
+    return false;
   }
   window.GrokbotPanels = {
     register(panel) {
-      if (!panel?.id || panels.has(panel.id)) throw new Error(`Duplicate or missing panel id: ${panel?.id}`);
+      if (!panel?.id || panels.has(panel.id)) {
+        panelError(panel?.id, new Error("Duplicate or missing panel id"));
+        return false;
+      }
       panels.set(panel.id, panel);
       mountSection(panel, panel.settingsSection, $("settings-extensions"));
-      if ($("bot-dialog").open) mountSection(panel, panel.botSection, $("bot-extensions"), botById(editingBotId) || null);
+      if ($("bot-dialog").open) mountBotSection(panel, botById(editingBotId) || null);
       panelCall(panel, panel.composer?.mount, $("composer-attachments"));
       panelCall(panel, panel.onState, state);
       updateComposer();
       schedulePoll();
+      return true;
     },
     openConversation(id) {
       if (busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
@@ -199,6 +232,7 @@
 
   async function refresh() {
     state = await api("/api/state");
+    for (const conversation of state.conversations) observeSavedConversation(conversation);
     if (!preferencesLoaded) {
       preferencesLoaded = true;
       applyTheme(state.preferences?.theme || themeChoice);
@@ -220,7 +254,7 @@
     clearTimeout(pollTimer);
     const live = state.conversations.some((conversation) => streamingMessage(conversation));
     const waiting = provider().signin === "pending" || provider().titling || (provider().connected && !provider().models_ready);
-    const panelWaiting = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.wantsPolling)));
+    const panelWaiting = [...panels.values()].some((panel) => panelCall(panel, panel.wantsPolling) === true);
     if (!live && !waiting && !panelWaiting) return;
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
@@ -241,6 +275,7 @@
     const index = state.conversations.findIndex((item) => item.id === conversation.id);
     if (index === -1) state.conversations.unshift(conversation);
     else state.conversations[index] = conversation;
+    observeSavedConversation(conversation);
     connected = true;
     connectionStatus = "online";
     ui.banner.hidden = true;
@@ -654,7 +689,7 @@
     if (live) { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const body = ui.input.value.trim();
-    const extras = sendExtras();
+    const extras = structuredClone(sendExtras());
     let conversation = currentConversation();
     busy = true;
     submissionActivity = "send";
@@ -671,6 +706,7 @@
         writePreference("grokbot.selected", selectedId);
       }
       messageId = crypto.randomUUID();
+      pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       ui.input.value = "";
       removePreference(previousDraftKey);
@@ -692,7 +728,7 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { ui.input.value = body; saveDraft(); }
+          if (!savedMessage) { pendingSends.delete(messageId); ui.input.value = body; saveDraft(); }
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
@@ -705,11 +741,7 @@
       busy = false;
       submissionActivity = null;
       render();
-      if (delivered) {
-        for (const panel of panels.values()) panelCall(panel, panel.composer?.onSent, { messageId, extras });
-        updateComposer();
-        mascot?.celebrate();
-      }
+      if (delivered) mascot?.celebrate();
       ui.input.focus();
     }
   }
@@ -742,7 +774,7 @@
     render();
     try {
       const response = await api("/api/send", {
-        ...(message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}),
+        ...(pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {})),
         conversation_id: conversation.id, message_id: message.id, body: message.body,
       });
       upsertConversation(response.conversation);
@@ -921,6 +953,7 @@
     button.addEventListener("click", () => selectBotShape(shape));
     return button;
   }));
+  $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);
   $("bot-delete-button").addEventListener("click", () => $("bot-delete-dialog").showModal());
   $("confirm-bot-delete").addEventListener("click", deleteBot);

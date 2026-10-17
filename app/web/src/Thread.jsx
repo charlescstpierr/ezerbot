@@ -14,7 +14,7 @@ import { Card as FallbackCard } from "./cards/fallback.jsx";
 const cards = new Map(Object.values(import.meta.glob("./cards/*.jsx", { eager: true }))
   .filter((module) => module.kind && module.Card)
   .map((module) => [module.kind, module.Card]));
-const chatKinds = new Set([undefined, null, "submission", "reply"]);
+const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
 
 const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 const math = createMathPlugin({ singleDollarTextMath: true });
@@ -124,12 +124,12 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
       {message.body && <div className="gb-bubble">{message.body}</div>}
       {message.attachments?.length > 0 && (
         <div className="flex flex-wrap justify-end gap-2" aria-label="Pièces jointes">
-          {message.attachments.map((attachment) => {
+          {message.attachments.map((attachment, index) => {
             const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
             if (!id) return null;
             const description = attachment.caption || attachment.name || "Image jointe";
             const url = `/api/attachments/${encodeURIComponent(id)}`;
-            return <a key={id} href={url} target="_blank" rel="noreferrer"><img className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" /></a>;
+            return <img key={`${id}-${index}`} className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" />;
           })}
         </div>
       )}

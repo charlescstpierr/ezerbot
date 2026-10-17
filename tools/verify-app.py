@@ -139,6 +139,26 @@ def verify_ui_regressions():
   choose('Ezerbot');
   check('visible product name and browser title are Ezerbot', document.title === 'Ezerbot' && $('home-link').textContent.trim() === 'ezerbot.' && $('home-link').getAttribute('aria-label') === 'Ezerbot, accueil');
   check('welcome chip and breadcrumb agree', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot');
+  // Exercise the shipped thread renderer with pending form delivery payloads. Actual
+  // model-tool suspension/resume belongs to the Rust forms integration harness.
+  const formHost = document.createElement('section');
+  formHost.style.cssText = 'position:fixed;inset:20px;z-index:9999;background:var(--background)';
+  document.body.append(formHost);
+  for (const [requester, expected] of [
+    ['grokbot', 'Demande d’Ezerbot'], ['qa-redacteur', 'Demande de Rédacteur'],
+    ['Émile', 'Demande d’Émile'], ['Hugo', 'Demande de Hugo'],
+  ]) {
+    const id = `branding-form-${requester}`;
+    window.GrokbotChat.renderThread(formHost, {messages:[{id, kind:'form', role:'assistant', payload:{
+      entry_id:id, route:{requesting_bot_id:requester}, status:{status:'pending'},
+      kind:{kind:'form', fields:[{name:'city', label:'Votre ville', required:true, field_type:{kind:'text'}}]},
+    }}]});
+    await until(() => formHost.querySelector(`[data-message-id="${id}"]`));
+    check(`${requester} form requester uses correct French elision`, formHost.innerText.includes(expected) && !formHost.innerText.includes('Demande de Ezerbot'));
+  }
+  window.GrokbotChat.renderThread(formHost, {messages:[]});
+  await until(() => !formHost.querySelector('[data-card-kind]'));
+  formHost.remove();
   const first = await send('Qui me répond ?');
   check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');
   check('reply and conversation page title use Ezerbot', $('messages').innerText.includes('Ezerbot') && document.title.endsWith(' · Ezerbot'));
@@ -352,6 +372,7 @@ report = {
 try:
     with (APP / 'Contents/Info.plist').open('rb') as file:
         info = plistlib.load(file)
+    require('obsolete generated Grokbot bundle is absent', not (ROOT / 'app/build/Grokbot.app').exists())
     require('bundle and About display Ezerbot', info['CFBundleName'] == info['CFBundleDisplayName'] == 'Ezerbot')
     require('bundle identity and executable stay compatible', info['CFBundleIdentifier'] == 'local.grokbot.workspace' and info['CFBundleExecutable'] == 'Grokbot')
     require('minimum macOS version supports dialog and UUID', info['LSMinimumSystemVersion'] == '12.3')

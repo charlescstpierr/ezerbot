@@ -21,7 +21,7 @@ cd "$project_dir"
 if [[ -d "$project_dir/app/web/node_modules" ]] && command -v npm >/dev/null; then
   npm --prefix "$project_dir/app/web" run build
 fi
-"$cargo_bin" build --release --locked -p grokbot-wrapper
+CARGO_TARGET_DIR="$project_dir/target" "$cargo_bin" build --release --locked -p grokbot-wrapper
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror -O2 -mmacosx-version-min=12.3 \
   -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers \
@@ -58,5 +58,7 @@ plutil -lint "$bundle/Contents/Info.plist"
 codesign --force --sign - "$bundle/Contents/MacOS/grokbot-wrapper"
 codesign --force --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"
+# Remove only the obsolete generated bundle, after its replacement verifies successfully.
+rm -rf "$project_dir/app/build/Grokbot.app"
 printf '\n%s\n' "Application créée : $bundle"
 printf '%s\n' "Ouvrir : open \"$bundle\""

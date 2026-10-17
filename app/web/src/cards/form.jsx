@@ -46,13 +46,14 @@ export function HumanInputCard({ message, title, input, children }) {
   const statusLabel = status === "resolved" ? recorded : status === "pending" && receipt ? "Résolution reçue · Vérification de l’état…" : labels[status];
   const requesterId = request.route?.requesting_bot_id;
   const requesterName = window.GrokbotPanels?.state?.bots?.find((bot) => bot.id === requesterId)?.name || requesterId;
+  const requesterLabel = /^[aeiouyàâäéèêëîïôöùûü]/i.test(requesterName) ? `d’${requesterName}` : `de ${requesterName}`;
   const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
     ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
   return (
     <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong></header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">Demande de {requesterName} · {statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">Demande {requesterLabel} · {statusLabel}</p>
         {children}
         <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}

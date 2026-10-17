@@ -25,14 +25,15 @@ CARGO_TARGET_DIR="$project_dir/target" "$cargo_bin" build --release --locked -p 
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror -O2 -mmacosx-version-min=12.3 \
   -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers \
-  "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Grokbot"
+  "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
 cp "$project_dir/target/release/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
 
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleExecutable</key><string>Grokbot</string>
+  <key>CFBundleExecutable</key><string>Ezerbot</string>
+  <key>CFBundleDevelopmentRegion</key><string>fr</string>
   <key>CFBundleIdentifier</key><string>local.grokbot.workspace</string>
   <key>CFBundleName</key><string>Ezerbot</string>
   <key>CFBundleDisplayName</key><string>Ezerbot</string>
@@ -55,6 +56,8 @@ clang -fobjc-arc -Wall -Wextra -Werror -O2 -framework Cocoa \
 "$project_dir/app/build/draw-icon" "$iconset"
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Grokbot.icns"
 plutil -lint "$bundle/Contents/Info.plist"
+# A rebuild may reuse a bundle generated before the native executable was renamed.
+rm -f "$bundle/Contents/MacOS/Grokbot"
 codesign --force --sign - "$bundle/Contents/MacOS/grokbot-wrapper"
 codesign --force --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"

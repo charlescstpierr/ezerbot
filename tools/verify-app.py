@@ -350,6 +350,13 @@ if '--ui-regressions' in sys.argv:
     raise SystemExit(0)
 
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--app', type=Path, default=APP, help='Running bundle to inspect (may be an isolated copy)')
+parser.add_argument('--report', type=Path, default=ROOT / 'evidence/wrapper-native-verification.json')
+args = parser.parse_args()
+APP = args.app.resolve()
+
+
 def run(arguments):
     return subprocess.check_output(arguments, text=True, timeout=30).strip()
 
@@ -374,16 +381,21 @@ try:
         info = plistlib.load(file)
     require('obsolete generated Grokbot bundle is absent', not (ROOT / 'app/build/Grokbot.app').exists())
     require('bundle and About display Ezerbot', info['CFBundleName'] == info['CFBundleDisplayName'] == 'Ezerbot')
-    require('bundle identity and executable stay compatible', info['CFBundleIdentifier'] == 'local.grokbot.workspace' and info['CFBundleExecutable'] == 'Grokbot')
+    require('bundle identity stays compatible', info['CFBundleIdentifier'] == 'local.grokbot.workspace')
+    require('native executable is Ezerbot', info['CFBundleExecutable'] == 'Ezerbot')
+    require('system-added menus use French', info.get('CFBundleDevelopmentRegion') == 'fr')
+    require('icon name stays compatible', info['CFBundleIconFile'] == 'Grokbot')
+    require('obsolete native executable is absent', not (APP / 'Contents/MacOS/Grokbot').exists())
     require('minimum macOS version supports dialog and UUID', info['LSMinimumSystemVersion'] == '12.3')
     run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(APP)])
     require('bundle signature verifies', True)
-    host = str(APP / 'Contents/MacOS/Grokbot')
-    candidates = run(['/usr/bin/pgrep', '-x', 'Grokbot']).splitlines()
-    host_commands = {host, str(Path(host).relative_to(ROOT))}
+    host = str(APP / 'Contents/MacOS/Ezerbot')
+    candidates = run(['/usr/bin/pgrep', '-x', 'Ezerbot']).splitlines()
+    host_commands = {host, os.path.relpath(host, ROOT)}
     owners = [int(pid) for pid in candidates if process_command(pid) in host_commands]
     require('this bundle is running', len(owners) == 1)
     owner = owners[0]
+    require('running process is named Ezerbot', run(['/bin/ps', '-p', str(owner), '-o', 'ucomm=']) == 'Ezerbot')
     children = run(['/usr/bin/pgrep', '-P', str(owner)]).splitlines()
     engine = str(APP / 'Contents/MacOS/grokbot-wrapper')
     owned = [int(pid) for pid in children if process_command(pid).startswith(engine + ' ')]
@@ -443,13 +455,13 @@ int main(int argc, const char **argv) {
     report['runtime']['windows'] = windows
     require('native window exists at supported size', any(window['bounds'].get('Width', 0) >= 820
                                                         and window['bounds'].get('Height', 0) >= 560 for window in windows))
-    tracked = [APP / 'Contents/MacOS/Grokbot', APP / 'Contents/MacOS/grokbot-wrapper',
+    tracked = [APP / 'Contents/MacOS/Ezerbot', APP / 'Contents/MacOS/grokbot-wrapper',
                APP / 'Contents/Info.plist', ROOT / 'app/native/main.m', ROOT / 'tools/build-app.sh']
-    report['sha256'] = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in tracked}
+    report['sha256'] = {os.path.relpath(path, ROOT): hashlib.sha256(path.read_bytes()).hexdigest() for path in tracked}
     report['status'] = 'passed'
 except Exception as error:
     report['status'] = 'failed'
     report['error'] = str(error)
-(ROOT / 'evidence/wrapper-native-verification.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 print(json.dumps(report, ensure_ascii=False, indent=2))
 raise SystemExit(0 if report['status'] == 'passed' else 1)

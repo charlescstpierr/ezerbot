@@ -9,8 +9,13 @@
 //! summary's priority, before optional blocks with larger numeric priorities.
 //! App policy, current user text and tool-call arguments cannot be truncated.
 //! Optional text is explicitly marked when truncated. History is a contiguous
-//! suffix, with no orphan tool outputs. Compaction boundaries must not split a
-//! call/output pair (including one completed in the current input).
+//! suffix before omission of empty cancelled-call entries, with no orphan tool
+//! outputs. Compaction boundaries must not split a call/output pair (including
+//! one completed in the current input). Callers must supply the last reset before
+//! the requested turn; a later mark is rejected, never treated as no reset.
+//! Unresolved calls are omitted from other turns for protocol safety. The host
+//! should expose pending approval/form status as a separate capability block;
+//! resuming the original exchange retains its call through the current output.
 //!
 //! Only external subcontent is fenced, not past user instructions or summaries.
 //! Framing is not authorization: tools must enforce permissions independently
@@ -42,6 +47,8 @@ pub struct AssembledContext {
 /// Assemble the actual structured model input. An app contract is required.
 /// History/current/summary blocks supplied by hooks are rejected: they would
 /// bypass the reset, summary, regeneration and budget selection performed here.
+/// `last_reset_entry` must be the latest reset mark preceding `current_message`
+/// (None only if there is none), not the latest reset of the whole conversation.
 pub fn assemble_input(
     request: &ContextRequest,
     blocks: &[ContextBlock],
@@ -259,14 +266,17 @@ fn select_history<'a>(
         .position(|item| item.entry_id == request.current_message.entry_id)
         .unwrap_or(history.len());
     let position = |id: &str| history.iter().rposition(|item| item.entry_id == id);
-    let reset_start = match last_reset_entry {
-        Some(id) => match position(id) {
-            Some(index) if index < end => index + 1,
-            Some(_) => 0, // A later reset cannot govern regeneration of this turn.
-            None => return Err(invalid("reset entry is absent from history")),
-        },
-        None => 0,
-    };
+    let reset_start =
+        match last_reset_entry {
+            Some(id) => match position(id) {
+                Some(index) if index < end => index + 1,
+                Some(_) => return Err(invalid(
+                    "reset entry follows the current message; pass the latest reset preceding it",
+                )),
+                None => return Err(invalid("reset entry is absent from history")),
+            },
+            None => 0,
+        };
     let mut start = reset_start;
     let mut active_summary = None;
     if let Some(summary) = summary {
@@ -306,6 +316,11 @@ fn select_history<'a>(
         return Err(invalid("summary boundary splits a tool call/output pair"));
     }
     drop_unfinished_calls(&mut selected, &request.current_message);
+    // Resolve positions before pruning: an empty cancelled-call placeholder is
+    // not a provider message, but it may still be a reset or summary boundary.
+    selected.retain(|item| {
+        !item.text.is_empty() || !item.images.is_empty() || !item.tool_items.is_empty()
+    });
     Ok((selected, active_summary))
 }
 
@@ -1164,7 +1179,7 @@ mod context_tests {
             &base(),
             &history,
             Some(&future_summary),
-            Some("future"),
+            None,
             &ContextBudget::default(),
         )
         .unwrap();
@@ -1191,6 +1206,71 @@ mod context_tests {
             &ContextBudget::default()
         )
         .is_err());
+    }
+
+    fn between_resets() -> (ContextRequest, [HistoryItem; 5]) {
+        let mut request = request();
+        request.current_message = entry("X", "failed question");
+        request.trigger = Trigger::UserMessage {
+            message_id: "X".into(),
+            attempt: 1,
+        };
+        let history = [
+            entry("secret", "hidden before reset A"),
+            entry("resetA", "reset"),
+            request.current_message.clone(),
+            entry("later", "later turn"),
+            entry("resetB", "reset"),
+        ];
+        (request, history)
+    }
+
+    #[test]
+    fn regenerate_rejects_reset_after_current() {
+        let (request, history) = between_resets();
+        let error = assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            Some("resetB"),
+            &ContextBudget::default(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("pass the latest reset preceding it"));
+    }
+
+    #[test]
+    fn regenerate_between_two_resets_starts_after_preceding_reset() {
+        let (request, history) = between_resets();
+        let result = assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            Some("resetA"),
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(ids(&result.input), vec!["X"]);
+        assert!(!result
+            .input
+            .iter()
+            .any(|item| item.text.contains("hidden before reset A")));
+        let preview = assemble(
+            &request,
+            &base(),
+            &history,
+            None,
+            Some("resetA"),
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert!(!preview
+            .iter()
+            .any(|block| block.text.contains("hidden before reset A")));
     }
 
     #[test]
@@ -1323,11 +1403,14 @@ mod context_tests {
     fn unfinished_history_calls_are_omitted_but_completed_and_pending_calls_remain() {
         let mut cancelled = entry("cancelled", "interrupted work");
         cancelled.tool_items.push(call("cancelled"));
+        let mut empty_cancelled = entry("empty-cancelled", "");
+        empty_cancelled.role = Role::Assistant;
+        empty_cancelled.tool_items.push(call("empty-cancelled"));
         let mut done = entry("done", "completed work");
         done.tool_items = vec![call("done"), output("done", "finished")];
         let mut pending = entry("pending", "waiting");
         pending.tool_items.push(call("pending"));
-        let history = [cancelled, done, pending];
+        let history = [cancelled, empty_cancelled, done, pending];
         let before = history.clone();
         let mut request = request();
         request
@@ -1347,6 +1430,10 @@ mod context_tests {
             ids(&result.input),
             vec!["cancelled", "done", "pending", "current"]
         );
+        assert!(!result
+            .input
+            .iter()
+            .any(|item| item.entry_id == "empty-cancelled"));
         assert!(result.input[0].tool_items.is_empty());
         assert_eq!(result.input[0].text, "interrupted work");
         assert_eq!(result.input[1].tool_items[0], call("done"));

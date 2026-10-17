@@ -713,6 +713,32 @@ mod tests {
     }
 
     #[test]
+    fn failed_image_does_not_pause_another_image_or_its_own_retry() {
+        let conn = connection();
+        let first = key();
+        let claim = begin(&conn, &first, 1_000).unwrap().unwrap();
+        assert!(finish(
+            &conn,
+            &first,
+            &claim,
+            &CaptionStatus::Failed {
+                reason: "temporary failure".into(),
+            },
+            1_001,
+        )
+        .unwrap());
+        assert_eq!(backoff_until(&conn).unwrap(), None);
+        let other = cache_key(
+            &digest(b"different image"),
+            &first.model,
+            &project("draft", &[]).unwrap(),
+        )
+        .unwrap();
+        assert!(begin(&conn, &other, 1_002).unwrap().is_some());
+        assert!(begin(&conn, &first, 1_002).unwrap().is_some());
+    }
+
+    #[test]
     fn skipped_backs_off_ten_minutes() {
         let conn = connection();
         let key = key();

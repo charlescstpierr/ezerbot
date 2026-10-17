@@ -13,12 +13,13 @@
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
   const buckets = new Map();
   const views = new WeakMap();
-  let context, tray, list, picker, cooldown = 0, cooldownTimer;
+  let context, tray, list, picker, cooldown = 0, cooldownTimer, nextChipId = 0;
   function backoff(until) {
-    if (until <= cooldown) return;
-    cooldown = until;
-    clearTimeout(cooldownTimer);
-    cooldownTimer = setTimeout(render, Math.max(0, cooldown - Date.now()));
+    cooldown = Math.max(cooldown, until);
+  }
+  function remainingWait(milliseconds) {
+    const seconds = Math.ceil(milliseconds / 1000);
+    return `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`;
   }
 
   function node(tag, className, text) {
@@ -57,19 +58,31 @@
   }
   function render() {
     if (!list || !context) return;
+    clearTimeout(cooldownTimer);
+    const remaining = Math.max(0, cooldown - Date.now());
+    let waiting = false;
     const group = bucket();
     const chips = group.items.map((item) => {
       if (!views.has(item)) views.set(item, createChip(group, item));
-      const { chip, status, retry } = views.get(item);
+      const { chip, status, retry, wait } = views.get(item);
       chip.dataset.status = item.upload === "ready" ? item.caption : item.upload;
       const label = captionText(item);
       if (status.textContent !== label) status.textContent = label;
       status.title = item.error || "";
       retry.hidden = !(item.upload === "failed" || item.caption === "failed" || item.caption === "skipped");
-      retry.disabled = item.caption === "skipped" && cooldown > Date.now();
-      retry.title = retry.disabled ? "La prédescription est en pause pendant dix minutes." : "Réessayer la préparation de cette image";
+      retry.disabled = !retry.hidden && item.upload === "ready" && remaining > 0;
+      wait.hidden = !retry.disabled;
+      const explanation = retry.disabled ? `Réessai dans ${remainingWait(remaining)}` : "";
+      if (wait.textContent !== explanation) wait.textContent = explanation;
+      retry.title = retry.disabled ? `Les prédescriptions sont en pause. ${explanation}` : "Réessayer la préparation de cette image";
+      if (retry.disabled) retry.setAttribute("aria-describedby", wait.id);
+      else retry.removeAttribute("aria-describedby");
+      waiting ||= retry.disabled;
       return chip;
     });
+    // Keep the remaining time and expiry accurate even without server polling.
+    // Tick only while the active tray actually shows a paused retry.
+    if (waiting) cooldownTimer = setTimeout(render, Math.min(1000, remaining));
     const visible = new Set(chips);
     for (const child of Array.from(list.children)) if (!visible.has(child)) child.remove();
     // Do not detach/reappend an unchanged chip: even moving the same node can
@@ -94,13 +107,18 @@
       if (item.upload === "failed") upload(group, item);
       else schedule(group, item, true);
     });
-    copy.append(name, status, retry);
+    // Not a live region: announcing a changing countdown every second would
+    // interrupt screen readers. The button describes the current wait on focus.
+    const wait = node("span", "attachment-wait");
+    wait.id = `attachment-wait-${++nextChipId}`;
+    wait.hidden = true;
+    copy.append(name, status, retry, wait);
     const close = node("button", "attachment-remove", "×");
     close.type = "button";
     close.setAttribute("aria-label", `Retirer ${item.file.name || "l’image"}`);
     close.addEventListener("click", () => remove(group, item));
     chip.append(image, copy, close);
-    return { chip, status, retry };
+    return { chip, status, retry, wait };
   }
 
   // The API requires an existing conversation (wrapper review r1/r2). Create it

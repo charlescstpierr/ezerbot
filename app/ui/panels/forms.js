@@ -47,6 +47,7 @@
     if (key === rulesKey) return;
     rulesKey = key;
     settings.replaceChildren();
+    settings.className = "setting-section";
     const heading = document.createElement("h3");
     heading.textContent = "Autorisations permanentes";
     settings.append(heading);

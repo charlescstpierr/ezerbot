@@ -489,7 +489,7 @@
   panels.register({
     id: "routines",
     settingsSection(container) {
-      const section = node("section", "routines-section");
+      const section = node("section", "setting-section");
       section.append(node("h3", "", "Routines"), button("Gérer les routines par bot", () => open(liveBots()[0]?.id))); container.append(section);
     },
     botSection(bot, container) {

@@ -1366,6 +1366,27 @@ impl Provider {
     }
 }
 
+/// The engine adapter is independent of the legacy `Run`/`generate` path until cutover.
+impl grokbot_engine::contracts::ModelGateway for Provider {
+    fn stream(
+        &self,
+        request: &grokbot_engine::contracts::ModelRequest,
+        emit: &mut dyn FnMut(
+            grokbot_engine::contracts::ModelEvent,
+        ) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        let body = crate::gateway::request_body(request)?;
+        match self.responses(body) {
+            Ok(response) => {
+                crate::gateway::stream_response(BufReader::new(response.into_reader()), emit)
+            }
+            Err(failure) => emit(grokbot_engine::contracts::ModelEvent::Failed {
+                reason: failure.message,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -323,7 +323,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
         "/api/send" => {
             let input: SendMessage = parse(body)?;
-            validate_id(&input.conversation_id)?;
+            validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
             for id in &input.attachments {
@@ -406,7 +406,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/reconcile" => {
             let input: ReconcileMessage = parse(body)?;
-            validate_id(&input.conversation_id)?;
+            validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
             let conversation = ConversationId::new(&input.conversation_id).expect("validated");
@@ -479,7 +479,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/stop" | "/api/regenerate" => {
             let input: ReconcileMessage = parse(body)?;
-            validate_id(&input.conversation_id)?;
+            validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             if path == "/api/regenerate" {
                 app.require_conversation(&input.conversation_id)?;
@@ -538,7 +538,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/conversations/reset" => {
             let input: Reset = parse(body)?;
-            validate_id(&input.conversation_id)?;
+            validate_conversation_id(&input.conversation_id)?;
             app.require_conversation(&input.conversation_id)?;
             for run in store::runs_for_conversation(&app.connection, &input.conversation_id)? {
                 if !run.status.is_terminal() {
@@ -897,7 +897,7 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
         )
         .optional()?
         .unwrap_or(true);
-    if deleted {
+    if deleted || !super::delegation::parent_conversations_available(ctx, run)? {
         return stop_run(ctx, run, TurnEnd::Stopped);
     }
     let live: bool = ctx.connection.query_row(
@@ -1142,6 +1142,7 @@ impl RunServices for Services<'_> {
             conversation_id: run.conversation_id.clone(),
             current_message: input.clone(),
         };
+        super::delegation::validate_context(&ctx, &request)?;
         let mut blocks = super::context(&ctx, &request)
             .into_iter()
             // Captions are hydrated into history below for reset/summary/budget
@@ -2166,7 +2167,13 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     let block = |source, priority, text: String| ContextBlock {
         source,
         priority,
-        budget: text.chars().count(),
+        // Private instructions and the host's delegated-task contract share
+        // this category cap; a short private instruction must not erase it.
+        budget: if source == ContextSource::BotInstructions {
+            16_384
+        } else {
+            text.chars().count()
+        },
         text,
     };
     let mut blocks = vec![block(

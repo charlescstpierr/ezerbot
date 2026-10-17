@@ -122,7 +122,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/conversations/update" => {
             let input: UpdateConversation = parse(body)?;
-            validate_id(&input.id)?;
+            validate_conversation_id(&input.id)?;
             app.require_conversation(&input.id)?;
             let title = input.title.as_deref().map(valid_title).transpose()?;
             if title.is_none() && input.favorite.is_none() {
@@ -136,7 +136,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/conversations/delete" => {
             let input: DeleteConversation = parse(body)?;
-            validate_id(&input.id)?;
+            validate_conversation_id(&input.id)?;
             let exists: bool = app.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2)", params![ACCOUNT, input.id], |r| r.get(0))?;
             if !exists {
                 return Err(ApiError::new(404, "Conversation introuvable."));

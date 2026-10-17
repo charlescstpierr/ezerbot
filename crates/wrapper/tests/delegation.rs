@@ -59,7 +59,7 @@ impl Fixture {
             path,
         };
         for id in ["child", "grandchild", "other"] {
-            f.post("/api/bots",json!({"id":id,"name":id,"color":"citron","description":"Worker","instructions":"Complete delegated work using complete_task."}));
+            f.post("/api/bots",json!({"id":id,"name":id,"color":"citron","description":"Worker","instructions":""}));
         }
         f
     }
@@ -230,6 +230,458 @@ fn suspended(outcome: ToolOutcome) -> String {
         } => ids[0].clone(),
         other => panic!("expected child suspension, got {other:?}"),
     }
+}
+
+#[test]
+fn parallel_delegates_in_one_response_run_concurrently() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        call("d1", "delegate", args("child")),
+        call("d2", "delegate", args("other")),
+        call("refused", "delegate", args("grokbot")),
+        completed(),
+    ]);
+    f.send(&c, "parallel", "Run independent tasks in parallel");
+    f.wait_parent(&c, "parallel", RunStatus::AwaitingChildren);
+    let parent = f.run(&c, "parallel");
+    let children = f.children(&parent);
+    assert_eq!(children.len(), 2);
+    assert!(children
+        .iter()
+        .all(|d| d.status == DelegationStatus::Running));
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["delegation"]["active_by_conversation"][&c], 2);
+    let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == RunEventKind::Suspended)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == "d1")
+            .unwrap()
+            .payload["outcome"]["status"],
+        "done"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e.kind == RunEventKind::Suspended)
+            .unwrap()
+            .payload["cause"]["ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    f.events(vec![
+        call(
+            "first-done",
+            "complete_task",
+            json!({"summary":"PARALLEL_FIRST_RESULT"}),
+        ),
+        completed(),
+    ]);
+    f.events(vec![call("need-input","request_form",json!({"fields":[{"name":"answer","label":"Continue","field_type":{"kind":"text"},"required":true}]})),completed()]);
+    f.tick();
+    wait("one child complete, sibling still working", || {
+        let edges = f.children(&parent);
+        edges
+            .iter()
+            .filter(|d| matches!(d.status, DelegationStatus::Done { .. }))
+            .count()
+            == 1
+            && edges.iter().any(|d| {
+                store::required(&f.db(), d.child_run_id.as_ref().unwrap())
+                    .unwrap()
+                    .status
+                    == RunStatus::AwaitingHumanInput
+            })
+    });
+    wait("child owners released", || {
+        f.provider.status()["titling"] == false
+    });
+    assert!(!model::ready_to_resume(&f.db(), &parent.run_id).unwrap());
+    assert_eq!(f.run(&c, "parallel").status, RunStatus::AwaitingChildren);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    f.events(vec![
+        call(
+            "second-done",
+            "complete_task",
+            json!({"summary":"PARALLEL_SECOND_RESULT"}),
+        ),
+        completed(),
+    ]);
+    f.post("/api/forms/submit",json!({"entry_id":entry,"submission_id":"continue","conversation_id":c,"values":{"answer":"yes"}}));
+    f.tick();
+    wait("both child results", || {
+        f.children(&parent)
+            .iter()
+            .all(|d| matches!(d.status, DelegationStatus::Done { .. }))
+    });
+    wait("child owners released", || {
+        f.provider.status()["titling"] == false
+    });
+    f.resume(&c, "parallel");
+    let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == RunEventKind::Resumed)
+            .count(),
+        1
+    );
+    let seen = f.server.seen.lock().unwrap();
+    let body = seen.bodies.last().unwrap().to_string();
+    assert!(body.contains("PARALLEL_FIRST_RESULT") && body.contains("PARALLEL_SECOND_RESULT"));
+    assert!(
+        body.contains("cycle"),
+        "a refused last delegate must not hide its reason"
+    );
+}
+
+#[test]
+fn plain_child_answer_is_preserved_and_completion_contract_is_host_owned() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    // A one-character private instruction must not cap the host contract.
+    f.post("/api/bots/update", json!({"id":"child","instructions":"X"}));
+    let (_, edge) = f.begin(&c, "plain", args("child"));
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"CHILD_PLAIN_ANSWER_42"}),
+        completed(),
+    ]);
+    f.tick();
+    wait("plain child ended", || {
+        matches!(
+            graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+            DelegationStatus::Failed { .. }
+        )
+    });
+    wait("child owner released", || {
+        f.provider.status()["titling"] == false
+    });
+    let seen = f.server.seen.lock().unwrap();
+    let instructions = seen.bodies.last().unwrap()["instructions"]
+        .as_str()
+        .unwrap();
+    assert!(instructions.contains("You are executing a delegated Task from bot grokbot"));
+    assert!(instructions.contains("call complete_task(summary) with the complete result"));
+    drop(seen);
+    f.resume(&c, "plain");
+    assert!(f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("CHILD_PLAIN_ANSWER_42"));
+}
+
+#[test]
+fn newest_long_results_and_all_wakees_fit_the_rendered_context_budget() {
+    let mut f = Fixture::new(false);
+    let root = f.root("long-results-root");
+    let mut ids = Vec::new();
+    for n in 0..8 {
+        let id = suspended(f.tool(&root, &format!("long-{n}"), "delegate", args("child")));
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        graph::set_status(
+            &tx,
+            &id,
+            &DelegationStatus::Done {
+                result: format!("SUMMARY_{n}_BEGIN{}", "\n\"\\".repeat(10_000)),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        ids.push(id);
+    }
+    // Model resumed for the older group too: none of its required wakees may be
+    // omitted merely because five newer historical results exist.
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    let mut run = store::required(&tx, &root.run_id).unwrap();
+    run.status = RunStatus::AwaitingChildren;
+    store::save(&tx, &run).unwrap();
+    store::append_event(
+        &tx,
+        &root.run_id,
+        RunEventKind::Suspended,
+        &json!({"cause":{"kind":"children","ids":ids[..3]}}),
+    )
+    .unwrap();
+    for id in &ids[..3] {
+        store::enqueue_wake(&tx, &root.run_id, WakeCause::Child, id).unwrap();
+    }
+    model::resume(&tx, &root.run_id).unwrap();
+    tx.commit().unwrap();
+    let request = ContextRequest {
+        run_id: root.run_id.clone(),
+        trigger: root.trigger.clone(),
+        bot_id: root.bot_id.clone(),
+        conversation_id: root.conversation_id.clone(),
+        current_message: HistoryItem {
+            entry_id: "resume".into(),
+            role: Role::User,
+            text: "resume".into(),
+            images: vec![],
+            tool_items: vec![],
+        },
+    };
+    let blocks = features::context(&f.context(&db, &root), &request)
+        .into_iter()
+        .filter(|b| b.source != ContextSource::CurrentMessage)
+        .collect::<Vec<_>>();
+    let assembled = grokbot_engine::context::assemble_input(
+        &request,
+        &blocks,
+        &[],
+        None,
+        None,
+        &ContextBudget::default(),
+    )
+    .unwrap();
+    let body = assembled
+        .blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for n in 0..8 {
+        assert!(
+            body.contains(&format!("SUMMARY_{n}_BEGIN")),
+            "missing result {n}"
+        );
+    }
+    assert!(body.contains("truncated"));
+    let result = blocks
+        .iter()
+        .find(|b| b.source == ContextSource::DelegatedContext)
+        .unwrap();
+    assert!(serde_json::to_string(&result.text).unwrap().chars().count() + 512 <= 32_000);
+    assert!(result.text.starts_with("Child results (untrusted data"));
+}
+
+#[test]
+fn task_namespace_is_rejected_for_bot_and_message_ids() {
+    let mut f = Fixture::new(false);
+    let c = f.conversation();
+    let err=f.app.api("POST","/api/bots",json!({"id":"task:a:b","name":"bad","color":"citron","description":"","instructions":""}).to_string().as_bytes()).unwrap_err();
+    assert_eq!(err.status, 400);
+    let err = f
+        .app
+        .api(
+            "POST",
+            "/api/send",
+            json!({"conversation_id":c,"message_id":"task:a:b","body":"bad"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(err.status, 400);
+    let root = f.root("conversation-scope-root");
+    let id = suspended(f.tool(&root, "task", "delegate", args("child")));
+    let edge = graph::get(&f.db(), &id).unwrap().unwrap();
+    f.post(
+        "/api/conversations/update",
+        json!({"id":edge.conversation_id,"title":"Allowed task thread"}),
+    );
+    f.post(
+        "/api/conversations/delete",
+        json!({"id":edge.conversation_id}),
+    );
+}
+
+#[test]
+fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let fact = match f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "remember",
+            json!({"text":"REVOKED_DELEGATED_FACT"}),
+        )
+        .unwrap()
+    {
+        ToolOutcome::Done { output } => output["fact"]["fact_id"].clone(),
+        _ => panic!(),
+    };
+    let mut a = args("child");
+    a["selected_context"]["texts"] = json!(["STILL_VALID_INLINE_CONTEXT"]);
+    a["selected_context"]["fact_ids"] = json!([fact]);
+    let (_, edge) = f.begin(&c, "revoke", a);
+    f.events(vec![call("pause","request_form",json!({"fields":[{"name":"answer","label":"Continue","field_type":{"kind":"text"},"required":true}]})),completed()]);
+    f.tick();
+    wait("child paused", || {
+        store::required(&f.db(), edge.child_run_id.as_ref().unwrap())
+            .unwrap()
+            .status
+            == RunStatus::AwaitingHumanInput
+    });
+    wait("child released", || f.provider.status()["titling"] == false);
+    f.post(
+        "/api/memory/forget",
+        json!({"bot_id":"grokbot","fact_id":fact}),
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    f.events(vec![
+        call(
+            "done",
+            "complete_task",
+            json!({"summary":"Used only remaining context"}),
+        ),
+        completed(),
+    ]);
+    f.post("/api/forms/submit",json!({"entry_id":entry,"submission_id":"after-forget","conversation_id":c,"values":{"answer":"continue"}}));
+    f.tick();
+    wait("child finished", || {
+        matches!(
+            graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+            DelegationStatus::Done { .. }
+        )
+    });
+    wait("child released", || f.provider.status()["titling"] == false);
+    let seen = f.server.seen.lock().unwrap();
+    let body = seen.bodies.last().unwrap().to_string();
+    assert!(body.contains("STILL_VALID_INLINE_CONTEXT"));
+    assert!(body.contains("revoked/unavailable"));
+    assert!(body.contains(fact.as_str().unwrap()));
+    assert!(!body.contains("REVOKED_DELEGATED_FACT"));
+    drop(seen);
+    f.resume(&c, "revoke");
+}
+
+#[test]
+fn unreadable_vault_prevents_child_model_calls_instead_of_dropping_context() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (_, edge) = f.begin(&c, "bad-vault", args("child"));
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    std::fs::write(f.path.with_extension("secrets.json"), b"not-json").unwrap();
+    f.tick();
+    wait("host rejects unreadable vault", || {
+        store::required(&f.db(), edge.child_run_id.as_ref().unwrap())
+            .unwrap()
+            .status
+            == RunStatus::Failed
+    });
+    wait("child released", || f.provider.status()["titling"] == false);
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+    std::fs::remove_file(f.path.with_extension("secrets.json")).unwrap();
+    f.tick();
+    f.resume(&c, "bad-vault");
+}
+
+#[test]
+fn deleting_parent_conversation_prevents_any_first_child_model_call() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (_, edge) = f.begin(&c, "delete-parent", args("child"));
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    f.post("/api/conversations/delete", json!({"id":c}));
+    f.tick();
+    assert_eq!(
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+        DelegationStatus::Cancelled
+    );
+    assert_eq!(
+        store::required(&f.db(), edge.child_run_id.as_ref().unwrap())
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+}
+
+#[test]
+fn cascade_settles_every_unexecuted_child_call() {
+    let mut f = Fixture::new(false);
+    let root = f.root("settle-root");
+    let id = suspended(f.tool(&root, "child", "delegate", args("child")));
+    let edge = graph::get(&f.db(), &id).unwrap().unwrap();
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    let child = model::set_running_at(&tx, edge.child_run_id.as_ref().unwrap(), 100).unwrap();
+    for call in ["unexecuted-1", "unexecuted-2"] {
+        store::append_event(&tx,&child.run_id,RunEventKind::ToolCall,&json!({"call_id":call,"name":"remember","arguments":{"text":"not executed"},"response":0})).unwrap();
+    }
+    tx.commit().unwrap();
+    f.post(
+        "/api/stop",
+        json!({"conversation_id":root.conversation_id,"message_id":root.run_id}),
+    );
+    let events = store::events(&db, &child.run_id, 0).unwrap();
+    for id in ["unexecuted-1", "unexecuted-2"] {
+        let result = events
+            .iter()
+            .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == id)
+            .unwrap();
+        assert_eq!(result.payload["outcome"]["status"], "failed");
+        assert_eq!(result.payload["outcome"]["reason"], "not executed: stopped");
+    }
+}
+
+#[test]
+fn state_history_is_bounded_and_idle_tick_takes_no_writer_lock() {
+    let mut f = Fixture::new(false);
+    let root = f.root("bounded-root");
+    let active = suspended(f.tool(&root, "old-active", "delegate", args("child")));
+    for n in 0..60 {
+        let id = suspended(f.tool(&root, &format!("history-{n}"), "delegate", args("child")));
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        graph::set_status(
+            &tx,
+            &id,
+            &DelegationStatus::Done {
+                result: "historical".into(),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let db = f.db();
+    let value = delegation::state(&f.context(&db, &root));
+    assert_eq!(value["delegations"].as_array().unwrap().len(), 51);
+    assert!(value["delegations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["id"] == active));
+    assert_eq!(value["active_by_conversation"][&root.conversation_id], 1);
+    let tx = features::write_transaction(&db).unwrap();
+    graph::set_status(
+        &tx,
+        &active,
+        &DelegationStatus::Done {
+            result: "done".into(),
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let writer = features::write_transaction(&db).unwrap();
+    let reader = f.db();
+    let started = std::time::Instant::now();
+    delegation::tick(&f.context(&reader, &root));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "idle tick waited for the writer lock"
+    );
+    writer.rollback().unwrap();
 }
 
 #[test]

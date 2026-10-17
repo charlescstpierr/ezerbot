@@ -13,7 +13,10 @@
 //! `tests/attachments_run.rs`. Historical images never reload blob bytes.
 
 use super::{write_transaction, Context};
-use crate::{now, parse, validate_id, ApiError, ApiResponse, App, Provider, ACCOUNT};
+use crate::{
+    now, parse, validate_conversation_id, validate_id, ApiError, ApiResponse, App, Provider,
+    ACCOUNT,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use grokbot_attachments::{precaption, staging};
 use grokbot_domain::{AccountId, SubmissionState};
@@ -190,7 +193,7 @@ fn dto(attachment: &staging::Attachment) -> Value {
 
 fn start_precaption(app: &App, body: &[u8]) -> Result<Value, ApiError> {
     let input: PrecaptionRequest = parse(body)?;
-    validate_id(&input.conversation_id)?;
+    validate_conversation_id(&input.conversation_id)?;
     validate_id(&input.attachment_id)?;
     // UI must create its conversation on first paste (not only on send). This
     // preserves usage isolation; tick also covers sends that skipped preparation.

@@ -1231,6 +1231,13 @@ fn validate_id(id: &str) -> Result<(), ApiError> {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
     };
+    if !atom(id) {
+        return Err(ApiError::new(400, "Identifiant invalide."));
+    }
+    Ok(())
+}
+
+fn validate_conversation_id(id: &str) -> Result<(), ApiError> {
     let invalid = || ApiError::new(400, "Identifiant invalide.");
     // DL-S01's task namespace is not a license for arbitrary colon-bearing
     // identifiers. Each component keeps the original ASCII atom restriction;
@@ -1247,15 +1254,10 @@ fn validate_id(id: &str) -> Result<(), ApiError> {
             return Err(invalid());
         }
         let (child, rest) = task.split_once(':').ok_or_else(invalid)?;
-        if !atom(child) {
-            return Err(invalid());
-        }
+        validate_id(child)?;
         parent = rest;
     }
-    if !atom(parent) {
-        return Err(invalid());
-    }
-    Ok(())
+    validate_id(parent)
 }
 
 fn now() -> u64 {

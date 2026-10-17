@@ -281,6 +281,13 @@
     ui.banner.hidden = true;
   }
 
+  function setComposerText(text) {
+    if (text) ui.input.value = text;
+    // The textarea adapter turns "" into invalid Tiptap content ([]).
+    // Use the mounted editor's clear command, without emitting a draft update.
+    else $("composer-input").querySelector(".gb-editor").editor.commands.clearContent(false);
+  }
+
   function saveDraft() {
     if (ui.input.value) writePreference(draftKey(), ui.input.value);
     else removePreference(draftKey());
@@ -310,7 +317,7 @@
     saveDraft();
     selectedId = id;
     writePreference("grokbot.selected", id || "");
-    ui.input.value = readPreference(draftKey(), "");
+    setComposerText(readPreference(draftKey(), ""));
     closeMenu();
     closeSidebar();
     render();
@@ -363,7 +370,7 @@
   }
 
   function renderBots() {
-    const chosen = chosenBot();
+    const chosen = currentBot();
     const chips = liveBots().flatMap((bot) => {
       const chip = element("button", "bot-chip");
       chip.type = "button";
@@ -371,7 +378,20 @@
       chip.setAttribute("aria-pressed", String(bot.id === chosen?.id));
       if (bot.description) chip.title = bot.description;
       chip.append(botAvatar(bot), element("span", "", bot.name));
-      chip.addEventListener("click", () => { chosenBotId = bot.id; writePreference("grokbot.bot", bot.id); render(); });
+      chip.addEventListener("click", () => {
+        if (busy) return;
+        chosenBotId = bot.id;
+        writePreference("grokbot.bot", bot.id);
+        // An old, persisted empty thread still belongs to its original bot.
+        // Move its draft to the welcome screen rather than sending to that bot.
+        if (currentConversation() && !currentConversation().messages.length) {
+          const draft = ui.input.value;
+          selectConversation(null);
+          setComposerText(draft);
+          saveDraft();
+          updateComposer();
+        } else render();
+      });
       if (bot.id !== chosen?.id) return [chip];
       // Le crayon est un frère de la puce : un bouton ne peut pas en contenir un autre.
       const edit = element("button", "bot-chip-edit");
@@ -505,7 +525,7 @@
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
     const label = $("workspace-label");
-    label.textContent = conversation ? botName(conversation.bot_id) : "Espace personnel";
+    label.textContent = conversation ? botName(conversation.bot_id) : bot?.name || "Espace personnel";
     // Sans conversation, ou pour un bot supprimé, le nom reste un simple texte.
     label.disabled = !conversation || !bot || bot.deleted;
     if (label.disabled) label.removeAttribute("title");
@@ -671,16 +691,10 @@
     requestAnimationFrame(() => { ui.scroll.scrollTop = ui.scroll.scrollHeight; });
   }
 
-  async function newConversation() {
+  function newConversation() {
     if (busy) return;
-    busy = true;
-    updateComposer();
-    try {
-      const { conversation } = await api("/api/conversations", { bot_id: chosenBot()?.id });
-      upsertConversation(conversation);
-      selectConversation(conversation.id, true);
-    } catch (error) { notify(error.message); }
-    finally { busy = false; updateComposer(); }
+    // Keep this a local draft; sendMessage creates the thread with the final bot choice.
+    selectConversation(null, true);
   }
 
   async function sendMessage(event) {
@@ -708,7 +722,7 @@
       messageId = crypto.randomUUID();
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
-      ui.input.value = "";
+      setComposerText("");
       removePreference(previousDraftKey);
       removePreference(draftKey());
       render();
@@ -728,7 +742,7 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); ui.input.value = body; saveDraft(); }
+          if (!savedMessage) { pendingSends.delete(messageId); setComposerText(body); saveDraft(); }
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
@@ -854,7 +868,7 @@
   });
   $("composer-form").addEventListener("submit", sendMessage);
   document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {
-    ui.input.value = button.dataset.prompt.replace(/\\n/g, "\n");
+    setComposerText(button.dataset.prompt.replace(/\\n/g, "\n"));
     saveDraft();
     updateComposer();
     ui.input.focus();
@@ -968,10 +982,10 @@
       await api("/api/conversations/delete", { id: conversation.id });
       state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
       removePreference(draftKey(conversation.id));
-      ui.input.value = "";
+      setComposerText("");
       selectedId = null;
       writePreference("grokbot.selected", "");
-      ui.input.value = readPreference(draftKey(), "");
+      setComposerText(readPreference(draftKey(), ""));
       $("delete-dialog").close();
       render();
       notify("Conversation supprimée.");
@@ -1002,10 +1016,10 @@
 
   applyTheme(themeChoice);
   applyAccent(accentChoice);
-  ui.input.value = readPreference(draftKey(), "");
+  setComposerText(readPreference(draftKey(), ""));
   render();
   refresh().then(() => {
-    ui.input.value = readPreference(draftKey(), "");
+    setComposerText(readPreference(draftKey(), ""));
     updateComposer();
     scrollToLatest();
   }).catch(showConnectionError);

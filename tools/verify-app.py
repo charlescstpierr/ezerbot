@@ -1,17 +1,196 @@
 #!/usr/bin/env python3
-"""Inspect the built, running Mac app without changing its workspace."""
+"""Inspect the native app, or run isolated welcome/composer browser regressions."""
 from datetime import datetime, timezone
 from pathlib import Path
+import argparse
 import hashlib
 import json
+import os
 import plistlib
 import re
+import selectors
 import subprocess
+import sys
 import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'app/build/Grokbot.app'
+
+
+def verify_ui_regressions():
+    """Drive the real shell/editor against a disposable, simulated Rust wrapper."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ui-regressions', action='store_true')
+    parser.add_argument('--report', type=Path, help='Optional report path (otherwise stdout only)')
+    args = parser.parse_args()
+    env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=os.environ.get('CHROME_DEVTOOLS_AXI_SESSION', 'gb-fix-newchat'))
+
+    def chrome(*arguments):
+        result = subprocess.run(['chrome-devtools-axi', *arguments], text=True, env=env, timeout=60,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode or re.search(r'^error:', result.stdout, re.MULTILINE):
+            raise AssertionError(result.stdout)
+        return result.stdout
+
+    with tempfile.TemporaryDirectory(prefix='grokbot-newchat-qa-') as directory:
+        home = Path(directory)
+        child_env = dict(os.environ, HOME=directory, CFFIXED_USER_HOME=directory)
+        # No account/token is copied, and no real provider endpoint is used.
+        child_env.pop('GROKBOT_FAKE_OPENAI', None)
+        with (home / 'wrapper.log').open('w+') as log:
+            child = subprocess.Popen([str(ROOT / 'target/debug/grokbot-wrapper'), '--port', '0',
+                                      '--db', str(home / 'workspace.sqlite')], cwd=ROOT, env=child_env,
+                                     stdout=subprocess.PIPE, stderr=log, text=True)
+            page_id = None
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(child.stdout, selectors.EVENT_READ)
+                    if not selector.select(15):
+                        raise TimeoutError('Isolated wrapper did not announce its URL')
+                url = json.loads(child.stdout.readline())['url']
+                if not re.fullmatch(r'http://127\.0\.0\.1:\d+', url):
+                    raise AssertionError('Wrapper must bind to IPv4 loopback')
+                chrome('newpage', url)
+                page = re.search(r'^\s*(\d+),' + re.escape(url) + r'/?\s*,true\s*$', chrome('pages'), re.MULTILINE)
+                if not page:
+                    raise AssertionError('Could not identify the isolated browser page')
+                page_id = page.group(1)
+                result = chrome('eval', r'''async () => {
+  const checks = [];
+  const check = (name, passed) => {
+    if (!passed) throw new Error(name);
+    checks.push({name, passed: true});
+  };
+  const $ = id => document.getElementById(id);
+  const api = async (path, body) => {
+    const response = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Grokbot-Request': 'local'},
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`${path}: ${response.status}`);
+    return response.json();
+  };
+  const until = async predicate => {
+    const deadline = Date.now() + 10000;
+    while (!(await predicate())) {
+      if (Date.now() > deadline) throw new Error('UI did not settle');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  const editor = () => document.querySelector('.gb-editor').editor;
+  const empty = () => JSON.stringify(editor().getJSON()) === JSON.stringify({type:'doc', content:[{type:'paragraph'}]});
+  const type = async text => {
+    document.querySelector('.gb-editor').focus();
+    document.execCommand('insertText', false, text);
+    // Tiptap observes the DOM edit in a microtask before firing onInput.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
+  const choose = name => [...document.querySelectorAll('.bot-chip')].find(node => node.textContent.trim() === name).click();
+  const chip = () => document.querySelector('.bot-chip[aria-pressed=true]').textContent.trim();
+  const cmdN = () => document.dispatchEvent(new KeyboardEvent('keydown', {key:'n', metaKey:true, bubbles:true, cancelable:true}));
+  const saved = () => api('/api/state');
+  const send = async body => {
+    await type(body);
+    check('typed message enables send', !$('send-button').disabled);
+    $('composer-form').requestSubmit();
+    await until(() => !$('new-chat').disabled);
+    const state = await saved();
+    const conversation = state.conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
+    check('sent text is preserved', conversation.messages.some(item => item.role === 'user' && item.body === body));
+    check('send clears to one valid empty paragraph', empty());
+    return conversation;
+  };
+  await until(() => window.GrokbotPanels?.state.bots.length > 0);
+  check('startup has one valid empty paragraph', empty());
+  check('fresh workspace has no conversations', (await saved()).conversations.length === 0);
+  await api('/api/bots', {id:'qa-redacteur', name:'Rédacteur', color:'violet', shape:'etoile', description:'Relit vos textes.', instructions:'Sois bref.'});
+  await window.GrokbotPanels.refresh();
+  choose('Rédacteur'); cmdN(); $('new-chat').click(); cmdN();
+  await until(() => !$('new-chat').disabled);
+  check('new-chat and Cmd+N do not persist empty threads', (await saved()).conversations.length === 0);
+  choose('Grokbot');
+  check('welcome chip and breadcrumb agree', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  const first = await send('Qui me répond ?');
+  check('R → Cmd+N → G sends to G', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Grokbot');
+  check('reply is rendered as G', $('messages').innerText.includes('Grokbot'));
+  await type('Brouillon du fil');
+  cmdN(); await type('Brouillon accueil'); cmdN();
+  check('repeated new-chat preserves the welcome draft', editor().getText() === 'Brouillon accueil');
+  window.GrokbotPanels.openConversation(first.id);
+  check('existing conversation draft is restored', editor().getText() === 'Brouillon du fil');
+  cmdN();
+  check('welcome draft is restored after leaving a thread', editor().getText() === 'Brouillon accueil');
+  editor().commands.selectAll(); editor().commands.deleteSelection();
+  choose('Rédacteur');
+  check('opposite choice updates breadcrumb', chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
+  const second = await send('Réponse du rédacteur');
+  check('G → new-chat → R sends to R', second.bot_id === 'qa-redacteur' && $('messages').innerText.includes('Rédacteur'));
+  check('only sent conversations are persisted', (await saved()).conversations.length === 2);
+  check('sent welcome draft is consumed', localStorage.getItem('grokbot.draft.new') === null);
+  cmdN();
+  check('new-chat restores an empty composer without warning content', empty());
+  // Freeze creation to prove a mid-send chip click cannot switch the recipient.
+  choose('Grokbot'); await type('Choix figé pendant l’envoi');
+  const originalFetch = window.fetch;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  window.fetch = async (...arguments_) => {
+    if (arguments_[0] === '/api/conversations') await gate;
+    return originalFetch(...arguments_);
+  };
+  $('composer-form').requestSubmit();
+  choose('Rédacteur');
+  check('bot choice is frozen while send creates its conversation', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  release();
+  await until(() => !$('new-chat').disabled);
+  window.fetch = originalFetch;
+  check('in-flight send keeps the original recipient', (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected')).bot_id === 'grokbot');
+  // Old versions could already have persisted an empty thread with a different bot.
+  const legacy = (await api('/api/conversations', {bot_id:'qa-redacteur'})).conversation;
+  await window.GrokbotPanels.refresh();
+  window.GrokbotPanels.openConversation(legacy.id);
+  check('legacy empty thread shows its actual bot', chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
+  await type('Brouillon ancien'); choose('Grokbot');
+  check('switching a legacy empty thread moves its draft to the chosen bot', localStorage.getItem('grokbot.selected') === '' && editor().getText() === 'Brouillon ancien' && chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  $('composer-form').requestSubmit();
+  await until(() => !$('new-chat').disabled);
+  check('legacy draft is sent to the newly chosen bot', (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected')).bot_id === 'grokbot');
+  $('confirm-delete').click();
+  await until(() => !$('new-chat').disabled);
+  check('deletion restores a valid empty composer', empty());
+  return {scope:'Real app.js, bundled Tiptap editor and isolated simulated wrapper', checks};
+}''')
+                value = re.search(r'^result: (.+)$', result, re.MULTILINE)
+                if not value:
+                    raise AssertionError(result)
+                ui_report = json.loads(value.group(1))
+                if isinstance(ui_report, str):
+                    ui_report = json.loads(ui_report)
+                console = chrome('console')
+                if '[tiptap warn]' in console or 'Unknown node type' in console:
+                    raise AssertionError(console)
+                ui_report['checks'].append({'name': 'no Tiptap invalid-content warning across startup, navigation, send and deletion', 'passed': True})
+                ui_report['status'] = 'passed'
+                if args.report:
+                    args.report.write_text(json.dumps(ui_report, ensure_ascii=False, indent=2) + '\n')
+                print(json.dumps(ui_report, ensure_ascii=False, indent=2))
+            finally:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                child.stdout.close()
+                if page_id:
+                    subprocess.run(['chrome-devtools-axi', 'closepage', page_id], env=env, timeout=30,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+if '--ui-regressions' in sys.argv:
+    verify_ui_regressions()
+    raise SystemExit(0)
 
 
 def run(arguments):

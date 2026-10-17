@@ -13,7 +13,7 @@
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
   const buckets = new Map();
   const views = new WeakMap();
-  let context, tray, list, picker, cooldown = 0, cooldownTimer, nextChipId = 0;
+  let context, tray, list, picker, pause, cooldown = 0, cooldownTimer;
   function backoff(until) {
     cooldown = Math.max(cooldown, until);
   }
@@ -54,32 +54,33 @@
   function captionText(item) {
     if (item.upload === "pending") return "Import en cours…";
     if (item.upload === "failed") return "Import impossible";
-    return { waiting: "Description en attente…", pending: "Description en cours…", ready: "Description prête", skipped: "Description ignorée", failed: "Description indisponible" }[item.caption];
+    return { waiting: "Description en attente…", pending: "Description en cours…", ready: "Description prête", skipped: "Description ignorée", paused: cooldown > Date.now() ? "Description en pause" : "Description à préparer", failed: "Description indisponible" }[item.caption];
   }
   function render() {
     if (!list || !context) return;
     clearTimeout(cooldownTimer);
     const remaining = Math.max(0, cooldown - Date.now());
+    const explanation = remaining > 0 ? `Prédescriptions en pause · reprise dans ${remainingWait(remaining)}` : "";
     let waiting = false;
     const group = bucket();
     const chips = group.items.map((item) => {
       if (!views.has(item)) views.set(item, createChip(group, item));
-      const { chip, status, retry, wait } = views.get(item);
+      const { chip, status, retry } = views.get(item);
       chip.dataset.status = item.upload === "ready" ? item.caption : item.upload;
       const label = captionText(item);
       if (status.textContent !== label) status.textContent = label;
       status.title = item.error || "";
-      retry.hidden = !(item.upload === "failed" || item.caption === "failed" || item.caption === "skipped");
+      retry.hidden = !(item.upload === "failed" || ["failed", "skipped", "paused"].includes(item.caption));
       retry.disabled = !retry.hidden && item.upload === "ready" && remaining > 0;
-      wait.hidden = !retry.disabled;
-      const explanation = retry.disabled ? `Réessai dans ${remainingWait(remaining)}` : "";
-      if (wait.textContent !== explanation) wait.textContent = explanation;
-      retry.title = retry.disabled ? `Les prédescriptions sont en pause. ${explanation}` : "Réessayer la préparation de cette image";
-      if (retry.disabled) retry.setAttribute("aria-describedby", wait.id);
+      retry.title = retry.disabled ? explanation : "Réessayer la préparation de cette image";
+      if (retry.disabled) retry.setAttribute("aria-describedby", pause.id);
       else retry.removeAttribute("aria-describedby");
       waiting ||= retry.disabled;
       return chip;
     });
+    pause.hidden = !waiting;
+    const visibleExplanation = waiting ? explanation : "";
+    if (pause.textContent !== visibleExplanation) pause.textContent = visibleExplanation;
     // Keep the remaining time and expiry accurate even without server polling.
     // Tick only while the active tray actually shows a paused retry.
     if (waiting) cooldownTimer = setTimeout(render, Math.min(1000, remaining));
@@ -107,19 +108,13 @@
       if (item.upload === "failed") upload(group, item);
       else schedule(group, item, true);
     });
-    // Not a live region: announcing a changing countdown every second would
-    // interrupt screen readers. The disabled button points to the visible wait
-    // for screen-reader browsing.
-    const wait = node("span", "attachment-wait");
-    wait.id = `attachment-wait-${++nextChipId}`;
-    wait.hidden = true;
-    copy.append(name, status, retry, wait);
+    copy.append(name, status, retry);
     const close = node("button", "attachment-remove", "×");
     close.type = "button";
     close.setAttribute("aria-label", `Retirer ${item.file.name || "l’image"}`);
     close.addEventListener("click", () => remove(group, item));
     chip.append(image, copy, close);
-    return { chip, status, retry, wait };
+    return { chip, status, retry };
   }
 
   // The API requires an existing conversation (wrapper review r1/r2). Create it
@@ -247,7 +242,9 @@
       changed();
       return;
     }
-    if (cooldown > Date.now()) { item.caption = "skipped"; changed(); return; }
+    // Poll an already-started job to learn its real outcome; a new image that
+    // never reached the service is paused, not refused/ignored.
+    if (cooldown > Date.now() && item.caption !== "pending") { item.caption = "paused"; changed(); return; }
     const revision = item.revision;
     item.caption = "pending";
     item.polling = true;
@@ -314,9 +311,15 @@
         choose.type = "button";
         choose.addEventListener("click", () => picker.click());
         picker.addEventListener("change", () => { onFiles(Array.from(picker.files), null, context); picker.value = ""; });
+        // One controller-wide notice, read in document order and referenced by
+        // disabled retries for screen-reader browsing. Not a live region: do not
+        // interrupt readers with a countdown announcement every second.
+        pause = node("p", "attachment-pause");
+        pause.id = "attachment-pause";
+        pause.hidden = true;
         list = node("ul", "attachment-list");
         list.setAttribute("aria-label", "Images à envoyer");
-        tray.append(choose, picker, list);
+        tray.append(choose, picker, pause, list);
         container.append(tray);
         const form = document.getElementById("composer-form");
         form.addEventListener("input", () => sync());

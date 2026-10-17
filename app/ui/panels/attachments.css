@@ -11,9 +11,9 @@
 .attachment-status { color: var(--muted); font-size: 11px; }
 .attachment-chip[data-status="ready"] .attachment-status { color: var(--ok); }
 .attachment-chip[data-status="failed"] .attachment-status { color: var(--danger-text); }
-.attachment-retry { align-self: flex-start; padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; color: var(--accent-ink); font-size: 11px; text-decoration: underline; }
-.attachment-retry:disabled { border-color: var(--muted); color: color-mix(in srgb, var(--muted) 60%, transparent); text-decoration: none; cursor: not-allowed; }
-.attachment-wait { color: var(--muted); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.attachment-retry { align-self: flex-start; padding: 2px 0; border: 0; color: var(--accent-ink); font-size: 11px; text-decoration: underline; }
+.attachment-retry:disabled { color: var(--muted); text-decoration: none; opacity: .5; cursor: not-allowed; }
+.attachment-pause { margin: 4px 0 6px; color: var(--muted); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .attachment-remove { flex: 0 0 auto; align-self: flex-start; width: 28px; height: 28px; border-radius: 5px; color: var(--muted); font-size: 20px; line-height: 1; }
 .attachment-remove:hover { color: var(--text); background: var(--pane); }
 @media (max-width: 600px) { .attachment-chip { width: 100%; } }

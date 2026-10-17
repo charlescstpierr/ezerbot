@@ -3,7 +3,8 @@
 //! The recovered importer (anchors A11–A17) checks the first 8192 bytes for NUL,
 //! validates UTF-8, counts UTF-16 units, and annotates the preserved document.
 //! Names follow the plan's frontmatter → heading → SKILL.md directory → filename
-//! precedence. Digest deduplication and exact per-file reports are local choices.
+//! precedence. Digest deduplication, named updates at capacity, and exact per-file
+//! reports are local choices (Grok applies its remaining-slot cap to updates too).
 //! `convert` is pure. Writes are serial and failures do not roll back earlier
 //! successes (SR04, A19). The caller owns transactions and HTTP batch limits.
 use crate::library::{self, Origin, Skill, SkillContent};
@@ -198,7 +199,8 @@ fn import_files(
                                         == front
                             })
                         });
-                        planned.insert(imported.content.name.clone());
+                        // Only final names claim reuse; suffixes and failed/refused
+                        // writes must not reserve their requested base name.
                         if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
                             ImportStatus::Skipped {
                                 reason: "too-many-skills".into(),
@@ -288,7 +290,7 @@ fn heading(body: &str) -> Option<&str> {
         .lines()
         .find(|line| !line.trim_matches(js_space).is_empty())?;
     let title = line.strip_prefix('#')?;
-    if !title.starts_with([' ', '\t']) {
+    if !title.starts_with([' ', '\t']) || title.contains(['\r', '\u{2028}', '\u{2029}']) {
         return None;
     }
     let title = title.trim_matches([' ', '\t']);
@@ -396,6 +398,9 @@ mod tests {
                 "parent-folder",
             ),
             ("no-heading.md", "intro\n# Not first", "no-heading"),
+            ("a.md", "# A\rB\nx", "a"),
+            ("a.md", "# A\u{2028}B\nx", "a"),
+            ("a.md", "# A\u{2029}B\nx", "a"),
             ("fallback.md", "---\nname: ???\n---\n# Heading", "heading"),
             ("☃.txt", "plain body", "skill"),
         ] {
@@ -749,11 +754,90 @@ mod tests {
         let second = import_batch(
             &conn,
             "bot",
-            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2")],
+            &[
+                file("x.md", "# Deploy\nreadme"),
+                file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
+            ],
         )
         .unwrap();
-        assert_eq!(written_id(&first), written_id(&second));
-        assert_eq!(library::list(&conn, "bot").unwrap().len(), 250);
+        assert_eq!(
+            second[0].status,
+            ImportStatus::Skipped {
+                reason: "too-many-skills".into()
+            }
+        );
+        assert_eq!(written_id(&first), written_id(&second[1..]));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 250);
+        let updated = saved
+            .iter()
+            .find(|skill| skill.skill_id == written_id(&first))
+            .unwrap();
+        assert_eq!(updated.version, 2);
+        assert!(updated.content.body.ends_with("v2"));
+    }
+
+    #[test]
+    fn heading_file_suffixed_before_named_reupload_still_updates() {
+        let conn = database();
+        let first = import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv1")],
+        )
+        .unwrap();
+        let reports = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("deploy/README.md", "# Deploy\nreadme"),
+                file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(written_id(&reports[1..]), written_id(&first));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].content.name, "deploy");
+        assert_eq!(saved[0].version, 2);
+        assert!(saved[0].content.body.ends_with("v2"));
+        assert_eq!(saved[1].content.name, "deploy-2");
+        assert_eq!(saved[1].skill_id, written_id(&reports));
+        assert!(saved[1].content.body.ends_with("readme"));
+    }
+
+    #[test]
+    fn failed_heading_does_not_claim_existing_name() {
+        let conn = database();
+        let first = import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv1")],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_readme BEFORE INSERT ON skills_library
+            WHEN NEW.body LIKE '%readme' BEGIN SELECT RAISE(ABORT, 'reject readme'); END;",
+        )
+        .unwrap();
+        let reports = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("deploy/README.md", "# Deploy\nreadme"),
+                file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            matches!(&reports[0].status, ImportStatus::Skipped { reason } if reason.starts_with("write-failed:"))
+        );
+        assert_eq!(written_id(&reports[1..]), written_id(&first));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].content.name, "deploy");
+        assert_eq!(saved[0].version, 2);
+        assert!(saved[0].content.body.ends_with("v2"));
     }
 
     #[test]

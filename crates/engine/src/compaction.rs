@@ -235,6 +235,9 @@ pub fn summarize_with_options(
                 }
                 text.push_str(&delta);
             }
+            // This independent text-only summary call has no function calls to
+            // replay. Never turn opaque provider state into summary evidence.
+            ModelEvent::Reasoning { .. } => {}
             ModelEvent::Completed => completed = true,
             _ => {
                 return Err(invalid(
@@ -319,17 +322,23 @@ fn evidence_entry(
     cap: usize,
     omit_tools: bool,
 ) -> Result<serde_json::Value> {
-    let tools = entry.tool_items.iter().map(|tool| Ok(match tool {
-        ToolItem::Call { call } => json!({
-            "kind": "call", "call_id": call.call_id, "name": call.name,
-            "arguments": tool_body(&serde_json::to_string(&call.arguments)?, cap, omit_tools),
-            "abandoned": exchanges.iter().any(|e| e.call_id == call.call_id && e.output.is_none() && !pending.contains(e.call_id)),
-        }),
-        ToolItem::Output { call_id, output } => json!({
-            "kind": "output", "call_id": call_id,
-            "output": tool_body(&match output { serde_json::Value::String(text) => text.clone(), _ => serde_json::to_string(output)? }, cap, omit_tools),
-        }),
-    })).collect::<Result<Vec<_>>>()?;
+    let mut tools = Vec::new();
+    for tool in &entry.tool_items {
+        match tool {
+            ToolItem::Call { call } => tools.push(json!({
+                "kind": "call", "call_id": call.call_id, "name": call.name,
+                "arguments": tool_body(&serde_json::to_string(&call.arguments)?, cap, omit_tools),
+                "abandoned": exchanges.iter().any(|e| e.call_id == call.call_id && e.output.is_none() && !pending.contains(e.call_id)),
+            })),
+            ToolItem::Output { call_id, output } => tools.push(json!({
+                "kind": "output", "call_id": call_id,
+                "output": tool_body(&match output { serde_json::Value::String(text) => text.clone(), _ => serde_json::to_string(output)? }, cap, omit_tools),
+            })),
+            // Historical calls are quoted evidence, not live provider calls.
+            // Their encrypted reasoning is neither evidence nor assistant text.
+            ToolItem::Reasoning { .. } => {}
+        }
+    }
     let images: Vec<_> = entry.images.iter().map(|image| json!({
         "attachment_id": image.attachment_id, "caption": image.caption.as_deref().map(|text| bounded(text, cap)),
     })).collect();
@@ -795,6 +804,7 @@ fn exchanges(history: &[HistoryItem]) -> Result<Vec<Exchange<'_>>> {
                     }
                     ranges[range].output = Some(index);
                 }
+                ToolItem::Reasoning { .. } => {}
             }
         }
     }
@@ -1796,6 +1806,114 @@ mod compaction_tests {
                 .text,
             "Bonjour 🐈"
         );
+    }
+
+    #[test]
+    fn historical_encrypted_reasoning_is_not_summary_evidence() {
+        let conn = conn();
+        let mut history = history(&["old", "call", "result", "tail"]);
+        history[1].tool_items = vec![
+            ToolItem::Reasoning {
+                item_id: "rs-opaque".into(),
+                encrypted_content: "opaque-ciphertext".repeat(100_000),
+            },
+            call("c"),
+        ];
+        history[2].tool_items.push(output("c"));
+        let gateway = Gateway::text("Only factual tool results.");
+        let summary = summarize(&gateway, "model", "conversation", &history, None).unwrap();
+        assert_eq!(summary.resume_from_entry_inclusive, "tail");
+        let requests = gateway.requests.lock().unwrap();
+        let evidence = &requests[0].input[0].text;
+        assert!(!evidence.contains("opaque-ciphertext"));
+        assert!(!evidence.contains("rs-opaque"));
+        assert!(!evidence.contains("encrypted_content"));
+        assert!(evidence.contains("tool evidence"));
+        save_exact(&conn, &summary, &history);
+    }
+
+    #[test]
+    fn pending_call_retains_its_typed_reasoning_for_context_replay() {
+        let mut history = history(&["old", "call", "later", "current"]);
+        let reasoning = ToolItem::Reasoning {
+            item_id: "rs-pending".into(),
+            encrypted_content: "opaque-provider-state".into(),
+        };
+        history[1].tool_items = vec![reasoning.clone(), call("pending")];
+        let options = SummaryOptions {
+            pending_call_ids: HashSet::from(["pending".into()]),
+            ..SummaryOptions::default()
+        };
+        let summary = generated_options(&history, None, &options);
+        assert_eq!(summary.resume_from_entry_inclusive, "call");
+        history[3].tool_items.push(output("pending"));
+        let request = ContextRequest {
+            run_id: "resume".into(),
+            bot_id: "bot".into(),
+            conversation_id: "conversation".into(),
+            trigger: Trigger::UserMessage {
+                message_id: "current".into(),
+                attempt: 0,
+            },
+            current_message: history[3].clone(),
+        };
+        let blocks = [ContextBlock {
+            source: ContextSource::AppContract,
+            priority: 0,
+            budget: 1000,
+            text: "app policy".into(),
+        }];
+        let assembled = crate::context::assemble_input(
+            &request,
+            &blocks,
+            &history,
+            Some(&summary),
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            assembled.input[0].tool_items,
+            vec![reasoning, call("pending")]
+        );
+    }
+
+    #[test]
+    fn summary_gateway_reasoning_is_ignored_not_rendered() {
+        let gateway = Gateway::events(vec![
+            ModelEvent::Reasoning {
+                item_id: "rs-summary".into(),
+                encrypted_content: "opaque-response-state".into(),
+            },
+            ModelEvent::TextDelta {
+                text: "Factual summary.".into(),
+            },
+            ModelEvent::Completed,
+        ]);
+        let summary = summarize(
+            &gateway,
+            "model",
+            "conversation",
+            &history(&["old", "tail"]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(summary.text, "Factual summary.");
+        let reasoning_only = Gateway::events(vec![
+            ModelEvent::Reasoning {
+                item_id: "rs-only".into(),
+                encrypted_content: "not-summary-text".into(),
+            },
+            ModelEvent::Completed,
+        ]);
+        assert!(summarize(
+            &reasoning_only,
+            "model",
+            "conversation",
+            &history(&["old", "tail"]),
+            None
+        )
+        .is_err());
     }
 
     #[test]

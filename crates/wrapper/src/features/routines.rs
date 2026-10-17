@@ -252,14 +252,19 @@ fn readable_schedule(conn: &Connection, r: &Routine) -> Result<String, ApiError>
     Ok(cron::describe_fr(&r.trigger, &r.time_zone)?)
 }
 fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError> {
-    let (label, text) = match &r.body {
-        RoutineBody::InlinePrompt { prompt } => ("Tâche proposée".to_owned(), prompt.clone()),
+    let (heading, text) = match &r.body {
+        RoutineBody::InlinePrompt { prompt } => {
+            ("> **Tâche proposée :**".to_owned(), prompt.clone())
+        }
         RoutineBody::SkillInvocation { skill_id, version } => {
             let s = library::get_version(conn, skill_id, *version)?
                 .filter(|s| s.bot_id == r.bot_id && !s.deleted)
                 .ok_or_else(|| ApiError::new(404, "Pinned skill version not found for this bot"))?;
             (
-                format!("Skill {} · version {version}", s.content.name),
+                format!(
+                    "> **Skill :**\n{}\n> \n> **Instructions :**",
+                    quoted_data(&format!("{} · version {version}", s.content.name))
+                ),
                 s.content.body,
             )
         }
@@ -269,17 +274,26 @@ fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError>
     if text.chars().count() > 2_000 {
         return Err(ApiError::new(400,"Routine body too long for conversational confirmation (2000 characters); review and resume it in the Routines panel"));
     }
-    Ok(format!("{label} :\n{text}"))
+    Ok(format!("{heading}\n{}", quoted_data(&text)))
 }
 fn quoted_data(text: &str) -> String {
     // Preserve the complete untrusted body as literal, readable quoted text.
-    // Escape Markdown (including HTML, links and fences); no model-authored line
-    // may break out of the preview or masquerade as the host's consent question.
-    text.replace("\r\n", "\n")
+    // Escape Markdown/HTML/fences and break GFM autolinks with invisible word
+    // joiners; no model-authored line may masquerade as the host's question.
+    text.replace("://", ":\u{2060}//")
+        .replace('@', "\u{2060}@")
+        .replace("\r\n", "\n")
         .replace('\r', "\n")
         .lines()
         .map(|line| {
             let escaped = line.chars().fold(String::new(), |mut out, c| {
+                if c == '.'
+                    && out
+                        .get(out.len().saturating_sub(3)..)
+                        .is_some_and(|s| s.eq_ignore_ascii_case("www"))
+                {
+                    out.push('\u{2060}');
+                }
                 if c.is_ascii_punctuation() {
                     out.push('\\');
                 }
@@ -295,11 +309,11 @@ fn ask_confirmation(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     let conversation = principal(ctx)?;
     let preview = confirmation_body(ctx.connection, r)?;
     let data = format!(
-        "{}\n\n{}\n\n{preview}",
-        r.name,
-        readable_schedule(ctx.connection, r)?
+        "> **Routine :**\n{}\n> \n> **Horaire :**\n{}\n> \n{preview}",
+        quoted_data(&r.name),
+        quoted_data(&readable_schedule(ctx.connection, r)?)
     );
-    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Pour distinguer des routines de même nom, utilisez le panneau Routines.",quoted_data(&data));
+    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{data}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Pour distinguer des routines de même nom, utilisez le panneau Routines.");
     let existing:Option<String>=ctx.connection.query_row("SELECT m.message_id FROM wrapper_routine_confirmation c JOIN wrapper_conversations v ON v.account_id=?1 AND v.id=c.conversation_id AND v.deleted=0 JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=c.conversation_id AND m.ordinal=c.after_ordinal WHERE c.routine_id=?2 AND c.conversation_id=?3 AND c.confirmed_message_id IS NULL",params![ACCOUNT,r.routine_id,conversation],|row|row.get(0)).optional()?;
     let notice = match existing {
         Some(id) => {

@@ -179,21 +179,25 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
             let week = if dow.bits == 0b11_1110 {
                 "du lundi au vendredi".into()
             } else {
-                let days = values(dow, 0, 6);
-                format!(
-                    "{} {}",
-                    if days.len() == 1 { "le" } else { "les" },
-                    days.iter()
-                        .map(|v| weekdays[*v as usize])
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                join_fr(
+                    &values(dow, 0, 6)
+                        .iter()
+                        .map(|v| format!("le {}", weekdays[*v as usize]))
+                        .collect::<Vec<_>>(),
                 )
             };
-            let days = values(dom, 1, 31);
             let month_days = format!(
-                "{} {} du mois",
-                if days.len() == 1 { "le" } else { "les jours" },
-                list(days)
+                "{} du mois",
+                join_fr(
+                    &values(dom, 1, 31)
+                        .iter()
+                        .map(|v| if *v == 1 {
+                            "le 1er".into()
+                        } else {
+                            format!("le {v}")
+                        })
+                        .collect::<Vec<_>>()
+                )
             );
             let days = match (dom.wildcard, dow.wildcard) {
                 (true, true) => "tous les jours".into(),
@@ -221,11 +225,12 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
                 ];
                 format!(
                     ", en {}",
-                    values(month, 1, 12)
-                        .iter()
-                        .map(|v| names[*v as usize])
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    join_fr(
+                        &values(month, 1, 12)
+                            .iter()
+                            .map(|v| names[*v as usize].to_owned())
+                            .collect::<Vec<_>>()
+                    )
                 )
             };
             let text = format!("{days} {time}{months}");
@@ -237,6 +242,14 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
         }
     };
     Ok(format!("{text} ({zone})"))
+}
+
+fn join_fr(items: &[String]) -> String {
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} et {last}", rest.join(", ")),
+    }
 }
 
 fn readable_duration(ms: u64) -> String {
@@ -536,10 +549,12 @@ mod cron_tests {
             ("0 8 * * 1-5", "Du lundi au vendredi à 08:00 (America/Toronto)"),
             ("@daily", "Tous les jours à 00:00 (America/Toronto)"),
             ("0 9 * * 7", "Le dimanche à 09:00 (America/Toronto)"),
-            ("0 9 1-7 2 1", "Les jours 1, 2, 3, 4, 5, 6, 7 du mois OU le lundi à 09:00, en février (America/Toronto)"),
+            ("0 9 1-7 2 1", "Le 1er, le 2, le 3, le 4, le 5, le 6 et le 7 du mois OU le lundi à 09:00, en février (America/Toronto)"),
             ("*/15 * * * *", "Tous les jours à chaque heure, aux minutes 0, 15, 30, 45 (America/Toronto)"),
             ("* * * * *", "Tous les jours à chaque minute (America/Toronto)"),
-            ("TZ=UTC @monthly", "Le 1 du mois à 00:00 (UTC)"),
+            ("TZ=UTC @monthly", "Le 1er du mois à 00:00 (UTC)"),
+            ("30 7 1,15 * *", "Le 1er et le 15 du mois à 07:30 (America/Toronto)"),
+            ("0 9 * 1,2 1,3", "Le lundi et le mercredi à 09:00, en janvier et février (America/Toronto)"),
         ] {
             assert_eq!(describe_fr(&parse(expression).unwrap(), "America/Toronto").unwrap(), expected);
         }

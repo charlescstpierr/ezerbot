@@ -386,7 +386,7 @@ fn model_confirmation_never_hides_prompt_tails_and_skill_body_is_reviewable() {
 #[test]
 fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
     let mut f = Fixture::new(false);
-    let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte";
+    let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte\nhttps://x.test www.x.test a@b.test WWW.x.test";
     let created = output(
         f.app
             .invoke_tool(
@@ -414,8 +414,18 @@ fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
     assert!(shown.contains("\\<img"));
     let preview = shown.split("\n\n").nth(1).unwrap();
     assert!(preview.lines().all(|line| line.starts_with("> ")));
-    assert!(literal.contains("Tâche proposée :  \n> Donne-moi la météo."));
-    assert!(literal.contains("[secret](https://example.com) <img src=x>"));
+    assert!(shown.contains("> **Routine :**\n> Météo du matin"));
+    assert!(shown.contains("> **Horaire :**\n> Du lundi au vendredi"));
+    assert!(literal.contains("> **Tâche proposée :**\n> Donne-moi la météo."));
+    for link in ["https://x.test", "www.x.test", "a@b.test", "WWW.x.test"] {
+        assert!(!literal.contains(link), "active autolink: {link}");
+    }
+    assert!(literal.contains("https:\u{2060}//x.test"));
+    assert!(literal.contains("www\u{2060}.x.test"));
+    assert!(literal.contains("a\u{2060}@b.test"));
+    assert!(literal
+        .replace('\u{2060}', "")
+        .contains("[secret](https://example.com) <img src=x>"));
     assert!(shown.contains("\n\nConfirmez-vous son activation ?"));
     let list = f
         .app

@@ -52,10 +52,10 @@
     return Number(total / scale);
   }
   function cadence(ms) {
-    for (const [unit, divisor] of [["jour(s)", 86400000], ["heure(s)", 3600000], ["minute(s)", 60000], ["seconde(s)", 1000]]) {
-      if (ms && ms % divisor === 0) return `${ms / divisor} ${unit}`;
+    for (const [unit, divisor] of [["jour", 86400000], ["heure", 3600000], ["minute", 60000], ["seconde", 1000]]) {
+      if (ms && ms % divisor === 0) return `${ms / divisor} ${unit}${ms / divisor === 1 ? "" : "s"}`;
     }
-    return `${ms} ms`;
+    return `${ms} millisecondes`;
   }
   // This is a description/early check only, never a client-side next-run oracle.
   // In particular, never describe 1-7 DOM + Monday as "first Monday" (CR09).
@@ -71,7 +71,9 @@
       const interval = duration(parts[0]), phase = parts.length === 2 ? duration(parts[1]) : null;
       if (interval < 60000) throw new Error("L’intervalle d’exécution minimum est d’une minute.");
       if (phase !== null && phase >= interval) throw new Error("La phase doit être inférieure à l’intervalle.");
-      return { trigger: { kind: "every", interval_ms: interval, phase_ms: phase }, zone, text: `Toutes les ${cadence(interval)} · ${phase === null ? "à partir de l’activation" : `phase ${cadence(phase)} depuis l’époque UTC`}` };
+      const intervalText = cadence(interval);
+      const repeat = intervalText.startsWith("1 ") ? `Chaque ${intervalText.slice(2)}` : `${interval % 86400000 === 0 ? "Tous les" : "Toutes les"} ${intervalText}`;
+      return { trigger: { kind: "every", interval_ms: interval, phase_ms: phase }, zone, text: `${repeat}, ${phase === null ? "à partir de l’activation" : `décalage de ${cadence(phase)} depuis l’époque UTC`}` };
     }
     text = aliases[text.toLowerCase()] || text;
     const fields = text.split(" "), bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
@@ -86,12 +88,28 @@
         }
       }
     });
+    // Mirror scheduler::cron::describe_fr, including expansion of lists/steps
+    // and DOM OR DOW. This remains a description, never a next-run oracle.
+    const values = (field, min, max, sunday = false) => {
+      const result = new Set();
+      for (const item of field.split(",")) {
+        const [range, stepText] = item.split("/"), step = Number(stepText || 1);
+        const [from, to] = range === "*" ? [min, max] : range.includes("-") ? range.split("-").map(Number) : [Number(range), stepText ? max : Number(range)];
+        for (let n = from; n <= to; n += step) result.add(sunday && n === 7 ? 0 : n);
+      }
+      return [...result].sort((a, b) => a - b);
+    };
+    const join = (items) => items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} et ${items.at(-1)}`;
     const [minute, hour, dom, month, dow] = fields;
-    const time = /^\d+$/.test(minute) && /^\d+$/.test(hour) ? `À ${hour.padStart(2, "0")}:${minute.padStart(2, "0")}` : `Minutes : ${minute} · Heures : ${hour}`;
-    const dayNames = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"];
-    const week = dow.includes("/") ? `${dow} (0/7 = dimanche, 1 = lundi)` : dow.replace(/\d+/g, (n) => dayNames[Number(n)]);
-    const days = dom !== "*" && dow !== "*" ? `jour du mois ${dom} OU ${week}` : dom !== "*" ? `jour du mois ${dom}` : dow !== "*" ? week : "tous les jours";
-    return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${time} · ${days}${month === "*" ? "" : ` · mois ${month}`}` };
+    const minutes = values(minute, 0, 59), hours = values(hour, 0, 23), weekdays = values(dow, 0, 7, true);
+    const time = minutes.length === 1 && hours.length === 1 ? `à ${String(hours[0]).padStart(2, "0")}:${String(minutes[0]).padStart(2, "0")}` : minutes.length === 60 && hours.length === 24 ? "à chaque minute" : hours.length === 24 ? `à chaque heure, aux minutes ${minutes.join(", ")}` : `aux heures ${hours.join(", ")} et aux minutes ${minutes.join(", ")}`;
+    const dayNames = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+    const week = weekdays.join(",") === "1,2,3,4,5" ? "du lundi au vendredi" : join(weekdays.map((n) => `le ${dayNames[n]}`));
+    const monthDays = `${join(values(dom, 1, 31).map((n) => `le ${n === 1 ? "1er" : n}`))} du mois`;
+    const days = dom !== "*" && dow !== "*" ? `${monthDays} OU ${week}` : dom !== "*" ? monthDays : dow !== "*" ? week : "tous les jours";
+    const monthNames = ["", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+    const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
+    return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
   function describe(r) {
     if (r.schedule_description) return r.schedule_description;
@@ -100,11 +118,12 @@
       const t = r.trigger;
       const expression = t.kind === "cron" ? t.expression : `@every ${t.interval_ms}ms${t.phase_ms === null || t.phase_ms === undefined ? "" : `/${t.phase_ms}ms`}`;
       const parsed = schedule(expression, t.time_zone || r.time_zone);
-      return `${parsed.text} · ${parsed.zone}`;
+      return `${parsed.text} (${parsed.zone})`;
     } catch { return "Horaire illisible — consultez ou corrigez cette routine."; }
   }
 
-  let dialog, botSelect, content, status, toolbar, view = "list", current = null;
+  let dialog, botSelect, content, status, toolbar, view = "list", current = null, returnToSettings = false;
+  let settingsScrollTop = 0, settingsFocus = null;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
   let historyLimit = 200, rangeLimit = 200;
   // Only compact running/nonce summaries survive a history request. The server
@@ -129,6 +148,7 @@
   }
   function openThread(id) {
     if (!panels.openConversation(id)) { message("Le fil est indisponible. Actualisez puis réessayez.", true); return; }
+    returnToSettings = false; // Navigating to a thread must not reopen Settings.
     dialog.close();
     for (const name of ["bot-dialog", "settings-dialog"]) document.getElementById(name)?.close();
   }
@@ -146,7 +166,18 @@
     status = node("p", "routines-note"); status.setAttribute("role", "status");
     content = node("div", "routines-content");
     dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, status, content);
-    dialog.addEventListener("close", () => { if (!dialog.open) { revision++; current = null; content.replaceChildren(); } });
+    dialog.addEventListener("close", () => {
+      if (dialog.open) return;
+      revision++; current = null; content.replaceChildren();
+      const restore = returnToSettings; returnToSettings = false;
+      const settings = document.getElementById("settings-dialog");
+      if (restore && settings && !settings.open) {
+        settings.showModal();
+        if (settingsFocus?.isConnected) settingsFocus.focus({ preventScroll: true });
+        settings.scrollTop = settingsScrollTop;
+      }
+      settingsFocus = null;
+    });
     (document.getElementById("panels") || document.body).append(dialog);
   }
   function open(bot) {
@@ -155,8 +186,13 @@
     botSelect.replaceChildren(...liveBots().map((b) => { const option = node("option", "", b.name); option.value = b.id; return option; }));
     botSelect.value = liveBots().some((b) => b.id === bot) ? bot : liveBots()[0]?.id || "";
     view = "list"; current = null; signature = ""; revision++;
-    // Routines replaces its entry dialog rather than stacking modal backdrops.
-    for (const name of ["bot-dialog", "settings-dialog"]) document.getElementById(name)?.close();
+    // Replace Settings, but never close the bot editor: its unsaved profile and
+    // memory drafts must survive. The bot-entry layering predates D17.
+    const settings = document.getElementById("settings-dialog");
+    returnToSettings = Boolean(settings?.open && !document.getElementById("bot-dialog")?.open);
+    settingsScrollTop = settings?.scrollTop || 0;
+    settingsFocus = returnToSettings && settings.contains(document.activeElement) ? document.activeElement : null;
+    settings?.close();
     message(""); dialog.showModal(); renderList();
     void reload();
   }
@@ -241,14 +277,17 @@
     const availableSkills = panels.state.skills?.by_bot?.[botId()] || [];
     skill.append(node("option", "", "Choisir une skill")); skill.firstChild.value = "";
     for (const item of availableSkills) {
-      const option = node("option", "", item.name + (item.name_truncated ? "…" : "")); option.value = item.skill_id; skill.append(option);
+      const description = [...(item.description || "")];
+      const label = item.name + (item.name_truncated ? "…" : "") + (description.length ? ` — ${description.slice(0, 60).join("")}${description.length > 60 || item.description_truncated ? "…" : ""}` : "");
+      const option = node("option", "", label); option.value = item.skill_id; skill.append(option);
     }
     if (r?.body.skill_id && !availableSkills.some((item) => item.skill_id === r.body.skill_id)) {
       const option = node("option", "", pinned?.content.name || "Skill épinglée indisponible"); option.value = r.body.skill_id; skill.append(option);
     }
     skill.value = r?.body.skill_id || "";
+    if (!availableSkills.length) { skill.disabled = true; skill.dataset.readOnly = "true"; }
     const version = field("Version épinglée de la skill"); version.type = "number"; version.min = "1"; version.step = "1"; version.value = String(r?.body.version || 1);
-    const skillHint = node("p", "routines-note", "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions."); fields.append(skillHint);
+    const skillHint = node("p", "routines-note", availableSkills.length ? "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions." : "Aucune skill pour ce bot : créez-en une dans Modifier le bot › Skills."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
     for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
@@ -276,7 +315,7 @@
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
       expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once";
-      try { const p = parsed(); preview.textContent = `${p.text} · ${p.zone}`; preview.classList.remove("routines-error"); }
+      try { const p = parsed(); preview.textContent = `${p.text} (${p.zone})`; preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
     const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value });

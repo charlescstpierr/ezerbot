@@ -10,7 +10,7 @@
   // /api/memory lists ACTIVE facts only. Keep confirmed tombstones for this
   // window, including across section remounts, never their text or provenance.
   // A durable forgotten-history endpoint belongs to a separate server slice.
-  const forgotten = new Map();
+  const forgotten = new Map(), forgottenIds = new Set();
   let activeReload;
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
@@ -87,7 +87,7 @@
       }
       function render() {
         if (!alive) return;
-        facts = facts.filter((fact) => !forgotten.has(fact.fact_id));
+        facts = facts.filter((fact) => !forgottenIds.has(fact.fact_id));
         const ids = new Set(available().map((fact) => fact.fact_id));
         for (const id of selected) if (!ids.has(id)) selected.delete(id);
         list.replaceChildren();
@@ -120,7 +120,7 @@
         history.replaceChildren();
         const tombstones = [...forgotten.values()].filter((fact) => fact.bot_id === bot.id || fact.scope === "team");
         if (tombstones.length) {
-          history.append(node("h4", "", "Oubliés dans cette fenêtre"), node("p", "memory-note", `${tombstones.length} ${tombstones.length === 1 ? "fait oublié" : "faits oubliés"}. Le texte et les versions précédentes ne sont pas conservés ici. Ce bilan local disparaît au rechargement.`));
+          history.append(node("h4", "", "Oubliés dans cette fenêtre"), node("p", "memory-note", `${tombstones.length} ${tombstones.length === 1 ? "fait oublié" : "faits oubliés"} (avec ${tombstones.length === 1 ? "ses" : "leurs"} versions précédentes). Le texte et les versions précédentes ne sont pas conservés ici. Ce bilan local disparaît au rechargement.`));
         }
         controls.disabled = busy;
         section.setAttribute("aria-busy", String(busy));
@@ -192,10 +192,13 @@
       }
       function confirmForget(fact) {
         const cancel = openEditor(fact.fact_id);
-        editor.append(node("p", "memory-note", `Oublier « ${fact.text} » et ses versions précédentes ?${fact.scope === "team" ? " Ce fait sera retiré pour tous les bots de l’espace." : ""} Cette action ne réinitialise pas la conversation.`), button("Confirmer l’oubli", () => {
+        const characters = [...fact.text];
+        const excerpt = characters.slice(0, 160).join("").trimEnd() + (characters.length > 160 ? "…" : "");
+        editor.append(node("p", "memory-note", `Oublier « ${excerpt} » et ses versions précédentes ?${fact.scope === "team" ? " Ce fait sera retiré pour tous les bots de l’espace." : ""} Cette action ne réinitialise pas la conversation.`), button("Confirmer l’oubli", () => {
           mutate("/api/memory/forget", { bot_id: fact.bot_id, fact_id: fact.fact_id }, (data) => {
-            for (const id of data.forgotten) forgotten.set(id, { fact_id: id, bot_id: fact.bot_id, scope: fact.scope });
-            facts = facts.filter((item) => !forgotten.has(item.fact_id));
+            for (const id of data.forgotten) forgottenIds.add(id);
+            forgotten.set(fact.fact_id, { bot_id: fact.bot_id, scope: fact.scope });
+            facts = facts.filter((item) => !forgottenIds.has(item.fact_id));
             status.textContent = "Fait oublié.";
           });
         }, "danger-button"), cancel);

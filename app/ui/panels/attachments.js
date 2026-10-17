@@ -108,7 +108,8 @@
       else schedule(group, item, true);
     });
     // Not a live region: announcing a changing countdown every second would
-    // interrupt screen readers. The button describes the current wait on focus.
+    // interrupt screen readers. The disabled button points to the visible wait
+    // for screen-reader browsing.
     const wait = node("span", "attachment-wait");
     wait.id = `attachment-wait-${++nextChipId}`;
     wait.hidden = true;

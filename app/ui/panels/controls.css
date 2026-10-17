@@ -1,0 +1,79 @@
+/* Shared by the conversation cards and panel dialogs via /panels.css.
+   Keep real selects/number inputs for keyboard navigation and validation, but
+   replace their platform chrome with the app's theme and accent tokens. */
+select,
+select.text-input,
+input[type="number"],
+[data-card-kind="form"] input[type="text"] {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background-color: var(--canvas);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+select,
+select.text-input {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 36px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 16px center, right 12px center;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+input[type="number"] {
+  -webkit-appearance: none;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+select:focus-visible,
+input[type="number"]:focus-visible,
+[data-card-kind="form"] input[type="text"]:focus-visible {
+  border-color: var(--accent-ink);
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+select:disabled,
+input[type="number"]:disabled,
+[data-card-kind="form"] input[type="text"]:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+/* Form decisions are ordinary actions, not retry/warning buttons. Leave the
+   warning palette of interrupted responses and other card kinds untouched. */
+[data-card-kind="form"] .gb-retry {
+  -webkit-appearance: none;
+  appearance: none;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+[data-card-kind="form"] .gb-retry:hover:enabled { background: var(--soft); }
+[data-card-kind="form"] .gb-retry-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+  font-weight: 600;
+}
+[data-card-kind="form"] .gb-retry-primary:hover:enabled {
+  background: var(--accent);
+  filter: brightness(1.08);
+}

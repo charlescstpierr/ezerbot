@@ -170,6 +170,7 @@ function ReplyProblem({ message, actions }) {
 function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
+  const copyText = "copyText" in message ? message.copyText : message.body;
   useEffect(() => {
     const root = content.current;
     if (!root) return;
@@ -196,9 +197,9 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming}>
-      <Mascot create={createMascot} />
+      {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
       <div className="gb-content" ref={content}>
-        <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>
+        {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>}
         {message.body
           ? (
             <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
@@ -208,9 +209,9 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           : streaming && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {message.notice && <p className="gb-notice">{message.notice}</p>}
-        {!streaming && (
+        {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
-            {message.body && <CopyIconButton text={message.body} label="Copier la réponse" onCopy={actions.onCopy} />}
+            {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
             {message.state === "stopped" && <><span className="gb-status"><Square />Réponse arrêtée</span><button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button></>}
           </footer>
         )}
@@ -244,7 +245,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
           if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-            : <AssistantMessage key={message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />;
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

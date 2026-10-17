@@ -50,7 +50,7 @@ export function Card({ message }) {
     <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind} data-task-status={task.status}>
       <header className="gb-engine-heading"><strong>Tâche</strong><span className="gb-engine-label">{label}</span></header>
       <p className="gb-engine-note">{turnLabel}</p>
-      {!done && ended && <p className="gb-engine-note">La tâche reste ouverte : sa fin n’a pas été déclarée.</p>}
+      {!done && ended && !["failed", "cancelled"].includes(status) && <p className="gb-engine-note">La tâche reste ouverte : sa fin n’a pas été déclarée.</p>}
       {done && <p className="gb-engine-text">{typeof task.summary === "string" && task.summary.trim() ? task.summary : "Tâche terminée sans résumé."}</p>}
     </article>
   );

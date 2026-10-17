@@ -26,7 +26,7 @@
     .gb-delegation-bar p { margin: 0; }
     .gb-delegation-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
     .gb-delegation-note { color: var(--muted); }
-    .main-panel[data-delegation-task] .composer-area { display: none; }
+    .main-panel[data-delegation-task] :is(.composer-area, #welcome) { display: none; }
   `;
   document.head.append(style);
   const bar = document.createElement("section");
@@ -65,6 +65,14 @@
     if (!panels.openConversation(id)) panels.notify("Ce fil est indisponible ou une autre action est en cours.");
     else if (taskView) heading.focus(); // The shell otherwise focuses the hidden editor.
   }
+  function focusView() {
+    if (taskView) { heading.focus(); return; }
+    const target = document.querySelector("#composer-input [contenteditable='true']") || document.getElementById("conversation-title");
+    if (target) {
+      if (!target.isContentEditable) target.tabIndex = -1;
+      target.focus();
+    }
+  }
   function updateStops() {
     for (const [key, button] of stopButtons) {
       button.disabled = stopping.has(key);
@@ -80,8 +88,11 @@
     stopButtons.set(key, button);
     button.addEventListener("click", async () => {
       if (stopping.has(key)) return;
+      const focused = document.activeElement === button;
       stopping.add(key);
       updateStops();
+      // Disabled/removed controls must not leave keyboard focus on <body>.
+      if (focused) focusView();
       try {
         // Both IDs are trusted host metadata; never infer a run from its title.
         await panels.api("/api/stop", { conversation_id: conversationId, message_id: runId });
@@ -156,10 +167,13 @@
           || conversations.get(conversation.parent_id)?.messages
             ?.find((message) => message.kind === "delegation" && message.payload?.conversation_id === conversation.id)?.payload;
         const status = edge?.status?.status;
+        // A queued edge has a reserved ID, but no engine run until admission.
+        const childRun = runs.find((run) => run.run_id === edge?.child_run_id);
+        const queuedWithoutRun = status === "queued" && !childRun;
         heading.textContent = `Fil de tâche · ${names.get(conversation.bot_id) || conversation.bot_id || "Bot inconnu"} · ${Object.hasOwn(labels, status) ? labels[status] : "État indisponible"}`;
         note.textContent = "Lecture seule. Répondez aux demandes d’approbation dans la conversation du bot principal.";
         const root = rootOf(conversation);
-        if (conversation.parent_id !== root?.id) links.push(["Retour au fil parent", conversation.parent_id]);
+        if (conversation.parent_id !== root?.id || queuedWithoutRun) links.push(["Retour au fil parent", conversation.parent_id]);
         if (root) links.push(["Conversation principale", root.id]);
         else note.textContent += " La conversation d’origine est indisponible.";
         // A non-default bot or a routine can be the root. Human requests have
@@ -171,16 +185,26 @@
           const principal = principalOf(conversation, state);
           if (principal && principal.id !== root?.id) links.push(["Conversation du bot principal", principal.id]);
         }
-        if (active(edge) && typeof edge.child_run_id === "string" && edge.child_run_id) {
-          links.push(["Arrêter la sous-tâche", conversation.id, edge.child_run_id]);
+        if (active(edge) && childRun) {
+          links.push([childRun.status === "awaiting_children" ? "Arrêter la sous-tâche et ses sous-tâches" : "Arrêter la sous-tâche", conversation.id, childRun.run_id]);
+        } else if (queuedWithoutRun) {
+          note.textContent += " En file d’attente : pour l’annuler, arrêtez la réponse du fil parent (toutes ses sous-tâches seront annulées).";
         }
       }
       if (hasChildren) {
         const parent = runs.find((run) => run.conversation_id === conversation.id && run.status === "awaiting_children");
-        if (parent?.run_id) links.push(["Arrêter", conversation.id, parent.run_id]);
+        if (parent?.run_id) links.push(["Arrêter la réponse et ses sous-tâches", conversation.id, parent.run_id]);
       }
       // Keep keyboard focus while the shell polls active children.
-      const nextKey = JSON.stringify(links.filter(([, id]) => conversations.has(id)));
+      const stopTargets = new Set();
+      const nextKey = JSON.stringify(links.filter(([, id, runId]) => {
+        if (!conversations.has(id)) return false;
+        if (!runId) return true;
+        const key = JSON.stringify([id, runId]);
+        if (stopTargets.has(key)) return false;
+        stopTargets.add(key);
+        return true;
+      }));
       if (nextKey !== navigationKey) {
         navigationKey = nextKey;
         const focused = nav.contains(document.activeElement);
@@ -190,7 +214,7 @@
           if (runId) stopButton(label, id, runId);
           else link(label, id);
         }
-        if (focused && taskView) heading.focus();
+        if (focused) focusView();
       }
       updateStops();
       version += 1;

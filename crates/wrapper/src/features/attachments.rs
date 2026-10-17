@@ -5,9 +5,11 @@
 //! establishes the client projection, 150s deadline and global 10-minute backoff.
 //!
 //! `context` contributes fenced caption data, never image bytes in instructions.
-//! Run integration uses `images_for_message` for typed sending-turn images; the
-//! text-only ContextBlock hook cannot carry input_image. gb-attachments-run tests
-//! that wiring after engine cutover. Historical images never reload blob bytes.
+//! The engine hydrates `HistoryItem.images` through `images_for_message`: the
+//! sending turn carries bytes plus its prepared caption; later turns carry only
+//! captions, including after restart. The text-only ContextBlock hook is a legacy
+//! preview, not a second instruction copy. Real Responses requests are covered by
+//! `tests/attachments_run.rs`. Historical images never reload blob bytes.
 
 use super::{write_transaction, Context};
 use crate::{now, parse, validate_id, ApiError, ApiResponse, App, Provider, ACCOUNT};
@@ -887,9 +889,11 @@ fn data_url(ctx: &Context<'_>, attachment: &staging::Attachment) -> Result<Strin
     ))
 }
 
-/// Engine-cutover seam: put these in HistoryItem.images, not instruction text.
-/// Model capability refusal is handled by precaption's global backoff; the caller
-/// can set sending_turn=false when it knows that the selected model lacks vision.
+/// Typed run input, never instruction text. The engine sets `sending_turn` only
+/// for the run's current message and uses false when hydrating historical entries.
+/// Caption lookup is scoped to the conversation (with a cross-model fallback),
+/// not recomputed from the possibly changed draft. Historical hydration must stay
+/// independent of blob availability. BMPs retain their honest local marker only.
 pub fn images_for_message(
     ctx: &Context<'_>,
     conversation: &str,

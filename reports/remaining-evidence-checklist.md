@@ -8,7 +8,7 @@ Cette passe reprend les questions ouvertes après les rapports de communications
 | Contexte et compaction effectifs | Requête modèle ou assembleur appelé | Artefacts complémentaires et limites du runtime disponible |
 | Mémoire, correction et oubli | Implémentation appelée ou effets corrélés avant/après | Disponibilité des artefacts serveur ; ne pas confondre interface et algorithme |
 | Routage et contexte entre bots | Producteur/consommateur serveur ou échange corrélé | Réutiliser le protocole déjà extrait et chercher le composant manquant |
-| Reprise après panne | Journal durable et effet corrélé | Distinguer mécanismes locaux déjà établis et service distant absent |
+| Reprise après panne | Journal durable et effet corrélé | Messages .71 : caches, worker et osascript retracés; UUID et retry exécutés sur tranches avec fixtures. Panne réelle et livraison restent à observer |
 | Connexion iPhone, push, arrière-plan et outils | Identité native iOS, paquet ou observation iPhone | Liens officiels dans le paquet Mac, fiche Apple et inventaire local borné |
 | Démonstration → skill | Pipeline média et validation/versionnement | Composants livrés supplémentaires, au-delà de l’import texte déjà couvert |
 | Scheduler | Exécution des occurrences et stockage associé | Séparer parser/contrat client et scheduler distant |

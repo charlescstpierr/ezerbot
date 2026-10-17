@@ -1,5 +1,7 @@
 # Analyse de Grok Bot et architecture de reconstruction en Rust
 
+La [reprise Messages .71](reports/messages-worker-recovery.md), le [chemin natif jusqu’à osascript](reports/native-messages-recovery.md) et les [scénarios REA avec fixtures](reports/messages-worker-slice-replay.md) précisent les pertes de résultat après effet. Le cache reste volatil et aucune garantie de déduplication durable n’est établie. Vérification hors ligne : `python3 tools/verify-messages-recovery-followup.py`.
+
 L’utilisateur vise désormais la parité fonctionnelle de son app avec Grok Bot. Le [découpage de livraison](reports/app-parity-delivery.md) part de l’app actuelle et la [proposition du premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md) couvre groupes, mentions et délégation dans le fil. Cette proposition est à relire; ce lot n’est pas encore implémenté.
 
 La [nouvelle analyse des membres](reports/multibot-membership-paths.md), les [tours de room](reports/multibot-turn-paths.md) et le [complément REA](reports/multibot-rea-followup.md) approfondissent le `@` dans une conversation existante et les groupes. Les sources produit actuelles sont [conservées séparément](reports/multibot-public-usage.md). `python3 tools/verify-multibot-investigation.py` vérifie la suite sans exécuter la cible.

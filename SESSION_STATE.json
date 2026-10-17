@@ -28,7 +28,7 @@
     "cached_cli_at_save": "/Users/cstpierrecharles/.npm/_npx/dea9475797100b20/node_modules/.bin/rea",
     "mcp_transport": "Transport closed; availability must be rechecked",
     "continuation_mcp_status": "Working for native metadata and demangling; Hopper/Ghidra/IDA unavailable. Native session closed.",
-    "latest_mcp_observation_status": "Working: passive original Electron renderer captured through Chromium CDP; historical Playwright/Node-inspector launch failure preserved."
+    "latest_mcp_observation_status": "Working: original passive Electron startup retained, plus controlled Node process capture of 16 manifest-bound .71 Messages slices with fixture boundaries. Complete .71 app and helper not executed."
   },
   "counts": {
     "extracted_files": 673,
@@ -620,7 +620,19 @@
       "reports/distribution-mobile-discovery.md",
       "reports/public-behavior-residual.md",
       "reports/native-input-residual.md",
-      "reports/release-0712-discovery.md"
+      "reports/release-0712-discovery.md",
+      "reports/local-cua-path-0712.md",
+      "reports/local-cua-consent-0712.md",
+      "reports/native-0712-mcp.md",
+      "reports/native-arm64-residual.md",
+      "reports/multibot-membership-paths.md",
+      "reports/multibot-turn-paths.md",
+      "reports/multibot-public-usage.md",
+      "reports/multibot-rea-followup.md",
+      "reports/app-parity-delivery.md",
+      "reports/messages-worker-recovery.md",
+      "reports/native-messages-recovery.md",
+      "reports/messages-worker-slice-replay.md"
     ],
     "original_version": "0.70.2",
     "original_startup_observed": true,
@@ -632,18 +644,22 @@
       "evidence/original-runtime-verification.json",
       "evidence/remaining-evidence-verification.json",
       "evidence/public-behavior-independent-review.json",
-      "evidence/releases/0.71.2/verification.json"
+      "evidence/releases/0.71.2/verification.json",
+      "evidence/local-control-followup-verification.json",
+      "evidence/multibot-investigation-verification.json",
+      "evidence/messages-recovery-followup-verification.json"
     ],
     "runtime_capture_evidence_id": "ev_c53b22e5265cd881f109292c4a6a6d4ad7a227f9fdeade0565c0105795301e08",
     "runtime_bundle": "evidence/remaining-rea-runtime-bundle.json",
     "original_owned_process_cleanup": "terminated",
     "ios_binary_acquired": false,
     "server_implementation_acquired": false,
-    "newer_release_investigation": "Official desktop 0.71.2 acquired separately; 668 ASAR members, targeted comparison preserves six native contradictions. No full semantic comparison or target execution.",
+    "newer_release_investigation": "0.71.2 local graphical control, consent, MCP companion and Messages recovery traced. 16 exact original JS slices executed with fixture boundaries in REA; complete application, worker bootstrap and native helper not executed.",
     "portable_view": ".lavish/remaining-grokbot-portable.html",
     "view_verification": [
       "evidence/remaining-view-verification.json",
-      "evidence/remaining-served-verification.json"
+      "evidence/remaining-served-verification.json",
+      "evidence/remaining-portable-verification.json"
     ],
     "question_statuses": {
       "server_engine": "unresolved",
@@ -665,6 +681,75 @@
     "newer_release_version": "0.71.2",
     "newer_release_target_executed": false,
     "newer_release_member_count": 668,
-    "goal_complete": false
+    "goal_complete": false,
+    "followup": {
+      "original_0702_arm64_subset": {
+        "functions": 9,
+        "instructions": 1196,
+        "bytes": 4784
+      },
+      "release_0712_local_control": {
+        "javascript_findings": 11,
+        "javascript_anchors": 48,
+        "consent_findings": 8,
+        "consent_anchors": 38,
+        "native_x64_functions": 42,
+        "native_x64_byte_rows": 7821,
+        "target_executed": false
+      },
+      "multibot": {
+        "membership_findings": 8,
+        "membership_anchors": 47,
+        "host_findings": 7,
+        "host_segments": 26,
+        "rea_bundle_records": 15,
+        "rea_semantic_coverage": "unknown",
+        "rea_cleanup_error_retained": true,
+        "recorded_worker_cleanup": "terminated-and-empty-temp-removed",
+        "server_scheduler_recovered": false,
+        "app_feature_implemented": false
+      },
+      "messages_recovery_0712": {
+        "worker_findings": 12,
+        "worker_anchors": 39,
+        "native_x64_functions": 20,
+        "native_instruction_byte_rows": 4337,
+        "native_anchors": 33,
+        "controlled_replay_slices": 16,
+        "controlled_replay_cases": 4,
+        "rea_evidence_id": "ev_e0e22e161c96d6a1db6661fbe68e99e006c3a35204228b02374fce15a8585934",
+        "raw_pty_complete": true,
+        "rendered_terminal_complete": false,
+        "selected_original_javascript_executed": true,
+        "original_application_executed": false,
+        "native_helper_executed": false,
+        "messages_accessed_or_sent": false,
+        "native_exactly_once_proven": false,
+        "product_feature_implemented": false
+      }
+    },
+    "newer_release_original_javascript_slices_executed": true
+  },
+  "product_capability_goal": {
+    "objective": "Rendre notre app capable du travail de Grok Bot, dont groupes, @ et communications entre bots",
+    "delivery_outline": "reports/app-parity-delivery.md",
+    "proposed_first_spec": "docs/superpowers/specs/2026-10-17-multibot-design.md",
+    "spec_approved": false,
+    "latest_user_steering": "utilise REA",
+    "immediate_task": "Continue REA investigation from saved evidence",
+    "product_code_written_in_this_followup": false
+  },
+  "multibot_rea_bundle": "evidence/multibot-rea-bundle.json",
+  "multibot_rea_cleanup": "evidence/multibot-rea-worker-cleanup.json",
+  "latest_local_app_window_action": {
+    "reason": "User clarified that their application was not open",
+    "bundle_path": "app/build/Grokbot.app",
+    "action": "open existing bundle to foreground",
+    "observed_pid": 60453,
+    "macos_active_verified": true,
+    "onscreen_window_count": 1,
+    "user_confirmation_received": false,
+    "product_changes_made": false,
+    "report_opening_is_separate": true
   }
 }

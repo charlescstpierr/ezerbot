@@ -348,6 +348,8 @@ fn drop_unfinished_calls(history: &mut [HistoryItem], current: &HistoryItem) {
                     true
                 }
                 ToolItem::Call { call } => outputs.contains(&call.call_id),
+                // Opaque provider state is retained intact, never rendered as text.
+                ToolItem::Reasoning { .. } => true,
             })
             .collect();
         item.tool_items.reverse();
@@ -368,7 +370,7 @@ fn orphan_prefix(history: &[HistoryItem]) -> usize {
                     calls.clear();
                     break;
                 }
-                ToolItem::Output { .. } => {}
+                ToolItem::Output { .. } | ToolItem::Reasoning { .. } => {}
             }
         }
     }
@@ -394,6 +396,7 @@ fn required_history_start(history: &[HistoryItem], current: &HistoryItem) -> Res
                     Some(&index) => dependency = dependency.min(index),
                     None => orphan = true,
                 },
+                ToolItem::Reasoning { .. } => {}
             }
         }
         dependencies.push((dependency, orphan));
@@ -411,7 +414,7 @@ fn required_history_start(history: &[HistoryItem], current: &HistoryItem) -> Res
                     .ok_or_else(|| invalid("current tool output has no call"))?;
                 start = start.min(*index);
             }
-            ToolItem::Output { .. } => {}
+            ToolItem::Output { .. } | ToolItem::Reasoning { .. } => {}
         }
     }
     for (index, &(dependency, orphan)) in dependencies.iter().enumerate().rev() {
@@ -441,7 +444,7 @@ fn current_outputs_linked(history: &[HistoryItem], current: &HistoryItem) -> boo
                 calls.insert(call.call_id.as_str());
             }
             ToolItem::Output { call_id, .. } if !calls.contains(call_id.as_str()) => return false,
-            ToolItem::Output { .. } => {}
+            ToolItem::Output { .. } | ToolItem::Reasoning { .. } => {}
         }
     }
     true
@@ -741,6 +744,77 @@ mod context_tests {
     }
     fn ids(input: &[HistoryItem]) -> Vec<&str> {
         input.iter().map(|item| item.entry_id.as_str()).collect()
+    }
+
+    #[test]
+    fn reasoning_stays_opaque_through_history_current_and_tool_links() {
+        let reasoning = ToolItem::Reasoning {
+            item_id: "reasoning-1".into(),
+            encrypted_content: "opaque-provider-state-not-user-text".into(),
+        };
+        let mut prior = entry("prior", "");
+        prior.role = Role::Assistant;
+        prior.tool_items = vec![reasoning.clone(), call("call-1")];
+        let mut request = request();
+        request.current_message.tool_items = vec![output("call-1", "result"), reasoning.clone()];
+        let history = [prior];
+        let before = history.clone();
+        let assembled = assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(ids(&assembled.input), vec!["prior", "current"]);
+        assert_eq!(assembled.input[0].tool_items, before[0].tool_items);
+        assert_eq!(assembled.input[1].tool_items[1], reasoning);
+        assert_eq!(assembled.input[0].text, "");
+        assert_eq!(assembled.input[1].text, request.current_message.text);
+        assert_eq!(history, before);
+        assert_eq!(
+            assembled.estimated_characters,
+            assembled
+                .blocks
+                .iter()
+                .map(|block| block.text.chars().count())
+                .sum::<usize>()
+                + assembled
+                    .input
+                    .iter()
+                    .map(|item| input_characters(item).unwrap())
+                    .sum::<usize>()
+        );
+        assert!(assembled
+            .blocks
+            .iter()
+            .all(|block| !block.text.contains("opaque-provider-state")));
+        // Reasoning is not a function call and cannot make an orphan output valid.
+        request.current_message.tool_items = vec![reasoning.clone(), output("missing", "result")];
+        assert!(assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .is_err());
+        // A standalone current reasoning item remains typed, without text projection.
+        request.current_message.tool_items = vec![reasoning.clone()];
+        let current = assemble_input(
+            &request,
+            &base(),
+            &[],
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(current.input[0].tool_items, vec![reasoning]);
+        assert_eq!(current.input[0].text, request.current_message.text);
     }
 
     #[test]

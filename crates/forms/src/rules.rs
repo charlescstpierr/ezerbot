@@ -1,52 +1,30 @@
-//! Durable permission grants and auto-review settings.
+//! Standing-permission lookup and persisted auto-review settings.
 //!
-//! REA `goal-permissions-secrets.md` PS01/PS05: save Always before resolving;
-//! a failed save must fall back to AllowOnce in the approval owner. PS04 orders
-//! never < ask < always. This reconstruction gives any matching Block precedence.
-//! PS01 Global grants cover the exact tool across arguments. Subject/Call bind
-//! the digest because no subject extractor exists. Standing rules do not replace
-//! the per-request digest-bound, single-use grant required at dispatch. The host
-//! authenticates principal-conversation consent and owns bot/workspace isolation.
-//! PS06 does not recover the remote natural-language reviewer. Instructions below
-//! are configuration for that reviewer, never substring/glob authorization rules.
-//! All mutations join the caller's transaction; removal does not cancel inflight
-//! effects (PS03). Neither rule text nor identifiers may contain secret values.
+//! `approvals` owns the sole permission registry, `forms_approval_rules`, including
+//! save-before-resolve, Always fallback, listing and revocation (REA PS01/PS05).
+//! This module only reads that registry, using its bot-pair isolation and canonical
+//! argument digest. Global covers the tool; Subject binds the digest; Call never
+//! persists. A matching Block wins (PS04). Revocation does not cancel grants or
+//! effects already admitted (PS03).
+//!
+//! PS06 does not recover the natural-language reviewer. AutoReviewConfig remains
+//! validated configuration for that future reviewer, never substring/glob rules.
+//! Neither rule text nor identifiers may contain secret values. The caller owns
+//! transactions; standing lookup, grant consumption and tool effects must share
+//! the dispatch transaction, so revocation cannot race admission.
 
-use grokbot_engine::contracts::{component_version, set_component_version, Error, Result};
+use crate::approvals::{self, RuleScope};
+use grokbot_engine::contracts::{
+    component_version, set_component_version, ApprovalRoute, Error, Result,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub const MAX_AUTO_REVIEW_ENTRIES: usize = 20;
 pub const MAX_AUTO_REVIEW_ENTRY_CHARS: usize = 1000;
 const SCHEMA_VERSION: u32 = 1;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuleScope {
-    Call,
-    Subject,
-    Global,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effect {
-    Allow,
-    Block,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionRule {
-    pub rule_id: String,
-    pub tool: String,
-    pub scope: RuleScope,
-    /// Required for Call/Subject; Global requires None and covers this exact
-    /// tool across arguments (PS01). A resulting execution grant must still bind
-    /// the current request's digest, not the action that created the rule.
-    pub args_digest: Option<String>,
-    pub effect: Effect,
-    pub created_at: i64,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoReviewConfig {
@@ -73,26 +51,15 @@ impl AutoReviewConfig {
     }
 }
 
+/// Only the new settings table is owned here. approvals::migrate initializes the
+/// shared standing-rule registry; forms::migrate calls both in that order.
 pub fn migrate(conn: &Connection) -> Result<()> {
     let version = component_version(conn, "forms_rules")?;
     if version > SCHEMA_VERSION {
         return Err(invalid("unsupported forms rules schema version"));
     }
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS forms_permission_rules (
-            rule_id TEXT PRIMARY KEY NOT NULL,
-            tool TEXT NOT NULL,
-            scope TEXT NOT NULL CHECK(scope IN ('call', 'subject', 'global')),
-            args_digest TEXT,
-            effect TEXT NOT NULL CHECK(effect IN ('allow', 'block')),
-            created_at INTEGER NOT NULL,
-            CHECK(length(trim(rule_id)) > 0 AND length(trim(tool)) > 0),
-            CHECK(args_digest IS NULL OR length(trim(args_digest)) > 0),
-            CHECK((scope = 'global' AND args_digest IS NULL)
-               OR (scope != 'global' AND args_digest IS NOT NULL))
-        );
-        CREATE INDEX IF NOT EXISTS forms_permission_rules_tool ON forms_permission_rules(tool);
-        CREATE TABLE IF NOT EXISTS forms_auto_review_config (
+        "CREATE TABLE IF NOT EXISTS forms_auto_review_config (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
             config TEXT NOT NULL
         );",
@@ -100,107 +67,63 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     set_component_version(conn, "forms_rules", SCHEMA_VERSION)
 }
 
-/// Save an explicit user-approved rule before resolving Always. Failure must not
-/// result in a standing grant. The approval owner handles the AllowOnce fallback.
-pub fn save_rule(conn: &Connection, rule: &PermissionRule) -> Result<()> {
-    validate_rule(rule)?;
-    let scope = match rule.scope {
-        RuleScope::Call => "call",
-        RuleScope::Subject => "subject",
-        RuleScope::Global => "global",
-    };
-    let effect = match rule.effect {
-        Effect::Allow => "allow",
-        Effect::Block => "block",
-    };
-    conn.execute(
-        "INSERT INTO forms_permission_rules(rule_id, tool, scope, args_digest, effect, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(rule_id) DO UPDATE SET tool = excluded.tool, scope = excluded.scope,
-             args_digest = excluded.args_digest, effect = excluded.effect, created_at = excluded.created_at",
-        params![rule.rule_id, rule.tool, scope, rule.args_digest, effect, rule.created_at],
-    )?;
-    Ok(())
-}
-
-pub fn list_rules(conn: &Connection) -> Result<Vec<PermissionRule>> {
-    let mut statement = conn.prepare(
-        "SELECT rule_id, tool, scope, args_digest, effect, created_at
-         FROM forms_permission_rules ORDER BY created_at, rule_id",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, i64>(5)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (rule_id, tool, scope, args_digest, effect, created_at) = row?;
-        let rule = PermissionRule {
-            rule_id,
-            tool,
-            args_digest,
-            created_at,
-            scope: match scope.as_str() {
-                "call" => RuleScope::Call,
-                "subject" => RuleScope::Subject,
-                "global" => RuleScope::Global,
-                _ => return Err(invalid("invalid stored rule scope")),
-            },
-            effect: match effect.as_str() {
-                "allow" => Effect::Allow,
-                "block" => Effect::Block,
-                _ => return Err(invalid("invalid stored rule effect")),
-            },
-        };
-        validate_rule(&rule)?;
-        Ok(rule)
-    })
-    .collect()
-}
-
-/// Idempotent revocation. The bool reports whether a row was removed.
-pub fn remove_rule(conn: &Connection, rule_id: &str) -> Result<bool> {
-    nonblank(rule_id, "rule ID must not be empty")?;
-    Ok(conn.execute(
-        "DELETE FROM forms_permission_rules WHERE rule_id = ?1",
-        [rule_id],
-    )? != 0)
-}
-
-/// None means Ask, never implicit authorization. This only evaluates durable,
-/// explicit grants; natural-language auto-review requires a separate reviewer.
-pub fn evaluate(conn: &Connection, tool: &str, args_digest: &str) -> Result<Option<Effect>> {
-    Ok(evaluate_rule(conn, tool, args_digest)?.map(|rule| rule.effect))
-}
-
-/// Same decision with provenance for AuthorizedBy::Rule. When several rules
-/// match, Block wins, then the oldest rule/ID for deterministic auditing.
-pub fn evaluate_rule(
+/// Read the same standing rules as approvals::auto_review. None means Ask;
+/// Some((false, id)) means Denied. This neither resolves a request nor consumes
+/// its single-use grant. check_approval must first honor existing per-call
+/// decisions, so a prior Deny/Expired/Cancelled cannot become a new request.
+///
+/// Digest calculation is shared with approvals, never supplied by the caller.
+/// Only requesting/target bot IDs scope permission: a new display conversation
+/// preserves it, but another bot, child or routine cannot borrow it. route must
+/// come from trusted host state, not model-supplied tool arguments.
+///
+/// rule_id is "permission:<sha256>" of the JSON tuple of the composite registry
+/// key (requesting bot, target bot, tool, stored digest, scope). It excludes the
+/// display conversation, current Global call digest and mutable Allow/Block flag.
+/// Ties are deterministic; a Block precedes every Allow. Lookup is read-only and
+/// uses the registry key's indexed bot/tool prefix, not a full-table scan.
+pub fn evaluate(
     conn: &Connection,
+    route: &ApprovalRoute,
     tool: &str,
-    args_digest: &str,
-) -> Result<Option<PermissionRule>> {
-    nonblank(tool, "tool must not be empty")?;
-    nonblank(args_digest, "argument digest must not be empty")?;
-    let mut allowed = None;
-    for rule in list_rules(conn)? {
-        if rule.tool != tool
-            || (rule.scope != RuleScope::Global && rule.args_digest.as_deref() != Some(args_digest))
-        {
-            continue;
-        }
-        match rule.effect {
-            Effect::Block => return Ok(Some(rule)),
-            Effect::Allow if allowed.is_none() => allowed = Some(rule),
-            Effect::Allow => {}
-        }
+    arguments: &Value,
+) -> Result<Option<(bool, String)>> {
+    if route.requesting_bot_id.trim().is_empty()
+        || route.target_bot_id.trim().is_empty()
+        || route.target_conversation_id.trim().is_empty()
+    {
+        return Err(invalid("approval route identifiers must not be empty"));
     }
-    Ok(allowed)
+    if !arguments.is_object() {
+        return Err(invalid("invalid arguments"));
+    }
+    let digest = approvals::args_digest(tool, arguments)?;
+    let matched: Option<(bool, String, String)> = conn
+        .query_row(
+            "SELECT allow, args_digest, scope FROM forms_approval_rules
+             WHERE requesting_bot_id=?1 AND target_bot_id=?2 AND tool=?3
+               AND (args_digest=?4 OR scope='\"global\"')
+             ORDER BY allow ASC, scope, args_digest LIMIT 1",
+            params![route.requesting_bot_id, route.target_bot_id, tool, digest],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((allow, stored_digest, scope)) = matched else {
+        return Ok(None);
+    };
+    let scope: RuleScope = serde_json::from_str(&scope)?;
+    if scope == RuleScope::Call {
+        return Err(invalid("call permission cannot be a standing rule"));
+    }
+    let key = serde_json::to_vec(&(
+        &route.requesting_bot_id,
+        &route.target_bot_id,
+        tool,
+        stored_digest,
+        scope,
+    ))?;
+    let rule_id = format!("permission:{:x}", Sha256::digest(key));
+    Ok(Some((allow, rule_id)))
 }
 
 pub fn save_auto_review_config(conn: &Connection, config: &AutoReviewConfig) -> Result<()> {
@@ -235,32 +158,13 @@ fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.into())
 }
 
-fn nonblank(value: &str, message: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        Err(invalid(message))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_rule(rule: &PermissionRule) -> Result<()> {
-    nonblank(&rule.rule_id, "rule ID must not be empty")?;
-    nonblank(&rule.tool, "tool must not be empty")?;
-    match (rule.scope, &rule.args_digest) {
-        (RuleScope::Global, None) => {}
-        (RuleScope::Global, Some(_)) => {
-            return Err(invalid("global rules must omit the argument digest"));
-        }
-        (_, Some(digest)) => nonblank(digest, "argument digest must not be empty")?,
-        (_, None) => return Err(invalid("call and subject rules require an argument digest")),
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approvals::ApprovalDecision;
+    use crate::requests::{self, HumanInputRequest, InputKind, RequestStatus};
     use grokbot_engine::contracts::with_tx;
+    use serde_json::json;
 
     fn connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -268,175 +172,313 @@ mod tests {
         conn
     }
 
-    fn rule(id: &str, effect: Effect, scope: RuleScope, digest: Option<&str>) -> PermissionRule {
-        PermissionRule {
-            rule_id: id.into(),
-            tool: "delete_skill".into(),
-            scope,
-            args_digest: digest.map(str::to_owned),
-            effect,
-            created_at: 123,
+    fn route() -> ApprovalRoute {
+        ApprovalRoute {
+            requesting_bot_id: "child-bot".into(),
+            target_bot_id: "main-bot".into(),
+            target_conversation_id: "main-conversation".into(),
         }
     }
 
-    #[test]
-    fn rules_call_and_subject_allow_are_bound_to_tool_and_digest() {
-        for scope in [RuleScope::Call, RuleScope::Subject] {
-            let conn = connection();
-            let grant = rule("allow", Effect::Allow, scope, Some("digest-a"));
-            save_rule(&conn, &grant).unwrap();
-            assert_eq!(
-                evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-                Some(Effect::Allow)
-            );
-            assert_eq!(
-                evaluate_rule(&conn, "delete_skill", "digest-a").unwrap(),
-                Some(grant)
-            );
-            assert_eq!(evaluate(&conn, "delete_skill", "digest-b").unwrap(), None);
-            assert_eq!(evaluate(&conn, "other_tool", "digest-a").unwrap(), None);
-            assert!(save_rule(&conn, &rule("unbound", Effect::Allow, scope, None)).is_err());
-        }
-    }
-
-    #[test]
-    fn rules_global_allow_covers_new_arguments_but_not_other_tools() {
-        let conn = connection();
-        let grant = rule("global", Effect::Allow, RuleScope::Global, None);
-        save_rule(&conn, &grant).unwrap();
-        for digest in ["digest-a", "digest-b"] {
-            assert_eq!(
-                evaluate(&conn, "delete_skill", digest).unwrap(),
-                Some(Effect::Allow)
-            );
-            assert_eq!(
-                evaluate_rule(&conn, "delete_skill", digest).unwrap(),
-                Some(grant.clone())
-            );
-        }
-        assert_eq!(evaluate(&conn, "other_tool", "digest-a").unwrap(), None);
-        assert!(save_rule(
-            &conn,
-            &rule(
-                "ambiguous",
-                Effect::Allow,
-                RuleScope::Global,
-                Some("digest-a")
-            )
-        )
-        .is_err());
-        assert!(save_rule(
-            &conn,
-            &rule("unbound-subject", Effect::Block, RuleScope::Subject, None)
-        )
-        .is_err());
-        save_rule(
-            &conn,
-            &rule("block", Effect::Block, RuleScope::Subject, Some("digest-b")),
-        )
-        .unwrap();
-        assert_eq!(
-            evaluate(&conn, "delete_skill", "digest-b").unwrap(),
-            Some(Effect::Block)
-        );
-        assert_eq!(
-            evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-            Some(Effect::Allow)
-        );
-    }
-
-    #[test]
-    fn rules_block_wins_regardless_of_insertion_order_or_scope() {
-        for block_first in [true, false] {
-            let conn = connection();
-            let allow = rule("allow", Effect::Allow, RuleScope::Subject, Some("digest-a"));
-            let block = rule("block", Effect::Block, RuleScope::Global, None);
-            for rule in if block_first {
-                [&block, &allow]
-            } else {
-                [&allow, &block]
-            } {
-                save_rule(&conn, rule).unwrap();
-            }
-            assert_eq!(
-                evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-                Some(Effect::Block)
-            );
-            assert_eq!(
-                evaluate(&conn, "delete_skill", "digest-b").unwrap(),
-                Some(Effect::Block)
-            );
-            assert_eq!(evaluate(&conn, "other_tool", "digest-a").unwrap(), None);
-            assert!(remove_rule(&conn, "block").unwrap());
-            assert!(!remove_rule(&conn, "block").unwrap());
-            assert_eq!(
-                evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-                Some(Effect::Allow)
-            );
-        }
-    }
-
-    #[test]
-    fn rules_call_block_is_digest_bound_and_bad_inputs_fail_closed() {
-        let conn = connection();
-        assert_eq!(evaluate(&conn, "delete_skill", "digest-a").unwrap(), None);
-        save_rule(
-            &conn,
-            &rule("block", Effect::Block, RuleScope::Call, Some("digest-a")),
-        )
-        .unwrap();
-        assert_eq!(
-            evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-            Some(Effect::Block)
-        );
-        assert_eq!(evaluate(&conn, "delete_skill", "digest-b").unwrap(), None);
-        assert!(save_rule(&conn, &rule("bad", Effect::Block, RuleScope::Call, None)).is_err());
-        assert!(save_rule(
-            &conn,
-            &rule(" ", Effect::Allow, RuleScope::Call, Some("digest-a"))
-        )
-        .is_err());
-        assert!(save_rule(
-            &conn,
-            &rule("bad", Effect::Allow, RuleScope::Call, Some(" "))
-        )
-        .is_err());
-        assert!(evaluate(&conn, "delete_skill", "").is_err());
-        assert!(evaluate(&conn, " ", "digest-a").is_err());
-    }
-
-    #[test]
-    fn rules_save_replace_and_remove_share_caller_rollback() {
-        let conn = connection();
-        let grant = rule("rule-1", Effect::Allow, RuleScope::Call, Some("digest-a"));
-        save_rule(&conn, &grant).unwrap();
-        let failed: Result<()> = with_tx(&conn, |conn| {
-            let mut updated = grant.clone();
-            updated.effect = Effect::Block;
-            save_rule(conn, &updated)?;
-            save_rule(
+    fn decide(
+        conn: &Connection,
+        id: &str,
+        route: &ApprovalRoute,
+        tool: &str,
+        arguments: &Value,
+        decision: ApprovalDecision,
+    ) {
+        with_tx(conn, |conn| -> Result<()> {
+            requests::create(
                 conn,
-                &rule(
-                    "rule-2",
-                    Effect::Allow,
-                    RuleScope::Subject,
-                    Some("digest-b"),
-                ),
+                &HumanInputRequest {
+                    id: id.into(),
+                    run_id: format!("run-{id}"),
+                    entry_id: format!("entry-{id}"),
+                    route: route.clone(),
+                    kind: InputKind::Approval {
+                        tool: tool.into(),
+                        args_digest: approvals::args_digest(tool, arguments)?,
+                        expires_at: 100,
+                    },
+                    status: RequestStatus::Pending,
+                },
             )?;
-            remove_rule(conn, "rule-1")?;
-            Err(invalid("rollback"))
-        });
-        assert!(failed.is_err());
-        assert_eq!(list_rules(&conn).unwrap(), vec![grant.clone()]);
-        let mut updated = grant;
-        updated.args_digest = Some("digest-b".into());
-        save_rule(&conn, &updated).unwrap();
-        assert_eq!(list_rules(&conn).unwrap().len(), 1);
-        assert_eq!(evaluate(&conn, "delete_skill", "digest-a").unwrap(), None);
-        assert_eq!(
-            evaluate(&conn, "delete_skill", "digest-b").unwrap(),
-            Some(Effect::Allow)
+            approvals::decide(
+                conn,
+                id,
+                &route.target_conversation_id,
+                &format!("submit-{id}"),
+                decision,
+                1,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn rules_use_core_always_and_never_registry_for_global_arguments() {
+        let conn = connection();
+        let route = route();
+        let a = json!({"path": "a", "value": 1});
+        let b = json!({"path": "b", "value": 2});
+        assert_eq!(evaluate(&conn, &route, "write", &a).unwrap(), None);
+        decide(
+            &conn,
+            "allow",
+            &route,
+            "write",
+            &a,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
         );
+        let first = evaluate(&conn, &route, "write", &a).unwrap().unwrap();
+        assert!(first.0);
+        assert_eq!(
+            evaluate(&conn, &route, "write", &b).unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(approvals::list_rules(&conn).unwrap().len(), 1);
+        decide(
+            &conn,
+            "never",
+            &route,
+            "write",
+            &b,
+            ApprovalDecision::Never {
+                scope: RuleScope::Global,
+            },
+        );
+        let denied = evaluate(&conn, &route, "write", &a).unwrap().unwrap();
+        assert!(!denied.0);
+        assert_eq!(denied.1, first.1); // Same composite key, changed effect.
+        assert_eq!(approvals::list_rules(&conn).unwrap().len(), 1);
+        assert_eq!(evaluate(&conn, &route, "write", &b).unwrap(), Some(denied));
+        assert!(!conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name='forms_permission_rules')",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn rules_are_bot_pair_bound_not_display_conversation_bound() {
+        let conn = connection();
+        let route = route();
+        let args = json!({"path": "a"});
+        decide(
+            &conn,
+            "allow",
+            &route,
+            "write",
+            &args,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
+        );
+        let expected = evaluate(&conn, &route, "write", &args).unwrap();
+        assert!(expected.as_ref().unwrap().0);
+        let mut other = route.clone();
+        other.requesting_bot_id = "untrusted-routine-or-other-child".into();
+        assert_eq!(evaluate(&conn, &other, "write", &args).unwrap(), None);
+        other = route.clone();
+        other.target_bot_id = "other-principal".into();
+        assert_eq!(evaluate(&conn, &other, "write", &args).unwrap(), None);
+        other = route.clone();
+        other.target_conversation_id = "new-main-thread".into();
+        assert_eq!(evaluate(&conn, &other, "write", &args).unwrap(), expected);
+        assert_eq!(evaluate(&conn, &route, "other-tool", &args).unwrap(), None);
+    }
+
+    #[test]
+    fn rules_subject_lookup_uses_core_canonical_argument_digest() {
+        let conn = connection();
+        let route = route();
+        let args = json!({"z": {"c": 1, "b": 2}, "a": [1, 2]});
+        decide(
+            &conn,
+            "subject",
+            &route,
+            "write",
+            &args,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Subject,
+            },
+        );
+        let first = evaluate(&conn, &route, "write", &args).unwrap();
+        assert!(first.as_ref().unwrap().0);
+        assert_eq!(
+            evaluate(
+                &conn,
+                &route,
+                "write",
+                &json!({"a": [1, 2], "z": {"b": 2, "c": 1}})
+            )
+            .unwrap(),
+            first
+        );
+        assert_eq!(
+            evaluate(
+                &conn,
+                &route,
+                "write",
+                &json!({"a": [2, 1], "z": {"b": 2, "c": 1}})
+            )
+            .unwrap(),
+            None
+        );
+        let other_args = json!({"different": true});
+        decide(
+            &conn,
+            "subject-2",
+            &route,
+            "write",
+            &other_args,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Subject,
+            },
+        );
+        assert_ne!(
+            evaluate(&conn, &route, "write", &other_args)
+                .unwrap()
+                .unwrap()
+                .1,
+            first.unwrap().1
+        );
+    }
+
+    #[test]
+    fn rules_block_wins_across_scopes_and_insertion_orders() {
+        for global_block in [true, false] {
+            for block_first in [true, false] {
+                let conn = connection();
+                let route = route();
+                let args = json!({"path": "a"});
+                let allow = ApprovalDecision::AlwaysAllow {
+                    scope: if global_block {
+                        RuleScope::Subject
+                    } else {
+                        RuleScope::Global
+                    },
+                };
+                let block = ApprovalDecision::Never {
+                    scope: if global_block {
+                        RuleScope::Global
+                    } else {
+                        RuleScope::Subject
+                    },
+                };
+                for (id, decision) in if block_first {
+                    [("block", block), ("allow", allow)]
+                } else {
+                    [("allow", allow), ("block", block)]
+                } {
+                    decide(&conn, id, &route, "write", &args, decision);
+                }
+                assert!(!evaluate(&conn, &route, "write", &args).unwrap().unwrap().0);
+                assert_eq!(
+                    evaluate(&conn, &route, "write", &json!({"path": "b"}))
+                        .unwrap()
+                        .unwrap()
+                        .0,
+                    !global_block
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rules_call_always_and_allow_once_never_become_standing_permissions() {
+        for decision in [
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Call,
+            },
+            ApprovalDecision::AllowOnce,
+        ] {
+            let conn = connection();
+            let route = route();
+            let args = json!({"path": "a"});
+            decide(&conn, "once", &route, "write", &args, decision);
+            assert!(approvals::list_rules(&conn).unwrap().is_empty());
+            assert_eq!(evaluate(&conn, &route, "write", &args).unwrap(), None);
+            with_tx(&conn, |conn| {
+                approvals::consume_allow_once(conn, "once", "run-once", "write", &args, 2)
+            })
+            .unwrap();
+            assert!(with_tx(&conn, |conn| approvals::consume_allow_once(
+                conn, "once", "run-once", "write", &args, 3
+            ))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn rules_revocation_uses_core_registry_and_lookup_is_read_only() {
+        let conn = connection();
+        let route = route();
+        let args = json!({"path": "a"});
+        decide(
+            &conn,
+            "allow",
+            &route,
+            "write",
+            &args,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Subject,
+            },
+        );
+        // An unrelated malformed rule must not poison every tool's lookup.
+        conn.execute(
+            "INSERT INTO forms_approval_rules VALUES (?1, ?2, ?3, 'unrelated-tool', '', 'invalid-json-scope', 1)",
+            params![route.requesting_bot_id, route.target_bot_id, route.target_conversation_id],
+        ).unwrap();
+        conn.pragma_update(None, "query_only", true).unwrap();
+        assert!(evaluate(&conn, &route, "write", &args).unwrap().unwrap().0);
+        conn.pragma_update(None, "query_only", false).unwrap();
+        conn.execute(
+            "DELETE FROM forms_approval_rules WHERE tool='unrelated-tool'",
+            [],
+        )
+        .unwrap();
+        let rule = approvals::list_rules(&conn).unwrap().pop().unwrap();
+        with_tx(&conn, |conn| approvals::revoke_rule(conn, &rule)).unwrap();
+        assert_eq!(evaluate(&conn, &route, "write", &args).unwrap(), None);
+        // Revocation changes future reviews, not an already admitted grant.
+        with_tx(&conn, |conn| {
+            approvals::consume_allow_once(conn, "allow", "run-allow", "write", &args, 2)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn rules_lookup_rejects_invalid_arguments_and_treats_identifiers_literally() {
+        let conn = connection();
+        let mut route = route();
+        route.requesting_bot_id = "child' OR 1=1 --".into();
+        let tool = "tool'; DROP TABLE forms_approval_rules; --";
+        let args = json!({"path": "a"});
+        decide(
+            &conn,
+            "allow",
+            &route,
+            tool,
+            &args,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
+        );
+        assert!(evaluate(&conn, &route, tool, &args).unwrap().unwrap().0);
+        assert_eq!(evaluate(&conn, &self::route(), tool, &args).unwrap(), None);
+        assert_eq!(evaluate(&conn, &route, "tool", &args).unwrap(), None);
+        assert!(evaluate(&conn, &route, tool, &json!("{truncated")).is_err());
+        assert!(evaluate(&conn, &route, tool, &json!([])).is_err());
+        assert!(evaluate(&conn, &route, " ", &args).is_err());
+        route.target_bot_id.clear();
+        assert!(evaluate(&conn, &route, tool, &args).is_err());
     }
 
     #[test]
@@ -479,7 +521,10 @@ mod tests {
             assert_eq!(load_auto_review_config(&conn).unwrap(), valid);
         }
         // Natural-language instructions cannot accidentally act as tool grants.
-        assert_eq!(evaluate(&conn, "delete_skill", "digest-a").unwrap(), None);
+        assert_eq!(
+            evaluate(&conn, &route(), "write", &json!({})).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -503,32 +548,10 @@ mod tests {
         );
         conn.execute(
             "INSERT INTO forms_auto_review_config VALUES (1, ?1)",
-            [
-                serde_json::json!({"enabled": true, "allow": ["x".repeat(1001)], "block": []})
-                    .to_string(),
-            ],
+            [json!({"enabled": true, "allow": ["x".repeat(1001)], "block": []}).to_string()],
         )
         .unwrap();
         assert!(load_auto_review_config(&conn).is_err());
-    }
-
-    #[test]
-    fn rules_identifiers_are_literal_and_listing_order_is_stable() {
-        let conn = connection();
-        let mut a = rule("a", Effect::Allow, RuleScope::Call, Some("digest-a"));
-        a.tool = "tool'; DROP TABLE forms_permission_rules; --".into();
-        let mut b = a.clone();
-        b.rule_id = "b".into();
-        save_rule(&conn, &b).unwrap();
-        save_rule(&conn, &a).unwrap();
-        assert_eq!(list_rules(&conn).unwrap(), vec![a.clone(), b]);
-        assert_eq!(
-            evaluate(&conn, &a.tool, "digest-a").unwrap(),
-            Some(Effect::Allow)
-        );
-        assert_eq!(evaluate(&conn, "tool", "digest-a").unwrap(), None);
-        assert!(!remove_rule(&conn, "a' OR 1=1 --").unwrap());
-        assert_eq!(list_rules(&conn).unwrap().len(), 2);
     }
 
     #[test]
@@ -550,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn rules_and_auto_review_config_survive_reopen() {
+    fn rules_core_permission_and_auto_review_config_survive_reopen() {
         let mut bytes = [0; 8];
         getrandom::getrandom(&mut bytes).unwrap();
         let path = std::env::temp_dir().join(format!(
@@ -558,40 +581,44 @@ mod tests {
             std::process::id(),
             u64::from_ne_bytes(bytes)
         ));
-        let grant = rule(
-            "rule-1",
-            Effect::Allow,
-            RuleScope::Subject,
-            Some("digest-a"),
-        );
+        let route = route();
+        let args = json!({"path": "a"});
         let config = AutoReviewConfig {
             enabled: true,
             allow: vec!["allow reviewed actions".into()],
             block: vec![],
         };
+        let rule_id;
         {
             let conn = Connection::open(&path).unwrap();
-            with_tx(&conn, |conn| -> Result<()> {
-                migrate(conn)?;
-                save_rule(conn, &grant)?;
-                save_auto_review_config(conn, &config)
-            })
-            .unwrap();
+            with_tx(&conn, super::super::migrate).unwrap();
+            decide(
+                &conn,
+                "allow",
+                &route,
+                "write",
+                &args,
+                ApprovalDecision::AlwaysAllow {
+                    scope: RuleScope::Subject,
+                },
+            );
+            with_tx(&conn, |conn| save_auto_review_config(conn, &config)).unwrap();
+            rule_id = evaluate(&conn, &route, "write", &args).unwrap().unwrap().1;
         }
         {
             let conn = Connection::open(&path).unwrap();
-            migrate(&conn).unwrap();
-            assert_eq!(list_rules(&conn).unwrap(), vec![grant]);
+            with_tx(&conn, super::super::migrate).unwrap();
             assert_eq!(load_auto_review_config(&conn).unwrap(), config);
             assert_eq!(
-                evaluate(&conn, "delete_skill", "digest-a").unwrap(),
-                Some(Effect::Allow)
+                evaluate(&conn, &route, "write", &args).unwrap(),
+                Some((true, rule_id))
             );
-            remove_rule(&conn, "rule-1").unwrap();
+            let rule = approvals::list_rules(&conn).unwrap().pop().unwrap();
+            with_tx(&conn, |conn| approvals::revoke_rule(conn, &rule)).unwrap();
         }
         {
             let conn = Connection::open(&path).unwrap();
-            assert_eq!(evaluate(&conn, "delete_skill", "digest-a").unwrap(), None);
+            assert_eq!(evaluate(&conn, &route, "write", &args).unwrap(), None);
         }
         std::fs::remove_file(path).unwrap();
     }

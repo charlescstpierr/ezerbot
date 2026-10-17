@@ -139,10 +139,12 @@ pub struct ApprovalRoute {
     pub target_conversation_id: String,
 }
 
-/// The approval gate is consulted before executing a protected tool. Only Ask
-/// creates a user request, routed to the principal conversation via ApprovalRoute.
-/// Denied never executes. Authorized must refer to the same canonical tool/args
-/// digest; consuming AllowOnce and committing the effect share a transaction.
+/// Consult the approval gate before executing a protected tool, after validating
+/// object arguments. Ask reuses/creates an idempotent principal-conversation request;
+/// Denied never executes. Check the existing (run_id, call_id, canonical digest)
+/// decision first: pending -> Ask; denied/expired/cancelled -> Denied, not another
+/// request. Authorized applies only to this tool/argument digest. Consume AllowOnce
+/// inside the same caller transaction as the check, tool effect and result event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ApprovalCheck {
@@ -154,9 +156,18 @@ pub enum ApprovalCheck {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthorizedBy {
-    AllowOnce { request_id: String },
-    Rule { rule_id: String },
-    AutoReview { rule_id: String },
+    AllowOnce {
+        request_id: String,
+    },
+    Rule {
+        rule_id: String,
+    },
+    /// Reserved for the future reviewer (REA PS06): `allow:<n>` identifies the
+    /// zero-based Allow instruction in the config snapshot used for this review.
+    /// Standing permissions use Rule, not an invented auto-review identifier.
+    AutoReview {
+        rule_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,8 +184,9 @@ pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     /// The gateway preserves invalid/truncated JSON as Value::String(raw).
-    /// The loop rejects non-object arguments with a per-call Failed outcome
-    /// ("invalid arguments"), retaining the call ID and continuing the turn.
+    /// Before check_approval or request_approval, the loop rejects non-object
+    /// arguments with a per-call Failed outcome ("invalid arguments"), retaining
+    /// the call ID and continuing the turn without asking the user to approve it.
     pub arguments: Value,
 }
 
@@ -442,6 +454,8 @@ fn ensure_component_versions(conn: &Connection, component: &str) -> Result<()> {
 /// Run-thread transaction helper. Capability functions themselves never BEGIN/COMMIT.
 /// BEGIN IMMEDIATE takes the write lock up front so busy_timeout applies, instead
 /// of failing a deferred read-to-write upgrade with SQLITE_BUSY_SNAPSHOT in WAL.
+/// Holds the database write lock for the entire closure: no network I/O, blocking
+/// waits or pure reads here (read outside with_tx); not for read-only connections.
 /// Errors (including unwinding) roll back. Nested transactions are rejected by SQLite.
 pub fn with_tx<T, E: From<rusqlite::Error>>(
     conn: &Connection,

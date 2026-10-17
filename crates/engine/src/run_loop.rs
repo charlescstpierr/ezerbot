@@ -30,15 +30,21 @@ pub trait RunServices {
     /// replayed after commit. Transaction retries may invoke this again after
     /// rollback: use SQLite, not process-local flags, for capability effects.
     fn call_tool(&mut self, conn: &Connection, run: &Run, call: &ToolCall) -> Result<ToolOutcome>;
-    /// Consult digest-bound standing rules, auto-review and single-use grants
-    /// before suspending. Denied must never execute; Authorized may execute.
+    /// After validating object arguments, first find the existing request keyed
+    /// by (run_id, call_id, canonical tool/argument digest): Pending -> Ask without
+    /// a new request; Denied/Expired/Cancelled -> Denied, never ask again. Otherwise
+    /// consult bot-scoped standing rules/auto-review or the resolved single-use grant.
+    /// Consume AllowOnce via approvals::consume_allow_once here, inside the caller's
+    /// same with_tx as call_tool and its result event. Denied must never execute.
     fn check_approval(
         &mut self,
         conn: &Connection,
         run: &Run,
         call: &ToolCall,
     ) -> Result<ApprovalCheck>;
-    /// Called only for ApprovalCheck::Ask. Display in the principal bot's
+    /// Called only for ApprovalCheck::Ask. Idempotent by (run_id, call_id, canonical
+    /// tool/argument digest): reuse the same SuspendCause::HumanInput { id } after
+    /// retries/crashes instead of creating another request. Display in the principal
     /// conversation; the returned cause still belongs to the originating run.
     fn request_approval(
         &mut self,

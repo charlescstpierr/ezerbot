@@ -367,7 +367,7 @@ const MANAGED_KEYS: [&str; 5] = [
 /// YAML remains authored content, including its key and all continuation lines.
 fn host_lines(header: &str) -> Vec<(&str, bool)> {
     let lines: Vec<_> = header.lines().collect();
-    lines
+    let mut owned: Vec<_> = lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
@@ -387,7 +387,22 @@ fn host_lines(header: &str) -> Vec<(&str, bool)> {
                     .is_some_and(|next| next.starts_with([' ', '\t']));
             (*line, scalar && !continued)
         })
-        .collect()
+        .collect();
+    // If a key also occurs as authored YAML, preserve every occurrence rather
+    // than silently choosing one value from an ambiguous author document.
+    for prefix in ["name:", "description:"] {
+        if owned
+            .iter()
+            .any(|(line, host)| !host && line.starts_with(prefix))
+        {
+            for (line, host) in &mut owned {
+                if line.starts_with(prefix) {
+                    *host = false;
+                }
+            }
+        }
+    }
+    owned
 }
 
 /// Only host-owned top-level, single-line fields are hidden. User frontmatter,
@@ -412,20 +427,44 @@ pub fn editable_body(text: &str) -> String {
     }
 }
 
-/// Reattach upload provenance and synchronize any existing name/description
-/// fields with the dedicated editor fields. Never parse Markdown-body YAML.
+/// A single-line metadata value typed in an editable upload header. Authored
+/// blocks, continuations and ambiguous duplicate keys are not field edits.
+pub fn typed_metadata(edited: &str, key: &str) -> Option<String> {
+    let (header, _) = frontmatter(edited)?;
+    let prefix = format!("{key}:");
+    host_lines(header)
+        .into_iter()
+        .find(|(line, host)| *host && line.starts_with(prefix.as_str()))
+        .map(|(line, _)| field(line, key))
+}
+
+/// Reattach upload provenance and synchronize scalar metadata with the editor
+/// fields. New typed scalars become fields; authored replacements stay intact.
+/// Never parse Markdown-body YAML.
 pub fn preserve_managed_frontmatter(
     original: &str,
     edited: &str,
     name: &str,
     description: &str,
 ) -> String {
-    let Some((header, _)) = frontmatter(original) else {
-        return edited.into();
-    };
-    let metadata: Vec<_> = host_lines(header)
+    let original_header = frontmatter(original).map_or("", |(header, _)| header);
+    // A complex replacement belongs to the author. Do not replay the old hidden
+    // scalar beside it, creating a duplicate key the author never entered.
+    let (edited_header, body) = frontmatter(edited).unwrap_or(("", edited));
+    let edited_lines = host_lines(edited_header);
+    let authored: Vec<_> = ["name:", "description:"]
         .into_iter()
-        .filter_map(|(line, host)| host.then_some(line))
+        .filter(|prefix| {
+            edited_lines
+                .iter()
+                .any(|(line, host)| !host && line.starts_with(prefix))
+        })
+        .collect();
+    let mut metadata: Vec<_> = host_lines(original_header)
+        .into_iter()
+        .filter_map(|(line, host)| {
+            (host && !authored.iter().any(|prefix| line.starts_with(prefix))).then_some(line)
+        })
         .map(|line| {
             if line.starts_with("name:") {
                 metadata_line("name", name)
@@ -436,13 +475,23 @@ pub fn preserve_managed_frontmatter(
             }
         })
         .collect();
+    // The wrapper adopts typed scalar values when the dedicated fields are
+    // unchanged. Re-emit newly introduced fields too, not just original keys.
+    for (key, value) in [("name", name), ("description", description)] {
+        let prefix = format!("{key}:");
+        if typed_metadata(edited, key).is_some()
+            && !metadata
+                .iter()
+                .any(|line| line.starts_with(prefix.as_str()))
+        {
+            metadata.push(metadata_line(key, value));
+        }
+    }
     if metadata.is_empty() {
         return edited.into();
     }
-    // Work from the raw edited document here: a metadata-only edit must not
-    // trim its unchanged Markdown body's leading separator or line endings.
-    let (header, body) = frontmatter(edited).unwrap_or(("", edited));
-    let header = host_lines(header)
+    // Preserve the raw Markdown body's separator and line endings.
+    let header = edited_lines
         .into_iter()
         .filter_map(|(line, host)| (!host).then_some(line))
         .collect::<Vec<_>>()
@@ -746,6 +795,47 @@ mod tests {
         let described = preserve_managed_frontmatter(&cleared, &cleared, "Titre", "Nouvelle");
         assert!(described.contains("description: Nouvelle"));
         assert_eq!(described.matches("description:").count(), 1);
+    }
+
+    #[test]
+    fn typed_scalars_become_fields_but_authored_replacements_are_not_duplicated() {
+        let original = "---\nname: Ancien\ndescription: Ancienne\norigin: upload\n---\nCorps";
+        let typed =
+            "---\nname: Nouveau\ndescription: \"Ligne 1\\nLigne 2\"\nauteur: Élodie\n---\nCorps";
+        assert_eq!(typed_metadata(typed, "name").as_deref(), Some("Nouveau"));
+        assert_eq!(
+            typed_metadata(typed, "description").as_deref(),
+            Some("Ligne 1\nLigne 2")
+        );
+        assert_eq!(
+            typed_metadata("Corps\ndescription: exemple", "description"),
+            None
+        );
+        let saved = preserve_managed_frontmatter(original, typed, "Nouveau", "Ligne 1\nLigne 2");
+        assert!(saved.contains("description: \"Ligne 1\\nLigne 2\""));
+        assert!(saved.contains("auteur: Élodie"));
+        assert_eq!(saved.matches("description:").count(), 1);
+        assert!(!editable_body(&saved).contains("description:"));
+        // Older versions could store an uploaded body without any header.
+        // Typed fields still follow the dedicated values in that case.
+        let legacy = preserve_managed_frontmatter(
+            "Ancien corps sans en-tête",
+            typed,
+            "Champ",
+            "Description du champ",
+        );
+        assert!(legacy.contains("name: Champ"));
+        assert!(legacy.contains("description: Description du champ"));
+        assert!(!legacy.contains("name: Nouveau"));
+        let authored =
+            "description: |\n  Première ligne\n  suite.\ndescription: Autre ligne écrite";
+        let edited = format!("---\n{authored}\nlicence: MIT\n---\nCorps");
+        assert_eq!(typed_metadata(&edited, "description"), None);
+        let saved = preserve_managed_frontmatter(original, &edited, "Nouveau", "Ancienne");
+        assert!(saved.contains(authored));
+        assert!(!saved.contains("description: Ancienne"));
+        assert_eq!(saved.matches("description:").count(), 2);
+        assert!(editable_body(&saved).contains(authored));
     }
 
     #[test]

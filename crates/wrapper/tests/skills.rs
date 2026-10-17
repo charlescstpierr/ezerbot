@@ -419,6 +419,159 @@ fn multiline_uploaded_descriptions_survive_name_description_and_body_edits() {
 }
 
 #[test]
+fn a_description_typed_into_upload_content_is_kept_and_becomes_the_field() {
+    let db = Database::new();
+    let mut app = db.open();
+    for (path, source, typed, expected) in [
+        ("ton.txt", "Écris avec chaleur.", "---\ndescription: Écrit avec chaleur.\nauteur: Élodie\n---\nÉcris avec chaleur.", "Écrit avec chaleur."),
+        ("analyse.md", "---\nname: Analyse\ndescription: |\n  Analyse un document\n  en profondeur.\nlicence: MIT\n---\nCorps", "---\ndescription: Analyse un document en profondeur.\nlicence: MIT\n---\nCorps", "Analyse un document en profondeur."),
+        ("resume.md", "---\nname: Résumé\ndescription: Ancienne\n---\nCorps", "---\ndescription: Tapée dans le contenu.\n---\nCorps", "Tapée dans le contenu."),
+    ] {
+        let report = post(&mut app, "/api/skills/import", json!({"bot_id":"grokbot", "files":[{"path":path, "content":source}]}));
+        let id = report["report"][0]["status"]["skill_id"].clone();
+        let saved = post(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":typed}));
+        let raw = saved["skill"]["content"]["body"].as_str().unwrap();
+        assert!(raw.contains(&format!("description: {expected}")), "{raw}");
+        assert!(raw.contains("origin: upload"));
+        assert_eq!(raw.matches("description:").count(), 1);
+        assert_eq!(saved["skill"]["content"]["description"], expected);
+        let versions = post(&mut app, "/api/skills/versions", json!({"bot_id":"grokbot", "skill_id":id}));
+        assert!(!versions["versions"][1]["content"]["editable_body"].as_str().unwrap().contains("description:"));
+        let renamed = post(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "name":"Renommée"}));
+        assert!(renamed["skill"]["content"]["body"].as_str().unwrap().contains(&format!("description: {expected}")));
+        assert_eq!(renamed["skill"]["content"]["description"], expected);
+    }
+}
+
+#[test]
+fn typed_upload_fields_follow_dedicated_field_precedence_and_validation() {
+    let db = Database::new();
+    let mut app = db.open();
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"notes.txt", "content":"Corps"}]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let typed = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":"---\nname: Titre saisi\ndescription: Description saisie\nauteur: Élodie\n---\nCorps"}),
+    );
+    assert_eq!(typed["skill"]["content"]["display_name"], "Titre saisi");
+    assert_eq!(typed["skill"]["content"]["name"], "titre-saisi");
+    assert_eq!(
+        typed["skill"]["content"]["description"],
+        "Description saisie"
+    );
+    let explicit = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "name":"Champ prioritaire", "description":"Description du champ", "body":"---\nname: Nom du contenu\ndescription: Description du contenu\nauteur: Élodie\n---\nCorps"}),
+    );
+    let raw = explicit["skill"]["content"]["body"].as_str().unwrap();
+    assert!(raw.contains("name: Champ prioritaire"));
+    assert!(raw.contains("description: Description du champ"));
+    assert!(raw.contains("auteur: Élodie"));
+    assert!(!raw.contains("du contenu"));
+    for body in [
+        format!("---\ndescription: {}\n---\nCorps", "x".repeat(1025)),
+        "---\nname: 東京\n---\nCorps".into(),
+    ] {
+        let error = request(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "body":body}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(listing(&mut app, "grokbot")[0], explicit["skill"]);
+}
+
+#[test]
+fn an_authored_description_block_replaces_a_hidden_scalar_without_duplication() {
+    let db = Database::new();
+    let mut app = db.open();
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"analyse.md", "content":"---\nname: Analyse\ndescription: Ancienne\nlicence: MIT\n---\nCorps"}]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let authored = "description: |\n  Texte de l’auteur\n  sur deux lignes.";
+    let saved = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":format!("---\n{authored}\nlicence: MIT\n---\nCorps")}),
+    );
+    let raw = saved["skill"]["content"]["body"].as_str().unwrap();
+    assert!(raw.contains(authored));
+    assert_eq!(raw.matches("description:").count(), 1);
+    assert!(!raw.contains("description: Ancienne"));
+    let renamed = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "name":"Analyse révisée"}),
+    );
+    assert_eq!(
+        renamed["skill"]["content"]["body"]
+            .as_str()
+            .unwrap()
+            .matches("description:")
+            .count(),
+        1
+    );
+    let scalar = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "body":"---\ndescription: De nouveau sur une ligne.\nlicence: MIT\n---\nCorps"}),
+    );
+    assert_eq!(
+        scalar["skill"]["content"]["description"],
+        "De nouveau sur une ligne."
+    );
+    assert_eq!(
+        scalar["skill"]["content"]["body"]
+            .as_str()
+            .unwrap()
+            .matches("description:")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn unchanged_large_metadata_in_a_raw_body_edit_is_not_revalidated() {
+    let db = Database::new();
+    let mut app = db.open();
+    let name = "n".repeat(200);
+    let description = "d".repeat(2000);
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"long.md", "content":format!("---\nname: {name}\ndescription: {description}\n---\nCorps original")}]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let original = listing(&mut app, "grokbot")[0].clone();
+    let body = original["content"]["body"]
+        .as_str()
+        .unwrap()
+        .replace("Corps original", "Corps révisé");
+    let edited = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":body}),
+    );
+    assert_eq!(edited["skill"]["content"]["display_name"], name);
+    assert_eq!(edited["skill"]["content"]["description"], description);
+    assert!(edited["skill"]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Corps révisé"));
+}
+
+#[test]
 fn clearing_then_replacing_a_single_line_description_remains_host_managed() {
     let db = Database::new();
     let mut app = db.open();

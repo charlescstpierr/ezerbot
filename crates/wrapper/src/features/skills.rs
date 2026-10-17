@@ -219,6 +219,28 @@ fn handle(
             if let Some(body) = input.body {
                 if body != current.content.body && body != editable_body(&current.content) {
                     validate_body(&body)?;
+                    if matches!(current.content.origin, Origin::Upload { .. }) {
+                        // Content-header scalars are field edits, not discarded
+                        // text. Explicitly changed dedicated fields take priority.
+                        if content.display_name == current.content.display_name {
+                            if let Some(name) = import::typed_metadata(&body, "name") {
+                                if name.trim() != current.content.display_name {
+                                    content.name = manual_name(&name)?;
+                                    content.display_name = name.trim().into();
+                                }
+                            }
+                        }
+                        if content.description == current.content.description {
+                            if let Some(description) = import::typed_metadata(&body, "description")
+                            {
+                                // Unchanged oversized imported metadata remains valid.
+                                if description != current.content.description {
+                                    validate_description(&description)?;
+                                    content.description = description;
+                                }
+                            }
+                        }
+                    }
                     content.body = body;
                 }
             }

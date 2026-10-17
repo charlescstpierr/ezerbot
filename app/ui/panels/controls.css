@@ -3,8 +3,10 @@
    replace their platform chrome with the app's theme and accent tokens. */
 select,
 select.text-input,
+[data-card-kind] select,
 input[type="number"],
-[data-card-kind="form"] input[type="text"] {
+[data-card-kind="form"] input[type="text"],
+[data-card-kind="secret"] input[type="password"] {
   min-width: 0;
   max-width: 100%;
   width: 100%;
@@ -20,10 +22,12 @@ input[type="number"],
 }
 
 select,
-select.text-input {
+select.text-input,
+[data-card-kind] select {
   -webkit-appearance: none;
   appearance: none;
   padding-right: 36px;
+  text-overflow: ellipsis;
   background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
     linear-gradient(135deg, var(--muted) 50%, transparent 50%);
   background-position: right 16px center, right 12px center;
@@ -43,37 +47,48 @@ input[type="number"]::-webkit-outer-spin-button {
   margin: 0;
 }
 
+/* Dialog inputs use the roomier .text-input spacing, including selects and
+   numbers. Keep their height and focus treatment aligned with adjacent fields. */
+.text-input:is(select, [type="number"]) {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  line-height: normal;
+}
+
+.text-input:focus-visible,
 select:focus-visible,
 input[type="number"]:focus-visible,
-[data-card-kind="form"] input[type="text"]:focus-visible {
+[data-card-kind="form"] input[type="text"]:focus-visible,
+[data-card-kind="secret"] input[type="password"]:focus-visible {
   border-color: var(--accent-ink);
   outline: 2px solid var(--accent-ink);
   outline-offset: 2px;
 }
 select:disabled,
 input[type="number"]:disabled,
-[data-card-kind="form"] input[type="text"]:disabled {
+[data-card-kind="form"] input[type="text"]:disabled,
+[data-card-kind="secret"] input[type="password"]:disabled {
   opacity: .5;
   cursor: default;
 }
 
-/* Form decisions are ordinary actions, not retry/warning buttons. Leave the
-   warning palette of interrupted responses and other card kinds untouched. */
-[data-card-kind="form"] .gb-retry {
+/* Form/secret decisions are ordinary actions, not retry/warning buttons. Leave
+   interrupted responses and approval warning actions untouched. */
+:is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry {
   -webkit-appearance: none;
   appearance: none;
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
 }
-[data-card-kind="form"] .gb-retry:hover:enabled { background: var(--soft); }
-[data-card-kind="form"] .gb-retry-primary {
+:is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry:hover:enabled { background: var(--soft); }
+:is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry-primary {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-on);
   font-weight: 600;
 }
-[data-card-kind="form"] .gb-retry-primary:hover:enabled {
+:is([data-card-kind="form"], [data-card-kind="secret"]) .gb-retry-primary:hover:enabled {
   background: var(--accent);
   filter: brightness(1.08);
 }

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -193,6 +193,16 @@ impl Fixture {
     fn restart(&mut self) {
         self.idle();
         self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
+    }
+    fn use_api(&mut self, base: &str) {
+        self.idle();
+        let mut endpoints = self.server.endpoints();
+        endpoints.api = format!("{base}/v1");
+        self.provider = Provider::with_endpoints(&self.path, endpoints, false);
+        self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
+        wait("replacement API catalogue", || {
+            self.provider.status()["models_ready"] == true
+        });
     }
 }
 impl Drop for Fixture {
@@ -419,8 +429,8 @@ fn sending_turn_without_vision_sends_caption_marker_not_image() {
     f.idle();
     let sent = f.send(&c, "unsupported", "Look", &[image]);
     assert_caption_only(&sent, "ce modèle ne peut pas lire les images");
-    // The model's controller backoff also covers another image, not only the
-    // original cache key. No run should rediscover this known limitation.
+    // A proven capability limitation covers another image too; a generic
+    // caption-controller cooldown alone must not have this effect.
     let mut bytes = STANDARD.decode(PNG).unwrap();
     bytes.push(0);
     let other = f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
@@ -432,6 +442,142 @@ fn sending_turn_without_vision_sends_caption_marker_not_image() {
     assert!(user_content(&sent).iter().any(|part| part["text"]
         .as_str()
         .is_some_and(|text| text.contains("ce modèle ne peut pas lire les images"))));
+    f.db()
+        .execute(
+            "UPDATE wrapper_attachment_model_no_vision SET until_ms = 0",
+            [],
+        )
+        .unwrap();
+    f.restart();
+    let restored = f.upload();
+    let sent = f.send(&c, "capability-restored", "Try again", &[restored]);
+    assert_image(&sent); // An old SKIPPED cache entry must not disable bytes forever.
+}
+
+#[test]
+fn caption_refusal_on_vision_model_still_sends_image() {
+    for empty in [false, true] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let other_conversation = f.conversation();
+        let image = f.upload();
+        let mut events = Vec::new();
+        if !empty {
+            events.push(
+                json!({"type": "response.refusal.delta", "delta": "Cannot describe this person"}),
+            );
+        }
+        events.push(json!({"type": "response.completed"}));
+        f.server
+            .seen
+            .lock()
+            .unwrap()
+            .responses
+            .push_back(ScriptedResponse::events(&events));
+        let input = json!({"conversation_id": c, "attachment_id": image, "draft": "Look"});
+        f.post("/api/attachments/precaption", input.clone());
+        wait("caption refusal/empty result", || {
+            f.post("/api/attachments/precaption", input.clone())["caption"]["status"] == "skipped"
+        });
+        f.idle();
+        assert_eq!(
+            f.db()
+                .query_row(
+                    "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                    [],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let sent = f.send(&c, "color", "What color dominates?", &[image]);
+        assert_image(&sent);
+        assert!(!sent
+            .to_string()
+            .contains("ce modèle ne peut pas lire les images"));
+        let mut bytes = STANDARD.decode(PNG).unwrap();
+        bytes.push(0);
+        let other_image = f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let other = f.send(
+            &other_conversation,
+            "color",
+            "Another image",
+            &[other_image],
+        );
+        let parts = user_content(&other);
+        let images = parts
+            .iter()
+            .filter(|part| part["type"] == "input_image")
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            images[0]["image_url"],
+            format!("data:image/png;base64,{}", STANDARD.encode(&bytes))
+        );
+        assert!(!other
+            .to_string()
+            .contains("ce modèle ne peut pas lire les images"));
+    }
+}
+
+#[test]
+fn unrelated_unsupported_setting_is_not_no_vision_evidence() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let image = f.upload();
+    let unrelated = || {
+        ScriptedResponse::json(
+            400,
+            json!({"error": {"message": "Unsupported option: temperature"}}),
+        )
+    };
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(unrelated());
+    let input = json!({"conversation_id": c, "attachment_id": image, "draft": "Look"});
+    f.post("/api/attachments/precaption", input.clone());
+    wait("unsupported setting caption failure", || {
+        f.post("/api/attachments/precaption", input.clone())["caption"]["status"] == "failed"
+    });
+    f.idle();
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(unrelated());
+    f.post("/api/send", json!({"conversation_id": c, "message_id": "setting", "body": "Look", "attachments": [image]}));
+    wait("original setting failure", || {
+        f.reply(&c, "setting")["state"] == "failed"
+    });
+    f.idle();
+    let calls = f.run_requests();
+    assert_eq!(
+        calls.len(),
+        1,
+        "must not silently remove images to repair unrelated settings"
+    );
+    assert_image(&calls[0]);
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert!(!f.reply(&c, "setting")["notice"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("ne lit pas les images"));
 }
 
 #[test]
@@ -493,6 +639,187 @@ fn unsupported_fallback_is_bounded_and_usage_errors_are_not_downgraded() {
         if !usage {
             assert_caption_only(&calls[1], "ce modèle ne peut pas lire les images");
         }
+    }
+}
+
+/// Content-aware Responses fixture: compaction can happen between any two
+/// calls, so a FIFO of canned replies would accidentally return a tool call to
+/// the summarizer and conceal the actual budget regression.
+struct ToolHeavyApi {
+    base: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl ToolHeavyApi {
+    fn new(seen: Arc<Mutex<Seen>>) -> Self {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut calls = 0;
+            while !stopping.load(Ordering::SeqCst) {
+                let Some(mut request) = server
+                    .recv_timeout(std::time::Duration::from_millis(20))
+                    .unwrap()
+                else {
+                    continue;
+                };
+                let response = if request.url() == "/v1/models" {
+                    ScriptedResponse::json(
+                        200,
+                        json!({"models": [{"slug": "gpt-test", "visibility": "list"}]}),
+                    )
+                } else {
+                    let mut raw = String::new();
+                    request.as_reader().read_to_string(&mut raw).unwrap();
+                    let body: Value = serde_json::from_str(&raw).unwrap();
+                    let summary = body["instructions"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("Maximum summary length:");
+                    seen.lock().unwrap().bodies.push(body);
+                    if summary {
+                        ScriptedResponse::events(&[
+                            json!({"type": "response.output_text.delta", "delta": "Previous tool exchanges summarized; the image description is retained if available."}),
+                            json!({"type": "response.completed"}),
+                        ])
+                    } else {
+                        calls += 1;
+                        if calls <= 5 {
+                            ScriptedResponse::events(&[
+                                json!({"type": "response.output_item.done", "item": {
+                                    "id": format!("fc-heavy-{calls}"), "type": "function_call", "status": "completed",
+                                    "call_id": format!("heavy-{calls}"), "name": "list_skills",
+                                    "arguments": json!({"query": "x".repeat(9_000), "limit": 1}).to_string(),
+                                }}),
+                                json!({"type": "response.completed"}),
+                            ])
+                        } else {
+                            ScriptedResponse::events(&[
+                                json!({"type": "response.output_text.delta", "delta": "Finished after five tools."}),
+                                json!({"type": "response.completed"}),
+                            ])
+                        }
+                    }
+                };
+                let _ = request.respond(
+                    tiny_http::Response::from_string(response.body)
+                        .with_status_code(response.status)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", response.content_type)
+                                .unwrap(),
+                        ),
+                );
+            }
+        });
+        Self {
+            base,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for ToolHeavyApi {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+fn tool_heavy_image_run_degrades_instead_of_failing() {
+    for mode in ["no-image", "png", "png-no-caption", "bmp", "no-vision"] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let mut ids = Vec::new();
+        if mode == "bmp" {
+            let mut bytes = vec![0; 70];
+            bytes[..2].copy_from_slice(b"BM");
+            bytes[2..6].copy_from_slice(&70u32.to_le_bytes());
+            bytes[14..18].copy_from_slice(&40u32.to_le_bytes());
+            ids.push(
+                f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        } else if mode != "no-image" {
+            let image = f.upload();
+            if mode == "png" {
+                f.prepare(&c, &image, "Look", "A blue square.");
+            }
+            ids.push(image);
+        }
+        if mode == "no-vision" {
+            f.db()
+                .execute(
+                    "INSERT INTO wrapper_attachment_model_no_vision VALUES ('gpt-test', ?1)",
+                    [i64::MAX],
+                )
+                .unwrap();
+        }
+        let server = ToolHeavyApi::new(f.server.seen.clone());
+        f.use_api(&server.base);
+        f.post("/api/engine/config", json!({"estimated_tokens": 12_000}));
+        let calls = f.send_calls(&c, "heavy", "Inspect then finish", &ids, 6);
+        assert!(
+            f.reply(&c, "heavy")["body"]
+                .as_str()
+                .unwrap()
+                .contains("Finished after five tools."),
+            "mode={mode}"
+        );
+        let summaries = f
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .filter(|body| {
+                body["instructions"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("Maximum summary length:")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !summaries.is_empty(),
+            "the heavy run must actually compact, mode={mode}"
+        );
+        assert!(summaries
+            .iter()
+            .all(|body| !body.to_string().contains("data:image")));
+        if mode.starts_with("png") {
+            assert_image(&calls[0]);
+            assert!(!calls.last().unwrap().to_string().contains("input_image"));
+            assert!(f.reply(&c, "heavy")["notice"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("limite de contexte"));
+        } else {
+            assert!(
+                calls
+                    .iter()
+                    .all(|body| !body.to_string().contains("input_image")),
+                "caption-only entries must never pin the run, mode={mode}"
+            );
+        }
+        assert_eq!(
+            f.db()
+                .query_row(
+                    "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                    [],
+                    |row| row.get::<_, u32>(0)
+                )
+                .unwrap(),
+            u32::from(mode == "no-vision"),
+            "budget degradation must not be recorded as a model capability failure"
+        );
     }
 }
 

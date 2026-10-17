@@ -937,6 +937,7 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
             cancel: &services.cancel.clone(),
             image_urls: Mutex::new(HashMap::new()),
             no_vision: AtomicBool::new(false),
+            captions_only: AtomicBool::new(false),
         };
         drive_owned(ctx.connection, &gateway, &mut services, &run.run_id)?;
         return Ok(());
@@ -961,6 +962,7 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
                 cancel: &cancel,
                 image_urls: Mutex::new(HashMap::new()),
                 no_vision: AtomicBool::new(false),
+                captions_only: AtomicBool::new(false),
             };
             drive_owned(&conn, &gateway, &mut services, &id)?;
             retitle(&conn, &provider, &id, &cancel, &path)?;
@@ -1432,8 +1434,30 @@ struct RunGatewayCall<'a> {
     source_revision: u64,
     image_urls: &'a Mutex<HashMap<String, String>>,
     no_vision: &'a AtomicBool,
+    captions_only: &'a AtomicBool,
 }
 impl RunGatewayCall<'_> {
+    /// A whole sending image suffix is useful only while it fits. Once a
+    /// budget-bound preparation fails, allow normal rolling compaction rather
+    /// than fail the task. This is not evidence about model capabilities.
+    fn degrade_image_budget(
+        &self,
+        error: &Error,
+        has_image_bytes: bool,
+    ) -> grokbot_engine::contracts::Result<bool> {
+        let budget_error = matches!(error, Error::InvalidInput(message)
+            if message.contains("budget") || message.contains("cannot fit") || message.contains("input window"));
+        if !has_image_bytes || !budget_error || self.captions_only.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.captions_only.store(true, Ordering::SeqCst);
+        self.connection.execute(
+            "UPDATE wrapper_engine_runs SET notice=?2 WHERE run_id=?1",
+            params![self.run_id, "La limite de contexte impose un tour sans octets d'image ; seules les descriptions disponibles sont conservées."],
+        )?;
+        Ok(true)
+    }
+
     fn stream(
         &self,
         request: &ModelRequest,
@@ -1464,7 +1488,7 @@ impl RunGatewayCall<'_> {
             &run.conversation_id,
             &original.entry_id,
             &request.model,
-            !self.no_vision.load(Ordering::SeqCst),
+            !self.no_vision.load(Ordering::SeqCst) && !self.captions_only.load(Ordering::SeqCst),
             &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
         )
         .map_err(engine_error)?;
@@ -1482,6 +1506,15 @@ impl RunGatewayCall<'_> {
                 super::attachments::without_vision(&mut entry.images);
             }
         }
+        if self.captions_only.load(Ordering::SeqCst) {
+            for entry in &mut request.input {
+                super::attachments::captions_only(&mut entry.images);
+            }
+        }
+        let has_sending_bytes = request.input.iter().any(|entry| {
+            entry.entry_id == original.entry_id
+                && entry.images.iter().any(|image| image.url.is_some())
+        });
         let reset_index = reset
             .as_ref()
             .and_then(|id| request.input.iter().position(|i| &i.entry_id == id))
@@ -1492,7 +1525,10 @@ impl RunGatewayCall<'_> {
         let compaction_end = request
             .input
             .iter()
-            .position(|entry| entry.entry_id == original.entry_id && !entry.images.is_empty())
+            .position(|entry| {
+                entry.entry_id == original.entry_id
+                    && entry.images.iter().any(|image| image.url.is_some())
+            })
             .map_or(request.input.len(), |index| index + 1);
         let eligible = &request.input[reset_index..compaction_end];
         let segment = eligible
@@ -1609,14 +1645,20 @@ impl RunGatewayCall<'_> {
                 cancel: self.cancel,
                 metadata: None,
             };
-            let mut next = compaction::summarize_with_options(
+            let mut next = match compaction::summarize_with_options(
                 &gateway,
                 &request.model,
                 &run.conversation_id,
                 &clean,
                 summary.as_ref(),
                 &options,
-            )?;
+            ) {
+                Ok(summary) => summary,
+                Err(error) if self.degrade_image_budget(&error, has_sending_bytes)? => {
+                    return self.stream(&request, emit);
+                }
+                Err(error) => return Err(error),
+            };
             next.text = redact::redact(&vault, &next.text)?;
             if !ephemeral {
                 let tx = super::write_transaction(self.connection)?;
@@ -1701,7 +1743,13 @@ impl RunGatewayCall<'_> {
                 &serde_json::to_value(outgoing)?,
             )?)?)
         };
-        let outgoing = assemble(&request.input)?;
+        let outgoing = match assemble(&request.input) {
+            Ok(outgoing) => outgoing,
+            Err(error) if self.degrade_image_budget(&error, has_sending_bytes)? => {
+                return self.stream(&request, emit);
+            }
+            Err(error) => return Err(error),
+        };
         if compaction::revision(self.connection, &run.conversation_id)? != self.source_revision {
             return Err(Error::Conflict("context source changed".into()));
         }
@@ -1736,9 +1784,7 @@ impl RunGatewayCall<'_> {
         let mut progressed = false;
         gateway.stream(&outgoing, &mut |event| {
             if let ModelEvent::Failed { reason } = &event {
-                let message = reason.to_ascii_lowercase();
-                let unsupported =
-                    message.contains("unsupported") || message.contains("not support");
+                let unsupported = super::attachments::image_unsupported(reason);
                 // Do not downgrade authentication, usage or network failures, or
                 // replay an attempt that already emitted text/tool calls.
                 if has_images && !progressed && unsupported {
@@ -1760,6 +1806,8 @@ impl RunGatewayCall<'_> {
             return Ok(());
         }
         self.no_vision.store(true, Ordering::SeqCst);
+        super::attachments::record_no_vision(self.connection, &request.model, now())
+            .map_err(engine_error)?;
         self.connection.execute(
             "UPDATE wrapper_engine_runs SET error=NULL,error_kind=NULL,notice=?2 WHERE run_id=?1",
             params![self.run_id, "Ce modèle ne lit pas les images ; la réponse utilise le texte et les descriptions disponibles."],
@@ -2392,6 +2440,7 @@ struct RunGateway<'a> {
     cancel: &'a AtomicBool,
     image_urls: Mutex<HashMap<String, String>>,
     no_vision: AtomicBool,
+    captions_only: AtomicBool,
 }
 impl ModelGateway for RunGateway<'_> {
     fn stream(
@@ -2428,6 +2477,7 @@ impl ModelGateway for RunGateway<'_> {
                 source_revision,
                 image_urls: &self.image_urls,
                 no_vision: &self.no_vision,
+                captions_only: &self.captions_only,
             }
             .stream(&fresh, emit);
             if !matches!(&result, Err(Error::Conflict(_))) {

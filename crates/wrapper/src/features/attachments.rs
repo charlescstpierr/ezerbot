@@ -7,7 +7,7 @@
 //! `context` contributes fenced caption data, never image bytes in instructions.
 //! The engine hydrates `HistoryItem.images` through `images_for_message`: the
 //! sending turn (including tool continuations) carries supported image bytes plus
-//! its prepared caption. Known vision skips use an honest local marker instead;
+//! its prepared caption. Proven image-capability errors use a local marker instead;
 //! later turns carry only captions, including after restart. The ContextBlock hook is a legacy
 //! preview, not a second instruction copy. Real Responses requests are covered by
 //! `tests/attachments_run.rs`. Historical images never reload blob bytes.
@@ -97,6 +97,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             attachment_id TEXT NOT NULL, model TEXT NOT NULL, next_attempt INTEGER NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(conversation_id, message_id, attachment_id, model)
+        );
+        CREATE TABLE IF NOT EXISTS wrapper_attachment_model_no_vision (
+            model TEXT PRIMARY KEY, until_ms INTEGER NOT NULL
         );",
     )?;
     // Upgrade databases opened by the initial adapter, without resetting budgets.
@@ -108,7 +111,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         )?;
     }
     conn.execute(
-        "INSERT INTO component_versions(component, version) VALUES ('attachments', 2)
+        "INSERT INTO component_versions(component, version) VALUES ('attachments', 3)
          ON CONFLICT(component) DO UPDATE SET version = MAX(version, excluded.version)",
         [],
     )?;
@@ -522,19 +525,23 @@ fn vision(
         return vision_failed();
     };
     request["input"][0]["content"][1]["image_url"] = Value::String(image_url);
+    let model = request["model"].as_str().unwrap_or_default().to_owned();
     let response = match provider.responses(request) {
         Ok(response) => response,
         // Unsupported images and explicit provider refusals are Skipped. Network,
         // authentication and usage failures stay retryable without leaking bodies.
         // Provider::responses preserves the refusal detail but has no typed
         // capability error yet. Do not mistake auth/usage/network errors for it.
-        Err(error)
-            if error.kind == "other" && {
-                let message = error.message.to_ascii_lowercase();
-                message.contains("unsupported") || message.contains("not support")
-            } =>
-        {
-            return CaptionStatus::skipped(now() as i64)
+        Err(error) if error.kind == "other" && image_unsupported(&error.message) => {
+            // A caption refusal/empty response is NOT a capability failure.
+            // Only this explicit provider error may disable image bytes in chat.
+            if let Ok(conn) =
+                Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            {
+                let _ = conn.busy_timeout(Duration::from_secs(3));
+                let _ = record_no_vision(&conn, &model, now());
+            }
+            return CaptionStatus::skipped(now() as i64);
         }
         Err(_) => {
             return CaptionStatus::Failed {
@@ -927,23 +934,17 @@ pub(super) fn images_for_message_cached(
         .iter()
         .map(|attachment| {
             let bmp = attachment.image_type == staging::ImageType::Bmp;
-            // Service SKIPPED is conservative evidence that these bytes cannot
-            // be used with this model. During its controller backoff, do not
-            // rediscover the same limitation on another image in a chat run.
-            // An offline/local skip never writes such evidence. A skip from a
-            // different model must not disable the newly selected vision model.
-            let skipped: bool = ctx.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM attachments_caption_cache c
-                 WHERE c.model = ?3 AND json_extract(c.status, '$.status') = 'skipped'
-                 AND (json_extract(c.status, '$.retry_after') > ?4
-                     OR EXISTS(SELECT 1 FROM attachments_caption_uses u
-                         WHERE u.conversation_id = ?1 AND u.sha256 = ?2
-                         AND u.sha256 = c.sha256 AND u.model = c.model AND u.context_digest = c.context_digest)))",
-                params![conversation, attachment.sha256, model, ctx.now_ms], |row| row.get(0),
+            // RC01's SKIPPED cooldown applies ONLY to precaption. A refusal or
+            // empty description must never strip bytes from the real user turn.
+            let no_vision: bool = ctx.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM wrapper_attachment_model_no_vision
+                 WHERE model = ?1 AND until_ms > ?2)",
+                params![model, ctx.now_ms],
+                |row| row.get(0),
             )?;
             let mut image = ImageInput {
                 attachment_id: attachment.id.clone(),
-                url: if sending_turn && !bmp && !skipped {
+                url: if sending_turn && !bmp && !no_vision {
                     let url = match urls.get(&attachment.id) {
                         Some(url) => url.clone(),
                         None => {
@@ -962,12 +963,47 @@ pub(super) fn images_for_message_cached(
                     caption_for(ctx.connection, conversation, &attachment.sha256, model)?
                 },
             };
-            if skipped && !bmp {
+            if no_vision && !bmp {
                 without_vision(std::slice::from_mut(&mut image));
             }
             Ok(image)
         })
         .collect()
+}
+
+/// Capability evidence is deliberately separate from the general caption cache.
+/// The bound allows a model/provider capability change to be rediscovered.
+pub(super) fn record_no_vision(
+    conn: &Connection,
+    model: &str,
+    now_ms: u64,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "INSERT INTO wrapper_attachment_model_no_vision(model, until_ms) VALUES (?1, ?2)
+         ON CONFLICT(model) DO UPDATE SET until_ms = MAX(until_ms, excluded.until_ms)",
+        params![model, now_ms.saturating_add(precaption::SKIPPED_BACKOFF_MS)],
+    )?;
+    Ok(())
+}
+
+pub(super) fn image_unsupported(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("image")
+        && (message.contains("unsupported") || message.contains("not support"))
+}
+
+/// Budget degradation is not a statement about model capabilities. Keep real
+/// captions unchanged, or truthfully disclose that no description is available.
+pub(super) fn captions_only(images: &mut [ImageInput]) {
+    for image in images {
+        image.url = None;
+        if image.caption.is_none() {
+            image.caption = Some(
+                "Image omise pour respecter la limite de contexte ; aucune description disponible."
+                    .into(),
+            );
+        }
+    }
 }
 
 /// Preserve any real description and explicitly disclose the missing visual

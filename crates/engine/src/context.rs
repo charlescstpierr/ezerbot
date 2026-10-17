@@ -82,7 +82,9 @@ pub fn assemble_input_for_turn(
     sending_entry_id: &str,
 ) -> Result<AssembledContext> {
     let has_sending_images = history.iter().any(|item| {
-        item.entry_id == sending_entry_id && item.role == Role::User && !item.images.is_empty()
+        item.entry_id == sending_entry_id
+            && item.role == Role::User
+            && item.images.iter().any(|image| image.url.is_some())
     });
     let limit = character_limit(budget)?;
     if !blocks
@@ -158,7 +160,9 @@ pub fn assemble_input_for_turn(
     // blocks/output bodies can evict it.
     let history_category = category(ContextSource::History);
     let sending_start = history.iter().position(|item| {
-        item.entry_id == sending_entry_id && item.role == Role::User && !item.images.is_empty()
+        item.entry_id == sending_entry_id
+            && item.role == Role::User
+            && item.images.iter().any(|image| image.url.is_some())
     });
     let required_start = required_history_start(&history, &current, sending_start)?;
     let required_cost = history[required_start..]
@@ -1220,6 +1224,21 @@ mod context_tests {
             "sending",
         )
         .is_err());
+        // A caption-only/BMP/no-vision entry has no live bytes to pin. It must
+        // remain compactable just like any other completed part of the turn.
+        let mut caption_history = history.clone();
+        caption_history[1].images[0].url = None;
+        let compacted = assemble_input_for_turn(
+            &request,
+            &base(),
+            &caption_history,
+            Some(&truncated),
+            None,
+            &budget(50_000),
+            "sending",
+        )
+        .unwrap();
+        assert_eq!(ids(&compacted.input), ["call", "result"]);
     }
 
     #[test]

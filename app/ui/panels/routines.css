@@ -1,0 +1,34 @@
+.routines-section { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 20px; }
+.routines-section h3 { margin: 0 0 12px; font-size: 14px; }
+.routines-dialog { width: min(800px, calc(100% - 32px)); }
+.routines-dialog h2 { font-size: 20px; }
+.routines-dialog h3 { margin: 0 0 8px; font-size: 14px; overflow-wrap: anywhere; }
+.routines-dialog h4 { margin: 20px 0 10px; font-size: 13px; }
+.routines-content { min-width: 0; }
+.routines-note, .routines-warning, .routines-error, .routines-preview { font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.routines-note { color: var(--muted); }
+.routines-warning { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-line); padding: 10px; border-radius: 7px; }
+.routines-error { color: var(--danger-text); }
+.routines-note:empty, .routines-error:empty { display: none; }
+.routines-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.routines-dialog button:disabled { opacity: .5; cursor: default; }
+.routines-row, .routines-occurrence { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.routines-state { display: inline-block; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 6px; background: var(--soft); margin: 0; }
+.routines-id { display: block; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; margin-top: 6px; }
+.routines-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.routines-fields > .form-label { margin-top: 16px; }
+.routines-fields .text-input { margin-top: 6px; }
+.routines-fields > .routines-enabled { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.routines-content > button { margin-right: 8px; margin-bottom: 12px; }
+.routines-fields textarea { white-space: pre-wrap; min-height: 130px; }
+.routines-preview { padding: 12px; border: 1px solid var(--line); background: var(--soft); border-radius: 7px; }
+.routines-skill-preview { padding: 12px; border: 1px solid var(--line); max-height: 320px; overflow: auto; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.routines-delete { border: 1px solid var(--warning-line); padding: 12px; border-radius: 7px; }
+.routines-delete button { margin: 4px; }
+.routines-occurrence[data-status="missed"] > strong { color: var(--warning-text); }
+.routines-occurrence[data-status="failed"] > strong { color: var(--danger-text); }
+.routines-occurrence[data-status="done"] > strong { color: var(--ok); }
+@media (max-width: 540px) {
+  .routines-dialog { padding: 18px; }
+  .routines-actions { gap: 10px; }
+}

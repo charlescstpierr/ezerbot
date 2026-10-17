@@ -4,6 +4,13 @@
   const panels = window.GrokbotPanels;
   if (!panels) return;
   const BATCH_BYTES = 8 * 1024 * 1024;
+  const EXTENSIONS = ["txt", "md", "markdown", "csv", "json", "yaml", "yml"];
+  const normalizeName = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  function supportedText(path) {
+    const base = path.split(/[\\/]/).pop();
+    const dot = base.lastIndexOf(".");
+    return dot > 0 && EXTENSIONS.includes(base.slice(dot + 1).toLowerCase());
+  }
   const encoder = new TextEncoder();
   const sessions = new Map();
   const mounts = new Set();
@@ -20,9 +27,9 @@
     el.addEventListener("click", action);
     return el;
   };
-  const reason = (value) => ({ unsupported: "Format non accepté", binary: "Fichier binaire", "invalid-utf8": "UTF-8 invalide", empty: "Fichier vide", "too-large": "Texte trop volumineux", "too-many-skills": "Limite de 250 skills atteinte" }[value] || value);
+  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom normalisé ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre de a à z ou un chiffre." }[value] || value);
   function session(botId) {
-    if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, rows: [], message: "" });
+    if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "" });
     return sessions.get(botId);
   }
   function changed() { for (const render of mounts) render(); }
@@ -37,28 +44,38 @@
     return btoa(binary);
   }
 
-  // SR03/SR04, reports/server-orchestration-residual.md: leave conversion,
-  // UTF-8/binary checks and naming to the server; preserve serial partial success.
+  // SR03/SR04, reports/server-orchestration-residual.md: reject unsupported
+  // extensions before reading. Conversion, UTF-8/binary checks and naming remain
+  // authoritative on the server; preserve serial partial success.
   // Budget SERIALIZED JSON, not raw bytes (skills-wrapper review r1 #6).
   async function importFiles(botId, files) {
     const job = session(botId);
     if (!files.length || job.running || job.mutating) return;
     job.running = true;
+    job.generation++;
     job.rows = files.map((file) => ({ path: file.webkitRelativePath || file.name, status: "pending" }));
     job.message = "Import en cours… Les paquets déjà écrits sont conservés.";
     changed();
-    let batch = [], positions = [], interrupted = false;
+    let batch = [], positions = [], interrupted = false, batchNumber = 0;
+    const written = new Map();
     const overhead = encoder.encode(JSON.stringify({ bot_id: botId, files: [] })).length;
     let size = overhead;
     async function flush() {
       if (!batch.length) return;
+      batchNumber++;
       try {
         const { report } = await panels.api("/api/skills/import", { bot_id: botId, files: batch });
         if (!Array.isArray(report) || report.length !== positions.length) throw new Error("Rapport incomplet du moteur local.");
         report.forEach((item, i) => {
           const status = item.status?.status;
           if (!["written", "skipped", "duplicate"].includes(status)) throw new Error("Statut d’import inconnu.");
-          Object.assign(job.rows[positions[i]], { status, reason: item.status.reason, skillId: item.status.skill_id });
+          const row = job.rows[positions[i]], skillId = item.status.skill_id;
+          Object.assign(row, { status, reason: item.status.reason, skillId });
+          if (status === "written") {
+            const previous = written.get(skillId);
+            if (previous && previous.batch < batchNumber) row.reason = `Mise à jour de la skill écrite par « ${previous.path} » (paquet séparé)`;
+            if (!previous) written.set(skillId, { path: row.path, batch: batchNumber });
+          }
         });
       } catch (error) {
         // A lost response is NOT evidence of rollback. Never claim these files
@@ -73,6 +90,7 @@
       for (let i = 0; i < files.length; i++) {
         if (interrupted) break;
         const row = job.rows[i], file = files[i];
+        if (!supportedText(row.path)) { Object.assign(row, { status: "skipped", reason: "unsupported" }); continue; }
         // No file this large can fit a batch, even before base64 expansion.
         if (file.size > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); continue; }
         let upload;
@@ -99,7 +117,8 @@
 
   function botSection(bot, container) {
     const section = node("section", "skills-section");
-    section.append(node("h3", "", "Skills"));
+    const sectionTitle = node("h3", "", "Skills"); sectionTitle.tabIndex = -1;
+    section.append(sectionTitle);
     container.append(section);
     if (!bot || bot.deleted) {
       section.append(node("p", "skills-note", "Enregistrez d’abord ce bot pour gérer ses skills."));
@@ -117,6 +136,7 @@
     section.append(node("p", "skills-note", "Textes UTF-8 : txt, md, markdown, csv, json, yaml, yml. 256 000 caractères par texte · 250 skills par bot."), actions, list, progress, report);
     const fileInput = node("input", "skills-file-input");
     fileInput.type = "file"; fileInput.multiple = true;
+    fileInput.accept = EXTENSIONS.map((extension) => `.${extension}`).join(",");
     const directoryInput = fileInput.cloneNode();
     directoryInput.setAttribute("webkitdirectory", "");
     directoryInput.setAttribute("directory", "");
@@ -154,6 +174,9 @@
     const name = field("Nom", "input"); name.autocomplete = "off";
     const description = field("Description", "textarea", 2);
     const body = field("Contenu", "textarea", 12); body.spellcheck = false;
+    name.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); description.focus(); }
+    });
     const versionLabel = node("p", "skills-note");
     const error = node("p", "skills-error"); error.setAttribute("role", "alert");
     const reload = button("Recharger la version courante (remplace vos saisies)", () => void openEditor(current?.skill_id));
@@ -173,8 +196,11 @@
     dialog.append(form);
     (document.getElementById("panels") || document.body).append(dialog);
     let alive = true, token = 0, current = null, versions = [], baseline = {}, signature = "", reportSignature = "";
+    let returnFocusId = null, focusPending = false, reportGeneration = -1;
     const active = (request) => alive && request === token && dialog.open;
-    dialog.addEventListener("close", () => { if (!dialog.open) token++; });
+    dialog.addEventListener("close", () => {
+      if (alive && !dialog.open) { token++; focusPending = true; render(); }
+    });
     function showVersion() {
       const version = versions.find((item) => String(item.version) === select.value);
       preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${version.content.name}\n${version.content.description}\n\n${version.content.body}` : "";
@@ -199,8 +225,9 @@
       showVersion();
     }
     async function openEditor(skillId) {
-      if (job.running || job.mutating) return;
+      if (job.running || job.mutating || (!skillId && (panels.state.skills?.by_bot?.[bot.id]?.length || 0) >= 250)) return;
       const request = ++token;
+      returnFocusId = skillId; focusPending = false;
       heading.textContent = skillId ? "Modifier une skill" : "Nouvelle skill";
       populate(null, []); error.textContent = ""; reload.disabled = false;
       if (!dialog.open) dialog.showModal();
@@ -221,15 +248,18 @@
       const request = token;
       job.mutating = true; fields.disabled = true; reload.disabled = true; error.textContent = ""; changed();
       try {
-        await panels.api(path, payload);
-        if (active(request)) dialog.close();
-        panels.notify(success);
+        const response = await panels.api(path, payload);
+        if (active(request)) { returnFocusId = response.skill?.skill_id || returnFocusId; dialog.close(); }
+        panels.notify(typeof success === "function" ? success(response) : success);
         await refresh();
       } catch (failure) {
         if (active(request)) {
-          error.textContent = `Action non confirmée : ${failure.message} Vos saisies sont conservées. Vérifiez la liste avant de réessayer. En cas de conflit, rechargez explicitement la version courante.`;
+          const uncertain = ["La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible."].includes(failure.message);
+          error.textContent = uncertain
+            ? `Action non confirmée : ${failure.message} Vos saisies sont conservées. Vérifiez la liste avant de réessayer.`
+            : `Action refusée : ${reason(failure.message)} Vos saisies sont conservées.${current ? " En cas de conflit, rechargez explicitement la version courante." : ""}`;
           reload.hidden = !current;
-        } else panels.notify(failure.message);
+        } else panels.notify(reason(failure.message));
         await refresh();
       } finally {
         job.mutating = false;
@@ -241,14 +271,18 @@
       event.preventDefault();
       if (fields.disabled) return;
       const values = { name: name.value, description: description.value, body: body.value };
-      if (!values.name.trim()) { error.textContent = "Donnez un nom à cette skill."; name.focus(); return; }
+      const normalized = normalizeName(values.name);
+      if (!normalized) { error.textContent = "Le nom doit contenir une lettre de a à z ou un chiffre."; name.focus(); return; }
+      if (normalized !== current?.content.name && normalized.length > 128) { error.textContent = reason("name-too-large"); name.focus(); return; }
+      if ((!current || values.description !== baseline.description) && [...values.description].length > 1024) { error.textContent = reason("description-too-large"); description.focus(); return; }
+      if (!values.body.trim()) { error.textContent = "Ajoutez un contenu à cette skill."; body.focus(); return; }
       // Imported annotations can make an unchanged body longer than the limit.
       if ((!current || values.body !== baseline.body) && values.body.length > 256000) {
         error.textContent = "Le contenu dépasse 256 000 caractères."; return;
       }
       const changes = current ? Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== baseline[key])) : values;
       if (current && !Object.keys(changes).length) { dialog.close(); return; }
-      void mutate(current ? "/api/skills/update" : "/api/skills", { bot_id: bot.id, ...(current ? { skill_id: current.skill_id, expected_version: current.version } : {}), ...changes }, "Skill enregistrée.");
+      void mutate(current ? "/api/skills/update" : "/api/skills", { bot_id: bot.id, ...(current ? { skill_id: current.skill_id, expected_version: current.version } : {}), ...changes }, ({ skill }) => `Skill « ${skill.content.name} » enregistrée.`);
     });
     async function remove() {
       if (!current || fields.disabled) return;
@@ -259,19 +293,32 @@
       const locked = job.running || job.mutating;
       for (const control of [add, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
       const skills = panels.state.skills?.by_bot?.[bot.id] || [];
+      add.disabled = locked || skills.length >= 250;
       const next = JSON.stringify([skills, locked, panels.state.skills?.error]);
       if (signature !== next) {
         signature = next;
         list.replaceChildren();
-        section.querySelector("h3").textContent = `Skills · ${skills.length}/250`;
+        sectionTitle.textContent = `Skills · ${skills.length}/250`;
         if (!skills.length) list.append(node("li", "skills-note", panels.state.skills?.error || "Aucune skill pour ce bot."));
         for (const skill of skills) {
           const row = node("li", "skills-row"), copy = node("div");
           copy.append(node("strong", "", skill.name + (skill.name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version} · ${skill.skill_id}`));
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${skill.name}`); edit.disabled = locked;
+          edit.dataset.skillId = skill.skill_id;
           row.append(copy, edit); list.append(row);
         }
+      }
+      if (focusPending && !locked && !dialog.open) {
+        focusPending = false;
+        if (section.isConnected && document.getElementById("bot-dialog")?.open) {
+          const target = [...list.querySelectorAll("button")].find((edit) => edit.dataset.skillId === returnFocusId);
+          (target || sectionTitle).focus();
+        }
+      }
+      if (reportGeneration !== job.generation) {
+        reportGeneration = job.generation;
+        report.open = job.rows.length > 0;
       }
       const countLabel = (status, singular, plural = `${singular}s`) => {
         const count = job.rows.filter((row) => row.status === status).length;
@@ -290,7 +337,6 @@
           row.append(node("span", "skills-report-path", item.path), node("span", "", `${labels[item.status]}${item.reason ? ` — ${reason(item.reason)}` : ""}`));
           return row;
         }));
-        if (job.rows.length) report.open = true;
       }
     }
     mounts.add(render); render();

@@ -28,7 +28,7 @@
     "cached_cli_at_save": "/Users/cstpierrecharles/.npm/_npx/dea9475797100b20/node_modules/.bin/rea",
     "mcp_transport": "Transport closed; availability must be rechecked",
     "continuation_mcp_status": "Working for native metadata and demangling; Hopper/Ghidra/IDA unavailable. Native session closed.",
-    "latest_mcp_observation_status": "Working: original passive Electron startup retained, plus controlled Node process capture of 16 manifest-bound .71 Messages slices with fixture boundaries. Complete .71 app and helper not executed."
+    "latest_mcp_observation_status": "Working: passive original Electron startup retained; controlled Node captures of 16 .71 Messages slices with fixtures and 26 .70 cron slices with explicit dates. Original complete .71 app and native helper not executed."
   },
   "counts": {
     "extracted_files": 673,
@@ -632,7 +632,10 @@
       "reports/app-parity-delivery.md",
       "reports/messages-worker-recovery.md",
       "reports/native-messages-recovery.md",
-      "reports/messages-worker-slice-replay.md"
+      "reports/messages-worker-slice-replay.md",
+      "reports/cron-candidate-replay.md",
+      "reports/routine-run-conversation.md",
+      "reports/memory-widget-consumer.md"
     ],
     "original_version": "0.70.2",
     "original_startup_observed": true,
@@ -647,7 +650,8 @@
       "evidence/releases/0.71.2/verification.json",
       "evidence/local-control-followup-verification.json",
       "evidence/multibot-investigation-verification.json",
-      "evidence/messages-recovery-followup-verification.json"
+      "evidence/messages-recovery-followup-verification.json",
+      "evidence/memory-routines-followup-verification.json"
     ],
     "runtime_capture_evidence_id": "ev_c53b22e5265cd881f109292c4a6a6d4ad7a227f9fdeade0565c0105795301e08",
     "runtime_bundle": "evidence/remaining-rea-runtime-bundle.json",
@@ -726,9 +730,34 @@
         "messages_accessed_or_sent": false,
         "native_exactly_once_proven": false,
         "product_feature_implemented": false
+      },
+      "memory_routines_0702": {
+        "cron_original_slices": 26,
+        "cron_cases": 16,
+        "cron_raw_frames": 10,
+        "cron_raw_bytes": 9709,
+        "cron_rendered_frames": 10,
+        "cron_capture_complete": true,
+        "cron_capture_evidence_id": "ev_ec367c9e76a03287bd7c8cc1e891d989cf2b9d47671f790d1136a8d95dd608ab",
+        "cron_environment": "Node 24.18.0 / ICU 78.3 / tzdata 2026b; not Electron Intl",
+        "cron_scheduler_executed": false,
+        "routine_report_findings": 8,
+        "routine_anchors": 35,
+        "routine_sources": 6,
+        "routine_run_session_result_join_established": false,
+        "memory_report_findings": 9,
+        "memory_new_detail_findings": 8,
+        "memory_sources": 7,
+        "memory_anchors": 42,
+        "memory_dedicated_static_checks": 24,
+        "source_manifest_bindings": 13,
+        "verification_commands": 3,
+        "live_memory_accessed_or_modified": false,
+        "product_feature_implemented": false
       }
     },
-    "newer_release_original_javascript_slices_executed": true
+    "newer_release_original_javascript_slices_executed": true,
+    "latest_safe_next_action": "Audit remaining nine questions against acquired artifact types. Reuse cron/memory/routine followups; do not repeat their capture or global scans. Distinguish unavailable server/iOS/authorized runtime evidence from client facts."
   },
   "product_capability_goal": {
     "objective": "Rendre notre app capable du travail de Grok Bot, dont groupes, @ et communications entre bots",

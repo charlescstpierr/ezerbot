@@ -8,21 +8,19 @@ mod provider;
 #[doc(hidden)]
 pub mod gateway;
 
+/// Capability hooks, shared by the HTTP app and future run-thread adapters.
+#[doc(hidden)]
+pub mod features;
+
 pub use provider::{Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use grokbot_domain::{
-    AccountGeneration, AccountId, AuthenticatedActor, ConversationId, DeliveryReceipt, MessageId,
-    Refusal, SubmissionState, TranscriptEntryId,
-};
-use grokbot_session::{
-    LookupOutcome, ReconciliationRequest, SendOutcome, SendRequest, SessionError,
-    SubmissionSession, SubmissionTransport,
-};
+use grokbot_domain::{AccountGeneration, AccountId, AuthenticatedActor, SubmissionState};
+use grokbot_session::{SessionError, SubmissionSession};
 use grokbot_store::SessionStore;
 use grokbot_submission_journal::JournalError;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -81,7 +79,6 @@ impl ApiResponse {
 }
 const ACCOUNT: &str = "local-workspace";
 const DEFAULT_TITLE: &str = "Nouvelle conversation";
-const DEMO_REPLY: &str = "Bien reçu. Ton message est conservé dans cette conversation. Le mode local simule les réponses ; aucun service d'intelligence artificielle n'est connecté.";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS wrapper_conversations (
@@ -168,26 +165,6 @@ CREATE INDEX IF NOT EXISTS wrapper_proposals_message
     ON wrapper_proposals (account_id, conversation_id, message_id);
 ";
 
-const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule les réponses.\n\n```mermaid\nflowchart LR\n  A[Votre message] --> B{Grokbot}\n  B -->|texte| C[Réponse]\n  B -->|schéma| D[Diagramme]\n  C & D --> E[(Historique local)]\n```\n\nPassez la souris sur le diagramme pour le copier, le télécharger ou l'agrandir.";
-const DEMO_CODE: &str = "Voici un exemple de code. Le mode local simule les réponses.\n\n```rust\nfn saluer(nom: &str) -> String {\n    format!(\"Bonjour, {nom} !\")\n}\n\nfn main() {\n    println!(\"{}\", saluer(\"Grokbot\"));\n}\n```\n\nLe bouton en haut du bloc copie le code.";
-const DEMO_TABLE: &str = "Voici un tableau d'exemple. Le mode local simule les réponses.\n\n| Élément | Rôle | État |\n| --- | --- | --- |\n| Moteur Rust | Garde l'historique | Actif |\n| Interface | Affiche la conversation | Active |\n| Service d'IA | Répond aux messages | **Non connecté** |\n\nLa formule $E = mc^2$ s'affiche aussi.";
-
-/// The simulated engine has no model. A few keywords pick a canned reply that shows the
-/// rich rendering (diagram, code, table); everything else gets the plain acknowledgement.
-fn demo_reply(body: &str) -> &'static str {
-    let body = body.to_lowercase();
-    let mentions = |words: &[&str]| words.iter().any(|word| body.contains(word));
-    if mentions(&["diagramme", "schéma", "schema", "mermaid"]) {
-        DEMO_DIAGRAM
-    } else if mentions(&["code", "rust", "fonction"]) {
-        DEMO_CODE
-    } else if mentions(&["tableau", "formule"]) {
-        DEMO_TABLE
-    } else {
-        DEMO_REPLY
-    }
-}
-
 #[derive(Debug)]
 pub struct ApiError {
     pub status: u16,
@@ -223,6 +200,17 @@ impl From<grokbot_store::StoreError> for ApiError {
     }
 }
 
+impl From<grokbot_engine::contracts::Error> for ApiError {
+    fn from(error: grokbot_engine::contracts::Error) -> Self {
+        let status = match &error {
+            grokbot_engine::contracts::Error::InvalidInput(_) => 400,
+            grokbot_engine::contracts::Error::NotImplemented(_) => 501,
+            _ => 500,
+        };
+        Self::new(status, error.to_string())
+    }
+}
+
 impl From<SessionError> for ApiError {
     fn from(error: SessionError) -> Self {
         let status = match &error {
@@ -242,11 +230,16 @@ pub struct Conversation {
     pub favorite: bool,
     pub updated_at: u64,
     pub messages: Vec<Message>,
+    pub kind: String,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Message {
     pub id: String,
+    pub kind: String,
+    pub payload: Value,
+    pub attachments: Vec<Value>,
     pub role: &'static str,
     pub body: String,
     pub state: &'static str,
@@ -401,124 +394,6 @@ const DEFAULT_BOT: BotTemplate = BotTemplate {
     instructions: "Tu es chaleureux, curieux et direct. Va à l'essentiel, pose une question quand la demande est ambiguë, et propose un prochain pas concret quand c'est utile.",
 };
 
-/// Le contrat d'affichage de l'application, commun à tous les bots.
-const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
-
-/// Ce que le bot par défaut sait de ses outils de proposition. Les autres bots n'en ont pas.
-const PROPOSAL_INSTRUCTIONS: &str = "Tu peux proposer à l'utilisateur de créer un nouveau bot avec l'outil propose_bot, ou de modifier un bot existant avec propose_bot_update, quand il le demande ou que c'est clairement utile. Remplis une vraie personnalité : un nom court, une présentation d'une ou deux phrases et des consignes de comportement précises. Rien ne change sans sa confirmation : il verra ta proposition sous ta réponse et choisira. Pour une modification, bot_id est l'identifiant exact d'un bot de la liste.";
-
-/// `bots` sert au bot par défaut, qui doit connaître les identifiants existants pour en proposer
-/// une modification. Les bots supprimés n'y figurent pas.
-fn compose_instructions(bot: &Bot, bots: &[Bot]) -> String {
-    let mut parts = vec![
-        BASE_INSTRUCTIONS.to_owned(),
-        format!("Tu t'appelles {}.", bot.name),
-    ];
-    if !bot.description.is_empty() {
-        parts.push(format!(
-            "Ton rôle, tel que les autres le voient : {}",
-            bot.description
-        ));
-    }
-    if !bot.instructions.is_empty() {
-        parts.push(format!(
-            "Consignes privées sur ta façon de te comporter :\n{}",
-            bot.instructions
-        ));
-    }
-    if bot.is_default && PROPOSALS_ENABLED {
-        let roster: Vec<String> = bots
-            .iter()
-            .filter(|known| !known.deleted)
-            .map(|known| {
-                if known.description.is_empty() {
-                    format!("- {} : {}", known.id, known.name)
-                } else {
-                    format!("- {} : {} — {}", known.id, known.name, known.description)
-                }
-            })
-            .collect();
-        parts.push(format!(
-            "{PROPOSAL_INSTRUCTIONS}\n\nBots existants (identifiant : nom — présentation) :\n{}",
-            roster.join("\n")
-        ));
-    }
-    parts.join("\n\n")
-}
-
-/// Les deux outils de proposition, en mode strict : chaque objet ferme `additionalProperties`,
-/// tous les champs sont requis, et les champs facultatifs acceptent `null`.
-fn proposal_tools() -> Vec<Value> {
-    let text = |description: &str| json!({"type": "string", "description": description});
-    let choice = |values: &[&str], description: &str| json!({"type": "string", "enum": values, "description": description});
-    let optional = |schema: Value| json!({"anyOf": [schema, {"type": "null"}]});
-    let fields = [
-        ("name", text("Nom court du bot, 40 caractères au plus.")),
-        ("shape", choice(&SHAPES, "Silhouette de la mascotte.")),
-        (
-            "color",
-            choice(&ACCENTS, "Couleur des yeux de la mascotte."),
-        ),
-        (
-            "description",
-            text("Présentation publique, une ou deux phrases, 280 caractères au plus."),
-        ),
-        (
-            "instructions",
-            text("Personnalité privée : ton, manières, limites. 8 000 caractères au plus."),
-        ),
-    ];
-    let required: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
-    let object = |properties: serde_json::Map<String, Value>, required: Vec<&str>| json!({"type": "object", "additionalProperties": false, "properties": properties, "required": required});
-    let mut create: serde_json::Map<String, Value> = fields
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
-        .collect();
-    create.insert(
-        "reason".into(),
-        text("Pourquoi ce bot serait utile, en une phrase."),
-    );
-    let changes: serde_json::Map<String, Value> = fields
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), optional(schema.clone())))
-        .collect();
-    let mut update = serde_json::Map::new();
-    update.insert(
-        "bot_id".into(),
-        text("Identifiant exact d'un bot existant."),
-    );
-    update.insert("changes".into(), object(changes, required.clone()));
-    update.insert(
-        "reason".into(),
-        text("Pourquoi cette modification serait utile, en une phrase."),
-    );
-    vec![
-        json!({
-            "type": "function", "name": "propose_bot", "strict": true,
-            "description": "Propose à l'utilisateur de créer un nouveau bot. Rien n'est créé sans sa confirmation.",
-            "parameters": object(create, [required.clone(), vec!["reason"]].concat()),
-        }),
-        json!({
-            "type": "function", "name": "propose_bot_update", "strict": true,
-            "description": "Propose à l'utilisateur de modifier un bot existant. Les champs à laisser tels quels sont null. Rien ne change sans sa confirmation.",
-            "parameters": object(update, vec!["bot_id", "changes", "reason"]),
-        }),
-    ]
-}
-
-/// Seul le bot par défaut peut proposer des bots.
-/// Chantier suspendu : le fil n'affiche pas encore les cartes de proposition. Tant que c'est
-/// faux, Grokbot ne reçoit ni les outils ni la consigne qui les décrit.
-const PROPOSALS_ENABLED: bool = false;
-
-fn tools_for(bot: &Bot) -> Vec<Value> {
-    if bot.is_default && PROPOSALS_ENABLED {
-        proposal_tools()
-    } else {
-        Vec::new()
-    }
-}
-
 /// L'identifiant du bot créé par une proposition, dérivé de son `call_id`.
 fn proposed_bot_id(proposal: &str) -> String {
     let safe: String = proposal
@@ -671,24 +546,6 @@ fn proposal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proposal> {
 
 const PROPOSAL_COLUMNS: &str = "id, conversation_id, message_id, kind, bot_id, payload, reason, status, result_bot_id, created_at, updated_at";
 
-/// Une ligne de l'historique envoyée au modèle, pour qu'il sache ce qu'il est advenu de sa
-/// proposition sans rien stocker chez OpenAI.
-fn proposal_transcript(proposal: &Proposal) -> String {
-    let status = match proposal.status.as_str() {
-        "accepted" => "acceptée",
-        "dismissed" => "refusée",
-        "stale" => "périmée",
-        _ => "en attente",
-    };
-    if proposal.kind == "update" {
-        let target = proposal.bot_id.as_deref().unwrap_or("?");
-        format!("[Proposition de modification du bot « {target} » : {status}]")
-    } else {
-        let name = proposal.payload["name"].as_str().unwrap_or("?");
-        format!("[Proposition de bot « {name} » : {status}]")
-    }
-}
-
 /// Pose le bot par défaut, ou le met à niveau tant que l'utilisateur ne l'a pas modifié.
 fn seed_default_bot(connection: &Connection) -> Result<(), ApiError> {
     connection.execute(
@@ -765,23 +622,6 @@ struct DismissProposal {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SendMessage {
-    conversation_id: String,
-    message_id: String,
-    body: String,
-    #[serde(default)]
-    simulate_loss: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReconcileMessage {
-    conversation_id: String,
-    message_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct UpdateConversation {
     id: String,
     title: Option<String>,
@@ -804,18 +644,6 @@ struct Preferences {
     fast: Option<bool>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Empty {}
-
-/// État, erreur, type d'erreur et note d'une génération.
-type GenerationRow = (String, Option<String>, Option<String>, Option<String>);
-
-/// Modèle, effort et palier de vitesse réellement envoyés.
-type ResolvedModel = (String, Option<String>, Option<String>);
-
-const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
-
 const DEFAULT_THEME: &str = "dark";
 const DEFAULT_ACCENT: &str = "citron";
 const ACCENTS: [&str; 9] = [
@@ -833,6 +661,7 @@ const DEFAULT_SHAPE: &str = "galet";
 const SHAPES: [&str; 6] = ["galet", "goutte", "nuage", "carre", "fantome", "etoile"];
 
 pub struct App {
+    db_path: PathBuf,
     connection: Connection,
     reader: SessionStore,
     session: SubmissionSession,
@@ -866,6 +695,7 @@ impl App {
         )?;
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(3))?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.execute_batch(SCHEMA)?;
         // Colonnes ajoutées après la première version : une ancienne base les reçoit avec leur défaut.
         for (table, column, definition) in [
@@ -888,6 +718,17 @@ impl App {
             ("wrapper_preferences", "model", "TEXT"),
             ("wrapper_preferences", "effort", "TEXT"),
             ("wrapper_preferences", "fast", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "wrapper_messages",
+                "kind",
+                "TEXT NOT NULL DEFAULT 'submission'",
+            ),
+            (
+                "wrapper_conversations",
+                "kind",
+                "TEXT NOT NULL DEFAULT 'chat'",
+            ),
+            ("wrapper_conversations", "parent_id", "TEXT"),
         ] {
             let present: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
@@ -902,12 +743,10 @@ impl App {
             }
         }
         seed_default_bot(&connection)?;
-        // Aucun fil d'exécution ne survit au processus : une génération restée ouverte est perdue.
-        connection.execute(
-            "UPDATE wrapper_generation SET status = 'failed', error = ?1, error_kind = 'other', updated_at = ?2 WHERE status = 'streaming'",
-            params![INTERRUPTED, now()],
-        )?;
+        features::migrate(&connection)?;
+        features::engine::startup(&connection)?;
         Ok(Self {
+            db_path: path.to_path_buf(),
             connection,
             reader,
             session,
@@ -916,122 +755,64 @@ impl App {
     }
 
     /// Periodic host hook, including while no HTTP request is arriving.
-    /// Feature dispatch will attach scheduler and run wake delivery here.
-    pub fn tick(&mut self, _now_ms: u64) {}
-
-    fn model_preferences(&self) -> Result<(Option<String>, Option<String>, bool), ApiError> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT model, effort, fast FROM wrapper_preferences WHERE account_id = ?1",
-                [ACCOUNT],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .unwrap_or((None, None, false)))
+    pub fn tick(&mut self, now_ms: u64) {
+        let mut ctx = self.feature_context();
+        ctx.now_ms = now_ms;
+        features::tick(&ctx);
     }
 
-    /// Le modèle et l'effort réellement envoyés : la préférence si le catalogue du compte la
-    /// contient, sinon le premier modèle et son réglage par défaut.
-    fn resolved_model(&self) -> Result<Option<ResolvedModel>, ApiError> {
-        let (model, effort, fast) = self.model_preferences()?;
-        let models = self.provider.models();
-        let Some(chosen) = models
-            .iter()
-            .find(|candidate| Some(&candidate.slug) == model.as_ref())
-            .or_else(|| models.first())
-        else {
-            return Ok(None);
-        };
-        let effort = effort
-            .filter(|effort| chosen.efforts.iter().any(|level| level.effort == *effort))
-            .or_else(|| chosen.default_effort.clone());
-        // « Fast » n'existe que pour un modèle qui annonce un palier de vitesse.
-        let tier = chosen
-            .tiers
-            .first()
-            .filter(|_| fast)
-            .map(|tier| tier.id.clone());
-        Ok(Some((chosen.slug.clone(), effort, tier)))
+    #[doc(hidden)]
+    pub fn feature_context(&self) -> features::Context<'_> {
+        features::Context {
+            connection: &self.connection,
+            provider: &self.provider,
+            db_path: &self.db_path,
+            now_ms: now(),
+            bot_id: None,
+            conversation_id: None,
+            run_id: None,
+        }
     }
 
-    fn history(
+    #[doc(hidden)]
+    pub fn context_preview(
         &self,
-        conversation: &str,
-        message: &str,
-    ) -> Result<Vec<(&'static str, String)>, ApiError> {
-        let mut history = Vec::new();
-        let conversations = self.conversations()?;
-        let Some(found) = conversations
-            .iter()
-            .find(|candidate| candidate.id == conversation)
-        else {
-            return Ok(history);
-        };
-        for item in &found.messages {
-            if item.role == "user" {
-                if matches!(item.state, "accepted" | "echoed") {
-                    history.push(("user", item.body.clone()));
-                }
-                if item.id == message {
-                    break;
-                }
-            } else if item.state != "failed" {
-                // Une proposition est rejouée en texte court : le modèle sait ce qu'il en est advenu.
-                let mut lines: Vec<String> = Vec::new();
-                if !item.body.trim().is_empty() {
-                    lines.push(item.body.clone());
-                }
-                lines.extend(item.proposals.iter().map(proposal_transcript));
-                if !lines.is_empty() {
-                    history.push(("assistant", lines.join("\n\n")));
-                }
-            }
-        }
-        Ok(history)
+        conversation_id: &str,
+    ) -> Result<Vec<grokbot_engine::contracts::ContextBlock>, ApiError> {
+        features::engine::context_preview(self, conversation_id)
     }
 
-    /// Démarre la génération d'une réponse marquée `streaming` qu'aucun fil ne traite encore.
-    fn start_generation(&self, conversation: &str, message: &str) -> Result<(), ApiError> {
-        let streaming: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming')",
-            params![ACCOUNT, conversation, message], |row| row.get(0),
-        )?;
-        if !streaming || self.provider.running(conversation, message) {
-            return Ok(());
-        }
-        let Some((model, effort, service_tier)) = self.resolved_model()? else {
-            self.connection.execute(
-                "UPDATE wrapper_generation SET status = 'failed', error = ?4, error_kind = 'other', updated_at = ?5 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
-                params![ACCOUNT, conversation, message, "Les modèles de votre compte ChatGPT ne sont pas encore chargés. Relancez la réponse dans un instant.", now()],
-            )?;
-            return Ok(());
+    #[doc(hidden)]
+    pub fn invoke_tool(
+        &self,
+        bot_id: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<grokbot_engine::contracts::ToolOutcome, ApiError> {
+        validate_id(bot_id)?;
+        self.require_bot(bot_id)?;
+        let tx = self.connection.unchecked_transaction()?;
+        let mut ctx = self.feature_context();
+        ctx.connection = &tx;
+        ctx.bot_id = Some(bot_id);
+        let call_id: String =
+            tx.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        let call = grokbot_engine::contracts::ToolCall {
+            call_id,
+            name: name.into(),
+            arguments: args,
         };
-        let history = self.history(conversation, message)?;
-        // Le sujet se précise souvent après la salutation : le titre est écrit au premier
-        // échange, puis revu une fois au troisième, tant que l'utilisateur ne l'a pas choisi.
-        let turns = history.iter().filter(|(role, _)| *role == "user").count();
-        let (automatic, bot_id): (bool, String) = self.connection.query_row(
-            "SELECT title_customized = 0, bot_id FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2",
-            params![ACCOUNT, conversation], |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        // Les instructions sont lues à chaque réponse : modifier le bot change ses conversations.
-        let bot = self
-            .bot(&bot_id)?
-            .ok_or_else(|| ApiError::new(500, "Le bot de cette conversation est introuvable."))?;
-        let bots = self.bots()?;
-        self.provider.generate(provider::Run {
-            conversation: conversation.into(),
-            message: message.into(),
-            instructions: compose_instructions(&bot, &bots),
-            tools: tools_for(&bot),
-            retitle: automatic && matches!(turns, 1 | 3),
-            history,
-            model,
-            effort,
-            service_tier,
-        });
-        Ok(())
+        let outcome = features::call_tool(&ctx, &call)
+            .ok_or_else(|| ApiError::new(404, "Cet outil n'existe pas."))?;
+        if matches!(
+            outcome,
+            grokbot_engine::contracts::ToolOutcome::Failed { .. }
+        ) {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(outcome)
     }
 
     fn proposal(&self, id: &str) -> Result<Option<Proposal>, ApiError> {
@@ -1258,327 +1039,28 @@ impl App {
             .unwrap_or_else(|| (DEFAULT_THEME.into(), DEFAULT_ACCENT.into())))
     }
 
-    /// HTTP entry point; `api` remains the JSON-only compatibility entry point.
+    /// HTTP dispatcher preserves binary feature responses without JSON encoding.
     pub fn api_response(
         &mut self,
         method: &str,
         path: &str,
         body: &[u8],
     ) -> Result<ApiResponse, ApiError> {
-        self.api(method, path, body).map(ApiResponse::Json)
-    }
-
-    pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         if body.len() > body_limit(path) {
             return Err(too_large(path));
         }
-        match (method, path) {
-            ("GET", "/api/state") => {
-                let (theme, accent) = self.preferences()?;
-                let provider = self.provider.status();
-                let resolved = self.resolved_model()?;
-                let fast = self.model_preferences()?.2;
-                Ok(json!({
-                    "account": {"id": ACCOUNT, "name": "Espace local"},
-                    "mode": if provider["connected"] == true { "chatgpt" } else { "simulated" },
-                    "conversations": self.conversations()?,
-                    "bots": self.bots()?,
-                    "preferences": {
-                        "theme": theme, "accent": accent, "fast": fast,
-                        "model": resolved.as_ref().map(|(model, _, _)| model),
-                        "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()),
-                    },
-                    "provider": provider,
-                }))
-            }
-            ("POST", "/api/preferences") => {
-                let input: Preferences = parse(body)?;
-                if input.model.is_some() || input.effort.is_some() || input.fast.is_some() {
-                    for value in [&input.model, &input.effort].into_iter().flatten() {
-                        validate_id(value)?;
-                    }
-                    let (theme, accent) = self.preferences()?;
-                    self.connection.execute("INSERT INTO wrapper_preferences (account_id, theme, accent) VALUES (?1, ?2, ?3) ON CONFLICT(account_id) DO NOTHING", params![ACCOUNT, theme, accent])?;
-                    self.connection.execute("UPDATE wrapper_preferences SET model = COALESCE(?2, model), effort = COALESCE(?3, effort), fast = COALESCE(?4, fast) WHERE account_id = ?1", params![ACCOUNT, input.model, input.effort, input.fast])?;
-                }
-                if input.theme.is_none() && input.accent.is_none() {
-                    if input.model.is_some() || input.effort.is_some() || input.fast.is_some() {
-                        let resolved = self.resolved_model()?;
-                        return Ok(json!({"preferences": {
-                            "fast": self.model_preferences()?.2,
-                            "model": resolved.as_ref().map(|(model, _, _)| model),
-                            "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()),
-                        }}));
-                    }
-                    return Err(ApiError::new(400, "Indiquez un thème ou un accent."));
-                }
-                let (stored_theme, stored_accent) = self.preferences()?;
-                let theme = input.theme.unwrap_or(stored_theme);
-                let accent = input.accent.unwrap_or(stored_accent);
-                if !matches!(theme.as_str(), "light" | "dark" | "system") {
-                    return Err(ApiError::new(
-                        400,
-                        "Le thème doit être light, dark ou system.",
-                    ));
-                }
-                if !ACCENTS.contains(&accent.as_str()) {
-                    return Err(ApiError::new(400, "Cet accent n’existe pas."));
-                }
-                self.connection.execute("INSERT INTO wrapper_preferences (account_id, theme, accent) VALUES (?1, ?2, ?3) ON CONFLICT(account_id) DO UPDATE SET theme = excluded.theme, accent = excluded.accent", params![ACCOUNT, theme, accent])?;
-                Ok(json!({"preferences": {"theme": theme, "accent": accent}}))
-            }
-            ("POST", "/api/conversations") => {
-                let input: CreateConversation = parse(body)?;
-                let title = valid_title(input.title.as_deref().unwrap_or(DEFAULT_TITLE))?;
-                let bot_id = input.bot_id.as_deref().unwrap_or(DEFAULT_BOT.id);
-                validate_id(bot_id)?;
-                self.require_bot(bot_id)?;
-                let id: String =
-                    self.connection
-                        .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
-                let timestamp = now();
-                self.connection.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id])?;
-                self.conversation_response(&id)
-            }
-            ("POST", "/api/send") => {
-                let input: SendMessage = parse(body)?;
-                validate_id(&input.conversation_id)?;
-                validate_id(&input.message_id)?;
-                self.require_conversation(&input.conversation_id)?;
-                let body = input.body.trim();
-                if body.is_empty() || body.len() > 16 * 1024 {
-                    return Err(ApiError::new(
-                        400,
-                        "Le message doit contenir entre 1 octet et 16 Ko de texte.",
-                    ));
-                }
-                let conversation =
-                    ConversationId::new(&input.conversation_id).expect("validated ID");
-                let message = MessageId::new(&input.message_id).expect("validated ID");
-                // Le corps est toujours préparé par le moteur, y compris pour vérifier l'idempotence.
-                let state =
-                    self.session
-                        .prepare(conversation.clone(), message.clone(), body.into())?;
-                let has_prior_message = self.reader.list_submissions()?.iter().any(|record| {
-                    record.conversation_id == conversation && record.message_id != message
-                });
-                if !has_prior_message {
-                    if let Some(title) = suggested_title(body) {
-                        self.connection.execute(
-                            "UPDATE wrapper_conversations SET title = ?3 WHERE account_id = ?1 AND id = ?2 AND title = ?4 AND title_customized = 0",
-                            params![ACCOUNT, input.conversation_id, title, DEFAULT_TITLE],
-                        )?;
-                    }
-                }
-                // Le journal fait autorité si une panne intervient avant cette métadonnée.
-                self.connection.execute("INSERT OR IGNORE INTO wrapper_messages (account_id, conversation_id, message_id, created_at) VALUES (?1, ?2, ?3, ?4)", params![ACCOUNT, input.conversation_id, input.message_id, now()])?;
-                if matches!(state, SubmissionState::Queued) {
-                    let mut transport = LocalTransport {
-                        connection: &self.connection,
-                        lose_reply: input.simulate_loss,
-                        live: self.provider.connected(),
-                        error: None,
-                    };
-                    self.session
-                        .send_with(&conversation, &message, &mut transport)?;
-                    if let Some(error) = transport.error {
-                        return Err(error);
-                    }
-                }
-                self.finish_echo(&conversation, &message)?;
-                self.start_generation(&input.conversation_id, &input.message_id)?;
-                self.touch(&input.conversation_id)?;
-                self.conversation_response(&input.conversation_id)
-            }
-            ("POST", "/api/reconcile") => {
-                let input: ReconcileMessage = parse(body)?;
-                validate_id(&input.conversation_id)?;
-                validate_id(&input.message_id)?;
-                self.require_conversation(&input.conversation_id)?;
-                let conversation =
-                    ConversationId::new(&input.conversation_id).expect("validated ID");
-                let message = MessageId::new(&input.message_id).expect("validated ID");
-                let state = self
-                    .session
-                    .state(&conversation, &message)?
-                    .ok_or_else(|| ApiError::new(404, "Message introuvable."))?;
-                if matches!(
-                    state,
-                    SubmissionState::Dispatching { .. } | SubmissionState::OutcomeUnknown { .. }
-                ) {
-                    let mut transport = LocalTransport {
-                        connection: &self.connection,
-                        lose_reply: false,
-                        live: self.provider.connected(),
-                        error: None,
-                    };
-                    self.session
-                        .reconcile_with(&conversation, &message, &mut transport)?;
-                    if let Some(error) = transport.error {
-                        return Err(error);
-                    }
-                }
-                self.finish_echo(&conversation, &message)?;
-                self.start_generation(&input.conversation_id, &input.message_id)?;
-                self.touch(&input.conversation_id)?;
-                self.conversation_response(&input.conversation_id)
-            }
-            ("POST", "/api/conversations/update") => {
-                let input: UpdateConversation = parse(body)?;
-                validate_id(&input.id)?;
-                self.require_conversation(&input.id)?;
-                let title = input.title.as_deref().map(valid_title).transpose()?;
-                if title.is_none() && input.favorite.is_none() {
-                    return Err(ApiError::new(
-                        400,
-                        "Choisis un titre ou un favori à modifier.",
-                    ));
-                }
-                self.connection.execute("UPDATE wrapper_conversations SET title = COALESCE(?3, title), title_customized = CASE WHEN ?3 IS NOT NULL THEN 1 ELSE title_customized END, favorite = COALESCE(?4, favorite), updated_at = ?5 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, title, input.favorite, now()])?;
-                self.conversation_response(&input.id)
-            }
-            ("POST", "/api/conversations/delete") => {
-                let input: DeleteConversation = parse(body)?;
-                validate_id(&input.id)?;
-                // Un tombstone garde l'identité afin qu'aucun ancien écho ne ressuscite la conversation.
-                let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2)", params![ACCOUNT, input.id], |r| r.get(0))?;
-                if !exists {
-                    return Err(ApiError::new(404, "Conversation introuvable."));
-                }
-                self.connection.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
-                Ok(json!({"ok": true}))
-            }
-            ("POST", "/api/bots") => {
-                let input: CreateBot = parse(body)?;
-                validate_id(&input.id)?;
-                // L'identifiant vient du client : rejouer la même création rend le même bot.
-                let fields = BotChanges {
-                    name: Some(input.name),
-                    color: Some(input.color),
-                    shape: Some(input.shape.unwrap_or_else(|| DEFAULT_SHAPE.into())),
-                    description: Some(input.description),
-                    instructions: Some(input.instructions),
-                }
-                .validated()?;
-                self.create_bot(&input.id, &fields)
-            }
-            ("POST", "/api/bots/update") => {
-                let input: UpdateBot = parse(body)?;
-                validate_id(&input.id)?;
-                let changes = BotChanges {
-                    name: input.name,
-                    color: input.color,
-                    shape: input.shape,
-                    description: input.description,
-                    instructions: input.instructions,
-                }
-                .validated()?;
-                self.update_bot(&input.id, &changes)
-            }
-            ("POST", "/api/proposals/accept") => {
-                let input: AcceptProposal = parse(body)?;
-                validate_id(&input.id)?;
-                self.accept_proposal(&input.id, input.overrides)
-            }
-            ("POST", "/api/proposals/dismiss") => {
-                let input: DismissProposal = parse(body)?;
-                validate_id(&input.id)?;
-                self.dismiss_proposal(&input.id)
-            }
-            ("POST", "/api/bots/delete") => {
-                let input: DeleteBot = parse(body)?;
-                validate_id(&input.id)?;
-                if input.id == DEFAULT_BOT.id {
-                    return Err(ApiError::new(
-                        409,
-                        "Le bot par défaut ne peut pas être supprimé.",
-                    ));
-                }
-                if self.bot(&input.id)?.is_none() {
-                    return Err(ApiError::new(404, "Bot introuvable."));
-                }
-                // Une pierre tombale : ses conversations gardent ses instructions.
-                self.connection.execute(
-                    "UPDATE wrapper_bots SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2",
-                    params![ACCOUNT, input.id, now()],
-                )?;
-                Ok(json!({"ok": true}))
-            }
-            ("POST", "/api/provider/signin") => {
-                let _: Empty = parse(body)?;
-                self.provider
-                    .start_signin()
-                    .map_err(|failure| ApiError::new(503, failure.message))?;
-                Ok(json!({"provider": self.provider.status()}))
-            }
-            ("POST", "/api/provider/cancel") => {
-                let _: Empty = parse(body)?;
-                self.provider.cancel_signin();
-                Ok(json!({"provider": self.provider.status()}))
-            }
-            ("POST", "/api/provider/welcomed") => {
-                let _: Empty = parse(body)?;
-                self.provider
-                    .mark_welcomed()
-                    .map_err(|_| ApiError::new(500, "Impossible d’enregistrer ce réglage."))?;
-                Ok(json!({"provider": self.provider.status()}))
-            }
-            ("POST", "/api/provider/signout") => {
-                let _: Empty = parse(body)?;
-                let revoked = self.provider.signout();
-                self.connection.execute(
-                    "UPDATE wrapper_generation SET status = 'stopped', updated_at = ?1 WHERE status = 'streaming'",
-                    [now()],
-                )?;
-                Ok(json!({"provider": self.provider.status(), "revoked": revoked}))
-            }
-            ("POST", "/api/stop") => {
-                let input: ReconcileMessage = parse(body)?;
-                validate_id(&input.conversation_id)?;
-                validate_id(&input.message_id)?;
-                self.provider
-                    .stop(&input.conversation_id, &input.message_id);
-                self.connection.execute(
-                    "UPDATE wrapper_generation SET status = 'stopped', updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming'",
-                    params![ACCOUNT, input.conversation_id, input.message_id, now()],
-                )?;
-                self.conversation_response(&input.conversation_id)
-            }
-            ("POST", "/api/regenerate") => {
-                let input: ReconcileMessage = parse(body)?;
-                validate_id(&input.conversation_id)?;
-                validate_id(&input.message_id)?;
-                self.require_conversation(&input.conversation_id)?;
-                if !self.provider.connected() {
-                    return Err(ApiError::new(
-                        409,
-                        "Connectez-vous à ChatGPT pour relancer cette réponse.",
-                    ));
-                }
-                if self
-                    .provider
-                    .running(&input.conversation_id, &input.message_id)
-                {
-                    return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
-                }
-                let restarted = self.connection.execute(
-                    "UPDATE wrapper_generation SET status = 'streaming', error = NULL, error_kind = NULL, notice = NULL, updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status IN ('failed', 'stopped')",
-                    params![ACCOUNT, input.conversation_id, input.message_id, now()],
-                )?;
-                if restarted == 0 {
-                    return Err(ApiError::new(
-                        409,
-                        "Cette réponse ne peut pas être relancée.",
-                    ));
-                }
-                self.connection.execute(
-                    "UPDATE wrapper_remote SET reply = '' WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
-                    params![ACCOUNT, input.conversation_id, input.message_id],
-                )?;
-                self.start_generation(&input.conversation_id, &input.message_id)?;
-                self.conversation_response(&input.conversation_id)
-            }
-            _ => Err(ApiError::new(404, "Cette adresse n'existe pas.")),
+        features::routes(self, method, path, body)
+            .unwrap_or_else(|| Err(ApiError::new(404, "Cette adresse n'existe pas.")))
+    }
+
+    /// JSON-only compatibility entry point; binary consumers use `api_response`.
+    pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+        match self.api_response(method, path, body)? {
+            ApiResponse::Json(value) => Ok(value),
+            ApiResponse::Bytes { .. } => Err(ApiError::new(
+                406,
+                "Cette route renvoie des octets, pas du JSON.",
+            )),
         }
     }
 
@@ -1640,29 +1122,6 @@ impl App {
         Ok(())
     }
 
-    fn finish_echo(
-        &mut self,
-        conversation: &ConversationId,
-        message: &MessageId,
-    ) -> Result<(), ApiError> {
-        if matches!(
-            self.session.state(conversation, message)?,
-            Some(SubmissionState::AcceptedAwaitingEcho { .. })
-        ) {
-            // Une acceptation connue termine son écho sans second envoi ni recherche distante.
-            let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3)", params![ACCOUNT, conversation.as_str(), message.as_str()], |r| r.get(0))?;
-            if exists {
-                self.session.observe_echo(
-                    conversation,
-                    message,
-                    TranscriptEntryId::new(format!("local-{}", message.as_str()))
-                        .expect("non-empty local echo ID"),
-                )?;
-            }
-        }
-        Ok(())
-    }
-
     fn conversation_response(&self, id: &str) -> Result<Value, ApiError> {
         let conversation = self
             .conversations()?
@@ -1670,190 +1129,6 @@ impl App {
             .find(|c| c.id == id)
             .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
         Ok(json!({"conversation": conversation}))
-    }
-
-    fn conversations(&self) -> Result<Vec<Conversation>, ApiError> {
-        let mut conversations = BTreeMap::new();
-        let mut hidden = HashSet::new();
-        let mut created = BTreeMap::new();
-        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id FROM wrapper_conversations WHERE account_id = ?1")?;
-        let rows = statement.query_map([ACCOUNT], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, bool>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, u64>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, title, favorite, deleted, created_at, updated_at, bot_id) = row?;
-            if deleted {
-                hidden.insert(id);
-                continue;
-            }
-            created.insert(id.clone(), created_at);
-            conversations.insert(
-                id.clone(),
-                Conversation {
-                    id,
-                    bot_id,
-                    title,
-                    favorite,
-                    updated_at,
-                    messages: Vec::new(),
-                },
-            );
-        }
-        let mut ordered: BTreeMap<String, Vec<(i64, Vec<Message>)>> = BTreeMap::new();
-        let mut proposals = self.proposals_by_message()?;
-        for record in self.reader.list_submissions()? {
-            let id = record.conversation_id.as_str();
-            if hidden.contains(id) {
-                continue;
-            }
-            let metadata: Option<(i64, u64)> = self.connection.query_row("SELECT ordinal, created_at FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-            let (ordinal, created_at) =
-                metadata.unwrap_or((i64::MAX, *created.get(id).unwrap_or(&0)));
-            let conversation = conversations
-                .entry(id.to_owned())
-                .or_insert_with(|| Conversation {
-                    id: id.to_owned(),
-                    bot_id: DEFAULT_BOT.id.into(),
-                    title: "Conversation récupérée".into(),
-                    favorite: false,
-                    updated_at: created_at,
-                    messages: Vec::new(),
-                });
-            conversation.updated_at = conversation.updated_at.max(created_at);
-            let mut pair = vec![Message {
-                id: record.message_id.as_str().into(),
-                role: "user",
-                body: record.body,
-                state: state_name(&record.state),
-                created_at,
-                error: None,
-                error_kind: None,
-                notice: None,
-                proposals: Vec::new(),
-            }];
-            if matches!(
-                record.state,
-                SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
-            ) {
-                let reply: Option<(String, u64)> = self.connection.query_row("SELECT reply, created_at FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                if let Some((body, created_at)) = reply {
-                    let generation: Option<GenerationRow> = self.connection.query_row("SELECT status, error, error_kind, notice FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-                    let (state, error, error_kind, notice) = match generation {
-                        Some((status, error, kind, notice)) => (
-                            match status.as_str() {
-                                "streaming" => "streaming",
-                                "failed" => "failed",
-                                "stopped" => "stopped",
-                                _ => "echoed",
-                            },
-                            error,
-                            kind,
-                            notice,
-                        ),
-                        None => ("echoed", None, None, None),
-                    };
-                    pair.push(Message {
-                        id: format!("reply-{}", record.message_id.as_str()),
-                        role: "assistant",
-                        body,
-                        state,
-                        created_at,
-                        error,
-                        error_kind,
-                        notice,
-                        proposals: proposals
-                            .remove(&(id.to_owned(), record.message_id.as_str().to_owned()))
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-            ordered.entry(id.into()).or_default().push((ordinal, pair));
-        }
-        for (id, mut messages) in ordered {
-            messages.sort_by_key(|(ordinal, _)| *ordinal);
-            if let Some(conversation) = conversations.get_mut(&id) {
-                conversation.messages = messages.into_iter().flat_map(|(_, pair)| pair).collect();
-            }
-        }
-        let mut result: Vec<_> = conversations.into_values().collect();
-        result.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(result)
-    }
-}
-
-struct LocalTransport<'a> {
-    connection: &'a Connection,
-    lose_reply: bool,
-    /// Un fournisseur est connecté : la réponse sera écrite par sa génération, pas par la démo.
-    live: bool,
-    error: Option<ApiError>,
-}
-
-impl LocalTransport<'_> {
-    fn accept(&self, request: &SendRequest) -> Result<SendOutcome, ApiError> {
-        let account = request.actor().account_id.as_str();
-        let conversation = request.conversation_id().as_str();
-        let message = request.message_id().as_str();
-        let tx = self.connection.unchecked_transaction()?;
-        let existing: Option<String> = tx.query_row("SELECT body FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![account, conversation, message], |r| r.get(0)).optional()?;
-        let existing_reply_absent = existing.is_none();
-        if existing.is_some_and(|body| body != request.body()) {
-            return Ok(SendOutcome::Refused(Refusal::Conflict));
-        }
-        tx.execute("INSERT INTO wrapper_remote (account_id, conversation_id, message_id, body, reply, created_at, send_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET send_count = send_count + 1", params![account, conversation, message, request.body(), if self.live { "" } else { demo_reply(request.body()) }, now()])?;
-        if self.live && existing_reply_absent {
-            tx.execute("INSERT OR IGNORE INTO wrapper_generation (account_id, conversation_id, message_id, status, updated_at) VALUES (?1, ?2, ?3, 'streaming', ?4)", params![account, conversation, message, now()])?;
-        }
-        tx.commit()?;
-        Ok(if self.lose_reply {
-            SendOutcome::OutcomeUnknown
-        } else {
-            SendOutcome::Accepted(DeliveryReceipt {
-                account_id: request.actor().account_id.clone(),
-                conversation_id: request.conversation_id().clone(),
-                message_id: request.message_id().clone(),
-            })
-        })
-    }
-}
-
-impl SubmissionTransport for LocalTransport<'_> {
-    fn send(&mut self, request: &SendRequest) -> SendOutcome {
-        match self.accept(request) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.error = Some(error);
-                SendOutcome::OutcomeUnknown
-            }
-        }
-    }
-
-    fn lookup(&mut self, request: &ReconciliationRequest) -> LookupOutcome {
-        let found: rusqlite::Result<bool> = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3)", params![request.actor().account_id.as_str(), request.conversation_id().as_str(), request.message_id().as_str()], |r| r.get(0));
-        match found {
-            Ok(true) => LookupOutcome::Found(DeliveryReceipt {
-                account_id: request.actor().account_id.clone(),
-                conversation_id: request.conversation_id().clone(),
-                message_id: request.message_id().clone(),
-            }),
-            Ok(false) => LookupOutcome::NotFound,
-            Err(error) => {
-                self.error = Some(error.into());
-                LookupOutcome::Unknown
-            }
-        }
     }
 }
 
@@ -1935,24 +1210,6 @@ fn valid_bot_instructions(instructions: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(instructions.into())
-}
-
-fn suggested_title(body: &str) -> Option<String> {
-    let line: String = body
-        .lines()
-        .next()?
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect();
-    let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.is_empty() {
-        return None;
-    }
-    if title.chars().count() <= 80 {
-        return Some(title);
-    }
-    let prefix: String = title.chars().take(79).collect();
-    Some(format!("{}…", prefix.trim_end()))
 }
 
 fn validate_id(id: &str) -> Result<(), ApiError> {

@@ -9,6 +9,276 @@ use super::{validate_headers, App};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn unknown_entry_kind_is_projected_in_ordinal_order() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    super::features::conversations::append_entry(
+        &app.connection,
+        &id,
+        "future-card",
+        "before",
+        900,
+    )
+    .unwrap();
+    send(&mut app, &id, "First", false);
+    super::features::conversations::append_entry(
+        &app.connection,
+        &id,
+        "future-card",
+        "between",
+        100,
+    )
+    .unwrap();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": id, "message_id": "second", "body": "Second"}),
+    )
+    .unwrap();
+    super::features::conversations::append_entry(&app.connection, &id, "future-card", "after", 1)
+        .unwrap();
+    // Appending the same entry never consumes a second ordinal.
+    super::features::conversations::append_entry(&app.connection, &id, "future-card", "after", 1)
+        .unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"][0]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "before",
+            "stable-nonce",
+            "reply-stable-nonce",
+            "between",
+            "second",
+            "reply-second",
+            "after"
+        ]
+    );
+    assert_eq!(messages[0]["kind"], "future-card");
+    assert_eq!(messages[1]["kind"], "message");
+    assert_eq!(state["conversations"][0]["kind"], "chat");
+    assert!(state["conversations"][0]["parent_id"].is_null());
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"],
+        state["conversations"]
+    );
+    post(&mut app, "/api/conversations/delete", json!({"id": id})).unwrap();
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"],
+        json!([])
+    );
+}
+
+#[test]
+fn old_database_gains_kind_columns() {
+    let db = Database::new();
+    let conn = rusqlite::Connection::open(&db.0).unwrap();
+    conn.execute_batch("CREATE TABLE wrapper_conversations (
+        account_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+        favorite INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(account_id, id));
+        CREATE TABLE wrapper_messages (
+        ordinal INTEGER PRIMARY KEY, account_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        message_id TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(account_id, conversation_id, message_id));
+        INSERT INTO wrapper_conversations (account_id, id, title, created_at, updated_at)
+        VALUES ('local-workspace', 'older', 'Ancienne', 123, 123);
+        INSERT INTO wrapper_messages VALUES (17, 'local-workspace', 'older', 'stable-nonce', 123);").unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let mut app = App::open(&db.0).unwrap();
+        let response = send(&mut app, "older", "Préservé", false);
+        assert_eq!(response["conversation"]["kind"], "chat");
+        assert!(response["conversation"]["parent_id"].is_null());
+        let metadata: (i64, String) = app
+            .connection
+            .query_row(
+                "SELECT ordinal, kind FROM wrapper_messages WHERE message_id = 'stable-nonce'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata, (17, "submission".into()));
+        assert_eq!(
+            app.connection
+                .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            app.connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(app.connection.query_row("SELECT count(*) FROM component_versions WHERE component = 'wrapper' AND version = 1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+}
+
+#[test]
+fn image_only_message_is_accepted() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    let request = json!({"conversation_id": id, "message_id": "image-only", "body": "  ", "attachments": ["image-1"]});
+    let first = post(&mut app, "/api/send", request.clone()).unwrap();
+    assert_eq!(first["conversation"]["messages"][0]["state"], "echoed");
+    // The journal accepts the real empty body, so no [image] fallback is needed.
+    assert_eq!(first["conversation"]["messages"][0]["body"], "");
+    assert_eq!(
+        first["conversation"]["messages"],
+        post(&mut app, "/api/send", request).unwrap()["conversation"]["messages"]
+    );
+    let submissions = app.reader.list_submissions().unwrap();
+    assert_eq!(submissions.len(), 1);
+    assert!(submissions[0].body.is_empty());
+    assert_eq!(
+        app.connection
+            .query_row("SELECT send_count FROM wrapper_remote", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": id, "message_id": "empty", "body": "", "attachments": []})
+        ),
+        Err(400)
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": id, "message_id": "bad-image", "body": "", "attachments": ["../image"]})
+        ),
+        Err(400)
+    );
+    assert_eq!(app.reader.list_submissions().unwrap().len(), 1);
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"],
+        first["conversation"]["messages"]
+    );
+}
+
+#[test]
+fn two_writers_do_not_return_busy() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    let account = grokbot_domain::AccountId::new(super::ACCOUNT).unwrap();
+    let mut writer = grokbot_store::SessionStore::open(&db.0, &account).unwrap();
+    let mut journal = writer.load_journal().unwrap();
+    let path = db.0.clone();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut conn = rusqlite::Connection::open(path).unwrap();
+        conn.busy_timeout(Duration::from_secs(3)).unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO component_versions VALUES ('writer-proof', 1)",
+            [],
+        )
+        .unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        tx.commit().unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let start = Instant::now();
+    writer.save_journal(&mut journal).unwrap();
+    worker.join().unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(100));
+    assert_eq!(
+        app.connection
+            .query_row(
+                "SELECT version FROM component_versions WHERE component = 'writer-proof'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    // Reopen the submission session after the independent journal writer advances
+    // its revision; stale-journal protection is not a SQLite busy failure.
+    drop(app);
+    app = App::open(&db.0).unwrap();
+    assert_eq!(
+        send(&mut app, &id, "After the competing writer", false)["conversation"]["messages"][0]
+            ["state"],
+        "echoed"
+    );
+}
+
+#[test]
+fn hidden_context_and_tool_probes_use_the_feature_dispatcher() {
+    use grokbot_engine::contracts::ContextSource;
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    send(&mut app, &id, "First", false);
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": id, "message_id": "second", "body": "Current"}),
+    )
+    .unwrap();
+    let blocks = app.context_preview(&id).unwrap();
+    assert_eq!(blocks.first().unwrap().source, ContextSource::AppContract);
+    assert!(blocks
+        .windows(2)
+        .all(|pair| pair[0].priority <= pair[1].priority));
+    assert!(blocks
+        .iter()
+        .any(|block| block.source == ContextSource::BotIdentity));
+    assert!(blocks
+        .iter()
+        .any(|block| block.source == ContextSource::History && block.text.contains("First")));
+    assert_eq!(blocks.last().unwrap().source, ContextSource::CurrentMessage);
+    assert_eq!(blocks.last().unwrap().text, "Current");
+    assert_eq!(app.context_preview("absent").unwrap_err().status, 404);
+    assert_eq!(
+        app.invoke_tool("grokbot", "unimplemented", json!({}))
+            .unwrap_err()
+            .status,
+        404
+    );
+    assert!(app.connection.is_autocommit());
+    assert_eq!(
+        app.invoke_tool("absent", "unimplemented", json!({}))
+            .unwrap_err()
+            .status,
+        404
+    );
+    app.tick(123);
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    for capability in [
+        "engine",
+        "skills",
+        "memory",
+        "forms",
+        "routines",
+        "delegation",
+        "attachments",
+    ] {
+        assert_eq!(state[capability], json!({}));
+    }
+    assert!(state["conversations"].is_array());
+}
+
 struct Database(PathBuf);
 
 impl Database {
@@ -350,7 +620,7 @@ fn acceptance_saved_before_echo_finishes_after_restart_without_remote_resend() {
         .prepare(conversation.clone(), message.clone(), "Accepted".into())
         .unwrap();
     let request = app.session.begin_send(&conversation, &message).unwrap();
-    let mut transport = super::LocalTransport {
+    let mut transport = super::features::engine::LocalTransport {
         connection: &app.connection,
         lose_reply: false,
         live: false,
@@ -778,32 +1048,6 @@ fn deleting_a_bot_keeps_its_conversations_but_blocks_new_ones() {
     let reply = send(&mut app, &id, "Encore une recette", false);
     assert_eq!(reply["conversation"]["bot_id"], "chef");
     assert_eq!(reply["conversation"]["messages"][1]["role"], "assistant");
-}
-
-#[test]
-fn composed_instructions_put_identity_role_and_private_rules_after_the_app_contract() {
-    let bot = super::Bot {
-        id: "bot-1".into(),
-        name: "Juriste".into(),
-        color: "violet".into(),
-        shape: "nuage".into(),
-        description: "Relit vos contrats.".into(),
-        instructions: "Cite toujours l'article.".into(),
-        is_default: false,
-        template: None,
-        customized: false,
-        deleted: false,
-    };
-    assert_eq!(
-        super::compose_instructions(&bot, &[]),
-        "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.\n\nTu t'appelles Juriste.\n\nTon rôle, tel que les autres le voient : Relit vos contrats.\n\nConsignes privées sur ta façon de te comporter :\nCite toujours l'article."
-    );
-    let bare = super::Bot {
-        description: String::new(),
-        instructions: String::new(),
-        ..bot
-    };
-    assert!(super::compose_instructions(&bare, &[]).ends_with("$$...$$.\n\nTu t'appelles Juriste."));
 }
 
 #[test]
@@ -1288,8 +1532,8 @@ fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
         deleted: true,
         ..default.clone()
     };
-    assert!(super::tools_for(&other).is_empty());
-    let tools = super::tools_for(&default);
+    assert!(super::features::engine::tools_for(&other).is_empty());
+    let tools = super::features::engine::tools_for(&default);
     let names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
@@ -1335,9 +1579,13 @@ fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
         json!({"type": "null"})
     );
 
-    let instructions =
-        super::compose_instructions(&default, &[default.clone(), other.clone(), gone]);
+    let instructions = super::features::engine::compose_instructions(
+        &default,
+        &[default.clone(), other.clone(), gone],
+    );
     assert!(instructions.contains("propose_bot_update"));
     assert!(instructions.ends_with("Bots existants (identifiant : nom — présentation) :\n- grokbot : Grokbot\n- chef : Chef — Cuisine."), "{instructions}");
-    assert!(!super::compose_instructions(&other, &[default]).contains("propose_bot"));
+    assert!(
+        !super::features::engine::compose_instructions(&other, &[default]).contains("propose_bot")
+    );
 }

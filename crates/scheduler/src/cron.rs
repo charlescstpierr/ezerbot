@@ -1,6 +1,14 @@
-//! Schedule parser/next-occurrence signatures (reports/cron-detail.md CR08–CR13).
-//! The parser implementation will use jiff for IANA zones, not OS subprocesses.
-use grokbot_engine::contracts::{pending, Result};
+//! Five-field cron and intervals, following `reports/cron-detail.md` CR08–CR13.
+//! DOM/DOW use OR when both are restricted; intervals with a phase align to UTC
+//! epoch, while intervals without one are relative to the supplied reference.
+//!
+//! Unlike the client's *candidate* preview (CR11), this scheduler implements the
+//! explicit policy in `reports/architecture-rust.md`: gaps move to the first
+//! valid instant, folds fire only at their first instant. Calendar search covers
+//! a Gregorian cycle (400 years), so leap-day schedules are not lost after 366
+//! days. Invalid zones fail closed instead of silently using the host's zone.
+use grokbot_engine::contracts::{Error, Result};
+use jiff::{civil::Date, tz::AmbiguousOffset, tz::TimeZone, Timestamp};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,13 +27,570 @@ pub enum Schedule {
     },
 }
 
-pub fn parse(_expression: &str) -> Result<Schedule> {
-    pending("scheduler.cron")
+fn invalid(message: impl std::fmt::Display) -> Error {
+    Error::InvalidInput(format!("invalid schedule: {message}"))
 }
-pub fn next_after(
-    _schedule: &Schedule,
-    _time_zone: &str,
-    _reference_ms: i64,
-) -> Result<Option<i64>> {
-    pending("scheduler.cron")
+
+/// Parse client cron syntax. One-shots are constructed as `Schedule::Once`, not
+/// inferred from an annual cron (CR15). Durations must fit whole milliseconds,
+/// the precision of the shared schedule contract.
+pub fn parse(expression: &str) -> Result<Schedule> {
+    let mut tokens: Vec<_> = expression.split_whitespace().collect();
+    let time_zone = tokens
+        .first()
+        .and_then(|token| {
+            token
+                .strip_prefix("CRON_TZ=")
+                .or_else(|| token.strip_prefix("TZ="))
+        })
+        .map(str::to_owned);
+    if let Some(zone) = &time_zone {
+        TimeZone::get(zone).map_err(invalid)?;
+        tokens.remove(0);
+    }
+    if tokens
+        .first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("@every"))
+    {
+        if time_zone.is_some() || tokens.len() != 2 {
+            return Err(invalid("@every needs one duration and no timezone prefix"));
+        }
+        let mut parts = tokens[1].split('/');
+        let interval_ms = duration_ms(parts.next().unwrap())?;
+        let phase_ms = parts.next().map(duration_ms).transpose()?;
+        if parts.next().is_some() {
+            return Err(invalid("too many interval phases"));
+        }
+        validate_every(interval_ms, phase_ms)?;
+        return Ok(Schedule::Every {
+            interval_ms,
+            phase_ms,
+        });
+    }
+    let expression = if tokens.len() == 1 {
+        match tokens[0].to_ascii_lowercase().as_str() {
+            "@hourly" => "0 * * * *".to_owned(),
+            "@daily" | "@midnight" => "0 0 * * *".to_owned(),
+            "@weekly" => "0 0 * * 0".to_owned(),
+            "@monthly" => "0 0 1 * *".to_owned(),
+            "@yearly" | "@annually" => "0 0 1 1 *".to_owned(),
+            _ => tokens.join(" "),
+        }
+    } else {
+        tokens.join(" ")
+    };
+    Cron::parse(&expression)?;
+    Ok(Schedule::Cron {
+        expression,
+        time_zone,
+    })
+}
+
+/// The first occurrence strictly after `reference_ms`, or `None` if no future
+/// slot is representable. An expression's zone takes precedence over the
+/// routine's zone (CR13). Absolute one-shots and intervals do not use a zone.
+/// Revalidate schedules here as serde and callers can bypass `parse`.
+pub fn next_after(schedule: &Schedule, time_zone: &str, reference_ms: i64) -> Result<Option<i64>> {
+    match schedule {
+        Schedule::Once { at } => Ok((*at > reference_ms).then_some(*at)),
+        Schedule::Every {
+            interval_ms,
+            phase_ms,
+        } => {
+            validate_every(*interval_ms, *phase_ms)?;
+            let reference = i128::from(reference_ms);
+            let interval = i128::from(*interval_ms);
+            let next = match phase_ms {
+                None => reference + interval,
+                Some(phase) => {
+                    let phase = i128::from(*phase);
+                    ((reference - phase).div_euclid(interval) + 1) * interval + phase
+                }
+            };
+            Ok(i64::try_from(next).ok())
+        }
+        Schedule::Cron {
+            expression,
+            time_zone: override_zone,
+        } => {
+            // Also accept aliases/prefixes in a manually constructed Cron DTO.
+            let Schedule::Cron {
+                expression,
+                time_zone: embedded_zone,
+            } = parse(expression)?
+            else {
+                return Err(invalid("a Cron schedule must contain cron syntax"));
+            };
+            let zone = TimeZone::get(
+                embedded_zone
+                    .as_deref()
+                    .or(override_zone.as_deref())
+                    .unwrap_or(time_zone),
+            )
+            .map_err(invalid)?;
+            let cron = Cron::parse(&expression)?;
+            let reference = Timestamp::from_millisecond(reference_ms).map_err(invalid)?;
+            let mut date = zone.to_datetime(reference).date();
+            // All possible month/DOM/DOW combinations repeat every 146097 days.
+            for _ in 0..=146_097 {
+                if cron.matches_date(date) {
+                    for hour in 0..24 {
+                        if !cron.fields[1].contains(hour) {
+                            continue;
+                        }
+                        for minute in 0..60 {
+                            if !cron.fields[0].contains(minute) {
+                                continue;
+                            }
+                            let local = date.at(hour as i8, minute as i8, 0, 0);
+                            let ambiguous = zone.to_ambiguous_timestamp(local);
+                            let candidate = match ambiguous.offset() {
+                                AmbiguousOffset::Gap { .. } => {
+                                    // `later()` would preserve the minute into the
+                                    // gap (02:30 -> 03:30), not its first valid
+                                    // instant (03:00). Take the transition itself.
+                                    let before = ambiguous.earlier().map_err(invalid)?;
+                                    zone.following(before)
+                                        .next()
+                                        .ok_or_else(|| invalid("gap has no ending transition"))?
+                                        .timestamp()
+                                }
+                                _ => ambiguous.earlier().map_err(invalid)?,
+                            };
+                            if candidate > reference {
+                                return Ok(Some(candidate.as_millisecond()));
+                            }
+                        }
+                    }
+                }
+                date = match date.tomorrow() {
+                    Ok(date) => date,
+                    Err(_) => return Ok(None),
+                };
+            }
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Field {
+    bits: u64,
+    wildcard: bool,
+}
+
+impl Field {
+    fn contains(self, value: u32) -> bool {
+        self.bits & (1 << value) != 0
+    }
+
+    fn parse(text: &str, min: u32, max: u32, sunday: bool) -> Result<Self> {
+        let number = |text: &str| -> Result<u32> {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid(format!("expected a number in {text:?}")));
+            }
+            text.parse().map_err(invalid)
+        };
+        let mut bits = 0;
+        for item in text.split(',') {
+            let (range, step) = match item.split_once('/') {
+                None => (item, 1),
+                Some((range, step)) => (range, number(step)?),
+            };
+            if step == 0 {
+                return Err(invalid("a field step must be positive"));
+            }
+            let (start, end) = if range == "*" {
+                (min, max)
+            } else if let Some((start, end)) = range.split_once('-') {
+                (number(start)?, number(end)?)
+            } else {
+                let start = number(range)?;
+                (start, if item.contains('/') { max } else { start })
+            };
+            if start < min || end > max || start > end {
+                return Err(invalid(format!("field {text:?} is outside {min}..{max}")));
+            }
+            for value in (start..=end).step_by(step as usize) {
+                bits |= 1 << if sunday && value == 7 { 0 } else { value };
+            }
+        }
+        Ok(Self {
+            bits,
+            wildcard: text == "*",
+        })
+    }
+}
+
+struct Cron {
+    fields: [Field; 5],
+}
+
+impl Cron {
+    fn parse(expression: &str) -> Result<Self> {
+        let fields: Vec<_> = expression.split_whitespace().collect();
+        if fields.len() != 5 {
+            return Err(invalid("cron requires exactly five fields (no seconds)"));
+        }
+        Ok(Self {
+            fields: [
+                Field::parse(fields[0], 0, 59, false)?,
+                Field::parse(fields[1], 0, 23, false)?,
+                Field::parse(fields[2], 1, 31, false)?,
+                Field::parse(fields[3], 1, 12, false)?,
+                Field::parse(fields[4], 0, 7, true)?,
+            ],
+        })
+    }
+
+    fn matches_date(&self, date: Date) -> bool {
+        let [_, _, dom, month, dow] = self.fields;
+        let day_matches = dom.contains(date.day() as u32);
+        let weekday_matches = dow.contains(date.weekday().to_sunday_zero_offset() as u32);
+        month.contains(date.month() as u32)
+            && match (dom.wildcard, dow.wildcard) {
+                (false, false) => day_matches || weekday_matches,
+                _ => day_matches && weekday_matches,
+            }
+    }
+}
+
+fn validate_every(interval: u64, phase: Option<u64>) -> Result<()> {
+    if interval == 0 || phase.is_some_and(|phase| phase >= interval) {
+        return Err(invalid(
+            "interval must be positive and phase less than interval",
+        ));
+    }
+    Ok(())
+}
+
+// Accumulate decimal components as exact fractions, not floats: 1.001s is
+// exactly 1001ms. A fractional-millisecond total cannot fit the public DTO.
+fn duration_ms(mut text: &str) -> Result<u64> {
+    let mut total = 0_u128;
+    let mut scale = 1_u128;
+    if text.is_empty() {
+        return Err(invalid("empty duration"));
+    }
+    while !text.is_empty() {
+        let end = text
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or_else(|| invalid("duration needs ms, s, m, h or d units"))?;
+        let (number, rest) = text.split_at(end);
+        let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+        if whole.is_empty() && fraction.is_empty()
+            || number.ends_with('.')
+            || !whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|b| b.is_ascii_digit())
+        {
+            return Err(invalid("invalid decimal duration"));
+        }
+        let fraction = fraction.trim_end_matches('0');
+        let component_scale = 10_u128
+            .checked_pow(u32::try_from(fraction.len()).map_err(invalid)?)
+            .ok_or_else(|| invalid("duration precision overflow"))?;
+        let coefficient = format!("0{whole}{fraction}")
+            .parse::<u128>()
+            .map_err(invalid)?;
+        let (unit, multiplier) = [
+            ("ms", 1),
+            ("s", 1_000),
+            ("m", 60_000),
+            ("h", 3_600_000),
+            ("d", 86_400_000),
+        ]
+        .into_iter()
+        .find(|(unit, _)| rest.starts_with(unit))
+        .ok_or_else(|| invalid("unsupported duration unit"))?;
+        let new_scale = scale.max(component_scale);
+        total = total
+            .checked_mul(new_scale / scale)
+            .and_then(|total| {
+                coefficient
+                    .checked_mul(multiplier)
+                    .and_then(|part| part.checked_mul(new_scale / component_scale))
+                    .and_then(|part| total.checked_add(part))
+            })
+            .ok_or_else(|| invalid("duration overflow"))?;
+        scale = new_scale;
+        text = &rest[unit.len()..];
+    }
+    if total % scale != 0 {
+        return Err(invalid(
+            "duration must be representable in whole milliseconds",
+        ));
+    }
+    u64::try_from(total / scale).map_err(invalid)
+}
+
+#[cfg(test)]
+mod cron_tests {
+    use super::*;
+
+    fn ms(instant: &str) -> i64 {
+        instant.parse::<Timestamp>().unwrap().as_millisecond()
+    }
+
+    fn next(expression: &str, reference: &str) -> Option<i64> {
+        next_after(&parse(expression).unwrap(), "UTC", ms(reference)).unwrap()
+    }
+
+    #[test]
+    fn aliases_and_tz_prefix_parse() {
+        for (alias, expression) in [
+            ("@HOURLY", "0 * * * *"),
+            ("@daily", "0 0 * * *"),
+            ("@midnight", "0 0 * * *"),
+            ("@weekly", "0 0 * * 0"),
+            ("@monthly", "0 0 1 * *"),
+            ("@yearly", "0 0 1 1 *"),
+            ("@annually", "0 0 1 1 *"),
+        ] {
+            assert_eq!(parse(alias).unwrap(), parse(expression).unwrap());
+        }
+        for prefix in ["TZ", "CRON_TZ"] {
+            let schedule = parse(&format!("  {prefix}=America/New_York  @daily  ")).unwrap();
+            assert_eq!(
+                next_after(&schedule, "not-a-zone", ms("2025-01-01T00:00:00Z")).unwrap(),
+                Some(ms("2025-01-01T05:00:00Z"))
+            );
+        }
+        assert!(parse("TZ=Not/A_Zone @daily").is_err());
+        assert!(parse("TZ=UTC @every 1h").is_err());
+        assert!(next_after(&parse("@daily").unwrap(), "invalid", 0).is_err());
+    }
+
+    #[test]
+    fn dom_dow_both_restricted_use_or() {
+        // Jan 2 is not Monday; Jan 13 is outside 1–7. Both must match CR09.
+        assert_eq!(
+            next("0 9 1-7 * 1", "2025-01-01T10:00:00Z"),
+            Some(ms("2025-01-02T09:00:00Z"))
+        );
+        assert_eq!(
+            next("0 9 1-7 * 1", "2025-01-07T10:00:00Z"),
+            Some(ms("2025-01-13T09:00:00Z"))
+        );
+        assert_eq!(
+            next("0 9 * * 1", "2025-01-07T10:00:00Z"),
+            Some(ms("2025-01-13T09:00:00Z"))
+        );
+        assert_eq!(
+            next("0 9 1 * *", "2025-01-01T10:00:00Z"),
+            Some(ms("2025-02-01T09:00:00Z"))
+        );
+        assert_eq!(
+            next("0 9 1-7 2 1", "2025-01-01T00:00:00Z"),
+            Some(ms("2025-02-01T09:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn every_with_phase_aligns_to_epoch() {
+        let schedule = parse("@every 1h30m/15m").unwrap();
+        assert_eq!(
+            schedule,
+            Schedule::Every {
+                interval_ms: 5_400_000,
+                phase_ms: Some(900_000)
+            }
+        );
+        for (reference, expected) in [
+            (-1, 900_000),
+            (-5_400_001, -4_500_000),
+            (900_000, 6_300_000),
+            (1_000_000, 6_300_000),
+        ] {
+            assert_eq!(
+                next_after(&schedule, "ignored", reference).unwrap(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            next_after(&parse("@every 0.5s").unwrap(), "ignored", 123).unwrap(),
+            Some(623)
+        );
+        assert_eq!(
+            next_after(&parse("@every 1s/0ms").unwrap(), "ignored", -1).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            parse("@every 1.001s0.1ms0.9ms").unwrap(),
+            Schedule::Every {
+                interval_ms: 1002,
+                phase_ms: None
+            }
+        );
+        assert_eq!(
+            parse("@every 1d2h3m4s5ms/.0s").unwrap(),
+            Schedule::Every {
+                interval_ms: 93_784_005,
+                phase_ms: Some(0)
+            }
+        );
+        assert_eq!(
+            parse("@every 18446744073709551615ms").unwrap(),
+            Schedule::Every {
+                interval_ms: u64::MAX,
+                phase_ms: None
+            }
+        );
+        for expression in [
+            "@every 18446744073709551616ms",
+            "@every 0s",
+            "@every 1h/1h",
+            "@every 1h/-1m",
+            "@every 1h/",
+            "@every 1h/0/0",
+            "@every 1h 30m",
+            "@every 1w",
+            "@every .1ms",
+            "@every 1e3s",
+            "@every 1..2s",
+            "@every 1.s",
+        ] {
+            assert!(parse(expression).is_err(), "{expression}");
+        }
+    }
+
+    #[test]
+    fn spring_forward_gap_moves_to_first_valid_instant() {
+        assert_eq!(
+            next("TZ=America/New_York 30 2 * * *", "2025-03-09T05:00:00Z"),
+            Some(ms("2025-03-09T07:00:00Z"))
+        );
+        // All nonexistent minutes collapse to one slot, not one run per minute.
+        assert_eq!(
+            next("TZ=America/New_York * 2 * * *", "2025-03-09T07:00:00Z"),
+            Some(ms("2025-03-10T06:00:00Z"))
+        );
+        // Non-hour gap: 02:15 moves to 02:30, not 02:45.
+        assert_eq!(
+            next("TZ=Australia/Lord_Howe 15 2 * * *", "2025-10-04T13:00:00Z"),
+            Some(ms("2025-10-04T15:30:00Z"))
+        );
+        // A whole skipped date also resolves to the transition instant.
+        assert_eq!(
+            next("TZ=Pacific/Apia 0 12 30 12 *", "2011-12-29T22:00:00Z"),
+            Some(ms("2011-12-30T10:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn fall_back_fold_fires_once() {
+        let expression = "TZ=America/New_York 30 1 * * *";
+        let first = ms("2025-11-02T05:30:00Z");
+        assert_eq!(next(expression, "2025-11-02T04:00:00Z"), Some(first));
+        let schedule = parse(expression).unwrap();
+        for reference in [
+            first,
+            ms("2025-11-02T06:00:00Z"),
+            ms("2025-11-02T06:30:00Z"),
+        ] {
+            assert_eq!(
+                next_after(&schedule, "UTC", reference).unwrap(),
+                Some(ms("2025-11-03T06:30:00Z"))
+            );
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // Keep the test name from the slice acceptance spec.
+    fn unsupported_seconds_names_and_L_W_hash_are_rejected() {
+        for expression in [
+            "",
+            "* * * * * *",
+            "0 9 * JAN *",
+            "0 9 * * MON",
+            "0 9 L * *",
+            "0 9 1W * *",
+            "0 9 * * 1#2",
+            "@reboot",
+            "60 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "*/0 * * * *",
+            "5-2 * * * *",
+            "1,,2 * * * *",
+            "1/2/3 * * * *",
+            "-1 * * * *",
+            "? * * * *",
+        ] {
+            assert!(parse(expression).is_err(), "{expression}");
+        }
+    }
+
+    #[test]
+    fn lists_ranges_steps_sunday_and_strict_minute_boundary() {
+        assert_eq!(
+            next("5,20-40/10 9-17/2 * * 7", "2025-01-05T09:05:00Z"),
+            Some(ms("2025-01-05T09:20:00Z"))
+        );
+        assert_eq!(
+            next("0 0 * * 7", "2025-01-05T00:00:00Z"),
+            next("0 0 * * 0", "2025-01-05T00:00:00Z")
+        );
+        assert_eq!(next("* * * * *", "1969-12-31T23:59:59.999Z"), Some(0));
+        assert_eq!(
+            next("* * * * *", "2025-01-01T00:00:00.001Z"),
+            Some(ms("2025-01-01T00:01:00Z"))
+        );
+        assert_eq!(
+            next("0 0 29 2 *", "2025-01-01T00:00:00Z"),
+            Some(ms("2028-02-29T00:00:00Z"))
+        );
+        assert_eq!(next("0 0 31 2 *", "2025-01-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn once_and_untrusted_dto_boundaries() {
+        let once = Schedule::Once { at: 100 };
+        assert_eq!(next_after(&once, "ignored", 99).unwrap(), Some(100));
+        assert_eq!(next_after(&once, "ignored", 100).unwrap(), None);
+        assert_eq!(next_after(&once, "ignored", 101).unwrap(), None);
+        let interval = parse("@every 1ms").unwrap();
+        assert_eq!(next_after(&interval, "ignored", i64::MAX).unwrap(), None);
+        assert_eq!(
+            next_after(
+                &Schedule::Every {
+                    interval_ms: u64::MAX,
+                    phase_ms: Some(0)
+                },
+                "ignored",
+                i64::MIN
+            )
+            .unwrap(),
+            Some(0)
+        );
+        for schedule in [
+            Schedule::Every {
+                interval_ms: 0,
+                phase_ms: None,
+            },
+            Schedule::Every {
+                interval_ms: 1,
+                phase_ms: Some(1),
+            },
+            Schedule::Cron {
+                expression: "@every 1h".into(),
+                time_zone: None,
+            },
+            Schedule::Cron {
+                expression: "* * * * * *".into(),
+                time_zone: None,
+            },
+        ] {
+            assert!(next_after(&schedule, "UTC", 0).is_err());
+        }
+        let serialized = serde_json::to_string(&parse("TZ=UTC @daily").unwrap()).unwrap();
+        let round_trip: Schedule = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            next_after(&round_trip, "ignored", 0).unwrap(),
+            Some(86_400_000)
+        );
+    }
 }

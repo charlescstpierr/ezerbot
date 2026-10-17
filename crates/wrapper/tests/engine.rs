@@ -692,3 +692,77 @@ fn model_form_suspends_and_resumes_through_wrapper_receipt() {
         .to_string();
     assert!(body.contains("Ocean blue") && body.contains("function_call_output"));
 }
+
+#[test]
+fn linked_upload_uses_typed_image_and_reset_hides_its_caption() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let uploaded = f
+        .app
+        .api(
+            "POST",
+            "/api/attachments",
+            b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01image payload",
+        )
+        .unwrap();
+    let id = uploaded["id"].as_str().unwrap().to_owned();
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"PRIVATE_BLUE_SQUARE_CAPTION"}),
+        complete(),
+    ]);
+    let caption = json!({"conversation_id":c,"attachment_id":id,"draft":"Look"});
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"linked-image","body":"Look","attachments":[id]}),
+    );
+    f.done(&c, "linked-image");
+    let sent = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(sent.contains("input_image") && sent.contains("PRIVATE_BLUE_SQUARE_CAPTION"));
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT input_json FROM wrapper_engine_runs WHERE run_id=?1",
+            [f.run("linked-image").run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("base64"));
+    f.send(&c, "linked-later", "What color?");
+    f.done(&c, "linked-later");
+    let later = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(!later.contains("input_image"));
+    assert!(later.contains("PRIVATE_BLUE_SQUARE_CAPTION"));
+    f.post("/api/conversations/reset", json!({"conversation_id":c}));
+    f.send(&c, "linked-reset", "Fresh start");
+    f.done(&c, "linked-reset");
+    let reset = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(!reset.contains("PRIVATE_BLUE_SQUARE_CAPTION") && !reset.contains("input_image"));
+}

@@ -489,13 +489,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             }
             let tx = super::write_transaction(&app.connection)?;
             let id = format!("reset-{}", random_id(&tx)?);
-            super::conversations::append_entry(
-                &tx,
-                &input.conversation_id,
-                "engine_reset",
-                &id,
-                now(),
-            )?;
+            super::conversations::append_entry(&tx, &input.conversation_id, "reset", &id, now())?;
             compaction::invalidate_all(&tx, &input.conversation_id)?;
             tx.commit()?;
             app.conversation_response(&input.conversation_id)
@@ -1015,6 +1009,33 @@ impl<'a> Services<'a> {
 impl RunServices for Services<'_> {
     fn context(&mut self, run: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
         let mut input = run_input(self.connection, &run.run_id)?;
+        let (model, effort, service_tier): (String, Option<String>, Option<String>) =
+            self.connection.query_row(
+                "SELECT model,effort,service_tier FROM wrapper_engine_runs WHERE run_id=?1",
+                [&run.run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+        let ctx = self.ctx(self.connection, run);
+        let linked = super::attachments::images_for_message(
+            &ctx,
+            &run.conversation_id,
+            &input.entry_id,
+            &model,
+            true,
+        )
+        .map_err(engine_error)?;
+        if !linked.is_empty() {
+            input.images = linked;
+            // Staging owns transport bytes; retain only typed references/captions.
+            let mut stored = input.clone();
+            for image in &mut stored.images {
+                image.url = None;
+            }
+            self.connection.execute(
+                "UPDATE wrapper_engine_runs SET input_json=?2 WHERE run_id=?1",
+                params![run.run_id, serde_json::to_string(&stored)?],
+            )?;
+        }
         let mut request = ContextRequest {
             run_id: run.run_id.clone(),
             trigger: run.trigger.clone(),
@@ -1022,10 +1043,15 @@ impl RunServices for Services<'_> {
             conversation_id: run.conversation_id.clone(),
             current_message: input.clone(),
         };
-        let ctx = self.ctx(self.connection, run);
         let mut blocks = super::context(&ctx, &request)
             .into_iter()
-            .filter(|b| b.source != ContextSource::CurrentMessage)
+            // Captions are hydrated into history below for reset/summary/budget
+            // selection. Do not also send the legacy aggregate instruction copy.
+            .filter(|b| {
+                b.source != ContextSource::CurrentMessage
+                    && !(b.source == ContextSource::ImageCaption
+                        && b.text.starts_with("<untrusted-image-captions>"))
+            })
             .collect::<Vec<_>>();
         if let Some(images) = take_image_inputs(&mut blocks)? {
             if input.images != images {
@@ -1054,12 +1080,8 @@ impl RunServices for Services<'_> {
             .collect::<Vec<_>>()
             .join("\n\n");
         let (mut history, _) = history(self.connection, run, &input)?;
+        hydrate_history_images(&ctx, &run.conversation_id, &model, &mut history)?;
         history.push(input);
-        let (model, effort, service_tier) = self.connection.query_row(
-            "SELECT model,effort,service_tier FROM wrapper_engine_runs WHERE run_id=?1",
-            [&run.run_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
         Ok(ModelRequest {
             model,
             instructions,
@@ -1223,6 +1245,22 @@ fn take_image_inputs(
     });
     Ok(images)
 }
+fn hydrate_history_images(
+    ctx: &super::Context<'_>,
+    conversation: &str,
+    model: &str,
+    history: &mut [HistoryItem],
+) -> grokbot_engine::contracts::Result<()> {
+    for item in history.iter_mut().filter(|i| i.role == Role::User) {
+        let linked =
+            super::attachments::images_for_message(ctx, conversation, &item.entry_id, model, false)
+                .map_err(engine_error)?;
+        if !linked.is_empty() {
+            item.images = linked;
+        }
+    }
+    Ok(())
+}
 fn run_input(conn: &Connection, id: &str) -> grokbot_engine::contracts::Result<HistoryItem> {
     let text: String = conn.query_row(
         "SELECT input_json FROM wrapper_engine_runs WHERE run_id=?1",
@@ -1251,7 +1289,7 @@ fn history(
             break;
         }
         match kind.as_str() {
-            "engine_reset" => {
+            "reset" | "engine_reset" => {
                 reset = Some(id.clone());
                 result.push(item(&id, Role::System, String::new()));
             }
@@ -1682,7 +1720,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         let run = store::get(ctx.connection, id).ok()??;
         return run_reply(ctx.connection, &run, format!("reply-{id}"), vec![]).ok();
     }
-    if kind == "engine_reset" {
+    if matches!(kind, "reset" | "engine_reset") {
         return Some(Message {
             id: id.into(),
             role: "assistant",
@@ -1819,7 +1857,7 @@ pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
         params![ACCOUNT, conversation_id],
         |r| r.get(0),
     )?;
-    let latest:Option<String>=app.connection.query_row("SELECT message_id FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='submission' AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='engine_reset'),-1) ORDER BY ordinal DESC LIMIT 1",params![ACCOUNT,conversation_id],|r|r.get(0)).optional()?;
+    let latest:Option<String>=app.connection.query_row("SELECT message_id FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='submission' AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')),-1) ORDER BY ordinal DESC LIMIT 1",params![ACCOUNT,conversation_id],|r|r.get(0)).optional()?;
     let text=latest.as_deref().and_then(|id|app.connection.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation_id,id],|r|r.get(0)).optional().ok().flatten()).unwrap_or_default();
     let current = item(latest.as_deref().unwrap_or("preview"), Role::User, text);
     let run = Run {
@@ -1848,11 +1886,29 @@ pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
     ctx.bot_id = Some(&bot);
     ctx.conversation_id = Some(conversation_id);
     let mut blocks = super::context(&ctx, &request);
-    blocks.retain(|b| b.source != ContextSource::CurrentMessage);
+    blocks.retain(|b| {
+        b.source != ContextSource::CurrentMessage
+            && !(b.source == ContextSource::ImageCaption
+                && b.text.starts_with("<untrusted-image-captions>"))
+    });
+    let model = app
+        .resolved_model()?
+        .map_or_else(String::new, |(model, _, _)| model);
+    let linked = super::attachments::images_for_message(
+        &ctx,
+        conversation_id,
+        &current.entry_id,
+        &model,
+        true,
+    )?;
+    if !linked.is_empty() {
+        request.current_message.images = linked;
+    }
     if let Some(images) = take_image_inputs(&mut blocks)? {
         request.current_message.images = images;
     }
-    let (history, reset) = history(&app.connection, &run, &current)?;
+    let (mut history, reset) = history(&app.connection, &run, &current)?;
+    hydrate_history_images(&ctx, conversation_id, &model, &mut history)?;
     Ok(assembler::assemble(
         &request,
         &blocks,

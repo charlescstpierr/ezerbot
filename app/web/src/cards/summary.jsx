@@ -10,6 +10,7 @@ export function Card({ message }) {
     <Disclosure message={message} title="Contexte résumé" label="Historique conservé">
       <p className="gb-engine-note">Ce résumé allège le contexte envoyé au modèle. Les messages originaux restent dans la conversation.</p>
       <Data value={typeof summary.text === "string" ? summary.text : message.body || "Résumé indisponible."} />
+      <h4>Détails techniques</h4>
       <dl className="gb-engine-bounds">
         <dt>Résumé jusqu’à l’entrée (incluse)</dt><dd>{summary.truncation_last_entry_inclusive || "Non disponible"}</dd>
         <dt>Reprise à l’entrée (incluse)</dt><dd>{summary.resume_from_entry_inclusive || "Non disponible"}</dd>

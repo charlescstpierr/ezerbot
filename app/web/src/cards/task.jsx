@@ -1,3 +1,5 @@
+import { useEngine } from "./tool.jsx";
+
 export const kind = "task";
 
 // REA goal-execution-autonomy.md §14: WORKING / NEEDS_INPUT / DONE
@@ -22,14 +24,21 @@ const runLabels = {
 };
 
 export function Card({ message }) {
-  const { task_status: task, turn_end: turnEnd, status } = message.payload || {};
-  const label = Object.hasOwn(taskLabels, task?.status) ? taskLabels[task.status] : null;
+  const view = useEngine();
+  const { run_id: runId, task_status: task, turn_end: turnEnd, status } = message.payload || {};
+  // The host emits a live snapshot at every task event. Only its last entry
+  // represents the task, at the latest chronological position, not before work.
+  const latest = view?.latestTask(runId);
+  if (latest && latest !== message.id) return null;
+  const terminal = ["finished", "failed", "cancelled"].includes(status);
+  const label = Object.hasOwn(taskLabels, task?.status)
+    ? terminal && task.status !== "done" ? "Non terminée" : taskLabels[task.status] : null;
   // A chat has no task_status; never manufacture a forever-Working task for it.
   if (!label) {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Statut de tâche indisponible.</article>;
   }
   const done = task.status === "done";
-  const ended = Boolean(turnEnd) || ["finished", "failed", "cancelled"].includes(status);
+  const ended = Boolean(turnEnd) || terminal;
   const turnLabel = Object.hasOwn(turnLabels, turnEnd) ? turnLabels[turnEnd]
     : Object.hasOwn(runLabels, status) ? runLabels[status] : "État du tour indisponible";
   return (

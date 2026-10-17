@@ -326,6 +326,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             validate_conversation_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
+            super::delegation::ensure_send_allowed(&app.feature_context(), &input.conversation_id)?;
             for id in &input.attachments {
                 validate_id(id)?;
             }
@@ -1118,6 +1119,12 @@ impl RunServices for Services<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
         let ctx = self.ctx(self.connection, run);
+        if !super::delegation::parent_conversations_available(&ctx, run)? {
+            stop_run(&ctx, run, TurnEnd::Stopped).map_err(engine_error)?;
+            return Err(Error::InvalidInput(
+                "task conversation is unavailable".into(),
+            ));
+        }
         let linked = super::attachments::images_for_message(
             &ctx,
             &run.conversation_id,
@@ -1142,17 +1149,17 @@ impl RunServices for Services<'_> {
             conversation_id: run.conversation_id.clone(),
             current_message: input.clone(),
         };
-        super::delegation::validate_context(&ctx, &request)?;
-        let mut blocks = super::context(&ctx, &request)
-            .into_iter()
-            // Captions are hydrated into history below for reset/summary/budget
-            // selection. Do not also send the legacy aggregate instruction copy.
-            .filter(|b| {
-                b.source != ContextSource::CurrentMessage
-                    && !(b.source == ContextSource::ImageCaption
-                        && b.text.starts_with("<untrusted-image-captions>"))
-            })
-            .collect::<Vec<_>>();
+        let mut blocks =
+            super::delegation::with_context(&ctx, &request, || super::context(&ctx, &request))?
+                .into_iter()
+                // Captions are hydrated into history below for reset/summary/budget
+                // selection. Do not also send the legacy aggregate instruction copy.
+                .filter(|b| {
+                    b.source != ContextSource::CurrentMessage
+                        && !(b.source == ContextSource::ImageCaption
+                            && b.text.starts_with("<untrusted-image-captions>"))
+                })
+                .collect::<Vec<_>>();
         if let Some(images) = take_image_inputs(&mut blocks)? {
             if input.images != images {
                 input.images = images;

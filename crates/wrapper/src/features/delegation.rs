@@ -30,7 +30,7 @@ use grokbot_skills::library;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::{cell::RefCell, collections::HashSet};
 
 pub fn routes(
     _: &mut crate::App,
@@ -52,6 +52,7 @@ const CONTEXT_BUDGET: usize = 32_000;
 const RESULT_CHARACTERS: usize = 8_000;
 const RECENT_RESULTS: usize = 5;
 const RECENT_STATE: usize = 50;
+const DELEGATION_FAILURE: &str = "Invalid or unavailable delegation context; no child was created.";
 
 pub fn migrate(conn: &Connection) -> std::result::Result<(), ApiError> {
     graph::migrate(conn)?;
@@ -61,7 +62,9 @@ pub fn migrate(conn: &Connection) -> std::result::Result<(), ApiError> {
         objective TEXT NOT NULL, refusal TEXT, created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS wrapper_delegation_status
-        ON delegation_graph(json_extract(status,'$.status'));",
+        ON delegation_graph(json_extract(status,'$.status'));
+    CREATE INDEX IF NOT EXISTS wrapper_delegation_calls_parent
+        ON wrapper_delegation_calls(parent_run_id);",
     )?;
     Ok(())
 }
@@ -157,11 +160,59 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
         }
         ctx.connection
             .execute_batch("RELEASE wrapper_delegation_tool")?;
-        result
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(_) => {
+                // A malformed final sibling must not strand children admitted
+                // by earlier receipts. Persist its failure OUTSIDE the rolled-
+                // back savepoint, then gate the batch on those existing children.
+                let outcome = batch_outcome(
+                    ctx,
+                    call,
+                    &parent,
+                    ToolOutcome::Failed {
+                        reason: DELEGATION_FAILURE.into(),
+                    },
+                )?;
+                if matches!(outcome, ToolOutcome::Suspend { .. }) {
+                    record_failed_call(ctx, call, &parent)?;
+                }
+                Ok(outcome)
+            }
+        }
     })();
     Some(result.unwrap_or_else(|_| ToolOutcome::Failed {
-        reason: "Invalid or unavailable delegation context; no child was created.".into(),
+        reason: DELEGATION_FAILURE.into(),
     }))
+}
+
+fn record_failed_call(ctx: &Context<'_>, call: &ToolCall, parent: &Run) -> Result<()> {
+    let id = format!(
+        "delegation_{}",
+        args_digest("delegation", &json!([parent.run_id, call.call_id]))?
+    );
+    let digest = args_digest(&call.name, &call.arguments)?;
+    let existing: Option<String> = ctx
+        .connection
+        .query_row(
+            "SELECT digest FROM wrapper_delegation_calls WHERE id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // Never overwrite a nonce binding. Keep a changed-argument replay failure
+    // separately while preserving the original admitted child's identity.
+    let id = if existing.as_ref().is_some_and(|old| old != &digest) {
+        format!(
+            "delegation_error_{}",
+            args_digest("delegation_failure", &json!([id, digest]))?
+        )
+    } else {
+        id
+    };
+    ctx.connection.execute("INSERT OR IGNORE INTO wrapper_delegation_calls(id,parent_run_id,digest,objective,refusal,created_at)
+        VALUES (?1,?2,?3,'',?4,?5)",params![id,parent.run_id,digest,DELEGATION_FAILURE,ctx.now_ms])?;
+    Ok(())
 }
 
 // All calls in a Responses batch are journalled before execution. Let earlier
@@ -184,13 +235,27 @@ fn batch_outcome(
         .filter_map(|e| e.payload["call_id"].as_str())
         .collect();
     let response = &events[index].payload["response"];
+    let usage = store::budget_usage(
+        ctx.connection,
+        &parent.run_id,
+        ctx.now_ms.min(i64::MAX as u64) as i64,
+    )?;
+    let mut pending = 0_u32;
     let later_delegate = events[index + 1..].iter().any(|event| {
-        event.kind == RunEventKind::ToolCall
-            && event.payload["name"] == "delegate"
+        let Some(id) = event.payload["call_id"].as_str() else {
+            return false;
+        };
+        if event.kind != RunEventKind::ToolCall || settled.contains(id) {
+            return false;
+        }
+        pending = pending.saturating_add(1);
+        // Non-object calls fail in the engine before reaching this adapter, and
+        // over-budget calls never execute. Neither can own the eventual wait.
+        event.payload["name"] == "delegate"
             && &event.payload["response"] == response
-            && event.payload["call_id"]
-                .as_str()
-                .is_some_and(|id| !settled.contains(id))
+            && !id.trim().is_empty()
+            && event.payload["arguments"].is_object()
+            && usage.tool_calls.saturating_add(pending) <= parent.budgets.tool_calls
     });
     if later_delegate {
         return Ok(match outcome {
@@ -208,11 +273,34 @@ fn batch_outcome(
             other => other,
         });
     }
-    let ids: Vec<_> = active_edges(ctx.connection)?
+    let mut ids: Vec<_> = active_edges(ctx.connection)?
         .into_iter()
         .filter(|d| d.parent_run_id == parent.run_id)
         .map(|d| d.id)
         .collect();
+    let batch_ids = events
+        .iter()
+        .filter(|e| {
+            e.kind == RunEventKind::ToolCall
+                && e.payload["name"] == "delegate"
+                && &e.payload["response"] == response
+        })
+        .filter_map(|e| e.payload["call_id"].as_str())
+        .map(|id| {
+            args_digest("delegation", &json!([parent.run_id, id]))
+                .map(|digest| format!("delegation_{digest}"))
+        })
+        .collect::<Result<HashSet<_>>>()?;
+    let mut seen: HashSet<_> = ids.iter().cloned().collect();
+    for wake in store::pending_wakes(ctx.connection)? {
+        if wake.run_id == parent.run_id
+            && wake.cause == WakeCause::Child
+            && batch_ids.contains(&wake.reference)
+            && seen.insert(wake.reference.clone())
+        {
+            ids.push(wake.reference);
+        }
+    }
     Ok(if ids.is_empty() {
         outcome
     } else {
@@ -717,6 +805,20 @@ pub fn on_run_event(ctx: &Context<'_>, event: &RunEvent) {
 // Called by the engine BEFORE launch, since its tick precedes delegation's.
 // The graph/run ancestry is bounded by Q3; no read of the parent's history occurs.
 pub fn parent_conversations_available(ctx: &Context<'_>, run: &Run) -> Result<bool> {
+    if matches!(run.trigger, Trigger::Delegation { .. }) {
+        let deleted: bool = ctx
+            .connection
+            .query_row(
+                "SELECT deleted FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+                params![ACCOUNT, run.conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(true);
+        if deleted {
+            return Ok(false);
+        }
+    }
     let mut current = run.clone();
     let mut seen = HashSet::new();
     while let Trigger::Delegation { delegation_id } = &current.trigger {
@@ -771,7 +873,27 @@ pub fn tick(ctx: &Context<'_>) {
                     react(&inner, &parent)?;
                 }
             }
-            if let Some(id) = &edge.child_run_id {
+            let Some(edge) = graph::get(&tx, &edge.id)?.filter(|d| {
+                matches!(
+                    d.status,
+                    DelegationStatus::Queued | DelegationStatus::Running
+                )
+            }) else {
+                continue;
+            };
+            let deleted: bool = tx
+                .query_row(
+                    "SELECT deleted FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+                    params![ACCOUNT, edge.conversation_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(true);
+            if deleted {
+                let mut cancelled = graph::set_status(&tx, &edge.id, &DelegationStatus::Cancelled)?;
+                cancelled.push(edge);
+                cancel_runs(&inner, cancelled)?;
+            } else if let Some(id) = &edge.child_run_id {
                 if let Some(run) = store::get(&tx, id)? {
                     react(&inner, &run)?;
                 }
@@ -875,9 +997,8 @@ fn live_selection(
 fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<String>> {
     let events = store::events(conn, &request.run_id, 0)?;
     let mut ids = Vec::new();
-    // Always retain the entire group which just woke this run, even if older
-    // than the recent-history window. Completed-before-wait children also appear
-    // among the most recent calls below.
+    // The wait now includes pending wakes from already-completed siblings too;
+    // retain that whole delivered group without reconstructing calls or hashes.
     if let Some(resumed) = events.iter().rposition(|e| e.kind == RunEventKind::Resumed) {
         if let Some(wait) = events[..resumed]
             .iter()
@@ -886,24 +1007,6 @@ fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<
         {
             if let Some(group) = wait.payload["cause"]["ids"].as_array() {
                 ids.extend(group.iter().filter_map(Value::as_str).map(str::to_owned));
-            }
-            // Include siblings completed before the last delegate entered the
-            // wait, which therefore no longer occurred in its active-child IDs.
-            if let Some(call) = events.iter().find(|e| {
-                e.kind == RunEventKind::ToolCall && e.payload["call_id"] == wait.payload["call_id"]
-            }) {
-                for sibling in events.iter().filter(|e| {
-                    e.kind == RunEventKind::ToolCall
-                        && e.payload["name"] == "delegate"
-                        && e.payload["response"] == call.payload["response"]
-                }) {
-                    if let Some(id) = sibling.payload["call_id"].as_str() {
-                        ids.push(format!(
-                            "delegation_{}",
-                            args_digest("delegation", &json!([request.run_id, id]))?
-                        ));
-                    }
-                }
             }
         }
     }
@@ -969,20 +1072,84 @@ fn result_context(conn: &Connection, request: &ContextRequest) -> Result<Option<
     }
 }
 
-// The engine calls this checked boundary before the void capability registry.
-// Vault/storage errors abort model preparation and use normal host retry/failure.
-pub fn validate_context(ctx: &Context<'_>, request: &ContextRequest) -> Result<()> {
+pub fn ensure_send_allowed(
+    ctx: &Context<'_>,
+    conversation: &str,
+) -> std::result::Result<(), ApiError> {
+    let active: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c
+        JOIN delegation_graph d ON d.conversation_id=c.id WHERE c.account_id=?1 AND c.id=?2 AND c.kind='task'
+        AND json_extract(d.status,'$.status') IN ('queued','running'))",
+        params![ACCOUNT,conversation],|r|r.get(0))?;
+    if active {
+        return Err(ApiError::new(
+            409,
+            "La tâche est en cours ; utilisez Stop ou attendez sa fin.",
+        ));
+    }
+    Ok(())
+}
+
+struct PreparedContext {
+    connection: usize,
+    run_id: String,
+    bot_id: String,
+    conversation_id: String,
+    trigger: Trigger,
+    blocks: Vec<ContextBlock>,
+}
+std::thread_local! { static PREPARED_CONTEXT: RefCell<Option<PreparedContext>> = const { RefCell::new(None) }; }
+// One checked snapshot per live assembly, scoped to this connection/request on
+// this thread. The registry reuses it; nested assembly/unwind restores its caller.
+pub fn with_context<T>(
+    ctx: &Context<'_>,
+    request: &ContextRequest,
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    let blocks = context_checked(ctx, request)?;
+    struct Restore(Option<PreparedContext>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREPARED_CONTEXT.with(|cache| {
+                cache.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(PREPARED_CONTEXT.with(|cache| {
+        cache.replace(Some(PreparedContext {
+            connection: ctx.connection as *const Connection as usize,
+            run_id: request.run_id.clone(),
+            bot_id: request.bot_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            trigger: request.trigger.clone(),
+            blocks,
+        }))
+    }));
+    Ok(operation())
+}
+pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
+    let prepared = PREPARED_CONTEXT.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .filter(|cached| {
+                // Delegated blocks depend on run/trigger/bot/conversation, not
+                // the current text or image transport bytes (never clone URLs).
+                cached.connection == ctx.connection as *const Connection as usize
+                    && cached.run_id == request.run_id
+                    && cached.bot_id == request.bot_id
+                    && cached.conversation_id == request.conversation_id
+                    && cached.trigger == request.trigger
+            })
+            .map(|cached| cached.blocks.clone())
+    });
+    prepared.unwrap_or_else(|| context_checked(ctx, request).unwrap_or_default())
+}
+fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
     if matches!(request.trigger, Trigger::Delegation { .. })
         && !parent_conversations_available(ctx, &store::required(ctx.connection, &request.run_id)?)?
     {
-        return Err(invalid("parent conversation is unavailable"));
+        return Err(invalid("task conversation is unavailable"));
     }
-    context_checked(ctx, request).map(|_| ())
-}
-pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
-    context_checked(ctx, request).unwrap_or_default()
-}
-fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<ContextBlock>> {
     let mut blocks = Vec::new();
     if let Trigger::Delegation { delegation_id } = &request.trigger {
         let edge = graph::get(ctx.connection, delegation_id)?

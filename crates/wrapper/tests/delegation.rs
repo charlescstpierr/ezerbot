@@ -232,6 +232,462 @@ fn suspended(outcome: ToolOutcome) -> String {
     }
 }
 
+fn context_request(run: &Run) -> ContextRequest {
+    ContextRequest {
+        run_id: run.run_id.clone(),
+        trigger: run.trigger.clone(),
+        bot_id: run.bot_id.clone(),
+        conversation_id: run.conversation_id.clone(),
+        current_message: HistoryItem {
+            entry_id: "current".into(),
+            role: Role::User,
+            text: "Verify selected material".into(),
+            images: vec![],
+            tool_items: vec![],
+        },
+    }
+}
+
+#[test]
+fn failed_last_delegate_waits_for_its_admitted_sibling() {
+    let mut invalid = Vec::new();
+    invalid.push(args("ghost-bot"));
+    let mut empty = args("child");
+    empty["objective"] = json!("");
+    invalid.push(empty);
+    let mut context = args("child");
+    context["selected_context"]["entry_ids"] = json!(["unreadable-entry"]);
+    invalid.push(context);
+    let mut schema = args("child");
+    schema["unknown"] = json!(true);
+    invalid.push(schema);
+    for bad in invalid {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        f.events(vec![
+            call("d1", "delegate", args("child")),
+            call("d2", "delegate", bad),
+            completed(),
+        ]);
+        f.send(&c, "failed-sibling", "Delegate independent work");
+        f.wait_parent(&c, "failed-sibling", RunStatus::AwaitingChildren);
+        let parent = f.run(&c, "failed-sibling");
+        let children = f.children(&parent);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].status, DelegationStatus::Running);
+        let failures:i64=f.db().query_row("SELECT COUNT(*) FROM wrapper_delegation_calls WHERE parent_run_id=?1 AND refusal IS NOT NULL",[&parent.run_id],|r|r.get(0)).unwrap();
+        assert_eq!(failures, 1);
+        f.child_done(&children[0]);
+        f.resume(&c, "failed-sibling");
+        let body = f
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(body.contains("Verified child summary"));
+        assert!(body.contains("Invalid or unavailable delegation context; no child was created."));
+        assert!(matches!(
+            graph::get(&f.db(), &children[0].id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DelegationStatus::Done { .. }
+        ));
+    }
+}
+
+#[test]
+fn non_object_last_delegate_cannot_own_the_batch_wait() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        call("d1", "delegate", args("child")),
+        call("d2", "delegate", json!([1])),
+        completed(),
+    ]);
+    f.send(&c, "invalid-args", "Delegate work");
+    f.wait_parent(&c, "invalid-args", RunStatus::AwaitingChildren);
+    let parent = f.run(&c, "invalid-args");
+    let edge = f.children(&parent).remove(0);
+    assert_eq!(edge.status, DelegationStatus::Running);
+    let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    assert!(events
+        .iter()
+        .any(|e| e.kind == RunEventKind::Suspended && e.payload["call_id"] == "d1"));
+    f.child_done(&edge);
+    f.resume(&c, "invalid-args");
+    let body = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(body.contains("Verified child summary") && body.contains("invalid arguments"));
+    assert!(matches!(
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+        DelegationStatus::Done { .. }
+    ));
+}
+
+#[test]
+fn tool_budget_cannot_skip_the_final_batch_wait() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let db = f.db();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let tx = features::write_transaction(&db).unwrap();
+    let root = model::start(
+        &tx,
+        &Run {
+            run_id: "budget-batch-root".into(),
+            bot_id: "grokbot".into(),
+            conversation_id: c,
+            trigger: Trigger::UserMessage {
+                message_id: "manual/budget".into(),
+                attempt: 0,
+            },
+            kind: RunKind::Chat,
+            status: RunStatus::Queued,
+            task_status: None,
+            turn_end: None,
+            budgets: RunBudgets {
+                tool_calls: 1,
+                ..RunBudgets::default()
+            },
+            started_at: now,
+        },
+    )
+    .unwrap();
+    let root = model::set_running_at(&tx, &root.run_id, now).unwrap();
+    tx.execute(
+        "INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,1,'gpt-test')",
+        rusqlite::params![
+            root.run_id,
+            serde_json::to_string(&context_request(&root).current_message).unwrap()
+        ],
+    )
+    .unwrap();
+    for (id, bot) in [("d1", "child"), ("d2", "other")] {
+        store::append_event(
+            &tx,
+            &root.run_id,
+            RunEventKind::ToolCall,
+            &json!({"call_id":id,"name":"delegate","arguments":args(bot),"response":1}),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    f.tick();
+    wait("budget batch waits", || {
+        store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
+    });
+    let edge = f.children(&root).remove(0);
+    assert_eq!(edge.status, DelegationStatus::Running);
+    f.child_done(&edge);
+    f.tick();
+    wait("budget ends only after child", || {
+        store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::Finished
+    });
+    assert_eq!(
+        store::required(&f.db(), &root.run_id).unwrap().turn_end,
+        Some(TurnEnd::BudgetExhausted)
+    );
+    assert!(matches!(
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+        DelegationStatus::Done { .. }
+    ));
+    assert!(!store::pending_wakes(&f.db())
+        .unwrap()
+        .iter()
+        .any(|w| w.run_id == root.run_id));
+}
+
+#[test]
+fn completed_before_batch_suspension_wake_is_delivered_with_the_group() {
+    let mut f = Fixture::new(false);
+    let root = f.root("early-completion-root");
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    for (id, bot) in [("d1", "child"), ("d2", "other")] {
+        store::append_event(
+            &tx,
+            &root.run_id,
+            RunEventKind::ToolCall,
+            &json!({"call_id":id,"name":"delegate","arguments":args(bot),"response":1}),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let first = f.tool(&root, "d1", "delegate", args("child"));
+    assert!(matches!(first, ToolOutcome::Done { .. }));
+    let edge = f.children(&root).remove(0);
+    let tx = features::write_transaction(&db).unwrap();
+    store::append_event(
+        &tx,
+        &root.run_id,
+        RunEventKind::ToolResult,
+        &json!({"call_id":"d1","outcome":first}),
+    )
+    .unwrap();
+    let mut child = model::set_running_at(&tx, edge.child_run_id.as_ref().unwrap(), 100).unwrap();
+    child.task_status = Some(TaskStatus::Done {
+        summary: "early summary".into(),
+    });
+    store::save(&tx, &child).unwrap();
+    let event = store::append_event(
+        &tx,
+        &child.run_id,
+        RunEventKind::TaskChanged,
+        &json!({"task_status":child.task_status}),
+    )
+    .unwrap();
+    delegation::on_run_event(&f.context(&tx, &child), &event);
+    tx.commit().unwrap();
+    let second = f.tool(&root, "d2", "delegate", args("other"));
+    let cause = match &second {
+        ToolOutcome::Suspend {
+            cause: SuspendCause::Children { ids },
+        } => {
+            assert_eq!(ids.len(), 2);
+            SuspendCause::Children { ids: ids.clone() }
+        }
+        other => panic!("{other:?}"),
+    };
+    let later = f
+        .children(&root)
+        .into_iter()
+        .find(|d| d.status == DelegationStatus::Running)
+        .unwrap();
+    let tx = features::write_transaction(&db).unwrap();
+    let mut parent = store::required(&tx, &root.run_id).unwrap();
+    parent.status = RunStatus::AwaitingChildren;
+    store::save(&tx, &parent).unwrap();
+    store::append_event(
+        &tx,
+        &root.run_id,
+        RunEventKind::ToolResult,
+        &json!({"call_id":"d2","outcome":second}),
+    )
+    .unwrap();
+    store::append_event(
+        &tx,
+        &root.run_id,
+        RunEventKind::Suspended,
+        &json!({"call_id":"d2","cause":cause}),
+    )
+    .unwrap();
+    let mut child = model::set_running_at(&tx, later.child_run_id.as_ref().unwrap(), 100).unwrap();
+    child.task_status = Some(TaskStatus::Done {
+        summary: "later summary".into(),
+    });
+    store::save(&tx, &child).unwrap();
+    let event = store::append_event(
+        &tx,
+        &child.run_id,
+        RunEventKind::TaskChanged,
+        &json!({"task_status":child.task_status}),
+    )
+    .unwrap();
+    delegation::on_run_event(&f.context(&tx, &child), &event);
+    model::resume(&tx, &root.run_id).unwrap();
+    tx.commit().unwrap();
+    assert!(!store::pending_wakes(&db)
+        .unwrap()
+        .iter()
+        .any(|w| w.run_id == root.run_id));
+    let events = store::events(&db, &root.run_id, 0).unwrap();
+    let resumed = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::Resumed)
+        .unwrap();
+    assert_eq!(resumed.payload["wake_ids"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn routines_and_all_delegated_result_tails_survive_assembly() {
+    let mut f = Fixture::new(false);
+    let root = f.root("routine-budget-root");
+    f.post("/api/routines",json!({"bot_id":"grokbot","name":"Routine index","prompt":"Daily check","schedule":"@daily","time_zone":"UTC","enabled":false}));
+    for n in 0..3 {
+        let id = suspended(f.tool(&root, &format!("result-{n}"), "delegate", args("child")));
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        graph::set_status(
+            &tx,
+            &id,
+            &DelegationStatus::Done {
+                result: format!("CHILD_{n}_BEGIN{}CHILD_{n}_END", "x".repeat(7_000)),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let db = f.db();
+    let request = context_request(&root);
+    let blocks = features::context(&f.context(&db, &root), &request)
+        .into_iter()
+        .filter(|b| b.source != ContextSource::CurrentMessage)
+        .collect::<Vec<_>>();
+    let assembled = grokbot_engine::context::assemble_input(
+        &request,
+        &blocks,
+        &[],
+        None,
+        None,
+        &ContextBudget::default(),
+    )
+    .unwrap();
+    let body = assembled
+        .blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("routines_total"));
+    for n in 0..3 {
+        assert!(body.contains(&format!("CHILD_{n}_END")));
+    }
+}
+
+#[test]
+fn child_routine_does_not_reduce_the_selected_context_window() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.post("/api/routines",json!({"bot_id":"child","name":"Child routine","prompt":"Daily check","schedule":"@daily","time_zone":"UTC","enabled":false}));
+    let mut a = args("child");
+    a["selected_context"]["texts"] =
+        json!([format!("{}SELECTED_CONTEXT_TAIL", "x".repeat(20_000))]);
+    let (_, edge) = f.begin(&c, "selected-window", a);
+    f.child_done(&edge);
+    let body = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(body.contains("SELECTED_CONTEXT_TAIL") && body.contains("routines_total"));
+    f.resume(&c, "selected-window");
+}
+
+#[test]
+fn active_task_send_is_rejected_without_a_second_run() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (_, edge) = f.begin(&c, "busy-thread", args("child"));
+    let task = edge.conversation_id.as_ref().unwrap();
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/send",
+            json!({"conversation_id":task,"message_id":"steer-child","body":"Change direction"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+    assert_eq!(
+        error.message,
+        "La tâche est en cours ; utilisez Stop ou attendez sa fin."
+    );
+    assert_eq!(
+        store::runs_for_conversation(&f.db(), task).unwrap().len(),
+        1
+    );
+    f.child_done(&edge);
+    f.resume(&c, "busy-thread");
+}
+
+#[test]
+fn deleting_waiting_task_thread_cancels_child_and_delivers_cancelled_to_parent() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "delete-child", args("child"));
+    f.events(vec![call("wait","request_form",json!({"fields":[{"name":"answer","label":"Answer","field_type":{"kind":"text"},"required":true}]})),completed()]);
+    f.tick();
+    wait("child input wait", || {
+        store::required(&f.db(), edge.child_run_id.as_ref().unwrap())
+            .unwrap()
+            .status
+            == RunStatus::AwaitingHumanInput
+    });
+    wait("child owner released", || {
+        f.provider.status()["titling"] == false
+    });
+    f.post(
+        "/api/conversations/delete",
+        json!({"id":edge.conversation_id}),
+    );
+    f.tick();
+    assert_eq!(
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+        DelegationStatus::Cancelled
+    );
+    assert_eq!(
+        store::required(&f.db(), edge.child_run_id.as_ref().unwrap())
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    assert!(store::pending_wakes(&f.db())
+        .unwrap()
+        .iter()
+        .any(|w| w.run_id == parent.run_id && w.reference == edge.id));
+    f.resume(&c, "delete-child");
+    assert!(f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("cancelled"));
+}
+
+#[test]
+fn checked_context_is_reused_once_and_cache_is_scoped_to_assembly() {
+    let mut f = Fixture::new(false);
+    let root = f.root("context-cache-root");
+    let mut a = args("child");
+    a["selected_context"]["texts"] = json!(["SCOPED_SELECTED_DATA"]);
+    let id = suspended(f.tool(&root, "cache", "delegate", a));
+    let edge = graph::get(&f.db(), &id).unwrap().unwrap();
+    let db = f.db();
+    let child = store::required(&db, edge.child_run_id.as_ref().unwrap()).unwrap();
+    let request = context_request(&child);
+    let ctx = f.context(&db, &child);
+    let blocks = delegation::with_context(&ctx, &request, || {
+        // If the hook recomputed context_checked, this malformed vault would
+        // erase/fail it. It must reuse the single already-checked snapshot.
+        std::fs::write(f.path.with_extension("secrets.json"), b"not-json").unwrap();
+        delegation::context(&ctx, &request)
+    })
+    .unwrap();
+    assert!(blocks
+        .iter()
+        .any(|b| b.text.contains("SCOPED_SELECTED_DATA")));
+    assert!(delegation::context(&ctx, &request).is_empty());
+    assert!(delegation::with_context(&ctx, &request, || ()).is_err());
+    std::fs::remove_file(f.path.with_extension("secrets.json")).unwrap();
+    let indexed:i64=db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='wrapper_delegation_calls_parent'",[],|r|r.get(0)).unwrap();
+    assert_eq!(indexed, 1);
+}
+
 #[test]
 fn parallel_delegates_in_one_response_run_concurrently() {
     let mut f = Fixture::new(true);

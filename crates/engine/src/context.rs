@@ -93,7 +93,7 @@ pub fn assemble_input_for_turn(
     {
         return Err(invalid("a nonempty app contract is required"));
     }
-    let mut caps = [limit; 9];
+    let mut caps = [limit; 10];
     for block in blocks {
         if matches!(
             block.source,
@@ -122,7 +122,7 @@ pub fn assemble_input_for_turn(
         ));
     }
     let mut remaining = limit;
-    let mut used = [0; 9];
+    let mut used = [0; 10];
     let mut kept = Vec::new();
     // Reserve the app contract before any optional context.
     for (index, block) in candidates
@@ -627,11 +627,12 @@ fn category(source: ContextSource) -> usize {
         ContextSource::SkillIndex => 3,
         ContextSource::Memory => 4,
         ContextSource::Summary => 5,
-        ContextSource::ToolResult
-        | ContextSource::ImageCaption
-        | ContextSource::DelegatedContext => 6,
-        ContextSource::History => 7,
-        ContextSource::CurrentMessage => 8,
+        ContextSource::ToolResult | ContextSource::ImageCaption => 6,
+        // Delegated data has its own cap: routine confirmations/image captions
+        // must not lower its budget, nor be evicted by a large child result.
+        ContextSource::DelegatedContext => 7,
+        ContextSource::History => 8,
+        ContextSource::CurrentMessage => 9,
     }
 }
 fn make_block(source: ContextSource, budget: usize, text: String) -> ContextBlock {
@@ -1631,6 +1632,44 @@ mod context_tests {
             assert!(external.text.chars().count() <= 2000);
             assert!(external.text.contains(TRUNCATION_MARKER));
         }
+    }
+
+    #[test]
+    fn delegated_context_has_a_separate_cap_from_routines_and_captions() {
+        let mut blocks = base();
+        blocks.push(block(
+            ContextSource::DelegatedContext,
+            94,
+            64_000,
+            &format!("{}DELEGATED_END", "x".repeat(22_000)),
+        ));
+        blocks.push(block(
+            ContextSource::ToolResult,
+            95,
+            16_000,
+            "routines_total: 1; pending_routine_confirmations: preserved",
+        ));
+        let assembled = assemble_input(
+            &request(),
+            &blocks,
+            &[],
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert!(assembled.blocks.iter().any(
+            |b| b.source == ContextSource::DelegatedContext && b.text.contains("DELEGATED_END")
+        ));
+        assert!(assembled
+            .blocks
+            .iter()
+            .any(|b| b.source == ContextSource::ToolResult
+                && b.text.contains("pending_routine_confirmations: preserved")));
+        assert_ne!(
+            category(ContextSource::DelegatedContext),
+            category(ContextSource::ToolResult)
+        );
     }
 
     #[test]

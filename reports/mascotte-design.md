@@ -1,6 +1,6 @@
 # Design autour de la mascotte
 
-L’utilisateur a demandé de refaire le wrapper en s’inspirant surtout de la mascotte animée de Grokbot. La nouvelle interface utilise des panneaux ivoire et sauge, un accent terracotta, une typographie sans sérif et un galet nacré au centre de l’accueil. La même silhouette apparaît dans la marque, le composeur, les réponses et la nouvelle icône Mac.
+L’utilisateur a demandé de refaire le wrapper en s’inspirant surtout de la mascotte animée de Grokbot. L’interface utilise des panneaux graphite, sombres par défaut, un thème clair neutre, une typographie sans sérif et un galet sombre aux yeux colorés au centre de l’accueil. Les yeux, les joues et le sourire prennent la couleur d’accent. La couleur d’accent se choisit dans les paramètres parmi neuf teintes (jaune citron par défaut); le serveur la conserve avec le thème dans `wrapper_preferences`. La même silhouette apparaît dans la marque, le composeur, les réponses et la nouvelle icône Mac.
 
 ## Référence conservée
 

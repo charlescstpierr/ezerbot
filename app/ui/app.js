@@ -3,14 +3,19 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const ui = {
-    list: $("conversation-list"), search: $("search"), input: $("composer-input"),
+    list: $("conversation-list"), search: $("search"), input: null,
     send: $("send-button"), welcome: $("welcome"), messages: $("messages"),
     scroll: $("chat-scroll"), title: $("conversation-title"), menu: $("conversation-menu"),
     menuButton: $("conversation-menu-button"), hint: $("composer-hint"),
     banner: $("connection-banner"), bannerText: $("connection-message"), toast: $("toast"),
   };
-  let state = { account: { name: "Espace personnel" }, mode: "simulated", conversations: [] };
+  let state = { account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots: [] };
   let selectedId = readPreference("grokbot.selected", null);
+  let chosenBotId = readPreference("grokbot.bot", "grokbot");
+  // Le bot ouvert dans le dialogue; `null` pour une création, dont l'identifiant reste stable entre deux essais.
+  let editingBotId = null;
+  let draftBotId = null;
+  const defaultWelcome = $("welcome-description").textContent;
   let favoriteOnly = false;
   let connected = false;
   let connectionStatus = "loading";
@@ -19,8 +24,14 @@
   const mascot = window.GrokbotMascot;
   let toastTimer;
   let simulateLoss = false;
-  let themeChoice = readPreference("grokbot.theme", "light");
+  let themeChoice = readPreference("grokbot.theme", "dark");
+  let accentChoice = readPreference("grokbot.accent", "citron");
+  const accents = ["citron", "orange", "ambre", "menthe", "cyan", "magenta", "vermillon", "violet", "blanc"];
   let preferencesLoaded = false;
+  let pollTimer;
+  let pickerKind = null;
+  const usageUrl = "https://chatgpt.com/settings/usage";
+  const effortNames = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
   const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
@@ -38,6 +49,16 @@
 
   function draftKey(id = selectedId) { return `grokbot.draft.${id || "new"}`; }
   function currentConversation() { return state.conversations.find((item) => item.id === selectedId); }
+  function botById(id) { return state.bots.find((bot) => bot.id === id); }
+  // Les bots supprimés restent dans l'état pour que leurs conversations gardent nom et couleur.
+  function liveBots() { return state.bots.filter((bot) => !bot.deleted); }
+  // Un choix devenu caduc (bot supprimé ailleurs) retombe sur le bot par défaut.
+  function chosenBot() { const bot = botById(chosenBotId); return bot && !bot.deleted ? bot : liveBots()[0]; }
+  function currentBot() { const conversation = currentConversation(); return conversation ? botById(conversation.bot_id) : chosenBot(); }
+  function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
+  function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
+  function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => message.state === "streaming"); }
+  function effortName(effort) { return effortNames[effort] || (effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : "Par défaut"); }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -106,13 +127,29 @@
     if (!preferencesLoaded) {
       preferencesLoaded = true;
       applyTheme(state.preferences?.theme || themeChoice);
+      applyAccent(state.preferences?.accent || accentChoice);
     }
     connected = true;
     connectionStatus = "online";
     ui.banner.hidden = true;
     if (selectedId && !state.conversations.some((item) => item.id === selectedId)) selectedId = null;
     writePreference("grokbot.selected", selectedId || "");
+    const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     render();
+    if (pinned && streamingMessage()) scrollToLatest();
+    schedulePoll();
+  }
+
+  // The engine writes a reply while it streams; the shell re-reads it until every reply settles.
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    const live = state.conversations.some((conversation) => streamingMessage(conversation));
+    const waiting = provider().signin === "pending" || provider().titling || (provider().connected && !provider().models_ready);
+    if (!live && !waiting) return;
+    pollTimer = setTimeout(async () => {
+      if (busy) { schedulePoll(); return; }
+      try { await refresh(); } catch { /* showConnectionError already told the user. */ }
+    }, live ? 200 : 800);
   }
 
   function showConnectionError(error) {
@@ -138,25 +175,23 @@
     else removePreference(draftKey());
   }
 
-  function resizeComposer() {
-    ui.input.style.height = "auto";
-    ui.input.style.height = `${Math.min(ui.input.scrollHeight, 180)}px`;
-  }
-
   function updateComposer() {
     const pendingMessage = currentConversation()?.messages.find((message) => message.role === "user" && pendingStates.has(message.state));
     const pending = Boolean(pendingMessage);
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
-    ui.send.disabled = busy || !connected || !ui.input.value.trim() || pending || tooLong;
-    ui.send.setAttribute("aria-label", busy ? "Envoi en cours" : "Envoyer le message");
-    ui.input.setAttribute("aria-invalid", String(tooLong));
+    const live = Boolean(streamingMessage());
+    ui.send.disabled = live ? false : busy || !connected || !ui.input.value.trim() || pending || tooLong;
+    ui.send.dataset.mode = live ? "stop" : "send";
+    ui.send.title = live ? "Arrêter la réponse" : "Envoyer le message";
+    ui.send.setAttribute("aria-label", live ? "Arrêter la réponse" : busy ? "Envoi en cours" : "Envoyer le message");
+    ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
+    ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong));
     ui.hint.textContent = pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
       activity: submissionActivity, pending: pendingMessage?.state || null, drafting: Boolean(ui.input.value.trim()) });
-    resizeComposer();
   }
 
   function selectConversation(id, focus = false) {
@@ -187,15 +222,16 @@
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86400000).toDateString();
     for (const conversation of items) {
+      const bot = botById(conversation.bot_id);
       const date = timestamp(conversation.updated_at).toDateString();
       const group = date === today ? "Aujourd’hui" : date === yesterday ? "Hier" : "Précédemment";
       if (group !== previousGroup) { ui.list.append(element("p", "list-group-title", group)); previousGroup = group; }
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
       button.dataset.conversationId = conversation.id;
-      button.title = conversation.title;
+      button.title = `${conversation.title} · ${botName(conversation.bot_id)}`;
       if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
-      button.append(icon("chat"), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
+      button.append(botDot(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
       if (conversation.messages.some((message) => message.state === "unknown")) button.append(element("span", "pending-indicator"));
       if (conversation.favorite) button.append(icon("star", "icon favorite-indicator"));
       button.addEventListener("click", () => { if (!busy) selectConversation(conversation.id); });
@@ -203,57 +239,125 @@
     }
   }
 
-  function renderMessage(message) {
-    const isUser = message.role === "user";
-    const article = element("article", `message ${isUser ? "message-user" : "message-assistant"}`);
-    article.dataset.messageId = message.id;
-    const avatar = element("div", "message-avatar", isUser ? "V" : undefined);
-    avatar.setAttribute("aria-hidden", "true");
-    if (!isUser) avatar.append(mascot ? mascot.create() : icon("mark"));
-    const content = element("div", "message-content");
-    const heading = element("div", "message-heading");
-    const date = timestamp(message.created_at);
-    const time = element("time", "", date.toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" }));
-    time.dateTime = date.toISOString();
-    heading.append(element("strong", "", isUser ? "Vous" : "Grokbot"), time);
-    content.append(heading, element("div", "message-body", message.body));
-    const actions = element("div", "message-actions");
-    const copy = element("button", "message-copy");
-    copy.type = "button";
-    copy.setAttribute("aria-label", isUser ? "Copier votre message" : "Copier la réponse");
-    copy.append(icon("copy"), element("span", "", "Copier"));
-    copy.addEventListener("click", async () => {
-      try {
-        await copyText(message.body);
-        copy.replaceChildren(icon("check"), element("span", "", "Copié"));
-        setTimeout(() => { if (copy.isConnected) copy.replaceChildren(icon("copy"), element("span", "", "Copier")); }, 1800);
-      } catch { notify("La copie n’est pas disponible. Sélectionnez le texte pour le copier."); }
-    });
-    actions.append(copy);
-    if (isUser && ["accepted", "echoed"].includes(message.state)) {
-      const status = element("span", "message-status");
-      status.append(icon("check"), document.createTextNode("Envoyé"));
-      actions.append(status);
-    }
-    if (isUser && ["queued", "dispatching"].includes(message.state)) actions.append(element("span", "message-status", "Envoi en cours…"));
-    if (message.state === "refused") actions.append(element("span", "message-status", "Envoi refusé"));
-    content.append(actions);
-    if (isUser && pendingStates.has(message.state) && (!busy || message.state === "unknown")) {
-      const card = element("div", "pending-card");
-      const copy = element("div", "pending-copy");
-      const queued = message.state === "queued";
-      copy.append(element("strong", "", queued ? "Ce message attend son envoi." : "Cet envoi attend confirmation."), element("p", "", queued ? "Votre message est sauvegardé. Reprenez l’envoi pour poursuivre." : "Votre message est sauvegardé. Vérifiez l’envoi pour poursuivre."));
-      const retry = element("button", "retry-button");
-      retry.type = "button";
-      retry.disabled = busy;
-      retry.append(icon("refresh"), document.createTextNode(queued ? "Reprendre l’envoi" : "Vérifier l’envoi"));
-      retry.addEventListener("click", () => queued ? resumeQueued(message) : reconcile(message.id));
-      card.append(copy, retry);
-      content.append(card);
-    }
-    article.append(avatar, content);
-    return article;
+  function botDot(bot) {
+    const dot = element("span", "bot-dot");
+    dot.setAttribute("aria-hidden", "true");
+    if (bot) dot.dataset.botColor = bot.color;
+    return dot;
   }
+
+  function renderBots() {
+    const chosen = chosenBot();
+    const chips = liveBots().map((bot) => {
+      const chip = element("button", "bot-chip");
+      chip.type = "button";
+      chip.dataset.botColor = bot.color;
+      chip.setAttribute("aria-pressed", String(bot.id === chosen?.id));
+      if (bot.description) chip.title = bot.description;
+      chip.append(botDot(bot), element("span", "", bot.name));
+      chip.addEventListener("click", () => { chosenBotId = bot.id; writePreference("grokbot.bot", bot.id); render(); });
+      return chip;
+    });
+    const add = element("button", "bot-chip add-bot");
+    add.type = "button";
+    add.append(icon("plus"), element("span", "", "Nouveau bot"));
+    add.addEventListener("click", () => openBotDialog(null));
+    $("bot-chips").replaceChildren(...chips, add);
+    $("welcome-description").textContent = chosen?.description || defaultWelcome;
+
+    $("bot-list").replaceChildren(...liveBots().map((bot) => {
+      const row = element("div", "bot-row");
+      const copy = element("div");
+      copy.append(element("strong", "", bot.name), element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Aucune description.")));
+      const edit = element("button", "secondary-button", "Modifier");
+      edit.type = "button";
+      edit.setAttribute("aria-label", `Modifier ${bot.name}`);
+      edit.addEventListener("click", () => openBotDialog(bot));
+      row.append(botDot(bot), copy, edit);
+      return row;
+    }));
+  }
+
+  function openBotDialog(bot) {
+    closeMenu();
+    editingBotId = bot?.id || null;
+    if (!bot && !draftBotId) draftBotId = crypto.randomUUID();
+    const values = bot || { name: "", color: chosenBot()?.color || "citron", description: "", instructions: "" };
+    $("bot-dialog-title").textContent = bot ? `Modifier ${bot.name}` : "Nouveau bot";
+    $("bot-save").textContent = bot ? "Enregistrer" : "Créer le bot";
+    $("bot-name").value = values.name;
+    $("bot-description").value = values.description;
+    $("bot-instructions").value = values.instructions;
+    selectBotColor(values.color);
+    $("bot-delete-button").hidden = !bot || bot.is_default;
+    $("bot-dialog").showModal();
+    $("bot-name").focus();
+  }
+
+  function selectBotColor(color) {
+    $("bot-colors").querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.botColor === color)));
+  }
+
+  function upsertBot(bot) {
+    const index = state.bots.findIndex((item) => item.id === bot.id);
+    if (index === -1) state.bots.push(bot);
+    else state.bots[index] = bot;
+  }
+
+  async function saveBot(event) {
+    event.preventDefault();
+    const name = $("bot-name").value.trim();
+    if (!name) { notify("Donnez un nom à votre bot."); $("bot-name").focus(); return; }
+    const values = {
+      name,
+      color: $("bot-colors").querySelector("[aria-pressed=true]")?.dataset.botColor || "citron",
+      description: $("bot-description").value.trim(),
+      instructions: $("bot-instructions").value.trim(),
+    };
+    const existing = botById(editingBotId);
+    // Seuls les champs modifiés partent : enregistrer sans rien changer ne personnalise pas le bot par défaut.
+    const changes = existing ? Object.fromEntries(Object.entries(values).filter(([key, value]) => existing[key] !== value)) : values;
+    if (existing && !Object.keys(changes).length) { $("bot-dialog").close(); return; }
+    $("bot-save").disabled = true;
+    try {
+      const { bot } = existing
+        ? await api("/api/bots/update", { id: existing.id, ...changes })
+        : await api("/api/bots", { id: draftBotId, ...changes });
+      upsertBot(bot);
+      if (!existing) { draftBotId = null; chosenBotId = bot.id; writePreference("grokbot.bot", bot.id); }
+      $("bot-dialog").close();
+      render();
+      notify(existing ? "Bot enregistré." : `${bot.name} est prêt.`);
+    } catch (error) { notify(error.message); }
+    finally { $("bot-save").disabled = false; }
+  }
+
+  async function deleteBot() {
+    const bot = botById(editingBotId);
+    if (!bot) return;
+    $("confirm-bot-delete").disabled = true;
+    try {
+      await api("/api/bots/delete", { id: bot.id });
+      upsertBot({ ...bot, deleted: true });
+      $("bot-delete-dialog").close();
+      $("bot-dialog").close();
+      render();
+      notify(`${bot.name} a été supprimé.`);
+    } catch (error) { notify(error.message); }
+    finally { $("confirm-bot-delete").disabled = false; }
+  }
+
+  const thread = {
+    createMascot: () => mascot?.create(),
+    onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
+    onRegenerate: (message) => generation("/api/regenerate", message.id.replace(/^reply-/, "")),
+    onSignIn: () => signIn(),
+    usageUrl,
+    async onCopy(text) {
+      try { await copyText(text); return true; }
+      catch { notify("La copie n’est pas disponible. Sélectionnez le texte pour le copier."); return false; }
+    },
+  };
 
   function render() {
     const conversation = currentConversation();
@@ -262,13 +366,158 @@
     $("account-name").textContent = name;
     $("account-avatar").textContent = name.charAt(0).toLocaleUpperCase("fr");
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
+    const bot = currentBot();
+    $("workspace-label").textContent = conversation ? botName(conversation.bot_id) : "Espace personnel";
+    if (bot) document.querySelector(".main-panel").dataset.botColor = bot.color;
+    else delete document.querySelector(".main-panel").dataset.botColor;
+    document.querySelector("[data-mascot=hero]").setAttribute("aria-label", `Faire sourire ${bot?.name || "Grokbot"}`);
+    $("edit-bot-button").disabled = !bot || bot.deleted;
     document.title = conversation ? `${conversation.title} · Grokbot` : "Grokbot";
     ui.welcome.hidden = hasMessages;
     ui.messages.hidden = !hasMessages;
-    ui.messages.replaceChildren(...(conversation?.messages || []).map(renderMessage));
+    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Grokbot", ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
+    renderBots();
+    renderProvider();
     updateComposer();
+  }
+
+  function pill(kind, label, value, enabled = true) {
+    const button = element("button", "tool-pill");
+    button.type = "button";
+    button.dataset.picker = kind;
+    button.disabled = !enabled;
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", String(pickerKind === kind));
+    button.append(element("small", "", label), element("b", "", value), icon("chevron"));
+    return button;
+  }
+
+  function option(label, hint, checked, change) {
+    const button = element("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitemradio");
+    button.setAttribute("aria-checked", String(checked));
+    const copy = element("span", "", label);
+    if (hint) copy.append(element("small", "", hint));
+    button.append(copy, icon("check"));
+    button.addEventListener("click", async () => {
+      closePicker();
+      try {
+        const response = await api("/api/preferences", change);
+        state.preferences = { ...state.preferences, ...response.preferences };
+      } catch (error) { notify(error.message); }
+      renderProvider();
+    });
+    return button;
+  }
+
+  function closePicker() { pickerKind = null; $("picker").hidden = true; }
+
+  function renderPicker() {
+    const picker = $("picker");
+    picker.hidden = !pickerKind;
+    if (!pickerKind) return;
+    const { models = [] } = provider();
+    const { model, effort, fast } = state.preferences || {};
+    const selected = models.find((item) => item.slug === model);
+    const title = { model: "Modèle", effort: "Effort de réflexion", speed: "Vitesse" }[pickerKind];
+    const options = pickerKind === "model" ? models.map((item) => option(item.name, item.description, item.slug === model, { model: item.slug }))
+      : pickerKind === "effort" ? (selected?.efforts || []).map((level) => option(effortName(level.effort), level.description, level.effort === effort, { effort: level.effort }))
+      : [option("Standard", "", !fast, { fast: false }), ...(selected?.tiers || []).slice(0, 1).map((tier) => option(tier.name, tier.description, Boolean(fast), { fast: true }))];
+    const foot = element("div", "picker-foot");
+    const link = element("a", "usage-link", "Gérer l’utilisation");
+    link.href = usageUrl; link.target = "_blank"; link.rel = "noreferrer";
+    foot.append(element("span", "", "Abonnement ChatGPT utilisé"), link);
+    picker.replaceChildren(element("h4", "", title), ...options, foot);
+  }
+
+  function renderProvider() {
+    const current = provider();
+    const { model, effort, fast } = state.preferences || {};
+    const selected = (current.models || []).find((item) => item.slug === model);
+    $("mode-badge-text").textContent = current.connected ? "ChatGPT" : "Local";
+    $("plan-banner").hidden = current.connected;
+    document.querySelectorAll("[data-provider-signin]").forEach((button) => { button.disabled = current.signin === "pending"; });
+
+    const tools = $("composer-tools");
+    if (current.connected) {
+      tools.replaceChildren(
+        pill("model", "Modèle", selected?.name || (current.models_ready ? "Aucun modèle" : "Chargement…"), Boolean(current.models?.length)),
+        pill("effort", "Effort", selected?.efforts.length ? effortName(effort) : "Par défaut", Boolean(selected?.efforts.length)),
+        // Speed is offered only by models that list a service tier.
+        ...(selected?.tiers.length ? [pill("speed", "Vitesse", fast ? selected.tiers[0].name : "Standard")] : []),
+      );
+      if (pickerKind === "speed" && !selected?.tiers.length) pickerKind = null;
+    } else {
+      closePicker();
+      tools.replaceChildren(document.createTextNode(`${currentBot()?.name || "Grokbot"} `), element("span", "composer-local", "Local"));
+    }
+    renderPicker();
+
+    const note = $("mode-note");
+    if (current.connected) {
+      const link = element("a", "", "Gérer l’utilisation");
+      link.href = usageUrl; link.target = "_blank"; link.rel = "noreferrer";
+      note.replaceChildren(document.createTextNode("Abonnement ChatGPT utilisé · "), link);
+    } else {
+      note.replaceChildren(element("span", "simulation-dot"), document.createTextNode("Réponses simulées"));
+    }
+
+    const card = element("div", "provider-card");
+    const copy = element("div");
+    const actions = element("div", "provider-actions");
+    const heading = element("h3", "", current.connected ? "Connecté à ChatGPT" : "Utiliser votre abonnement ChatGPT");
+    if (current.connected) heading.prepend(element("span", "status-dot"));
+    copy.append(heading, element("p", "", current.connected ? current.email || "Compte ChatGPT"
+      : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
+      : "Les réponses de Grokbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
+    if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
+    const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
+    if (current.connected) {
+      const link = element("a", "secondary-button", "Gérer l’utilisation");
+      link.href = usageUrl; link.target = "_blank"; link.rel = "noreferrer";
+      actions.append(link, action("Se déconnecter", "secondary-button", signOut));
+    } else if (current.signin === "pending") {
+      actions.append(action("Annuler", "secondary-button", () => providerAction("/api/provider/cancel")));
+    } else {
+      actions.append(action("Continuer avec ChatGPT", "chatgpt-button", signIn));
+    }
+    card.append(copy, actions);
+    $("provider-section").replaceChildren(card);
+
+    const dialog = $("plan-dialog");
+    if (current.connected && !current.welcomed && !dialog.open) dialog.showModal();
+  }
+
+  async function providerAction(path) {
+    try {
+      const response = await api(path, {});
+      state.provider = response.provider;
+      renderProvider();
+      schedulePoll();
+      return response;
+    } catch (error) { notify(error.message); return null; }
+  }
+
+  function signIn() { return providerAction("/api/provider/signin"); }
+
+  async function signOut() {
+    const response = await providerAction("/api/provider/signout");
+    if (response && !response.revoked) notify("Déconnecté sur ce Mac. OpenAI n’a pas confirmé : vous pouvez retirer Grokbot dans les réglages de ChatGPT.");
+    if (response) await refresh().catch(() => {});
+  }
+
+  async function generation(path, messageId) {
+    const conversation = currentConversation();
+    if (!conversation) return;
+    try {
+      const response = await api(path, { conversation_id: conversation.id, message_id: messageId });
+      upsertConversation(response.conversation);
+      render();
+      schedulePoll();
+    } catch (error) { notify(error.message); }
   }
 
   function scrollToLatest() {
@@ -280,7 +529,7 @@
     busy = true;
     updateComposer();
     try {
-      const { conversation } = await api("/api/conversations", {});
+      const { conversation } = await api("/api/conversations", { bot_id: chosenBot()?.id });
       upsertConversation(conversation);
       selectConversation(conversation.id, true);
     } catch (error) { notify(error.message); }
@@ -289,6 +538,8 @@
 
   async function sendMessage(event) {
     event.preventDefault();
+    const live = streamingMessage();
+    if (live) { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const body = ui.input.value.trim();
     let conversation = currentConversation();
@@ -300,7 +551,7 @@
     let previousDraftKey = draftKey();
     try {
       if (!conversation) {
-        const created = await api("/api/conversations", {});
+        const created = await api("/api/conversations", { bot_id: chosenBot()?.id });
         upsertConversation(created.conversation);
         conversation = created.conversation;
         selectedId = conversation.id;
@@ -322,6 +573,7 @@
       delivered = response.conversation.messages.some((message) => message.id === messageId && ["accepted", "echoed"].includes(message.state));
       render();
       scrollToLatest();
+      schedulePoll();
     } catch (error) {
       if (messageId) {
         try {
@@ -394,7 +646,7 @@
   }
 
   function applyTheme(choice) {
-    themeChoice = ["light", "dark", "system"].includes(choice) ? choice : "light";
+    themeChoice = ["light", "dark", "system"].includes(choice) ? choice : "dark";
     document.documentElement.dataset.theme = themeChoice === "system" ? (systemTheme.matches ? "dark" : "light") : themeChoice;
     writePreference("grokbot.theme", themeChoice);
     document.querySelectorAll("[data-theme-choice]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.themeChoice === themeChoice)));
@@ -438,12 +690,10 @@
     $("favorites-filter").setAttribute("aria-label", favoriteOnly ? "Afficher toutes les conversations" : "Afficher les favoris");
     renderList();
   });
-  ui.input.addEventListener("input", () => { saveDraft(); updateComposer(); });
-  ui.input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-      event.preventDefault();
-      if (!ui.send.disabled) $("composer-form").requestSubmit();
-    }
+  ui.input = window.GrokbotChat.mountInput($("composer-input"), {
+    placeholder: "Qu’avez-vous en tête ?",
+    onInput: () => { saveDraft(); updateComposer(); },
+    onSubmit: () => { if (!ui.send.disabled && !streamingMessage()) $("composer-form").requestSubmit(); },
   });
   $("composer-form").addEventListener("submit", sendMessage);
   document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {
@@ -451,13 +701,19 @@
     saveDraft();
     updateComposer();
     ui.input.focus();
-    ui.input.setSelectionRange(ui.input.value.length, ui.input.value.length);
   }));
   ui.menuButton.addEventListener("click", () => {
     ui.menu.hidden = !ui.menu.hidden;
     ui.menuButton.setAttribute("aria-expanded", String(!ui.menu.hidden));
   });
-  document.addEventListener("click", (event) => { if (!ui.menu.contains(event.target) && !ui.menuButton.contains(event.target)) closeMenu(); });
+  document.addEventListener("click", (event) => {
+    if (!ui.menu.contains(event.target) && !ui.menuButton.contains(event.target)) closeMenu();
+    const opener = event.target.closest("[data-picker]");
+    if (opener) { pickerKind = pickerKind === opener.dataset.picker ? null : opener.dataset.picker; renderProvider(); }
+    else if (pickerKind && !$("picker").contains(event.target)) { closePicker(); renderProvider(); }
+    if (event.target.closest("[data-provider-signin]")) signIn();
+  });
+  $("plan-acknowledge").addEventListener("click", async () => { $("plan-dialog").close(); await providerAction("/api/provider/welcomed"); });
   $("sidebar-toggle").addEventListener("click", () => {
     const open = document.body.classList.toggle("sidebar-open");
     $("sidebar-toggle").setAttribute("aria-expanded", String(open));
@@ -467,6 +723,13 @@
   $("sidebar-scrim").addEventListener("click", closeSidebar);
   $("settings-button").addEventListener("click", () => { closeSidebar(); $("settings-dialog").showModal(); });
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
+  function applyAccent(choice) {
+    accentChoice = accents.includes(choice) ? choice : "citron";
+    document.documentElement.dataset.accent = accentChoice;
+    writePreference("grokbot.accent", accentChoice);
+    document.querySelectorAll("[data-accent-choice]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.accentChoice === accentChoice)));
+  }
+
   document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("click", (event) => {
     if (event.target !== dialog) return;
     const rect = dialog.getBoundingClientRect();
@@ -481,6 +744,15 @@
       applyTheme(response.preferences?.theme || response.theme || theme);
     } catch (error) { notify(error.message); }
     finally { buttons.forEach((item) => { item.disabled = false; }); }
+  }));
+  document.querySelectorAll("[data-accent-choice]").forEach((button) => button.addEventListener("click", async () => {
+    const accent = button.dataset.accentChoice;
+    const previous = accentChoice;
+    applyAccent(accent);
+    try {
+      const response = await api("/api/preferences", { accent });
+      applyAccent(response.preferences?.accent || accent);
+    } catch (error) { applyAccent(previous); notify(error.message); }
   }));
   systemTheme.addEventListener("change", () => { if (themeChoice === "system") applyTheme("system"); });
   $("simulate-loss").addEventListener("change", (event) => { simulateLoss = event.target.checked; });
@@ -502,6 +774,20 @@
     if (conversation) await updateConversation({ favorite: !conversation.favorite });
   });
   $("export-button").addEventListener("click", exportConversation);
+  $("edit-bot-button").addEventListener("click", () => { const bot = currentBot(); if (bot) openBotDialog(bot); });
+  document.querySelectorAll("[data-new-bot]").forEach((button) => button.addEventListener("click", () => openBotDialog(null)));
+  // Les pastilles du bot reprennent celles de l'accent, sans leur effet sur l'application.
+  $("bot-colors").replaceChildren(...[...document.querySelectorAll("[data-accent-choice]")].map((swatch) => {
+    const button = swatch.cloneNode(true);
+    button.dataset.botColor = swatch.dataset.accentChoice;
+    button.removeAttribute("data-accent-choice");
+    button.type = "button";
+    button.addEventListener("click", () => selectBotColor(button.dataset.botColor));
+    return button;
+  }));
+  $("bot-form").addEventListener("submit", saveBot);
+  $("bot-delete-button").addEventListener("click", () => $("bot-delete-dialog").showModal());
+  $("confirm-bot-delete").addEventListener("click", deleteBot);
   $("delete-button").addEventListener("click", () => { closeMenu(); $("delete-dialog").showModal(); });
   $("confirm-delete").addEventListener("click", async () => {
     const conversation = currentConversation();
@@ -530,7 +816,7 @@
     finally { $("reconnect-button").disabled = false; }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { closeMenu(); closeSidebar(); }
+    if (event.key === "Escape") { closeMenu(); closeSidebar(); if (pickerKind) { closePicker(); renderProvider(); } }
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     const dialogOpen = Boolean(document.querySelector("dialog[open]"));
     if (event.key.toLowerCase() === "n" && !dialogOpen) { event.preventDefault(); newConversation(); }
@@ -546,6 +832,7 @@
   });
 
   applyTheme(themeChoice);
+  applyAccent(accentChoice);
   ui.input.value = readPreference(draftKey(), "");
   render();
   refresh().then(() => {

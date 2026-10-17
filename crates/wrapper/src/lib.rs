@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod provider;
+
+pub use provider::{Endpoints, Provider};
+
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::Path;
@@ -36,6 +40,22 @@ CREATE TABLE IF NOT EXISTS wrapper_conversations (
     deleted INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    bot_id TEXT NOT NULL DEFAULT 'grokbot',
+    PRIMARY KEY (account_id, id)
+);
+CREATE TABLE IF NOT EXISTS wrapper_bots (
+    account_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    template TEXT,
+    template_version INTEGER,
+    customized INTEGER NOT NULL DEFAULT 0,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
     PRIMARY KEY (account_id, id)
 );
 CREATE TABLE IF NOT EXISTS wrapper_messages (
@@ -58,9 +78,44 @@ CREATE TABLE IF NOT EXISTS wrapper_remote (
 );
 CREATE TABLE IF NOT EXISTS wrapper_preferences (
     account_id TEXT PRIMARY KEY,
-    theme TEXT NOT NULL CHECK (theme IN ('light', 'dark', 'system'))
+    theme TEXT NOT NULL CHECK (theme IN ('light', 'dark', 'system')),
+    accent TEXT NOT NULL DEFAULT 'citron',
+    model TEXT,
+    effort TEXT,
+    fast INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS wrapper_generation (
+    account_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('streaming', 'done', 'failed', 'stopped')),
+    error TEXT,
+    error_kind TEXT,
+    notice TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, conversation_id, message_id)
 );
 ";
+
+const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule les réponses.\n\n```mermaid\nflowchart LR\n  A[Votre message] --> B{Grokbot}\n  B -->|texte| C[Réponse]\n  B -->|schéma| D[Diagramme]\n  C & D --> E[(Historique local)]\n```\n\nPassez la souris sur le diagramme pour le copier, le télécharger ou l'agrandir.";
+const DEMO_CODE: &str = "Voici un exemple de code. Le mode local simule les réponses.\n\n```rust\nfn saluer(nom: &str) -> String {\n    format!(\"Bonjour, {nom} !\")\n}\n\nfn main() {\n    println!(\"{}\", saluer(\"Grokbot\"));\n}\n```\n\nLe bouton en haut du bloc copie le code.";
+const DEMO_TABLE: &str = "Voici un tableau d'exemple. Le mode local simule les réponses.\n\n| Élément | Rôle | État |\n| --- | --- | --- |\n| Moteur Rust | Garde l'historique | Actif |\n| Interface | Affiche la conversation | Active |\n| Service d'IA | Répond aux messages | **Non connecté** |\n\nLa formule $E = mc^2$ s'affiche aussi.";
+
+/// The simulated engine has no model. A few keywords pick a canned reply that shows the
+/// rich rendering (diagram, code, table); everything else gets the plain acknowledgement.
+fn demo_reply(body: &str) -> &'static str {
+    let body = body.to_lowercase();
+    let mentions = |words: &[&str]| words.iter().any(|word| body.contains(word));
+    if mentions(&["diagramme", "schéma", "schema", "mermaid"]) {
+        DEMO_DIAGRAM
+    } else if mentions(&["code", "rust", "fonction"]) {
+        DEMO_CODE
+    } else if mentions(&["tableau", "formule"]) {
+        DEMO_TABLE
+    } else {
+        DEMO_REPLY
+    }
+}
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -111,6 +166,7 @@ impl From<SessionError> for ApiError {
 #[derive(Debug, Serialize)]
 pub struct Conversation {
     pub id: String,
+    pub bot_id: String,
     pub title: String,
     pub favorite: bool,
     pub updated_at: u64,
@@ -124,12 +180,129 @@ pub struct Message {
     pub body: String,
     pub state: &'static str,
     pub created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// Un bot tel que l'interface et la génération le voient.
+#[derive(Debug, Serialize)]
+pub struct Bot {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    /// Publique : présentée dans l'interface et donnée au modèle comme contrainte de rôle.
+    pub description: String,
+    /// Privées : la façon dont le bot se comporte.
+    pub instructions: String,
+    pub is_default: bool,
+    pub template: Option<String>,
+    pub customized: bool,
+    /// Une pierre tombale : le bot ne démarre plus de conversation, mais les siennes gardent son nom.
+    pub deleted: bool,
+}
+
+/// Le bot livré avec l'application. Augmenter `version` réécrit les copies que l'utilisateur
+/// n'a pas modifiées.
+struct BotTemplate {
+    id: &'static str,
+    version: i64,
+    name: &'static str,
+    color: &'static str,
+    description: &'static str,
+    instructions: &'static str,
+}
+
+const DEFAULT_BOT: BotTemplate = BotTemplate {
+    id: "grokbot",
+    version: 1,
+    name: "Grokbot",
+    color: "citron",
+    description: "Un petit compagnon curieux et chaleureux, prêt à faire grandir vos idées.",
+    instructions: "Tu es chaleureux, curieux et direct. Va à l'essentiel, pose une question quand la demande est ambiguë, et propose un prochain pas concret quand c'est utile.",
+};
+
+/// Le contrat d'affichage de l'application, commun à tous les bots.
+const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
+
+fn compose_instructions(bot: &Bot) -> String {
+    let mut parts = vec![
+        BASE_INSTRUCTIONS.to_owned(),
+        format!("Tu t'appelles {}.", bot.name),
+    ];
+    if !bot.description.is_empty() {
+        parts.push(format!(
+            "Ton rôle, tel que les autres le voient : {}",
+            bot.description
+        ));
+    }
+    if !bot.instructions.is_empty() {
+        parts.push(format!(
+            "Consignes privées sur ta façon de te comporter :\n{}",
+            bot.instructions
+        ));
+    }
+    parts.join("\n\n")
+}
+
+/// Pose le bot par défaut, ou le met à niveau tant que l'utilisateur ne l'a pas modifié.
+fn seed_default_bot(connection: &Connection) -> Result<(), ApiError> {
+    connection.execute(
+        "INSERT INTO wrapper_bots (account_id, id, name, color, description, instructions, template, template_version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?2, ?7, ?8, ?8)
+         ON CONFLICT(account_id, id) DO UPDATE SET name = excluded.name, description = excluded.description,
+             instructions = excluded.instructions, template_version = excluded.template_version, updated_at = excluded.updated_at
+         WHERE wrapper_bots.customized = 0 AND COALESCE(wrapper_bots.template_version, 0) < excluded.template_version",
+        params![
+            ACCOUNT,
+            DEFAULT_BOT.id,
+            DEFAULT_BOT.name,
+            DEFAULT_BOT.color,
+            DEFAULT_BOT.description,
+            DEFAULT_BOT.instructions,
+            DEFAULT_BOT.version,
+            now()
+        ],
+    )?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateConversation {
     title: Option<String>,
+    bot_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBot {
+    id: String,
+    name: String,
+    color: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    instructions: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateBot {
+    id: String,
+    name: Option<String>,
+    color: Option<String>,
+    description: Option<String>,
+    instructions: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteBot {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -166,17 +339,52 @@ struct DeleteConversation {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preferences {
-    theme: String,
+    theme: Option<String>,
+    accent: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    fast: Option<bool>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+/// État, erreur, type d'erreur et note d'une génération.
+type GenerationRow = (String, Option<String>, Option<String>, Option<String>);
+
+/// Modèle, effort et palier de vitesse réellement envoyés.
+type ResolvedModel = (String, Option<String>, Option<String>);
+
+const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
+
+const DEFAULT_THEME: &str = "dark";
+const DEFAULT_ACCENT: &str = "citron";
+const ACCENTS: [&str; 9] = [
+    "citron",
+    "orange",
+    "ambre",
+    "menthe",
+    "cyan",
+    "magenta",
+    "vermillon",
+    "violet",
+    "blanc",
+];
 
 pub struct App {
     connection: Connection,
     reader: SessionStore,
     session: SubmissionSession,
+    provider: Provider,
 }
 
 impl App {
     pub fn open(path: &Path) -> Result<Self, ApiError> {
+        Self::open_with(path, Provider::new(path))
+    }
+
+    pub fn open_with(path: &Path, provider: Provider) -> Result<Self, ApiError> {
         let account_id = AccountId::new(ACCOUNT).expect("constant account ID");
         let reader = SessionStore::open(path, &account_id)?;
         let generation = reader
@@ -199,18 +407,168 @@ impl App {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(3))?;
         connection.execute_batch(SCHEMA)?;
-        let has_title_source: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_conversations') WHERE name = 'title_customized')",
-            [], |row| row.get(0),
-        )?;
-        if !has_title_source {
-            connection.execute("ALTER TABLE wrapper_conversations ADD COLUMN title_customized INTEGER NOT NULL DEFAULT 0", [])?;
+        // Colonnes ajoutées après la première version : une ancienne base les reçoit avec leur défaut.
+        for (table, column, definition) in [
+            (
+                "wrapper_conversations",
+                "title_customized",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "wrapper_conversations",
+                "bot_id",
+                "TEXT NOT NULL DEFAULT 'grokbot'",
+            ),
+            (
+                "wrapper_preferences",
+                "accent",
+                "TEXT NOT NULL DEFAULT 'citron'",
+            ),
+            ("wrapper_preferences", "model", "TEXT"),
+            ("wrapper_preferences", "effort", "TEXT"),
+            ("wrapper_preferences", "fast", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let present: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+                [table, column],
+                |row| row.get(0),
+            )?;
+            if !present {
+                connection.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
         }
+        seed_default_bot(&connection)?;
+        // Aucun fil d'exécution ne survit au processus : une génération restée ouverte est perdue.
+        connection.execute(
+            "UPDATE wrapper_generation SET status = 'failed', error = ?1, error_kind = 'other', updated_at = ?2 WHERE status = 'streaming'",
+            params![INTERRUPTED, now()],
+        )?;
         Ok(Self {
             connection,
             reader,
             session,
+            provider,
         })
+    }
+
+    fn model_preferences(&self) -> Result<(Option<String>, Option<String>, bool), ApiError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT model, effort, fast FROM wrapper_preferences WHERE account_id = ?1",
+                [ACCOUNT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None, false)))
+    }
+
+    /// Le modèle et l'effort réellement envoyés : la préférence si le catalogue du compte la
+    /// contient, sinon le premier modèle et son réglage par défaut.
+    fn resolved_model(&self) -> Result<Option<ResolvedModel>, ApiError> {
+        let (model, effort, fast) = self.model_preferences()?;
+        let models = self.provider.models();
+        let Some(chosen) = models
+            .iter()
+            .find(|candidate| Some(&candidate.slug) == model.as_ref())
+            .or_else(|| models.first())
+        else {
+            return Ok(None);
+        };
+        let effort = effort
+            .filter(|effort| chosen.efforts.iter().any(|level| level.effort == *effort))
+            .or_else(|| chosen.default_effort.clone());
+        // « Fast » n'existe que pour un modèle qui annonce un palier de vitesse.
+        let tier = chosen
+            .tiers
+            .first()
+            .filter(|_| fast)
+            .map(|tier| tier.id.clone());
+        Ok(Some((chosen.slug.clone(), effort, tier)))
+    }
+
+    fn history(
+        &self,
+        conversation: &str,
+        message: &str,
+    ) -> Result<Vec<(&'static str, String)>, ApiError> {
+        let mut history = Vec::new();
+        let conversations = self.conversations()?;
+        let Some(found) = conversations
+            .iter()
+            .find(|candidate| candidate.id == conversation)
+        else {
+            return Ok(history);
+        };
+        for item in &found.messages {
+            if item.role == "user" {
+                if matches!(item.state, "accepted" | "echoed") {
+                    history.push(("user", item.body.clone()));
+                }
+                if item.id == message {
+                    break;
+                }
+            } else if !item.body.trim().is_empty() && item.state != "failed" {
+                history.push(("assistant", item.body.clone()));
+            }
+        }
+        Ok(history)
+    }
+
+    /// Démarre la génération d'une réponse marquée `streaming` qu'aucun fil ne traite encore.
+    fn start_generation(&self, conversation: &str, message: &str) -> Result<(), ApiError> {
+        let streaming: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming')",
+            params![ACCOUNT, conversation, message], |row| row.get(0),
+        )?;
+        if !streaming || self.provider.running(conversation, message) {
+            return Ok(());
+        }
+        let Some((model, effort, service_tier)) = self.resolved_model()? else {
+            self.connection.execute(
+                "UPDATE wrapper_generation SET status = 'failed', error = ?4, error_kind = 'other', updated_at = ?5 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+                params![ACCOUNT, conversation, message, "Les modèles de votre compte ChatGPT ne sont pas encore chargés. Relancez la réponse dans un instant.", now()],
+            )?;
+            return Ok(());
+        };
+        let history = self.history(conversation, message)?;
+        // Le sujet se précise souvent après la salutation : le titre est écrit au premier
+        // échange, puis revu une fois au troisième, tant que l'utilisateur ne l'a pas choisi.
+        let turns = history.iter().filter(|(role, _)| *role == "user").count();
+        let (automatic, bot_id): (bool, String) = self.connection.query_row(
+            "SELECT title_customized = 0, bot_id FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2",
+            params![ACCOUNT, conversation], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // Les instructions sont lues à chaque réponse : modifier le bot change ses conversations.
+        let bot = self
+            .bot(&bot_id)?
+            .ok_or_else(|| ApiError::new(500, "Le bot de cette conversation est introuvable."))?;
+        self.provider.generate(provider::Run {
+            conversation: conversation.into(),
+            message: message.into(),
+            instructions: compose_instructions(&bot),
+            retitle: automatic && matches!(turns, 1 | 3),
+            history,
+            model,
+            effort,
+            service_tier,
+        });
+        Ok(())
+    }
+
+    fn preferences(&self) -> Result<(String, String), ApiError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT theme, accent FROM wrapper_preferences WHERE account_id = ?1",
+                [ACCOUNT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_else(|| (DEFAULT_THEME.into(), DEFAULT_ACCENT.into())))
     }
 
     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
@@ -218,30 +576,71 @@ impl App {
             return Err(ApiError::new(413, "La requête dépasse 64 Ko."));
         }
         match (method, path) {
-            ("GET", "/api/state") => Ok(json!({
-                "account": {"id": ACCOUNT, "name": "Espace local"},
-                "mode": "simulated", "conversations": self.conversations()?,
-                "preferences": {"theme": self.connection.query_row("SELECT theme FROM wrapper_preferences WHERE account_id = ?1", [ACCOUNT], |r| r.get::<_, String>(0)).optional()?.unwrap_or_else(|| "system".into())},
-            })),
+            ("GET", "/api/state") => {
+                let (theme, accent) = self.preferences()?;
+                let provider = self.provider.status();
+                let resolved = self.resolved_model()?;
+                let fast = self.model_preferences()?.2;
+                Ok(json!({
+                    "account": {"id": ACCOUNT, "name": "Espace local"},
+                    "mode": if provider["connected"] == true { "chatgpt" } else { "simulated" },
+                    "conversations": self.conversations()?,
+                    "bots": self.bots()?,
+                    "preferences": {
+                        "theme": theme, "accent": accent, "fast": fast,
+                        "model": resolved.as_ref().map(|(model, _, _)| model),
+                        "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()),
+                    },
+                    "provider": provider,
+                }))
+            }
             ("POST", "/api/preferences") => {
                 let input: Preferences = parse(body)?;
-                if !matches!(input.theme.as_str(), "light" | "dark" | "system") {
+                if input.model.is_some() || input.effort.is_some() || input.fast.is_some() {
+                    for value in [&input.model, &input.effort].into_iter().flatten() {
+                        validate_id(value)?;
+                    }
+                    let (theme, accent) = self.preferences()?;
+                    self.connection.execute("INSERT INTO wrapper_preferences (account_id, theme, accent) VALUES (?1, ?2, ?3) ON CONFLICT(account_id) DO NOTHING", params![ACCOUNT, theme, accent])?;
+                    self.connection.execute("UPDATE wrapper_preferences SET model = COALESCE(?2, model), effort = COALESCE(?3, effort), fast = COALESCE(?4, fast) WHERE account_id = ?1", params![ACCOUNT, input.model, input.effort, input.fast])?;
+                }
+                if input.theme.is_none() && input.accent.is_none() {
+                    if input.model.is_some() || input.effort.is_some() || input.fast.is_some() {
+                        let resolved = self.resolved_model()?;
+                        return Ok(json!({"preferences": {
+                            "fast": self.model_preferences()?.2,
+                            "model": resolved.as_ref().map(|(model, _, _)| model),
+                            "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()),
+                        }}));
+                    }
+                    return Err(ApiError::new(400, "Indiquez un thème ou un accent."));
+                }
+                let (stored_theme, stored_accent) = self.preferences()?;
+                let theme = input.theme.unwrap_or(stored_theme);
+                let accent = input.accent.unwrap_or(stored_accent);
+                if !matches!(theme.as_str(), "light" | "dark" | "system") {
                     return Err(ApiError::new(
                         400,
                         "Le thème doit être light, dark ou system.",
                     ));
                 }
-                self.connection.execute("INSERT INTO wrapper_preferences (account_id, theme) VALUES (?1, ?2) ON CONFLICT(account_id) DO UPDATE SET theme = excluded.theme", params![ACCOUNT, input.theme])?;
-                Ok(json!({"preferences": {"theme": input.theme}}))
+                if !ACCENTS.contains(&accent.as_str()) {
+                    return Err(ApiError::new(400, "Cet accent n’existe pas."));
+                }
+                self.connection.execute("INSERT INTO wrapper_preferences (account_id, theme, accent) VALUES (?1, ?2, ?3) ON CONFLICT(account_id) DO UPDATE SET theme = excluded.theme, accent = excluded.accent", params![ACCOUNT, theme, accent])?;
+                Ok(json!({"preferences": {"theme": theme, "accent": accent}}))
             }
             ("POST", "/api/conversations") => {
                 let input: CreateConversation = parse(body)?;
                 let title = valid_title(input.title.as_deref().unwrap_or(DEFAULT_TITLE))?;
+                let bot_id = input.bot_id.as_deref().unwrap_or(DEFAULT_BOT.id);
+                validate_id(bot_id)?;
+                self.require_bot(bot_id)?;
                 let id: String =
                     self.connection
                         .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
                 let timestamp = now();
-                self.connection.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)", params![ACCOUNT, id, title, input.title.is_some(), timestamp])?;
+                self.connection.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id])?;
                 self.conversation_response(&id)
             }
             ("POST", "/api/send") => {
@@ -280,6 +679,7 @@ impl App {
                     let mut transport = LocalTransport {
                         connection: &self.connection,
                         lose_reply: input.simulate_loss,
+                        live: self.provider.connected(),
                         error: None,
                     };
                     self.session
@@ -289,6 +689,7 @@ impl App {
                     }
                 }
                 self.finish_echo(&conversation, &message)?;
+                self.start_generation(&input.conversation_id, &input.message_id)?;
                 self.touch(&input.conversation_id)?;
                 self.conversation_response(&input.conversation_id)
             }
@@ -311,6 +712,7 @@ impl App {
                     let mut transport = LocalTransport {
                         connection: &self.connection,
                         lose_reply: false,
+                        live: self.provider.connected(),
                         error: None,
                     };
                     self.session
@@ -320,6 +722,7 @@ impl App {
                     }
                 }
                 self.finish_echo(&conversation, &message)?;
+                self.start_generation(&input.conversation_id, &input.message_id)?;
                 self.touch(&input.conversation_id)?;
                 self.conversation_response(&input.conversation_id)
             }
@@ -348,6 +751,166 @@ impl App {
                 self.connection.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
                 Ok(json!({"ok": true}))
             }
+            ("POST", "/api/bots") => {
+                let input: CreateBot = parse(body)?;
+                validate_id(&input.id)?;
+                let name = valid_bot_name(&input.name)?;
+                let color = valid_bot_color(&input.color)?;
+                let description = valid_bot_description(&input.description)?;
+                let instructions = valid_bot_instructions(&input.instructions)?;
+                // L'identifiant vient du client : rejouer la même création rend le même bot.
+                if let Some(bot) = self.bot(&input.id)? {
+                    let same = (
+                        bot.name.as_str(),
+                        bot.color.as_str(),
+                        bot.description.as_str(),
+                        bot.instructions.as_str(),
+                    ) == (
+                        name.as_str(),
+                        color,
+                        description.as_str(),
+                        instructions.as_str(),
+                    );
+                    if bot.deleted || !same {
+                        return Err(ApiError::new(
+                            409,
+                            "Ce bot existe déjà avec un autre contenu.",
+                        ));
+                    }
+                    return Ok(json!({"bot": bot}));
+                }
+                let timestamp = now();
+                self.connection.execute(
+                    "INSERT INTO wrapper_bots (account_id, id, name, color, description, instructions, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![ACCOUNT, input.id, name, color, description, instructions, timestamp],
+                )?;
+                self.bot_response(&input.id)
+            }
+            ("POST", "/api/bots/update") => {
+                let input: UpdateBot = parse(body)?;
+                validate_id(&input.id)?;
+                let name = input.name.as_deref().map(valid_bot_name).transpose()?;
+                let color = input.color.as_deref().map(valid_bot_color).transpose()?;
+                let description = input
+                    .description
+                    .as_deref()
+                    .map(valid_bot_description)
+                    .transpose()?;
+                let instructions = input
+                    .instructions
+                    .as_deref()
+                    .map(valid_bot_instructions)
+                    .transpose()?;
+                if name.is_none()
+                    && color.is_none()
+                    && description.is_none()
+                    && instructions.is_none()
+                {
+                    return Err(ApiError::new(
+                        400,
+                        "Choisis au moins un champ du bot à modifier.",
+                    ));
+                }
+                self.require_bot(&input.id)?;
+                self.connection.execute(
+                    "UPDATE wrapper_bots SET name = COALESCE(?3, name), color = COALESCE(?4, color), description = COALESCE(?5, description), instructions = COALESCE(?6, instructions), customized = 1, updated_at = ?7 WHERE account_id = ?1 AND id = ?2",
+                    params![ACCOUNT, input.id, name, color, description, instructions, now()],
+                )?;
+                self.bot_response(&input.id)
+            }
+            ("POST", "/api/bots/delete") => {
+                let input: DeleteBot = parse(body)?;
+                validate_id(&input.id)?;
+                if input.id == DEFAULT_BOT.id {
+                    return Err(ApiError::new(
+                        409,
+                        "Le bot par défaut ne peut pas être supprimé.",
+                    ));
+                }
+                if self.bot(&input.id)?.is_none() {
+                    return Err(ApiError::new(404, "Bot introuvable."));
+                }
+                // Une pierre tombale : ses conversations gardent ses instructions.
+                self.connection.execute(
+                    "UPDATE wrapper_bots SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2",
+                    params![ACCOUNT, input.id, now()],
+                )?;
+                Ok(json!({"ok": true}))
+            }
+            ("POST", "/api/provider/signin") => {
+                let _: Empty = parse(body)?;
+                self.provider
+                    .start_signin()
+                    .map_err(|failure| ApiError::new(503, failure.message))?;
+                Ok(json!({"provider": self.provider.status()}))
+            }
+            ("POST", "/api/provider/cancel") => {
+                let _: Empty = parse(body)?;
+                self.provider.cancel_signin();
+                Ok(json!({"provider": self.provider.status()}))
+            }
+            ("POST", "/api/provider/welcomed") => {
+                let _: Empty = parse(body)?;
+                self.provider
+                    .mark_welcomed()
+                    .map_err(|_| ApiError::new(500, "Impossible d’enregistrer ce réglage."))?;
+                Ok(json!({"provider": self.provider.status()}))
+            }
+            ("POST", "/api/provider/signout") => {
+                let _: Empty = parse(body)?;
+                let revoked = self.provider.signout();
+                self.connection.execute(
+                    "UPDATE wrapper_generation SET status = 'stopped', updated_at = ?1 WHERE status = 'streaming'",
+                    [now()],
+                )?;
+                Ok(json!({"provider": self.provider.status(), "revoked": revoked}))
+            }
+            ("POST", "/api/stop") => {
+                let input: ReconcileMessage = parse(body)?;
+                validate_id(&input.conversation_id)?;
+                validate_id(&input.message_id)?;
+                self.provider
+                    .stop(&input.conversation_id, &input.message_id);
+                self.connection.execute(
+                    "UPDATE wrapper_generation SET status = 'stopped', updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming'",
+                    params![ACCOUNT, input.conversation_id, input.message_id, now()],
+                )?;
+                self.conversation_response(&input.conversation_id)
+            }
+            ("POST", "/api/regenerate") => {
+                let input: ReconcileMessage = parse(body)?;
+                validate_id(&input.conversation_id)?;
+                validate_id(&input.message_id)?;
+                self.require_conversation(&input.conversation_id)?;
+                if !self.provider.connected() {
+                    return Err(ApiError::new(
+                        409,
+                        "Connectez-vous à ChatGPT pour relancer cette réponse.",
+                    ));
+                }
+                if self
+                    .provider
+                    .running(&input.conversation_id, &input.message_id)
+                {
+                    return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
+                }
+                let restarted = self.connection.execute(
+                    "UPDATE wrapper_generation SET status = 'streaming', error = NULL, error_kind = NULL, notice = NULL, updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status IN ('failed', 'stopped')",
+                    params![ACCOUNT, input.conversation_id, input.message_id, now()],
+                )?;
+                if restarted == 0 {
+                    return Err(ApiError::new(
+                        409,
+                        "Cette réponse ne peut pas être relancée.",
+                    ));
+                }
+                self.connection.execute(
+                    "UPDATE wrapper_remote SET reply = '' WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+                    params![ACCOUNT, input.conversation_id, input.message_id],
+                )?;
+                self.start_generation(&input.conversation_id, &input.message_id)?;
+                self.conversation_response(&input.conversation_id)
+            }
             _ => Err(ApiError::new(404, "Cette adresse n'existe pas.")),
         }
     }
@@ -366,6 +929,43 @@ impl App {
             Some(true) => Err(ApiError::new(409, "Cette conversation a été supprimée.")),
             None => Err(ApiError::new(404, "Conversation introuvable.")),
         }
+    }
+
+    /// Un bot supprimé reste lisible pour ses conversations.
+    fn bot(&self, id: &str) -> Result<Option<Bot>, ApiError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, name, color, description, instructions, template, customized, deleted FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
+                params![ACCOUNT, id],
+                bot_from_row,
+            )
+            .optional()?)
+    }
+
+    fn bots(&self) -> Result<Vec<Bot>, ApiError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, color, description, instructions, template, customized, deleted FROM wrapper_bots WHERE account_id = ?1 ORDER BY id = ?2 DESC, created_at, id",
+        )?;
+        let bots = statement
+            .query_map(params![ACCOUNT, DEFAULT_BOT.id], bot_from_row)?
+            .collect::<Result<_, _>>()?;
+        Ok(bots)
+    }
+
+    fn require_bot(&self, id: &str) -> Result<(), ApiError> {
+        match self.bot(id)? {
+            Some(bot) if !bot.deleted => Ok(()),
+            Some(_) => Err(ApiError::new(409, "Ce bot a été supprimé.")),
+            None => Err(ApiError::new(404, "Bot introuvable.")),
+        }
+    }
+
+    fn bot_response(&self, id: &str) -> Result<Value, ApiError> {
+        let bot = self
+            .bot(id)?
+            .ok_or_else(|| ApiError::new(404, "Bot introuvable."))?;
+        Ok(json!({"bot": bot}))
     }
 
     fn touch(&self, id: &str) -> Result<(), ApiError> {
@@ -409,7 +1009,7 @@ impl App {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
-        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at FROM wrapper_conversations WHERE account_id = ?1")?;
+        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id FROM wrapper_conversations WHERE account_id = ?1")?;
         let rows = statement.query_map([ACCOUNT], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -418,10 +1018,11 @@ impl App {
                 row.get::<_, bool>(3)?,
                 row.get::<_, u64>(4)?,
                 row.get::<_, u64>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
         for row in rows {
-            let (id, title, favorite, deleted, created_at, updated_at) = row?;
+            let (id, title, favorite, deleted, created_at, updated_at, bot_id) = row?;
             if deleted {
                 hidden.insert(id);
                 continue;
@@ -431,6 +1032,7 @@ impl App {
                 id.clone(),
                 Conversation {
                     id,
+                    bot_id,
                     title,
                     favorite,
                     updated_at,
@@ -451,6 +1053,7 @@ impl App {
                 .entry(id.to_owned())
                 .or_insert_with(|| Conversation {
                     id: id.to_owned(),
+                    bot_id: DEFAULT_BOT.id.into(),
                     title: "Conversation récupérée".into(),
                     favorite: false,
                     updated_at: created_at,
@@ -463,6 +1066,9 @@ impl App {
                 body: record.body,
                 state: state_name(&record.state),
                 created_at,
+                error: None,
+                error_kind: None,
+                notice: None,
             }];
             if matches!(
                 record.state,
@@ -470,12 +1076,30 @@ impl App {
             ) {
                 let reply: Option<(String, u64)> = self.connection.query_row("SELECT reply, created_at FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
                 if let Some((body, created_at)) = reply {
+                    let generation: Option<GenerationRow> = self.connection.query_row("SELECT status, error, error_kind, notice FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, id, record.message_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+                    let (state, error, error_kind, notice) = match generation {
+                        Some((status, error, kind, notice)) => (
+                            match status.as_str() {
+                                "streaming" => "streaming",
+                                "failed" => "failed",
+                                "stopped" => "stopped",
+                                _ => "echoed",
+                            },
+                            error,
+                            kind,
+                            notice,
+                        ),
+                        None => ("echoed", None, None, None),
+                    };
                     pair.push(Message {
                         id: format!("reply-{}", record.message_id.as_str()),
                         role: "assistant",
                         body,
-                        state: "echoed",
+                        state,
                         created_at,
+                        error,
+                        error_kind,
+                        notice,
                     });
                 }
             }
@@ -500,6 +1124,8 @@ impl App {
 struct LocalTransport<'a> {
     connection: &'a Connection,
     lose_reply: bool,
+    /// Un fournisseur est connecté : la réponse sera écrite par sa génération, pas par la démo.
+    live: bool,
     error: Option<ApiError>,
 }
 
@@ -510,10 +1136,14 @@ impl LocalTransport<'_> {
         let message = request.message_id().as_str();
         let tx = self.connection.unchecked_transaction()?;
         let existing: Option<String> = tx.query_row("SELECT body FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![account, conversation, message], |r| r.get(0)).optional()?;
+        let existing_reply_absent = existing.is_none();
         if existing.is_some_and(|body| body != request.body()) {
             return Ok(SendOutcome::Refused(Refusal::Conflict));
         }
-        tx.execute("INSERT INTO wrapper_remote (account_id, conversation_id, message_id, body, reply, created_at, send_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET send_count = send_count + 1", params![account, conversation, message, request.body(), DEMO_REPLY, now()])?;
+        tx.execute("INSERT INTO wrapper_remote (account_id, conversation_id, message_id, body, reply, created_at, send_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET send_count = send_count + 1", params![account, conversation, message, request.body(), if self.live { "" } else { demo_reply(request.body()) }, now()])?;
+        if self.live && existing_reply_absent {
+            tx.execute("INSERT OR IGNORE INTO wrapper_generation (account_id, conversation_id, message_id, status, updated_at) VALUES (?1, ?2, ?3, 'streaming', ?4)", params![account, conversation, message, now()])?;
+        }
         tx.commit()?;
         Ok(if self.lose_reply {
             SendOutcome::OutcomeUnknown
@@ -568,6 +1198,62 @@ fn valid_title(title: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(title.into())
+}
+
+fn bot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
+    let id: String = row.get(0)?;
+    Ok(Bot {
+        is_default: id == DEFAULT_BOT.id,
+        id,
+        name: row.get(1)?,
+        color: row.get(2)?,
+        description: row.get(3)?,
+        instructions: row.get(4)?,
+        template: row.get(5)?,
+        customized: row.get(6)?,
+        deleted: row.get(7)?,
+    })
+}
+
+fn valid_bot_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err(ApiError::new(
+            400,
+            "Le nom du bot doit contenir entre 1 et 40 caractères.",
+        ));
+    }
+    Ok(name.into())
+}
+
+fn valid_bot_color(color: &str) -> Result<&'static str, ApiError> {
+    ACCENTS
+        .iter()
+        .find(|accent| **accent == color)
+        .copied()
+        .ok_or_else(|| ApiError::new(400, "Cette couleur n’existe pas."))
+}
+
+fn valid_bot_description(description: &str) -> Result<String, ApiError> {
+    let description = description.trim();
+    if description.chars().count() > 280 {
+        return Err(ApiError::new(
+            400,
+            "La description du bot ne doit pas dépasser 280 caractères.",
+        ));
+    }
+    Ok(description.into())
+}
+
+fn valid_bot_instructions(instructions: &str) -> Result<String, ApiError> {
+    let instructions = instructions.trim();
+    if instructions.chars().count() > 8_000 {
+        return Err(ApiError::new(
+            400,
+            "Les instructions du bot ne doivent pas dépasser 8 000 caractères.",
+        ));
+    }
+    Ok(instructions.into())
 }
 
 fn suggested_title(body: &str) -> Option<String> {

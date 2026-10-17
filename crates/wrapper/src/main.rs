@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use grokbot_wrapper::{validate_headers, ApiError, App, BODY_LIMIT};
+use grokbot_wrapper::{validate_headers, ApiError, App, Provider, BODY_LIMIT};
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
@@ -10,6 +10,9 @@ const STYLES: &str = include_str!("../../../app/ui/styles.css");
 const SCRIPT: &str = include_str!("../../../app/ui/app.js");
 const MASCOT_SCRIPT: &str = include_str!("../../../app/ui/mascot.js");
 const MASCOT_STYLES: &str = include_str!("../../../app/ui/mascot.css");
+// Built from app/web by `npm run build`.
+const CHAT_SCRIPT: &str = include_str!("../../../app/ui/chat.js");
+const CHAT_STYLES: &str = include_str!("../../../app/ui/chat.css");
 
 struct Options {
     port: u16,
@@ -78,6 +81,8 @@ fn payload(
             "/app.js" => Some((SCRIPT, "text/javascript; charset=utf-8")),
             "/mascot.js" => Some((MASCOT_SCRIPT, "text/javascript; charset=utf-8")),
             "/mascot.css" => Some((MASCOT_STYLES, "text/css; charset=utf-8")),
+            "/chat.js" => Some((CHAT_SCRIPT, "text/javascript; charset=utf-8")),
+            "/chat.css" => Some((CHAT_STYLES, "text/css; charset=utf-8")),
             _ => None,
         };
         if let Some((content, content_type)) = asset {
@@ -97,8 +102,26 @@ fn payload(
     ))
 }
 
+/// Les builds de développement peuvent viser un faux serveur OpenAI pour essayer l'interface
+/// sans compte. Un build de production ne lit jamais cette variable.
+fn provider(db: &std::path::Path) -> Provider {
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("GROKBOT_FAKE_OPENAI") {
+        let endpoints = grokbot_wrapper::Endpoints {
+            authorize: format!("{base}/authorize"),
+            token: format!("{base}/token"),
+            revoke: format!("{base}/revoke"),
+            jwks: format!("{base}/jwks"),
+            issuer: base.clone(),
+            api: format!("{base}/v1"),
+        };
+        return Provider::with_endpoints(db, endpoints, false);
+    }
+    Provider::new(db)
+}
+
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut app = App::open(&options.db)?;
+    let mut app = App::open_with(&options.db, provider(&options.db))?;
     let server = Server::http(("127.0.0.1", options.port))?;
     let port = server
         .server_addr()
@@ -124,7 +147,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
             ("Referrer-Policy", "no-referrer"),
-            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
         ] {
             response.add_header(Header::from_bytes(name, value).expect("constant response header"));
         }

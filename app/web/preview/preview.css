@@ -1,0 +1,48 @@
+body.preview { display: block; height: auto; overflow: auto; background: var(--surround); padding: 26px 20px 60px; }
+.pv-page { max-width: 1040px; margin: 0 auto; }
+.pv-page h1 { font-size: 26px; letter-spacing: -.5px; margin: 0 0 6px; }
+.pv-lead { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.6; max-width: 66ch; }
+.pv-bar { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; padding: 12px 14px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); font-size: 12px; color: var(--muted); }
+.pv-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pv-choice { display: flex; gap: 4px; padding: 3px; border-radius: 8px; background: var(--soft); }
+.pv-choice label { padding: 6px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); font-weight: 500; }
+.pv-choice label:has(input:checked) { background: var(--accent); color: var(--accent-on); }
+.pv-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.pv-dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--pane); outline: 1px solid var(--line); background: var(--c); }
+.pv-dot[aria-pressed="true"] { outline: 2px solid var(--text); }
+.pv-panel { border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); overflow: hidden; }
+.pv-top { display: flex; justify-content: space-between; align-items: center; padding: 16px 26px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--subtle); }
+.pv-top b { color: var(--text); font-weight: 500; }
+.pv-panel .gb-composer { margin: 6px auto 20px; }
+.pv-form { margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); display: grid; gap: 12px; }
+.pv-form h2 { margin: 0; font-size: 14px; }
+.pv-form p { margin: 0; font-size: 12px; color: var(--muted); }
+.pv-form textarea { width: 100%; min-height: 70px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); color: var(--text); font-size: 13px; resize: vertical; }
+.pv-send { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.pv-send button { padding: 10px 16px; border-radius: 8px; background: var(--accent); color: var(--accent-on); font-weight: 600; font-size: 13px; }
+.gb-composer { width: min(760px, calc(100% - 54px)); margin: 0 auto; padding: 14px 16px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); transition: border-color .15s, box-shadow .15s; }
+.gb-composer:focus-within { border-color: var(--accent-ink); box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / .16); }
+.gb-composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; }
+.gb-composer-hint { color: var(--subtle); font-size: 11px; }
+.gb-send { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: var(--accent); color: var(--accent-on); transition: filter .15s, background .15s; }
+.gb-send:hover:enabled { filter: brightness(1.08); }
+.gb-send:disabled { background: var(--soft); color: var(--subtle); }
+.gb-composer .gb-send .lucide { width: 17px; height: 17px; stroke-width: 2; }
+/* Variant: document. Every turn is a full-width block, no bubbles. */
+[data-chat-variant="document"] .gb-thread { gap: 0; }
+[data-chat-variant="document"] .gb-message { padding: 20px 0; }
+[data-chat-variant="document"] .gb-user { align-items: stretch; padding-left: 16px; border-left: 2px solid var(--accent-ink); margin: 14px 0 0; padding-top: 2px; padding-bottom: 2px; }
+[data-chat-variant="document"] .gb-user .gb-meta { display: flex; }
+[data-chat-variant="document"] .gb-bubble { max-width: none; padding: 0; background: none; border-radius: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; line-height: 1.5; }
+[data-chat-variant="document"] .gb-assistant { border-bottom: 1px solid var(--line); padding-bottom: 24px; }
+[data-chat-variant="document"] .gb-assistant:last-of-type { border-bottom: 0; }
+
+/* Variant: cards. Every message sits in a framed card with a header strip. */
+[data-chat-variant="cards"] .gb-thread { gap: 14px; }
+[data-chat-variant="cards"] .gb-message { border: 1px solid var(--line); border-radius: 12px; background: var(--pane); padding: 14px 16px 8px; }
+[data-chat-variant="cards"] .gb-user { align-items: stretch; background: var(--accent-soft); border-color: transparent; }
+[data-chat-variant="cards"] .gb-user .gb-meta { display: flex; }
+[data-chat-variant="cards"] .gb-bubble { max-width: none; padding: 0; background: none; border-radius: 0; }
+[data-chat-variant="cards"] .gb-typing { padding-bottom: 14px; }
+[data-chat-variant="cards"] .gb-dots { background: none; padding: 0; }
+

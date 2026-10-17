@@ -56,13 +56,15 @@ try:
     url = 'http://' + listeners[0]
     report['runtime'] = {'host_pid': owner, 'engine_pid': engine_pid, 'url': url}
     for endpoint, source in [('/', 'index.html'), ('/styles.css', 'styles.css'), ('/app.js', 'app.js'),
-                             ('/mascot.css', 'mascot.css'), ('/mascot.js', 'mascot.js')]:
+                             ('/mascot.css', 'mascot.css'), ('/mascot.js', 'mascot.js'),
+                             ('/chat.css', 'chat.css'), ('/chat.js', 'chat.js')]:
         with urllib.request.urlopen(url + endpoint, timeout=10) as response:
             actual = response.read()
         require(f'bundled {source} matches current source', actual == (ROOT / 'app/ui' / source).read_bytes())
     with urllib.request.urlopen(url + '/api/state', timeout=10) as response:
         state = json.load(response)
-    require('running engine advertises simulated mode', state['mode'] == 'simulated')
+    # Le mode suit la connexion de l'utilisateur : simulé sans compte, ChatGPT une fois connecté.
+    require('running engine advertises a known mode', state['mode'] in ('simulated', 'chatgpt'))
 
     # Query only this application's window metadata, without screen capture or Accessibility.
     source = r'''#import <Cocoa/Cocoa.h>

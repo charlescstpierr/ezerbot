@@ -5,6 +5,9 @@
 .mascot-squish { animation: companion-breathe 4s ease-in-out infinite; }
 .mascot-blink { animation: companion-blink 4s infinite; transform-origin: center 60%; }
 .mascot-shadow { transform-origin: 164px 252px; animation: companion-shadow 4s ease-in-out infinite; }
+.mascot-shell { stroke: #ffffff1f; stroke-width: 1.5; }
+.mascot-eye, .mascot-cheek { fill: var(--mascot-eye); }
+.mascot-smile { stroke: var(--mascot-eye); }
 .mascot-cheek, .mascot-smile { opacity: 0; transition: opacity .24s; }
 .mascot[data-reactive="false"] .mascot-float,
 .mascot[data-reactive="false"] .mascot-squish,

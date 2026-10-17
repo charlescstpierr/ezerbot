@@ -19,3 +19,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tiny_http = "0.12"
+ureq = { version = "2", features = ["json"] }
+jsonwebtoken = "9"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"

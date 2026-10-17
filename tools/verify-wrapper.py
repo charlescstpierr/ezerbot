@@ -72,7 +72,7 @@ try:
     with tempfile.TemporaryDirectory(prefix='grokbot-wrapper-qa-') as directory:
         database = Path(directory) / 'workspace.sqlite'
         active = Server(database)
-        for path in ['/', '/styles.css', '/app.js', '/mascot.css', '/mascot.js']:
+        for path in ['/', '/styles.css', '/app.js', '/mascot.css', '/mascot.js', '/chat.css', '/chat.js']:
             status, content, _ = active.request(path)
             require(f'offline asset {path}', status == 200 and len(content) > 100)
         initial = active.json('/api/state')
@@ -96,6 +96,28 @@ try:
                 sum(item['role'] == 'assistant' for item in repeated['messages']) == 1)
         status, _, _ = active.request('/api/send', {**request, 'body': 'Different immutable body'})
         require('same nonce and different body rejected', status == 409)
+        require('fresh state lists only the default bot',
+                [bot['id'] for bot in initial['bots']] == ['grokbot'] and initial['bots'][0]['is_default'] is True)
+        require('conversation belongs to the default bot', conversation['bot_id'] == 'grokbot')
+        bot_request = {'id': 'wrapper-smoke-bot', 'name': 'Relecteur', 'color': 'menthe',
+                       'description': 'Relit vos textes.', 'instructions': 'Sois bref.'}
+        created_bot = active.json('/api/bots', bot_request)['bot']
+        require('bot creation replays without a duplicate',
+                active.json('/api/bots', bot_request)['bot'] == created_bot and
+                [bot['id'] for bot in active.json('/api/state')['bots']] == ['grokbot', 'wrapper-smoke-bot'])
+        status, _, _ = active.request('/api/bots', {**bot_request, 'name': 'Autre'})
+        require('same bot id with other content rejected', status == 409)
+        status, _, _ = active.request('/api/bots', {**bot_request, 'id': 'other', 'color': 'terracotta'})
+        require('unknown bot color rejected', status == 400)
+        bot_conversation = active.json('/api/conversations', {'bot_id': 'wrapper-smoke-bot'})['conversation']
+        require('conversation created with a chosen bot', bot_conversation['bot_id'] == 'wrapper-smoke-bot')
+        status, _, _ = active.request('/api/bots/delete', {'id': 'grokbot'})
+        require('default bot cannot be deleted', status == 409)
+        active.json('/api/bots/delete', {'id': 'wrapper-smoke-bot'})
+        kept = next(bot for bot in active.json('/api/state')['bots'] if bot['id'] == 'wrapper-smoke-bot')
+        require('deleted bot stays readable for its conversations', kept['deleted'] is True and kept['name'] == bot_request['name'])
+        status, _, _ = active.request('/api/conversations', {'bot_id': 'wrapper-smoke-bot'})
+        require('deleted bot cannot start a conversation', status == 409)
         active.json('/api/conversations/update', {'id': identifier, 'title': 'Retrouvée après redémarrage',
                                                   'favorite': True})
         active.json('/api/preferences', {'theme': 'dark'})

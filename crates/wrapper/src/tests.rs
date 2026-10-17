@@ -241,15 +241,15 @@ fn theme_preference_is_account_scoped_and_survives_restart() {
     let mut app = App::open(&db.0).unwrap();
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["theme"],
-        "system"
+        "dark"
     );
-    app.api("POST", "/api/preferences", br#"{"theme":"dark"}"#)
+    app.api("POST", "/api/preferences", br#"{"theme":"light"}"#)
         .unwrap();
     drop(app);
     let mut app = App::open(&db.0).unwrap();
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["theme"],
-        "dark"
+        "light"
     );
     assert_eq!(
         app.api("POST", "/api/preferences", br#"{"theme":"invalid"}"#)
@@ -259,7 +259,38 @@ fn theme_preference_is_account_scoped_and_survives_restart() {
     );
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["theme"],
-        "dark"
+        "light"
+    );
+}
+
+#[test]
+fn accent_preference_survives_restart_and_keeps_the_theme() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["preferences"]["accent"],
+        "citron"
+    );
+    app.api("POST", "/api/preferences", br#"{"theme":"light"}"#)
+        .unwrap();
+    app.api("POST", "/api/preferences", br#"{"accent":"menthe"}"#)
+        .unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let preferences = app.api("GET", "/api/state", b"").unwrap()["preferences"].clone();
+    assert_eq!(preferences["accent"], "menthe");
+    assert_eq!(preferences["theme"], "light");
+    for body in [&br#"{"accent":"terracotta"}"#[..], &br#"{}"#[..]] {
+        assert_eq!(
+            app.api("POST", "/api/preferences", body)
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["preferences"]["accent"],
+        "menthe"
     );
 }
 
@@ -322,6 +353,7 @@ fn acceptance_saved_before_echo_finishes_after_restart_without_remote_resend() {
     let mut transport = super::LocalTransport {
         connection: &app.connection,
         lose_reply: false,
+        live: false,
         error: None,
     };
     let outcome = transport.send(&request);
@@ -492,4 +524,264 @@ fn conversation_and_echo_are_readable_after_restart() {
         state["conversations"][0]["messages"][1]["role"],
         "assistant"
     );
+}
+
+fn post(app: &mut App, path: &str, body: serde_json::Value) -> Result<serde_json::Value, u16> {
+    app.api("POST", path, &serde_json::to_vec(&body).unwrap())
+        .map_err(|error| error.status)
+}
+
+fn bot_ids(app: &mut App) -> Vec<String> {
+    app.api("GET", "/api/state", b"").unwrap()["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|bot| bot["deleted"] == false)
+        .map(|bot| bot["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn fresh_database_has_exactly_the_default_bot_at_its_template_version() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["bots"].as_array().unwrap().len(), 1);
+    let bot = &state["bots"][0];
+    assert_eq!(
+        (
+            bot["id"].clone(),
+            bot["name"].clone(),
+            bot["color"].clone(),
+            bot["is_default"].clone(),
+            bot["template"].clone(),
+            bot["customized"].clone(),
+        ),
+        (
+            json!("grokbot"),
+            json!("Grokbot"),
+            json!("citron"),
+            json!(true),
+            json!("grokbot"),
+            json!(false),
+        )
+    );
+    let version: i64 = app
+        .connection
+        .query_row(
+            "SELECT template_version FROM wrapper_bots WHERE id = 'grokbot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    conversation(&mut app);
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["bot_id"],
+        "grokbot"
+    );
+}
+
+#[test]
+fn default_bot_reconciliation_converges_and_never_overwrites_customization() {
+    let db = Database::new();
+    drop(App::open(&db.0).unwrap());
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(bot_ids(&mut app), ["grokbot"]);
+
+    // Une copie non modifiée d'une ancienne version du template est mise à niveau.
+    app.connection
+        .execute(
+            "UPDATE wrapper_bots SET name = 'Ancien', instructions = 'Vieux', template_version = 0 WHERE id = 'grokbot'",
+            [],
+        )
+        .unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let bot = app.api("GET", "/api/state", b"").unwrap()["bots"][0].clone();
+    assert_eq!(bot["name"], "Grokbot");
+    assert_ne!(bot["instructions"], "Vieux");
+
+    // Une copie personnalisée garde ses valeurs, même face à un template plus récent.
+    post(
+        &mut app,
+        "/api/bots/update",
+        json!({"id": "grokbot", "name": "Mon Grok", "instructions": "Parle en vers."}),
+    )
+    .unwrap();
+    app.connection
+        .execute(
+            "UPDATE wrapper_bots SET template_version = 0 WHERE id = 'grokbot'",
+            [],
+        )
+        .unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["bots"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (
+            state["bots"][0]["name"].clone(),
+            state["bots"][0]["instructions"].clone(),
+            state["bots"][0]["customized"].clone(),
+        ),
+        (json!("Mon Grok"), json!("Parle en vers."), json!(true))
+    );
+}
+
+#[test]
+fn database_without_bot_column_is_migrated_to_the_default_bot() {
+    let db = Database::new();
+    let connection = rusqlite::Connection::open(&db.0).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE wrapper_conversations (
+        account_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+        title_customized INTEGER NOT NULL DEFAULT 0,
+        favorite INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(account_id, id)
+    );
+    INSERT INTO wrapper_conversations (account_id, id, title, created_at, updated_at)
+    VALUES ('local-workspace', 'avant-les-bots', 'Ancienne', 123, 123);",
+        )
+        .unwrap();
+    drop(connection);
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["conversations"][0]["id"], "avant-les-bots");
+    assert_eq!(state["conversations"][0]["bot_id"], "grokbot");
+    let reply = send(&mut app, "avant-les-bots", "Toujours là ?", false);
+    assert_eq!(reply["conversation"]["messages"][0]["state"], "echoed");
+}
+
+#[test]
+fn bot_creation_is_idempotent_on_its_client_id() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let request = json!({
+        "id": "bot-1", "name": "  Juriste  ", "color": "violet",
+        "description": "Relit vos contrats.", "instructions": "Cite toujours l'article."
+    });
+    let first = post(&mut app, "/api/bots", request.clone()).unwrap();
+    let replay = post(&mut app, "/api/bots", request.clone()).unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(
+        first["bot"],
+        json!({
+            "id": "bot-1", "name": "Juriste", "color": "violet",
+            "description": "Relit vos contrats.", "instructions": "Cite toujours l'article.",
+            "is_default": false, "template": null, "customized": false, "deleted": false,
+        })
+    );
+    assert_eq!(bot_ids(&mut app), ["grokbot", "bot-1"]);
+    let mut renamed = request;
+    renamed["name"] = json!("Notaire");
+    assert_eq!(post(&mut app, "/api/bots", renamed), Err(409));
+    assert_eq!(bot_ids(&mut app), ["grokbot", "bot-1"]);
+}
+
+#[test]
+fn bot_boundaries_reject_invalid_input() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    for body in [
+        json!({"id": "b", "name": "   ", "color": "citron"}),
+        json!({"id": "b", "name": "x".repeat(41), "color": "citron"}),
+        json!({"id": "b", "name": "Bot", "color": "terracotta"}),
+        json!({"id": "b", "name": "Bot", "color": "citron", "avatar": "🙂"}),
+        json!({"id": "b", "name": "Bot", "color": "citron", "description": "é".repeat(281)}),
+        json!({"id": "b", "name": "Bot", "color": "citron", "instructions": "a".repeat(8_001)}),
+        json!({"id": "pas valide", "name": "Bot", "color": "citron"}),
+    ] {
+        assert_eq!(post(&mut app, "/api/bots", body), Err(400));
+    }
+    assert_eq!(
+        post(&mut app, "/api/bots/update", json!({"id": "grokbot"})),
+        Err(400)
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/bots/update",
+            json!({"id": "absent", "name": "X"})
+        ),
+        Err(404)
+    );
+    assert_eq!(
+        post(&mut app, "/api/conversations", json!({"bot_id": "absent"})),
+        Err(404)
+    );
+    assert_eq!(bot_ids(&mut app), ["grokbot"]);
+}
+
+#[test]
+fn deleting_a_bot_keeps_its_conversations_but_blocks_new_ones() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    assert_eq!(
+        post(&mut app, "/api/bots/delete", json!({"id": "grokbot"})),
+        Err(409)
+    );
+    post(
+        &mut app,
+        "/api/bots",
+        json!({"id": "chef", "name": "Chef", "color": "orange"}),
+    )
+    .unwrap();
+    let created = post(&mut app, "/api/conversations", json!({"bot_id": "chef"})).unwrap();
+    let id = created["conversation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["conversation"]["bot_id"], "chef");
+    post(&mut app, "/api/bots/delete", json!({"id": "chef"})).unwrap();
+    assert_eq!(bot_ids(&mut app), ["grokbot"]);
+    let kept = app.api("GET", "/api/state", b"").unwrap()["bots"][1].clone();
+    assert_eq!(
+        (
+            kept["id"].clone(),
+            kept["name"].clone(),
+            kept["color"].clone(),
+            kept["deleted"].clone()
+        ),
+        (json!("chef"), json!("Chef"), json!("orange"), json!(true))
+    );
+    assert_eq!(
+        post(&mut app, "/api/conversations", json!({"bot_id": "chef"})),
+        Err(409)
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/bots/update",
+            json!({"id": "chef", "name": "X"})
+        ),
+        Err(409)
+    );
+    let reply = send(&mut app, &id, "Encore une recette", false);
+    assert_eq!(reply["conversation"]["bot_id"], "chef");
+    assert_eq!(reply["conversation"]["messages"][1]["role"], "assistant");
+}
+
+#[test]
+fn composed_instructions_put_identity_role_and_private_rules_after_the_app_contract() {
+    let bot = super::Bot {
+        id: "bot-1".into(),
+        name: "Juriste".into(),
+        color: "violet".into(),
+        description: "Relit vos contrats.".into(),
+        instructions: "Cite toujours l'article.".into(),
+        is_default: false,
+        template: None,
+        customized: false,
+        deleted: false,
+    };
+    assert_eq!(
+        super::compose_instructions(&bot),
+        "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.\n\nTu t'appelles Juriste.\n\nTon rôle, tel que les autres le voient : Relit vos contrats.\n\nConsignes privées sur ta façon de te comporter :\nCite toujours l'article."
+    );
+    let bare = super::Bot {
+        description: String::new(),
+        instructions: String::new(),
+        ..bot
+    };
+    assert!(super::compose_instructions(&bare).ends_with("$$...$$.\n\nTu t'appelles Juriste."));
 }

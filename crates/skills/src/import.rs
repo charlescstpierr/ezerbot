@@ -421,7 +421,14 @@ pub fn editable_body(text: &str) -> String {
         .collect();
     if lines.iter().all(|line| line.trim().is_empty()) {
         // annotate adds one blank separator before a headerless upload's text.
-        body.strip_prefix('\n').unwrap_or(body).into()
+        let rest = body.strip_prefix('\n').unwrap_or(body);
+        // Keep the boundary before rule-like text (even an unfinished marker at
+        // EOF), so a later body edit cannot turn it into the hidden header.
+        if rest.starts_with("---") {
+            format!("\n{rest}")
+        } else {
+            rest.into()
+        }
     } else {
         format!("---\n{}\n---\n{body}", lines.join("\n"))
     }
@@ -795,6 +802,28 @@ mod tests {
         let described = preserve_managed_frontmatter(&cleared, &cleared, "Titre", "Nouvelle");
         assert!(described.contains("description: Nouvelle"));
         assert_eq!(described.matches("description:").count(), 1);
+    }
+
+    #[test]
+    fn a_body_opening_with_a_rule_keeps_its_separator_in_the_editor() {
+        for body in [
+            "---\nname: Exemple\nprix: 12 €\n---\nTexte",
+            "---\ndescription: Exemple\n---\nTexte",
+            "---\nTexte sans fermeture",
+            "---\r\nname: Exemple\r\n---\r\nTexte",
+            "---",
+            "----\nTexte",
+        ] {
+            let original = format!("---\nname: Fiche\norigin: upload\n---\n\n{body}");
+            let editable = editable_body(&original);
+            assert!(editable.starts_with("\n---"), "{editable:?}");
+            assert_eq!(typed_metadata(&editable, "name"), None);
+            assert_eq!(typed_metadata(&editable, "description"), None);
+            let saved = preserve_managed_frontmatter(&original, &editable, "Fiche", "");
+            assert_eq!(saved, original);
+            let extended = format!("{editable}\nname: Ajouté plus tard\n---\nCorps");
+            assert_eq!(typed_metadata(&extended, "name"), None);
+        }
     }
 
     #[test]

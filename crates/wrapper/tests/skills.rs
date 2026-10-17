@@ -419,6 +419,44 @@ fn multiline_uploaded_descriptions_survive_name_description_and_body_edits() {
 }
 
 #[test]
+fn a_markdown_block_opening_the_body_is_not_read_as_the_hidden_header() {
+    for (body, appendix) in [
+        ("---\nname: Exemple de fiche\nprix: 12 €\n---\n\nRemplis la fiche pour chaque produit.", ""),
+        ("---\nprix: 12 €\n---\n\nRemplis la fiche pour chaque produit.", ""),
+        ("---\ndescription: Exemple de description\nprix: 12 €\n---\n\nRemplis la fiche pour chaque produit.", ""),
+        ("---\nname: Exemple de fiche\nprix: 12 €", "\n---\nRemplis la fiche pour chaque produit vendu."),
+        ("---", "\nname: Exemple de fiche\nprix: 12 €\n---\nRemplis la fiche pour chaque produit vendu."),
+        ("---\r\nname: Exemple de fiche\r\nprix: 12 €\r\n---\r\n\r\nRemplis la fiche pour chaque produit.", ""),
+    ] {
+        let db = Database::new();
+        let mut app = db.open();
+        let report = post(&mut app, "/api/skills/import", json!({"bot_id":"grokbot", "files":[{"path":"fiche.md", "content":format!("---\nname: Fiche produit\n---\n{body}")}]}));
+        let id = report["report"][0]["status"]["skill_id"].clone();
+        let versions = post(&mut app, "/api/skills/versions", json!({"bot_id":"grokbot", "skill_id":id}));
+        let original = versions["versions"][0].clone();
+        let view = original["content"]["editable_body"].as_str().unwrap();
+        let noop = post(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":view}));
+        assert_eq!(noop["skill"]["version"], 1);
+        let edited = view.replace("chaque produit", "chaque produit vendu") + appendix;
+        let expected = original["content"]["body"].as_str().unwrap().replace("chaque produit", "chaque produit vendu") + appendix;
+        let saved = post(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":edited}));
+        assert_eq!(saved["skill"]["content"]["display_name"], "Fiche produit");
+        assert_eq!(saved["skill"]["content"]["name"], "fiche-produit");
+        assert_eq!(saved["skill"]["content"]["description"], "");
+        assert_eq!(saved["skill"]["content"]["body"], expected);
+        assert!(view.starts_with("\n---"));
+        let second = post(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "body":format!("{edited}\nEncore.")}));
+        assert_eq!(second["skill"]["content"]["display_name"], "Fiche produit");
+        assert_eq!(second["skill"]["content"]["body"], format!("{expected}\nEncore."));
+        let versions = post(&mut app, "/api/skills/versions", json!({"bot_id":"grokbot", "skill_id":id}));
+        assert_eq!(versions["versions"][0], original);
+        assert_eq!(versions["versions"].as_array().unwrap().len(), 3);
+        let output = tool_output(&app, "read_skill", json!({"name":"Fiche produit"}));
+        assert_eq!(output["body"], second["skill"]["content"]["body"]);
+    }
+}
+
+#[test]
 fn a_description_typed_into_upload_content_is_kept_and_becomes_the_field() {
     let db = Database::new();
     let mut app = db.open();

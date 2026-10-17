@@ -355,11 +355,18 @@ fn begin_task() -> ScriptedResponse {
     ])
 }
 fn no_vision() -> ScriptedResponse {
+    no_vision_message("This model does not support input_image")
+}
+fn no_vision_message(message: &str) -> ScriptedResponse {
     ScriptedResponse::json(
         400,
-        json!({"error": {
-            "code": "unsupported_image", "message": "This model does not support input_image",
-        }}),
+        json!({"error": {"code": "unsupported_image", "message": message}}),
+    )
+}
+fn rejected_image(message: &str) -> ScriptedResponse {
+    ScriptedResponse::json(
+        400,
+        json!({"error": {"code": "invalid_image_format", "message": message}}),
     )
 }
 fn assert_image(request: &Value) {
@@ -412,46 +419,51 @@ fn sending_turn_keeps_image_across_tool_calls() {
 
 #[test]
 fn sending_turn_without_vision_sends_caption_marker_not_image() {
-    let mut f = Fixture::new();
-    let c = f.conversation();
-    let image = f.upload();
-    f.server
-        .seen
-        .lock()
-        .unwrap()
-        .responses
-        .push_back(no_vision());
-    let input = json!({"conversation_id": c, "attachment_id": image, "draft": "Look"});
-    f.post("/api/attachments/precaption", input.clone());
-    wait("vision skip", || {
-        f.post("/api/attachments/precaption", input.clone())["caption"]["status"] == "skipped"
-    });
-    f.idle();
-    let sent = f.send(&c, "unsupported", "Look", &[image]);
-    assert_caption_only(&sent, "ce modèle ne peut pas lire les images");
-    // A proven capability limitation covers another image too; a generic
-    // caption-controller cooldown alone must not have this effect.
-    let mut bytes = STANDARD.decode(PNG).unwrap();
-    bytes.push(0);
-    let other = f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let sent = f.send(&c, "unsupported-other", "Another image", &[other]);
-    assert!(!sent.to_string().contains("input_image"));
-    assert!(user_content(&sent).iter().any(|part| part["text"]
-        .as_str()
-        .is_some_and(|text| text.contains("ce modèle ne peut pas lire les images"))));
-    f.db()
-        .execute(
-            "UPDATE wrapper_attachment_model_no_vision SET until_ms = 0",
-            [],
-        )
-        .unwrap();
-    f.restart();
-    let restored = f.upload();
-    let sent = f.send(&c, "capability-restored", "Try again", &[restored]);
-    assert_image(&sent); // An old SKIPPED cache entry must not disable bytes forever.
+    for message in [
+        "This model does not support input_image",
+        "Invalid content type. image_url is only supported by certain models.",
+    ] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let image = f.upload();
+        f.server
+            .seen
+            .lock()
+            .unwrap()
+            .responses
+            .push_back(no_vision_message(message));
+        let input = json!({"conversation_id": c, "attachment_id": image, "draft": "Look"});
+        f.post("/api/attachments/precaption", input.clone());
+        wait("vision skip", || {
+            f.post("/api/attachments/precaption", input.clone())["caption"]["status"] == "skipped"
+        });
+        f.idle();
+        let sent = f.send(&c, "unsupported", "Look", &[image]);
+        assert_caption_only(&sent, "ce modèle ne peut pas lire les images");
+        // A proven capability limitation covers another image too; a generic
+        // caption-controller cooldown alone must not have this effect.
+        let mut bytes = STANDARD.decode(PNG).unwrap();
+        bytes.push(0);
+        let other = f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sent = f.send(&c, "unsupported-other", "Another image", &[other]);
+        assert!(!sent.to_string().contains("input_image"));
+        assert!(user_content(&sent).iter().any(|part| part["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ce modèle ne peut pas lire les images"))));
+        f.db()
+            .execute(
+                "UPDATE wrapper_attachment_model_no_vision SET until_ms = 0",
+                [],
+            )
+            .unwrap();
+        f.restart();
+        let restored = f.upload();
+        let sent = f.send(&c, "capability-restored", "Try again", &[restored]);
+        assert_image(&sent); // An old SKIPPED cache entry must not disable bytes forever.
+    }
 }
 
 #[test]
@@ -521,6 +533,185 @@ fn caption_refusal_on_vision_model_still_sends_image() {
             .to_string()
             .contains("ce modèle ne peut pas lire les images"));
     }
+}
+
+#[test]
+fn bad_image_rejection_is_not_model_evidence() {
+    let public_error = "You uploaded an unsupported image. Please make sure your image is below 20 MB in size and is of one the following formats: ['png', 'jpeg', 'gif', 'webp'].";
+    for message in [
+        public_error,
+        "Invalid image supplied to this model; unsupported image encoding.",
+    ] {
+        for preparation in [true, false] {
+            let mut f = Fixture::new();
+            let c = f.conversation();
+            let other = f.conversation();
+            let good = f.upload();
+            f.prepare(&c, &good, "Look", "A valid photograph.");
+            let mut corrupt = STANDARD.decode(PNG).unwrap()[..16].to_vec();
+            corrupt.extend_from_slice(b"corrupt image data after the magic bytes");
+            let bad = f.app.api("POST", "/api/attachments", &corrupt).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            f.server
+                .seen
+                .lock()
+                .unwrap()
+                .responses
+                .push_back(rejected_image(message));
+            if preparation {
+                let input = json!({"conversation_id": c, "attachment_id": bad, "draft": "Look"});
+                f.post("/api/attachments/precaption", input.clone());
+                wait("bad image caption skip", || {
+                    f.post("/api/attachments/precaption", input.clone())["caption"]["status"]
+                        == "skipped"
+                });
+                f.idle();
+            } else {
+                f.server
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .responses
+                    .push_back(begin_task());
+                let calls = f.send_calls(&c, "bad-image", "Inspect both", &[bad, good.clone()], 3);
+                assert_eq!(
+                    user_content(&calls[0])
+                        .iter()
+                        .filter(|part| part["type"] == "input_image")
+                        .count(),
+                    2
+                );
+                for call in &calls[1..] {
+                    assert_caption_only(call, "A valid photograph.");
+                    assert!(!call
+                        .to_string()
+                        .contains("ce modèle ne peut pas lire les images"));
+                }
+                let notice = f.reply(&c, "bad-image")["notice"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert!(notice.contains("image jointe a été refusée"));
+                assert!(!notice.contains("ne lit pas les images"));
+                assert!(f
+                    .db()
+                    .query_row(
+                        "SELECT images_degraded FROM wrapper_engine_runs",
+                        [],
+                        |row| row.get::<_, bool>(0)
+                    )
+                    .unwrap());
+            }
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                        [],
+                        |row| row.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            let sent = f.send(&other, "valid-image", "What color?", &[good]);
+            assert_image(&sent);
+            assert!(!sent
+                .to_string()
+                .contains("ce modèle ne peut pas lire les images"));
+            assert!(!f.reply(&other, "valid-image")["notice"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ne lit pas les images"));
+        }
+    }
+}
+
+#[test]
+fn invalid_image_auto_caption_is_terminal_after_first_attempt() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let image = f.upload();
+    f.send(&c, "image", "Look", &[image]);
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(rejected_image("Invalid image data"));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    f.app.tick(now);
+    f.idle();
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before + 1);
+    for hour in 1..=20 {
+        if hour == 4 {
+            f.restart();
+        }
+        f.app.tick(now + hour * 3_600_000);
+        f.idle();
+        assert_eq!(
+            f.server.seen.lock().unwrap().bodies.len(),
+            before + 1,
+            "terminal invalid-image rejection must not auto-retry after cooldown or restart"
+        );
+    }
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn legacy_capability_evidence_is_cleared_and_degraded_column_migrates_once() {
+    let mut f = Fixture::new();
+    f.db()
+        .execute_batch(
+            "ALTER TABLE wrapper_engine_runs DROP COLUMN images_degraded;
+        UPDATE component_versions SET version=1 WHERE component='wrapper.engine';
+        UPDATE component_versions SET version=3 WHERE component='attachments';
+        INSERT INTO wrapper_attachment_model_no_vision VALUES ('gpt-test', 9223372036854775807);",
+        )
+        .unwrap();
+    f.restart();
+    assert_eq!(f.db().query_row("SELECT COUNT(*) FROM pragma_table_info('wrapper_engine_runs') WHERE name='images_degraded'", [], |row| row.get::<_, u32>(0)).unwrap(), 1);
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_attachment_model_no_vision VALUES ('gpt-test', ?1)",
+            [i64::MAX],
+        )
+        .unwrap();
+    f.restart();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_attachment_model_no_vision",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1,
+        "current evidence survives an idempotent migration"
+    );
 }
 
 #[test]
@@ -651,7 +842,7 @@ struct ToolHeavyApi {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl ToolHeavyApi {
-    fn new(seen: Arc<Mutex<Seen>>) -> Self {
+    fn new(seen: Arc<Mutex<Seen>>, suspend: bool) -> Self {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let base = format!("http://{}", server.server_addr());
         let stop = Arc::new(AtomicBool::new(false));
@@ -695,6 +886,15 @@ impl ToolHeavyApi {
                                 }}),
                                 json!({"type": "response.completed"}),
                             ])
+                        } else if suspend && calls == 6 {
+                            ScriptedResponse::events(&[
+                                json!({"type": "response.output_item.done", "item": {
+                                    "id": "fc-form", "type": "function_call", "status": "completed",
+                                    "call_id": "confirm-result", "name": "request_form",
+                                    "arguments": json!({"fields": [{"name": "answer", "label": "Answer", "field_type": {"kind": "text"}, "required": true}]}).to_string(),
+                                }}),
+                                json!({"type": "response.completed"}),
+                            ])
                         } else {
                             ScriptedResponse::events(&[
                                 json!({"type": "response.output_text.delta", "delta": "Finished after five tools."}),
@@ -730,6 +930,83 @@ impl Drop for ToolHeavyApi {
 }
 
 #[test]
+fn degraded_run_resumes_without_restoring_bytes_or_recompacting() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let image = f.upload();
+    f.prepare(&c, &image, "Look", "A blue square.");
+    let server = ToolHeavyApi::new(f.server.seen.clone(), true);
+    f.use_api(&server.base);
+    f.post("/api/engine/config", json!({"estimated_tokens": 12_000}));
+    f.send_calls(
+        &c,
+        "heavy-form",
+        "Inspect then ask",
+        std::slice::from_ref(&image),
+        6,
+    );
+    let db = f.db();
+    let (run_id, degraded): (String, bool) = db
+        .query_row(
+            "SELECT run_id,images_degraded FROM wrapper_engine_runs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(degraded);
+    let form = grokbot_forms::requests::list_for_run(&db, &run_id)
+        .unwrap()
+        .remove(0);
+    let seen = f.server.seen.clone();
+    let summaries = || {
+        seen.lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .filter(|body| {
+                body["instructions"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("Maximum summary length:")
+            })
+            .count()
+    };
+    let before = summaries();
+    assert!(before > 0);
+    let attachment = staging::get(&db, &image).unwrap().unwrap();
+    let mut directory = f.path.as_os_str().to_os_string();
+    directory.push(".attachments");
+    std::fs::remove_file(PathBuf::from(directory).join(attachment.sha256)).unwrap();
+    f.restart();
+    f.post("/api/forms/submit", json!({"entry_id": form.entry_id, "submission_id": "confirm-blue", "conversation_id": c, "values": {"answer": "Blue"}}));
+    f.app.tick(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    );
+    wait("degraded form run resumed", || {
+        f.reply(&c, "heavy-form")["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Finished after five tools.")
+    });
+    f.idle();
+    assert_eq!(
+        summaries(),
+        before,
+        "do not spend ephemeral compactions on an already degraded run"
+    );
+    assert_eq!(f.run_requests().len(), 7);
+    assert!(!f
+        .run_requests()
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("input_image"));
+}
+
+#[test]
 fn tool_heavy_image_run_degrades_instead_of_failing() {
     for mode in ["no-image", "png", "png-no-caption", "bmp", "no-vision"] {
         let mut f = Fixture::new();
@@ -761,7 +1038,7 @@ fn tool_heavy_image_run_degrades_instead_of_failing() {
                 )
                 .unwrap();
         }
-        let server = ToolHeavyApi::new(f.server.seen.clone());
+        let server = ToolHeavyApi::new(f.server.seen.clone(), false);
         f.use_api(&server.base);
         f.post("/api/engine/config", json!({"estimated_tokens": 12_000}));
         let calls = f.send_calls(&c, "heavy", "Inspect then finish", &ids, 6);

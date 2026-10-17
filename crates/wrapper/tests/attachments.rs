@@ -448,10 +448,12 @@ fn automatic_permanent_failure_stops_after_five_attempts_across_restart() {
         &[image["id"].as_str().unwrap().into()],
     );
     fixture.connect();
+    // A bad image is terminal; this separately exercises the retry budget for
+    // a persistent provider/configuration failure unrelated to image contents.
     for _ in 0..20 {
         fixture.reply(ScriptedResponse::json(
             400,
-            json!({"error": {"message": "Invalid image data"}}),
+            json!({"error": {"message": "Invalid request configuration"}}),
         ));
     }
     let now = clock_ms();

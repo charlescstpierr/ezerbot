@@ -110,8 +110,19 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             [],
         )?;
     }
+    let previous: Option<u32> = conn
+        .query_row(
+            "SELECT version FROM component_versions WHERE component = 'attachments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if previous.unwrap_or(0) < 4 {
+        // Version 3 could confuse a rejected file with a model-wide limitation.
+        conn.execute("DELETE FROM wrapper_attachment_model_no_vision", [])?;
+    }
     conn.execute(
-        "INSERT INTO component_versions(component, version) VALUES ('attachments', 3)
+        "INSERT INTO component_versions(component, version) VALUES ('attachments', 4)
          ON CONFLICT(component) DO UPDATE SET version = MAX(version, excluded.version)",
         [],
     )?;
@@ -532,7 +543,7 @@ fn vision(
         // authentication and usage failures stay retryable without leaking bodies.
         // Provider::responses preserves the refusal detail but has no typed
         // capability error yet. Do not mistake auth/usage/network errors for it.
-        Err(error) if error.kind == "other" && image_unsupported(&error.message) => {
+        Err(error) if error.kind == "other" && model_lacks_vision(&error.message) => {
             // A caption refusal/empty response is NOT a capability failure.
             // Only this explicit provider error may disable image bytes in chat.
             if let Ok(conn) =
@@ -541,6 +552,11 @@ fn vision(
                 let _ = conn.busy_timeout(Duration::from_secs(3));
                 let _ = record_no_vision(&conn, &model, now());
             }
+            return CaptionStatus::skipped(now() as i64);
+        }
+        Err(error) if error.kind == "other" && image_rejected(&error.message) => {
+            // A bad file may cool down precaption, but says nothing about the
+            // model's ability to read other images in real user turns.
             return CaptionStatus::skipped(now() as i64);
         }
         Err(_) => {
@@ -930,18 +946,22 @@ pub(super) fn images_for_message_cached(
     sending_turn: bool,
     urls: &mut HashMap<String, String>,
 ) -> Result<Vec<ImageInput>, ApiError> {
-    staging::for_message(ctx.connection, conversation, message)?
+    let attachments = staging::for_message(ctx.connection, conversation, message)?;
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    // One capability read per message, not per attachment. RC01's general
+    // SKIPPED cooldown remains independent and never strips bytes from chat.
+    let no_vision: bool = ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_attachment_model_no_vision
+         WHERE model = ?1 AND until_ms > ?2)",
+        params![model, ctx.now_ms],
+        |row| row.get(0),
+    )?;
+    attachments
         .iter()
         .map(|attachment| {
             let bmp = attachment.image_type == staging::ImageType::Bmp;
-            // RC01's SKIPPED cooldown applies ONLY to precaption. A refusal or
-            // empty description must never strip bytes from the real user turn.
-            let no_vision: bool = ctx.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM wrapper_attachment_model_no_vision
-                 WHERE model = ?1 AND until_ms > ?2)",
-                params![model, ctx.now_ms],
-                |row| row.get(0),
-            )?;
             let mut image = ImageInput {
                 attachment_id: attachment.id.clone(),
                 url: if sending_turn && !bmp && !no_vision {
@@ -986,22 +1006,38 @@ pub(super) fn record_no_vision(
     Ok(())
 }
 
-pub(super) fn image_unsupported(message: &str) -> bool {
+pub(super) fn image_rejected(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    message.contains("image")
-        && (message.contains("unsupported") || message.contains("not support"))
+    [
+        "uploaded an unsupported image",
+        "make sure your image",
+        "invalid image",
+        "image_parse_error",
+        "invalid_image",
+        "image too large",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
 }
 
-/// Budget degradation is not a statement about model capabilities. Keep real
-/// captions unchanged, or truthfully disclose that no description is available.
+pub(super) fn model_lacks_vision(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    !image_rejected(&message)
+        && message.contains("model")
+        && message.contains("image")
+        && (message.contains("unsupported")
+            || message.contains("not support")
+            || message.contains("only supported by certain models"))
+}
+
+/// Per-run degradation (budget or file rejection) is not a statement about
+/// model capabilities. Keep captions or disclose the missing description.
 pub(super) fn captions_only(images: &mut [ImageInput]) {
     for image in images {
         image.url = None;
         if image.caption.is_none() {
-            image.caption = Some(
-                "Image omise pour respecter la limite de contexte ; aucune description disponible."
-                    .into(),
-            );
+            image.caption =
+                Some("Image indisponible sur ce tour ; aucune description disponible.".into());
         }
     }
 }

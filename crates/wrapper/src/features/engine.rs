@@ -144,12 +144,23 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         "CREATE TABLE IF NOT EXISTS wrapper_engine_runs (
         run_id TEXT PRIMARY KEY, input_json TEXT NOT NULL, live INTEGER NOT NULL,
         model TEXT NOT NULL, effort TEXT, service_tier TEXT, error TEXT, error_kind TEXT,
-        notice TEXT, title_state TEXT NOT NULL DEFAULT 'none', retries INTEGER NOT NULL DEFAULT 0
+        notice TEXT, title_state TEXT NOT NULL DEFAULT 'none', retries INTEGER NOT NULL DEFAULT 0,
+        images_degraded INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS wrapper_engine_config (
         account_id TEXT PRIMARY KEY, estimated_tokens INTEGER NOT NULL
     );",
     )?;
+    let has_degraded: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_engine_runs') WHERE name = 'images_degraded')",
+        [], |row| row.get(0),
+    )?;
+    if !has_degraded {
+        conn.execute(
+            "ALTER TABLE wrapper_engine_runs ADD COLUMN images_degraded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     conn.execute(
         "INSERT OR IGNORE INTO wrapper_engine_config VALUES (?1,100000)",
         [ACCOUNT],
@@ -242,6 +253,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             }
         }
         set_component_version(conn, "wrapper.engine", 1)?;
+    }
+    if component_version(conn, "wrapper.engine")? < 2 {
+        set_component_version(conn, "wrapper.engine", 2)?;
     }
     Ok(())
 }
@@ -914,6 +928,11 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
             )?;
         }
     }
+    let images_degraded: bool = ctx.connection.query_row(
+        "SELECT images_degraded FROM wrapper_engine_runs WHERE run_id=?1",
+        [&run.run_id],
+        |row| row.get(0),
+    )?;
     let Some(cancel) = ctx.provider.claim_run(&run.run_id) else {
         return Ok(());
     };
@@ -937,7 +956,7 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
             cancel: &services.cancel.clone(),
             image_urls: Mutex::new(HashMap::new()),
             no_vision: AtomicBool::new(false),
-            captions_only: AtomicBool::new(false),
+            captions_only: AtomicBool::new(images_degraded),
         };
         drive_owned(ctx.connection, &gateway, &mut services, &run.run_id)?;
         return Ok(());
@@ -962,7 +981,7 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
                 cancel: &cancel,
                 image_urls: Mutex::new(HashMap::new()),
                 no_vision: AtomicBool::new(false),
-                captions_only: AtomicBool::new(false),
+                captions_only: AtomicBool::new(images_degraded),
             };
             drive_owned(&conn, &gateway, &mut services, &id)?;
             retitle(&conn, &provider, &id, &cancel, &path)?;
@@ -1425,6 +1444,12 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
 
 /// Final model boundary: full replay is budgeted/fenced here, not just the base
 /// context before run_loop appends its events. Compaction never rewrites transcript.
+#[derive(Clone, Copy)]
+enum ImageFallback {
+    NoVision,
+    RejectedFile,
+}
+
 struct RunGatewayCall<'a> {
     path: &'a Path,
     provider: &'a Provider,
@@ -1452,7 +1477,7 @@ impl RunGatewayCall<'_> {
         }
         self.captions_only.store(true, Ordering::SeqCst);
         self.connection.execute(
-            "UPDATE wrapper_engine_runs SET notice=?2 WHERE run_id=?1",
+            "UPDATE wrapper_engine_runs SET notice=?2,images_degraded=1 WHERE run_id=?1",
             params![self.run_id, "La limite de contexte impose un tour sans octets d'image ; seules les descriptions disponibles sont conservées."],
         )?;
         Ok(true)
@@ -1780,44 +1805,64 @@ impl RunGatewayCall<'_> {
             .input
             .iter()
             .any(|entry| entry.images.iter().any(|image| image.url.is_some()));
-        let mut retry_without_vision = false;
+        let mut image_fallback = None;
         let mut progressed = false;
         gateway.stream(&outgoing, &mut |event| {
             if let ModelEvent::Failed { reason } = &event {
-                let unsupported = super::attachments::image_unsupported(reason);
-                // Do not downgrade authentication, usage or network failures, or
-                // replay an attempt that already emitted text/tool calls.
-                if has_images && !progressed && unsupported {
-                    let kind: Option<String> = self.connection.query_row(
-                        "SELECT error_kind FROM wrapper_engine_runs WHERE run_id=?1",
-                        [self.run_id],
-                        |row| row.get(0),
-                    )?;
-                    if kind.as_deref() == Some("other") {
-                        retry_without_vision = true;
-                        return Ok(());
+                // Do not downgrade auth/usage/network errors, unrelated settings,
+                // or any attempt that already emitted text/tool calls.
+                if has_images && !progressed {
+                    let classification = if super::attachments::model_lacks_vision(reason) {
+                        Some(ImageFallback::NoVision)
+                    } else if super::attachments::image_rejected(reason) {
+                        Some(ImageFallback::RejectedFile)
+                    } else {
+                        None
+                    };
+                    if let Some(classification) = classification {
+                        let kind: Option<String> = self.connection.query_row(
+                            "SELECT error_kind FROM wrapper_engine_runs WHERE run_id=?1",
+                            [self.run_id],
+                            |row| row.get(0),
+                        )?;
+                        if kind.as_deref() == Some("other") {
+                            image_fallback = Some(classification);
+                            return Ok(());
+                        }
                     }
                 }
             }
             progressed |= !matches!(&event, ModelEvent::Failed { .. });
             forward(event)
         })?;
-        if !retry_without_vision {
+        let Some(image_fallback) = image_fallback else {
             return Ok(());
-        }
-        self.no_vision.store(true, Ordering::SeqCst);
-        super::attachments::record_no_vision(self.connection, &request.model, now())
-            .map_err(engine_error)?;
+        };
+        let (notice, degraded) = match image_fallback {
+            ImageFallback::NoVision => {
+                self.no_vision.store(true, Ordering::SeqCst);
+                super::attachments::record_no_vision(self.connection, &request.model, now())
+                    .map_err(engine_error)?;
+                ("Ce modèle ne lit pas les images ; la réponse utilise le texte et les descriptions disponibles.", false)
+            }
+            ImageFallback::RejectedFile => {
+                self.captions_only.store(true, Ordering::SeqCst);
+                ("Une image jointe a été refusée ; seules les descriptions disponibles sont utilisées.", true)
+            }
+        };
         self.connection.execute(
-            "UPDATE wrapper_engine_runs SET error=NULL,error_kind=NULL,notice=?2 WHERE run_id=?1",
-            params![self.run_id, "Ce modèle ne lit pas les images ; la réponse utilise le texte et les descriptions disponibles."],
+            "UPDATE wrapper_engine_runs SET error=NULL,error_kind=NULL,notice=?2,images_degraded=MAX(images_degraded,?3) WHERE run_id=?1",
+            params![self.run_id, notice, degraded],
         )?;
         if compaction::revision(self.connection, &run.conversation_id)? != self.source_revision {
             return Err(Error::Conflict("context source changed".into()));
         }
         let mut fallback = request.input.clone();
         for entry in &mut fallback {
-            super::attachments::without_vision(&mut entry.images);
+            match image_fallback {
+                ImageFallback::NoVision => super::attachments::without_vision(&mut entry.images),
+                ImageFallback::RejectedFile => super::attachments::captions_only(&mut entry.images),
+            }
         }
         // One retry only, through the same fencing, budget, secret redaction,
         // cancellation and metadata path. Further failures are real failures.

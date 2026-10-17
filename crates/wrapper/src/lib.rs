@@ -695,7 +695,14 @@ impl App {
         )?;
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(3))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            return Err(ApiError::new(
+                500,
+                "Le stockage local n'a pas pu activer le mode WAL.",
+            ));
+        }
         connection.execute_batch(SCHEMA)?;
         // Colonnes ajoutées après la première version : une ancienne base les reçoit avec leur défaut.
         for (table, column, definition) in [
@@ -791,7 +798,7 @@ impl App {
     ) -> Result<grokbot_engine::contracts::ToolOutcome, ApiError> {
         validate_id(bot_id)?;
         self.require_bot(bot_id)?;
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = features::write_transaction(&self.connection)?;
         let mut ctx = self.feature_context();
         ctx.connection = &tx;
         ctx.bot_id = Some(bot_id);

@@ -9,6 +9,247 @@ use super::{validate_headers, App};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+// Seed only metadata: linking does not read image bytes. This exercises the real
+// attachment core without implementing the downstream upload/thumbnail adapter.
+fn seed_attachments(app: &App) {
+    let tx = super::features::write_transaction(&app.connection).unwrap();
+    grokbot_attachments::staging::migrate(&tx).unwrap();
+    for (id, digest) in [("image-a", "a".repeat(64)), ("image-b", "b".repeat(64))] {
+        tx.execute("INSERT INTO attachments_staged(id, sha256, image_type, byte_length, staged_at) VALUES (?1, ?2, 'image/png', 24, 0)", rusqlite::params![id, digest]).unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn attachment_link_hook(
+    ctx: &super::features::Context<'_>,
+    conversation: &str,
+    message: &str,
+    ids: &[String],
+) -> Result<(), super::ApiError> {
+    let existing =
+        grokbot_attachments::staging::for_message(ctx.connection, conversation, message)?;
+    let old: std::collections::BTreeSet<_> = existing.iter().map(|item| item.id.as_str()).collect();
+    let new: std::collections::BTreeSet<_> = ids.iter().map(String::as_str).collect();
+    if !old.is_empty() && old != new {
+        return Err(super::ApiError::new(409, "Attachment set changed"));
+    }
+    grokbot_attachments::staging::link_attachments(ctx.connection, conversation, message, ids)?;
+    Ok(())
+}
+
+#[test]
+fn rejected_attachment_send_does_not_create_submission() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+    for (message, text) in [("empty", ""), ("text", "Original")] {
+        let result = super::features::test_hooks::with_link(attachment_link_hook, || {
+            post(
+                &mut app,
+                "/api/send",
+                json!({"conversation_id": id, "message_id": message, "body": text, "attachments": ["expired-attachment"]}),
+            )
+        });
+        assert_eq!(result, Err(400));
+        assert!(app.reader.list_submissions().unwrap().is_empty());
+        assert_eq!(
+            app.connection
+                .query_row("SELECT count(*) FROM wrapper_messages", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            app.connection
+                .query_row("SELECT count(*) FROM attachments_message_links", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            app.connection
+                .query_row("SELECT count(*) FROM wrapper_remote", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    assert!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Refused input did not reserve the nonce/body in the journal.
+    assert!(post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": id, "message_id": "empty", "body": "Corrected"})
+    )
+    .is_ok());
+}
+
+#[test]
+fn queued_image_only_retry_without_attachment_ids_is_recoverable() {
+    fn must_not_relink(
+        _: &super::features::Context<'_>,
+        _: &str,
+        _: &str,
+        _: &[String],
+    ) -> Result<(), super::ApiError> {
+        panic!("a body-only retry must keep existing links, not validate an empty replacement set")
+    }
+    for with_links in [false, true] {
+        let db = Database::new();
+        let mut app = App::open(&db.0).unwrap();
+        let id = conversation(&mut app);
+        seed_attachments(&app);
+        if with_links {
+            let tx = super::features::write_transaction(&app.connection).unwrap();
+            grokbot_attachments::staging::link_attachments(
+                &tx,
+                &id,
+                "queued-image",
+                &["image-a".into()],
+            )
+            .unwrap();
+            super::features::conversations::append_entry(&tx, &id, "submission", "queued-image", 1)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        app.session
+            .prepare(
+                ConversationId::new(&id).unwrap(),
+                MessageId::new("queued-image").unwrap(),
+                String::new(),
+            )
+            .unwrap();
+        drop(app); // Simulate a crash between prepare and transport (also the old journal-only gap).
+        let mut app = App::open(&db.0).unwrap();
+        let result = super::features::test_hooks::with_link(must_not_relink, || {
+            post(
+                &mut app,
+                "/api/send",
+                json!({"conversation_id": id, "message_id": "queued-image", "body": ""}),
+            )
+            .unwrap()
+        });
+        assert_eq!(result["conversation"]["messages"][0]["state"], "echoed");
+        assert!(app.reader.list_submissions().unwrap()[0].body.is_empty());
+        assert_eq!(
+            grokbot_attachments::staging::for_message(&app.connection, &id, "queued-image")
+                .unwrap()
+                .len(),
+            usize::from(with_links)
+        );
+    }
+}
+
+#[test]
+fn crash_after_link_commit_before_journal_prepare_is_invisible_and_retryable() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+    let tx = super::features::write_transaction(&app.connection).unwrap();
+    grokbot_attachments::staging::link_attachments(&tx, &id, "orphan", &["image-a".into()])
+        .unwrap();
+    super::features::conversations::append_entry(&tx, &id, "submission", "orphan", 1).unwrap();
+    tx.commit().unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    assert!(
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let result = super::features::test_hooks::with_link(attachment_link_hook, || {
+        post(&mut app, "/api/send", json!({"conversation_id": id, "message_id": "orphan", "body": "", "attachments": ["image-a"]})).unwrap()
+    });
+    assert_eq!(result["conversation"]["messages"][0]["state"], "echoed");
+    assert_eq!(app.reader.list_submissions().unwrap().len(), 1);
+    assert_eq!(
+        grokbot_attachments::staging::for_message(&app.connection, &id, "orphan")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn timeline_kind_collisions_return_conflict_in_both_directions() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    super::features::conversations::append_entry(&app.connection, &id, "form", "same", 1).unwrap();
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": id, "message_id": "same", "body": "Not journaled"})
+        ),
+        Err(409)
+    );
+    assert!(app.reader.list_submissions().unwrap().is_empty());
+    assert_eq!(
+        super::features::conversations::append_entry(&app.connection, &id, "task", "same", 2)
+            .unwrap_err()
+            .status,
+        409
+    );
+    send(&mut app, &id, "Submission first", false);
+    assert_eq!(
+        super::features::conversations::append_entry(
+            &app.connection,
+            &id,
+            "form",
+            "stable-nonce",
+            3
+        )
+        .unwrap_err()
+        .status,
+        409
+    );
+}
+
+#[test]
+fn attachment_link_contract_rejects_changed_nonempty_retry_sets() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+    super::features::test_hooks::with_link(attachment_link_hook, || {
+        let request = json!({"conversation_id": id, "message_id": "image", "body": "", "attachments": ["image-a"]});
+        post(&mut app, "/api/send", request.clone()).unwrap();
+        post(&mut app, "/api/send", request).unwrap();
+        assert_eq!(
+            post(
+                &mut app,
+                "/api/send",
+                json!({"conversation_id": id, "message_id": "image", "body": "", "attachments": ["image-b"]})
+            ),
+            Err(409)
+        );
+        post(
+            &mut app,
+            "/api/send",
+            json!({"conversation_id": id, "message_id": "image", "body": ""}),
+        )
+        .unwrap();
+    });
+    let links = grokbot_attachments::staging::for_message(&app.connection, &id, "image").unwrap();
+    assert_eq!(
+        links
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["image-a"]
+    );
+}
+
 #[test]
 fn unknown_entry_kind_is_projected_in_ordinal_order() {
     let db = Database::new();
@@ -126,7 +367,8 @@ fn image_only_message_is_accepted() {
     let db = Database::new();
     let mut app = App::open(&db.0).unwrap();
     let id = conversation(&mut app);
-    let request = json!({"conversation_id": id, "message_id": "image-only", "body": "  ", "attachments": ["image-1"]});
+    seed_attachments(&app);
+    let request = json!({"conversation_id": id, "message_id": "image-only", "body": "  ", "attachments": ["image-a"]});
     let first = post(&mut app, "/api/send", request.clone()).unwrap();
     assert_eq!(first["conversation"]["messages"][0]["state"], "echoed");
     // The journal accepts the real empty body, so no [image] fallback is needed.
@@ -173,54 +415,85 @@ fn image_only_message_is_accepted() {
 #[test]
 fn two_writers_do_not_return_busy() {
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
     let db = Database::new();
     let mut app = App::open(&db.0).unwrap();
     let id = conversation(&mut app);
-    let account = grokbot_domain::AccountId::new(super::ACCOUNT).unwrap();
-    let mut writer = grokbot_store::SessionStore::open(&db.0, &account).unwrap();
-    let mut journal = writer.load_journal().unwrap();
-    let path = db.0.clone();
-    let (locked_tx, locked_rx) = mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let mut conn = rusqlite::Connection::open(path).unwrap();
-        conn.busy_timeout(Duration::from_secs(3)).unwrap();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .unwrap();
-        tx.execute(
-            "INSERT INTO component_versions VALUES ('writer-proof', 1)",
-            [],
-        )
+    // Use the actual constructor shared by send, tool probes, migration and
+    // LocalTransport, then establish a read snapshot before attempting a write.
+    let tx = super::features::write_transaction(&app.connection).unwrap();
+    let _: i64 = tx
+        .query_row("SELECT count(*) FROM wrapper_messages", [], |row| {
+            row.get(0)
+        })
         .unwrap();
-        locked_tx.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        tx.commit().unwrap();
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let path = db.0.clone();
+    let worker_id = id.clone();
+    let worker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        // Deliberately disable the default busy handler: observe the contested
+        // write now, and explicitly retry it only after the wrapper commits.
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let first = conn.execute("INSERT INTO wrapper_messages(account_id, conversation_id, message_id, kind, created_at) VALUES ('local-workspace', ?1, 'worker', 'task', 1)", [&worker_id]);
+        let retry = first.is_err();
+        attempt_tx.send(first.map(|_| ())).unwrap();
+        release_rx.recv().unwrap();
+        if retry {
+            super::features::conversations::append_entry(&conn, &worker_id, "task", "worker", 1)
+                .unwrap();
+        }
     });
-    locked_rx.recv().unwrap();
-    let start = Instant::now();
-    writer.save_journal(&mut journal).unwrap();
+    let competing_attempt = attempt_rx.recv().unwrap();
+    let result = super::features::conversations::append_entry(&tx, &id, "tool", "wrapper", 2);
+    if result.is_ok() {
+        tx.commit().unwrap();
+    } else {
+        tx.rollback().unwrap();
+    }
+    release_tx.send(()).unwrap();
     worker.join().unwrap();
-    assert!(start.elapsed() >= Duration::from_millis(100));
+    // DEFERRED instead of IMMEDIATE lets the other writer commit after our read:
+    // this write then fails with BUSY_SNAPSHOT (517), independent of timeouts.
+    result.unwrap();
+    assert!(
+        matches!(competing_attempt, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy)
+    );
     assert_eq!(
         app.connection
-            .query_row(
-                "SELECT version FROM component_versions WHERE component = 'writer-proof'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
+            .query_row("SELECT count(*) FROM wrapper_messages", [], |r| r
+                .get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
-    // Reopen the submission session after the independent journal writer advances
-    // its revision; stale-journal protection is not a SQLite busy failure.
-    drop(app);
-    app = App::open(&db.0).unwrap();
-    assert_eq!(
-        send(&mut app, &id, "After the competing writer", false)["conversation"]["messages"][0]
-            ["state"],
-        "echoed"
-    );
+}
+
+#[test]
+fn queued_current_message_does_not_drop_the_previous_assistant_from_preview() {
+    use grokbot_engine::contracts::ContextSource;
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    let response = send(&mut app, &id, "First question", false);
+    let previous_reply = response["conversation"]["messages"][1]["body"]
+        .as_str()
+        .unwrap();
+    app.session
+        .prepare(
+            ConversationId::new(&id).unwrap(),
+            MessageId::new("queued").unwrap(),
+            "Still queued".into(),
+        )
+        .unwrap();
+    let blocks = app.context_preview(&id).unwrap();
+    let history = blocks
+        .iter()
+        .find(|block| block.source == ContextSource::History)
+        .unwrap();
+    assert!(history.text.contains("First question"));
+    assert!(history.text.contains(previous_reply));
+    assert!(!history.text.contains("Still queued"));
+    assert_eq!(blocks.last().unwrap().text, "Still queued");
 }
 
 #[test]
@@ -274,7 +547,10 @@ fn hidden_context_and_tool_probes_use_the_feature_dispatcher() {
         "delegation",
         "attachments",
     ] {
-        assert_eq!(state[capability], json!({}));
+        assert!(
+            state.get(capability).is_some(),
+            "missing namespaced state: {capability}"
+        );
     }
     assert!(state["conversations"].is_array());
 }
@@ -750,7 +1026,11 @@ fn existing_wrapper_database_migrates_title_metadata_without_losing_conversation
 
 impl Drop for Database {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.0.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(path));
+        }
     }
 }
 

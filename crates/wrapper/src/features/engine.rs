@@ -258,32 +258,56 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 validate_id(id)?;
             }
             let text = input.body.trim();
-            if (text.is_empty() && input.attachments.is_empty()) || text.len() > 16 * 1024 {
-                return Err(ApiError::new(
-                    400,
-                    "Le message doit contenir entre 1 octet et 16 Ko de texte.",
-                ));
-            }
-            // The journal accepts an empty body (covered by image_only_message_is_accepted).
-            // Attachment links stay in their capability, not the immutable text payload.
             let conversation = ConversationId::new(&input.conversation_id).expect("validated ID");
             let message = MessageId::new(&input.message_id).expect("validated ID");
-            // The hook validates/links before any remote effect. Its writes and the
-            // ordinal metadata are atomic; a retry can repair a journal-only crash.
-            let state = app
-                .session
-                .prepare(conversation.clone(), message.clone(), text.into())?;
-            let tx = app.connection.unchecked_transaction()?;
-            let mut ctx = app.feature_context();
-            ctx.connection = &tx;
-            super::link_attachments(
-                &ctx,
+            let previous = app.session.state(&conversation, &message)?;
+            if (previous.is_none() && text.is_empty() && input.attachments.is_empty())
+                || text.len() > 16 * 1024
+            {
+                return Err(ApiError::new(
+                    400,
+                    "Ajoutez du texte (16 Ko au plus) ou une image.",
+                ));
+            }
+            // Existing submissions check their immutable body before any link write.
+            // A body-only UI retry must preserve the links of an image-only message.
+            let prepared = if previous.is_some() {
+                Some(
+                    app.session
+                        .prepare(conversation.clone(), message.clone(), text.into())?,
+                )
+            } else {
+                None
+            };
+            // Validate links and reserve the ordinal BEFORE journaling a new message.
+            // Failure rolls both back. A crash after commit but before prepare leaves
+            // only invisible orphan metadata/links that the same request can reuse.
+            let tx = super::write_transaction(&app.connection)?;
+            super::conversations::append_entry(
+                &tx,
                 &input.conversation_id,
+                "submission",
                 &input.message_id,
-                &input.attachments,
+                now(),
             )?;
-            tx.execute("INSERT OR IGNORE INTO wrapper_messages (account_id, conversation_id, message_id, created_at) VALUES (?1, ?2, ?3, ?4)", params![ACCOUNT, input.conversation_id, input.message_id, now()])?;
+            if previous.is_none() || !input.attachments.is_empty() {
+                let mut ctx = app.feature_context();
+                ctx.connection = &tx;
+                ctx.conversation_id = Some(&input.conversation_id);
+                super::link_attachments(
+                    &ctx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    &input.attachments,
+                )?;
+            }
             tx.commit()?;
+            let state = match prepared {
+                Some(state) => state,
+                None => app
+                    .session
+                    .prepare(conversation.clone(), message.clone(), text.into())?,
+            };
             let has_prior_message = app.reader.list_submissions()?.iter().any(|record| {
                 record.conversation_id == conversation && record.message_id != message
             });
@@ -607,7 +631,7 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     };
     let mut blocks = vec![block(
         ContextSource::AppContract,
-        0,
+        super::priority::APP,
         BASE_INSTRUCTIONS.into(),
     )];
     if let Ok(Some(bot)) = ctx.connection.query_row(
@@ -616,12 +640,12 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     ).optional() {
         let mut identity = format!("Tu t'appelles {}.", bot.name);
         if !bot.description.is_empty() { identity.push_str(&format!("\n\nTon rôle, tel que les autres le voient : {}", bot.description)); }
-        blocks.push(block(ContextSource::BotIdentity, 10, identity));
-        if !bot.instructions.is_empty() { blocks.push(block(ContextSource::BotInstructions, 20, format!("Consignes privées sur ta façon de te comporter :\n{}", bot.instructions))); }
+        blocks.push(block(ContextSource::BotIdentity, super::priority::IDENTITY, identity));
+        if !bot.instructions.is_empty() { blocks.push(block(ContextSource::BotInstructions, super::priority::INSTRUCTIONS, format!("Consignes privées sur ta façon de te comporter :\n{}", bot.instructions))); }
     }
     blocks.push(block(
         ContextSource::CurrentMessage,
-        100,
+        super::priority::CURRENT,
         request.current_message.text.clone(),
     ));
     blocks
@@ -662,17 +686,19 @@ pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
     let mut blocks = super::context(&ctx, &request);
     if let Some(current) = current {
         let history = app.history(conversation_id, &current.id)?;
-        // The current input has its own block, not a duplicate history entry.
+        // history() includes the current message only after acceptance. A queued
+        // input must not accidentally remove the preceding assistant response.
+        let included_current = usize::from(matches!(current.state, "accepted" | "echoed"));
         let text = history
             .iter()
-            .take(history.len().saturating_sub(1))
+            .take(history.len().saturating_sub(included_current))
             .map(|(role, text)| format!("{role}: {text}"))
             .collect::<Vec<_>>()
             .join("\n\n");
         if !text.is_empty() {
             blocks.push(ContextBlock {
                 source: ContextSource::History,
-                priority: 90,
+                priority: super::priority::HISTORY,
                 budget: text.chars().count(),
                 text,
             });
@@ -693,7 +719,7 @@ impl LocalTransport<'_> {
         let account = request.actor().account_id.as_str();
         let conversation = request.conversation_id().as_str();
         let message = request.message_id().as_str();
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = super::write_transaction(self.connection)?;
         let existing: Option<String> = tx.query_row("SELECT body FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![account, conversation, message], |r| r.get(0)).optional()?;
         let existing_reply_absent = existing.is_none();
         if existing.is_some_and(|body| body != request.body()) {

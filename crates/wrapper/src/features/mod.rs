@@ -2,8 +2,15 @@
 //!
 //! Routes receive the mutable app (the submission session has mutable state). Other
 //! hooks use a borrowed context, also constructible by run threads with their own
-//! SQLite connection. Capability writes participate in the caller's transaction;
-//! they must not BEGIN/COMMIT. `run_id` is absent for the hidden preview/tool probes.
+//! SQLite connection. Capability writes participate in the caller's IMMEDIATE
+//! transaction (use `write_transaction`); they must not BEGIN/COMMIT. Taking the
+//! write lock before reading prevents WAL's non-retryable BUSY_SNAPSHOT upgrade.
+//! `run_id` is absent for the hidden preview/tool probes.
+//!
+//! Attachment linking validates a new message before journal preparation. On a
+//! retry, an empty ID list means "keep the existing links" and is not dispatched.
+//! Hooks MUST return 409 if a nonempty retry list differs from the existing set;
+//! silently accumulating attachments would violate message nonce immutability.
 
 use crate::{ApiError, ApiResponse, App, Message, Provider};
 use grokbot_engine::contracts::{
@@ -12,6 +19,24 @@ use grokbot_engine::contracts::{
 use rusqlite::Connection;
 use serde_json::Value;
 use std::path::Path;
+
+/// Reserved assembly slots: app, bot, skills, memory, summary, history, current.
+/// Tool items belong in history; external data never outranks the app contract.
+pub mod priority {
+    pub const APP: u32 = 0;
+    pub const IDENTITY: u32 = 10;
+    pub const INSTRUCTIONS: u32 = 20;
+    pub const SKILLS: u32 = 30;
+    pub const MEMORY: u32 = 40;
+    pub const SUMMARY: u32 = 50;
+    pub const HISTORY: u32 = 90;
+    pub const CURRENT: u32 = 100;
+}
+
+/// Every wrapper read-then-write transaction must acquire its writer lock first.
+pub fn write_transaction(conn: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
 
 pub struct Context<'a> {
     pub connection: &'a Connection,
@@ -102,8 +127,8 @@ registry!(
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS component_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")?;
-    let tx = conn.unchecked_transaction()?;
+    let tx = write_transaction(conn)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS component_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")?;
     for feature in FEATURES {
         (feature.migrate)(&tx)?;
     }
@@ -173,8 +198,41 @@ pub fn link_attachments(
     message: &str,
     ids: &[String],
 ) -> Result<(), ApiError> {
+    #[cfg(test)]
+    if let Some(result) = test_hooks::link_attachments(ctx, conversation, message, ids) {
+        result?;
+    }
     for feature in FEATURES {
         (feature.link_attachments)(ctx, conversation, message, ids)?;
     }
     Ok(())
+}
+
+/// Thread-local hook injection keeps negative-path unit tests isolated from each
+/// other, without turning the production capability stubs into implementations.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::*;
+    type Link = fn(&Context<'_>, &str, &str, &[String]) -> Result<(), ApiError>;
+    std::thread_local! {
+        static LINK: std::cell::Cell<Option<Link>> = const { std::cell::Cell::new(None) };
+    }
+    pub fn with_link<T>(hook: Link, operation: impl FnOnce() -> T) -> T {
+        struct Restore(Option<Link>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LINK.set(self.0);
+            }
+        }
+        let _restore = Restore(LINK.replace(Some(hook)));
+        operation()
+    }
+    pub(super) fn link_attachments(
+        ctx: &Context<'_>,
+        conversation: &str,
+        message: &str,
+        ids: &[String],
+    ) -> Option<Result<(), ApiError>> {
+        LINK.get().map(|hook| hook(ctx, conversation, message, ids))
+    }
 }

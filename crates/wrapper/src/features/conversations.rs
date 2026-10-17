@@ -199,8 +199,9 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     }
 }
 
-/// Append a non-submission entry on the caller's connection/transaction. Ownership
-/// of the payload stays with the capability; `entry` projects it when state is read.
+/// Append a timeline identity on the caller's connection/transaction. Submissions
+/// and capability entries share this namespace: only the same kind is idempotent.
+/// Capability payloads remain with their owner; `entry` projects them on reads.
 pub fn append_entry(
     conn: &Connection,
     conversation: &str,
@@ -208,7 +209,14 @@ pub fn append_entry(
     id: &str,
     created_at: u64,
 ) -> Result<(), ApiError> {
-    conn.execute("INSERT OR IGNORE INTO wrapper_messages (account_id, conversation_id, message_id, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![ACCOUNT, conversation, id, kind, created_at])?;
+    conn.execute("INSERT INTO wrapper_messages (account_id, conversation_id, message_id, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_id, conversation_id, message_id) DO NOTHING", params![ACCOUNT, conversation, id, kind, created_at])?;
+    let existing: String = conn.query_row("SELECT kind FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, conversation, id], |row| row.get(0))?;
+    if existing != kind {
+        return Err(ApiError::new(
+            409,
+            "Cet identifiant appartient déjà à un autre type d'entrée.",
+        ));
+    }
     Ok(())
 }
 

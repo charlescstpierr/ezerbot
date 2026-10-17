@@ -109,8 +109,9 @@ impl SessionStore {
             }
         }
         let mut connection = Connection::open(path)?;
-        // Run threads and the submission session write the same database. Wait for
-        // short transactions rather than surfacing SQLITE_BUSY to the user.
+        // Align with the wrapper/provider's explicit three-second wait policy
+        // (rusqlite otherwise defaults to five seconds). Read-then-write callers
+        // must also use IMMEDIATE transactions to avoid WAL snapshot upgrades.
         connection.busy_timeout(std::time::Duration::from_secs(3))?;
         migrate(&mut connection)?;
         Ok(Self {

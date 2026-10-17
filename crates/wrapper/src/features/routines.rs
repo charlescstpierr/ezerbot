@@ -325,13 +325,42 @@ fn quoted_data(text: &str) -> String {
 }
 fn review_stamp(conn: &Connection, r: &Routine) -> Result<String, ApiError> {
     let at: Option<String> = conn.query_row(
-        "SELECT strftime('%d/%m/%Y à %H:%M:%f UTC',?1/1000.0,'unixepoch')",
+        "SELECT strftime('%d/%m/%Y à %H:%M:%S',?1/1000.0,'unixepoch','localtime')",
         [r.modified_at],
         |row| row.get(0),
     )?;
-    Ok(at
+    // A date (even with milliseconds) is not an identity. Keep homonyms
+    // distinguishable in both chat and panel with a short ID-derived reference.
+    // Extend a colliding prefix; include deleted records so deletion cannot
+    // shorten an existing reference or reuse it for another stored routine.
+    let id = r
+        .routine_id
+        .strip_prefix("routine-")
+        .unwrap_or(&r.routine_id);
+    let offset = r.routine_id.len() - id.len();
+    let mut length = id.len().min(8);
+    let mut stmt = conn.prepare("SELECT routine_id FROM scheduler_routines WHERE routine_id<>?1 AND substr(routine_id,1,?2)=?3")?;
+    let others = stmt.query_map(
+        params![
+            r.routine_id,
+            offset + length,
+            &r.routine_id[..offset + length]
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    for other in others {
+        let shared = r
+            .routine_id
+            .bytes()
+            .zip(other?.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        length = length.max((shared.saturating_sub(offset) + 1).min(id.len()));
+    }
+    let date = at
         .map(|at| format!("Modifiée le {at}"))
-        .unwrap_or_else(|| "Date de modification indisponible".into()))
+        .unwrap_or_else(|| "Date de modification indisponible".into());
+    Ok(format!("{date} · Réf. {}", &id[..length]))
 }
 fn ask_confirmation(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     let conversation = principal(ctx)?;

@@ -443,11 +443,26 @@ fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
 }
 
 #[test]
-fn same_named_routines_show_their_modification_stamp_in_panel_metadata_and_chat() {
+fn same_named_routines_show_local_seconds_and_distinct_references_in_panel_metadata_and_chat() {
     let mut f = Fixture::new(false);
-    let a = model_create(&f, "Météo du matin", "Première proposition");
-    f.app.tick(now() + 1_000);
-    let b = model_create(&f, "Météo du matin", "Deuxième proposition");
+    let create_at = |at| {
+        let db = f.db();
+        let tx = features::write_transaction(&db).unwrap();
+        let mut ctx = f.app.feature_context();
+        ctx.connection = &tx;
+        ctx.bot_id = Some("grokbot");
+        ctx.now_ms = at;
+        let created = output(features::routines::call_tool(&ctx, &ToolCall {
+            call_id: "create".into(),
+            name: "create_routine".into(),
+            arguments: json!({"name":"Météo du matin","prompt":"Météo","schedule":"@every 1m","time_zone":"Pacific/Honolulu"}),
+        }).unwrap());
+        tx.commit().unwrap();
+        created
+    };
+    // Same second: dropping milliseconds must not make homonyms identical.
+    let a = create_at(1_792_000_000_123);
+    let b = create_at(1_792_000_000_124);
     assert_ne!(a["routine"]["review_stamp"], b["routine"]["review_stamp"]);
     let notices: String = f
         .db()
@@ -463,7 +478,16 @@ fn same_named_routines_show_their_modification_stamp_in_panel_metadata_and_chat(
         .unwrap();
     for item in [&a, &b] {
         let stamp = item["routine"]["review_stamp"].as_str().unwrap();
-        assert!(stamp.starts_with("Modifiée le "));
+        let (date, reference) = stamp.split_once(" · Réf. ").unwrap();
+        let expected: String = f.db().query_row(
+            "SELECT strftime('Modifiée le %d/%m/%Y à %H:%M:%S',?1/1000.0,'unixepoch','localtime')",
+            [item["routine"]["modified_at"].as_i64().unwrap()],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(date, expected);
+        assert!(!date.contains('.'));
+        assert!(!stamp.contains("UTC"));
+        assert!(reference.len() >= 8 && reference.bytes().all(|b| b.is_ascii_hexdigit()));
         assert!(notices.contains(stamp));
         assert!(list["routines"]
             .as_array()
@@ -471,6 +495,49 @@ fn same_named_routines_show_their_modification_stamp_in_panel_metadata_and_chat(
             .iter()
             .any(|r| r["review_stamp"] == stamp));
     }
+}
+
+#[test]
+fn routine_review_references_extend_colliding_id_prefixes_and_survive_deletion() {
+    let mut f = Fixture::new(false);
+    let mut a = f.create("Report");
+    a.routine_id = "routine-12345678aaaaaaaaaaaaaaaaaaaaaaaa".into();
+    a.conversation_id = "collision-a".into();
+    routine::create(&f.db(), &a).unwrap();
+    let mut b = a.clone();
+    b.routine_id = "routine-12345678bbbbbbbbbbbbbbbbbbbbbbbb".into();
+    b.conversation_id = "collision-b".into();
+    routine::create(&f.db(), &b).unwrap();
+    let list = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    for (id, reference) in [(&a.routine_id, "12345678a"), (&b.routine_id, "12345678b")] {
+        let stamp = list["routines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["routine_id"] == *id)
+            .unwrap()["review_stamp"]
+            .as_str()
+            .unwrap();
+        assert!(stamp.ends_with(&format!(" · Réf. {reference}")));
+    }
+    routine::delete(&f.db(), &a.routine_id).unwrap();
+    f.reopen();
+    let list = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    let stamp = list["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["routine_id"] == b.routine_id)
+        .unwrap()["review_stamp"]
+        .as_str()
+        .unwrap();
+    assert!(stamp.ends_with(" · Réf. 12345678b"));
 }
 
 #[test]

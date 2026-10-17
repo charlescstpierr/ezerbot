@@ -866,9 +866,8 @@ impl Provider {
     /// Révoque la session renouvelable puis efface les jetons. Rend `false` si OpenAI n'a pas confirmé.
     pub fn signout(&self) -> bool {
         self.cancel_signin();
-        for cancel in lock(&self.inner.runs).values() {
-            cancel.store(true, Ordering::SeqCst);
-        }
+        // The engine route durably stops only provider-consuming runs. A blanket
+        // signal here could cancel an already-suspended form during owner release.
         let _guard = lock(&self.inner.credentials);
         let Some(mut credentials) = self.read() else {
             return true;
@@ -1055,6 +1054,15 @@ impl Provider {
             cancel,
         };
         crate::gateway::stream_response(reader, &mut |event| {
+            if matches!(event, ModelEvent::Incomplete { .. }) {
+                metadata(
+                    Some("OpenAI a arrêté cette réponse avant la fin."),
+                    Some(&Failure {
+                        message: "OpenAI a arrêté cette réponse avant la fin.".into(),
+                        kind: "incomplete",
+                    }),
+                )?;
+            }
             if let ModelEvent::Failed { reason } = &event {
                 let kind = if reason.contains("Limite d’utilisation")
                     || reason.contains("Limite d'utilisation")

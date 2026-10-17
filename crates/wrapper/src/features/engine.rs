@@ -180,13 +180,10 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         for (conversation, message, text, reply, created, bot, status, error, kind, notice) in rows
         {
             let run = Run {
-                run_id: format!("legacy-{message}"),
+                run_id: legacy_run_id(&conversation, &message),
                 bot_id: bot,
+                trigger: user_trigger(&conversation, &message, 0),
                 conversation_id: conversation,
-                trigger: Trigger::UserMessage {
-                    message_id: message.clone(),
-                    attempt: 0,
-                },
                 kind: RunKind::Chat,
                 status: RunStatus::Queued,
                 task_status: None,
@@ -250,23 +247,35 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 
 pub fn startup(conn: &Connection) -> Result<(), ApiError> {
     conn.pragma_update(None, "secure_delete", true)?;
-    let tx = super::write_transaction(conn)?;
-    // No old generation threads survive a process restart. Preserve events and
-    // usage; the next tick claims Interrupted IDs, never a new trigger/attempt.
-    for mut run in store::runs_with_status(&tx, RunStatus::Running)? {
-        run.status = RunStatus::Interrupted;
-        store::save(&tx, &run)?;
-        let event = store::append_event(
-            &tx,
-            &run.run_id,
-            RunEventKind::Interrupted,
-            &json!({"reason":"process_restart"}),
-        )?;
-        // Recovery has no provider/context; capability hooks consume identifiers only.
-        // Reactions to Interrupted do not complete a routine or child.
-        let _ = event;
+    let path = Path::new(
+        conn.path()
+            .ok_or_else(|| ApiError::new(500, "Recovery requires a file database."))?,
+    );
+    // Construction is inert (no status/auth/network calls). Recovery reactions
+    // only use the transaction, under the same no-I/O contract as normal hooks.
+    let provider = Provider::with_endpoints(path, Endpoints::default(), false);
+    let mut services = Services {
+        path,
+        provider: &provider,
+        connection: conn,
+        cancel: Arc::new(AtomicBool::new(false)),
+    };
+    for run in store::runs_with_status(conn, RunStatus::Running)? {
+        run_loop::with_run_events(conn, &mut services, &run.run_id, |conn, _| {
+            let mut current = store::required(conn, &run.run_id)?;
+            if current.status == RunStatus::Running {
+                current.status = RunStatus::Interrupted;
+                store::save(conn, &current)?;
+                store::append_event(
+                    conn,
+                    &current.run_id,
+                    RunEventKind::Interrupted,
+                    &json!({"reason":"process_restart"}),
+                )?;
+            }
+            Ok(())
+        })?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -438,12 +447,16 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 RunStatus::Queued,
                 RunStatus::Running,
                 RunStatus::Interrupted,
-                RunStatus::AwaitingApproval,
-                RunStatus::AwaitingHumanInput,
-                RunStatus::AwaitingChildren,
             ] {
                 for run in store::runs_with_status(&app.connection, status)? {
-                    stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
+                    let live: bool = app.connection.query_row(
+                        "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
+                        [&run.run_id],
+                        |r| r.get(0),
+                    )?;
+                    if live {
+                        stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
+                    }
                 }
             }
             let revoked = app.provider.signout();
@@ -453,17 +466,47 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let input: ReconcileMessage = parse(body)?;
             validate_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
-            app.require_conversation(&input.conversation_id)?;
-            let trigger = Trigger::UserMessage {
-                message_id: input.message_id.clone(),
-                attempt: 0,
-            };
+            if path == "/api/regenerate" {
+                app.require_conversation(&input.conversation_id)?;
+            } else {
+                let exists:bool=app.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2)",params![ACCOUNT,input.conversation_id],|r|r.get(0))?;
+                if !exists {
+                    return Err(ApiError::new(404, "Conversation introuvable."));
+                }
+            }
+            let trigger = user_trigger(&input.conversation_id, &input.message_id, 0);
             let old = store::latest_run_for_trigger(&app.connection, &trigger)?
+                .or(store::get(&app.connection, &input.message_id)?)
                 .filter(|r| r.conversation_id == input.conversation_id)
                 .ok_or_else(|| ApiError::new(404, "Réponse introuvable."))?;
             if path == "/api/stop" {
                 stop_run(&app.feature_context(), &old, TurnEnd::Stopped)?;
+                let deleted: bool = app.connection.query_row(
+                    "SELECT deleted FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+                    params![ACCOUNT, input.conversation_id],
+                    |r| r.get(0),
+                )?;
+                if deleted {
+                    return Ok(json!({"ok":true,"run_id":old.run_id}));
+                }
             } else {
+                if !matches!(old.trigger, Trigger::UserMessage { .. }) {
+                    return Err(ApiError::new(
+                        409,
+                        "Une réponse de tâche ne peut pas être régénérée.",
+                    ));
+                }
+                let live: bool = app.connection.query_row(
+                    "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
+                    [&old.run_id],
+                    |r| r.get(0),
+                )?;
+                if live && !app.provider.connected() {
+                    return Err(ApiError::new(
+                        409,
+                        "Connectez-vous à ChatGPT pour relancer cette réponse.",
+                    ));
+                }
                 if !old.status.is_terminal() && old.status != RunStatus::Interrupted {
                     return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
                 }
@@ -533,6 +576,20 @@ fn suggested_title(body: &str) -> Option<String> {
             title.chars().take(79).collect::<String>().trim_end()
         ))
     }
+}
+fn user_trigger(conversation: &str, message: &str, attempt: u32) -> Trigger {
+    // API message IDs are conversation-scoped; '/' cannot occur in either ID.
+    Trigger::UserMessage {
+        message_id: format!("{conversation}/{message}"),
+        attempt,
+    }
+}
+fn legacy_run_id(conversation: &str, message: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "legacy-{:x}",
+        Sha256::digest(serde_json::to_vec(&(conversation, message)).expect("string tuple"))
+    )
 }
 fn random_id(conn: &Connection) -> rusqlite::Result<String> {
     conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
@@ -607,10 +664,7 @@ impl App {
         ctx.conversation_id = Some(conversation);
         start_run(
             &ctx,
-            Trigger::UserMessage {
-                message_id: message.into(),
-                attempt,
-            },
+            user_trigger(conversation, message, attempt),
             item(message, Role::User, text),
         )?;
         Ok(())
@@ -679,6 +733,12 @@ pub fn start_run(
     let conversation = ctx
         .conversation_id
         .ok_or_else(|| ApiError::new(400, "Conversation requise."))?;
+    let trigger = match trigger {
+        Trigger::UserMessage { attempt, .. } => {
+            user_trigger(conversation, &input.entry_id, attempt)
+        }
+        other => other,
+    };
     let kind = if matches!(trigger, Trigger::UserMessage { .. }) {
         RunKind::Chat
     } else {
@@ -737,6 +797,7 @@ pub fn tick(ctx: &super::Context<'_>) {
     // pending wakes must NEVER mark them Delivered (SR01/SR02).
     for status in [
         RunStatus::Queued,
+        RunStatus::Running,
         RunStatus::Interrupted,
         RunStatus::AwaitingHumanInput,
         RunStatus::AwaitingApproval,
@@ -812,6 +873,18 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
     if run.status.is_terminal() {
         return Ok(());
     }
+    let deleted: bool = ctx
+        .connection
+        .query_row(
+            "SELECT deleted FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+            params![ACCOUNT, run.conversation_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(true);
+    if deleted {
+        return stop_run(ctx, run, TurnEnd::Stopped);
+    }
     let live: bool = ctx.connection.query_row(
         "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
         [&run.run_id],
@@ -829,6 +902,9 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
         )?;
         if model.is_empty() {
             let Some((model, effort, tier)) = resolve_model(ctx.connection, ctx.provider)? else {
+                ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='other' WHERE run_id=?1",params![run.run_id,"Les modèles de votre compte ChatGPT ne sont pas encore chargés. Relancez la réponse dans un instant."])?;
+                let mut services = Services::new(ctx)?;
+                fail_host(ctx.connection, &mut services, &run.run_id)?;
                 return Ok(());
             };
             ctx.connection.execute(
@@ -1301,10 +1377,7 @@ fn history(
                 let mut user = item(&id, Role::User, text);
                 let previous = store::latest_run_for_trigger(
                     conn,
-                    &Trigger::UserMessage {
-                        message_id: id.clone(),
-                        attempt: 0,
-                    },
+                    &user_trigger(&run.conversation_id, &id, 0),
                 )?;
                 if let Some(previous) = &previous {
                     user.images = run_input(conn, &previous.run_id)?.images;
@@ -1328,7 +1401,11 @@ fn history(
 fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec<HistoryItem>> {
     let events = store::events(conn, &run.run_id, 0)?;
     let mut items = run_loop::replay_items(&events)?;
+    // replay_items coalesces each completed response before this defense-in-depth
+    // redaction, including legacy events written by a pre-cutover generator.
+    let vault = event_vault(conn)?;
     for item in &mut items {
+        item.text = redact::redact(&vault, &item.text)?;
         for tool in &mut item.tool_items {
             if let ToolItem::Output { call_id, output } = tool {
                 if output["status"] == "suspend" {
@@ -1589,7 +1666,18 @@ impl RunGatewayCall<'_> {
             cancel: self.cancel,
             metadata: Some((self.path, self.run_id)),
         };
+        let mut deltas = RedactedDeltas::new(&vault)?;
         gateway.stream(&outgoing, &mut |event| {
+            if let ModelEvent::TextDelta { text } = event {
+                deltas.pending.push_str(&text);
+                return deltas.flush(false, emit);
+            }
+            if matches!(
+                event,
+                ModelEvent::Completed | ModelEvent::Failed { .. } | ModelEvent::Incomplete { .. }
+            ) {
+                deltas.flush(true, emit)?;
+            }
             let event = serde_json::from_value(redact::redact_value(
                 &vault,
                 &serde_json::to_value(event)?,
@@ -1597,6 +1685,75 @@ impl RunGatewayCall<'_> {
             emit(event)
         })
     }
+}
+/// Retain the longest known secret's suffix across deltas BEFORE persisting or
+/// displaying text. Snapshot values are never model-facing and survive rotation
+/// for this stream, so removing a vault value cannot reveal its buffered tail.
+struct RedactedDeltas<'a> {
+    vault: &'a Vault,
+    pending: String,
+    known: Vec<String>,
+    tail: usize,
+}
+impl<'a> RedactedDeltas<'a> {
+    fn new(vault: &'a Vault) -> grokbot_engine::contracts::Result<Self> {
+        let mut state = Self {
+            vault,
+            pending: String::new(),
+            known: vec![],
+            tail: 0,
+        };
+        state.refresh()?;
+        Ok(state)
+    }
+    fn refresh(&mut self) -> grokbot_engine::contracts::Result<()> {
+        for metadata in self.vault.list()? {
+            if let Some(value) = self.vault.get(&metadata.name)? {
+                self.tail = self.tail.max(value.chars().count());
+                if !self.known.contains(&value) {
+                    self.known.push(value);
+                }
+            }
+        }
+        self.known.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        Ok(())
+    }
+    fn flush(
+        &mut self,
+        finished: bool,
+        emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        self.refresh()?;
+        self.pending = redact::redact(self.vault, &self.pending)?;
+        loop {
+            let old = self.pending.clone();
+            for value in &self.known {
+                self.pending = self.pending.replace(value, "[...]");
+            }
+            if self.pending == old {
+                break;
+            }
+        }
+        let kept = if finished { 0 } else { self.tail };
+        let count = self.pending.chars().count().saturating_sub(kept);
+        let boundary = self
+            .pending
+            .char_indices()
+            .nth(count)
+            .map_or(self.pending.len(), |(n, _)| n);
+        let text = self.pending[..boundary].to_owned();
+        self.pending.drain(..boundary);
+        if !text.is_empty() {
+            emit(ModelEvent::TextDelta { text })?;
+        }
+        Ok(())
+    }
+}
+fn event_vault(conn: &Connection) -> grokbot_engine::contracts::Result<Vault> {
+    let path = conn
+        .path()
+        .ok_or_else(|| Error::InvalidInput("file database required".into()))?;
+    vault(Path::new(path))
 }
 struct ProviderGateway<'a> {
     provider: &'a Provider,
@@ -1656,7 +1813,7 @@ fn projected_text(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Re
             text.push_str(event.payload["text"].as_str().unwrap_or_default());
         }
     }
-    Ok(text)
+    redact::redact(&event_vault(conn)?, &text)
 }
 fn run_reply(
     conn: &Connection,
@@ -1673,6 +1830,7 @@ fn run_reply(
     let (state, error) = match run.status {
         RunStatus::Queued | RunStatus::Running => ("streaming", None),
         RunStatus::Interrupted => ("failed", Some(INTERRUPTED.into())),
+        RunStatus::Failed if metadata.1.as_deref() == Some("incomplete") => ("echoed", None),
         RunStatus::Failed => ("failed", metadata.0.or_else(|| Some(INTERRUPTED.into()))),
         RunStatus::Cancelled => ("stopped", None),
         _ => ("echoed", None),
@@ -1698,14 +1856,10 @@ pub fn reply(
     message: &str,
     proposals: Vec<Proposal>,
 ) -> Result<Option<Message>, ApiError> {
-    let Some(run) = store::latest_run_for_trigger(
-        ctx.connection,
-        &Trigger::UserMessage {
-            message_id: message.into(),
-            attempt: 0,
-        },
-    )?
-    .filter(|r| r.conversation_id == conversation) else {
+    let Some(run) =
+        store::latest_run_for_trigger(ctx.connection, &user_trigger(conversation, message, 0))?
+            .filter(|r| r.conversation_id == conversation)
+    else {
         return Ok(None);
     };
     Ok(Some(run_reply(
@@ -1850,7 +2004,68 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     ));
     blocks
 }
+/// Compatibility probe: capability-owned RAW blocks, ready for one assembly pass.
+/// Keep queued user text and monotone priorities; callers inspect memory/skill JSON.
 pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBlock>, ApiError> {
+    app.require_conversation(conversation_id)?;
+    let conversation = app
+        .conversations()?
+        .into_iter()
+        .find(|c| c.id == conversation_id)
+        .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
+    let current = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user");
+    let id = current.map_or("preview", |m| m.id.as_str());
+    let request = ContextRequest {
+        run_id: "preview".into(),
+        trigger: user_trigger(conversation_id, id, 0),
+        bot_id: conversation.bot_id.clone(),
+        conversation_id: conversation_id.into(),
+        current_message: item(
+            id,
+            Role::User,
+            current.map_or_else(String::new, |m| m.body.clone()),
+        ),
+    };
+    let mut ctx = app.feature_context();
+    ctx.bot_id = Some(&conversation.bot_id);
+    ctx.conversation_id = Some(conversation_id);
+    let mut blocks = super::context(&ctx, &request);
+    let mut lines = Vec::new();
+    for message in &conversation.messages {
+        if message.id == id {
+            break;
+        }
+        if matches!(message.kind.as_str(), "reset" | "engine_reset") {
+            lines.clear();
+            continue;
+        }
+        if message.kind == "message"
+            && ((message.role == "user" && matches!(message.state, "accepted" | "echoed"))
+                || (message.role == "assistant" && message.state != "failed"))
+            && !message.body.is_empty()
+        {
+            lines.push(format!("{}: {}", message.role, message.body));
+        }
+    }
+    if !lines.is_empty() {
+        let text = lines.join("\n\n");
+        blocks.push(ContextBlock {
+            source: ContextSource::History,
+            priority: super::priority::HISTORY,
+            budget: text.chars().count(),
+            text,
+        });
+    }
+    blocks.sort_by_key(|b| b.priority);
+    Ok(blocks)
+}
+/// Assembled diagnostic view, deliberately separate from the raw feature probe.
+#[doc(hidden)]
+pub fn request_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBlock>, ApiError> {
     app.require_conversation(conversation_id)?;
     let bot: String = app.connection.query_row(
         "SELECT bot_id FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
@@ -1864,10 +2079,7 @@ pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
         run_id: "preview".into(),
         bot_id: bot.clone(),
         conversation_id: conversation_id.into(),
-        trigger: Trigger::UserMessage {
-            message_id: current.entry_id.clone(),
-            attempt: 0,
-        },
+        trigger: user_trigger(conversation_id, &current.entry_id, 0),
         kind: RunKind::Chat,
         status: RunStatus::Queued,
         task_status: None,
@@ -1893,7 +2105,9 @@ pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
     });
     let model = app
         .resolved_model()?
-        .map_or_else(String::new, |(model, _, _)| model);
+        .map(|(model, _, _)| model)
+        .or(app.model_preferences()?.0)
+        .unwrap_or_else(|| "simulated".into());
     let linked = super::attachments::images_for_message(
         &ctx,
         conversation_id,
@@ -1987,26 +2201,7 @@ fn retitle(
             return Err(Error::InvalidInput("title generation incomplete".into()));
         }
         let title = redact::redact(&vault(path)?, &title)?;
-        let line = title
-            .lines()
-            .find(|s| !s.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .trim_matches(|c: char| {
-                c.is_whitespace()
-                    || matches!(
-                        c,
-                        '"' | '\'' | '«' | '»' | '“' | '”' | '`' | '*' | '#' | '_'
-                    )
-            })
-            .trim_end_matches(['.', ':', ' ']);
-        let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        let title = if title.chars().count() > 60 {
-            format!("{}…", title.chars().take(59).collect::<String>().trim_end())
-        } else {
-            title
-        };
-        if !title.is_empty() {
+        if let Some(title) = clean_title(&title) {
             conn.execute("UPDATE wrapper_conversations SET title=?3 WHERE account_id=?1 AND id=?2 AND title_customized=0 AND deleted=0",params![ACCOUNT,run.conversation_id,title])?;
         }
         Ok(())
@@ -2016,6 +2211,31 @@ fn retitle(
         [id],
     )?;
     result
+}
+fn clean_title(raw: &str) -> Option<String> {
+    let line = raw.lines().find(|s| !s.trim().is_empty())?;
+    let line=line.chars().filter(|c|!c.is_control() && !matches!(*c,'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).collect::<String>();
+    let line = line
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\'' | '«' | '»' | '“' | '”' | '`' | '*' | '#' | '_'
+                )
+        })
+        .trim_end_matches(['.', ':', ' ']);
+    let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        None
+    } else if title.chars().count() > 60 {
+        Some(format!(
+            "{}…",
+            title.chars().take(59).collect::<String>().trim_end()
+        ))
+    } else {
+        Some(title)
+    }
 }
 pub(crate) struct LocalTransport<'a> {
     pub(crate) connection: &'a Connection,
@@ -2123,5 +2343,28 @@ impl ModelGateway for RunGateway<'_> {
         Err(Error::InvalidInput(
             "context changed repeatedly; retry this response".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::clean_title;
+    #[test]
+    fn titles_are_short_clean_and_control_free() {
+        assert_eq!(
+            clean_title("\n« Service de notifications en Rust. »\nAutre ligne").as_deref(),
+            Some("Service de notifications en Rust")
+        );
+        assert_eq!(
+            clean_title("**Recette   de\tpain**").as_deref(),
+            Some("Recette de pain")
+        );
+        assert_eq!(clean_title("  \n \"\" "), None);
+        assert_eq!(
+            clean_title("« Su\u{0007}jet\u{200e}. »").as_deref(),
+            Some("Sujet")
+        );
+        let long = clean_title(&"mot ".repeat(40)).unwrap();
+        assert!(long.chars().count() <= 60 && long.ends_with('…'));
     }
 }

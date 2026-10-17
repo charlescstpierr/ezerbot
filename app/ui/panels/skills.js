@@ -214,7 +214,7 @@
       // Textareas normalize CRLF. Compare with the displayed initial values so
       // editing a description never silently rewrites an untouched imported body.
       baseline = { name: name.value, description: description.value, body: body.value };
-      versionLabel.textContent = skill ? `Version ${skill.version} · ${skill.skill_id}` : "Le nom affiché conserve ses accents. Une clé technique est créée automatiquement.";
+      versionLabel.textContent = skill ? `Version ${skill.version} · ${skill.skill_id}` : "Votre bot retrouve cette skill par son nom.";
       history.hidden = !skill; history.open = false;
       removeButton.hidden = !skill; confirmation.hidden = true;
       reload.hidden = true;
@@ -223,6 +223,11 @@
         option.value = String(item.version); return option;
       }));
       showVersion();
+    }
+    function focusName() {
+      name.focus();
+      name.setSelectionRange(0, 0);
+      name.scrollLeft = 0;
     }
     async function openEditor(skillId) {
       if (job.running || job.mutating || (!skillId && (panels.state.skills?.by_bot?.[bot.id]?.length || 0) >= 250)) return;
@@ -239,9 +244,9 @@
           if (!active(request)) return;
           const all = response.versions.slice().sort((a, b) => b.version - a.version);
           if (!all.length || all[0].deleted) throw new Error("Cette skill a été supprimée. Rouvrez la liste.");
-          populate(all[0], all); error.textContent = ""; fields.disabled = false; name.focus();
+          populate(all[0], all); error.textContent = ""; fields.disabled = false; focusName();
         } catch (failure) { if (active(request)) error.textContent = failure.message; }
-      } else { fields.disabled = false; name.focus(); }
+      } else { fields.disabled = false; focusName(); }
     }
     async function mutate(path, payload, success) {
       if (job.running || job.mutating) return;
@@ -301,9 +306,12 @@
         list.replaceChildren();
         sectionTitle.textContent = `Skills · ${skills.length}/250`;
         if (!skills.length) list.append(node("li", "skills-note", panels.state.skills?.error || "Aucune skill pour ce bot."));
+        const titleCounts = new Map();
+        for (const skill of skills) titleCounts.set(displayName(skill), (titleCounts.get(displayName(skill)) || 0) + 1);
         for (const skill of skills) {
           const row = node("li", "skills-row"), copy = node("div");
-          copy.append(node("strong", "", displayName(skill) + (skill.display_name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version} · ${skill.skill_id}`));
+          const lookupKey = titleCounts.get(displayName(skill)) > 1 ? `${skill.name}${skill.name_truncated ? "…" : ""} · ` : "";
+          copy.append(node("strong", "", displayName(skill) + (skill.display_name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version} · ${lookupKey}${skill.skill_id}`));
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;

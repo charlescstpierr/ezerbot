@@ -264,11 +264,90 @@ fn body_replacement_keeps_all_host_managed_upload_fields() {
 }
 
 #[test]
+fn upload_editor_hides_metadata_and_sparse_edits_synchronize_the_stored_document() {
+    let db = Database::new();
+    let mut app = db.open();
+    let text = "Commencez par une phrase empathique.";
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"ton-chaleureux.txt", "content":text}]}),
+    );
+    let txt = listing(&mut app, "grokbot").remove(0);
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":txt["skill_id"]}),
+    );
+    assert_eq!(versions["versions"][0]["content"]["editable_body"], text);
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"resume.md", "content":"---\nname: Résumé express\ndescription: Trois puces.\nauteur: Élodie\n---\nRésumez ce texte."}]}),
+    );
+    let original = listing(&mut app, "grokbot")
+        .into_iter()
+        .find(|s| s["content"]["name"] == "resume-express")
+        .unwrap();
+    let id = original["skill_id"].clone();
+    let renamed = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":"Résumé éclair"}),
+    );
+    let raw = renamed["skill"]["content"]["body"].as_str().unwrap();
+    assert!(raw.contains("name: Résumé éclair\n"));
+    assert!(!raw.contains("name: Résumé express"));
+    assert!(raw.contains("description: Trois puces.\n"));
+    assert!(raw.contains("origin: upload\nupload-extension: .md"));
+    assert!(raw.contains("auteur: Élodie\n"));
+    let described = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "description":"Une synthèse brève."}),
+    );
+    assert!(described["skill"]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("description: Une synthèse brève.\n"));
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    for version in versions["versions"].as_array().unwrap() {
+        let editable = version["content"]["editable_body"].as_str().unwrap();
+        assert!(editable.contains("auteur: Élodie"));
+        for key in [
+            "name:",
+            "description:",
+            "origin:",
+            "upload-extension:",
+            "upload-name:",
+        ] {
+            assert!(!editable.contains(key));
+        }
+    }
+    assert_eq!(
+        versions["versions"][0]["content"]["body"],
+        original["content"]["body"]
+    );
+    let unchanged = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "name":"Résumé éclair", "description":"Une synthèse brève.", "body":versions["versions"][2]["content"]["editable_body"]}),
+    );
+    assert_eq!(unchanged["skill"], described["skill"]);
+    let output = tool_output(&app, "read_skill", json!({"skill_id":id}));
+    assert_eq!(output["body"], described["skill"]["content"]["body"]);
+}
+
+#[test]
 fn user_frontmatter_stays_visible_editable_and_removable_for_manual_and_model_skills() {
     use grokbot_skills::library::{self, Origin, SkillContent};
     let db = Database::new();
     let mut app = db.open();
-    let body = "---\norigin: Bretagne\nupload-extension: recette\nupload-name: maison\nportions: 4\n---\nCrêpes au beurre salé.";
+    let body = "---\nname: Recette de famille\ndescription: Texte écrit par l’auteur\norigin: Bretagne\nupload-extension: recette\nupload-name: maison\nportions: 4\n---\nCrêpes au beurre salé.";
     for origin in [Origin::Manual, Origin::Model] {
         let skill = if origin == Origin::Manual {
             add(&mut app, "grokbot", "Crêpes bretonnes", body)
@@ -842,7 +921,13 @@ fn sparse_updates_preserve_description_body_and_upload_provenance() {
         renamed["content"]["description"],
         original["content"]["description"]
     );
-    assert_eq!(renamed["content"]["body"], original["content"]["body"]);
+    assert_eq!(
+        renamed["content"]["body"].as_str().unwrap(),
+        original["content"]["body"]
+            .as_str()
+            .unwrap()
+            .replace("name: Deploy", "name: Deploy safely")
+    );
     assert_eq!(renamed["content"]["origin"], original["content"]["origin"]);
     let corrected = post(
         &mut app,

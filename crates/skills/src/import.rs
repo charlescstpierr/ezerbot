@@ -289,6 +289,12 @@ fn field(header: &str, key: &str) -> String {
         .find_map(|line| line.strip_prefix(&prefix))
         .unwrap_or("")
         .trim_matches(js_space);
+    // Host-written multiline metadata is a JSON-quoted single-line YAML scalar.
+    if value.starts_with('"') {
+        if let Ok(decoded) = serde_json::from_str::<String>(value) {
+            return decoded;
+        }
+    }
     for quote in ['\'', '"'] {
         if let Some(value) = value
             .strip_prefix(quote)
@@ -350,7 +356,13 @@ fn legacy_slug(title: &str) -> String {
         .join("-")
 }
 
-const MANAGED_KEYS: [&str; 3] = ["origin:", "upload-extension:", "upload-name:"];
+const MANAGED_KEYS: [&str; 5] = [
+    "name:",
+    "description:",
+    "origin:",
+    "upload-extension:",
+    "upload-name:",
+];
 fn managed(line: &str) -> bool {
     MANAGED_KEYS.iter().any(|key| line.starts_with(key))
 }
@@ -366,29 +378,72 @@ pub fn editable_body(text: &str) -> String {
     }
     let lines: Vec<_> = header.lines().filter(|line| !managed(line)).collect();
     if lines.iter().all(|line| line.trim().is_empty()) {
-        body.into()
+        // annotate adds one blank separator before a headerless upload's text.
+        body.strip_prefix('\n').unwrap_or(body).into()
     } else {
         format!("---\n{}\n---\n{body}", lines.join("\n"))
     }
 }
 
-/// Reattach the original host provenance on edits, even when the user removes
-/// all frontmatter or tries to replace its managed fields. Never parse body YAML.
-pub fn preserve_managed_frontmatter(original: &str, edited: &str) -> String {
+/// Reattach upload provenance and synchronize any existing name/description
+/// fields with the dedicated editor fields. Never parse Markdown-body YAML.
+pub fn preserve_managed_frontmatter(
+    original: &str,
+    edited: &str,
+    name: &str,
+    description: &str,
+) -> String {
     let Some((header, _)) = frontmatter(original) else {
         return edited.into();
     };
-    let metadata: Vec<_> = header.lines().filter(|line| managed(line)).collect();
+    let metadata: Vec<_> = header
+        .lines()
+        .filter(|line| managed(line))
+        .map(|line| {
+            if line.starts_with("name:") {
+                metadata_line("name", name)
+            } else if line.starts_with("description:") {
+                metadata_line("description", description)
+            } else {
+                line.into()
+            }
+        })
+        .collect();
     if metadata.is_empty() {
         return edited.into();
     }
-    let clean = editable_body(edited);
-    let (header, body) = frontmatter(&clean).unwrap_or(("", &clean));
+    // Work from the raw edited document here: a metadata-only edit must not
+    // trim its unchanged Markdown body's leading separator or line endings.
+    let (header, body) = frontmatter(edited).unwrap_or(("", edited));
+    let header = header
+        .lines()
+        .filter(|line| !managed(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     let separator = if header.is_empty() { "" } else { "\n" };
     format!(
         "---\n{header}{separator}{}\n---\n{body}",
         metadata.join("\n")
     )
+}
+
+fn metadata_line(key: &str, value: &str) -> String {
+    // Keep ordinary metadata readable, but never let a multiline description or
+    // YAML delimiter create extra header fields (or close the header).
+    let quote = value.chars().any(char::is_control)
+        || value.trim() != value
+        || value.starts_with([
+            '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%',
+            '@', '`',
+        ])
+        || value.contains(": ")
+        || value.contains(" #");
+    let value = if quote {
+        serde_json::to_string(value).expect("string serialization")
+    } else {
+        value.into()
+    };
+    format!("{key}: {value}")
 }
 
 fn annotate(text: &str, title: &str, has_name: bool, extension: &str, file_name: &str) -> String {
@@ -570,27 +625,61 @@ mod tests {
     fn editable_frontmatter_hides_only_host_fields_and_preserves_them_on_save() {
         let original = "---\r\nname: Été\r\ncustom: gardé\r\norigin: upload\r\nupload-extension: .txt\r\nupload-name: 'été.txt'\r\n---\r\n\r\norigin: exemple\r\n";
         let editable = editable_body(original);
-        assert!(editable.contains("name: Été\ncustom: gardé"));
+        assert!(editable.contains("custom: gardé"));
+        assert!(!editable.contains("name: Été"));
         assert!(editable.ends_with("origin: exemple\r\n"));
         assert!(!editable.contains("origin: upload"));
         let saved = preserve_managed_frontmatter(
             original,
             "---\ncustom: nouveau\norigin: model\n---\nCorps",
+            "Été révisé",
+            "Description",
         );
+        assert!(saved.contains("name: Été révisé"));
         assert!(saved.contains(
-            "custom: nouveau\norigin: upload\nupload-extension: .txt\nupload-name: 'été.txt'"
+            "custom: nouveau\nname: Été révisé\norigin: upload\nupload-extension: .txt\nupload-name: 'été.txt'"
         ));
         assert!(saved.ends_with("Corps"));
-        assert!(preserve_managed_frontmatter(original, "Corps seul").ends_with("---\nCorps seul"));
+        assert!(
+            preserve_managed_frontmatter(original, "Corps seul", "Été", "Description")
+                .ends_with("---\nCorps seul")
+        );
         for text in [
             "origin: exemple\nTexte",
             "---\ncustom: valeur\n---\nTexte",
             "---\norigin: exemple sans fermeture",
         ] {
             assert_eq!(editable_body(text), text);
-            assert_eq!(preserve_managed_frontmatter("Corps manuel", text), text);
+            assert_eq!(
+                preserve_managed_frontmatter("Corps manuel", text, "Nom", "Description"),
+                text
+            );
         }
         assert_eq!(editable_body("---\norigin: upload\n---\nCorps"), "Corps");
+    }
+
+    #[test]
+    fn metadata_rewrites_stay_single_line_and_preserve_user_fields() {
+        let original = "---\nname: Ancien\ndescription: Ancienne\nauteur: Élodie\norigin: upload\n---\nCorps\nname: exemple dans le corps";
+        let name = "\"Titre\": résumé";
+        let description = "Première ligne\n---\nauteur: pas un champ\r\nDernière ligne";
+        let saved =
+            preserve_managed_frontmatter(original, &editable_body(original), name, description);
+        let (header, body) = frontmatter(&saved).unwrap();
+        assert_eq!(field(header, "name"), name);
+        assert_eq!(field(header, "description"), description);
+        assert_eq!(field(header, "auteur"), "Élodie");
+        assert_eq!(header.lines().count(), 4);
+        assert_eq!(body, "Corps\nname: exemple dans le corps");
+        assert_eq!(editable_body(&saved), editable_body(original));
+        let only_name = preserve_managed_frontmatter(
+            "---\nname: Ancien\norigin: upload\n---\nTexte",
+            "Texte",
+            "Nouveau",
+            "Description absente du fichier",
+        );
+        assert!(!only_name.contains("description:"));
+        assert_eq!(editable_body(&only_name), "Texte");
     }
 
     #[test]

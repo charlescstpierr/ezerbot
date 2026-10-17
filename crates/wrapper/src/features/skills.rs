@@ -217,12 +217,19 @@ fn handle(
             if let Some(body) = input.body {
                 if body != current.content.body && body != editable_body(&current.content) {
                     validate_body(&body)?;
-                    content.body = if matches!(current.content.origin, Origin::Upload { .. }) {
-                        import::preserve_managed_frontmatter(&current.content.body, &body)
-                    } else {
-                        body
-                    };
+                    content.body = body;
                 }
+            }
+            if matches!(current.content.origin, Origin::Upload { .. }) && content != current.content
+            {
+                // Name/description-only edits must update the stored document
+                // too; otherwise read_skill would receive stale metadata.
+                content.body = import::preserve_managed_frontmatter(
+                    &current.content.body,
+                    &content.body,
+                    &content.display_name,
+                    &content.description,
+                );
             }
             // Omitted fields and upload provenance survive manual edits. Do not
             // reject an unchanged imported body for its added upload frontmatter.

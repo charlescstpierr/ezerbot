@@ -24,7 +24,10 @@ def verify_ui_regressions():
     parser.add_argument('--ui-regressions', action='store_true')
     parser.add_argument('--report', type=Path, help='Optional report path (otherwise stdout only)')
     args = parser.parse_args()
-    env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=os.environ.get('CHROME_DEVTOOLS_AXI_SESSION', 'gb-fix-newchat'))
+    env = dict(os.environ, CHROME_DEVTOOLS_AXI_SESSION=os.environ.get('CHROME_DEVTOOLS_AXI_SESSION', 'grokbot-ui-regressions'))
+    # Assets are embedded with include_str!: always rebuild with the parent HOME/toolchain.
+    subprocess.run([str(Path.home() / '.cargo/bin/cargo'), 'build', '--locked', '-p', 'grokbot-wrapper'],
+                   cwd=ROOT, check=True)
 
     def chrome(*arguments):
         result = subprocess.run(['chrome-devtools-axi', *arguments], text=True, env=env, timeout=60,
@@ -43,6 +46,7 @@ def verify_ui_regressions():
                                       '--db', str(home / 'workspace.sqlite')], cwd=ROOT, env=child_env,
                                      stdout=subprocess.PIPE, stderr=log, text=True)
             page_id = None
+            previous_page_id = None
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(child.stdout, selectors.EVENT_READ)
@@ -51,6 +55,16 @@ def verify_ui_regressions():
                 url = json.loads(child.stdout.readline())['url']
                 if not re.fullmatch(r'http://127\.0\.0\.1:\d+', url):
                     raise AssertionError('Wrapper must bind to IPv4 loopback')
+                with urllib.request.urlopen(url + '/app.js', timeout=10) as response:
+                    if response.read() != (ROOT / 'app/ui/app.js').read_bytes():
+                        raise AssertionError('Wrapper embeds a different app.js than the current worktree')
+                pages = chrome('pages')
+                previous = re.search(r'^\s*(\d+),[^\n]*,true\s*$', pages, re.MULTILINE)
+                if not previous:
+                    previous = re.search(r'^\s*(\d+),', pages, re.MULTILINE)
+                    if previous:
+                        chrome('selectpage', previous.group(1))
+                previous_page_id = previous.group(1) if previous else None
                 chrome('newpage', url)
                 page = re.search(r'^\s*(\d+),' + re.escape(url) + r'/?\s*,true\s*$', chrome('pages'), re.MULTILINE)
                 if not page:
@@ -153,12 +167,51 @@ def verify_ui_regressions():
   check('legacy empty thread shows its actual bot', chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
   await type('Brouillon ancien'); choose('Grokbot');
   check('switching a legacy empty thread moves its draft to the chosen bot', localStorage.getItem('grokbot.selected') === '' && editor().getText() === 'Brouillon ancien' && chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  check('moving a legacy draft removes its old key', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
   check('legacy draft is sent to the newly chosen bot', (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected')).bot_id === 'grokbot');
   $('confirm-delete').click();
   await until(() => !$('new-chat').disabled);
   check('deletion restores a valid empty composer', empty());
+  // An empty legacy draft must never erase an existing welcome draft.
+  await type('Brouillon accueil A');
+  window.GrokbotPanels.openConversation(legacy.id);
+  check('sent legacy text is not restored as a duplicate', empty());
+  choose('Grokbot');
+  check('empty legacy draft preserves welcome text and storage', editor().getText() === 'Brouillon accueil A' && localStorage.getItem('grokbot.draft.new') === 'Brouillon accueil A');
+  check('empty legacy draft has no residual storage key', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
+  // When both drafts contain text, keep both in order and consume the old key.
+  window.GrokbotPanels.openConversation(legacy.id);
+  await type('Brouillon ancien B'); choose('Grokbot');
+  const merged = 'Brouillon accueil A\nBrouillon ancien B';
+  check('two nonempty drafts are preserved without replacement', editor().getText({blockSeparator:'\n'}) === merged && localStorage.getItem('grokbot.draft.new') === merged);
+  check('merged legacy draft is moved rather than copied', localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
+  $('composer-form').requestSubmit();
+  await until(() => !$('new-chat').disabled);
+  const mergedConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
+  check('merged text is sent exactly once to the chosen bot', mergedConversation.bot_id === 'grokbot' && mergedConversation.messages.filter(item => item.role === 'user' && item.body === merged).length === 1);
+  window.GrokbotPanels.openConversation(legacy.id);
+  check('reopening legacy thread after send cannot resend the moved draft', empty() && $('send-button').disabled);
+  // Creating a bot from an old empty thread follows the same safe draft transition.
+  cmdN(); await type('Brouillon accueil C');
+  window.GrokbotPanels.openConversation(legacy.id); await type('Brouillon ancien D');
+  const beforeCreate = (await saved()).conversations.length;
+  document.querySelector('.add-bot').click();
+  $('bot-name').value = 'Traducteur';
+  $('bot-description').value = 'Traduit vos textes.';
+  $('bot-instructions').value = 'Traduis en français.';
+  $('bot-form').requestSubmit();
+  await until(() => !$('bot-dialog').open);
+  const newBot = window.GrokbotPanels.state.bots.find(bot => bot.name === 'Traducteur');
+  const createdDraft = 'Brouillon accueil C\nBrouillon ancien D';
+  check('new bot is selected from a legacy empty thread', newBot && chip() === 'Traducteur' && $('workspace-label').textContent === 'Traducteur' && localStorage.getItem('grokbot.selected') === '' && localStorage.getItem('grokbot.bot') === newBot.id);
+  check('new-bot creation preserves both drafts and clears the old key', editor().getText({blockSeparator:'\n'}) === createdDraft && localStorage.getItem('grokbot.draft.new') === createdDraft && localStorage.getItem(`grokbot.draft.${legacy.id}`) === null);
+  check('new-bot creation does not persist another empty conversation', (await saved()).conversations.length === beforeCreate);
+  $('composer-form').requestSubmit();
+  await until(() => !$('new-chat').disabled);
+  const newBotConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
+  check('created bot receives the preserved draft', newBotConversation.bot_id === newBot.id && newBotConversation.messages.some(item => item.role === 'user' && item.body === createdDraft));
   return {scope:'Real app.js, bundled Tiptap editor and isolated simulated wrapper', checks};
 }''')
                 value = re.search(r'^result: (.+)$', result, re.MULTILINE)
@@ -170,6 +223,7 @@ def verify_ui_regressions():
                 console = chrome('console')
                 if '[tiptap warn]' in console or 'Unknown node type' in console:
                     raise AssertionError(console)
+                ui_report['checks'].append({'name': 'rebuilt wrapper embeds the current worktree app.js', 'passed': True})
                 ui_report['checks'].append({'name': 'no Tiptap invalid-content warning across startup, navigation, send and deletion', 'passed': True})
                 ui_report['status'] = 'passed'
                 if args.report:
@@ -185,6 +239,9 @@ def verify_ui_regressions():
                 child.stdout.close()
                 if page_id:
                     subprocess.run(['chrome-devtools-axi', 'closepage', page_id], env=env, timeout=30,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                if previous_page_id:
+                    subprocess.run(['chrome-devtools-axi', 'selectpage', previous_page_id], env=env, timeout=30,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 

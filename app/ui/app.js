@@ -325,6 +325,19 @@
     if (focus) ui.input.focus();
   }
 
+  function leaveEmptyThread() {
+    if (!currentConversation() || currentConversation().messages.length) return;
+    const draft = ui.input.value;
+    // Move the text, not a copy: selectConversation will remove the old draft key.
+    setComposerText("");
+    selectConversation(null);
+    const welcome = ui.input.value;
+    if (draft) {
+      setComposerText(welcome ? `${welcome}\n${draft}` : draft);
+      saveDraft();
+    }
+  }
+
   function renderList() {
     ui.list.replaceChildren();
     const query = ui.search.value.trim().toLocaleLowerCase("fr");
@@ -382,15 +395,9 @@
         if (busy) return;
         chosenBotId = bot.id;
         writePreference("grokbot.bot", bot.id);
-        // An old, persisted empty thread still belongs to its original bot.
-        // Move its draft to the welcome screen rather than sending to that bot.
-        if (currentConversation() && !currentConversation().messages.length) {
-          const draft = ui.input.value;
-          selectConversation(null);
-          setComposerText(draft);
-          saveDraft();
-          updateComposer();
-        } else render();
+        // Preserve both drafts when leaving a persisted empty thread from an old version.
+        leaveEmptyThread();
+        render();
       });
       if (bot.id !== chosen?.id) return [chip];
       // Le crayon est un frère de la puce : un bouton ne peut pas en contenir un autre.
@@ -476,7 +483,12 @@
         ? await api("/api/bots/update", { id: existing.id, ...changes })
         : await api("/api/bots", { id: draftBotId, ...changes });
       upsertBot(bot);
-      if (!existing) { draftBotId = null; chosenBotId = bot.id; writePreference("grokbot.bot", bot.id); }
+      if (!existing) {
+        draftBotId = null;
+        chosenBotId = bot.id;
+        writePreference("grokbot.bot", bot.id);
+        leaveEmptyThread();
+      }
       $("bot-dialog").close();
       render();
       notify(existing ? "Bot enregistré." : `${bot.name} est prêt.`);

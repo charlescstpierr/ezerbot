@@ -4,7 +4,9 @@
 //!
 //! One budget pass produces both structured provider input and its preview.
 //! Lower priorities win optional-data contention; source order controls display.
-//! Category caps are the smallest supplied block budget in that category.
+//! Category caps apply to supplied blocks; history has a separate category and
+//! is bounded only by the remaining run budget. Current output bodies take the
+//! summary's priority, before optional blocks with larger numeric priorities.
 //! App policy, current user text and tool-call arguments cannot be truncated.
 //! Optional text is explicitly marked when truncated. History is a contiguous
 //! suffix, with no orphan tool outputs. Compaction boundaries must not split a
@@ -55,7 +57,7 @@ pub fn assemble_input(
     {
         return Err(invalid("a nonempty app contract is required"));
     }
-    let mut caps = [limit; 8];
+    let mut caps = [limit; 9];
     for block in blocks {
         if matches!(
             block.source,
@@ -78,7 +80,7 @@ pub fn assemble_input(
         ));
     }
     let mut remaining = limit;
-    let mut used = [0; 8];
+    let mut used = [0; 9];
     let mut kept = Vec::new();
     // Reserve the app contract before any optional context.
     for (index, block) in candidates
@@ -110,6 +112,7 @@ pub fn assemble_input(
         .collect::<Result<_>>()?;
     // A current output may complete a call stored in an earlier entry. Reserve
     // that complete suffix before optional blocks/output bodies can evict it.
+    let history_category = category(ContextSource::History);
     let required_start = required_history_start(&history, &current)?;
     let required_cost = history[required_start..]
         .iter()
@@ -117,20 +120,26 @@ pub fn assemble_input(
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .sum::<usize>();
-    if required_cost > remaining.min(caps[6]) {
+    if required_cost > remaining.min(caps[history_category]) {
         return Err(invalid(
             "pending tool exchange cannot fit; compact at a complete tool boundary",
         ));
     }
     remaining -= required_cost;
-    used[6] += required_cost;
+    used[history_category] += required_cost;
 
+    let mut payloads = Some(payloads);
     let mut order: Vec<_> = (0..candidates.len())
         .filter(|&i| candidates[i].source != ContextSource::AppContract)
         .collect();
     order.sort_by_key(|&i| (candidates[i].priority, category(candidates[i].source), i));
     for index in order {
         let block = &candidates[index];
+        if block.priority > category(ContextSource::Summary) as u32 {
+            if let Some(payloads) = payloads.take() {
+                expand_current(&mut current, payloads, &mut remaining)?;
+            }
+        }
         let category = category(block.source);
         let available = remaining.min(caps[category] - used[category]);
         if let Some(text) = fit_text(block.source, &block.text, available) {
@@ -145,24 +154,12 @@ pub fn assemble_input(
             }
         }
     }
-    // Older bodies are shortened before newer bodies; neither call IDs nor call
-    // arguments are edited. The whole structured JSON cost includes escaping.
-    for (slot, original) in payloads.into_iter().rev() {
-        let old_cost = quoted_characters(slot.get(&current));
-        let text = fit_rendered(
-            &original,
-            old_cost + remaining,
-            |text| fence(slot.source(), text),
-            quoted_characters,
-        )
-        .ok_or_else(|| invalid("current external-data envelope cannot fit"))?;
-        let cost = quoted_characters(&text);
-        remaining = remaining + old_cost - cost;
-        slot.set(&mut current, text);
+    if let Some(payloads) = payloads {
+        expand_current(&mut current, payloads, &mut remaining)?;
     }
 
     let mut start = required_start;
-    let history_available = remaining.min(caps[6] - used[6]);
+    let history_available = remaining.min(caps[history_category] - used[history_category]);
     let mut history_cost = 0;
     for (index, item) in history[..required_start].iter().enumerate().rev() {
         let cost = input_characters(item)?;
@@ -261,12 +258,13 @@ fn select_history<'a>(
         .iter()
         .position(|item| item.entry_id == request.current_message.entry_id)
         .unwrap_or(history.len());
-    let history = &history[..end];
     let position = |id: &str| history.iter().rposition(|item| item.entry_id == id);
     let reset_start = match last_reset_entry {
-        Some(id) => {
-            position(id).ok_or_else(|| invalid("reset entry is absent from prior history"))? + 1
-        }
+        Some(id) => match position(id) {
+            Some(index) if index < end => index + 1,
+            Some(_) => 0, // A later reset cannot govern regeneration of this turn.
+            None => return Err(invalid("reset entry is absent from history")),
+        },
         None => 0,
     };
     let mut start = reset_start;
@@ -276,24 +274,28 @@ fn select_history<'a>(
             return Err(invalid("summary belongs to a different conversation"));
         }
         let truncation = position(&summary.truncation_last_entry_inclusive)
-            .ok_or_else(|| invalid("summary truncation entry is absent from prior history"))?;
-        if truncation >= reset_start {
+            .ok_or_else(|| invalid("summary truncation entry is absent from history"))?;
+        // Summaries covering a later turn are irrelevant to regeneration, just
+        // like later resets. Their text must not enter the earlier context.
+        if truncation >= reset_start && truncation < end {
             let resume = position(&summary.resume_from_entry_inclusive)
                 .or_else(|| {
                     (summary.resume_from_entry_inclusive == request.current_message.entry_id)
-                        .then_some(history.len())
+                        .then_some(end)
                 })
-                .ok_or_else(|| invalid("summary resume entry is absent from prior history"))?;
+                .ok_or_else(|| invalid("summary resume entry is absent from history"))?;
             if resume <= truncation {
                 return Err(invalid(
                     "summary resume entry must follow its truncation entry",
                 ));
             }
-            start = resume;
-            active_summary = Some(summary);
+            if resume <= end {
+                start = resume;
+                active_summary = Some(summary);
+            }
         }
     }
-    let selected = history[start..].to_vec();
+    let mut selected = history[start..end].to_vec();
     // Completed pairs in the summarized region are omitted even when the summary
     // excludes tool results. Otherwise compaction would accumulate all old output
     // forever. A split pair is rejected; compaction must choose an intact boundary.
@@ -303,7 +305,38 @@ fn select_history<'a>(
     {
         return Err(invalid("summary boundary splits a tool call/output pair"));
     }
+    drop_unfinished_calls(&mut selected, &request.current_message);
     Ok((selected, active_summary))
+}
+
+/// Interrupted/cancelled tools can leave a persisted call without any result.
+/// Such historical calls must not demand a missing output in every later turn.
+/// Walk backwards so only outputs following a call can complete it. A result in
+/// the current input also keeps its historical call, for resumed exchanges.
+fn drop_unfinished_calls(history: &mut [HistoryItem], current: &HistoryItem) {
+    let mut outputs: HashSet<_> = current
+        .tool_items
+        .iter()
+        .filter_map(|tool| match tool {
+            ToolItem::Output { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for item in history.iter_mut().rev() {
+        let tools = std::mem::take(&mut item.tool_items);
+        item.tool_items = tools
+            .into_iter()
+            .rev()
+            .filter(|tool| match tool {
+                ToolItem::Output { call_id, .. } => {
+                    outputs.insert(call_id.clone());
+                    true
+                }
+                ToolItem::Call { call } => outputs.contains(&call.call_id),
+            })
+            .collect();
+        item.tool_items.reverse();
+    }
 }
 
 fn orphan_prefix(history: &[HistoryItem]) -> usize {
@@ -437,6 +470,28 @@ impl PayloadSlot {
     }
 }
 
+/// Older bodies are shortened before newer bodies; neither call IDs nor call
+/// arguments are edited. Count escaping in the complete structured JSON.
+fn expand_current(
+    current: &mut HistoryItem,
+    payloads: Vec<(PayloadSlot, String)>,
+    remaining: &mut usize,
+) -> Result<()> {
+    for (slot, original) in payloads.into_iter().rev() {
+        let old_cost = quoted_characters(slot.get(current));
+        let text = fit_rendered(
+            &original,
+            old_cost + *remaining,
+            |text| fence(slot.source(), text),
+            quoted_characters,
+        )
+        .ok_or_else(|| invalid("current external-data envelope cannot fit"))?;
+        *remaining = *remaining + old_cost - quoted_characters(&text);
+        slot.set(current, text);
+    }
+    Ok(())
+}
+
 fn prepare_entry(
     item: &HistoryItem,
     current: bool,
@@ -498,11 +553,11 @@ fn category(source: ContextSource) -> usize {
         ContextSource::SkillIndex => 3,
         ContextSource::Memory => 4,
         ContextSource::Summary => 5,
-        ContextSource::History
-        | ContextSource::ToolResult
+        ContextSource::ToolResult
         | ContextSource::ImageCaption
         | ContextSource::DelegatedContext => 6,
-        ContextSource::CurrentMessage => 7,
+        ContextSource::History => 7,
+        ContextSource::CurrentMessage => 8,
     }
 }
 fn make_block(source: ContextSource, budget: usize, text: String) -> ContextBlock {
@@ -1102,23 +1157,37 @@ mod context_tests {
         )
         .unwrap();
         assert_eq!(ids(&result.input), vec!["before", "current"]);
-        let mut invalid_summary = summary();
-        invalid_summary.truncation_last_entry_inclusive = "r0".into();
-        assert!(assemble_input(
+        let mut future_summary = summary();
+        future_summary.truncation_last_entry_inclusive = "r0".into();
+        let earlier = assemble_input(
             &request,
             &base(),
             &history,
-            Some(&invalid_summary),
-            None,
-            &ContextBudget::default()
-        )
-        .is_err());
-        assert!(assemble_input(
-            &request,
-            &base(),
-            &history,
-            None,
+            Some(&future_summary),
             Some("future"),
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(earlier, result);
+        // Even a summary starting in the past must not skip into a future turn.
+        future_summary.truncation_last_entry_inclusive = "before".into();
+        future_summary.resume_from_entry_inclusive = "future".into();
+        let earlier = assemble_input(
+            &request,
+            &base(),
+            &history,
+            Some(&future_summary),
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(earlier, result);
+        assert!(assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            Some("missing-reset"),
             &ContextBudget::default()
         )
         .is_err());
@@ -1167,6 +1236,149 @@ mod context_tests {
             .unwrap()
             .text
             .starts_with("External data"));
+    }
+
+    #[test]
+    fn delegated_block_budget_does_not_cap_history() {
+        let history: Vec<_> = (0..10)
+            .map(|n| entry(&format!("h{n}"), &"x".repeat(1000)))
+            .collect();
+        let baseline = assemble_input(
+            &request(),
+            &base(),
+            &history,
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(baseline.input.len(), 11);
+        for source in [
+            ContextSource::DelegatedContext,
+            ContextSource::ToolResult,
+            ContextSource::ImageCaption,
+        ] {
+            let mut blocks = base();
+            blocks.push(block(source, 6, 2000, &"context".repeat(1000)));
+            let result = assemble_input(
+                &request(),
+                &blocks,
+                &history,
+                None,
+                None,
+                &ContextBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(result.input, baseline.input);
+            let external = result.blocks.iter().find(|b| b.source == source).unwrap();
+            assert!(external.text.chars().count() <= 2000);
+            assert!(external.text.contains(TRUNCATION_MARKER));
+        }
+    }
+
+    #[test]
+    fn hook_budget_does_not_cap_pending_tool_exchange() {
+        let mut pending = entry("pending", &"p".repeat(1000));
+        pending.role = Role::Assistant;
+        pending.tool_items.push(call("c1"));
+        let mut request = request();
+        request
+            .current_message
+            .tool_items
+            .push(output("c1", "resumed"));
+        for source in [
+            ContextSource::DelegatedContext,
+            ContextSource::ToolResult,
+            ContextSource::ImageCaption,
+        ] {
+            let mut blocks = base();
+            blocks.push(block(source, 6, 500, &"context".repeat(500)));
+            let result = assemble_input(
+                &request,
+                &blocks,
+                &[pending.clone()],
+                None,
+                None,
+                &ContextBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(ids(&result.input), vec!["pending", "current"]);
+            assert_eq!(result.input[0].tool_items, pending.tool_items);
+            assert!(output_text(&result.input[1], 0).contains("resumed"));
+            assert!(
+                result
+                    .blocks
+                    .iter()
+                    .find(|b| b.source == source)
+                    .unwrap()
+                    .text
+                    .chars()
+                    .count()
+                    <= 500
+            );
+        }
+    }
+
+    #[test]
+    fn unfinished_history_calls_are_omitted_but_completed_and_pending_calls_remain() {
+        let mut cancelled = entry("cancelled", "interrupted work");
+        cancelled.tool_items.push(call("cancelled"));
+        let mut done = entry("done", "completed work");
+        done.tool_items = vec![call("done"), output("done", "finished")];
+        let mut pending = entry("pending", "waiting");
+        pending.tool_items.push(call("pending"));
+        let history = [cancelled, done, pending];
+        let before = history.clone();
+        let mut request = request();
+        request
+            .current_message
+            .tool_items
+            .push(output("pending", "resumed"));
+        let result = assemble_input(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&result.input),
+            vec!["cancelled", "done", "pending", "current"]
+        );
+        assert!(result.input[0].tool_items.is_empty());
+        assert_eq!(result.input[0].text, "interrupted work");
+        assert_eq!(result.input[1].tool_items[0], call("done"));
+        assert!(output_text(&result.input[1], 1).contains("finished"));
+        assert_eq!(result.input[2].tool_items[0], call("pending"));
+        assert_eq!(history, before);
+    }
+
+    #[test]
+    fn current_outputs_precede_lower_priority_memory() {
+        let mut request = request();
+        let body = "critical result ".repeat(20);
+        request.current_message.tool_items = vec![call("c1"), output("c1", &body)];
+        let mut blocks = base();
+        blocks.push(block(
+            ContextSource::Memory,
+            100,
+            1000,
+            &"low priority fact".repeat(200),
+        ));
+        let result = assemble_input(&request, &blocks, &[], None, None, &budget(1000)).unwrap();
+        let text = output_text(&result.input[0], 1);
+        assert!(text.contains(&body));
+        assert!(!text.contains(TRUNCATION_MARKER));
+        assert!(result
+            .blocks
+            .iter()
+            .find(|b| b.source == ContextSource::Memory)
+            .unwrap()
+            .text
+            .contains(TRUNCATION_MARKER));
+        assert!(result.estimated_characters <= 1000);
     }
 
     #[test]

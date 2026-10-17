@@ -6,7 +6,8 @@
 //! standing permissions, PS07/PS08 the separate secret submission boundary.
 //! Q5 routine activation is conversation confirmation, not an approval policy here.
 //! The caller owns tool transactions; HTTP writes/ticks acquire IMMEDIATE locks.
-//! Wake delivery/approved-tool dispatch belong to gb-forms-resume/engine-cutover.
+//! The engine commits wake delivery with its first Resumed event, never on submit.
+//! Deleted deciding conversations explicitly cancel pending cards on the next tick.
 //! Approval requests are host gate helpers, not an ordinary model tool: ordinary
 //! HumanInput tools suspend as AwaitingHumanInput and cannot consume Approval wakes.
 //! The gate binds the request/grant to the actual protected (run, call, digest).
@@ -341,6 +342,7 @@ fn create_request(
         ctx.now_ms,
     )?;
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
+    // Defense in depth if a standing rule appears between gate check and request.
     if approval {
         if let Some(receipt) =
             approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
@@ -429,7 +431,13 @@ pub fn check_tool_approval(
             }),
         };
     }
-    let route = request_route(ctx, run, true)?;
+    // Standing rules are bot-scoped, not conversation-scoped. A successful
+    // auto-admission must not create an otherwise unused "Approbations" chat.
+    let route = ApprovalRoute {
+        requesting_bot_id: run.bot_id.clone(),
+        target_bot_id: DEFAULT_BOT.id.into(),
+        target_conversation_id: run.conversation_id.clone(),
+    };
     Ok(
         match rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)? {
             Some((true, rule_id)) => ApprovalCheck::Authorized {
@@ -750,33 +758,53 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             if existing {
                 requests::receipt(&tx, &input.entry_id, &submission)?
             } else {
-                if request.status != RequestStatus::Pending {
-                    return Err(ApiError::new(409, "Request is no longer pending"));
-                }
-                // Compatibility shim until a core requests::cancel API is added
-                // by its owner (requests.rs is outside this slice's manifest).
-                // Core cancel_for_run cancels every card, not this single entry.
-                let resolution: String = tx.query_row(
-                    "SELECT 'resolution_' || lower(hex(randomblob(16)))",
-                    [],
-                    |r| r.get(0),
-                )?;
-                tx.execute("INSERT INTO forms_resolutions(resolution_id,entry_id,submission_id,values_json) VALUES (?1,?2,?3,'\"cancelled\"')",params![resolution,input.entry_id,submission])?;
-                let changed = tx.execute("UPDATE forms_requests SET status='cancelled', resolution_id=?2 WHERE id=?1 AND status='pending'",params![request.id,resolution])?;
-                if changed != 1 {
-                    return Err(ApiError::new(409, "Request is no longer pending"));
-                }
-                attach(
-                    &tx,
-                    &request,
-                    requests::receipt(&tx, &input.entry_id, &submission)?,
-                )?
+                cancel_request(&tx, &request, &submission)?
             }
         }
         _ => unreachable!(),
     };
     tx.commit()?;
     Ok(json!({"accepted":true,"receipt":receipt}))
+}
+
+// Compatibility shim until the core owns a single-entry cancel API. Both the
+// user route and orphan reconciliation must resolve + wake in the same transaction.
+fn cancel_request(
+    conn: &Connection,
+    request: &HumanInputRequest,
+    submission: &str,
+) -> Result<grokbot_engine::contracts::ResumeReceipt, ApiError> {
+    if request.status != RequestStatus::Pending {
+        return Err(ApiError::new(409, "Request is no longer pending"));
+    }
+    let resolution: String = conn.query_row(
+        "SELECT 'resolution_' || lower(hex(randomblob(16)))",
+        [],
+        |r| r.get(0),
+    )?;
+    conn.execute("INSERT INTO forms_resolutions(resolution_id,entry_id,submission_id,values_json) VALUES (?1,?2,?3,'\"cancelled\"')",params![resolution,request.entry_id,submission])?;
+    let changed = conn.execute("UPDATE forms_requests SET status='cancelled', resolution_id=?2 WHERE id=?1 AND status='pending'",params![request.id,resolution])?;
+    if changed != 1 {
+        return Err(ApiError::new(409, "Request is no longer pending"));
+    }
+    attach(
+        conn,
+        request,
+        requests::receipt(conn, &request.entry_id, submission)?,
+    )
+}
+
+fn orphaned_requests(conn: &Connection) -> Result<Vec<String>, ApiError> {
+    let mut statement = conn.prepare(
+        "SELECT r.id FROM forms_requests r LEFT JOIN wrapper_conversations c
+         ON c.account_id=?1 AND c.id=json_extract(r.route_json,'$.target_conversation_id')
+         AND c.bot_id=json_extract(r.route_json,'$.target_bot_id')
+         WHERE r.status='pending' AND (c.id IS NULL OR c.deleted=1)",
+    )?;
+    let ids = statement
+        .query_map([ACCOUNT], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 fn secret_metadata(ctx: &Context<'_>) -> Result<Value, ApiError> {
@@ -871,12 +899,21 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
 pub fn tick(ctx: &Context<'_>) {
     let expire = || -> Result<(), ApiError> {
         let due: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_requests WHERE status='pending' AND json_extract(kind_json,'$.kind')='approval' AND json_extract(kind_json,'$.expires_at')<=?1)", [clock(ctx)], |row| row.get(0))?;
-        if !due {
+        if !due && orphaned_requests(ctx.connection)?.is_empty() {
             return Ok(());
         }
         let tx = write_transaction(ctx.connection)?;
         for (request, receipt) in approvals::expire_pending(&tx, clock(ctx))? {
             attach(&tx, &request, receipt)?;
+        }
+        // A task/routine's visible deciding chat can be deleted independently of
+        // its origin. Without this resolution a form/secret has no expiry and
+        // strands that run forever. Re-read under the writer lock to avoid racing
+        // a submission; approved/executed actions are never rewritten (REA PS03).
+        for id in orphaned_requests(&tx)? {
+            if let Some(request) = requests::get(&tx, &id)? {
+                cancel_request(&tx, &request, "unavailable")?;
+            }
         }
         tx.commit()?;
         Ok(())

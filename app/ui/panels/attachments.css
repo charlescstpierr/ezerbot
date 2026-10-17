@@ -1,0 +1,18 @@
+.attachments-panel { margin: 0 0 8px; min-width: 0; }
+.attachment-choose { padding: 5px 8px; border-radius: 6px; color: var(--muted); font-size: 12px; }
+.attachment-choose:hover { background: var(--soft); color: var(--text); }
+.attachment-picker { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; padding: 0; list-style: none; }
+.attachment-list:empty { display: none; }
+.attachment-chip { display: flex; align-items: center; gap: 9px; max-width: 100%; width: 260px; padding: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); }
+.attachment-preview { width: 48px; height: 48px; flex: 0 0 auto; border-radius: 5px; object-fit: cover; }
+.attachment-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.attachment-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.attachment-status { color: var(--muted); font-size: 11px; }
+.attachment-chip[data-status="ready"] .attachment-status { color: var(--ok); }
+.attachment-chip[data-status="failed"] .attachment-status { color: var(--danger-text); }
+.attachment-retry { align-self: flex-start; padding: 2px 0; color: var(--accent-ink); font-size: 11px; text-decoration: underline; }
+.attachment-retry:disabled { color: var(--muted); text-decoration: none; }
+.attachment-remove { flex: 0 0 auto; align-self: flex-start; width: 28px; height: 28px; border-radius: 5px; color: var(--muted); font-size: 20px; line-height: 1; }
+.attachment-remove:hover { color: var(--text); background: var(--pane); }
+@media (max-width: 600px) { .attachment-chip { width: 100%; } }

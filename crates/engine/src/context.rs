@@ -57,6 +57,33 @@ pub fn assemble_input(
     last_reset_entry: Option<&str>,
     budget: &ContextBudget,
 ) -> Result<AssembledContext> {
+    assemble_input_for_turn(
+        request,
+        blocks,
+        history,
+        summary,
+        last_reset_entry,
+        budget,
+        &request.current_message.entry_id,
+    )
+}
+
+/// A tool continuation has a different current entry but belongs to the same
+/// sending turn. Keep that turn's user images, with their normal image charge,
+/// throughout the run; never restore URLs on genuinely historical entries.
+/// The host must not compact across `sending_entry_id` while its images are live.
+pub fn assemble_input_for_turn(
+    request: &ContextRequest,
+    blocks: &[ContextBlock],
+    history: &[HistoryItem],
+    summary: Option<&Summary>,
+    last_reset_entry: Option<&str>,
+    budget: &ContextBudget,
+    sending_entry_id: &str,
+) -> Result<AssembledContext> {
+    let has_sending_images = history.iter().any(|item| {
+        item.entry_id == sending_entry_id && item.role == Role::User && !item.images.is_empty()
+    });
     let limit = character_limit(budget)?;
     if !blocks
         .iter()
@@ -78,6 +105,12 @@ pub fn assemble_input(
         *cap = (*cap).min(block.budget);
     }
     let (history, summary) = select_history(request, history, summary, last_reset_entry)?;
+    if has_sending_images
+        && request.current_message.entry_id != sending_entry_id
+        && !history.iter().any(|item| item.entry_id == sending_entry_id)
+    {
+        return Err(invalid("summary/reset cannot truncate sending-turn images"));
+    }
     let mut candidates = blocks.to_vec();
     if let Some(summary) = summary {
         candidates.push(make_block(
@@ -115,12 +148,19 @@ pub fn assemble_input(
     remaining -= current_minimum;
     let history: Vec<_> = history
         .iter()
-        .map(|item| prepare_entry(item, false, false).map(|(item, _)| item))
+        .map(|item| {
+            let sending = item.entry_id == sending_entry_id && item.role == Role::User;
+            prepare_entry(item, sending, false).map(|(item, _)| item)
+        })
         .collect::<Result<_>>()?;
     // A current output may complete a call stored in an earlier entry. Reserve
-    // that complete suffix before optional blocks/output bodies can evict it.
+    // that complete suffix (and the sending image entry, if any) before optional
+    // blocks/output bodies can evict it.
     let history_category = category(ContextSource::History);
-    let required_start = required_history_start(&history, &current)?;
+    let sending_start = history.iter().position(|item| {
+        item.entry_id == sending_entry_id && item.role == Role::User && !item.images.is_empty()
+    });
+    let required_start = required_history_start(&history, &current, sending_start)?;
     let required_cost = history[required_start..]
         .iter()
         .map(input_characters)
@@ -387,8 +427,13 @@ fn orphan_prefix(history: &[HistoryItem]) -> usize {
 /// Find the earliest call needed by the current outputs, then close over the
 /// dependencies of all history entries in that mandatory suffix. This keeps
 /// pending exchanges valid even when a current output consumes most of a run's
-/// budget. Completed older exchanges remain optional.
-fn required_history_start(history: &[HistoryItem], current: &HistoryItem) -> Result<usize> {
+/// budget. Sending images pin their user entry through the same dependency
+/// closure; completed exchanges in genuinely older turns remain optional.
+fn required_history_start(
+    history: &[HistoryItem],
+    current: &HistoryItem,
+    sending_start: Option<usize>,
+) -> Result<usize> {
     let mut calls = HashMap::new();
     let mut dependencies = Vec::new();
     for (index, item) in history.iter().enumerate() {
@@ -409,7 +454,7 @@ fn required_history_start(history: &[HistoryItem], current: &HistoryItem) -> Res
         dependencies.push((dependency, orphan));
     }
     let mut current_calls = HashSet::new();
-    let mut start = history.len();
+    let mut start = sending_start.unwrap_or(history.len());
     for tool in &current.tool_items {
         match tool {
             ToolItem::Call { call } => {
@@ -1104,6 +1149,77 @@ mod context_tests {
             .unwrap()
             .contains("external_data"));
         assert!(original.current_message.images[0].url.is_some());
+    }
+
+    #[test]
+    fn sending_images_survive_tool_continuation_but_history_urls_do_not() {
+        let mut sending = entry("sending", "Inspect this image");
+        sending.images.push(ImageInput {
+            attachment_id: "image".into(),
+            url: Some("data:image/png;base64,AAAA".into()),
+            caption: Some("a square".into()),
+        });
+        let mut old = sending.clone();
+        old.entry_id = "old".into();
+        let mut called = entry("call", "");
+        called.role = Role::Assistant;
+        called.tool_items.push(call("c"));
+        let mut request = request();
+        request.current_message = entry("result", "");
+        request.current_message.role = Role::Tool;
+        request.current_message.tool_items.push(output("c", "done"));
+        let history = vec![old, sending.clone(), called];
+        let assembled = assemble_input_for_turn(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &budget(50_000),
+            "sending",
+        )
+        .unwrap();
+        assert_eq!(ids(&assembled.input), ["old", "sending", "call", "result"]);
+        assert!(assembled.input[0].images[0].url.is_none());
+        assert_eq!(assembled.input[1].images[0].url, sending.images[0].url);
+        assert!(assembled.input[1].images[0]
+            .caption
+            .as_ref()
+            .unwrap()
+            .contains("external_data"));
+        let mut without_bytes = assembled.input[1].clone();
+        without_bytes.images[0].url = None;
+        assert!(
+            input_characters(&assembled.input[1]).unwrap()
+                >= input_characters(&without_bytes).unwrap() + IMAGE_BUDGET_CHARS
+        );
+        // Mandatory sending bytes must fail an undersized window rather than
+        // quietly dropping the image-bearing user entry after a tool call.
+        assert!(assemble_input_for_turn(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &budget(IMAGE_BUDGET_CHARS),
+            "sending",
+        )
+        .is_err());
+        let truncated = Summary {
+            truncation_last_entry_inclusive: "sending".into(),
+            resume_from_entry_inclusive: "call".into(),
+            ..summary()
+        };
+        assert!(assemble_input_for_turn(
+            &request,
+            &base(),
+            &history,
+            Some(&truncated),
+            None,
+            &budget(50_000),
+            "sending",
+        )
+        .is_err());
     }
 
     #[test]

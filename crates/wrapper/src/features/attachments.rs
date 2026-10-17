@@ -6,8 +6,9 @@
 //!
 //! `context` contributes fenced caption data, never image bytes in instructions.
 //! The engine hydrates `HistoryItem.images` through `images_for_message`: the
-//! sending turn carries bytes plus its prepared caption; later turns carry only
-//! captions, including after restart. The text-only ContextBlock hook is a legacy
+//! sending turn (including tool continuations) carries supported image bytes plus
+//! its prepared caption. Known vision skips use an honest local marker instead;
+//! later turns carry only captions, including after restart. The ContextBlock hook is a legacy
 //! preview, not a second instruction copy. Real Responses requests are covered by
 //! `tests/attachments_run.rs`. Historical images never reload blob bytes.
 
@@ -38,6 +39,7 @@ const AUTOMATIC_RETRY_MS: u64 = 60_000;
 const MAX_AUTOMATIC_RETRY_MS: u64 = 3_600_000;
 const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 const BMP_CAPTION: &str = "Image BMP jointe : ce format ne peut pas être décrit par le modèle.";
+const NO_VISION_CAPTION: &str = "Image jointe : ce modèle ne peut pas lire les images.";
 
 // A timed-out HTTP worker still holds its slot until the actual network call
 // ends. Per-database counters also isolate independent local apps/test fixtures.
@@ -890,7 +892,7 @@ fn data_url(ctx: &Context<'_>, attachment: &staging::Attachment) -> Result<Strin
 }
 
 /// Typed run input, never instruction text. The engine sets `sending_turn` only
-/// for the run's current message and uses false when hydrating historical entries.
+/// for the originating user entry throughout its run, not for historical entries.
 /// Caption lookup is scoped to the conversation (with a cross-model fallback),
 /// not recomputed from the possibly changed draft. Historical hydration must stay
 /// independent of blob availability. BMPs retain their honest local marker only.
@@ -901,24 +903,87 @@ pub fn images_for_message(
     model: &str,
     sending_turn: bool,
 ) -> Result<Vec<ImageInput>, ApiError> {
+    images_for_message_cached(
+        ctx,
+        conversation,
+        message,
+        model,
+        sending_turn,
+        &mut HashMap::new(),
+    )
+}
+
+/// Transport cache belongs to a single live run, never SQLite or a shared bot.
+/// Captions and capability skips are still refreshed on every call.
+pub(super) fn images_for_message_cached(
+    ctx: &Context<'_>,
+    conversation: &str,
+    message: &str,
+    model: &str,
+    sending_turn: bool,
+    urls: &mut HashMap<String, String>,
+) -> Result<Vec<ImageInput>, ApiError> {
     staging::for_message(ctx.connection, conversation, message)?
         .iter()
         .map(|attachment| {
-            Ok(ImageInput {
+            let bmp = attachment.image_type == staging::ImageType::Bmp;
+            // Service SKIPPED is conservative evidence that these bytes cannot
+            // be used with this model. During its controller backoff, do not
+            // rediscover the same limitation on another image in a chat run.
+            // An offline/local skip never writes such evidence. A skip from a
+            // different model must not disable the newly selected vision model.
+            let skipped: bool = ctx.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachments_caption_cache c
+                 WHERE c.model = ?3 AND json_extract(c.status, '$.status') = 'skipped'
+                 AND (json_extract(c.status, '$.retry_after') > ?4
+                     OR EXISTS(SELECT 1 FROM attachments_caption_uses u
+                         WHERE u.conversation_id = ?1 AND u.sha256 = ?2
+                         AND u.sha256 = c.sha256 AND u.model = c.model AND u.context_digest = c.context_digest)))",
+                params![conversation, attachment.sha256, model, ctx.now_ms], |row| row.get(0),
+            )?;
+            let mut image = ImageInput {
                 attachment_id: attachment.id.clone(),
-                url: if sending_turn && attachment.image_type != staging::ImageType::Bmp {
-                    Some(data_url(ctx, attachment)?)
+                url: if sending_turn && !bmp && !skipped {
+                    let url = match urls.get(&attachment.id) {
+                        Some(url) => url.clone(),
+                        None => {
+                            let url = data_url(ctx, attachment)?;
+                            urls.insert(attachment.id.clone(), url.clone());
+                            url
+                        }
+                    };
+                    Some(url)
                 } else {
                     None
                 },
-                caption: if attachment.image_type == staging::ImageType::Bmp {
+                caption: if bmp {
                     Some(BMP_CAPTION.into())
                 } else {
                     caption_for(ctx.connection, conversation, &attachment.sha256, model)?
                 },
-            })
+            };
+            if skipped && !bmp {
+                without_vision(std::slice::from_mut(&mut image));
+            }
+            Ok(image)
         })
         .collect()
+}
+
+/// Preserve any real description and explicitly disclose the missing visual
+/// input. Called before the engine's fencing/budget pass, including on fallback.
+pub(super) fn without_vision(images: &mut [ImageInput]) {
+    for image in images {
+        image.url = None;
+        match &mut image.caption {
+            Some(caption) if !caption.contains(NO_VISION_CAPTION) => {
+                caption.push('\n');
+                caption.push_str(NO_VISION_CAPTION);
+            }
+            Some(_) => {}
+            None => image.caption = Some(NO_VISION_CAPTION.into()),
+        }
+    }
 }
 
 fn caption_for(

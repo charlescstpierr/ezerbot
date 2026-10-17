@@ -21,9 +21,10 @@ use grokbot_forms::{redact, requests, vault::Vault};
 use grokbot_session::{
     LookupOutcome, ReconciliationRequest, SendOutcome, SendRequest, SubmissionTransport,
 };
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 #[derive(Deserialize)]
@@ -934,6 +935,8 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
             provider: ctx.provider,
             run_id: &run.run_id,
             cancel: &services.cancel.clone(),
+            image_urls: Mutex::new(HashMap::new()),
+            no_vision: AtomicBool::new(false),
         };
         drive_owned(ctx.connection, &gateway, &mut services, &run.run_id)?;
         return Ok(());
@@ -956,6 +959,8 @@ fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
                 provider: &provider,
                 run_id: &id,
                 cancel: &cancel,
+                image_urls: Mutex::new(HashMap::new()),
+                no_vision: AtomicBool::new(false),
             };
             drive_owned(&conn, &gateway, &mut services, &id)?;
             retitle(&conn, &provider, &id, &cancel, &path)?;
@@ -1097,19 +1102,16 @@ impl RunServices for Services<'_> {
             &run.conversation_id,
             &input.entry_id,
             &model,
-            true,
+            false,
         )
         .map_err(engine_error)?;
-        if !linked.is_empty() {
+        if !linked.is_empty() && input.images != linked {
             input.images = linked;
-            // Staging owns transport bytes; retain only typed references/captions.
-            let mut stored = input.clone();
-            for image in &mut stored.images {
-                image.url = None;
-            }
+            // Transport hydration happens only at the final model boundary;
+            // SQLite retains references/captions, and unchanged input stays inert.
             self.connection.execute(
                 "UPDATE wrapper_engine_runs SET input_json=?2 WHERE run_id=?1",
-                params![run.run_id, serde_json::to_string(&stored)?],
+                params![run.run_id, serde_json::to_string(&input)?],
             )?;
         }
         let mut request = ContextRequest {
@@ -1428,6 +1430,8 @@ struct RunGatewayCall<'a> {
     run_id: &'a str,
     cancel: &'a AtomicBool,
     source_revision: u64,
+    image_urls: &'a Mutex<HashMap<String, String>>,
+    no_vision: &'a AtomicBool,
 }
 impl RunGatewayCall<'_> {
     fn stream(
@@ -1446,11 +1450,51 @@ impl RunGatewayCall<'_> {
         let run = store::required(self.connection, self.run_id)?;
         let original = run_input(self.connection, self.run_id)?;
         let (_, reset) = history(self.connection, &run, &original)?;
+        let ctx = super::Context {
+            connection: self.connection,
+            provider: self.provider,
+            db_path: self.path,
+            now_ms: now(),
+            bot_id: Some(&run.bot_id),
+            conversation_id: Some(&run.conversation_id),
+            run_id: Some(&run.run_id),
+        };
+        let linked = super::attachments::images_for_message_cached(
+            &ctx,
+            &run.conversation_id,
+            &original.entry_id,
+            &request.model,
+            !self.no_vision.load(Ordering::SeqCst),
+            &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+        )
+        .map_err(engine_error)?;
+        if let Some(sending) = request
+            .input
+            .iter_mut()
+            .find(|entry| entry.entry_id == original.entry_id && entry.role == Role::User)
+        {
+            if !linked.is_empty() {
+                sending.images = linked;
+            }
+        }
+        if self.no_vision.load(Ordering::SeqCst) {
+            for entry in &mut request.input {
+                super::attachments::without_vision(&mut entry.images);
+            }
+        }
         let reset_index = reset
             .as_ref()
             .and_then(|id| request.input.iter().position(|i| &i.entry_id == id))
             .map_or(0, |n| n + 1);
-        let eligible = &request.input[reset_index..];
+        // Compaction may summarize previous turns, never the sending image or
+        // its current tool continuation. Its bytes must remain available until
+        // this run ends, even with store:false and a rolling summary.
+        let compaction_end = request
+            .input
+            .iter()
+            .position(|entry| entry.entry_id == original.entry_id && !entry.images.is_empty())
+            .map_or(request.input.len(), |index| index + 1);
+        let eligible = &request.input[reset_index..compaction_end];
         let segment = eligible
             .first()
             .map(|i| i.entry_id.as_str())
@@ -1601,16 +1645,6 @@ impl RunGatewayCall<'_> {
             }
             summary = Some(next);
         }
-        let Some(current) = request.input.last() else {
-            return Err(Error::InvalidInput("empty run input".into()));
-        };
-        let mut context_request = ContextRequest {
-            run_id: run.run_id.clone(),
-            trigger: run.trigger,
-            bot_id: run.bot_id,
-            conversation_id: run.conversation_id,
-            current_message: current.clone(),
-        };
         // Keep built-in tool protocol with the app contract, BEFORE bot identity.
         let (instructions, protocol) = request
             .instructions
@@ -1631,34 +1665,44 @@ impl RunGatewayCall<'_> {
             budget: instructions.chars().count(),
             text: instructions,
         };
-        context_request.current_message = serde_json::from_value(redact::redact_value(
-            &vault,
-            &serde_json::to_value(&context_request.current_message)?,
-        )?)?;
-        let mut assembled = assembler::assemble_input(
-            &context_request,
-            &[block],
-            &request.input,
-            summary.as_ref(),
-            reset.as_deref(),
-            &budget,
-        )?;
-        // An already-fenced tool result remains data under the next pass too.
-        let mut outgoing = request.clone();
-        outgoing.instructions = assembled
-            .blocks
-            .iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        outgoing.input = std::mem::take(&mut assembled.input);
-        outgoing = serde_json::from_value(redact::redact_value(
-            &vault,
-            &serde_json::to_value(outgoing)?,
-        )?)?;
-        if compaction::revision(self.connection, &context_request.conversation_id)?
-            != self.source_revision
-        {
+        let assemble = |input: &[HistoryItem]| -> grokbot_engine::contracts::Result<ModelRequest> {
+            let current = input
+                .last()
+                .ok_or_else(|| Error::InvalidInput("empty run input".into()))?;
+            let context_request = ContextRequest {
+                run_id: run.run_id.clone(),
+                trigger: run.trigger.clone(),
+                bot_id: run.bot_id.clone(),
+                conversation_id: run.conversation_id.clone(),
+                current_message: serde_json::from_value(redact::redact_value(
+                    &vault,
+                    &serde_json::to_value(current)?,
+                )?)?,
+            };
+            let assembled = assembler::assemble_input_for_turn(
+                &context_request,
+                std::slice::from_ref(&block),
+                input,
+                summary.as_ref(),
+                reset.as_deref(),
+                &budget,
+                &original.entry_id,
+            )?;
+            let mut outgoing = request.clone();
+            outgoing.instructions = assembled
+                .blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            outgoing.input = assembled.input;
+            Ok(serde_json::from_value(redact::redact_value(
+                &vault,
+                &serde_json::to_value(outgoing)?,
+            )?)?)
+        };
+        let outgoing = assemble(&request.input)?;
+        if compaction::revision(self.connection, &run.conversation_id)? != self.source_revision {
             return Err(Error::Conflict("context source changed".into()));
         }
         let gateway = ProviderGateway {
@@ -1667,7 +1711,7 @@ impl RunGatewayCall<'_> {
             metadata: Some((self.path, self.run_id)),
         };
         let mut deltas = RedactedDeltas::new(&vault)?;
-        gateway.stream(&outgoing, &mut |event| {
+        let mut forward = |event| {
             if let ModelEvent::TextDelta { text } = event {
                 deltas.pending.push_str(&text);
                 return deltas.flush(false, emit);
@@ -1683,7 +1727,53 @@ impl RunGatewayCall<'_> {
                 &serde_json::to_value(event)?,
             )?)?;
             emit(event)
-        })
+        };
+        let has_images = outgoing
+            .input
+            .iter()
+            .any(|entry| entry.images.iter().any(|image| image.url.is_some()));
+        let mut retry_without_vision = false;
+        let mut progressed = false;
+        gateway.stream(&outgoing, &mut |event| {
+            if let ModelEvent::Failed { reason } = &event {
+                let message = reason.to_ascii_lowercase();
+                let unsupported =
+                    message.contains("unsupported") || message.contains("not support");
+                // Do not downgrade authentication, usage or network failures, or
+                // replay an attempt that already emitted text/tool calls.
+                if has_images && !progressed && unsupported {
+                    let kind: Option<String> = self.connection.query_row(
+                        "SELECT error_kind FROM wrapper_engine_runs WHERE run_id=?1",
+                        [self.run_id],
+                        |row| row.get(0),
+                    )?;
+                    if kind.as_deref() == Some("other") {
+                        retry_without_vision = true;
+                        return Ok(());
+                    }
+                }
+            }
+            progressed |= !matches!(&event, ModelEvent::Failed { .. });
+            forward(event)
+        })?;
+        if !retry_without_vision {
+            return Ok(());
+        }
+        self.no_vision.store(true, Ordering::SeqCst);
+        self.connection.execute(
+            "UPDATE wrapper_engine_runs SET error=NULL,error_kind=NULL,notice=?2 WHERE run_id=?1",
+            params![self.run_id, "Ce modèle ne lit pas les images ; la réponse utilise le texte et les descriptions disponibles."],
+        )?;
+        if compaction::revision(self.connection, &run.conversation_id)? != self.source_revision {
+            return Err(Error::Conflict("context source changed".into()));
+        }
+        let mut fallback = request.input.clone();
+        for entry in &mut fallback {
+            super::attachments::without_vision(&mut entry.images);
+        }
+        // One retry only, through the same fencing, budget, secret redaction,
+        // cancellation and metadata path. Further failures are real failures.
+        gateway.stream(&assemble(&fallback)?, &mut forward)
     }
 }
 /// Retain the longest known secret's suffix across deltas BEFORE persisting or
@@ -2300,6 +2390,8 @@ struct RunGateway<'a> {
     provider: &'a Provider,
     run_id: &'a str,
     cancel: &'a AtomicBool,
+    image_urls: Mutex<HashMap<String, String>>,
+    no_vision: AtomicBool,
 }
 impl ModelGateway for RunGateway<'_> {
     fn stream(
@@ -2334,6 +2426,8 @@ impl ModelGateway for RunGateway<'_> {
                 run_id: self.run_id,
                 cancel: self.cancel,
                 source_revision,
+                image_urls: &self.image_urls,
+                no_vision: &self.no_vision,
             }
             .stream(&fresh, emit);
             if !matches!(&result, Err(Error::Conflict(_))) {

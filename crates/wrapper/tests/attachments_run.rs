@@ -145,25 +145,39 @@ impl Fixture {
             .collect()
     }
     fn send(&mut self, conversation: &str, message: &str, body: &str, images: &[String]) -> Value {
+        self.send_calls(conversation, message, body, images, 1)
+            .remove(0)
+    }
+    fn reply(&mut self, conversation: &str, message: &str) -> Value {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == conversation)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == format!("reply-{message}"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+    fn send_calls(
+        &mut self,
+        conversation: &str,
+        message: &str,
+        body: &str,
+        images: &[String],
+        count: usize,
+    ) -> Vec<Value> {
         let before = self.run_requests().len();
         self.post(
             "/api/send",
             json!({"conversation_id": conversation, "message_id": message, "body": body, "attachments": images}),
         );
         wait("successful engine reply", || {
-            let state = self.app.api("GET", "/api/state", b"").unwrap();
-            let reply = state["conversations"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|c| c["id"] == conversation)
-                .unwrap()["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["id"] == format!("reply-{message}"))
-                .cloned()
-                .unwrap_or(Value::Null);
+            let reply = self.reply(conversation, message);
             assert_ne!(reply["state"], "failed", "{reply}");
             reply["state"] == "echoed"
         });
@@ -171,10 +185,10 @@ impl Fixture {
         let requests = self.run_requests();
         assert_eq!(
             requests.len(),
-            before + 1,
-            "one model call per plain chat run"
+            before + count,
+            "unexpected Responses calls for this run"
         );
-        requests[before].clone()
+        requests[before..].to_vec()
     }
     fn restart(&mut self) {
         self.idle();
@@ -183,8 +197,10 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.idle();
-        std::fs::remove_dir_all(self.path.parent().unwrap()).unwrap();
+        if !std::thread::panicking() {
+            self.idle();
+        }
+        let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
 
@@ -316,6 +332,168 @@ fn same_image_never_reuses_another_conversations_caption() {
     let later = f.send(&b, "later", "Explain", &[]);
     assert_caption_only(&later, "B_PUBLIC_CAPTION");
     assert!(!later.to_string().contains("A_PRIVATE_CAPTION"));
+}
+
+fn begin_task() -> ScriptedResponse {
+    ScriptedResponse::events(&[
+        json!({"type": "response.output_item.done", "item": {
+            "id": "fc-image", "type": "function_call", "status": "completed",
+            "call_id": "inspect-image", "name": "begin_task",
+            "arguments": json!({"objective": "Inspect the image"}).to_string(),
+        }}),
+        json!({"type": "response.completed"}),
+    ])
+}
+fn no_vision() -> ScriptedResponse {
+    ScriptedResponse::json(
+        400,
+        json!({"error": {
+            "code": "unsupported_image", "message": "This model does not support input_image",
+        }}),
+    )
+}
+fn assert_image(request: &Value) {
+    let parts = user_content(request);
+    let images = parts
+        .iter()
+        .filter(|part| part["type"] == "input_image")
+        .collect::<Vec<_>>();
+    assert_eq!(images.len(), 1);
+    assert_eq!(
+        images[0]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+}
+
+#[test]
+fn sending_turn_keeps_image_across_tool_calls() {
+    // Sending before precaption is ready is precisely when dropping the image
+    // would leave the continuation with no visual information whatsoever.
+    for prepared in [false, true] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let image = f.upload();
+        if prepared {
+            f.prepare(&c, &image, "Look", "A blue square.");
+        }
+        f.server
+            .seen
+            .lock()
+            .unwrap()
+            .responses
+            .push_back(begin_task());
+        let calls = f.send_calls(&c, "tool-image", "Inspect", &[image], 2);
+        for request in &calls {
+            assert_image(request);
+            if prepared {
+                assert_caption(request, "A blue square.");
+            }
+        }
+        assert!(calls[1]["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "function_call_output" && item["call_id"] == "inspect-image"
+        }));
+        let later = f.send(&c, "next", "Follow up", &[]);
+        assert!(!later.to_string().contains("input_image"));
+        if prepared {
+            assert_caption_only(&later, "A blue square.");
+        }
+    }
+}
+
+#[test]
+fn sending_turn_without_vision_sends_caption_marker_not_image() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let image = f.upload();
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(no_vision());
+    let input = json!({"conversation_id": c, "attachment_id": image, "draft": "Look"});
+    f.post("/api/attachments/precaption", input.clone());
+    wait("vision skip", || {
+        f.post("/api/attachments/precaption", input.clone())["caption"]["status"] == "skipped"
+    });
+    f.idle();
+    let sent = f.send(&c, "unsupported", "Look", &[image]);
+    assert_caption_only(&sent, "ce modèle ne peut pas lire les images");
+    // The model's controller backoff also covers another image, not only the
+    // original cache key. No run should rediscover this known limitation.
+    let mut bytes = STANDARD.decode(PNG).unwrap();
+    bytes.push(0);
+    let other = f.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sent = f.send(&c, "unsupported-other", "Another image", &[other]);
+    assert!(!sent.to_string().contains("input_image"));
+    assert!(user_content(&sent).iter().any(|part| part["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("ce modèle ne peut pas lire les images"))));
+}
+
+#[test]
+fn unknown_vision_refusal_retries_once_and_stays_text_only_across_tools() {
+    for prepared in [false, true] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let image = f.upload();
+        if prepared {
+            f.prepare(&c, &image, "Look", "A blue square.");
+        }
+        {
+            let mut seen = f.server.seen.lock().unwrap();
+            seen.responses.push_back(no_vision());
+            seen.responses.push_back(begin_task());
+        }
+        let calls = f.send_calls(&c, "fallback-tool", "Inspect", &[image], 3);
+        assert_image(&calls[0]);
+        for request in &calls[1..] {
+            assert_caption_only(request, "ce modèle ne peut pas lire les images");
+            if prepared {
+                assert_caption(request, "A blue square.");
+            }
+        }
+        let reply = f.reply(&c, "fallback-tool");
+        assert!(
+            reply["error"].is_null(),
+            "recovered failure must not remain in UI: {reply}"
+        );
+        assert!(reply["error_kind"].is_null());
+    }
+}
+
+#[test]
+fn unsupported_fallback_is_bounded_and_usage_errors_are_not_downgraded() {
+    for usage in [false, true] {
+        let mut f = Fixture::new();
+        let c = f.conversation();
+        let image = f.upload();
+        {
+            let mut seen = f.server.seen.lock().unwrap();
+            if usage {
+                seen.responses.push_back(ScriptedResponse::json(429, json!({"error": {
+                    "code": "subscription_sharing_usage_limit_exceeded", "message": "unsupported quota",
+                }})));
+            } else {
+                seen.responses.push_back(no_vision());
+                seen.responses.push_back(no_vision());
+            }
+        }
+        f.post("/api/send", json!({"conversation_id": c, "message_id": "failed", "body": "Look", "attachments": [image]}));
+        wait("expected failed run", || {
+            f.reply(&c, "failed")["state"] == "failed"
+        });
+        f.idle();
+        let calls = f.run_requests();
+        assert_eq!(calls.len(), if usage { 1 } else { 2 });
+        assert_image(&calls[0]);
+        if !usage {
+            assert_caption_only(&calls[1], "ce modèle ne peut pas lire les images");
+        }
+    }
 }
 
 #[test]

@@ -1,6 +1,8 @@
 .routines-section { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 20px; }
 .routines-section h3 { margin: 0 0 12px; font-size: 14px; }
 .routines-dialog { width: min(800px, calc(100% - 32px)); }
+.routines-covered { visibility: hidden; }
+.routines-covered::backdrop { background: transparent; }
 .routines-dialog h2 { font-size: 20px; }
 .routines-dialog h3 { margin: 0 0 8px; font-size: 14px; overflow-wrap: anywhere; }
 .routines-dialog h4 { margin: 20px 0 10px; font-size: 13px; }

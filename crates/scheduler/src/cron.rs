@@ -87,7 +87,8 @@ pub fn parse(expression: &str) -> Result<Schedule> {
 }
 
 /// Human-readable French presentation, using the same parser and DOM/DOW OR
-/// semantics as execution. The effective timezone appears exactly once.
+/// semantics as execution. Calendar schedules name the effective timezone;
+/// elapsed intervals do not use one.
 /// This describes a schedule, never predicts its next occurrence.
 pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
     let (text, zone) = match schedule {
@@ -121,12 +122,12 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
             };
             let text = match phase_ms {
                 Some(phase) => format!(
-                    "{cadence}, décalage de {} depuis l’époque UTC",
+                    "{cadence}, décalé de {} sur l’horloge UTC",
                     readable_duration(*phase)
                 ),
                 None => format!("{cadence}, à partir de l’activation"),
             };
-            (text, time_zone)
+            return Ok(text);
         }
         Schedule::Cron {
             expression,
@@ -186,19 +187,7 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
                         .collect::<Vec<_>>(),
                 )
             };
-            let month_days = format!(
-                "{} du mois",
-                join_fr(
-                    &values(dom, 1, 31)
-                        .iter()
-                        .map(|v| if *v == 1 {
-                            "le 1er".into()
-                        } else {
-                            format!("le {v}")
-                        })
-                        .collect::<Vec<_>>()
-                )
-            );
+            let month_days = format!("{} du mois", calendar_days_fr(&values(dom, 1, 31)));
             let days = match (dom.wildcard, dow.wildcard) {
                 (true, true) => "tous les jours".into(),
                 (true, false) => week,
@@ -242,6 +231,35 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
         }
     };
     Ok(format!("{text} ({zone})"))
+}
+
+fn calendar_days_fr(days: &[u32]) -> String {
+    let ordinal = |day| {
+        if day == 1 {
+            "1er".into()
+        } else {
+            format!("{day}")
+        }
+    };
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < days.len() {
+        let mut end = i;
+        while end + 1 < days.len() && days[end + 1] == days[end] + 1 {
+            end += 1;
+        }
+        if end - i >= 2 {
+            ranges.push(format!("du {} au {}", ordinal(days[i]), ordinal(days[end])));
+        } else {
+            ranges.extend(
+                days[i..=end]
+                    .iter()
+                    .map(|day| format!("le {}", ordinal(*day))),
+            );
+        }
+        i = end + 1;
+    }
+    join_fr(&ranges)
 }
 
 fn join_fr(items: &[String]) -> String {
@@ -546,17 +564,38 @@ mod cron_tests {
     #[test]
     fn readable_schedules_keep_calendar_semantics_and_effective_zone() {
         for (expression, expected) in [
-            ("0 8 * * 1-5", "Du lundi au vendredi à 08:00 (America/Toronto)"),
+            (
+                "0 8 * * 1-5",
+                "Du lundi au vendredi à 08:00 (America/Toronto)",
+            ),
             ("@daily", "Tous les jours à 00:00 (America/Toronto)"),
             ("0 9 * * 7", "Le dimanche à 09:00 (America/Toronto)"),
-            ("0 9 1-7 2 1", "Le 1er, le 2, le 3, le 4, le 5, le 6 et le 7 du mois OU le lundi à 09:00, en février (America/Toronto)"),
-            ("*/15 * * * *", "Tous les jours à chaque heure, aux minutes 0, 15, 30, 45 (America/Toronto)"),
-            ("* * * * *", "Tous les jours à chaque minute (America/Toronto)"),
+            (
+                "0 9 1-7 2 1",
+                "Du 1er au 7 du mois OU le lundi à 09:00, en février (America/Toronto)",
+            ),
+            (
+                "*/15 * * * *",
+                "Tous les jours à chaque heure, aux minutes 0, 15, 30, 45 (America/Toronto)",
+            ),
+            (
+                "* * * * *",
+                "Tous les jours à chaque minute (America/Toronto)",
+            ),
             ("TZ=UTC @monthly", "Le 1er du mois à 00:00 (UTC)"),
-            ("30 7 1,15 * *", "Le 1er et le 15 du mois à 07:30 (America/Toronto)"),
-            ("0 9 * 1,2 1,3", "Le lundi et le mercredi à 09:00, en janvier et février (America/Toronto)"),
+            (
+                "30 7 1,15 * *",
+                "Le 1er et le 15 du mois à 07:30 (America/Toronto)",
+            ),
+            (
+                "0 9 * 1,2 1,3",
+                "Le lundi et le mercredi à 09:00, en janvier et février (America/Toronto)",
+            ),
         ] {
-            assert_eq!(describe_fr(&parse(expression).unwrap(), "America/Toronto").unwrap(), expected);
+            assert_eq!(
+                describe_fr(&parse(expression).unwrap(), "America/Toronto").unwrap(),
+                expected
+            );
         }
         let prefixed = Schedule::Cron {
             expression: "TZ=UTC @daily".into(),
@@ -568,7 +607,7 @@ mod cron_tests {
         );
         assert_eq!(
             describe_fr(&parse("@every 1h/0ms").unwrap(), "UTC").unwrap(),
-            "Chaque heure, décalage de 0 millisecondes depuis l’époque UTC (UTC)"
+            "Chaque heure, décalé de 0 millisecondes sur l’horloge UTC"
         );
         assert_eq!(
             describe_fr(

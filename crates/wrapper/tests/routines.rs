@@ -372,21 +372,20 @@ fn model_confirmation_never_hides_prompt_tails_and_skill_body_is_reviewable() {
         .filter_map(|m| m["body"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let literal = shown.replace('\\', "");
-    assert!(literal.contains("FULL_SKILL_BODY"));
-    assert!(literal.contains(skill["content"]["name"].as_str().unwrap()));
-    assert!(literal.contains("Chaque minute"));
+    assert!(shown.contains("FULL\\_SKILL\\_BODY"));
+    assert!(shown.contains(skill["content"]["name"].as_str().unwrap()));
+    assert!(shown.contains("Chaque minute"));
     assert!(!shown.contains("interval_ms"));
     assert!(shown.contains("non vérifié"));
     assert!(!shown.contains("```text"));
-    assert!(!literal.contains(skill["skill_id"].as_str().unwrap()));
-    assert!(!literal.contains(created["routine"]["routine_id"].as_str().unwrap()));
+    assert!(!shown.contains(skill["skill_id"].as_str().unwrap()));
+    assert!(!shown.contains(created["routine"]["routine_id"].as_str().unwrap()));
 }
 
 #[test]
 fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
     let mut f = Fixture::new(false);
-    let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte\nhttps://x.test www.x.test a@b.test WWW.x.test";
+    let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte\nhttps://x.test www.x.test a@b.test WWW.x.test\n\n    indenté de 4 espaces\n1. ordre\n- liste\nC:\\temp";
     let created = output(
         f.app
             .invoke_tool(
@@ -403,8 +402,16 @@ fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
         .db()
         .query_row("SELECT body FROM wrapper_routine_notices", [], |r| r.get(0))
         .unwrap();
-    let literal = shown.replace('\\', "");
+    let literal = &shown;
     assert!(literal.contains("Du lundi au vendredi à 08:00 (America/Toronto)"));
+    assert!(!shown.contains("08\\:00"));
+    assert!(!shown.contains("America\\/Toronto"));
+    assert!(shown.contains("> \u{a0}  \n"));
+    assert!(shown.contains("> \u{a0}\u{a0}\u{a0}\u{a0}indenté de 4 espaces"));
+    assert!(shown.contains("> 1\\. ordre"));
+    assert!(shown.contains("> \\- liste"));
+    assert!(shown.contains("> C:\\\\temp"));
+    assert_eq!(created["routine"]["body"]["prompt"], prompt);
     assert_eq!(literal.matches("America/Toronto").count(), 1);
     assert!(!literal.contains("Europe/Paris"));
     assert!(!literal.contains("0 8 * * 1-5"));
@@ -423,9 +430,7 @@ fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
     assert!(literal.contains("https:\u{2060}//x.test"));
     assert!(literal.contains("www\u{2060}.x.test"));
     assert!(literal.contains("a\u{2060}@b.test"));
-    assert!(literal
-        .replace('\u{2060}', "")
-        .contains("[secret](https://example.com) <img src=x>"));
+    assert!(shown.contains("\\[secret\\](https:\u{2060}//example.com) \\<img src=x\\>"));
     assert!(shown.contains("\n\nConfirmez-vous son activation ?"));
     let list = f
         .app
@@ -435,6 +440,37 @@ fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
         list["routines"][0]["schedule_description"],
         "Du lundi au vendredi à 08:00 (America/Toronto)"
     );
+}
+
+#[test]
+fn same_named_routines_show_their_modification_stamp_in_panel_metadata_and_chat() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Météo du matin", "Première proposition");
+    f.app.tick(now() + 1_000);
+    let b = model_create(&f, "Météo du matin", "Deuxième proposition");
+    assert_ne!(a["routine"]["review_stamp"], b["routine"]["review_stamp"]);
+    let notices: String = f
+        .db()
+        .query_row(
+            "SELECT group_concat(body, char(10)) FROM wrapper_routine_notices",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let list = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    for item in [&a, &b] {
+        let stamp = item["routine"]["review_stamp"].as_str().unwrap();
+        assert!(stamp.starts_with("Modifiée le "));
+        assert!(notices.contains(stamp));
+        assert!(list["routines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["review_stamp"] == stamp));
+    }
 }
 
 #[test]
@@ -951,10 +987,9 @@ fn one_shot_consent_shows_the_host_local_datetime_and_explicit_utc() {
             |row| row.get(0),
         )
         .unwrap();
-    let literal = text.replace('\\', "");
-    assert!(literal.contains(&expected));
-    assert!(literal.contains("UTC"));
-    assert!(literal.contains(&features::routines::local_zone()));
+    assert!(text.contains(&expected));
+    assert!(text.contains("UTC"));
+    assert!(text.contains(&features::routines::local_zone()));
     assert!(result["local_time"].is_string());
 }
 

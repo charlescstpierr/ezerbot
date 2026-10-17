@@ -277,40 +277,69 @@ fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError>
     Ok(format!("{heading}\n{}", quoted_data(&text)))
 }
 fn quoted_data(text: &str) -> String {
-    // Preserve the complete untrusted body as literal, readable quoted text.
-    // Escape Markdown/HTML/fences and break GFM autolinks with invisible word
-    // joiners; no model-authored line may masquerade as the host's question.
+    // Escape only active Markdown/HTML/math syntax, not everyday punctuation
+    // copied from this notice. NBSP preserves blank lines and indentation;
+    // invisible word joiners prevent GFM from activating untrusted URLs/emails.
     text.replace("://", ":\u{2060}//")
         .replace('@', "\u{2060}@")
         .replace("\r\n", "\n")
         .replace('\r', "\n")
-        .lines()
+        .split('\n')
         .map(|line| {
-            let escaped = line.chars().fold(String::new(), |mut out, c| {
+            let mut escaped = String::new();
+            let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
+            for (offset, c) in line.char_indices() {
+                if offset < leading {
+                    escaped.push_str(if c == '\t' {
+                        "\u{a0}\u{a0}\u{a0}\u{a0}"
+                    } else {
+                        "\u{a0}"
+                    });
+                    continue;
+                }
                 if c == '.'
-                    && out
-                        .get(out.len().saturating_sub(3)..)
+                    && escaped
+                        .get(escaped.len().saturating_sub(3)..)
                         .is_some_and(|s| s.eq_ignore_ascii_case("www"))
                 {
-                    out.push('\u{2060}');
+                    escaped.push('\u{2060}');
                 }
-                if c.is_ascii_punctuation() {
-                    out.push('\\');
+                let ordered = matches!(c, '.' | ')')
+                    && offset > 0
+                    && line[..offset].bytes().all(|b| b.is_ascii_digit());
+                if "\\`*_[]<>&!|~$#".contains(c)
+                    || (offset == 0 && matches!(c, '-' | '+' | '='))
+                    || ordered
+                {
+                    escaped.push('\\');
                 }
-                out.push(c);
-                out
-            });
+                escaped.push(c);
+            }
+            if escaped.is_empty() {
+                escaped.push('\u{a0}');
+            }
             format!("> {escaped}  ")
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
+fn review_stamp(conn: &Connection, r: &Routine) -> Result<String, ApiError> {
+    let at: Option<String> = conn.query_row(
+        "SELECT strftime('%d/%m/%Y à %H:%M:%f UTC',?1/1000.0,'unixepoch')",
+        [r.modified_at],
+        |row| row.get(0),
+    )?;
+    Ok(at
+        .map(|at| format!("Modifiée le {at}"))
+        .unwrap_or_else(|| "Date de modification indisponible".into()))
+}
 fn ask_confirmation(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     let conversation = principal(ctx)?;
     let preview = confirmation_body(ctx.connection, r)?;
     let data = format!(
-        "> **Routine :**\n{}\n> \n> **Horaire :**\n{}\n> \n{preview}",
+        "> **Routine :**\n{}\n> \n{}\n> \n> **Horaire :**\n{}\n> \n{preview}",
         quoted_data(&r.name),
+        quoted_data(&review_stamp(ctx.connection, r)?),
         quoted_data(&readable_schedule(ctx.connection, r)?)
     );
     let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{data}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Pour distinguer des routines de même nom, utilisez le panneau Routines.");
@@ -450,6 +479,7 @@ fn routine_value(conn: &Connection, r: &Routine) -> Result<Value, ApiError> {
         .optional()?;
     let mut value = json!(r);
     value["model_edited_at"] = json!(edited);
+    value["review_stamp"] = json!(review_stamp(conn, r)?);
     value["schedule_description"] = json!(cron::describe_fr(&r.trigger, &r.time_zone)
         .unwrap_or_else(|_| "Horaire indisponible — consultez cette routine.".into()));
     Ok(value)

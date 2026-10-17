@@ -73,7 +73,7 @@
       if (phase !== null && phase >= interval) throw new Error("La phase doit être inférieure à l’intervalle.");
       const intervalText = cadence(interval);
       const repeat = intervalText.startsWith("1 ") ? `Chaque ${intervalText.slice(2)}` : `${interval % 86400000 === 0 ? "Tous les" : "Toutes les"} ${intervalText}`;
-      return { trigger: { kind: "every", interval_ms: interval, phase_ms: phase }, zone, text: `${repeat}, ${phase === null ? "à partir de l’activation" : `décalage de ${cadence(phase)} depuis l’époque UTC`}` };
+      return { trigger: { kind: "every", interval_ms: interval, phase_ms: phase }, zone, text: `${repeat}, ${phase === null ? "à partir de l’activation" : `décalé de ${cadence(phase)} sur l’horloge UTC`}` };
     }
     text = aliases[text.toLowerCase()] || text;
     const fields = text.split(" "), bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
@@ -105,12 +105,21 @@
     const time = minutes.length === 1 && hours.length === 1 ? `à ${String(hours[0]).padStart(2, "0")}:${String(minutes[0]).padStart(2, "0")}` : minutes.length === 60 && hours.length === 24 ? "à chaque minute" : hours.length === 24 ? `à chaque heure, aux minutes ${minutes.join(", ")}` : `aux heures ${hours.join(", ")} et aux minutes ${minutes.join(", ")}`;
     const dayNames = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
     const week = weekdays.join(",") === "1,2,3,4,5" ? "du lundi au vendredi" : join(weekdays.map((n) => `le ${dayNames[n]}`));
-    const monthDays = `${join(values(dom, 1, 31).map((n) => `le ${n === 1 ? "1er" : n}`))} du mois`;
+    const calendarDays = values(dom, 1, 31), ranges = [], ordinal = (n) => n === 1 ? "1er" : String(n);
+    for (let i = 0; i < calendarDays.length; i++) {
+      let end = i;
+      while (calendarDays[end + 1] === calendarDays[end] + 1) end++;
+      if (end - i >= 2) ranges.push(`du ${ordinal(calendarDays[i])} au ${ordinal(calendarDays[end])}`);
+      else for (let j = i; j <= end; j++) ranges.push(`le ${ordinal(calendarDays[j])}`);
+      i = end;
+    }
+    const monthDays = `${join(ranges)} du mois`;
     const days = dom !== "*" && dow !== "*" ? `${monthDays} OU ${week}` : dom !== "*" ? monthDays : dow !== "*" ? week : "tous les jours";
     const monthNames = ["", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
     const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
+  const scheduleLabel = (parsed) => parsed.trigger.kind === "every" ? parsed.text : `${parsed.text} (${parsed.zone})`;
   function describe(r) {
     if (r.schedule_description) return r.schedule_description;
     try {
@@ -118,12 +127,12 @@
       const t = r.trigger;
       const expression = t.kind === "cron" ? t.expression : `@every ${t.interval_ms}ms${t.phase_ms === null || t.phase_ms === undefined ? "" : `/${t.phase_ms}ms`}`;
       const parsed = schedule(expression, t.time_zone || r.time_zone);
-      return `${parsed.text} (${parsed.zone})`;
+      return scheduleLabel(parsed);
     } catch { return "Horaire illisible — consultez ou corrigez cette routine."; }
   }
 
-  let dialog, botSelect, content, status, toolbar, view = "list", current = null, returnToSettings = false;
-  let settingsScrollTop = 0, settingsFocus = null;
+  let dialog, botSelect, content, status, toolbar, view = "list", current = null;
+  let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
   let historyLimit = 200, rangeLimit = 200;
   // Only compact running/nonce summaries survive a history request. The server
@@ -148,7 +157,7 @@
   }
   function openThread(id) {
     if (!panels.openConversation(id)) { message("Le fil est indisponible. Actualisez puis réessayez.", true); return; }
-    returnToSettings = false; // Navigating to a thread must not reopen Settings.
+    restoreCovered = false; // Thread navigation closes the entry dialogs too.
     dialog.close();
     for (const name of ["bot-dialog", "settings-dialog"]) document.getElementById(name)?.close();
   }
@@ -169,14 +178,13 @@
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
       revision++; current = null; content.replaceChildren();
-      const restore = returnToSettings; returnToSettings = false;
-      const settings = document.getElementById("settings-dialog");
-      if (restore && settings && !settings.open) {
-        settings.showModal();
-        if (settingsFocus?.isConnected) settingsFocus.focus({ preventScroll: true });
-        settings.scrollTop = settingsScrollTop;
+      for (const { entry, scrollTop, focus } of covered.splice(0)) {
+        entry.classList.remove("routines-covered");
+        if (restoreCovered && entry.open) {
+          if (focus?.isConnected) focus.focus({ preventScroll: true });
+          entry.scrollTop = scrollTop;
+        }
       }
-      settingsFocus = null;
     });
     (document.getElementById("panels") || document.body).append(dialog);
   }
@@ -186,13 +194,14 @@
     botSelect.replaceChildren(...liveBots().map((b) => { const option = node("option", "", b.name); option.value = b.id; return option; }));
     botSelect.value = liveBots().some((b) => b.id === bot) ? bot : liveBots()[0]?.id || "";
     view = "list"; current = null; signature = ""; revision++;
-    // Replace Settings, but never close the bot editor: its unsaved profile and
-    // memory drafts must survive. The bot-entry layering predates D17.
-    const settings = document.getElementById("settings-dialog");
-    returnToSettings = Boolean(settings?.open && !document.getElementById("bot-dialog")?.open);
-    settingsScrollTop = settings?.scrollTop || 0;
-    settingsFocus = returnToSettings && settings.contains(document.activeElement) ? document.activeElement : null;
-    settings?.close();
+    // Keep entry dialogs mounted (including unsaved bot/memory/skill drafts),
+    // but hide their surfaces and backdrops while Routines is the visible layer.
+    restoreCovered = true;
+    covered = ["settings-dialog", "bot-dialog"].map((name) => document.getElementById(name)).filter((entry) => entry?.open).map((entry) => {
+      const snapshot = { entry, scrollTop: entry.scrollTop, focus: entry.contains(document.activeElement) ? document.activeElement : null };
+      entry.classList.add("routines-covered");
+      return snapshot;
+    });
     message(""); dialog.showModal(); renderList();
     void reload();
   }
@@ -224,6 +233,7 @@
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
+      if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${item.error}`));
       const actions = node("div", "routines-actions");
@@ -315,7 +325,7 @@
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
       expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once";
-      try { const p = parsed(); preview.textContent = `${p.text} (${p.zone})`; preview.classList.remove("routines-error"); }
+      try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
     const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value });

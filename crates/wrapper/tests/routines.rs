@@ -137,6 +137,473 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 
+fn confirm_current(f: &Fixture, conv: &str, message: &str, routine: &str) -> ToolOutcome {
+    let db = f.db();
+    let run = store::latest_run_for_trigger(
+        &db,
+        &Trigger::UserMessage {
+            message_id: format!("{conv}/{message}"),
+            attempt: 0,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let tx = features::write_transaction(&db).unwrap();
+    let mut ctx = f.app.feature_context();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("grokbot");
+    ctx.conversation_id = Some(conv);
+    ctx.run_id = Some(&run.run_id);
+    let out = features::routines::call_tool(
+        &ctx,
+        &ToolCall {
+            call_id: "confirm".into(),
+            name: "enable_routine".into(),
+            arguments: json!({"routine_id":routine,"confirm":true}),
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    out
+}
+fn model_create(f: &Fixture, name: &str, prompt: &str) -> Value {
+    output(
+        f.app
+            .invoke_tool(
+                "grokbot",
+                "create_routine",
+                json!({"name":name,"prompt":prompt,"schedule":"@every 1m"}),
+            )
+            .unwrap(),
+    )
+}
+
+#[test]
+fn generic_consent_is_only_valid_for_the_first_user_turn_but_named_consent_can_be_later() {
+    let mut f = Fixture::new(false);
+    let created = model_create(&f, "Stale report", "Report");
+    let conv = created["confirmation_conversation_id"].as_str().unwrap();
+    let id = created["routine"]["routine_id"].as_str().unwrap();
+    for (msg, text) in [("unrelated", "Parle-moi de Rust"), ("ok-later", "ok")] {
+        f.post(
+            "/api/send",
+            json!({"conversation_id":conv,"message_id":msg,"body":text}),
+        );
+    }
+    assert!(matches!(
+        confirm_current(&f, conv, "ok-later", id),
+        ToolOutcome::Failed { .. }
+    ));
+    assert!(!routine::get(&f.db(), id).unwrap().unwrap().enabled);
+    f.post("/api/send",json!({"conversation_id":conv,"message_id":"named","body":"activer la routine Stale report"}));
+    assert_eq!(
+        output(confirm_current(&f, conv, "named", id))["routine"]["enabled"],
+        true
+    );
+}
+
+#[test]
+fn stale_confirmation_can_be_reasked_without_spam_and_obsolete_runs_cannot_enable() {
+    let mut f = Fixture::new(false);
+    let created = model_create(&f, "Reask", "Report");
+    let conv = created["confirmation_conversation_id"].as_str().unwrap();
+    let id = created["routine"]["routine_id"].as_str().unwrap();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"old-yes","body":"oui"}),
+    );
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"new-no","body":"non"}),
+    );
+    assert!(matches!(
+        confirm_current(&f, conv, "old-yes", id),
+        ToolOutcome::Failed { .. }
+    ));
+    output(
+        f.app
+            .invoke_tool("grokbot", "enable_routine", json!({"routine_id":id}))
+            .unwrap(),
+    );
+    assert_eq!(
+        f.db()
+            .query_row("SELECT count(*) FROM wrapper_routine_notices", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"fresh-yes","body":"oui"}),
+    );
+    assert_eq!(
+        output(confirm_current(&f, conv, "fresh-yes", id))["routine"]["enabled"],
+        true
+    );
+}
+
+#[test]
+fn immediate_consent_accepts_native_punctuation_and_politeness_without_model_message_ids() {
+    for text in [
+        "oui",
+        "d’accord",
+        "oui merci",
+        "oui, vas-y",
+        "Oui !!",
+        "ok.  ",
+    ] {
+        let mut f = Fixture::new(false);
+        let created = model_create(&f, "Report", "Report");
+        let conv = created["confirmation_conversation_id"].as_str().unwrap();
+        let id = created["routine"]["routine_id"].as_str().unwrap();
+        f.post(
+            "/api/send",
+            json!({"conversation_id":conv,"message_id":"opaque-host-only-uuid","body":text}),
+        );
+        assert_eq!(
+            output(confirm_current(&f, conv, "opaque-host-only-uuid", id))["routine"]["enabled"],
+            true,
+            "{text}"
+        );
+    }
+    let tool = features::routines::tools()
+        .into_iter()
+        .find(|t| t.name == "enable_routine")
+        .unwrap();
+    assert!(tool.schema["properties"]["confirmation_message_id"].is_null());
+    assert_eq!(tool.schema["properties"]["confirm"]["type"], "boolean");
+}
+
+#[test]
+fn default_timezone_matches_detected_host_and_context_supplies_injected_clock_even_without_routines(
+) {
+    let mut f = Fixture::new(false);
+    let conv = f.post("/api/conversations", json!({"title":"Clock"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut ctx = f.app.feature_context();
+    ctx.now_ms = 1_900_000_000_000;
+    let request = ContextRequest {
+        run_id: "preview".into(),
+        trigger: Trigger::UserMessage {
+            message_id: "preview".into(),
+            attempt: 0,
+        },
+        bot_id: "grokbot".into(),
+        conversation_id: conv,
+        current_message: HistoryItem {
+            entry_id: "preview".into(),
+            role: Role::User,
+            text: "Schedule tomorrow".into(),
+            images: vec![],
+            tool_items: vec![],
+        },
+    };
+    let blocks = features::routines::context(&ctx, &request);
+    let data: Value = serde_json::from_str(&blocks[0].text).unwrap();
+    assert_eq!(data["now_utc_ms"], ctx.now_ms);
+    assert_eq!(data["local_time_zone"], features::routines::local_zone());
+    let created = model_create(&f, "Morning", "Morning report");
+    assert_eq!(
+        created["routine"]["time_zone"],
+        features::routines::local_zone()
+    );
+    let r = f.create("User report");
+    assert_eq!(r.time_zone, features::routines::local_zone());
+}
+
+#[test]
+fn model_confirmation_never_hides_prompt_tails_and_skill_body_is_reviewable() {
+    let mut f = Fixture::new(false);
+    let long = format!("{}HIDDEN_TAIL_EXFILTRATE", "x".repeat(2_000));
+    let denied = f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "create_routine",
+            json!({"name":"Hidden","prompt":long,"schedule":"@every 1m"}),
+        )
+        .unwrap();
+    assert!(matches!(denied,ToolOutcome::Failed{reason} if reason.contains("too long")));
+    assert!(routine::list(&f.db(), "grokbot").unwrap().is_empty());
+    let skill = f.post(
+        "/api/skills",
+        json!({"bot_id":"grokbot","name":"Auditable skill","body":"FULL_SKILL_BODY"}),
+    )["skill"]
+        .clone();
+    let created=output(f.app.invoke_tool("grokbot","create_routine",json!({"name":"Skill report","body":{"kind":"skill_invocation","skill_id":skill["skill_id"],"version":1},"schedule":"@every 1m"})).unwrap());
+    let chat = f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == created["confirmation_conversation_id"])
+        .unwrap()
+        .clone();
+    let shown = chat["messages"].to_string();
+    assert!(shown.contains("FULL_SKILL_BODY"));
+    assert!(shown.contains(skill["content"]["name"].as_str().unwrap()));
+    assert!(shown.contains("toutes les 1 minutes"));
+    assert!(!shown.contains("interval_ms"));
+    assert!(shown.contains("non vérifié"));
+    assert!(shown.contains("```text"));
+}
+
+#[test]
+fn model_edit_provenance_is_exposed_and_human_edit_clears_it() {
+    let mut f = Fixture::new(false);
+    let r = f.create("User authored");
+    let edited=output(f.app.invoke_tool("grokbot","update_routine",json!({"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"prompt":"Model authored"})).unwrap())["routine"].clone();
+    assert!(edited["model_edited_at"].is_i64());
+    let list = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert!(list["routines"][0]["model_edited_at"].is_i64());
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["routines"]["items"][0]["routine"]["model_edited_at"].is_i64());
+    let human=f.post("/api/routines/update",json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":edited["modified_at"],"schedule_version":edited["schedule_version"],"prompt":"Reviewed by user"}));
+    assert!(human["routine"]["model_edited_at"].is_null());
+}
+
+#[test]
+fn pending_questions_are_reused_bounded_and_revision_changes_require_a_later_turn() {
+    let mut f = Fixture::new(false);
+    let created = model_create(&f, "One", "Report");
+    let conv = created["confirmation_conversation_id"].as_str().unwrap();
+    let mut r = created["routine"].clone();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"old-consent","body":"oui"}),
+    );
+    for i in 0..5 {
+        r=output(f.app.invoke_tool("grokbot","update_routine",json!({"routine_id":r["routine_id"],"modified_at":r["modified_at"],"schedule_version":r["schedule_version"],"name":format!("One {i}")})).unwrap())["routine"].clone();
+    }
+    assert_eq!(
+        f.db()
+            .query_row("SELECT count(*) FROM wrapper_routine_notices", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        confirm_current(&f, conv, "old-consent", r["routine_id"].as_str().unwrap()),
+        ToolOutcome::Failed { .. }
+    ));
+    for i in 0..4 {
+        model_create(&f, &format!("Question {i}"), "Report");
+    }
+    assert!(matches!(
+        f.app
+            .invoke_tool(
+                "grokbot",
+                "create_routine",
+                json!({"name":"Overflow","prompt":"Report","schedule":"@every 1m"})
+            )
+            .unwrap(),
+        ToolOutcome::Failed { .. }
+    ));
+    assert_eq!(routine::list(&f.db(), "grokbot").unwrap().len(), 5);
+}
+
+#[test]
+fn deleted_bots_are_paused_after_one_deterministic_failure() {
+    let mut f = Fixture::new(false);
+    f.post(
+        "/api/bots",
+        json!({"id":"gone","name":"Gone","color":"citron","description":"","instructions":""}),
+    );
+    let r: Routine = serde_json::from_value(
+        f.post(
+            "/api/routines",
+            json!({"bot_id":"gone","name":"Report","prompt":"Report","schedule":"@every 1m"}),
+        )["routine"]
+            .clone(),
+    )
+    .unwrap();
+    f.post("/api/bots/delete", json!({"id":"gone"}));
+    for i in 1..=5 {
+        f.app.tick((r.modified_at + i * 60_000) as u64);
+    }
+    assert!(
+        !routine::get(&f.db(), &r.routine_id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(occurrences::list(&f.db(), &r.routine_id).unwrap().len(), 1);
+}
+
+#[test]
+fn deleted_questions_leave_context_and_deleted_chats_get_fresh_questions() {
+    let mut f = Fixture::new(false);
+    let created = model_create(&f, "Ghost", "GHOST_PROMPT");
+    let conv = created["confirmation_conversation_id"].as_str().unwrap();
+    let id = created["routine"]["routine_id"].as_str().unwrap();
+    f.post("/api/conversations/delete", json!({"id":conv}));
+    let again = output(
+        f.app
+            .invoke_tool("grokbot", "enable_routine", json!({"routine_id":id}))
+            .unwrap(),
+    );
+    assert_ne!(again["confirmation_conversation_id"], conv);
+    let new_conv = again["confirmation_conversation_id"].as_str().unwrap();
+    f.post(
+        "/api/routines/delete",
+        json!({"bot_id":"grokbot","routine_id":id}),
+    );
+    assert!(!f
+        .app
+        .context_preview(new_conv)
+        .unwrap()
+        .iter()
+        .any(|b| b.text.contains("GHOST_PROMPT")));
+}
+
+#[test]
+fn transient_engine_creation_errors_keep_occurrence_retryable_and_get_reads_do_not_take_write_lock()
+{
+    let mut f = Fixture::new(false);
+    let r = f.create("Retry");
+    let db = f.db();
+    db.execute_batch("CREATE TRIGGER fail_engine_insert BEFORE INSERT ON wrapper_engine_runs BEGIN SELECT RAISE(ABORT,'transient hook/storage failure'); END").unwrap();
+    f.tick_due(&r);
+    assert_eq!(
+        occurrences::list(&db, &r.routine_id).unwrap()[0].status,
+        OccurrenceStatus::Pending
+    );
+    assert!(routine::get(&db, &r.routine_id).unwrap().unwrap().enabled);
+    db.execute_batch("DROP TRIGGER fail_engine_insert").unwrap();
+    f.tick_due(&r);
+    assert_eq!(f.count(), 1);
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    f.app
+        .feature_context()
+        .connection
+        .busy_timeout(Duration::from_millis(30))
+        .unwrap();
+    assert!(f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .is_ok());
+    assert!(f
+        .app
+        .api(
+            "GET",
+            &format!(
+                "/api/routines/history?bot_id=grokbot&routine_id={}",
+                r.routine_id
+            ),
+            b""
+        )
+        .is_ok());
+    db.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn principal_ancestor_routing_matches_forms_instead_of_latest_other_chat() {
+    let mut f = Fixture::new(false);
+    let parent = f.post("/api/conversations", json!({"title":"Parent"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = f.post("/api/conversations", json!({"title":"Other principal"}))["conversation"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post(
+        "/api/bots",
+        json!({"id":"child","name":"Child","color":"citron","description":"","instructions":""}),
+    );
+    let db = f.db();
+    db.execute(
+        "UPDATE wrapper_conversations SET updated_at=updated_at+10000 WHERE id=?1",
+        [&other],
+    )
+    .unwrap();
+    db.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) SELECT account_id,'child-task','Child task','child','task',id,created_at,updated_at FROM wrapper_conversations WHERE id=?1",[&parent]).unwrap();
+    let tx = features::write_transaction(&db).unwrap();
+    let mut ctx = f.app.feature_context();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("child");
+    ctx.conversation_id = Some("child-task");
+    let result = output(
+        features::routines::call_tool(
+            &ctx,
+            &ToolCall {
+                call_id: "child-create".into(),
+                name: "create_routine".into(),
+                arguments: json!({"name":"Child report","prompt":"Report","schedule":"@every 1m"}),
+            },
+        )
+        .unwrap(),
+    );
+    assert_eq!(result["confirmation_conversation_id"], parent);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn automatic_occurrences_do_not_overlap_an_active_run_in_the_routine_thread() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Sequential");
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    grokbot_engine::model::start(
+        &tx,
+        &Run {
+            run_id: "active-run".into(),
+            bot_id: r.bot_id.clone(),
+            conversation_id: r.conversation_id.clone(),
+            trigger: Trigger::Delegation {
+                delegation_id: "blocker".into(),
+            },
+            kind: RunKind::Task,
+            status: grokbot_engine::model::RunStatus::Running,
+            task_status: Some(TaskStatus::Working),
+            turn_end: None,
+            budgets: RunBudgets::default(),
+            started_at: r.modified_at,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let mut ctx = f.app.feature_context();
+    ctx.now_ms = (r.modified_at + 60_000) as u64;
+    features::routines::tick(&ctx);
+    assert_eq!(f.count(), 0);
+    assert_eq!(
+        occurrences::list(&db, &r.routine_id).unwrap()[0].status,
+        OccurrenceStatus::Pending
+    );
+    let tx = features::write_transaction(&db).unwrap();
+    grokbot_engine::model::cancel(&tx, "active-run", TurnEnd::Stopped).unwrap();
+    tx.commit().unwrap();
+    f.tick_due(&r);
+    assert_eq!(f.count(), 1);
+}
+
+#[test]
+fn long_model_edits_fail_atomically_without_changing_a_trusted_active_routine() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Original");
+    let result=f.app.invoke_tool("grokbot","update_routine",json!({"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"prompt":"x".repeat(2_001)})).unwrap();
+    assert!(matches!(result, ToolOutcome::Failed { .. }));
+    assert_eq!(routine::get(&f.db(), &r.routine_id).unwrap().unwrap(), r);
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT count(*) FROM wrapper_routine_provenance",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
 #[test]
 fn due_occurrence_starts_exactly_one_run() {
     let mut f = Fixture::new(false);
@@ -328,7 +795,7 @@ fn model_enable_requires_approval() {
     let tool = ToolCall {
         call_id: "enable".into(),
         name: "enable_routine".into(),
-        arguments: json!({"routine_id":r.routine_id,"confirmation_message_id":"confirm-1"}),
+        arguments: json!({"routine_id":r.routine_id,"confirm":true}),
     };
     assert!(
         output(features::routines::call_tool(&ctx, &tool).unwrap())["routine"]["enabled"] == true
@@ -382,7 +849,7 @@ fn conversational_confirmation_enables_through_real_model_tool_loop() {
         call(
             "activate",
             "enable_routine",
-            json!({"routine_id":r.routine_id,"confirmation_message_id":"denied"}),
+            json!({"routine_id":r.routine_id,"confirm":true}),
         ),
         complete(),
     ]);
@@ -407,14 +874,14 @@ fn conversational_confirmation_enables_through_real_model_tool_loop() {
         call(
             "activate",
             "enable_routine",
-            json!({"routine_id":r.routine_id,"confirmation_message_id":"accepted"}),
+            json!({"routine_id":r.routine_id,"confirm":true}),
         ),
         complete(),
     ]);
     f.events(vec![complete()]);
     f.post(
         "/api/send",
-        json!({"conversation_id":conv,"message_id":"accepted","body":"oui"}),
+        json!({"conversation_id":conv,"message_id":"accepted","body":"activer la routine Confirmed live"}),
     );
     wait("accepted chat finished", || {
         store::latest_run_for_trigger(
@@ -428,6 +895,14 @@ fn conversational_confirmation_enables_through_real_model_tool_loop() {
         .is_some_and(|r| r.status.is_terminal())
     });
     assert!(routine::get(&db, &r.routine_id).unwrap().unwrap().enabled);
+    let seen = f.server.seen.lock().unwrap();
+    // The scripted activation needs only an ID actually present in model input
+    // and confirm:true. No invisible current-message ID is ever supplied.
+    let bodies = seen.bodies.iter().map(Value::to_string).collect::<String>();
+    assert!(bodies.contains(&r.routine_id));
+    assert!(!bodies.contains("confirmation_message_id"));
+    assert!(!bodies.contains("\"accepted\""));
+    drop(seen);
     assert_eq!(
         db.query_row("SELECT count(*) FROM forms_requests", [], |row| row
             .get::<_, i64>(0))
@@ -615,7 +1090,16 @@ fn subbot_confirmation_is_visible_only_in_principal_chat_and_context() {
         .unwrap()
         .iter()
         .any(|b| b.text.contains("Child report")));
-    assert!(matches!(f.app.invoke_tool("child","enable_routine",json!({"routine_id":requested["routine"]["routine_id"],"confirmation_message_id":"yes"})).unwrap(),ToolOutcome::Failed{..}));
+    assert!(matches!(
+        f.app
+            .invoke_tool(
+                "child",
+                "enable_routine",
+                json!({"routine_id":requested["routine"]["routine_id"],"confirm":true})
+            )
+            .unwrap(),
+        ToolOutcome::Failed { .. }
+    ));
 }
 
 #[test]

@@ -43,9 +43,41 @@ export function orderThread(messages) {
       else add(after, tail, fragment);
     });
   });
-  return messages.flatMap((message, index) => [
+  // A human-input call is already represented by its request card. Match the
+  // durable request and run, not just the tool name: failed calls and requests
+  // routed to another conversation must keep their diagnostic tool card.
+  const requests = new Map(messages.filter((message) => ["form", "secret"].includes(message.kind)
+    && message.payload?.id).map((message) => [message.payload.id, message]));
+  const ordered = messages.flatMap((message, index) => [
     ...(before.get(index) || []),
     ...(replies.has(index) ? [] : [message]),
     ...(after.get(index) || []),
-  ]);
+  ]).filter((message) => {
+    if (message.kind !== "tool") return true;
+    const { call, outcome, run_id: runId } = message.payload || {};
+    // These calls have no UI of their own (the task card carries their status).
+    if (["begin_task", "complete_task"].includes(call?.name)) return false;
+    const requestKind = { request_form: "form", request_secret: "secret" }[call?.name];
+    const request = outcome?.status === "suspend" && outcome.cause?.kind === "human_input"
+      ? requests.get(outcome.cause.id) : undefined;
+    return !(requestKind && request?.kind === requestKind && runId && request.payload.run_id === runId);
+  });
+
+  // When a turn opens with cards, move only its heading above them. Text still
+  // follows the call anchors, and a completed tool-only turn gets no empty reply.
+  const headings = new Map();
+  for (const index of replies) {
+    const message = messages[index];
+    const runId = message.payload.run_id;
+    const first = ordered.findIndex((item) => item.key && item.payload?.run_id === runId);
+    if (first < 0) continue;
+    const opening = ordered.findIndex((item, position) => position < first && !chatKinds.has(item.kind)
+      && (item.payload?.run_id === runId || item.payload?.parent_run_id === runId));
+    if (opening < 0) continue;
+    headings.set(opening, {
+      id: `${message.id}:heading`, kind: "turn-heading", created_at: message.created_at,
+    });
+    ordered[first] = { ...ordered[first], continuation: true };
+  }
+  return ordered.flatMap((message, index) => headings.has(index) ? [headings.get(index), message] : [message]);
 }

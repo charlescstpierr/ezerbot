@@ -241,6 +241,12 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
         {ordered.map((message) => {
+          if (message.kind === "turn-heading") return (
+            <div className="gb-message gb-assistant gb-turn-heading" key={message.id}>
+              <Mascot create={createMascot} />
+              <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>
+            </div>
+          );
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"

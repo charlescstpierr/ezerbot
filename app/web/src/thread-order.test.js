@@ -67,6 +67,64 @@ test("tool-only completion stays empty; empty live/error/stop statuses survive",
   }
 });
 
+test("card-first turn opens with one heading, then tools, then response text", () => {
+  const message = reply("echoed", [{ body: "Après." }], { created_at: 1234 });
+  const child = { id: "child", kind: "delegation", payload: { parent_run_id: "run" } };
+  const result = orderThread([user, message, tool, child]);
+  assert.deepEqual(result.map((m) => m.kind || m.id), [user.id, "turn-heading", "tool", "delegation", "message"]);
+  assert.equal(result[1].created_at, message.created_at);
+  assert.equal(result[1].id, `${message.id}:heading`);
+  assert.equal(result.at(-1).continuation, true);
+  assert.equal(result.at(-1).body, "Après.");
+  assert.equal(result.at(-1).copyText, message.body);
+});
+
+test("heading opens card-first live, error and stopped turns without duplicating status", () => {
+  for (const state of ["streaming", "failed", "stopped"]) {
+    const result = orderThread([user, reply(state, [], { error: "Erreur" }), tool]);
+    assert.equal(result[1].kind, "turn-heading");
+    assert.equal(result[2], tool);
+    assert.equal(result[3].state, state);
+    assert.equal(result[3].continuation, true);
+  }
+});
+
+test("pre-call text keeps the heading and tool-only completions never get an empty heading", () => {
+  assert.equal(orderThread([user, reply("echoed", [preCall]), tool]).some((m) => m.kind === "turn-heading"), false);
+  const internal = { id: "complete", kind: "tool", payload: { run_id: "run", call: { name: "complete_task" } } };
+  const task = { id: "task", kind: "task", payload: { run_id: "run" } };
+  assert.deepEqual(orderThread([user, reply("echoed", []), internal, task]), [user, task]);
+});
+
+test("each turn's heading stays with its own cards, not an unrelated routed request", () => {
+  const unrelated = { id: "routed", kind: "secret", payload: { run_id: "another-run" } };
+  const nextUser = { ...user, id: "next" };
+  const nextReply = { ...reply("echoed", [{ body: "Second." }]), id: "second", payload: { run_id: "second-run", parts: [{ body: "Second." }] } };
+  const nextTool = { ...tool, id: "second-tool", payload: { run_id: "second-run" } };
+  const result = orderThread([unrelated, user, reply("echoed", [{ body: "First." }]), tool, nextUser, nextReply, nextTool]);
+  assert.deepEqual(result.map((m) => m.id), ["routed", "question", "reply-question:heading", tool.id, "reply-question", "next", "second:heading", "second-tool", "second"]);
+});
+
+for (const kind of ["form", "secret"]) {
+  const request = { id: "input", kind, payload: { id: "input", run_id: "run", status: { status: "pending" } } };
+  const call = { ...tool, payload: { run_id: "run", call: { name: `request_${kind}` }, outcome: { status: "suspend", cause: { kind: "human_input", id: "input" } } } };
+  test(`${kind} request replaces only its matching tool, including after resolution`, () => {
+    for (const status of ["pending", "resolved", "cancelled"]) {
+      const card = { ...request, payload: { ...request.payload, status: { status } } };
+      assert.deepEqual(orderThread([user, reply("echoed", []), call, card]), [user, card]);
+      const result = orderThread([user, reply("echoed", [{ body: "Avant.", before: call.id }, { body: "Après." }]), call, card]);
+      assert.deepEqual(result.map((m) => m.body ?? m.id), ["Question", "Avant.", card.id, "Après."]);
+    }
+  });
+  test(`${kind} missing/routed request, unrelated run and failed calls keep their diagnostic card`, () => {
+    assert.ok(orderThread([call]).includes(call));
+    assert.ok(orderThread([call, { ...request, payload: { ...request.payload, run_id: "child" } }]).includes(call));
+    assert.ok(orderThread([call, { ...request, payload: { ...request.payload, id: "other-input" } }]).includes(call));
+    const failed = { ...call, payload: { ...call.payload, outcome: { status: "failed", reason: "Invalid fields" } } };
+    assert.ok(orderThread([failed, request]).includes(failed));
+  });
+}
+
 test("task/delegation/form cards stay before the tail without moving another turn", () => {
   const cards = [tool,
     { id: "delegation", kind: "delegation", payload: { parent_run_id: "run" } },

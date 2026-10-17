@@ -470,13 +470,9 @@ fn forget(
         ));
     }
     let snapshots = facts::forget(conn, bot, id).map_err(memory_error)?;
-    // Use every predecessor's original text AND provenance before discarding
-    // the snapshots. A correction may have happened in another conversation.
-    for snapshot in &snapshots {
-        if !snapshot.text.is_empty() {
-            redact_traces(conn, snapshot, executing_run)?;
-        }
-    }
+    // One pass over the entire lineage: redacting an older prefix first would
+    // hide a later correction's match while leaving its added detail in replay.
+    redact_traces(conn, &snapshots, executing_run)?;
     Ok(json!({"forgotten": snapshots.iter().map(|fact| &fact.fact_id).collect::<Vec<_>>()}))
 }
 
@@ -485,16 +481,50 @@ fn forget(
 /// private fact must not alter another bot's independent journal.
 fn redact_traces(
     conn: &Connection,
-    fact: &Fact,
+    snapshots: &[Fact],
     executing_run: Option<&str>,
 ) -> Result<(), ApiError> {
-    use grokbot_engine::{compaction, model, run_loop, store};
+    use grokbot_engine::{compaction, run_loop, store};
 
-    // remember deduplicates after whitespace normalization (RC02). Its replay
-    // arguments can therefore differ from the retained fact text. Recover only
-    // aliases whose successful result points to this exact fact, not unrelated
-    // calls that happen to have similar prose.
-    let mut statement = conn.prepare(
+    let facts: Vec<_> = snapshots
+        .iter()
+        .filter(|fact| !fact.text.is_empty())
+        .collect();
+    if facts.is_empty() {
+        return Ok(());
+    }
+    // Union the lineage's scopes before reading or rewriting any run. A former
+    // private version and its team replacement must be forgotten together.
+    let mut bots: BTreeSet<_> = facts.iter().map(|fact| fact.bot_id.clone()).collect();
+    if facts.iter().any(|fact| fact.scope == Scope::Team) {
+        let mut statement = conn.prepare(
+            "SELECT bot_id FROM engine_runs UNION SELECT bot_id FROM wrapper_conversations WHERE account_id=?1",
+        )?;
+        bots.extend(
+            statement
+                .query_map([ACCOUNT], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    // Refuse rather than mutate another run's lifecycle behind its observer.
+    // The IMMEDIATE caller transaction prevents a concurrent model callback
+    // from slipping between this check and the wipe. Our own forget_fact run
+    // is between model calls, and is rebuilt from committed events afterwards.
+    let mut running = conn.prepare(
+        "SELECT EXISTS(SELECT 1 FROM engine_runs WHERE bot_id=?1 AND status='running' AND run_id!=?2)",
+    )?;
+    for bot in &bots {
+        if running.query_row(params![bot, executing_run.unwrap_or("")], |row| {
+            row.get::<_, bool>(0)
+        })? {
+            return Err(ApiError::new(409, "Une réponse concernée est en cours. Arrêtez-la ou attendez sa fin avant de réessayer l'oubli."));
+        }
+    }
+
+    // Gather every original spelling BEFORE redaction. Matching all versions
+    // simultaneously lets redaction_ranges choose the longest overlapping match.
+    let mut texts: BTreeSet<_> = facts.iter().map(|fact| fact.text.clone()).collect();
+    let mut aliases = conn.prepare(
         "SELECT json_extract(c.payload,'$.arguments.text') FROM engine_run_events c
          JOIN engine_run_events o ON o.run_id=c.run_id AND o.kind='tool_result'
              AND json_extract(o.payload,'$.call_id')=json_extract(c.payload,'$.call_id')
@@ -502,95 +532,84 @@ fn redact_traces(
              AND json_extract(o.payload,'$.outcome.output.fact.fact_id')=?1
              AND json_type(c.payload,'$.arguments.text')='text'",
     )?;
-    let mut texts = statement
-        .query_map([&fact.fact_id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    texts.insert(fact.text.clone());
+    for fact in &facts {
+        texts.extend(
+            aliases
+                .query_map([&fact.fact_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
     texts.retain(|text| !text.is_empty());
-    let bots = if fact.scope == Scope::Team {
-        let mut statement = conn.prepare(
-            "SELECT bot_id FROM engine_runs UNION SELECT bot_id FROM wrapper_conversations WHERE account_id=?1",
-        )?;
-        let mut bots = statement
-            .query_map([ACCOUNT], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        bots.insert(fact.bot_id.clone());
-        bots
-    } else {
-        BTreeSet::from([fact.bot_id.clone()])
-    };
-    // Failed memory calls can contain a whitespace variant too (e.g. a refused
-    // sensitivity change). They have no successful fact ID to join against.
+    let normalized: BTreeSet<_> = texts.iter().map(|text| normalize(text)).collect();
+    // Failed calls have no successful fact ID to join against (RC02 aliases).
+    let mut failed_aliases = conn.prepare(
+        "SELECT json_extract(e.payload,'$.arguments.text') FROM engine_run_events e
+         JOIN engine_runs r USING(run_id) WHERE r.bot_id=?1 AND e.kind='tool_call'
+         AND json_extract(e.payload,'$.name') IN ('remember','correct_fact')
+         AND json_type(e.payload,'$.arguments.text')='text'",
+    )?;
     for bot in &bots {
-        let mut statement = conn.prepare(
-            "SELECT json_extract(e.payload,'$.arguments.text') FROM engine_run_events e
-             JOIN engine_runs r USING(run_id) WHERE r.bot_id=?1 AND e.kind='tool_call'
-             AND json_extract(e.payload,'$.name') IN ('remember','correct_fact')
-             AND json_type(e.payload,'$.arguments.text')='text'",
-        )?;
-        for text in statement.query_map([bot], |row| row.get::<_, String>(0))? {
+        for text in failed_aliases.query_map([bot], |row| row.get::<_, String>(0))? {
             let text = text?;
-            if normalize(&text) == normalize(&fact.text) {
+            if normalized.contains(&normalize(&text)) {
                 texts.insert(text);
             }
         }
     }
     let mut covering = BTreeSet::new();
     let mut conversations = BTreeSet::new();
-    if let (Some(conversation), Some(entry)) =
-        (&fact.provenance.conversation_id, &fact.provenance.entry_id)
-    {
-        covering.insert((conversation.clone(), entry.clone()));
-    }
-    for bot in bots {
-        let mut statement =
-            conn.prepare("SELECT run_id,conversation_id FROM engine_runs WHERE bot_id=?1")?;
-        let runs = statement
-            .query_map([&bot], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (run, conversation) in runs {
-            // Stop in-flight providers before their next callback can commit
-            // forgotten content. Never stop this forget_fact's own run: it is
-            // between model calls, and cancelling it would roll back the tool.
-            if Some(run.as_str()) != executing_run
-                && store::required(conn, &run)?.status == model::RunStatus::Running
-            {
-                model::cancel(conn, &run, grokbot_engine::contracts::TurnEnd::Stopped)?;
-            }
-            // Replay coalesces streamed deltas. A phrase split over two events
-            // is covered by the first entry's ID in a compaction summary.
-            for item in run_loop::replay_items(&store::events(conn, &run, 0)?)? {
-                let value =
-                    serde_json::to_value(&item).map_err(grokbot_engine::contracts::Error::from)?;
-                if texts.iter().any(|text| contains_text(&value, text)) {
-                    covering.insert((conversation.clone(), item.entry_id));
-                }
-            }
-            redact_run(conn, &run, &texts)?;
-            conversations.insert(conversation);
+    for fact in &facts {
+        if let (Some(conversation), Some(entry)) =
+            (&fact.provenance.conversation_id, &fact.provenance.entry_id)
+        {
+            covering.insert((conversation.clone(), entry.clone()));
         }
-        let mut statement =
-            conn.prepare("SELECT id FROM wrapper_conversations WHERE account_id=?1 AND bot_id=?2")?;
+    }
+    let mut runs = Vec::new();
+    let mut run_rows =
+        conn.prepare("SELECT run_id,conversation_id FROM engine_runs WHERE bot_id=?1")?;
+    let mut conversation_rows =
+        conn.prepare("SELECT id FROM wrapper_conversations WHERE account_id=?1 AND bot_id=?2")?;
+    for bot in &bots {
+        runs.extend(
+            run_rows
+                .query_map([bot], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
         conversations.extend(
-            statement
+            conversation_rows
                 .query_map(params![ACCOUNT, bot], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
+    }
+    // Compute ALL coverage on original replay, including cross-conversation
+    // echoes of extending corrections, before rewriting a single payload.
+    for (run, conversation) in &runs {
+        for item in run_loop::replay_items(&store::events(conn, run, 0)?)? {
+            let value =
+                serde_json::to_value(&item).map_err(grokbot_engine::contracts::Error::from)?;
+            if texts.iter().any(|text| contains_text(&value, text)) {
+                covering.insert((conversation.clone(), item.entry_id));
+            }
+        }
+        conversations.insert(conversation.clone());
+    }
+    for (run, _) in &runs {
+        redact_run(conn, run, &texts)?;
     }
     for (conversation, entry) in covering {
         compaction::invalidate_covering(conn, &conversation, &entry)?;
     }
     for conversation in conversations {
-        // Even without a covering summary, memory blocks/readers may already be
-        // in flight. Bump the source revision so the gateway rebuilds them. The
-        // synthetic ID cannot cover modern summaries; legacy unknown-coverage
-        // summaries are conservatively invalidated by the compaction API.
+        // Bump the source revision even without a saved summary. The synthetic
+        // ID leaves known unrelated coverage intact; legacy unknown coverage is
+        // conservatively invalidated by the compaction API.
         compaction::invalidate_covering(
             conn,
             &conversation,
-            &format!("forgotten:{}", fact.fact_id),
+            &format!("forgotten:{}", facts[0].fact_id),
         )?;
     }
     Ok(())

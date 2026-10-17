@@ -301,6 +301,19 @@ fn covering_summary_is_regenerated() {
 // Save exact known coverage to distinguish invalidation by provenance from
 // accidental substring matching of the summary's prose.
 fn summary_for_run(f: &Fixture, message: &str, summary_id: &str) -> Summary {
+    summary_for_run_text(
+        f,
+        message,
+        summary_id,
+        "A paraphrased durable inference without the literal forgotten text.",
+    )
+}
+fn summary_for_run_text(
+    f: &Fixture,
+    message: &str,
+    summary_id: &str,
+    summary_text: &str,
+) -> Summary {
     let run = f.run(message);
     let mut history =
         run_loop::replay_items(&store::events(&f.db(), &run.run_id, 0).unwrap()).unwrap();
@@ -314,7 +327,7 @@ fn summary_for_run(f: &Fixture, message: &str, summary_id: &str) -> Summary {
     let summary = Summary {
         summary_id: summary_id.into(),
         conversation_id: run.conversation_id,
-        text: "A paraphrased durable inference without the literal forgotten text.".into(),
+        text: summary_text.into(),
         truncation_last_entry_inclusive: history.last().unwrap().entry_id.clone(),
         resume_from_entry_inclusive: tail.entry_id.clone(),
         previous_summary_id: None,
@@ -327,6 +340,77 @@ fn summary_for_run(f: &Fixture, message: &str, summary_id: &str) -> Summary {
     })
     .unwrap();
     summary
+}
+
+#[test]
+fn extending_correction_forgets_added_detail_in_cards_and_requests() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let original = "Private inference: allergic to peanuts";
+    let suffix = "and to shellfish";
+    let extended = format!("{original} {suffix}");
+    let old = f.learn(&c, "learn", original);
+    f.events(vec![
+        call(
+            "extend",
+            "correct_fact",
+            json!({"fact_id":old,"text":extended,"sensitive":null}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "extend", "Add the new detail to that inference.");
+    let id = facts::list_active(&f.db(), "grokbot").unwrap()[0]
+        .fact_id
+        .clone();
+    assert!(contains(&f.state(), suffix));
+    f.forget("grokbot", &id);
+    let state = f.state();
+    assert!(!contains(&state, original));
+    assert!(!contains(&state, suffix));
+    let before = f.bodies().len();
+    f.send(&c, "after-extension", "Continue without that memory.");
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, original));
+        assert!(!contains(body, suffix));
+    }
+}
+
+#[test]
+fn extending_correction_invalidates_summary_of_echo_in_another_conversation() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let original = "Private inference: allergic to peanuts";
+    let extended = format!("{original} and to shellfish");
+    let old = f.learn(&c, "learn", original);
+    f.events(vec![
+        call(
+            "extend",
+            "correct_fact",
+            json!({"fact_id":old,"text":extended,"sensitive":null}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "extend", "Add the new detail to that inference.");
+    let echo = f.conversation("grokbot");
+    f.events(vec![text(&extended), complete()]);
+    f.send(&echo, "echo-extension", "Summarize the current inference.");
+    summary_for_run_text(&f, "echo-extension", "echo-extension-summary", &extended);
+    assert!(compaction::latest(&f.db(), &echo).unwrap().is_some());
+    let id = facts::list_active(&f.db(), "grokbot").unwrap()[0]
+        .fact_id
+        .clone();
+    f.forget("grokbot", &id);
+    assert!(compaction::latest(&f.db(), &echo).unwrap().is_none());
+    assert!(!contains(&f.state(), "and to shellfish"));
+    let before = f.bodies().len();
+    f.send(
+        &echo,
+        "after-echo-extension",
+        "Continue without that memory.",
+    );
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, "and to shellfish"));
+    }
 }
 
 #[test]
@@ -687,10 +771,10 @@ impl Drop for PausedStream {
 }
 
 #[test]
-fn forgetting_stops_concurrent_stream_before_late_plaintext_can_commit() {
+fn forgetting_refuses_concurrent_stream_then_succeeds_after_it_finishes() {
     let mut f = Fixture::new();
     let c = f.conversation("grokbot");
-    let secret = "A forgotten inference emitted after the forget commit.";
+    let secret = "An inference emitted before a deferred forget can commit.";
     let id = f.learn(&c, "learn", secret);
     let gated = PausedStream::new(secret);
     let mut endpoints = f.server.endpoints();
@@ -711,15 +795,42 @@ fn forgetting_stops_concurrent_stream_before_late_plaintext_can_commit() {
             .iter()
             .any(|event| event.kind == RunEventKind::TextDelta)
     });
-    f.forget("grokbot", &id);
+    let input = json!({"bot_id":"grokbot","fact_id":id}).to_string();
+    let error = f
+        .app
+        .api("POST", "/api/memory/forget", input.as_bytes())
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(matches!(
+        f.app
+            .invoke_tool("grokbot", "forget_fact", json!({"fact_id":id}))
+            .unwrap(),
+        ToolOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        facts::get(&f.db(), &id).unwrap().unwrap().status,
+        FactStatus::Active
+    );
+    assert_eq!(compaction::revision(&f.db(), &c).unwrap(), 0);
     assert_eq!(
         store::required(&f.db(), &run.run_id).unwrap().status,
-        grokbot_engine::model::RunStatus::Cancelled
+        grokbot_engine::model::RunStatus::Running
     );
     gated.release();
     wait("late model bytes sent", || {
         gated.sent.load(Ordering::SeqCst)
     });
+    wait("stream finished normally", || {
+        store::required(&f.db(), &run.run_id).unwrap().status
+            == grokbot_engine::model::RunStatus::Finished
+    });
+    assert!(store::events(&f.db(), &run.run_id, 0)
+        .unwrap()
+        .iter()
+        .any(|event| contains(&event.payload, secret)));
+    // Retry only after the response is settled. No lifecycle event, observer,
+    // approval or provider cancellation has been bypassed by forgetting.
+    f.forget("grokbot", &id);
     let provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
     f.app = App::open_with(&f.path, provider.clone()).unwrap();
     wait("restored catalog", || {

@@ -317,7 +317,7 @@ fn duration_ms(mut text: &str) -> Result<u64> {
         scale = new_scale;
         text = &rest[unit.len()..];
     }
-    if total % scale != 0 {
+    if !total.is_multiple_of(scale) {
         return Err(invalid(
             "duration must be representable in whole milliseconds",
         ));

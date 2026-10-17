@@ -61,8 +61,9 @@ try:
         with urllib.request.urlopen(url + endpoint, timeout=10) as response:
             actual = response.read()
         require(f'bundled {source} matches current source', actual == (ROOT / 'app/ui' / source).read_bytes())
-    for extension, separator in [('js', b'\n;\n'), ('css', b'\n')]:
-        expected = b''.join(path.read_bytes() + separator
+    for extension in ['js', 'css']:
+        expected = b''.join((b';(function () {\n' + path.read_bytes() + b'\n})();\n')
+                            if extension == 'js' else path.read_bytes() + b'\n'
                             for path in sorted((ROOT / 'app/ui/panels').glob(f'*.{extension}'))
                             if path.is_file())
         with urllib.request.urlopen(url + f'/panels.{extension}', timeout=10) as response:

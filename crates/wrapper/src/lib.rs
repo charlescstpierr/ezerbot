@@ -42,6 +42,25 @@ pub fn body_limit(path: &str) -> usize {
     }
 }
 
+/// Shared size error for direct API calls, declared lengths and chunked bodies.
+pub fn too_large(path: &str) -> ApiError {
+    let limit = body_limit(path);
+    let (amount, unit) = if limit >= 1024 * 1024 {
+        (limit / (1024 * 1024), "Mio")
+    } else {
+        (limit / 1024, "Ko")
+    };
+    ApiError::new(
+        413,
+        format!("Le fichier ou la requête dépasse la taille permise ({amount} {unit})."),
+    )
+}
+
+/// tiny_http accepts CR/LF in header values: reject controls and non-ASCII before encoding.
+pub fn header_safe(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| (0x20..0x7f).contains(&byte))
+}
+
 /// Feature routes can return binary data without JSON encoding or losing their MIME type.
 #[derive(Debug)]
 pub enum ApiResponse {
@@ -1251,10 +1270,7 @@ impl App {
 
     pub fn api(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         if body.len() > body_limit(path) {
-            return Err(ApiError::new(
-                413,
-                "La requête dépasse la limite de cette route.",
-            ));
+            return Err(too_large(path));
         }
         match (method, path) {
             ("GET", "/api/state") => {
@@ -2004,7 +2020,7 @@ pub fn validate_headers_for_path(
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
         return Err(reject());
     }
-    if method == "POST" {
+    if method != "GET" && method != "HEAD" {
         if let Some(origin) = one("origin")? {
             if origin != format!("http://{host}") {
                 return Err(reject());

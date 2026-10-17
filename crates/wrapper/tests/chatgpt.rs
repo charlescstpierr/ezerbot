@@ -154,7 +154,8 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
             .iter()
             .any(|fields| fields["grant_type"] == "refresh_token"
                 && fields["refresh_token"] == "refresh-1"));
-        assert!(seen.bearer.iter().all(|bearer| bearer == "Bearer access-2"));
+        let latest = format!("Bearer {}", seen.access_tokens.last().unwrap());
+        assert!(seen.bearer.iter().all(|bearer| bearer == &latest));
         let first = &seen.bodies[0];
         assert_eq!(
             (first["store"].clone(), first["stream"].clone()),
@@ -279,8 +280,15 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     let body = json!({"model": "gpt-test", "stream": true, "store": false,
         "input": [{"role": "user", "content": "Raw request"}], "tools": []});
     let unauthorized = || ScriptedResponse::json(401, json!({"error": {"code": "expired"}}));
-    let forms_before = seen.lock().unwrap().forms.len();
-    let bodies_before = seen.lock().unwrap().bodies.len();
+    let (forms_before, bodies_before, bearers_before, previous_token) = {
+        let seen = seen.lock().unwrap();
+        (
+            seen.forms.len(),
+            seen.bodies.len(),
+            seen.bearer.len(),
+            seen.access_tokens.last().unwrap().clone(),
+        )
+    };
     seen.lock().unwrap().responses.extend([
         unauthorized(),
         ScriptedResponse::events(&[json!({"type": "response.completed"})]),
@@ -295,7 +303,15 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.forms.len(), forms_before + 1);
         assert_eq!(&seen.bodies[bodies_before..], &[body.clone(), body.clone()]);
-        assert!(seen.bearer.iter().all(|bearer| bearer == "Bearer access-2"));
+        let latest_token = seen.access_tokens.last().unwrap();
+        assert_ne!(&previous_token, latest_token);
+        assert_eq!(
+            &seen.bearer[bearers_before..],
+            &[
+                format!("Bearer {previous_token}"),
+                format!("Bearer {latest_token}")
+            ]
+        );
     }
     let forms_before = seen.lock().unwrap().forms.len();
     let bodies_before = seen.lock().unwrap().bodies.len();
@@ -343,9 +359,10 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
         true
     );
     assert!(seen.lock().unwrap().revoked);
-    assert!(!std::fs::read_to_string(&credentials)
-        .unwrap()
-        .contains("refresh-2"));
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
+    assert!(saved["refresh_token"].is_null());
+    assert!(saved["access_token"].is_null());
     let simulated = post(
         &mut app,
         "/api/send",

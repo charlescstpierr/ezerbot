@@ -6,7 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use grokbot_wrapper::{body_limit, validate_headers_for_path, ApiResponse, BODY_LIMIT};
+use grokbot_wrapper::{
+    body_limit, header_safe, too_large, validate_headers_for_path, ApiResponse, BODY_LIMIT,
+};
 use serde_json::{json, Value};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -167,16 +169,21 @@ fn status(result: Result<ureq::Response, ureq::Error>) -> u16 {
     }
 }
 
+fn accepted_by_host(status: u16) -> bool {
+    !matches!(status, 403 | 413)
+}
+
 #[test]
 fn binary_post_only_allowed_on_attachment_route() {
     let host = Host::new();
     let image = b"\x89PNG\r\n\x1a\n\0\xff";
-    // Staging is implemented by the attachments slice; 404 means the host accepted the body.
-    assert_eq!(host.post("/api/attachments", "image/png", image), 404);
-    assert_eq!(
-        host.post("/api/attachments", "IMAGE/JPEG; charset=binary", image),
-        404
-    );
+    // Assert only host policy; future feature routes may reject these incomplete image bytes.
+    for mime in ["image/png", "IMAGE/JPEG; charset=binary"] {
+        assert!(
+            accepted_by_host(host.post("/api/attachments", mime, image)),
+            "{mime}"
+        );
+    }
     for path in [
         "/api/send",
         "/api/skills/import",
@@ -232,12 +239,25 @@ fn body_limit_by_route() {
     ] {
         assert_eq!(body_limit(path), 64 * 1024);
     }
+    for (path, size) in [
+        ("/api/attachments", "20 Mio"),
+        ("/api/skills/import", "16 Mio"),
+        ("/api/send", "64 Ko"),
+    ] {
+        let error = too_large(path);
+        assert_eq!(error.status, 413);
+        assert_eq!(
+            error.message,
+            format!("Le fichier ou la requête dépasse la taille permise ({size}).")
+        );
+    }
     let body = vec![b' '; BODY_LIMIT + 1];
-    assert_eq!(host.post("/api/attachments", "image/png", &body), 404);
-    assert_eq!(
-        host.post("/api/skills/import", "application/json", &body),
-        404
-    );
+    for (path, mime) in [
+        ("/api/attachments", "image/png"),
+        ("/api/skills/import", "application/json"),
+    ] {
+        assert!(accepted_by_host(host.post(path, mime, &body)), "{path}");
+    }
     assert_eq!(
         host.post("/api/conversations", "application/json", &body),
         413
@@ -270,6 +290,58 @@ fn body_limit_by_route() {
         ),
         413
     );
+}
+
+#[test]
+fn non_read_methods_require_local_marker_and_origin() {
+    let host = Host::new();
+    for method in ["DELETE", "PUT", "PATCH", "OPTIONS"] {
+        let request = || {
+            ureq::request(method, &format!("{}/api/conversations", host.url))
+                .set("Content-Type", "application/json")
+        };
+        assert_eq!(status(request().send_string("{}")), 403, "{method}");
+        assert_eq!(
+            status(
+                request()
+                    .set("X-Grokbot-Request", "local")
+                    .set("Origin", "https://foreign.example")
+                    .send_string("{}")
+            ),
+            403,
+            "{method}"
+        );
+        assert!(
+            accepted_by_host(status(
+                request()
+                    .set("X-Grokbot-Request", "local")
+                    .set("Origin", &host.url)
+                    .send_string("{}")
+            )),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn unsafe_content_type_is_rejected() {
+    for value in [
+        "",
+        "image/pngé",
+        "image/png\r\nSet-Cookie: x=1",
+        "image/png\0",
+        "image/png\t",
+    ] {
+        assert!(!header_safe(value), "{value:?}");
+    }
+    for value in ["image/png", "application/json; charset=utf-8"] {
+        assert!(header_safe(value));
+        assert!(tiny_http::Header::from_bytes("Content-Type", value).is_ok());
+    }
+    for byte in 0u8..=127 {
+        let value = format!("image/png{}", char::from(byte));
+        assert_eq!(header_safe(&value), (0x20..0x7f).contains(&byte), "{byte}");
+    }
 }
 
 #[test]

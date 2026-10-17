@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
-    body_limit, validate_headers_for_path, ApiError, ApiResponse, App, Provider,
+    body_limit, header_safe, too_large, validate_headers_for_path, ApiError, ApiResponse, App,
+    Provider,
 };
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
@@ -72,7 +73,7 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
     validate_headers_for_path(port, &method, &path, &headers)?;
     let limit = body_limit(&path);
     if request.body_length().is_some_and(|length| length > limit) {
-        return Err(error(413, "La requête dépasse la limite de cette route."));
+        return Err(too_large(&path));
     }
     if method == "GET" {
         let asset = match path.as_str() {
@@ -102,7 +103,7 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
         .map_err(|_| error(400, "Le corps de la requête est illisible."))?;
     // Chunked requests have no declared length. Check again after the bounded read.
     if body.len() > limit {
-        return Err(error(413, "La requête dépasse la limite de cette route."));
+        return Err(too_large(&path));
     }
     app.api_response(&method, &path, &body)
 }
@@ -149,7 +150,18 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         let (status, body, content_type) = match payload(&mut request, port, &mut app) {
             Ok(response) => {
                 let (body, content_type) = response.into_parts();
-                (200, body, content_type)
+                if header_safe(&content_type) {
+                    (200, body, content_type)
+                } else {
+                    eprintln!("Type de contenu invalide refusé.");
+                    (
+                        500,
+                        json!({"error": "La réponse de l'application est invalide."})
+                            .to_string()
+                            .into_bytes(),
+                        "application/json; charset=utf-8".into(),
+                    )
+                }
             }
             Err(error) => (
                 error.status,
@@ -166,7 +178,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             ("Referrer-Policy", "no-referrer"),
             ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
         ] {
-            response.add_header(Header::from_bytes(name, value).expect("constant response header"));
+            response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }
         if let Err(error) = request.respond(response) {
             eprintln!("Réponse HTTP interrompue : {error}");

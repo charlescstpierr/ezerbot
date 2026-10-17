@@ -16,14 +16,21 @@ fn main() {
         Err(error) => panic!("cannot read {}: {error}", panels.display()),
     };
     sources.sort();
-    for (extension, separator) in [("js", "\n;\n"), ("css", "\n")] {
+    for extension in ["js", "css"] {
         let mut bundle = String::new();
         for path in &sources {
             if path.extension().and_then(|value| value.to_str()) == Some(extension) {
                 println!("cargo:rerun-if-changed={}", path.display());
-                bundle.push_str(&fs::read_to_string(path).expect("UTF-8 panel source"));
-                // Keep trailing comments and adjacent JS expressions in separate scripts.
-                bundle.push_str(separator);
+                let source = fs::read_to_string(path).expect("UTF-8 panel source");
+                if extension == "js" {
+                    // Each panel has its own declarations and strict-mode scope.
+                    bundle.push_str(";(function () {\n");
+                    bundle.push_str(&source);
+                    bundle.push_str("\n})();\n");
+                } else {
+                    bundle.push_str(&source);
+                    bundle.push('\n');
+                }
             }
         }
         fs::write(output.join(format!("panels.{extension}")), bundle).expect("write panel bundle");

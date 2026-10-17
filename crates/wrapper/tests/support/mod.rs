@@ -21,6 +21,8 @@ pub struct Seen {
     pub nonce: String,
     pub forms: Vec<HashMap<String, String>>,
     pub bearer: Vec<String>,
+    /// Distinct issued tokens let tests detect reuse of a stale bearer after refresh.
+    pub access_tokens: Vec<String>,
     pub bodies: Vec<Value>,
     pub revoked: bool,
     /// FIFO replies for /v1/responses. An empty queue uses the original chat fixture.
@@ -141,9 +143,12 @@ impl FakeOpenAi {
                         let fields = form(&body);
                         let refresh = fields["grant_type"] == "refresh_token";
                         seen.forms.push(fields);
+                        let sequence = seen.access_tokens.len() + 1;
+                        let access = format!("access-{sequence}");
+                        seen.access_tokens.push(access.clone());
                         let reply = json!({
-                            "access_token": if refresh { "access-2" } else { "access-1" },
-                            "refresh_token": if refresh { "refresh-2" } else { "refresh-1" },
+                            "access_token": access,
+                            "refresh_token": format!("refresh-{sequence}"),
                             "id_token": id_token(&issuer, &seen.nonce),
                             "token_type": "Bearer", "expires_in": if refresh { 3600 } else { 1 },
                             "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke",

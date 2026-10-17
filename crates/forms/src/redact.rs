@@ -1,24 +1,42 @@
 //! Fail-closed, exact-value redaction for model-facing text and JSON. The caller
-//! must apply this boundary before emitting context, tool output or provider input.
+//! must apply this boundary before *persisting* any model-visible text (tool
+//! outputs, events, summaries) and again before emitting provider input. Emission-
+//! time redaction alone does not cover rotated or removed values.
+//! Apply `redact_value` before JSON serialization; use `redact` for unencoded
+//! text. Single JSON-escaped values are also masked as defense in depth, not as
+//! a general decoder for arbitrary encodings or repeated serialization.
 //! PS11 (`reports/goal-permissions-secrets.md`) only establishes targeted Grok
 //! sanitizers; this broader boundary is the plan's defense-in-depth choice.
 use crate::vault::Vault;
 use grokbot_engine::contracts::{Error, Result};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 // Shorter in UTF-8 bytes than *any* valid secret, so repeated masking converges
 // even if replacement boundaries accidentally form another known secret.
 const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
-    let values = vault.known_values()?;
+    let values = known_patterns(vault)?;
     Ok(mask(text, &values))
 }
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.
-    let values = vault.known_values()?;
+    let values = known_patterns(vault)?;
     mask_value(value, &values)
+}
+
+fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
+    let mut patterns = BTreeSet::new();
+    for value in vault.known_values()? {
+        let encoded = serde_json::to_string(&value)?;
+        // The serializer always adds ASCII quotes around a String. Retain the
+        // interior so a tool result containing serialized JSON is also masked.
+        patterns.insert(encoded[1..encoded.len() - 1].to_owned());
+        patterns.insert(value);
+    }
+    Ok(patterns.into_iter().collect())
 }
 
 fn mask(text: &str, values: &[String]) -> String {
@@ -164,6 +182,39 @@ mod tests {
         let serialized = serde_json::to_string(&redacted).unwrap();
         assert!(!serialized.contains("12345678"));
         assert!(!serialized.contains("quote\\\"slash"));
+    }
+
+    #[test]
+    fn redact_masks_json_escaped_secrets_in_text_and_nested_outputs() {
+        let test = TestVault::new();
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQ-test-material\n-----END PRIVATE KEY-----";
+        let password = "pa\"ss\\word99";
+        test.vault.set("KEY", "", pem).unwrap();
+        test.vault.set("PASSWORD", "", password).unwrap();
+        let tool_output = json!({ "key": pem, "pw": password });
+        let encoded = serde_json::to_string(&tool_output).unwrap();
+        let sanitized = redact(&test.vault, &encoded).unwrap();
+        let decoded: Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(decoded, json!({ "key": MASK, "pw": MASK }));
+        let nested =
+            redact_value(&test.vault, &json!({ "function_call_output": encoded })).unwrap();
+        let nested_decoded: Value =
+            serde_json::from_str(nested["function_call_output"].as_str().unwrap()).unwrap();
+        assert_eq!(nested_decoded, decoded);
+        for secret in [pem, password] {
+            let escaped = serde_json::to_string(secret).unwrap();
+            assert!(!sanitized.contains(&escaped[1..escaped.len() - 1]));
+        }
+    }
+
+    #[test]
+    fn redact_before_persistence_survives_rotation_and_removal() {
+        let test = TestVault::new();
+        test.vault.set("TOKEN", "", "old-token-value").unwrap();
+        let persisted = redact(&test.vault, "output: old-token-value").unwrap();
+        test.vault.set("TOKEN", "", "new-token-value").unwrap();
+        test.vault.remove("TOKEN").unwrap();
+        assert_eq!(redact(&test.vault, &persisted).unwrap(), "output: [...]");
     }
 
     #[test]

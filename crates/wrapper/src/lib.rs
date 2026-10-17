@@ -1224,13 +1224,36 @@ fn valid_bot_instructions(instructions: &str) -> Result<String, ApiError> {
 }
 
 fn validate_id(id: &str) -> Result<(), ApiError> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
-    {
-        return Err(ApiError::new(400, "Identifiant invalide."));
+    let atom = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    };
+    let invalid = || ApiError::new(400, "Identifiant invalide.");
+    // DL-S01's task namespace is not a license for arbitrary colon-bearing
+    // identifiers. Each component keeps the original ASCII atom restriction;
+    // only task:<id>:<parent> may nest, to Q3's maximum delegation depth of 3.
+    // The total bound also covers nested task conversations longer than 128.
+    if id.len() > 512 {
+        return Err(invalid());
+    }
+    let mut parent = id;
+    let mut depth = 0;
+    while let Some(task) = parent.strip_prefix("task:") {
+        depth += 1;
+        if depth > 3 {
+            return Err(invalid());
+        }
+        let (child, rest) = task.split_once(':').ok_or_else(invalid)?;
+        if !atom(child) {
+            return Err(invalid());
+        }
+        parent = rest;
+    }
+    if !atom(parent) {
+        return Err(invalid());
     }
     Ok(())
 }

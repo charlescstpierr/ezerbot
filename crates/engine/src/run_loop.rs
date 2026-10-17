@@ -16,7 +16,7 @@ use crate::model::{self, invalid, Run, RunStatus};
 use crate::store;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub trait RunServices {
@@ -26,6 +26,7 @@ pub trait RunServices {
     fn context(&mut self, run: &Run) -> Result<ModelRequest>;
     fn tools(&self) -> Vec<ToolSpec>;
     /// Internal effects use this transaction and must not commit independently.
+    /// No network/slow work here or in approval methods: suspend for remote review.
     /// A Suspend is a committed result (e.g. a form/child was created), never
     /// replayed after commit. Transaction retries may invoke this again after
     /// rollback: use SQLite, not process-local flags, for capability effects.
@@ -246,12 +247,14 @@ fn tool_specs(services: &dyn RunServices) -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec {
             name: "begin_task".into(),
+            description: "Start an explicit task with an objective".into(),
             schema: json!({"type":"object", "properties":{"objective":{"type":"string"}},
                 "required":["objective"], "additionalProperties":false}),
             requires_approval: false,
         },
         ToolSpec {
             name: "complete_task".into(),
+            description: "Mark the current task done with its final summary".into(),
             schema: json!({"type":"object", "properties":{"summary":{"type":"string"}},
                 "required":["summary"], "additionalProperties":false}),
             requires_approval: false,
@@ -375,6 +378,18 @@ pub fn replay_items(events: &[RunEvent]) -> Result<Vec<HistoryItem>> {
                 let call: ToolCall = serde_json::from_value(event.payload.clone())?;
                 if !outputs.contains(call.call_id.as_str()) {
                     continue;
+                }
+                // Reasoning and its following call stay in the same atomic
+                // history entry, so filtering/budget cuts cannot orphan it.
+                if let Some(reasoning) = event.payload.get("reasoning") {
+                    let reasoning: Vec<ToolItem> = serde_json::from_value(reasoning.clone())?;
+                    if reasoning
+                        .iter()
+                        .any(|item| !matches!(item, ToolItem::Reasoning { .. }))
+                    {
+                        return Err(invalid("non-reasoning item in tool-call reasoning state"));
+                    }
+                    item.tool_items.extend(reasoning);
                 }
                 item.tool_items.push(ToolItem::Call { call });
             }
@@ -528,8 +543,10 @@ fn execute(
             return Err(invalid("run stopped before tool execution"));
         }
         let spec = specs.iter().find(|spec| spec.name == call.name);
-        let approval = if spec.is_some_and(|spec| spec.requires_approval) {
-            let decision = services.request_approval(conn, &run, call)?;
+        let valid_arguments = call.arguments.is_object();
+        let mut authorized_by = None;
+        let approval = if valid_arguments && spec.is_some_and(|spec| spec.requires_approval) {
+            let decision = services.check_approval(conn, &run, call)?;
             if services.is_cancelled(run_id)
                 || store::budget_usage(conn, run_id, now_ms())?.elapsed_ms
                     >= run.budgets.duration_ms
@@ -537,15 +554,25 @@ fn execute(
                 return Err(invalid("run stopped during approval"));
             }
             match decision {
-                ToolOutcome::Suspend { cause } => {
+                ApprovalCheck::Ask => {
+                    let cause = services.request_approval(conn, &run, call)?;
+                    if services.is_cancelled(run_id)
+                        || store::budget_usage(conn, run_id, now_ms())?.elapsed_ms
+                            >= run.budgets.duration_ms
+                    {
+                        return Err(invalid("run stopped during approval request"));
+                    }
                     if !matches!(cause, SuspendCause::HumanInput { .. }) {
                         return Err(invalid("an approval must wait for human input"));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Some(RunProgress::Suspended(cause)));
                 }
-                ToolOutcome::Failed { reason } => Some(ToolOutcome::Failed { reason }),
-                ToolOutcome::Done { .. } => None,
+                ApprovalCheck::Denied { reason } => Some(ToolOutcome::Failed { reason }),
+                ApprovalCheck::Authorized { by } => {
+                    authorized_by = Some(by);
+                    None
+                }
             }
         } else {
             None
@@ -553,7 +580,11 @@ fn execute(
         let mut usage = store::budget_usage(conn, run_id, now_ms())?;
         usage.tool_calls += 1;
         store::save_budget_usage(conn, run_id, &usage)?;
-        let outcome = if let Some(denied) = approval {
+        let outcome = if !valid_arguments {
+            ToolOutcome::Failed {
+                reason: "invalid arguments".into(),
+            }
+        } else if let Some(denied) = approval {
             denied
         } else if spec.is_none() {
             ToolOutcome::Failed {
@@ -570,12 +601,11 @@ fn execute(
             // Roll back internal effects, budget reservation and approval consumption.
             return Err(invalid("run stopped during tool execution"));
         }
-        store::append_event(
-            conn,
-            run_id,
-            RunEventKind::ToolResult,
-            &json!({"call_id": call.call_id, "outcome": outcome}),
-        )?;
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        if let Some(by) = authorized_by {
+            payload["authorized_by"] = serde_json::to_value(by)?;
+        }
+        store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
         if let ToolOutcome::Suspend { cause } = outcome {
             suspend(conn, &mut run, call, &cause, false)?;
             return Ok(Some(RunProgress::Suspended(cause)));
@@ -719,6 +749,9 @@ fn drive(
             Ok(usage.model_calls)
         })?;
         let mut calls: Vec<ToolCall> = vec![];
+        let mut reasoning = Vec::new();
+        let mut reasoning_ids = HashSet::new();
+        let mut call_reasoning: HashMap<String, Vec<ToolItem>> = HashMap::new();
         let known: HashSet<String> = events
             .iter()
             .filter(|event| event.kind == RunEventKind::ToolCall)
@@ -747,6 +780,22 @@ fn drive(
                     .map(|_| ())
                 })
                 .inspect_err(|_| persistence_error = true),
+                ModelEvent::Reasoning {
+                    item_id,
+                    encrypted_content,
+                } => {
+                    if item_id.is_empty()
+                        || encrypted_content.is_empty()
+                        || !reasoning_ids.insert(item_id.clone())
+                    {
+                        return Err(invalid("model returned empty or reused reasoning state"));
+                    }
+                    reasoning.push(ToolItem::Reasoning {
+                        item_id,
+                        encrypted_content,
+                    });
+                    Ok(())
+                }
                 ModelEvent::ToolCall {
                     call_id,
                     name,
@@ -773,6 +822,7 @@ fn drive(
                             return Err(invalid("conflicting tool call ID"));
                         }
                     } else {
+                        call_reasoning.insert(call.call_id.clone(), std::mem::take(&mut reasoning));
                         calls.push(call);
                     }
                     Ok(())
@@ -790,6 +840,14 @@ fn drive(
                                 store::append_event(conn, run_id, RunEventKind::ToolCall, &{
                                     let mut payload = serde_json::to_value(call)?;
                                     payload["response"] = json!(response);
+                                    // Commit opaque state only with its following call,
+                                    // never partial/failed or standalone reasoning.
+                                    if let Some(items) = call_reasoning
+                                        .get(&call.call_id)
+                                        .filter(|items| !items.is_empty())
+                                    {
+                                        payload["reasoning"] = serde_json::to_value(items)?;
+                                    }
                                     payload
                                 })?;
                             }
@@ -829,7 +887,9 @@ fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{with_tx, Error, RunBudgets, Trigger, WakeCause, WakeStatus};
+    use crate::contracts::{
+        with_tx, AuthorizedBy, Error, RunBudgets, Trigger, WakeCause, WakeStatus,
+    };
     use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -872,6 +932,8 @@ mod tests {
         specs: Vec<ToolSpec>,
         calls: Vec<String>,
         approval_calls: usize,
+        approval_requests: usize,
+        standing: Option<AuthorizedBy>,
         allowed: bool,
         deny: bool,
         suspend: Option<SuspendCause>,
@@ -922,17 +984,20 @@ mod tests {
                 },
             })
         }
-        fn request_approval(
+        fn check_approval(
             &mut self,
             conn: &Connection,
             _: &Run,
             call: &ToolCall,
-        ) -> Result<ToolOutcome> {
+        ) -> Result<ApprovalCheck> {
             self.approval_calls += 1;
             if self.deny {
-                return Ok(ToolOutcome::Failed {
+                return Ok(ApprovalCheck::Denied {
                     reason: "denied".into(),
                 });
+            }
+            if let Some(by) = &self.standing {
+                return Ok(ApprovalCheck::Authorized { by: by.clone() });
             }
             let decision: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM approval_decisions WHERE id=?1)",
@@ -941,16 +1006,25 @@ mod tests {
             )?;
             if self.allowed || decision {
                 conn.execute("INSERT INTO grants_used VALUES ('once')", [])?;
-                Ok(ToolOutcome::Done {
-                    output: Value::Null,
-                })
-            } else {
-                Ok(ToolOutcome::Suspend {
-                    cause: SuspendCause::HumanInput {
-                        id: "approval".into(),
+                Ok(ApprovalCheck::Authorized {
+                    by: AuthorizedBy::AllowOnce {
+                        request_id: "approval".into(),
                     },
                 })
+            } else {
+                Ok(ApprovalCheck::Ask)
             }
+        }
+        fn request_approval(
+            &mut self,
+            _: &Connection,
+            _: &Run,
+            _: &ToolCall,
+        ) -> Result<SuspendCause> {
+            self.approval_requests += 1;
+            Ok(SuspendCause::HumanInput {
+                id: "approval".into(),
+            })
         }
         fn is_cancelled(&self, _: &str) -> bool {
             self.cancel.load(Ordering::SeqCst)
@@ -978,6 +1052,7 @@ mod tests {
     fn spec(name: &str, requires_approval: bool) -> ToolSpec {
         ToolSpec {
             name: name.into(),
+            description: format!("Test tool {name}"),
             schema: json!({"type":"object"}),
             requires_approval,
         }
@@ -1202,6 +1277,7 @@ mod tests {
         assert_eq!(count(&conn, "grants_used"), 1);
         assert_eq!(services.calls, ["effect"]);
         assert_eq!(services.approval_calls, 2);
+        assert_eq!(services.approval_requests, 1);
         assert_eq!(store::budget_usage(&conn, "run", now_ms())?.tool_calls, 1);
         assert!(matches!(
             store::wake_status(&conn, &wake.wake_id)?,
@@ -1233,9 +1309,228 @@ mod tests {
         assert_eq!(services.calls, ["effect"]);
         assert_eq!(count(&conn, "effects"), 1);
         assert_eq!(count(&conn, "grants_used"), 1);
-        assert!(!store::events(&conn, "run", 0)?
+        assert_eq!(services.approval_requests, 0);
+        let events = store::events(&conn, "run", 0)?;
+        assert!(!events
             .iter()
             .any(|event| event.kind == RunEventKind::Suspended));
+        assert_eq!(
+            events
+                .iter()
+                .find(|event| event.kind == RunEventKind::ToolResult)
+                .unwrap()
+                .payload["authorized_by"],
+            json!({"kind": "allow_once", "request_id": "approval"})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn denied_after_approval_wake_never_creates_another_request() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![call("effect", "work", json!({}))]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", true)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Suspended(_)
+        ));
+        with_tx(&conn, |conn| {
+            store::enqueue_wake(conn, "run", WakeCause::Approval, "approval")
+        })?;
+        services.deny = true;
+        assert_eq!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Ended(TurnEnd::Finished)
+        );
+        assert_eq!(services.approval_calls, 2);
+        assert_eq!(services.approval_requests, 1);
+        assert_eq!(count(&conn, "effects"), 0);
+        assert_eq!(count(&conn, "grants_used"), 0);
+        let events = store::events(&conn, "run", 0)?;
+        let result = events
+            .iter()
+            .find(|event| event.kind == RunEventKind::ToolResult)
+            .unwrap();
+        assert_eq!(
+            result.payload["outcome"],
+            json!({"status": "failed", "reason": "denied"})
+        );
+        assert!(result.payload.get("authorized_by").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn standing_authorization_is_audited_without_requesting_approval() -> Result<()> {
+        for by in [
+            AuthorizedBy::Rule {
+                rule_id: "permission:test".into(),
+            },
+            AuthorizedBy::AutoReview {
+                rule_id: "allow:0".into(),
+            },
+        ] {
+            let conn = database(true, RunBudgets::default())?;
+            let gateway = Scripted::new(vec![
+                response(vec![call("effect", "work", json!({}))]),
+                response(vec![]),
+            ]);
+            let mut services = Services {
+                specs: vec![spec("work", true)],
+                standing: Some(by.clone()),
+                ..Default::default()
+            };
+            run(&conn, &gateway, &mut services, "run")?;
+            assert_eq!(services.approval_calls, 1);
+            assert_eq!(services.approval_requests, 0);
+            assert_eq!(count(&conn, "effects"), 1);
+            let events = store::events(&conn, "run", 0)?;
+            let result = events
+                .iter()
+                .find(|event| event.kind == RunEventKind::ToolResult)
+                .unwrap();
+            assert_eq!(result.payload["authorized_by"], serde_json::to_value(&by)?);
+            assert_eq!(result.payload["outcome"]["status"], "done");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_arguments_fail_per_call_before_approval_and_other_calls_continue() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("raw", "work", json!("{truncated")),
+                call("array", "work", json!([])),
+                call("valid", "work", json!({})),
+            ]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", true)],
+            allowed: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Ended(TurnEnd::Finished)
+        );
+        assert_eq!(services.approval_calls, 1);
+        assert_eq!(services.approval_requests, 0);
+        assert_eq!(services.calls, ["valid"]);
+        assert_eq!(count(&conn, "effects"), 1);
+        assert_eq!(count(&conn, "grants_used"), 1);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|event| event.kind == RunEventKind::ToolResult)
+            .collect();
+        for result in &results[..2] {
+            assert_eq!(
+                result.payload["outcome"],
+                json!({"status": "failed", "reason": "invalid arguments"})
+            );
+            assert!(result.payload.get("authorized_by").is_none());
+        }
+        assert_eq!(results[2].payload["call_id"], "valid");
+        assert_eq!(results[2].payload["outcome"]["status"], "done");
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_commits_with_completed_call_and_survives_interrupted_tool_retry() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let reasoning = ModelEvent::Reasoning {
+            item_id: "rs_1".into(),
+            encrypted_content: "opaque-state".into(),
+        };
+        let gateway = Scripted::new(vec![
+            response(vec![reasoning, call("effect", "work", json!({}))]),
+            response(vec![]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("work", false)],
+            error_in_tool: true,
+            ..Default::default()
+        };
+        assert!(run(&conn, &gateway, &mut services, "run").is_err());
+        assert_eq!(
+            store::required(&conn, "run")?.status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(count(&conn, "effects"), 0);
+        // The completed response's opaque state is durable, but no orphan call
+        // or reasoning is replayed before its effect has a committed result.
+        let events = store::events(&conn, "run", 0)?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == RunEventKind::ToolCall)
+                .count(),
+            1
+        );
+        assert!(replay_items(&events)?.is_empty());
+        services.error_in_tool = false;
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(count(&conn, "effects"), 1);
+        let requests = gateway.requests.lock().unwrap();
+        let item = requests[1]
+            .input
+            .iter()
+            .find(|item| matches!(item.tool_items.first(), Some(ToolItem::Reasoning { .. })))
+            .unwrap();
+        assert_eq!(item.tool_items.len(), 2);
+        assert_eq!(
+            item.tool_items[0],
+            ToolItem::Reasoning {
+                item_id: "rs_1".into(),
+                encrypted_content: "opaque-state".into()
+            }
+        );
+        assert!(matches!(&item.tool_items[1], ToolItem::Call { call } if call.call_id == "effect"));
+        assert!(requests[1]
+            .input
+            .iter()
+            .all(|item| !item.text.contains("opaque-state")));
+        let events = store::events(&conn, "run", 0)?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == RunEventKind::ToolCall)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == RunEventKind::ToolResult)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn final_text_only_reasoning_does_not_create_orphan_replay_items() -> Result<()> {
+        let conn = database(false, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![response(vec![
+            ModelEvent::Reasoning {
+                item_id: "rs_1".into(),
+                encrypted_content: "opaque-state".into(),
+            },
+            ModelEvent::TextDelta {
+                text: "answer".into(),
+            },
+        ])]);
+        run(&conn, &gateway, &mut Services::default(), "run")?;
+        let replay = replay_items(&store::events(&conn, "run", 0)?)?;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].text, "answer");
+        assert!(replay[0].tool_items.is_empty());
         Ok(())
     }
 
@@ -1411,7 +1706,13 @@ mod tests {
             }),
         ] {
             let conn = database(true, RunBudgets::default())?;
-            let mut events = vec![call("partial", "work", json!({}))];
+            let mut events = vec![
+                ModelEvent::Reasoning {
+                    item_id: "rs_partial".into(),
+                    encrypted_content: "incomplete-state".into(),
+                },
+                call("partial", "work", json!({})),
+            ];
             events.extend(terminal);
             let gateway = Scripted::new(vec![events]);
             let mut services = Services {

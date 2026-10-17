@@ -63,7 +63,7 @@
 [data-theme="dark"][data-accent="blanc"] { --accent-rgb: 255 255 255; --accent-on: #0a0b0d; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-body { margin: 0; background: var(--surround); color: var(--text); height: 100dvh; overflow: hidden; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
+body { margin: 0; background: var(--surround); color: var(--text); height: 100dvh; overflow: hidden; display: grid; grid-template-columns: 270px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 button, input, textarea { font: inherit; }
 button { cursor: pointer; border: 0; color: inherit; background: none; }
 button:disabled { cursor: default; }
@@ -77,7 +77,7 @@ input:focus, textarea:focus { outline: none; }
 .icon-button:disabled { opacity: .35; }
 kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius: 4px; white-space: nowrap; }
 
-.sidebar { min-width: 0; display: flex; flex-direction: column; background: var(--sidebar); color: var(--sidebar-text); padding: 48px 16px 15px; margin: 8px 0 8px 8px; border: 1px solid var(--line); border-radius: 10px; z-index: 30; }
+.sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--sidebar); color: var(--sidebar-text); padding: 48px 16px 15px; margin: 8px 0 8px 8px; border: 1px solid var(--line); border-radius: 10px; z-index: 30; }
 .brand-row { display: flex; align-items: center; justify-content: space-between; margin: 0 3px 24px; }
 .brand { color: var(--text); text-decoration: none; display: inline-flex; align-items: center; gap: 7px; font-size: 24px; letter-spacing: -1.1px; font-weight: 650; }
 .brand-mark { width: 31px; height: 31px; color: var(--accent); }
@@ -120,7 +120,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .sidebar-companion > :last-child { min-width: 0; }
 .sidebar-companion strong { display: block; font-size: 11px; font-weight: 550; color: var(--text); line-height: 1.4; }
 .sidebar-companion small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.5; }
-.sidebar-bottom { padding: 10px 1px 0; }
+.sidebar-bottom { flex: 0 0 auto; padding: 10px 1px 0; }
 .local-note { display: flex; gap: 8px; padding: 11px 5px 14px; border-bottom: 1px solid var(--line); margin-bottom: 11px; color: var(--sidebar-muted); }
 .local-note > .icon { width: 14px; height: 14px; margin-top: 1px; }
 .local-note strong { display: block; font-size: 9px; font-weight: 500; color: var(--muted); margin-bottom: 5px; }
@@ -143,6 +143,9 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .topbar-actions { display: flex; align-items: center; gap: 11px; flex: 0 0 auto; }
 .mode-badge { font-size: 9px; color: var(--muted); display: flex; align-items: center; gap: 5px; background: var(--soft); border-radius: 6px; padding: 5px 9px; }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
+/* renderProvider adds model controls only while connected to ChatGPT. */
+.mode-badge .status-dot { background: transparent; box-shadow: inset 0 0 0 1px var(--subtle); }
+.main-panel:has(#composer-tools [data-picker="model"]) .mode-badge .status-dot { background: var(--ok); box-shadow: none; }
 .popover { position: absolute; right: 20px; top: 53px; z-index: 40; min-width: 230px; padding: 6px; border-radius: 10px; background: var(--pane); border: 1px solid var(--line); box-shadow: 0 12px 38px #00000038; }
 .popover button { display: flex; align-items: center; gap: 10px; padding: 10px 11px; width: 100%; border-radius: 6px; font-size: 12px; text-align: left; }
 .popover button:hover { background: var(--soft); }
@@ -169,7 +172,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .suggestion-arrow { position: absolute; right: 11px; top: 17px; width: 12px; height: 12px; color: var(--subtle); opacity: 0; transition: opacity .15s; }
 .suggestion:hover .suggestion-arrow { opacity: .8; }
 
-.composer-area { width: min(720px, calc(100% - 54px)); margin: 0 auto; flex: 0 0 auto; padding-bottom: 17px; padding-top: 10px; }
+.composer-area { position: relative; width: min(720px, calc(100% - 54px)); margin: 0 auto; flex: 0 0 auto; padding-bottom: 17px; padding-top: 10px; }
 .composer { padding: 15px 17px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); transition: border-color .15s, box-shadow .15s; }
 .composer:focus-within { border-color: var(--accent-ink); box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / .16); }
 .composer-input { min-height: 24px; }
@@ -221,7 +224,7 @@ a.secondary-button { text-decoration: none; }
 .connection-banner { display: flex; align-items: center; justify-content: center; gap: 15px; background: var(--warning-bg); color: var(--warning-text); padding: 10px 20px; font-size: 11px; line-height: 1.5; }
 .connection-banner button { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 10px; padding: 3px; text-decoration: underline; text-underline-offset: 3px; }
 .connection-banner .icon { width: 13px; height: 13px; }
-.toast { position: fixed; left: calc(50% + 135px); bottom: 30px; transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--canvas); border-radius: 8px; font-size: 12px; padding: 13px 20px; max-width: min(460px, calc(100% - 36px)); box-shadow: 0 7px 22px #0002; line-height: 1.5; text-align: center; }
+.toast { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--canvas); border-radius: 8px; font-size: 12px; padding: 13px 20px; width: max-content; max-width: min(460px, calc(100% - 24px)); overflow-wrap: anywhere; box-shadow: 0 7px 22px #0002; line-height: 1.5; text-align: center; }
 
 .dialog { border: 1px solid var(--line); border-radius: 12px; padding: 27px; background: var(--pane); color: var(--text); width: min(470px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; box-shadow: 0 20px 80px #00000050; }
 .dialog::backdrop { background: var(--scrim); }
@@ -309,11 +312,11 @@ a.secondary-button { text-decoration: none; }
 .setting-heading .secondary-button { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 8px 11px; }
 .setting-heading .icon { width: 13px; height: 13px; }
 .bot-list { display: grid; gap: 6px; }
-.bot-row { display: flex; align-items: center; gap: 11px; padding: 10px 11px; border-radius: 8px; background: var(--soft); }
+.bot-row { min-width: 0; display: flex; align-items: center; gap: 11px; padding: 10px 11px; border-radius: 8px; background: var(--soft); }
 .bot-row > div { flex: 1; min-width: 0; }
-.bot-row strong { display: block; font-size: 12px; font-weight: 550; }
+.bot-row strong { display: block; font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-row small { display: block; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
-.bot-row .secondary-button { padding: 7px 11px; }
+.bot-row .secondary-button { flex: 0 0 auto; padding: 7px 11px; }
 .bot-field { margin-top: 18px; }
 .form-label small { color: var(--subtle); margin-left: 6px; }
 textarea.text-input { display: block; resize: vertical; min-height: 58px; line-height: 1.55; }
@@ -344,7 +347,6 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .suggestion { padding-left: 10px; padding-right: 10px; }
   .suggestion strong { font-size: 9px; }
   .suggestion small { font-size: 8px; }
-  .toast { left: calc(50% + 122px); }
 }
 @media (max-width: 900px) and (min-width: 761px) {
   .suggestion-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -388,7 +390,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-caption { padding-top: 9px; justify-content: center; font-size: 8px; }
   .composer-caption > #composer-hint { display: none; }
   .composer-caption > #composer-hint[data-alert="true"] { display: block; }
-  .toast { left: 50%; bottom: 26px; font-size: 11px; }
+  .toast { font-size: 11px; }
   .dialog { padding: 23px; }
   .connection-banner { gap: 8px; padding: 9px 15px; font-size: 10px; }
 }

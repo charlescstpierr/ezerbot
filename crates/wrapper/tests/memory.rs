@@ -500,6 +500,7 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
     );
     assert_eq!(features::memory::tools().len(), 3);
     for spec in features::memory::tools() {
+        assert!(!spec.description.is_empty());
         assert!(!spec.requires_approval);
         assert_eq!(spec.schema["additionalProperties"], false);
         assert_eq!(

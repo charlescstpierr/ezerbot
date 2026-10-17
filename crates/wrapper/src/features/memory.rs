@@ -165,19 +165,27 @@ pub fn tools() -> Vec<ToolSpec> {
     [
         (
             "remember",
+            "Mémorise un fait durable dans la mémoire privée de ce bot. Marque les faits sensibles comme sensibles.",
             json!({"text": text, "sensitive": {"type": "boolean"}, "source": source}),
             vec!["text", "sensitive", "source"],
         ),
         (
             "correct_fact",
+            "Corrige un fait actif appartenant à ce bot en créant un nouveau fait qui remplace l'ancien. Utilise l'identifiant exact de la mémoire.",
             json!({"fact_id": id, "text": text, "source": source}),
             vec!["fact_id", "text", "source"],
         ),
-        ("forget_fact", json!({"fact_id": id}), vec!["fact_id"]),
+        (
+            "forget_fact",
+            "Oublie un fait actif appartenant à ce bot et ses versions précédentes. Utilise l'identifiant du fait actif, pas celui d'une version remplacée.",
+            json!({"fact_id": id}),
+            vec!["fact_id"],
+        ),
     ]
     .into_iter()
-    .map(|(name, properties, required)| ToolSpec {
+    .map(|(name, description, properties, required)| ToolSpec {
         name: name.into(),
+        description: description.into(),
         requires_approval: false,
         schema: json!({"type": "object", "additionalProperties": false,
             "properties": properties, "required": required}),

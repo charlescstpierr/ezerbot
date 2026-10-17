@@ -611,7 +611,7 @@
   },
   "original_startup_runtime_observed": true,
   "remaining_evidence_investigation": {
-    "status": "in_progress",
+    "status": "complete",
     "report": "reports/remaining-evidence-progress.md",
     "checklist": "reports/remaining-evidence-checklist.md",
     "view": ".lavish/remaining-grokbot.html",
@@ -635,7 +635,8 @@
       "reports/messages-worker-slice-replay.md",
       "reports/cron-candidate-replay.md",
       "reports/routine-run-conversation.md",
-      "reports/memory-widget-consumer.md"
+      "reports/memory-widget-consumer.md",
+      "reports/goal-evidence-audit.md"
     ],
     "original_version": "0.70.2",
     "original_startup_observed": true,
@@ -651,7 +652,8 @@
       "evidence/local-control-followup-verification.json",
       "evidence/multibot-investigation-verification.json",
       "evidence/messages-recovery-followup-verification.json",
-      "evidence/memory-routines-followup-verification.json"
+      "evidence/memory-routines-followup-verification.json",
+      "evidence/goal-audit-verification.json"
     ],
     "runtime_capture_evidence_id": "ev_c53b22e5265cd881f109292c4a6a6d4ad7a227f9fdeade0565c0105795301e08",
     "runtime_bundle": "evidence/remaining-rea-runtime-bundle.json",
@@ -685,7 +687,7 @@
     "newer_release_version": "0.71.2",
     "newer_release_target_executed": false,
     "newer_release_member_count": 668,
-    "goal_complete": false,
+    "goal_complete": true,
     "followup": {
       "original_0702_arm64_subset": {
         "functions": 9,
@@ -757,7 +759,23 @@
       }
     },
     "newer_release_original_javascript_slices_executed": true,
-    "latest_safe_next_action": "Audit remaining nine questions against acquired artifact types. Reuse cron/memory/routine followups; do not repeat their capture or global scans. Distinguish unavailable server/iOS/authorized runtime evidence from client facts."
+    "latest_safe_next_action": "Research requirements audited. New investigations need the exact server/iOS/authenticated/OS-effect evidence listed in reports/goal-evidence-audit.md; do not repeat identical analyses without a new hypothesis or source.",
+    "final_audit": {
+      "report": "reports/goal-evidence-audit.md",
+      "ledger": "evidence/goal-evidence-audit.json",
+      "verification": "evidence/goal-audit-verification.json",
+      "reviews": "evidence/goal-scope-review.json",
+      "access": "evidence/goal-access-audit.json",
+      "objective_source": "evidence/goal-objective-source.json",
+      "research_requirements_satisfied": 7,
+      "question_count": 9,
+      "question_knowledge_complete": false,
+      "product_parity_proven": false
+    },
+    "question_knowledge_complete": false,
+    "product_parity_proven": false,
+    "goal_completion_record": "evidence/goal-completion.json",
+    "goal_completion_scope": "Requested investigation delivered: new evidence across nine topics, preserved proofs and exact inaccessible-evidence requirements. Hidden mechanisms remain partial/unresolved."
   },
   "product_capability_goal": {
     "objective": "Rendre notre app capable du travail de Grok Bot, dont groupes, @ et communications entre bots",

@@ -1,5 +1,7 @@
 # Grok Bot en Rust — dossier de reprise
 
+Commencer par l’[audit final de l’investigation](reports/goal-evidence-audit.md). Les neuf sujets ont leurs preuves, limites et pièces externes requises. La recherche n’annonce ni récupération du moteur serveur, ni app iOS analysée, ni parité terminée. Les nouvelles observations exigent une nouvelle preuve accessible ; ne pas relancer les mêmes analyses ou captures pour obtenir ces corps absents. Vérifier avec `python3 tools/verify-goal-audit.py`.
+
 La suite [horaires](reports/cron-candidate-replay.md), [runs de routine](reports/routine-run-conversation.md) et [cartes mémoire](reports/memory-widget-consumer.md) complète les frontières client/serveur. Le calcul candidat est exécuté sur 16 cas avec des dates constantes, sans ordonnanceur ni routine réelle. Les cartes mémoire peuvent marquer un fait traité tout en le gardant privé. La promotion et le reçu au widget ne forment pas une transaction prouvée. Vérifier avec `python3 tools/verify-memory-routines-followup.py`.
 
 La dernière passe REA suit [Messages après panne](reports/messages-worker-recovery.md) jusqu’au [helper natif](reports/native-messages-recovery.md). Une [sonde de tranches originales avec fixtures](reports/messages-worker-slice-replay.md) vérifie UUID et retry, sans lancer l’app originale ni envoyer de message. Vérifier avec `python3 tools/verify-messages-recovery-followup.py`. Le redémarrage du worker ne rejoue pas ses opérations ; les protections B4 restent volatiles.

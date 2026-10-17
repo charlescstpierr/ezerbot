@@ -1,5 +1,7 @@
 # Analyse de Grok Bot et architecture de reconstruction en Rust
 
+L’[audit de l’objectif REA](reports/goal-evidence-audit.md) relie les neuf sujets aux preuves acquises et précise les artefacts encore nécessaires. Il distingue la livraison de l’investigation de la connaissance complète du serveur et de la parité produit. Vérification : `python3 tools/verify-goal-audit.py`.
+
 Le [calcul candidat des horaires](reports/cron-candidate-replay.md) a été exécuté sur 16 cas datés, dont les deux changements d’heure. Le [suivi des runs](reports/routine-run-conversation.md) sépare modifications de routine et exécutions. Les [cartes mémoire](reports/memory-widget-consumer.md) séparent promotion de faits, reçu au bot et état traité. Les garanties serveur restent explicites dans ces rapports. Vérification hors ligne : `python3 tools/verify-memory-routines-followup.py`.
 
 La [reprise Messages .71](reports/messages-worker-recovery.md), le [chemin natif jusqu’à osascript](reports/native-messages-recovery.md) et les [scénarios REA avec fixtures](reports/messages-worker-slice-replay.md) précisent les pertes de résultat après effet. Le cache reste volatil et aucune garantie de déduplication durable n’est établie. Vérification hors ligne : `python3 tools/verify-messages-recovery-followup.py`.

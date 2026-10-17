@@ -1,5 +1,7 @@
 # Nouvelles preuves sur les manques de Grok Bot
 
+L’[audit de l’objectif](goal-evidence-audit.md) relie les sept exigences de recherche aux preuves et aux neuf sujets ci-dessous. L’investigation établit leurs frontières et les pièces externes nécessaires. Les statuts partiel/non résolu restent ceux de la connaissance du produit ; ils ne sont pas convertis en fonctionnalités implémentées ou en algorithmes serveur récupérés.
+
 Cette passe apporte une observation du démarrage original, l’identité native iPhone, des déclarations officielles sur le comportement produit et le chemin natif de relâchement des entrées. Une suite établit maintenant la chaîne de contrôle graphique effectivement composée dans la distribution Mac 0.71.2, son consentement par app et sa façade MCP native. Elle complète les [questions de départ](remaining-evidence-checklist.md). Les corps du moteur serveur et de l’app iOS ne sont toujours pas acquis.
 
 La séparation des preuves est essentielle : un script chargé est observé au runtime ; une branche de désassemblage est une observation statique ; une documentation décrit le comportement annoncé. Aucune de ces catégories ne devient automatiquement la preuve d’une autre.

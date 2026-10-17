@@ -1,5 +1,7 @@
 # Reprendre le travail
 
+L’[audit de l’investigation demandée](reports/goal-evidence-audit.md) conserve sept exigences de recherche satisfaites et les neuf frontières de connaissance. La prochaine avancée substantielle nécessite les preuves précises listées : implémentations/traces serveur, app iOS analysable ou scénario authentifié/effet OS contrôlé. La présence actuelle d’un compte connecté n’a pas été inspectée. Vérifier le dossier sans nouvelle capture avec `python3 tools/verify-goal-audit.py`. Les choix de notre produit restent séparés de ces conclusions.
+
 ## Objectif produit actuel
 
 L’utilisateur veut pouvoir faire dans son app ce que fait Grok Bot. Il a précisé les échanges entre bots, `@` dans un fil existant et les conversations à plusieurs bots. Lire [app-parity-delivery.md](reports/app-parity-delivery.md) puis la [proposition de premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md). Le code audité a déjà profils et chemin ChatGPT, mais `Conversation` et SQLite rattachent encore le fil à un unique bot. La proposition n’est pas approuvée et aucun code produit de ce lot n’a été écrit pendant cette passe. Préserver les changements concurrents dans app/ui et wrapper.

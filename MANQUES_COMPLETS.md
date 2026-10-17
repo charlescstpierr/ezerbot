@@ -1,5 +1,7 @@
 # Ce qui manque pour la prochaine session
 
+L’[audit de clôture de l’investigation](reports/goal-evidence-audit.md) distingue les preuves acquises des mécanismes encore inconnus. Il fournit pour chaque sujet l’artefact exact qui permettrait d’aller plus loin. Cette livraison de recherche ne termine ni le moteur, ni les intégrations, ni la parité de notre app.
+
 Les [horaires testés](reports/cron-candidate-replay.md) sont des instants candidats du client. La [jointure d’un run de routine à sa conversation et sa sortie](reports/routine-run-conversation.md) reste non établie. Les [cartes mémoire](reports/memory-widget-consumer.md) distinguent désormais fait traité, fait privé, promotion et reçu ; l’oubli et l’injection au modèle restent inconnus. La [reprise Messages](reports/messages-worker-recovery.md) et son [chemin natif](reports/native-messages-recovery.md) ne livrent pas de garantie durable d’unicité après effet incertain.
 
 Objectif produit ajouté : rendre notre app capable du même travail que Grok Bot. Le [découpage](reports/app-parity-delivery.md) distingue les parcours déjà présents des lots à construire. Le premier lot [groupes/mentions/tours](docs/superpowers/specs/2026-10-17-multibot-design.md) est une proposition à relire. Le wrapper courant conserve un seul `bot_id` par conversation; un adaptateur ChatGPT existe déjà, avec mode simulé sans connexion. Ne pas présenter les nouveaux rapports d’analyse comme du code produit livré.

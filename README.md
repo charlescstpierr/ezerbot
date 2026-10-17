@@ -6,7 +6,7 @@ Le [calcul candidat des horaires](reports/cron-candidate-replay.md) a été exé
 
 La [reprise Messages .71](reports/messages-worker-recovery.md), le [chemin natif jusqu’à osascript](reports/native-messages-recovery.md) et les [scénarios REA avec fixtures](reports/messages-worker-slice-replay.md) précisent les pertes de résultat après effet. Le cache reste volatil et aucune garantie de déduplication durable n’est établie. Vérification hors ligne : `python3 tools/verify-messages-recovery-followup.py`.
 
-L’utilisateur vise désormais la parité fonctionnelle de son app avec Grok Bot. Le [découpage de livraison](reports/app-parity-delivery.md) part de l’app actuelle et la [proposition du premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md) couvre groupes, mentions et délégation dans le fil. Cette proposition est à relire; ce lot n’est pas encore implémenté.
+L’utilisateur vise désormais la parité fonctionnelle de son app avec Grok Bot. Le [découpage de livraison](reports/app-parity-delivery.md) part de l’app actuelle et la [proposition du premier lot](docs/superpowers/specs/2026-10-17-multibot-design.md) couvre groupes, mentions et délégation dans le fil. Cette proposition est à relire; groupes, mentions et tours de room ne sont pas encore implémentés. La délégation locale en fils de tâche est livrée séparément ci-dessous.
 
 La [nouvelle analyse des membres](reports/multibot-membership-paths.md), les [tours de room](reports/multibot-turn-paths.md) et le [complément REA](reports/multibot-rea-followup.md) approfondissent le `@` dans une conversation existante et les groupes. Les sources produit actuelles sont [conservées séparément](reports/multibot-public-usage.md). `python3 tools/verify-multibot-investigation.py` vérifie la suite sans exécuter la cible.
 
@@ -22,7 +22,7 @@ La [suite de la rétro-ingénierie](reports/investigation-continuation.md) couvr
 
 Pour reprendre, commencer par [LIRE_EN_PREMIER.md](LIRE_EN_PREMIER.md), [PROCHAINE_SESSION.md](PROCHAINE_SESSION.md) et [MANQUES_COMPLETS.md](MANQUES_COMPLETS.md).
 
-Ce dossier documente le client Grok Bot 0.70.2 installé sur le Mac et définit une architecture Rust indépendante pour reproduire ses familles fonctionnelles. Il contient les preuves, les contrats, les traces de comportement, les limites et les critères de validation. Huit crates Rust constituent désormais un socle local, avec orchestration durable et un wrapper Mac utilisable. Les réponses sont simulées; les modèles, services cloud et intégrations restent à construire.
+Ce dossier documente le client Grok Bot 0.70.2 installé sur le Mac et définit une architecture Rust indépendante pour reproduire ses familles fonctionnelles. Il contient les preuves, les contrats, les traces de comportement, les limites et les critères de validation. Quinze crates Rust constituent désormais un socle local, avec orchestration durable et un wrapper Mac utilisable. Le wrapper propose un mode simulé sans connexion et un adaptateur ChatGPT, ainsi que les sept capacités locales décrites ci-dessous. Les services cloud et les connecteurs restent à construire.
 
 ## Ouvrir l’application locale
 
@@ -33,7 +33,7 @@ bash tools/build-app.sh
 open app/build/Grokbot.app
 ```
 
-Le build requiert macOS 12.3 ou ultérieur, les outils de compilation Apple et Rust. Le bundle embarque le moteur Rust et ses ressources hors ligne. Une fine coque Cocoa héberge l’interface HTML dans WKWebView. Le [nouveau design](reports/mascotte-design.md) met la mascotte animée au centre : clignements, regard, saisie et réactions aux envois. Aucun modèle ni compte Grok n’est connecté. [Wrapper local](reports/wrapper-local.md) décrit le fonctionnement et les vérifications.
+Le build requiert macOS 12.3 ou ultérieur, les outils de compilation Apple et Rust. Le bundle embarque le moteur Rust et ses ressources hors ligne. Une fine coque Cocoa héberge l’interface HTML dans WKWebView. Le [nouveau design](reports/mascotte-design.md) met la mascotte animée au centre : clignements, regard, saisie et réactions aux envois. Aucun compte Grok n’est connecté. Dans les paramètres, « Continuer avec ChatGPT » permet de choisir un modèle du catalogue du compte; sans connexion, les réponses restent explicitement simulées. L’adaptateur est testé contre un faux serveur OpenAI, pas avec un vrai compte. [Wrapper local](reports/wrapper-local.md) décrit le fonctionnement et les vérifications.
 
 - [Architecture Rust](reports/architecture-rust.md) décrit les composants, propriétaires, types, flux, reprises et choix de conception.
 - [Matrice de parité](reports/parity.md) couvre 45 familles et les scénarios qui devront prouver la future reconstruction.
@@ -41,6 +41,22 @@ Le build requiert macOS 12.3 ou ultérieur, les outils de compilation Apple et R
 - [Contrats et conversations](reports/protocol.md) retrace les schémas, envois, transcripts, mémoire, routines, skills, équipes, fichiers et voix.
 - [Exécution et ordinateur](reports/execution.md) retrace le coordinateur, daemon, transports, autorisations, VNC, WebAuthn, 1Password et egress.
 - [Vue interactive locale](vue/architecture.html) rassemble ces rapports, les diagrammes, une simulation des reprises et des extraits cités.
+
+## Les sept capacités locales
+
+Ces fonctions sont implémentées dans notre reconstruction, pas récupérées du serveur fermé de Grok Bot. Les références REA et les choix locaux sont détaillés dans [wrapper-local.md](reports/wrapper-local.md#les-sept-capacités).
+
+| Capacité | Parcours disponible | Limite importante |
+|---|---|---|
+| Skills | Bibliothèque par bot, éditeur, versions et import texte/fichiers/dossiers | 250 skills; pas d’apprentissage Teach ni de marketplace |
+| Mémoire | Faits privés/équipe, correction, oubli et partage par lots | « Équipe » = tous les bots locaux; oublier ne supprime pas vos messages |
+| Runs et contexte | Boucle modèle/outils, reprise durable, arrêt, relance, tâches et compaction | Budgets locaux; tâche terminée seulement par `complete_task` |
+| Formulaires, approbations, secrets | Cartes typées, reçu de reprise, décisions utilisateur dans le chat principal, coffre séparé | Règles persistées évaluées automatiquement; réviseur en langage naturel encore absent |
+| Routines | Cron, intervalle ou date unique; prompt libre ou skill épinglée; historique | Moteur ouvert requis; proposition du modèle activée après confirmation dans le chat principal, sans carte d’approbation séparée |
+| Délégation | Enfants parallèles, contexte sélectionné, résultats au parent et arrêt en cascade | 4 actifs, 3 par racine, profondeur 3, file 16; fils de tâche en lecture seule dans l’interface |
+| Images | Collage, dépôt/sélecteur, miniature et prédescription avec le brouillon | 20 Mio/image; vision dépendante du modèle; seuls les textes de légende circulent ensuite |
+
+Les paramètres d’un bot donnent accès aux skills et à la mémoire; le panneau Routines se trouve aussi dans les paramètres généraux. Les cartes d’outil, de tâche et de résumé apparaissent dans le fil. Aucun outil shell, accès à l’ordinateur, MCP ou connecteur externe n’est encore fourni. Les approbations de sous-bots, routines ou outils protégés sont présentées à l’utilisateur dans une conversation du bot principal; ce dernier ne les accepte pas à sa place. Les limites et suites restantes figurent dans [MANQUES_COMPLETS.md](MANQUES_COMPLETS.md#capacités-locales-livrées-et-suites).
 
 ## Essayer et vérifier le socle Rust
 
@@ -52,13 +68,13 @@ cargo run --locked -p grokbot-try -- status --db try-data/session.sqlite
 cargo run --locked -p grokbot-try -- flow --db try-data/flow.sqlite
 cargo run --locked -p grokbot-try -- status --db try-data/flow.sqlite
 cargo build --locked -p grokbot-wrapper
-python3 tools/verify-wrapper.py
-python3 tools/verify-app.py # après ouverture de l’app Mac
+python3 tools/verify-wrapper.py --report /tmp/grokbot-wrapper-verification.json
+python3 tools/verify-app.py # contrôle natif séparé, après ouverture de l’app Mac
 ```
 
 La démo exige un chemin neuf et refuse de remplacer une base existante. `status` relit le compte fictif de la démo. Les bibliothèques ouvrent SQLite avec un `AccountId` explicite. Le toolchain Rust est installé dans `~/.cargo/bin`, même si le shell ne l'inclut pas dans son PATH.
 
-[Consolidation Rust](reports/consolidation-rust.md) décrit les premières corrections. [Orchestration durable](reports/orchestration-rust.md) décrit les commandes avant transport, les snapshots gardés et les essais de processus. [rust-verification.json](evidence/rust-verification.json) conserve les commandes, résultats et empreintes du code vérifié. Les preuves statiques de l'original restent distinctes de ces tests du système indépendant.
+[Consolidation Rust](reports/consolidation-rust.md) décrit les premières corrections. [Orchestration durable](reports/orchestration-rust.md) décrit les commandes avant transport, les snapshots gardés et les essais de processus. [rust-verification.json](evidence/rust-verification.json) conserve les commandes, résultats et empreintes du code vérifié. Les preuves statiques de l'original restent distinctes de ces tests du système indépendant. Les fichiers `evidence/*verification.json` versionnés sont des instantanés historiques, pas une certification du code courant. La passe documentaire des sept capacités a relancé le build `--locked` et la vérification HTTP avec un rapport hors dépôt; aucun nouveau JSON de preuve n’est versionné. Les contrôles natifs de cette livraison restent à faire par le capitaine.
 
 Le dépôt Git versionne les sources, les ressources de l’interface, les scripts, les rapports et les preuves résumées. Les archives locales `inputs/`, `artifacts/client/`, `artifacts/formatted/` et `evidence/rea-bundle.json` sont conservées sur disque et exclues de Git, comme les builds et captures de contrôle. Après un clone, construire l’app ne nécessite pas ces archives; les vérifications de rétro-ingénierie nécessitent de les recopier depuis ce dossier de sauvegarde.
 

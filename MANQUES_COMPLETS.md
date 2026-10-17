@@ -1,6 +1,26 @@
 # Ce qui manque pour la prochaine session
 
-L’[audit de clôture de l’investigation](reports/goal-evidence-audit.md) distingue les preuves acquises des mécanismes encore inconnus. Il fournit pour chaque sujet l’artefact exact qui permettrait d’aller plus loin. Cette livraison de recherche ne termine ni le moteur, ni les intégrations, ni la parité de notre app.
+## Capacités locales livrées et suites
+
+Le wrapper a maintenant sept capacités implémentées : skills versionnées/import texte par bot, mémoire privée/équipe avec correction/oubli, moteur de run et contexte/compaction, formulaires/approbations/secrets, routines, délégation et images avec prédescription. [Wrapper local](reports/wrapper-local.md#les-sept-capacités) décrit leurs parcours, défauts et références REA. Cela ne ferme pas les inconnues du **serveur original** décrites plus bas. Les quinze crates, l’adaptateur ChatGPT et les panneaux locaux ne sont ni une fleet cloud ni la parité des 45 familles.
+
+Les valeurs par défaut retenues sont locales : coffre fichier `0600`, mémoire écrite par outils, équipe = tous les bots locaux, délégation 4 actifs/3 par racine/profondeur 3/file 16, un rattrapage de routine dans 60 minutes, budgets de run 12 appels modèle/24 outils/10 minutes, compaction à 70 % de 100 000 tokens estimés. Exception au défaut initial de conception : **une routine proposée par le modèle est activée après confirmation utilisateur dans la conversation principale, sans gate d’approbation séparée**, comme CR19. Toute demande d’approbation d’un sous-bot, d’une routine ou d’un outil protégé est acceptée/refusée par l’utilisateur dans une conversation du bot principal; les permissions persistées peuvent éviter les demandes suivantes.
+
+| Capacité livrée | Suite ou limite encore ouverte |
+|---|---|
+| Skills | Import nommé par frontmatter pouvant mettre à jour une skill existante : choix local, anciennes versions conservées. Pas d’écriture modèle, Teach→skill, fichiers annexes ou marketplace. `GET /api/skills` charge encore tous les corps. |
+| Mémoire | Pas d’extraction automatique. Oublier ne supprime ni les messages utilisateur, ni toutes les copies déléguées/cartes, ni les sauvegardes. Expurgation sous verrou coûteuse; refus 409 si une autre réponse concernée tourne. Tombstones UI limitées à la fenêtre courante; purge des faits privés de bots supprimés non accessible dans l’interface. |
+| Runs/contexte | Reprise et outils internes durables, pas garantie d’unicité d’effets externes. Fin de tour ≠ fin de tâche; pas de continuation infinie après budget. Évaluer les tâches et les fenêtres réelles avec un vrai fournisseur. |
+| Formulaires/approbations/secrets | Reçu de reprise et règles Toujours persistées fonctionnent. **Le reviewer en langage naturel reste à implémenter**; configuration seule, pas décision sémantique automatique. Aucun outil externe protégé en production. Suppression du fil de décision annule les demandes au lieu de les rerouter. Coffre local non chiffré par le trousseau; pas de consommateur de secret. |
+| Routines | Moteur ouvert requis, pas de launch agent ni de triggers fournisseur/webhook/exclusions. Historique serveur non paginé; reprise manuelle d’affichage parfois nécessaire après coupure. Renforcer concurrence de la reprise depuis le panneau et retours d’erreur de confirmation/historique. |
+| Délégation | Contexte choisi et contrôlé, pas snapshot immuable des skills. Fils UI en lecture seule; envoi session mère/taskId et annulation individuelle d’un enfant sans run attendent des endpoints. L’API accepte encore des suivis de tâches terminées que l’interface interdit. |
+| Images | Staging, légendes et repli vision testés avec faux OpenAI, pas un vrai compte. Certains rejets non reconnus échouent sans repli; une reprise tardive peut retenter une requête sans vision. Pas de purge automatique générale du stockage d’images. |
+
+Le build `cargo build --locked -p grokbot-wrapper` et la vérification HTTP ont été relancés pour cette passe documentaire, avec rapport hors dépôt. Les JSON versionnés sont des instantanés historiques, pas une certification actuelle des sept pistes. Les imports de skills et une routine en mode simulé ont été contrôlés dans le navigateur; **native app check pending for the captain** (imports fichiers/dossiers, images, cartes, export). Les essais ChatGPT réels, l’accessibilité/IME et l’évaluation métier restent à produire.
+
+## Frontières de l’investigation originale
+
+L’[audit de clôture de l’investigation](reports/goal-evidence-audit.md) distingue les preuves acquises des mécanismes encore inconnus. Il fournit pour chaque sujet l’artefact exact qui permettrait d’aller plus loin. Cette livraison de recherche n’explique pas le moteur fermé et ne termine ni les intégrations ni la parité de notre app; notre moteur local est désormais implémenté séparément.
 
 Les [horaires testés](reports/cron-candidate-replay.md) sont des instants candidats du client. La [jointure d’un run de routine à sa conversation et sa sortie](reports/routine-run-conversation.md) reste non établie. Les [cartes mémoire](reports/memory-widget-consumer.md) distinguent désormais fait traité, fait privé, promotion et reçu ; l’oubli et l’injection au modèle restent inconnus. La [reprise Messages](reports/messages-worker-recovery.md) et son [chemin natif](reports/native-messages-recovery.md) ne livrent pas de garantie durable d’unicité après effet incertain.
 
@@ -18,7 +38,7 @@ La [passe des neuf sujets](reports/goal-nine-topics.md) établit les projections
 
 La [nouvelle enquête](reports/investigation-continuation.md) précise les manques suivants : compaction effective et prompt de résumé, contexte hérité lors des délégations, ordonnanceur des tours de room, checkpoints des moteurs distants, garanties du scheduler, isolation des écrans et volumes, corps natifs restants et paramètres effectifs des politiques d'accès. Huit fonctions du helper ont désormais été suivies au désassemblage. Les traces nouvelles couvrent aussi banques connectées, avatars IA, workers de code cloud et édition de documents/canvas. La matrice historique de 45 familles reste une base de travail, pas un inventaire exhaustif du serveur.
 
-Le dossier contient une analyse statique du client et une architecture de reconstruction. Il manque encore les observations après connexion, certains internes, les choix de fournisseurs, les intégrations Rust et leur validation complète. Un socle local est déjà implémenté; [consolidation-rust.md](reports/consolidation-rust.md) décrit sa portée. La liste couvre le périmètre connu des 45 familles; elle ne prétend pas découvrir toutes les fonctions cachées d’un serveur fermé.
+Le dossier contient une analyse statique du client, une architecture et une reconstruction locale partielle. Il manque encore les observations après connexion à Grok, certains internes, les fournisseurs des futures intégrations et leur validation complète. Un socle local est déjà implémenté; [consolidation-rust.md](reports/consolidation-rust.md) décrit sa portée. La liste couvre le périmètre connu des 45 familles; elle ne prétend pas découvrir toutes les fonctions cachées d’un serveur fermé.
 
 ## État acquis
 
@@ -60,11 +80,11 @@ L’architecture définit les composants, les identités, les états, les repris
 | Élément | État actuel | Quand il devient nécessaire |
 |---|---|---|
 | Rust, Cargo et cible de compilation | Toolchain installé dans `~/.cargo/bin`; absent du PATH de certains shells | Dès le début du code Rust |
-| Dépôt, workspace et CI | Workspace de huit crates, dépôt Git local propre au projet et tests locaux; aucune CI distante | Phase 1 de construction |
+| Dépôt, workspace et CI | Workspace de quinze crates, dépôt Git local et vérifications locales; aucune CI distante | Phase 1 de construction |
 | UI native | Wrapper Cocoa/WKWebView local construit; Iced candidat pour une UI entièrement Rust; éditeur riche, IME, accessibilité et vidéo non validés | Avant de figer le client |
 | PostgreSQL, SQLite et stockage d’objets | Architecture proposée; SQLite locale et migrations du socle créées; PostgreSQL et stockage serveur à construire | Persistance locale/serveur et artefacts |
-| API d’identité | Fournisseur, OAuth, SSO et coffre OS à choisir | Login du produit Rust |
-| Modèle, transcription et synthèse | Fournisseurs, modèles, prompts, budgets et clés non configurés | Runs et voix réels |
+| API d’identité | Sign in with ChatGPT implémenté/testé avec faux serveur; identité Grok/produit, SSO et coffre OS restent à construire | Login du produit Rust |
+| Modèle, transcription et synthèse | Adaptateur Responses et catalogue ChatGPT, mode simulé et budgets locaux implémentés; compte réel non validé, transcription/TTS absents | Runs et voix réels |
 | Machines cloud et volumes | Fournisseur, région, images, sauvegardes et coût non choisis | Ordinateur persistant et workers |
 | Compte Grok de test | Aucun parcours authentifié observé; accès à revalider avec l’utilisateur | Tests de l’original |
 | Connecteurs | Comptes de test, OAuth, apps et endpoints webhook à préparer par service | Validation de chaque connecteur |
@@ -78,9 +98,9 @@ Les clés et tokens se configurent dans un coffre ou l’environnement de la fut
 
 ## Implémentation et preuves encore à produire
 
-Le socle `domain`, `wire`, `replica`, `submission-journal`, `store` et `session` est implémenté localement, avec la démo `try`. Les modules suivants restent à écrire : `desktop`, `desktop-host`, `control-plane`, `run-engine`, `context`, `policy`, `tools`, `computer`, `worker`, `local-exec`, `connectors`, `scheduler`, `demonstrations`, `spending`, `hosting`, `voice`, `native-broker`, `egress` et `observability`.
+Le socle `domain`, `wire`, `replica`, `submission-journal`, `store` et `session` est implémenté localement, avec la démo `try`. Le wrapper et les crates `skills`, `memory`, `engine`, `forms`, `scheduler`, `delegation`, `attachments` ajoutent les sept capacités locales. Restent les services cloud `control-plane`/`worker`/`computer`, l’exécution locale externe, les connecteurs, démonstrations, dépenses, hébergement, voix, broker natif, egress et observabilité complète, ainsi qu’un DesktopHost Rust distinct de la coque Cocoa.
 
-Les newtypes, enums d’état, DTO versionnés, migrations SQLite, journal et replays de snapshots et deltas existent. Leur orchestration autour d’un transport simulé existe. Le transport réseau réel, les migrations PostgreSQL et les garanties serveur restent à construire. Un wrapper Mac local du socle existe, avec conversations, thèmes et transport simulé; voir [wrapper-local.md](reports/wrapper-local.md). Viennent ensuite le moteur, l’ordinateur et les intégrations selon les phases de [reports/parity.md](reports/parity.md).
+Les newtypes, enums d’état, DTO versionnés, migrations SQLite, journal et replays de snapshots et deltas existent. Leur orchestration autour d’un transport simulé existe. Le transport de conversation distant Grok, les migrations PostgreSQL et les garanties serveur restent à construire. Le wrapper Mac ajoute conversations, thèmes, passerelle ChatGPT ou simulée et outils internes; voir [wrapper-local.md](reports/wrapper-local.md). Viennent ensuite l’ordinateur, les intégrations et les validations restantes de [reports/parity.md](reports/parity.md), matrice historique non mise à jour par cette passe.
 
 La compilation, les tests de domaine, certaines pannes et reprises, l’isolation SQLite par compte et les écritures concurrentes de journal et de réplique sont vérifiés localement. Les preuves manquantes comprennent la concurrence de bout en bout, le réseau, l’OS réel, les intégrations sandbox, un client fermé pendant un run cloud, les upgrades et les migrations serveur. La matrice conserve les obligations complètes de chaque famille; les tests du socle n’établissent pas leur parité complète.
 
@@ -88,40 +108,40 @@ Une équivalence avec un système à modèle se mesure par les états, les effet
 
 ## Liste des 45 familles
 
-Les familles et obligations du tableau proviennent de `evidence/parity.json`. La colonne « État Rust » reflète la consolidation et le wrapper local; leurs sous-ensembles ne couvrent pas les obligations complètes. Chaque famille reste à compléter et à valider en Rust. Les mentions « Socle partiel » renvoient uniquement aux bibliothèques et scénarios locaux. La colonne « Preuve actuelle » précise seulement ce qui est établi sur l’original.
+Les familles et obligations du tableau proviennent de `evidence/parity.json`. La colonne « État Rust » distingue maintenant les sous-ensembles locaux livrés, sans réécrire la matrice REA historique; ces sous-ensembles ne couvrent pas les obligations complètes. Chaque famille reste à compléter et à valider en Rust. Les mentions « Socle partiel » renvoient uniquement aux bibliothèques et scénarios locaux. La colonne « Preuve actuelle » précise seulement ce qui est établi sur l’original.
 
 | Famille | Preuve actuelle | État Rust | Travail prévu | Validation à produire |
 |---|---|---|---|---|
 | Démarrage et processus | Chemin client retracé | Socle partiel | DesktopHost et Coordinator séparés; hello versionné et confiance du caller | Remplacer le renderer sans accepter les réponses d'une ancienne génération |
 | Interface, composeur et documents | Chemin client retracé | Socle partiel | Iced, éditeur riche, viewers et adaptateur OS | Mentions, IME, collage, clavier, lecteurs d'écran et grandes conversations |
-| Connexion et rotation | Chemin client retracé | Non implémenté | AuthService avec epoch, single-flight et coffre OS | Refresh tardif après logout; retour navigateur périmé |
+| Connexion et rotation | Chemin client retracé | Adaptateur ChatGPT local | Auth Grok/produit, SSO et coffre OS | Vrai compte, refresh tardif après logout et retour périmé |
 | Multi-compte | Chemin client retracé | Socle partiel | AccountRuntime révocable et caches scoped | Changer de compte pendant send, sync, approval et accès local |
 | Deep links | Chemin client retracé | Non implémenté | Grammaire, canonicalisation, queue et déduplication | Lien avant boot, après reload et vers un bot inaccessible |
-| Profils et création de bots | Chemin client retracé | Non implémenté | BotRegistry, versions et route de run indépendante | Création répétée avec même nonce; changement de rôle et visibilité |
+| Profils et création de bots | Chemin client retracé | Profils locaux livrés | Étendre vers rôles, ACL et templates distants | Visibilité et isolation multi-utilisateur |
 | Sessions et rooms | Contrat partiel | Socle partiel | ConversationId scoped par compte, bot et session; membership | Deux humains avec un bot d'équipe ne partagent pas accidentellement une session privée |
 | Bot principal et roster | Contrat partiel | Non implémenté | Préférences de roster et coordination durable | Bot masqué, épinglé, supprimé et bot principal remplacé |
 | Journal d'envoi | Chemin client retracé | Socle partiel | Journal durable avec nonce, reçu et attente d'écho | Panne avant POST, après acceptation et avant écho; aucun doublon logique |
 | Snapshots et deltas | Chemin client retracé | Socle partiel | Génération serveur distincte de ReplicaEpoch et ReplicaSequence | Trou, duplicate, cursorTooOld, corps manquant et changement de source |
 | Annulation et nouvelle conversation | Chemin client retracé | Socle partiel | CancelQueued, cancel RPC, interrupt run et reset conversation distincts | Réponse tardive d'outil après interruption; message accepté conservé |
-| Moteur d'agent et prompts | Implémentation inconnue | Non implémenté | RunEngine, ModelGateway, checkpoints, budgets et outils | Évaluations de tâches et résultats; pas d'égalité supposée des réponses du modèle |
-| Mémoire | Contrat partiel | Non implémenté | Mémoire avec portée, version, source et budget de contexte | Fact obsolète remplacé; duplication de bot sans mémoire privée copiée |
-| Sous-agents et coordination | Contrat partiel | Non implémenté | Messages durables avec corrélation, budgets et prévention des cycles | Deux bots actifs, échec du receveur et cycle de délégation |
+| Moteur d'agent et prompts | Implémentation inconnue | Moteur local livré | Évaluer contexte, compaction, budgets et reprises avec vrai fournisseur | Résultats métier et coût; pas d’égalité supposée des réponses |
+| Mémoire | Contrat partiel | Faits locaux livrés | Compléter purge des copies, tombstones UI et évaluation de réapprentissage | Oubli vs messages utilisateur, délégation et concurrence à grande échelle |
+| Sous-agents et coordination | Contrat partiel | Délégation locale livrée | Pilotage de tâche par message; rooms et échanges interbot généraux | Contexte modifié/révoqué, annulation individuelle en file et reprises réelles |
 | Ordinateur cloud partagé | Documentation | Non implémenté | ComputerManager par compte et volume persistant | Client fermé, update machine et restauration de snapshot |
 | Écrans de bot et reprise humaine | Contrat partiel | Non implémenté | ScreenLease et ownership des entrées | Deux bots en parallèle; contrôle humain; clic avec lease périmée |
-| Registre d'outils | Chemin client retracé | Non implémenté | Capabilities annoncées seulement pour handlers actifs | Descripteur présent mais handler absent produit un refus clair |
+| Registre d'outils | Chemin client retracé | Outils internes livrés | Ajouter outils externes avec politique et journal d’effets | Refus explicites, effet incertain après panne et permissions |
 | Daemon local et supervision | Chemin client retracé | Non implémenté | Supervisor, générations, outbox et transports bornés | Ancien PID, changement de compte, credential expiré et reprise de résultat |
 | Shell et jobs background | Chemin client retracé | Non implémenté | ShellService avec politique OS explicite et groupe de processus | Cwd hors scope; kill descendants; sortie volumineuse; budget |
-| Fichiers et transferts | Chemin client retracé | Non implémenté | Root handles, uploads staged/committed, hashes et quotas | Symlink remplacé, chunk rejoué, fichier grossissant et abandon d'upload |
+| Fichiers et transferts | Chemin client retracé | Images locales livrées | Fichiers généraux, root handles, transferts et quotas | Vision réelle, purge, symlinks et transferts interrompus |
 | Panneau desktop-mount | Chemin client retracé | Non implémenté | Panneau flottant du bot; pas un montage de dossiers | Ouverture, déplacement, fermeture et scope du composeur |
-| Approvals et auto-review | Contrat partiel | Non implémenté | PolicyService, grant lié au digest et règles admin prioritaires | Commande modifiée, refus, AlwaysAllow, expiration et réponse tardive |
-| Formulaires et secrets | Contrat partiel | Non implémenté | Secret broker et canal hors transcript | Secret absent des logs, mémoire, modèles et export de conversation |
+| Approvals et auto-review | Contrat partiel | Gate/règles locales livrées | Reviewer langage naturel et règles admin; outils externes à protéger | Décision utilisateur dans le chat principal, digest modifié et révocation |
+| Formulaires et secrets | Contrat partiel | Cartes/reçus/coffre local livrés | Consommateurs de secrets, coffre OS et résilience des demandes orphelines | Compte réel, OS et exclusion des valeurs sur nouveaux connecteurs |
 | Clé matérielle WebAuthn | Contrat partiel | Non implémenté | Cérémonie bornée et consentement par challenge | Origin/rpId erronés, PIN tardif, abort et device retiré |
 | 1Password | Contrat partiel | Non implémenté | Provisioning à commandes fixes et secret sink | Timeout après mint; statut inconnu persisté; scope vault |
 | Messages du Mac | Chemin client retracé | Non implémenté | Native broker et registre durable d'effet | Panne après envoi; reprise sans envoi aveugle |
 | MCP et connecteurs | Chemin client retracé | Non implémenté | Manifeste, registry, OAuth broker et révocation | Connexion expirée, tool inconnu, refus scope et déconnexion |
-| Skills et plugins | Chemin client retracé | Non implémenté | Bibliothèque versionnée et permissions explicites | Mise à jour de skill, private/team scope et instructions externes |
+| Skills et plugins | Chemin client retracé | Bibliothèque/import locaux livrés | Écriture modèle, plugins et publication d’équipe | Imports natifs/dossiers, réimport nommé et contexte hostile |
 | Apprentissage par démonstration | Chemin client retracé | Non implémenté | DemonstrationSession et draft de skill, save/discard explicites | Start doublé, stop save, stop discard, limite durée, changement de compte et erreur de capture |
-| Routines, horaires et triggers | Contrat partiel | Non implémenté | Prompt autonome ou skill optionnelle; triggers provider et groupes; occurrences durables | Routine sans skill, groupe de listeners, filtres provider, DST, retry après crash et webhook doublé |
+| Routines, horaires et triggers | Contrat partiel | Horaires/occurrences locaux livrés | Triggers provider/groupes, launch agent et historique paginé | Confirmation dans le chat principal, vrai fournisseur et webhook doublé |
 | Templates et marketplace | Contrat partiel | Non implémenté | Versions de modèle, provenance et import sans sessions privées | Import public/team, update de modèle, scopes et fichiers exclus |
 | Voix, dictée et mémos | Chemin client retracé | Non implémenté | VoiceSession, audio streaming, transcription et TTS | Reconnect, interruption vocale, epoch audio et fin de mémo |
 | Meetings et capture | Contrat partiel | Non implémenté | Session de capture consentie et artefacts distincts | Arrêt capture, permission refusée, limites durée et rétention |

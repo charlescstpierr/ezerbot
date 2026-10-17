@@ -343,6 +343,152 @@ fn upload_editor_hides_metadata_and_sparse_edits_synchronize_the_stored_document
 }
 
 #[test]
+fn multiline_uploaded_descriptions_survive_name_description_and_body_edits() {
+    let db = Database::new();
+    let mut app = db.open();
+    for (i, authored) in [
+        "description: |\n  Analyse un document\n  en profondeur.",
+        "description: >-\n  Rédige un plan\n  en cinq points.",
+        "description: Première partie\n  suite de la description.",
+        "description: Première partie\n\n# commentaire\n  suite de la description.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source =
+            format!("---\nname: Analyse cas {i}\n{authored}\nlicence: MIT\n---\nTexte à analyser.");
+        let report = post(
+            &mut app,
+            "/api/skills/import",
+            json!({"bot_id":"grokbot", "files":[{"path":format!("analyse-{i}.md"), "content":source}]}),
+        );
+        let id = report["report"][0]["status"]["skill_id"].clone();
+        let versions = post(
+            &mut app,
+            "/api/skills/versions",
+            json!({"bot_id":"grokbot", "skill_id":id}),
+        );
+        let original = versions["versions"][0].clone();
+        assert!(original["content"]["editable_body"]
+            .as_str()
+            .unwrap()
+            .contains(authored));
+        post(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":format!("Analyse approfondie {i}")}),
+        );
+        let described = post(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "description":"Présentation courte"}),
+        );
+        assert!(described["skill"]["content"]["body"]
+            .as_str()
+            .unwrap()
+            .contains(authored));
+        let edited_body = original["content"]["editable_body"]
+            .as_str()
+            .unwrap()
+            .replace("Texte à analyser.", "Corps révisé.");
+        let edited = post(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "body":edited_body}),
+        );
+        let raw = edited["skill"]["content"]["body"].as_str().unwrap();
+        assert!(raw.contains(authored));
+        assert!(raw.contains("licence: MIT"));
+        assert!(raw.contains("origin: upload"));
+        assert!(raw.contains("Corps révisé."));
+        assert!(!raw.contains("description: \"|\""));
+        assert_eq!(raw.matches("description:").count(), 1);
+        let versions = post(
+            &mut app,
+            "/api/skills/versions",
+            json!({"bot_id":"grokbot", "skill_id":id}),
+        );
+        assert_eq!(versions["versions"][0], original);
+        for version in versions["versions"].as_array().unwrap() {
+            assert!(version["content"]["editable_body"]
+                .as_str()
+                .unwrap()
+                .contains(authored));
+        }
+    }
+}
+
+#[test]
+fn clearing_then_replacing_a_single_line_description_remains_host_managed() {
+    let db = Database::new();
+    let mut app = db.open();
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"resume.md", "content":"---\nname: Résumé\ndescription: Ancienne\n---\nTexte"}]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "description":""}),
+    );
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    assert_eq!(versions["versions"][1]["content"]["editable_body"], "Texte");
+    let updated = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "description":"Nouvelle"}),
+    );
+    let raw = updated["skill"]["content"]["body"].as_str().unwrap();
+    assert!(raw.contains("description: Nouvelle"));
+    assert_eq!(raw.matches("description:").count(), 1);
+}
+
+#[test]
+fn reimport_is_an_explicit_source_update_and_keeps_the_previous_manual_revision() {
+    let db = Database::new();
+    let mut app = db.open();
+    let file = json!({"path":"resume.md", "content":"---\nname: Résumé express\ndescription: Trois puces.\n---\nTexte source."});
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[file.clone()]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let edited = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "description":"Ma description."}),
+    );
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[file]}),
+    );
+    assert_eq!(report_status(&report, 0), "written");
+    assert_eq!(report["report"][0]["status"]["skill_id"], id);
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    assert_eq!(
+        versions["versions"][1]["content"]["description"],
+        edited["skill"]["content"]["description"]
+    );
+    assert_eq!(
+        versions["versions"][2]["content"]["description"],
+        "Trois puces."
+    );
+    assert_eq!(versions["versions"].as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn user_frontmatter_stays_visible_editable_and_removable_for_manual_and_model_skills() {
     use grokbot_skills::library::{self, Origin, SkillContent};
     let db = Database::new();
@@ -595,6 +741,47 @@ fn context_index_includes_human_titles_alongside_legacy_and_fallback_keys() {
         .any(|record| record["name"] == "skill" && record["title"] == "東京メモ"));
     assert!(!index.text.contains("BODY_NOT_IN_INDEX"));
     assert!(index.text.chars().count() <= index.budget);
+}
+
+#[test]
+fn human_titles_never_displace_affordable_lookup_keys_in_the_context_index() {
+    let db = Database::new();
+    let mut app = db.open();
+    for i in 0..80 {
+        add(
+            &mut app,
+            "grokbot",
+            &format!("Résumé détaillé des échanges et des prochaines étapes {i:03}"),
+            "BODY_NOT_IN_INDEX",
+        );
+    }
+    let conversation = conversation(&mut app, "grokbot");
+    let preview = app.context_preview(&conversation).unwrap();
+    let index = preview
+        .iter()
+        .find(|block| block.source == ContextSource::SkillIndex)
+        .unwrap();
+    let records: Vec<Value> = index
+        .text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(
+        records.iter().filter(|r| r.get("name").is_some()).count(),
+        80
+    );
+    assert!(records.iter().any(|r| r["omitted"] == 0));
+    for i in 0..80 {
+        let key = format!("resume-detaille-des-echanges-et-des-prochaines-etapes-{i:03}");
+        assert!(records.iter().any(|r| r["name"] == key), "missing {key}");
+    }
+    let titles = records.iter().filter(|r| r.get("title").is_some()).count();
+    assert!(
+        titles > 0 && titles < 80,
+        "titles must use only spare budget"
+    );
+    assert!(index.text.chars().count() <= index.budget);
+    assert!(!index.text.contains("BODY_NOT_IN_INDEX"));
 }
 
 #[test]

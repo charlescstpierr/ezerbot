@@ -363,8 +363,31 @@ const MANAGED_KEYS: [&str; 5] = [
     "upload-extension:",
     "upload-name:",
 ];
-fn managed(line: &str) -> bool {
-    MANAGED_KEYS.iter().any(|key| line.starts_with(key))
+/// Only standalone, single-line scalar metadata belongs to the host. Complex
+/// YAML remains authored content, including its key and all continuation lines.
+fn host_lines(header: &str) -> Vec<(&str, bool)> {
+    let lines: Vec<_> = header.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let scalar = MANAGED_KEYS.iter().any(|key| {
+                line.strip_prefix(key).is_some_and(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && !value.starts_with(['|', '>', '[', '{'])
+                })
+            });
+            // Blank/comment lines can separate a plain scalar from its continuation.
+            // Non-candidate lines need no lookahead; this also keeps headers
+            // with long blank/comment runs linear rather than quadratic.
+            let continued = scalar
+                && lines[index + 1..]
+                    .iter()
+                    .find(|next| !next.trim().is_empty() && !next.trim_start().starts_with('#'))
+                    .is_some_and(|next| next.starts_with([' ', '\t']));
+            (*line, scalar && !continued)
+        })
+        .collect()
 }
 
 /// Only host-owned top-level, single-line fields are hidden. User frontmatter,
@@ -373,10 +396,14 @@ pub fn editable_body(text: &str) -> String {
     let Some((header, body)) = frontmatter(text) else {
         return text.into();
     };
-    if !header.lines().any(managed) {
+    let header = host_lines(header);
+    if !header.iter().any(|(_, host)| *host) {
         return text.into();
     }
-    let lines: Vec<_> = header.lines().filter(|line| !managed(line)).collect();
+    let lines: Vec<_> = header
+        .into_iter()
+        .filter_map(|(line, host)| (!host).then_some(line))
+        .collect();
     if lines.iter().all(|line| line.trim().is_empty()) {
         // annotate adds one blank separator before a headerless upload's text.
         body.strip_prefix('\n').unwrap_or(body).into()
@@ -396,9 +423,9 @@ pub fn preserve_managed_frontmatter(
     let Some((header, _)) = frontmatter(original) else {
         return edited.into();
     };
-    let metadata: Vec<_> = header
-        .lines()
-        .filter(|line| managed(line))
+    let metadata: Vec<_> = host_lines(header)
+        .into_iter()
+        .filter_map(|(line, host)| host.then_some(line))
         .map(|line| {
             if line.starts_with("name:") {
                 metadata_line("name", name)
@@ -415,9 +442,9 @@ pub fn preserve_managed_frontmatter(
     // Work from the raw edited document here: a metadata-only edit must not
     // trim its unchanged Markdown body's leading separator or line endings.
     let (header, body) = frontmatter(edited).unwrap_or(("", edited));
-    let header = header
-        .lines()
-        .filter(|line| !managed(line))
+    let header = host_lines(header)
+        .into_iter()
+        .filter_map(|(line, host)| (!host).then_some(line))
         .collect::<Vec<_>>()
         .join("\n");
     let separator = if header.is_empty() { "" } else { "\n" };
@@ -430,7 +457,8 @@ pub fn preserve_managed_frontmatter(
 fn metadata_line(key: &str, value: &str) -> String {
     // Keep ordinary metadata readable, but never let a multiline description or
     // YAML delimiter create extra header fields (or close the header).
-    let quote = value.chars().any(char::is_control)
+    let quote = value.is_empty()
+        || value.chars().any(char::is_control)
         || value.trim() != value
         || value.starts_with([
             '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%',
@@ -680,6 +708,44 @@ mod tests {
         );
         assert!(!only_name.contains("description:"));
         assert_eq!(editable_body(&only_name), "Texte");
+    }
+
+    #[test]
+    fn multiline_name_and_description_stay_authored_and_intact() {
+        for header in [
+            "description: |\n  Analyse un document\n  en profondeur.",
+            "description: >-\n  Rédige un plan\n  en cinq points.",
+            "description: Première partie\n  suite de la description.",
+            "description: Première partie\n\n# commentaire\n  suite de la description.",
+            "description: [premier, second]",
+            "description: {fr: Bonjour}",
+            "name:\n  - pas un titre",
+        ] {
+            let original =
+                format!("---\nname: Titre\n{header}\nlicence: MIT\norigin: upload\n---\nCorps")
+                    .replacen("name: Titre\nname:", "name:", 1);
+            let editable = editable_body(&original);
+            assert!(editable.contains(header), "{editable}");
+            assert!(!editable.contains("origin: upload"));
+            for edited in [&original, &editable] {
+                let saved = preserve_managed_frontmatter(
+                    &original,
+                    edited,
+                    "Nouveau",
+                    "Description courte",
+                );
+                assert!(saved.contains(header), "{saved}");
+                assert!(!saved.contains("description: \"|\""));
+                assert_eq!(editable_body(&saved), editable_body(&original));
+            }
+        }
+        let original = "---\nname: Titre\ndescription: Ancienne\norigin: upload\n---\nCorps";
+        let cleared = preserve_managed_frontmatter(original, original, "Titre", "");
+        assert!(cleared.contains("description: \"\""));
+        assert_eq!(editable_body(&cleared), "Corps");
+        let described = preserve_managed_frontmatter(&cleared, &cleared, "Titre", "Nouvelle");
+        assert!(described.contains("description: Nouvelle"));
+        assert_eq!(described.matches("description:").count(), 1);
     }
 
     #[test]

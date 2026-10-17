@@ -47,6 +47,11 @@ input[type="number"]::-webkit-outer-spin-button {
   margin: 0;
 }
 
+input[type="checkbox"] {
+  accent-color: var(--accent-ink);
+  vertical-align: -2px;
+}
+
 /* Dialog inputs use the roomier .text-input spacing, including selects and
    numbers. Keep their height and focus treatment aligned with adjacent fields. */
 .text-input:is(select, [type="number"]) {
@@ -62,7 +67,7 @@ input[type="number"]:focus-visible,
 [data-card-kind="secret"] input[type="password"]:focus-visible {
   border-color: var(--accent-ink);
   outline: 2px solid var(--accent-ink);
-  outline-offset: 2px;
+  outline-offset: 0;
 }
 select:disabled,
 input[type="number"]:disabled,

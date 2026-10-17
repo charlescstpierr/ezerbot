@@ -15,7 +15,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,9 +29,6 @@ const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 const REFRESH_MARGIN: u64 = 300;
-const ACCOUNT: &str = "local-workspace";
-const TITLE_INSTRUCTIONS: &str = "Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.";
-const TITLE_LENGTH: usize = 60;
 
 #[derive(Clone)]
 pub struct Endpoints {
@@ -64,6 +60,9 @@ pub struct Failure {
     pub message: String,
     pub kind: &'static str,
 }
+
+type MetadataSink<'a> =
+    dyn FnMut(Option<&str>, Option<&Failure>) -> grokbot_engine::contracts::Result<()> + 'a;
 
 impl Failure {
     fn other(message: impl Into<String>) -> Self {
@@ -106,23 +105,6 @@ pub struct Model {
     pub efforts: Vec<Effort>,
     pub default_effort: Option<String>,
     pub tiers: Vec<Tier>,
-}
-
-pub struct Run {
-    pub conversation: String,
-    pub message: String,
-    /// Instructions composées à partir du bot de la conversation.
-    pub instructions: String,
-    /// Outils de proposition, en mode strict. Vide pour tout bot sauf le bot par défaut.
-    pub tools: Vec<Value>,
-    /// Paires (rôle, texte), de la plus ancienne à la plus récente.
-    pub history: Vec<(&'static str, String)>,
-    pub model: String,
-    pub effort: Option<String>,
-    /// Identifiant du palier de vitesse choisi; absent pour la vitesse standard.
-    pub service_tier: Option<String>,
-    /// Demande un titre de conversation tiré du sujet, une fois la réponse terminée.
-    pub retitle: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -208,7 +190,6 @@ struct Attempt {
 
 struct Inner {
     file: PathBuf,
-    db: PathBuf,
     endpoints: Endpoints,
     open_browser: bool,
     // Sérialise les lectures, les écritures et les renouvellements : le jeton de renouvellement tourne.
@@ -236,13 +217,6 @@ fn seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn random_token(bytes: usize) -> String {
@@ -435,144 +409,6 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-/// Un événement du flux Responses, réduit à ce que l'affichage et les propositions utilisent.
-#[derive(Debug, PartialEq)]
-enum StreamEvent {
-    Delta(String),
-    /// `response.function_call_arguments.delta` : un fragment des arguments d'un appel.
-    CallDelta {
-        item_id: String,
-        delta: String,
-    },
-    /// `response.output_item.done` d'un élément `function_call` : l'appel complet.
-    Call(ToolCall),
-    Completed,
-    Incomplete,
-    Failed(Failure),
-    Other,
-}
-
-fn stream_event(data: &str) -> StreamEvent {
-    let Ok(event) = serde_json::from_str::<Value>(data) else {
-        return StreamEvent::Other;
-    };
-    match event["type"].as_str().unwrap_or_default() {
-        "response.output_text.delta" => {
-            StreamEvent::Delta(event["delta"].as_str().unwrap_or_default().into())
-        }
-        "response.function_call_arguments.delta" => StreamEvent::CallDelta {
-            item_id: text(&event["item_id"]),
-            delta: text(&event["delta"]),
-        },
-        // `response.output_item.added` et `response.function_call_arguments.done` annoncent le
-        // même appel ; l'élément terminé porte à lui seul `call_id`, `name` et `arguments`.
-        "response.output_item.done" if event["item"]["type"] == "function_call" => {
-            let item = &event["item"];
-            StreamEvent::Call(ToolCall {
-                item_id: text(&item["id"]),
-                call_id: text(&item["call_id"]),
-                name: text(&item["name"]),
-                arguments: text(&item["arguments"]),
-            })
-        }
-        "response.completed" => StreamEvent::Completed,
-        "response.incomplete" => StreamEvent::Incomplete,
-        "response.failed" => {
-            let (code, message, _) = error_parts(&event["response"]);
-            StreamEvent::Failed(failure(0, &code, &message))
-        }
-        "error" => {
-            let (code, message, _) = error_parts(&event);
-            StreamEvent::Failed(failure(0, &code, &message))
-        }
-        _ => StreamEvent::Other,
-    }
-}
-
-fn request_body(run: &Run, effort: Option<&str>, tier: Option<&str>) -> Value {
-    let input: Vec<Value> = run
-        .history
-        .iter()
-        .map(|(role, text)| json!({"role": role, "content": text}))
-        .collect();
-    // `store: false` et `stream: true` sont exigés par ce parcours; l'historique voyage dans `input`.
-    let mut body = json!({
-        "model": run.model, "instructions": run.instructions, "input": input, "store": false, "stream": true,
-    });
-    if let Some(effort) = effort {
-        body["reasoning"] = json!({"effort": effort});
-    }
-    if let Some(tier) = tier {
-        body["service_tier"] = json!(tier);
-    }
-    if !run.tools.is_empty() {
-        body["tools"] = json!(run.tools);
-    }
-    body
-}
-
-/// Ce qu'un flux terminé laisse : des notes à afficher sous la réponse et les appels de fonction.
-#[derive(Default)]
-struct Streamed {
-    notices: Vec<String>,
-    calls: Vec<ToolCall>,
-}
-
-impl Streamed {
-    fn notice(&self) -> Option<String> {
-        (!self.notices.is_empty()).then(|| self.notices.join(" "))
-    }
-}
-
-/// Ramène la réponse du modèle à une ligne courte et propre pour la liste des conversations.
-fn clean_title(raw: &str) -> Option<String> {
-    let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
-    let line = line.trim_matches(|character: char| {
-        character.is_whitespace()
-            || matches!(
-                character,
-                '"' | '\'' | '«' | '»' | '“' | '”' | '`' | '*' | '#' | '_'
-            )
-    });
-    let line = line.trim_end_matches(['.', ':', ' ']);
-    let words: String = line
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect();
-    if words.is_empty() {
-        return None;
-    }
-    if words.chars().count() <= TITLE_LENGTH {
-        return Some(words);
-    }
-    let prefix: String = words.chars().take(TITLE_LENGTH - 1).collect();
-    Some(format!("{}…", prefix.trim_end()))
-}
-
-/// Le début de l'échange suffit pour nommer le sujet; chaque tour est tronqué.
-fn title_transcript(history: &[(&'static str, String)], reply: &str) -> String {
-    let turn = |role: &str, text: &str| {
-        let excerpt: String = text.chars().take(700).collect();
-        format!(
-            "{} : {excerpt}",
-            if role == "user" {
-                "Utilisateur"
-            } else {
-                "Assistant"
-            }
-        )
-    };
-    let mut lines: Vec<String> = history
-        .iter()
-        .map(|(role, text)| turn(role, text))
-        .collect();
-    lines.push(turn("assistant", reply));
-    lines.join("\n\n")
-}
-
 fn page(title: &str, detail: &str) -> String {
     format!("<!doctype html><html lang=\"fr\"><meta charset=\"utf-8\"><title>Grokbot</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#0a0b0d;color:#e6e7ea;font:16px -apple-system,sans-serif\"><main style=\"max-width:420px;padding:24px;text-align:center\"><h1 style=\"font-size:22px\">{title}</h1><p style=\"color:#9a9fa9\">{detail}</p></main></body></html>")
 }
@@ -593,7 +429,6 @@ impl Provider {
         Self {
             inner: Arc::new(Inner {
                 file,
-                db: db.to_owned(),
                 endpoints,
                 open_browser,
                 credentials: Mutex::new(()),
@@ -1095,16 +930,16 @@ impl Provider {
     /// Sends an unmodified Responses body and returns the raw JSON/SSE response.
     /// Authentication is renewed at most once after a 401; other failures are not retried.
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
-        self.responses_with_options(body, false)
+        self.responses_with_options(body, false, &mut Vec::new())
     }
 
     /// Only the engine adapter opts into the legacy effort/Fast compatibility fallback.
     /// One authentication refresh is shared across all attempts of this logical request.
-    /// TODO(engine-cutover): ModelEvent needs a notice channel for downgraded settings.
     fn responses_with_options(
         &self,
         mut body: Value,
         capability_fallback: bool,
+        notices: &mut Vec<String>,
     ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
         let accept = if body["stream"] == true {
@@ -1134,6 +969,7 @@ impl Provider {
                 body.as_object_mut()
                     .expect("field belongs to an object")
                     .remove("service_tier");
+                notices.push("OpenAI n’accepte pas la vitesse Fast avec cette connexion. La réponse a utilisé la vitesse Standard.".into());
             } else if capability_fallback
                 && status == 400
                 && (param.contains("reasoning") || message.contains("reasoning"))
@@ -1142,6 +978,7 @@ impl Provider {
                 body.as_object_mut()
                     .expect("field belongs to an object")
                     .remove("reasoning");
+                notices.push("Ce modèle n’accepte pas ce niveau d’effort. La réponse a utilisé son réglage par défaut.".into());
             } else if status == 0 {
                 return Err(network_failure());
             } else {
@@ -1150,250 +987,98 @@ impl Provider {
         }
     }
 
-    fn run_key(conversation: &str, message: &str) -> String {
-        format!("{conversation}\n{message}")
+    /// Process-local ownership only; durable lifecycle belongs to grokbot-engine.
+    pub(crate) fn claim_run(&self, id: &str) -> Option<Arc<AtomicBool>> {
+        let mut runs = lock(&self.inner.runs);
+        if runs.contains_key(id) {
+            return None;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        runs.insert(id.into(), cancel.clone());
+        Some(cancel)
     }
-
-    pub fn running(&self, conversation: &str, message: &str) -> bool {
-        lock(&self.inner.runs).contains_key(&Self::run_key(conversation, message))
+    pub(crate) fn release_run(&self, id: &str) {
+        lock(&self.inner.runs).remove(id);
     }
-
-    pub fn stop(&self, conversation: &str, message: &str) {
-        if let Some(cancel) = lock(&self.inner.runs).get(&Self::run_key(conversation, message)) {
+    pub(crate) fn cancel_run(&self, id: &str) {
+        if let Some(cancel) = lock(&self.inner.runs).get(id) {
             cancel.store(true, Ordering::SeqCst);
         }
     }
-
-    /// Lance la génération en arrière-plan. Le texte partiel et l'état final vont dans SQLite,
-    /// où la boucle HTTP les relit : elle ne reste jamais bloquée sur OpenAI.
-    pub fn generate(&self, run: Run) {
-        let key = Self::run_key(&run.conversation, &run.message);
-        let cancel = Arc::new(AtomicBool::new(false));
-        lock(&self.inner.runs).insert(key.clone(), cancel.clone());
-        let provider = self.clone();
-        thread::spawn(move || {
-            let outcome = provider.stream(&run, &cancel);
-            if !cancel.load(Ordering::SeqCst) {
-                let completed = outcome.is_ok() && run.retitle;
-                if completed {
-                    // Compté avant de marquer la réponse terminée : l'interface ne cesse pas de relire.
-                    provider.inner.titling.fetch_add(1, Ordering::SeqCst);
-                }
-                let connection = provider.database();
-                let (status, error, kind, notice) = match outcome {
-                    Ok(mut streamed) => {
-                        // Les propositions sont enregistrées avant l'état `done` : l'interface les
-                        // voit avec la réponse terminée. Un appel invalide devient une note.
-                        for call in &streamed.calls {
-                            let recorded =
-                                connection.as_ref().map_err(|_| ()).and_then(|connection| {
-                                    crate::record_proposal(
-                                        connection,
-                                        &run.conversation,
-                                        &run.message,
-                                        call,
-                                    )
-                                    .map_err(|_| ())
-                                });
-                            match recorded {
-                                Ok(Some(notice)) => streamed.notices.push(notice),
-                                Ok(None) => {}
-                                Err(()) => streamed.notices.push(
-                                    "Une proposition de bot n’a pas pu être enregistrée.".into(),
-                                ),
-                            }
-                        }
-                        ("done", None, None, streamed.notice())
-                    }
-                    Err(failure) => ("failed", Some(failure.message), Some(failure.kind), None),
-                };
-                if let Ok(connection) = connection {
-                    let _ = connection.execute(
-                        "UPDATE wrapper_generation SET status = ?4, error = ?5, error_kind = ?6, notice = ?7, updated_at = ?8 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming'",
-                        params![ACCOUNT, run.conversation, run.message, status, error, kind, notice, millis()],
-                    );
-                }
-                if completed {
-                    lock(&provider.inner.runs).remove(&key);
-                    let _ = provider.retitle(&run);
-                    provider.inner.titling.fetch_sub(1, Ordering::SeqCst);
-                }
-            }
-            lock(&provider.inner.runs).remove(&key);
-        });
+    pub(crate) fn title_started(&self) {
+        self.inner.titling.fetch_add(1, Ordering::SeqCst);
+    }
+    pub(crate) fn title_finished(&self) {
+        self.inner.titling.fetch_sub(1, Ordering::SeqCst);
     }
 
-    /// Demande au modèle un titre tiré du sujet et l'écrit, sauf si l'utilisateur a nommé la conversation.
-    fn retitle(&self, run: &Run) -> Option<()> {
-        let connection = self.database().ok()?;
-        let reply: String = connection
-            .query_row(
-                "SELECT reply FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
-                params![ACCOUNT, run.conversation, run.message],
-                |row| row.get(0),
-            )
-            .ok()?;
-        let token = self.bearer(false).ok()?;
-        let body = json!({
-            "model": run.model, "instructions": TITLE_INSTRUCTIONS, "store": false, "stream": true,
-            "input": [{"role": "user", "content": title_transcript(&run.history, &reply)}],
-        });
-        let response = agent()
-            .post(&format!("{}/responses", self.inner.endpoints.api))
-            .set("Authorization", &format!("Bearer {token}"))
-            .set("Accept", "text/event-stream")
-            .send_json(body)
-            .ok()?;
-        let mut text = String::new();
-        let mut data = String::new();
-        for line in BufReader::new(response.into_reader()).lines() {
-            let line = line.ok()?;
-            if let Some(chunk) = line.strip_prefix("data:") {
-                data.push_str(chunk.trim_start());
-            } else if line.is_empty() && !data.is_empty() {
-                match stream_event(&data) {
-                    StreamEvent::Delta(delta) => text.push_str(&delta),
-                    StreamEvent::Completed => break,
-                    StreamEvent::Incomplete | StreamEvent::Failed(_) => return None,
-                    StreamEvent::CallDelta { .. } | StreamEvent::Call(_) | StreamEvent::Other => {}
-                }
-                data.clear();
-            }
-        }
-        let title = clean_title(&text)?;
-        connection
-            .execute(
-                "UPDATE wrapper_conversations SET title = ?3 WHERE account_id = ?1 AND id = ?2 AND title_customized = 0 AND deleted = 0",
-                params![ACCOUNT, run.conversation, title],
-            )
-            .ok()?;
-        Some(())
-    }
-
-    fn database(&self) -> rusqlite::Result<Connection> {
-        let connection = Connection::open(&self.inner.db)?;
-        connection.busy_timeout(Duration::from_secs(3))?;
-        Ok(connection)
-    }
-
-    /// Rend les notes à afficher sous la réponse, par exemple quand un réglage a dû être retiré,
-    /// et les appels de fonction terminés. Un flux annulé rend un résultat vide.
-    fn stream(&self, run: &Run, cancel: &AtomicBool) -> Result<Streamed, Failure> {
-        let connection = self
-            .database()
-            .map_err(|_| Failure::other("Le stockage local est indisponible."))?;
-        let mut effort = run.effort.as_deref();
-        let mut tier = run.service_tier.as_deref();
-        let mut streamed = Streamed::default();
-        let mut refreshed = false;
-        let response = loop {
-            let token = self.bearer(false)?;
-            let attempt = agent()
-                .post(&format!("{}/responses", self.inner.endpoints.api))
-                .set("Authorization", &format!("Bearer {token}"))
-                .set("Accept", "text/event-stream")
-                .send_json(request_body(run, effort, tier));
-            let (status, code, message, param) = match attempt {
-                Ok(response) => break response,
-                Err(error) => request_failure(error),
-            };
-            if status == 0 {
-                return Err(network_failure());
-            }
-            if status == 401 && !refreshed {
-                refreshed = true;
-                self.bearer(true)?;
-            } else if status == 400
-                && tier.is_some()
-                && (param.contains("service_tier") || message.contains("service_tier"))
-            {
-                tier = None;
-                streamed.notices.push("OpenAI n’accepte pas la vitesse Fast avec cette connexion. La réponse a utilisé la vitesse Standard.".into());
-            } else if status == 400
-                && effort.is_some()
-                && (param.contains("reasoning") || message.contains("reasoning"))
-            {
-                effort = None;
-                streamed.notices.push("Ce modèle n’accepte pas ce niveau d’effort. La réponse a utilisé son réglage par défaut.".into());
-            } else {
-                return Err(failure(status, &code, &message));
-            }
-        };
-        let mut text = String::new();
-        let mut data = String::new();
-        // Fragments d'arguments par élément, au cas où l'élément terminé arriverait sans eux.
-        let mut fragments: HashMap<String, String> = HashMap::new();
-        let mut written = Instant::now();
-        let save = |text: &str| {
-            connection.execute(
-                "UPDATE wrapper_remote SET reply = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
-                params![ACCOUNT, run.conversation, run.message, text],
-            )
-        };
-        let interrupted = || {
-            Failure::other("La réponse a été interrompue avant la fin. Vous pouvez la relancer.")
-        };
-        for line in BufReader::new(response.into_reader()).lines() {
-            if cancel.load(Ordering::SeqCst) {
-                return Ok(Streamed::default());
-            }
-            let line = line.map_err(|_| interrupted())?;
-            if let Some(chunk) = line.strip_prefix("data:") {
-                data.push_str(chunk.trim_start());
-                continue;
-            }
-            if !line.is_empty() || data.is_empty() {
-                continue;
-            }
-            let event = stream_event(&data);
-            data.clear();
-            match event {
-                StreamEvent::Delta(delta) => {
-                    text.push_str(&delta);
-                    if written.elapsed() >= Duration::from_millis(80) {
-                        let _ = save(&text);
-                        written = Instant::now();
-                    }
-                }
-                StreamEvent::CallDelta { item_id, delta } => {
-                    fragments.entry(item_id).or_default().push_str(&delta);
-                }
-                StreamEvent::Call(mut call) => {
-                    if call.arguments.is_empty() {
-                        call.arguments = fragments.remove(&call.item_id).unwrap_or_default();
-                    }
-                    streamed.calls.push(call);
-                }
-                StreamEvent::Completed | StreamEvent::Incomplete => {
-                    if cancel.load(Ordering::SeqCst) {
-                        return Ok(Streamed::default());
-                    }
-                    save(&text)
-                        .map_err(|_| Failure::other("Le stockage local est indisponible."))?;
-                    if matches!(event, StreamEvent::Incomplete) {
-                        streamed
-                            .notices
-                            .push("OpenAI a arrêté cette réponse avant la fin.".into());
-                    }
-                    return Ok(streamed);
-                }
-                StreamEvent::Failed(failure) => {
-                    let _ = save(&text);
-                    return Err(failure);
-                }
-                StreamEvent::Other => {}
-            }
-        }
+    /// Wrapper metadata is an adapter side channel, not another text generator.
+    /// This preserves Fast notices and reconnect/usage actions without changing
+    /// the shared ModelEvent contract or bypassing its one Responses parser.
+    pub(crate) fn stream_run(
+        &self,
+        request: &grokbot_engine::contracts::ModelRequest,
+        cancel: &AtomicBool,
+        metadata: &mut MetadataSink<'_>,
+        emit: &mut dyn FnMut(
+            grokbot_engine::contracts::ModelEvent,
+        ) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        use grokbot_engine::contracts::{Error, ModelEvent};
         if cancel.load(Ordering::SeqCst) {
-            return Ok(Streamed::default());
+            return Err(Error::InvalidInput("run cancelled".into()));
         }
-        // Une réponse ne compte comme terminée qu'après `response.completed`.
-        let _ = save(&text);
-        Err(interrupted())
+        let mut body = crate::gateway::request_body(request)?;
+        // Keep the accepted legacy plain-text input shape for ordinary chats.
+        for item in body["input"].as_array_mut().expect("gateway input") {
+            if let Some(content) = item["content"].as_array() {
+                if content.len() == 1 && content[0]["type"] == "input_text" {
+                    item["content"] = content[0]["text"].clone();
+                }
+            }
+        }
+        let mut notices = Vec::new();
+        let response = match self.responses_with_options(body, true, &mut notices) {
+            Ok(response) => response,
+            Err(failure) => {
+                metadata(None, Some(&failure))?;
+                return emit(ModelEvent::Failed {
+                    reason: failure.message,
+                });
+            }
+        };
+        if !notices.is_empty() {
+            metadata(Some(&notices.join(" ")), None)?;
+        }
+        let reader = Cancellable {
+            reader: BufReader::new(response.into_reader()),
+            cancel,
+        };
+        crate::gateway::stream_response(reader, &mut |event| {
+            if let ModelEvent::Failed { reason } = &event {
+                let kind = if reason.contains("Limite d’utilisation")
+                    || reason.contains("Limite d'utilisation")
+                {
+                    "limit"
+                } else if reason.contains("Reconnectez") {
+                    "signin"
+                } else {
+                    "other"
+                };
+                metadata(
+                    None,
+                    Some(&Failure {
+                        message: reason.clone(),
+                        kind,
+                    }),
+                )?;
+            }
+            emit(event)
+        })
     }
 }
 
-/// The engine adapter is independent of the legacy `Run`/`generate` path until cutover.
+/// Responses is the sole model transport; the engine owns generation and replay.
 impl grokbot_engine::contracts::ModelGateway for Provider {
     fn stream(
         &self,
@@ -1403,7 +1088,7 @@ impl grokbot_engine::contracts::ModelGateway for Provider {
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
         let body = crate::gateway::request_body(request)?;
-        match self.responses_with_options(body, true) {
+        match self.responses_with_options(body, true, &mut Vec::new()) {
             Ok(response) => {
                 crate::gateway::stream_response(BufReader::new(response.into_reader()), emit)
             }
@@ -1411,6 +1096,32 @@ impl grokbot_engine::contracts::ModelGateway for Provider {
                 reason: failure.message,
             }),
         }
+    }
+}
+
+/// Probe cancellation even while the shared parser ignores a keepalive or an
+/// argument delta. A blocked network read still obeys the transport deadline.
+struct Cancellable<'a, R> {
+    reader: R,
+    cancel: &'a AtomicBool,
+}
+impl<R: BufRead> std::io::Read for Cancellable<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("run cancelled"));
+        }
+        self.reader.read(bytes)
+    }
+}
+impl<R: BufRead> BufRead for Cancellable<'_, R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("run cancelled"));
+        }
+        self.reader.fill_buf()
+    }
+    fn consume(&mut self, amount: usize) {
+        self.reader.consume(amount);
     }
 }
 
@@ -1482,151 +1193,5 @@ mod tests {
                 && models[1].tiers.is_empty()
                 && models[1].default_effort.is_none()
         );
-    }
-
-    #[test]
-    fn titles_are_reduced_to_one_short_clean_line() {
-        assert_eq!(
-            clean_title("\n« Service de notifications en Rust. »\nAutre ligne").as_deref(),
-            Some("Service de notifications en Rust")
-        );
-        assert_eq!(
-            clean_title("**Recette   de\tpain**").as_deref(),
-            Some("Recette de pain")
-        );
-        assert_eq!(clean_title("  \n \"\" "), None);
-        let long = clean_title(&"mot ".repeat(40)).unwrap();
-        assert!(long.chars().count() <= TITLE_LENGTH && long.ends_with('…'));
-        let transcript = title_transcript(&[("user", "Bonjour".into())], &"x".repeat(2000));
-        assert!(
-            transcript.starts_with("Utilisateur : Bonjour\n\nAssistant : x")
-                && transcript.chars().count() < 800
-        );
-    }
-
-    #[test]
-    fn stream_events_separate_text_completion_and_plan_errors() {
-        assert_eq!(
-            stream_event(r#"{"type":"response.output_text.delta","delta":"Bon"}"#),
-            StreamEvent::Delta("Bon".into())
-        );
-        assert_eq!(
-            stream_event(r#"{"type":"response.completed"}"#),
-            StreamEvent::Completed
-        );
-        assert_eq!(
-            stream_event(r#"{"type":"response.created"}"#),
-            StreamEvent::Other
-        );
-        let StreamEvent::Failed(failure) = stream_event(
-            r#"{"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"limit"}}}"#,
-        ) else {
-            panic!("expected a failure");
-        };
-        assert_eq!(failure.kind, "limit");
-    }
-
-    #[test]
-    fn function_call_events_are_read_as_the_documentation_describes_them() {
-        assert_eq!(
-            stream_event(
-                r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_1","name":"propose_bot","arguments":""}}"#
-            ),
-            StreamEvent::Other
-        );
-        assert_eq!(
-            stream_event(
-                r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"na"}"#
-            ),
-            StreamEvent::CallDelta {
-                item_id: "fc_1".into(),
-                delta: "{\"na".into()
-            }
-        );
-        assert_eq!(
-            stream_event(
-                r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"arguments":"{}"}"#
-            ),
-            StreamEvent::Other
-        );
-        assert_eq!(
-            stream_event(
-                r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"propose_bot","arguments":"{\"name\":\"X\"}"}}"#
-            ),
-            StreamEvent::Call(ToolCall {
-                item_id: "fc_1".into(),
-                call_id: "call_1".into(),
-                name: "propose_bot".into(),
-                arguments: "{\"name\":\"X\"}".into()
-            })
-        );
-        // Un élément texte terminé n'est pas un appel.
-        assert_eq!(
-            stream_event(
-                r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message"}}"#
-            ),
-            StreamEvent::Other
-        );
-    }
-
-    #[test]
-    fn request_body_carries_tools_only_when_the_run_has_some() {
-        let mut run = Run {
-            conversation: "c".into(),
-            message: "m".into(),
-            instructions: String::new(),
-            tools: Vec::new(),
-            history: Vec::new(),
-            model: "gpt-a".into(),
-            effort: None,
-            service_tier: None,
-            retitle: false,
-        };
-        assert!(request_body(&run, None, None).get("tools").is_none());
-        run.tools = vec![json!({"type": "function", "name": "propose_bot", "strict": true})];
-        assert_eq!(
-            request_body(&run, None, None)["tools"][0]["name"],
-            "propose_bot"
-        );
-    }
-
-    #[test]
-    fn request_body_follows_the_plan_usage_rules() {
-        let run = Run {
-            conversation: "c".into(),
-            message: "m".into(),
-            instructions: "Tu t'appelles Test.".into(),
-            tools: Vec::new(),
-            history: vec![
-                ("user", "Bonjour".into()),
-                ("assistant", "Salut".into()),
-                ("user", "Encore".into()),
-            ],
-            model: "gpt-a".into(),
-            effort: Some("high".into()),
-            service_tier: Some("priority".into()),
-            retitle: false,
-        };
-        let body = request_body(&run, run.effort.as_deref(), run.service_tier.as_deref());
-        assert_eq!(
-            (body["store"].clone(), body["stream"].clone()),
-            (json!(false), json!(true))
-        );
-        assert_eq!(body["instructions"], "Tu t'appelles Test.");
-        assert_eq!(body["input"].as_array().unwrap().len(), 3);
-        assert_eq!(body["reasoning"]["effort"], "high");
-        assert_eq!(body["service_tier"], "priority");
-        let plain = request_body(&run, None, None);
-        assert!(plain.get("reasoning").is_none() && plain.get("service_tier").is_none());
-        // Champs refusés par ce parcours.
-        for field in [
-            "previous_response_id",
-            "max_output_tokens",
-            "temperature",
-            "metadata",
-            "user",
-        ] {
-            assert!(body.get(field).is_none());
-        }
     }
 }

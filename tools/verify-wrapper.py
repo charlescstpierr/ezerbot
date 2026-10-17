@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import argparse
 import json
 import selectors
+import sqlite3
 import subprocess
 import tempfile
 import urllib.request
@@ -100,9 +101,19 @@ try:
         require('reconciliation reaches echo', any(item['role'] == 'user' and item['state'] == 'echoed'
                                                  for item in reconciled['messages']))
         repeated = active.json('/api/send', request)['conversation']
+        plain = [item for item in repeated['messages'] if item.get('kind', 'message') == 'message']
         require('same nonce has one user message and one reply',
-                sum(item['role'] == 'user' for item in repeated['messages']) == 1 and
-                sum(item['role'] == 'assistant' for item in repeated['messages']) == 1)
+                sum(item['role'] == 'user' for item in plain) == 1 and
+                sum(item['role'] == 'assistant' for item in plain) == 1)
+        require('plain reply preserves stable id and completed state',
+                any(item['id'] == 'reply-wrapper-smoke-message' and item['state'] == 'echoed'
+                    for item in plain))
+        with sqlite3.connect(database) as connection:
+            require('all responses use the durable engine exactly once',
+                    connection.execute('SELECT COUNT(*), MIN(status) FROM engine_runs').fetchone()
+                    == (1, 'finished'))
+            require('legacy generation is no longer written',
+                    connection.execute('SELECT COUNT(*) FROM wrapper_generation').fetchone()[0] == 0)
         status, _, _ = active.request('/api/send', {**request, 'body': 'Different immutable body'})
         require('same nonce and different body rejected', status == 409)
         require('fresh state lists only the default bot',

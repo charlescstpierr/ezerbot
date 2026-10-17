@@ -1,11 +1,29 @@
-//! Legacy text generation, deliberately kept intact until gb-engine-cutover.
-//! A plain chat reply keeps the `reply-<message_id>` ID and `streaming` state:
-//! app.js polling, stop/regenerate and the wrapper verification rely on them.
+//! Local run host. REA `goal-execution-autonomy.md` §14 keeps turn, tool and task
+//! completion separate; CM11 (`goal-context-memory-learning.md`) keeps reset
+//! separate from forgetting. Budgets/recovery policy are local reconstruction.
+//! Summary bounds follow RC06, with the 70% fallback from `compaction-runtimes.md`.
 
 use crate::*;
 use grokbot_domain::{ConversationId, DeliveryReceipt, MessageId, Refusal, TranscriptEntryId};
+use grokbot_engine::contracts::{
+    component_version, set_component_version, ApprovalCheck, ContextBlock, ContextBudget,
+    ContextRequest, ContextSource, Error, HistoryItem, ImageInput, ModelEvent, ModelGateway,
+    ModelRequest, Role, RunBudgets, RunEvent, RunEventKind, RunKind, Summary, SuspendCause,
+    TaskStatus, ToolItem, ToolOutcome, ToolSpec, Trigger, TurnEnd,
+};
+use grokbot_engine::{
+    compaction, context as assembler,
+    model::{self, Run, RunStatus},
+    run_loop::{self, RunServices},
+    store,
+};
+use grokbot_forms::{redact, requests, vault::Vault};
 use grokbot_session::{
     LookupOutcome, ReconciliationRequest, SendOutcome, SendRequest, SubmissionTransport,
+};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 #[derive(Deserialize)]
@@ -20,145 +38,33 @@ struct SendMessage {
     #[serde(default)]
     simulate_loss: bool,
 }
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconcileMessage {
     conversation_id: String,
     message_id: String,
 }
-
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reset {
+    conversation_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Configuration {
+    estimated_tokens: usize,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-/// Kept disabled just as before: this slice does not reactivate bot proposals.
-const PROPOSALS_ENABLED: bool = false;
-
-/// Les deux outils de proposition, en mode strict : chaque objet ferme `additionalProperties`,
-/// tous les champs sont requis, et les champs facultatifs acceptent `null`.
-fn proposal_tools() -> Vec<Value> {
-    let text = |description: &str| json!({"type": "string", "description": description});
-    let choice = |values: &[&str], description: &str| json!({"type": "string", "enum": values, "description": description});
-    let optional = |schema: Value| json!({"anyOf": [schema, {"type": "null"}]});
-    let fields = [
-        ("name", text("Nom court du bot, 40 caractères au plus.")),
-        ("shape", choice(&SHAPES, "Silhouette de la mascotte.")),
-        (
-            "color",
-            choice(&ACCENTS, "Couleur des yeux de la mascotte."),
-        ),
-        (
-            "description",
-            text("Présentation publique, une ou deux phrases, 280 caractères au plus."),
-        ),
-        (
-            "instructions",
-            text("Personnalité privée : ton, manières, limites. 8 000 caractères au plus."),
-        ),
-    ];
-    let required: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
-    let object = |properties: serde_json::Map<String, Value>, required: Vec<&str>| json!({"type": "object", "additionalProperties": false, "properties": properties, "required": required});
-    let mut create: serde_json::Map<String, Value> = fields
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
-        .collect();
-    create.insert(
-        "reason".into(),
-        text("Pourquoi ce bot serait utile, en une phrase."),
-    );
-    let changes: serde_json::Map<String, Value> = fields
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), optional(schema.clone())))
-        .collect();
-    let mut update = serde_json::Map::new();
-    update.insert(
-        "bot_id".into(),
-        text("Identifiant exact d'un bot existant."),
-    );
-    update.insert("changes".into(), object(changes, required.clone()));
-    update.insert(
-        "reason".into(),
-        text("Pourquoi cette modification serait utile, en une phrase."),
-    );
-    vec![
-        json!({
-            "type": "function", "name": "propose_bot", "strict": true,
-            "description": "Propose à l'utilisateur de créer un nouveau bot. Rien n'est créé sans sa confirmation.",
-            "parameters": object(create, [required.clone(), vec!["reason"]].concat()),
-        }),
-        json!({
-            "type": "function", "name": "propose_bot_update", "strict": true,
-            "description": "Propose à l'utilisateur de modifier un bot existant. Les champs à laisser tels quels sont null. Rien ne change sans sa confirmation.",
-            "parameters": object(update, vec!["bot_id", "changes", "reason"]),
-        }),
-    ]
-}
-
-pub(crate) fn tools_for(bot: &Bot) -> Vec<Value> {
-    if bot.is_default && PROPOSALS_ENABLED {
-        proposal_tools()
-    } else {
-        Vec::new()
-    }
-}
-
-fn proposal_transcript(proposal: &Proposal) -> String {
-    let status = match proposal.status.as_str() {
-        "accepted" => "acceptée",
-        "dismissed" => "refusée",
-        "stale" => "périmée",
-        _ => "en attente",
-    };
-    if proposal.kind == "update" {
-        let target = proposal.bot_id.as_deref().unwrap_or("?");
-        format!("[Proposition de modification du bot « {target} » : {status}]")
-    } else {
-        let name = proposal.payload["name"].as_str().unwrap_or("?");
-        format!("[Proposition de bot « {name} » : {status}]")
-    }
-}
-
-fn suggested_title(body: &str) -> Option<String> {
-    let line: String = body
-        .lines()
-        .next()?
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect();
-    let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.is_empty() {
-        return None;
-    }
-    if title.chars().count() <= 80 {
-        return Some(title);
-    }
-    let prefix: String = title.chars().take(79).collect();
-    Some(format!("{}…", prefix.trim_end()))
-}
-use grokbot_engine::contracts::{
-    ContextBlock, ContextRequest, ContextSource, HistoryItem, Role, Trigger,
-};
-
-empty_hooks!(
-    migrate,
-    state,
-    tick,
-    tools,
-    call_tool,
-    entry,
-    on_run_event,
-    link_attachments
-);
-
+empty_hooks!(tools, call_tool, link_attachments);
+const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
-type GenerationRow = (String, Option<String>, Option<String>, Option<String>);
-
 const DEMO_REPLY: &str = "Bien reçu. Ton message est conservé dans cette conversation. Le mode local simule les réponses ; aucun service d'intelligence artificielle n'est connecté.";
 const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule les réponses.\n\n```mermaid\nflowchart LR\n  A[Votre message] --> B{Grokbot}\n  B -->|texte| C[Réponse]\n  B -->|schéma| D[Diagramme]\n  C & D --> E[(Historique local)]\n```\n\nPassez la souris sur le diagramme pour le copier, le télécharger ou l'agrandir.";
 const DEMO_CODE: &str = "Voici un exemple de code. Le mode local simule les réponses.\n\n```rust\nfn saluer(nom: &str) -> String {\n    format!(\"Bonjour, {nom} !\")\n}\n\nfn main() {\n    println!(\"{}\", saluer(\"Grokbot\"));\n}\n```\n\nLe bouton en haut du bloc copie le code.";
 const DEMO_TABLE: &str = "Voici un tableau d'exemple. Le mode local simule les réponses.\n\n| Élément | Rôle | État |\n| --- | --- | --- |\n| Moteur Rust | Garde l'historique | Actif |\n| Interface | Affiche la conversation | Active |\n| Service d'IA | Répond aux messages | **Non connecté** |\n\nLa formule $E = mc^2$ s'affiche aussi.";
-
 pub(crate) fn demo_reply(body: &str) -> &'static str {
     let body = body.to_lowercase();
     let mentions = |words: &[&str]| words.iter().any(|word| body.contains(word));
@@ -172,11 +78,13 @@ pub(crate) fn demo_reply(body: &str) -> &'static str {
         DEMO_REPLY
     }
 }
-
-const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
-const PROPOSAL_INSTRUCTIONS: &str = "Tu peux proposer à l'utilisateur de créer un nouveau bot avec l'outil propose_bot, ou de modifier un bot existant avec propose_bot_update, quand il le demande ou que c'est clairement utile. Remplis une vraie personnalité : un nom court, une présentation d'une ou deux phrases et des consignes de comportement précises. Rien ne change sans sa confirmation : il verra ta proposition sous ta réponse et choisira. Pour une modification, bot_id est l'identifiant exact d'un bot de la liste.";
-
-pub(crate) fn compose_instructions(bot: &Bot, bots: &[Bot]) -> String {
+// Proposal tools remain disabled, as before this cutover.
+#[cfg(test)]
+pub(crate) fn tools_for(_: &Bot) -> Vec<Value> {
+    Vec::new()
+}
+#[cfg(test)]
+pub(crate) fn compose_instructions(bot: &Bot, _: &[Bot]) -> String {
     let mut parts = vec![
         BASE_INSTRUCTIONS.to_owned(),
         format!("Tu t'appelles {}.", bot.name),
@@ -193,33 +101,172 @@ pub(crate) fn compose_instructions(bot: &Bot, bots: &[Bot]) -> String {
             bot.instructions
         ));
     }
-    if bot.is_default && PROPOSALS_ENABLED {
-        let roster: Vec<String> = bots
-            .iter()
-            .filter(|known| !known.deleted)
-            .map(|known| {
-                if known.description.is_empty() {
-                    format!("- {} : {}", known.id, known.name)
-                } else {
-                    format!("- {} : {} — {}", known.id, known.name, known.description)
-                }
-            })
-            .collect();
-        parts.push(format!(
-            "{PROPOSAL_INSTRUCTIONS}\n\nBots existants (identifiant : nom — présentation) :\n{}",
-            roster.join("\n")
-        ));
-    }
     parts.join("\n\n")
 }
-
-/// No generation thread survives a process restart. The run engine replaces this
-/// sweep with durable Interrupted runs at cutover, not in the host or dispatcher.
-pub fn startup(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute(
-        "UPDATE wrapper_generation SET status = 'failed', error = ?1, error_kind = 'other', updated_at = ?2 WHERE status = 'streaming'",
-        params![INTERRUPTED, now()],
+fn item(id: &str, role: Role, text: String) -> HistoryItem {
+    HistoryItem {
+        entry_id: id.into(),
+        role,
+        text,
+        images: vec![],
+        tool_items: vec![],
+    }
+}
+fn engine_error(_: ApiError) -> Error {
+    Error::InvalidInput("capability storage operation failed".into())
+}
+fn database(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(3))?;
+    conn.pragma_update(None, "secure_delete", true)?;
+    Ok(conn)
+}
+fn vault(path: &Path) -> grokbot_engine::contracts::Result<Vault> {
+    Vault::open(&path.with_extension("secrets.json"))
+}
+fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<ContextBudget> {
+    let tokens = conn.query_row(
+        "SELECT estimated_tokens FROM wrapper_engine_config WHERE account_id=?1",
+        [ACCOUNT],
+        |r| r.get(0),
     )?;
+    Ok(ContextBudget {
+        estimated_tokens: tokens,
+        ..ContextBudget::default()
+    })
+}
+
+pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    store::migrate(conn)?;
+    compaction::migrate(conn)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wrapper_engine_runs (
+        run_id TEXT PRIMARY KEY, input_json TEXT NOT NULL, live INTEGER NOT NULL,
+        model TEXT NOT NULL, effort TEXT, service_tier TEXT, error TEXT, error_kind TEXT,
+        notice TEXT, title_state TEXT NOT NULL DEFAULT 'none', retries INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS wrapper_engine_config (
+        account_id TEXT PRIMARY KEY, estimated_tokens INTEGER NOT NULL
+    );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO wrapper_engine_config VALUES (?1,100000)",
+        [ACCOUNT],
+    )?;
+    // Only pre-cutover rows are imported. New wrapper_remote rows are acceptance
+    // receipts, NOT another response journal. The version write is atomic with import.
+    if component_version(conn, "wrapper.engine")? == 0 {
+        let mut stmt = conn.prepare("SELECT r.conversation_id,r.message_id,r.body,r.reply,r.created_at,c.bot_id,
+            g.status,g.error,g.error_kind,g.notice FROM wrapper_remote r
+            JOIN wrapper_conversations c ON c.account_id=r.account_id AND c.id=r.conversation_id
+            LEFT JOIN wrapper_generation g ON g.account_id=r.account_id AND g.conversation_id=r.conversation_id AND g.message_id=r.message_id
+            WHERE r.account_id=?1 ORDER BY r.created_at,r.rowid")?;
+        let rows = stmt
+            .query_map([ACCOUNT], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (conversation, message, text, reply, created, bot, status, error, kind, notice) in rows
+        {
+            let run = Run {
+                run_id: format!("legacy-{message}"),
+                bot_id: bot,
+                conversation_id: conversation,
+                trigger: Trigger::UserMessage {
+                    message_id: message.clone(),
+                    attempt: 0,
+                },
+                kind: RunKind::Chat,
+                status: RunStatus::Queued,
+                task_status: None,
+                turn_end: None,
+                budgets: RunBudgets::default(),
+                started_at: created,
+            };
+            let mut run = model::start(conn, &run)?;
+            conn.execute("INSERT OR IGNORE INTO wrapper_engine_runs(run_id,input_json,live,model,error,error_kind,notice) VALUES (?1,?2,?3,'',?4,?5,?6)",
+                params![run.run_id,serde_json::to_string(&item(&message,Role::User,text)).map_err(|_| ApiError::new(500,"Migration invalide."))?,status.is_some(),error,kind,notice])?;
+            model::set_running_at(conn, &run.run_id, created)?;
+            if !reply.is_empty() {
+                store::append_event(
+                    conn,
+                    &run.run_id,
+                    RunEventKind::TextDelta,
+                    &json!({"text":reply,"response":0}),
+                )?;
+            }
+            match status.as_deref() {
+                Some("streaming") => {
+                    run.status = RunStatus::Interrupted;
+                    store::save(conn, &run)?;
+                    store::append_event(
+                        conn,
+                        &run.run_id,
+                        RunEventKind::Interrupted,
+                        &json!({"reason":"process_restart"}),
+                    )?;
+                }
+                Some("failed") => {
+                    run.status = RunStatus::Failed;
+                    store::save(conn, &run)?;
+                    store::append_event(
+                        conn,
+                        &run.run_id,
+                        RunEventKind::TurnEnded,
+                        &json!({"failed":true,"response":0}),
+                    )?;
+                }
+                Some("stopped") => {
+                    model::cancel(conn, &run.run_id, TurnEnd::Stopped)?;
+                }
+                _ => {
+                    run.status = RunStatus::Finished;
+                    run.turn_end = Some(TurnEnd::Finished);
+                    store::save(conn, &run)?;
+                    store::append_event(
+                        conn,
+                        &run.run_id,
+                        RunEventKind::TurnEnded,
+                        &json!({"turn_end":"finished","response":0}),
+                    )?;
+                }
+            }
+        }
+        set_component_version(conn, "wrapper.engine", 1)?;
+    }
+    Ok(())
+}
+
+pub fn startup(conn: &Connection) -> Result<(), ApiError> {
+    conn.pragma_update(None, "secure_delete", true)?;
+    let tx = super::write_transaction(conn)?;
+    // No old generation threads survive a process restart. Preserve events and
+    // usage; the next tick claims Interrupted IDs, never a new trigger/attempt.
+    for mut run in store::runs_with_status(&tx, RunStatus::Running)? {
+        run.status = RunStatus::Interrupted;
+        store::save(&tx, &run)?;
+        let event = store::append_event(
+            &tx,
+            &run.run_id,
+            RunEventKind::Interrupted,
+            &json!({"reason":"process_restart"}),
+        )?;
+        // Recovery has no provider/context; capability hooks consume identifiers only.
+        // Reactions to Interrupted do not complete a routine or child.
+        let _ = event;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -240,13 +287,14 @@ pub fn routes(
                 | "/api/provider/signout"
                 | "/api/stop"
                 | "/api/regenerate"
+                | "/api/conversations/reset"
+                | "/api/engine/config"
         )
     {
         return None;
     }
     Some(route(app, path, body).map(ApiResponse::Json))
 }
-
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
         "/api/send" => {
@@ -258,8 +306,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 validate_id(id)?;
             }
             let text = input.body.trim();
-            let conversation = ConversationId::new(&input.conversation_id).expect("validated ID");
-            let message = MessageId::new(&input.message_id).expect("validated ID");
+            let conversation = ConversationId::new(&input.conversation_id).expect("validated");
+            let message = MessageId::new(&input.message_id).expect("validated");
             let previous = app.session.state(&conversation, &message)?;
             if (previous.is_none() && text.is_empty() && input.attachments.is_empty())
                 || text.len() > 16 * 1024
@@ -269,8 +317,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     "Ajoutez du texte (16 Ko au plus) ou une image.",
                 ));
             }
-            // Existing submissions check their immutable body before any link write.
-            // A body-only UI retry must preserve the links of an image-only message.
             let prepared = if previous.is_some() {
                 Some(
                     app.session
@@ -279,9 +325,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             } else {
                 None
             };
-            // Validate links and reserve the ordinal BEFORE journaling a new message.
-            // Failure rolls both back. A crash after commit but before prepare leaves
-            // only invisible orphan metadata/links that the same request can reuse.
             let tx = super::write_transaction(&app.connection)?;
             super::conversations::append_entry(
                 &tx,
@@ -308,21 +351,21 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .session
                     .prepare(conversation.clone(), message.clone(), text.into())?,
             };
-            let has_prior_message = app.reader.list_submissions()?.iter().any(|record| {
-                record.conversation_id == conversation && record.message_id != message
-            });
-            if !has_prior_message {
+            let has_prior = app
+                .reader
+                .list_submissions()?
+                .iter()
+                .any(|r| r.conversation_id == conversation && r.message_id != message);
+            if !has_prior {
                 if let Some(title) = suggested_title(text) {
-                    app.connection.execute(
-                        "UPDATE wrapper_conversations SET title = ?3 WHERE account_id = ?1 AND id = ?2 AND title = ?4 AND title_customized = 0",
-                        params![ACCOUNT, input.conversation_id, title, DEFAULT_TITLE],
-                    )?;
+                    app.connection.execute("UPDATE wrapper_conversations SET title=?3 WHERE account_id=?1 AND id=?2 AND title=?4 AND title_customized=0",params![ACCOUNT,input.conversation_id,title,DEFAULT_TITLE])?;
                 }
             }
             if matches!(state, SubmissionState::Queued) {
                 let mut transport = LocalTransport {
                     connection: &app.connection,
                     lose_reply: input.simulate_loss,
+                    #[cfg(test)]
                     live: app.provider.connected(),
                     error: None,
                 };
@@ -333,7 +376,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 }
             }
             app.finish_echo(&conversation, &message)?;
-            app.start_generation(&input.conversation_id, &input.message_id)?;
+            app.start_message(&input.conversation_id, &input.message_id, 0)?;
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
@@ -342,8 +385,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             validate_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
-            let conversation = ConversationId::new(&input.conversation_id).expect("validated ID");
-            let message = MessageId::new(&input.message_id).expect("validated ID");
+            let conversation = ConversationId::new(&input.conversation_id).expect("validated");
+            let message = MessageId::new(&input.message_id).expect("validated");
             let state = app
                 .session
                 .state(&conversation, &message)?
@@ -355,6 +398,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 let mut transport = LocalTransport {
                     connection: &app.connection,
                     lose_reply: false,
+                    #[cfg(test)]
                     live: app.provider.connected(),
                     error: None,
                 };
@@ -365,7 +409,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 }
             }
             app.finish_echo(&conversation, &message)?;
-            app.start_generation(&input.conversation_id, &input.message_id)?;
+            app.start_message(&input.conversation_id, &input.message_id, 0)?;
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
@@ -373,191 +417,210 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let _: Empty = parse(body)?;
             app.provider
                 .start_signin()
-                .map_err(|failure| ApiError::new(503, failure.message))?;
-            Ok(json!({"provider": app.provider.status()}))
+                .map_err(|f| ApiError::new(503, f.message))?;
+            Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/cancel" => {
             let _: Empty = parse(body)?;
             app.provider.cancel_signin();
-            Ok(json!({"provider": app.provider.status()}))
+            Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/welcomed" => {
             let _: Empty = parse(body)?;
             app.provider
                 .mark_welcomed()
                 .map_err(|_| ApiError::new(500, "Impossible d’enregistrer ce réglage."))?;
-            Ok(json!({"provider": app.provider.status()}))
+            Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/signout" => {
             let _: Empty = parse(body)?;
+            for status in [
+                RunStatus::Queued,
+                RunStatus::Running,
+                RunStatus::Interrupted,
+                RunStatus::AwaitingApproval,
+                RunStatus::AwaitingHumanInput,
+                RunStatus::AwaitingChildren,
+            ] {
+                for run in store::runs_with_status(&app.connection, status)? {
+                    stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
+                }
+            }
             let revoked = app.provider.signout();
-            app.connection.execute("UPDATE wrapper_generation SET status = 'stopped', updated_at = ?1 WHERE status = 'streaming'", [now()])?;
-            Ok(json!({"provider": app.provider.status(), "revoked": revoked}))
+            Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
         }
-        "/api/stop" => {
-            let input: ReconcileMessage = parse(body)?;
-            validate_id(&input.conversation_id)?;
-            validate_id(&input.message_id)?;
-            app.provider.stop(&input.conversation_id, &input.message_id);
-            app.connection.execute(
-                "UPDATE wrapper_generation SET status = 'stopped', updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming'",
-                params![ACCOUNT, input.conversation_id, input.message_id, now()],
-            )?;
-            app.conversation_response(&input.conversation_id)
-        }
-        "/api/regenerate" => {
+        "/api/stop" | "/api/regenerate" => {
             let input: ReconcileMessage = parse(body)?;
             validate_id(&input.conversation_id)?;
             validate_id(&input.message_id)?;
             app.require_conversation(&input.conversation_id)?;
-            if !app.provider.connected() {
-                return Err(ApiError::new(
-                    409,
-                    "Connectez-vous à ChatGPT pour relancer cette réponse.",
-                ));
+            let trigger = Trigger::UserMessage {
+                message_id: input.message_id.clone(),
+                attempt: 0,
+            };
+            let old = store::latest_run_for_trigger(&app.connection, &trigger)?
+                .filter(|r| r.conversation_id == input.conversation_id)
+                .ok_or_else(|| ApiError::new(404, "Réponse introuvable."))?;
+            if path == "/api/stop" {
+                stop_run(&app.feature_context(), &old, TurnEnd::Stopped)?;
+            } else {
+                if !old.status.is_terminal() && old.status != RunStatus::Interrupted {
+                    return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
+                }
+                let Trigger::UserMessage { attempt, .. } = old.trigger else {
+                    unreachable!()
+                };
+                let next = attempt
+                    .checked_add(1)
+                    .ok_or_else(|| ApiError::new(409, "Trop de relances."))?;
+                stop_run(&app.feature_context(), &old, TurnEnd::Superseded)?;
+                app.start_message(&input.conversation_id, &input.message_id, next)?;
             }
-            if app
-                .provider
-                .running(&input.conversation_id, &input.message_id)
-            {
-                return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
-            }
-            let restarted = app.connection.execute(
-                "UPDATE wrapper_generation SET status = 'streaming', error = NULL, error_kind = NULL, notice = NULL, updated_at = ?4 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status IN ('failed', 'stopped')",
-                params![ACCOUNT, input.conversation_id, input.message_id, now()],
-            )?;
-            if restarted == 0 {
-                return Err(ApiError::new(
-                    409,
-                    "Cette réponse ne peut pas être relancée.",
-                ));
-            }
-            app.connection.execute("UPDATE wrapper_remote SET reply = '' WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, input.conversation_id, input.message_id])?;
-            app.start_generation(&input.conversation_id, &input.message_id)?;
             app.conversation_response(&input.conversation_id)
         }
-        _ => unreachable!("route filtered above"),
+        "/api/conversations/reset" => {
+            let input: Reset = parse(body)?;
+            validate_id(&input.conversation_id)?;
+            app.require_conversation(&input.conversation_id)?;
+            for run in store::runs_for_conversation(&app.connection, &input.conversation_id)? {
+                if !run.status.is_terminal() {
+                    stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
+                }
+            }
+            let tx = super::write_transaction(&app.connection)?;
+            let id = format!("reset-{}", random_id(&tx)?);
+            super::conversations::append_entry(
+                &tx,
+                &input.conversation_id,
+                "engine_reset",
+                &id,
+                now(),
+            )?;
+            compaction::invalidate_all(&tx, &input.conversation_id)?;
+            tx.commit()?;
+            app.conversation_response(&input.conversation_id)
+        }
+        "/api/engine/config" => {
+            let input: Configuration = parse(body)?;
+            // Below 12k the summary's protocol metadata can exceed its own window
+            // (compaction r4). Refuse an unusable configuration, not silent loss.
+            if !(12000..=2_000_000).contains(&input.estimated_tokens) {
+                return Err(ApiError::new(
+                    400,
+                    "Le budget doit être entre 12 000 et 2 000 000 tokens estimés.",
+                ));
+            }
+            app.connection.execute(
+                "UPDATE wrapper_engine_config SET estimated_tokens=?2 WHERE account_id=?1",
+                params![ACCOUNT, input.estimated_tokens],
+            )?;
+            Ok(json!({"estimated_tokens":input.estimated_tokens}))
+        }
+        _ => unreachable!(),
     }
 }
-
-/// Model, effort and service tier actually sent to the provider.
+fn suggested_title(body: &str) -> Option<String> {
+    let title = body
+        .lines()
+        .next()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        None
+    } else if title.chars().count() <= 80 {
+        Some(title)
+    } else {
+        Some(format!(
+            "{}…",
+            title.chars().take(79).collect::<String>().trim_end()
+        ))
+    }
+}
+fn random_id(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
+}
 type ResolvedModel = (String, Option<String>, Option<String>);
-
 impl App {
-    pub(crate) fn model_preferences(
-        &self,
-    ) -> Result<(Option<String>, Option<String>, bool), ApiError> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT model, effort, fast FROM wrapper_preferences WHERE account_id = ?1",
-                [ACCOUNT],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .unwrap_or((None, None, false)))
-    }
-
-    /// Resolve preferences against the account's current catalog, keeping its defaults.
-    pub(crate) fn resolved_model(&self) -> Result<Option<ResolvedModel>, ApiError> {
-        let (model, effort, fast) = self.model_preferences()?;
-        let models = self.provider.models();
-        let Some(chosen) = models
-            .iter()
-            .find(|candidate| Some(&candidate.slug) == model.as_ref())
-            .or_else(|| models.first())
-        else {
-            return Ok(None);
-        };
-        let effort = effort
-            .filter(|effort| chosen.efforts.iter().any(|level| level.effort == *effort))
-            .or_else(|| chosen.default_effort.clone());
-        let tier = chosen
-            .tiers
-            .first()
-            .filter(|_| fast)
-            .map(|tier| tier.id.clone());
-        Ok(Some((chosen.slug.clone(), effort, tier)))
-    }
-
+    #[cfg(test)]
     pub(crate) fn history(
         &self,
         conversation: &str,
         message: &str,
     ) -> Result<Vec<(&'static str, String)>, ApiError> {
         let mut history = Vec::new();
-        let conversations = self.conversations()?;
-        let Some(found) = conversations
-            .iter()
-            .find(|candidate| candidate.id == conversation)
-        else {
-            return Ok(history);
-        };
-        for item in &found.messages {
-            if item.role == "user" {
-                if matches!(item.state, "accepted" | "echoed") {
-                    history.push(("user", item.body.clone()));
-                }
-                if item.id == message {
-                    break;
-                }
-            } else if item.state != "failed" {
-                let mut lines = Vec::new();
-                if !item.body.trim().is_empty() {
-                    lines.push(item.body.clone());
-                }
-                lines.extend(item.proposals.iter().map(proposal_transcript));
-                if !lines.is_empty() {
-                    history.push(("assistant", lines.join("\n\n")));
+        if let Some(found) = self
+            .conversations()?
+            .into_iter()
+            .find(|c| c.id == conversation)
+        {
+            for item in found.messages {
+                if item.role == "user" {
+                    if matches!(item.state, "accepted" | "echoed") {
+                        history.push(("user", item.body));
+                    }
+                    if item.id == message {
+                        break;
+                    }
+                } else if item.state != "failed" && !item.body.is_empty() {
+                    history.push(("assistant", item.body));
                 }
             }
         }
         Ok(history)
     }
-
-    pub(crate) fn start_generation(
+    pub(crate) fn model_preferences(
+        &self,
+    ) -> Result<(Option<String>, Option<String>, bool), ApiError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT model,effort,fast FROM wrapper_preferences WHERE account_id=?1",
+                [ACCOUNT],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None, false)))
+    }
+    pub(crate) fn resolved_model(&self) -> Result<Option<ResolvedModel>, ApiError> {
+        resolve_model(&self.connection, &self.provider).map_err(Into::into)
+    }
+    fn start_message(
         &self,
         conversation: &str,
         message: &str,
+        attempt: u32,
     ) -> Result<(), ApiError> {
-        let streaming: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND status = 'streaming')",
-            params![ACCOUNT, conversation, message], |row| row.get(0),
-        )?;
-        if !streaming || self.provider.running(conversation, message) {
+        let cid = ConversationId::new(conversation).expect("validated");
+        let mid = MessageId::new(message).expect("validated");
+        if !matches!(
+            self.session.state(&cid, &mid)?,
+            Some(SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. })
+        ) {
             return Ok(());
         }
-        let Some((model, effort, service_tier)) = self.resolved_model()? else {
-            self.connection.execute(
-                "UPDATE wrapper_generation SET status = 'failed', error = ?4, error_kind = 'other', updated_at = ?5 WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
-                params![ACCOUNT, conversation, message, "Les modèles de votre compte ChatGPT ne sont pas encore chargés. Relancez la réponse dans un instant.", now()],
-            )?;
-            return Ok(());
-        };
-        let history = self.history(conversation, message)?;
-        let turns = history.iter().filter(|(role, _)| *role == "user").count();
-        let (automatic, bot_id): (bool, String) = self.connection.query_row(
-            "SELECT title_customized = 0, bot_id FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2",
-            params![ACCOUNT, conversation], |row| Ok((row.get(0)?, row.get(1)?)),
+        let bot: String = self.connection.query_row(
+            "SELECT bot_id FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+            params![ACCOUNT, conversation],
+            |r| r.get(0),
         )?;
-        let bot = self
-            .bot(&bot_id)?
-            .ok_or_else(|| ApiError::new(500, "Le bot de cette conversation est introuvable."))?;
-        let bots = self.bots()?;
-        self.provider.generate(provider::Run {
-            conversation: conversation.into(),
-            message: message.into(),
-            instructions: compose_instructions(&bot, &bots),
-            tools: tools_for(&bot),
-            retitle: automatic && matches!(turns, 1 | 3),
-            history,
-            model,
-            effort,
-            service_tier,
-        });
+        let text:String=self.connection.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,message],|r|r.get(0))?;
+        let mut ctx = self.feature_context();
+        ctx.bot_id = Some(&bot);
+        ctx.conversation_id = Some(conversation);
+        start_run(
+            &ctx,
+            Trigger::UserMessage {
+                message_id: message.into(),
+                attempt,
+            },
+            item(message, Role::User, text),
+        )?;
         Ok(())
     }
-
     pub(crate) fn finish_echo(
         &mut self,
         conversation: &ConversationId,
@@ -567,61 +630,1163 @@ impl App {
             self.session.state(conversation, message)?,
             Some(SubmissionState::AcceptedAwaitingEcho { .. })
         ) {
-            let exists: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3)", params![ACCOUNT, conversation.as_str(), message.as_str()], |r| r.get(0))?;
+            let exists:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3)",params![ACCOUNT,conversation.as_str(),message.as_str()],|r|r.get(0))?;
             if exists {
                 self.session.observe_echo(
                     conversation,
                     message,
-                    TranscriptEntryId::new(format!("local-{}", message.as_str()))
-                        .expect("non-empty local echo ID"),
+                    TranscriptEntryId::new(format!("local-{}", message.as_str())).expect("echo ID"),
                 )?;
             }
         }
         Ok(())
     }
 }
+fn resolve_model(
+    conn: &Connection,
+    provider: &Provider,
+) -> grokbot_engine::contracts::Result<Option<ResolvedModel>> {
+    let (model, effort, fast): (Option<String>, Option<String>, bool) = conn
+        .query_row(
+            "SELECT model,effort,fast FROM wrapper_preferences WHERE account_id=?1",
+            [ACCOUNT],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+        .unwrap_or((None, None, false));
+    let models = provider.models();
+    Ok(models
+        .iter()
+        .find(|m| Some(&m.slug) == model.as_ref())
+        .or_else(|| models.first())
+        .map(|m| {
+            let effort = effort
+                .filter(|e| m.efforts.iter().any(|l| l.effort == *e))
+                .or_else(|| m.default_effort.clone());
+            (
+                m.slug.clone(),
+                effort,
+                m.tiers.first().filter(|_| fast).map(|t| t.id.clone()),
+            )
+        }))
+}
 
+/// Shared launch point for chat, occurrence and delegation adapters. The caller
+/// supplies its own conversation, bot and explicit input (never parent history).
+/// Call outside a transaction. Identity, input and model selection commit together.
+pub fn start_run(
+    ctx: &super::Context<'_>,
+    trigger: Trigger,
+    input: HistoryItem,
+) -> Result<Run, ApiError> {
+    let bot = ctx
+        .bot_id
+        .ok_or_else(|| ApiError::new(400, "Bot requis."))?;
+    let conversation = ctx
+        .conversation_id
+        .ok_or_else(|| ApiError::new(400, "Conversation requise."))?;
+    let kind = if matches!(trigger, Trigger::UserMessage { .. }) {
+        RunKind::Chat
+    } else {
+        RunKind::Task
+    };
+    let run = Run {
+        run_id: format!("run-{}", random_id(ctx.connection)?),
+        bot_id: bot.into(),
+        conversation_id: conversation.into(),
+        trigger,
+        kind,
+        status: RunStatus::Queued,
+        task_status: (kind == RunKind::Task).then_some(TaskStatus::Working),
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: now() as i64,
+    };
+    let live = ctx.provider.connected();
+    let (model, effort, tier) = if live {
+        resolve_model(ctx.connection, ctx.provider)?.unwrap_or_else(|| (String::new(), None, None))
+    } else {
+        ("simulated".into(), None, None)
+    };
+    let mut services = Services::new(ctx)?;
+    let saved = run_loop::with_run_events(
+        ctx.connection,
+        &mut services,
+        &run.run_id,
+        |conn, _| {
+            let saved = model::start(conn, &run)?;
+            conn.execute("INSERT OR IGNORE INTO wrapper_engine_runs(run_id,input_json,live,model,effort,service_tier) VALUES (?1,?2,?3,?4,?5,?6)",params![saved.run_id,serde_json::to_string(&input)?,live,model,effort,tier])?;
+            if !matches!(saved.trigger, Trigger::UserMessage { .. }) {
+                super::conversations::append_entry(
+                    conn,
+                    conversation,
+                    "engine_reply",
+                    &saved.run_id,
+                    now(),
+                )
+                .map_err(engine_error)?;
+            }
+            Ok(saved)
+        },
+    )?;
+    launch(ctx, &saved)?;
+    Ok(saved)
+}
+fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
+    ctx.provider.cancel_run(&run.run_id);
+    let mut services = Services::new(ctx)?;
+    run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
+    Ok(())
+}
+pub fn tick(ctx: &super::Context<'_>) {
+    // run() commits Resumed and the matching receipt together. Merely scanning
+    // pending wakes must NEVER mark them Delivered (SR01/SR02).
+    for status in [
+        RunStatus::Queued,
+        RunStatus::Interrupted,
+        RunStatus::AwaitingHumanInput,
+        RunStatus::AwaitingApproval,
+        RunStatus::AwaitingChildren,
+    ] {
+        if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
+            for run in runs {
+                if status.is_suspended() && reconcile_input_wait(ctx.connection, &run).is_err() {
+                    continue;
+                }
+                if !status.is_suspended()
+                    || model::ready_to_resume(ctx.connection, &run.run_id).unwrap_or(false)
+                {
+                    let _ = launch(ctx, &run);
+                }
+            }
+        }
+    }
+}
+/// Forms receipts name resolutions, whereas suspension events name requests.
+/// Bridge that binding before delivering; scanning alone still never ACKs a wake.
+fn reconcile_input_wait(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<()> {
+    if !matches!(
+        run.status,
+        RunStatus::AwaitingApproval | RunStatus::AwaitingHumanInput
+    ) {
+        return Ok(());
+    }
+    for reference in store::awaiting_references(conn, &run.run_id)? {
+        let Some(request) = requests::get(conn, &reference)? else {
+            continue;
+        };
+        let resolution = match request.status {
+            requests::RequestStatus::Resolved { resolution_id }
+            | requests::RequestStatus::Expired { resolution_id }
+            | requests::RequestStatus::Cancelled {
+                resolution_id: Some(resolution_id),
+            } => resolution_id,
+            requests::RequestStatus::Denied => {
+                let id: Option<String> = conn
+                    .query_row(
+                        "SELECT resolution_id FROM forms_requests WHERE id=?1",
+                        [&request.id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let Some(id) = id else {
+                    continue;
+                };
+                id
+            }
+            _ => continue,
+        };
+        if store::pending_wakes(conn)?
+            .iter()
+            .any(|w| w.run_id == run.run_id && w.reference == resolution)
+        {
+            let tx = super::write_transaction(conn)?;
+            if store::required(&tx, &run.run_id)?.status == run.status {
+                store::set_awaiting(
+                    &tx,
+                    &run.run_id,
+                    &SuspendCause::HumanInput { id: resolution },
+                )?;
+            }
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
+    if run.status.is_terminal() {
+        return Ok(());
+    }
+    let live: bool = ctx.connection.query_row(
+        "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
+        [&run.run_id],
+        |r| r.get(0),
+    )?;
+    // Do not silently turn a real interrupted job into a simulated success.
+    if live && !ctx.provider.connected() {
+        return Ok(());
+    }
+    if live {
+        let model: String = ctx.connection.query_row(
+            "SELECT model FROM wrapper_engine_runs WHERE run_id=?1",
+            [&run.run_id],
+            |r| r.get(0),
+        )?;
+        if model.is_empty() {
+            let Some((model, effort, tier)) = resolve_model(ctx.connection, ctx.provider)? else {
+                return Ok(());
+            };
+            ctx.connection.execute(
+                "UPDATE wrapper_engine_runs SET model=?2,effort=?3,service_tier=?4 WHERE run_id=?1",
+                params![run.run_id, model, effort, tier],
+            )?;
+        }
+    }
+    let Some(cancel) = ctx.provider.claim_run(&run.run_id) else {
+        return Ok(());
+    };
+    let guard = RunOwner {
+        provider: ctx.provider.clone(),
+        id: run.run_id.clone(),
+        titling: live,
+    };
+    // Mark before the final event can stop UI polling; clear even on unwind.
+    if live {
+        ctx.provider.title_started();
+    }
+    if !live {
+        let _guard = guard;
+        let mut services = Services::new(ctx)?;
+        services.cancel = cancel;
+        let gateway = RunGateway {
+            path: ctx.db_path,
+            provider: ctx.provider,
+            run_id: &run.run_id,
+            cancel: &services.cancel.clone(),
+        };
+        drive_owned(ctx.connection, &gateway, &mut services, &run.run_id)?;
+        return Ok(());
+    }
+    let path = ctx.db_path.to_path_buf();
+    let provider = ctx.provider.clone();
+    let id = run.run_id.clone();
+    std::thread::spawn(move || {
+        let _guard = guard;
+        let result = (|| -> grokbot_engine::contracts::Result<()> {
+            let conn = database(&path)?;
+            let mut services = Services {
+                path: &path,
+                provider: &provider,
+                connection: &conn,
+                cancel: cancel.clone(),
+            };
+            let gateway = RunGateway {
+                path: &path,
+                provider: &provider,
+                run_id: &id,
+                cancel: &cancel,
+            };
+            drive_owned(&conn, &gateway, &mut services, &id)?;
+            retitle(&conn, &provider, &id, &cancel, &path)?;
+            Ok(())
+        })();
+        // A failed DB open retains the durable queued/interrupted record for tick.
+        let _ = result;
+    });
+    Ok(())
+}
+/// Bound adapter/hook failures in both simulated and connected modes. Retrying
+/// retains the committed tool prefix; deterministic errors cannot spin forever.
+fn drive_owned(
+    conn: &Connection,
+    gateway: &dyn ModelGateway,
+    services: &mut dyn RunServices,
+    id: &str,
+) -> grokbot_engine::contracts::Result<()> {
+    for _ in 0..4 {
+        let result = run_loop::run(conn, gateway, services, id);
+        let run = store::required(conn, id)?;
+        if run.status.is_terminal() || run.status.is_suspended() {
+            return Ok(());
+        }
+        if result.is_err() {
+            let retries:i64=conn.query_row("UPDATE wrapper_engine_runs SET retries=retries+1 WHERE run_id=?1 RETURNING retries",[id],|r|r.get(0))?;
+            if retries >= 3 {
+                return fail_host(conn, services, id);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Err(Error::InvalidInput(
+        "run owner could not make progress".into(),
+    ))
+}
+struct RunOwner {
+    provider: Provider,
+    id: String,
+    titling: bool,
+}
+impl Drop for RunOwner {
+    fn drop(&mut self) {
+        if self.titling {
+            self.provider.title_finished();
+        }
+        self.provider.release_run(&self.id);
+    }
+}
+fn fail_host(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    id: &str,
+) -> grokbot_engine::contracts::Result<()> {
+    run_loop::with_run_events(conn, services, id, |conn, _| {
+        let mut run = store::required(conn, id)?;
+        if run.status.is_terminal() {
+            return Ok(());
+        }
+        if run.status == RunStatus::Interrupted {
+            model::resume(conn, id)?;
+        }
+        let events = store::events(conn, id, 0)?;
+        let settled: HashSet<_> = events
+            .iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .filter_map(|e| e.payload["call_id"].as_str())
+            .collect();
+        for event in &events {
+            if event.kind == RunEventKind::ToolCall {
+                if let Some(call) = event.payload["call_id"].as_str() {
+                    if !settled.contains(call) {
+                        store::append_event(
+                            conn,
+                            id,
+                            RunEventKind::ToolResult,
+                            &json!({"call_id":call,"outcome":{"status":"failed","reason":"local service unavailable"}}),
+                        )?;
+                    }
+                }
+            }
+        }
+        run = store::required(conn, id)?;
+        run.status = RunStatus::Failed;
+        run.turn_end = None;
+        if run.task_status == Some(TaskStatus::NeedsInput) {
+            run.task_status = Some(TaskStatus::Working);
+        }
+        store::save(conn, &run)?;
+        store::append_event(
+            conn,
+            id,
+            RunEventKind::TurnEnded,
+            &json!({"failed":true,"reason":"local_service_unavailable"}),
+        )?;
+        Ok(())
+    })
+}
+
+struct Services<'a> {
+    path: &'a Path,
+    provider: &'a Provider,
+    connection: &'a Connection,
+    cancel: Arc<AtomicBool>,
+}
+impl<'a> Services<'a> {
+    fn new(ctx: &super::Context<'a>) -> grokbot_engine::contracts::Result<Self> {
+        Ok(Self {
+            path: ctx.db_path,
+            provider: ctx.provider,
+            connection: ctx.connection,
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+    }
+    fn ctx<'b>(&'b self, conn: &'b Connection, run: &'b Run) -> super::Context<'b> {
+        super::Context {
+            connection: conn,
+            provider: self.provider,
+            db_path: self.path,
+            now_ms: now(),
+            bot_id: Some(&run.bot_id),
+            conversation_id: Some(&run.conversation_id),
+            run_id: Some(&run.run_id),
+        }
+    }
+}
+impl RunServices for Services<'_> {
+    fn context(&mut self, run: &Run) -> grokbot_engine::contracts::Result<ModelRequest> {
+        let mut input = run_input(self.connection, &run.run_id)?;
+        let mut request = ContextRequest {
+            run_id: run.run_id.clone(),
+            trigger: run.trigger.clone(),
+            bot_id: run.bot_id.clone(),
+            conversation_id: run.conversation_id.clone(),
+            current_message: input.clone(),
+        };
+        let ctx = self.ctx(self.connection, run);
+        let mut blocks = super::context(&ctx, &request)
+            .into_iter()
+            .filter(|b| b.source != ContextSource::CurrentMessage)
+            .collect::<Vec<_>>();
+        if let Some(images) = take_image_inputs(&mut blocks)? {
+            if input.images != images {
+                input.images = images;
+                self.connection.execute(
+                    "UPDATE wrapper_engine_runs SET input_json=?2 WHERE run_id=?1",
+                    params![run.run_id, serde_json::to_string(&input)?],
+                )?;
+            }
+            request.current_message = input.clone();
+        }
+        // First fence capability data. The final pass after replay performs the
+        // actual full-request budget, so current-run tool outputs cannot bypass it.
+        let assembled = assembler::assemble_input(
+            &request,
+            &blocks,
+            &[],
+            None,
+            None,
+            &budget(self.connection)?,
+        )?;
+        let instructions = assembled
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let (mut history, _) = history(self.connection, run, &input)?;
+        history.push(input);
+        let (model, effort, service_tier) = self.connection.query_row(
+            "SELECT model,effort,service_tier FROM wrapper_engine_runs WHERE run_id=?1",
+            [&run.run_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(ModelRequest {
+            model,
+            instructions,
+            input: history,
+            tools: vec![],
+            effort,
+            service_tier,
+        })
+    }
+    fn tools(&self) -> Vec<ToolSpec> {
+        super::tools()
+    }
+    fn call_tool(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+        let outcome = if matches!(call.name.as_str(), "propose_bot" | "propose_bot_update") {
+            // Proposal tools are not advertised; retain their existing recording
+            // adapter for a future explicit enable, without a second generator.
+            let input = run_input(conn, &run.run_id)?;
+            let proposal = crate::provider::ToolCall {
+                item_id: String::new(),
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                arguments: serde_json::to_string(&call.arguments)?,
+            };
+            match crate::record_proposal(conn, &run.conversation_id, &input.entry_id, &proposal)
+                .map_err(engine_error)?
+            {
+                Some(notice) => ToolOutcome::Failed { reason: notice },
+                None => ToolOutcome::Done {
+                    output: json!({"proposed":true}),
+                },
+            }
+        } else {
+            super::call_tool(&self.ctx(conn, run), call).unwrap_or_else(|| ToolOutcome::Failed {
+                reason: "unknown tool".into(),
+            })
+        };
+        let value = redact::redact_value(&vault(self.path)?, &serde_json::to_value(outcome)?)?;
+        Ok(serde_json::from_value(value)?)
+    }
+    fn check_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> grokbot_engine::contracts::Result<ApprovalCheck> {
+        super::forms::check_tool_approval(&self.ctx(conn, run), run, call).map_err(engine_error)
+    }
+    fn request_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> grokbot_engine::contracts::Result<SuspendCause> {
+        super::forms::request_tool_approval(&self.ctx(conn, run), run, call).map_err(engine_error)
+    }
+    fn is_cancelled(&self, _: &str) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+    fn on_run_event(
+        &mut self,
+        conn: &Connection,
+        event: &RunEvent,
+    ) -> grokbot_engine::contracts::Result<()> {
+        let run = store::required(conn, &event.run_id)?;
+        let kind = match event.kind {
+            RunEventKind::ToolCall => Some("engine_tool"),
+            RunEventKind::TaskChanged
+            | RunEventKind::Suspended
+            | RunEventKind::TurnEnded
+            | RunEventKind::Cancelled
+                if run.kind == RunKind::Task =>
+            {
+                Some("engine_task")
+            }
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            super::conversations::append_entry(
+                conn,
+                &run.conversation_id,
+                kind,
+                &format!("{}:{}", run.run_id, event.seq),
+                now(),
+            )
+            .map_err(engine_error)?;
+        }
+        // Check the forms reaction before the legacy void registry hook; any
+        // invalidation/retargeting failure rolls back this event and is retried.
+        let ctx = self.ctx(conn, &run);
+        super::forms::on_run_event_checked(&ctx, event).map_err(engine_error)?;
+        // Registry reactions are idempotent and share this SAME writer transaction.
+        super::on_run_event(&ctx, event);
+        Ok(())
+    }
+    fn resolution(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call_id: &str,
+    ) -> grokbot_engine::contracts::Result<Option<Value>> {
+        resolution(conn, run, call_id)
+    }
+}
+fn resolution(
+    conn: &Connection,
+    run: &Run,
+    call_id: &str,
+) -> grokbot_engine::contracts::Result<Option<Value>> {
+    let events = store::events(conn, &run.run_id, 0)?;
+    let id = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call_id)
+        .and_then(|e| e.payload["outcome"]["cause"]["id"].as_str());
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let Some(request) = requests::get(conn, id)? else {
+        return Ok(None);
+    };
+    let resolution = match request.status {
+        requests::RequestStatus::Resolved { resolution_id }
+        | requests::RequestStatus::Expired { resolution_id }
+        | requests::RequestStatus::Cancelled {
+            resolution_id: Some(resolution_id),
+        } => resolution_id,
+        _ => return Ok(None),
+    };
+    Ok(Some(requests::resolved_values(conn, &resolution)?))
+}
+const IMAGE_INPUT_PREFIX: &str = "grokbot:image-inputs:v1:";
+/// Typed extension for attachments' context hook. Transport bytes are extracted
+/// into HistoryItem.images, NEVER inserted into instructions or charged as text.
+/// Emit only images already validated/linked to request.current_message.entry_id.
+pub fn image_input_block(images: &[ImageInput]) -> grokbot_engine::contracts::Result<ContextBlock> {
+    let text = format!("{IMAGE_INPUT_PREFIX}{}", serde_json::to_string(images)?);
+    Ok(ContextBlock {
+        source: ContextSource::ImageCaption,
+        priority: super::priority::HISTORY,
+        budget: 0,
+        text,
+    })
+}
+fn take_image_inputs(
+    blocks: &mut Vec<ContextBlock>,
+) -> grokbot_engine::contracts::Result<Option<Vec<ImageInput>>> {
+    let mut images = None;
+    for block in blocks.iter() {
+        if block.source == ContextSource::ImageCaption {
+            if let Some(json) = block.text.strip_prefix(IMAGE_INPUT_PREFIX) {
+                images = Some(serde_json::from_str(json)?);
+            }
+        }
+    }
+    blocks.retain(|b| {
+        !(b.source == ContextSource::ImageCaption && b.text.starts_with(IMAGE_INPUT_PREFIX))
+    });
+    Ok(images)
+}
+fn run_input(conn: &Connection, id: &str) -> grokbot_engine::contracts::Result<HistoryItem> {
+    let text: String = conn.query_row(
+        "SELECT input_json FROM wrapper_engine_runs WHERE run_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(serde_json::from_str(&text)?)
+}
+/// Read raw, ordered evidence. Select the LAST reset preceding this particular
+/// input, not the last reset of the conversation (context r3/r4).
+fn history(
+    conn: &Connection,
+    run: &Run,
+    current: &HistoryItem,
+) -> grokbot_engine::contracts::Result<(Vec<HistoryItem>, Option<String>)> {
+    let mut stmt=conn.prepare("SELECT message_id,kind FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 ORDER BY ordinal")?;
+    let rows = stmt
+        .query_map(params![ACCOUNT, run.conversation_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::new();
+    let mut reset = None;
+    for (id, kind) in rows {
+        if id == current.entry_id || (kind == "engine_reply" && id == run.run_id) {
+            break;
+        }
+        match kind.as_str() {
+            "engine_reset" => {
+                reset = Some(id.clone());
+                result.push(item(&id, Role::System, String::new()));
+            }
+            "submission" => {
+                let text:Option<String>=conn.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,run.conversation_id,id],|r|r.get(0)).optional()?;
+                let Some(text) = text else {
+                    continue;
+                };
+                let mut user = item(&id, Role::User, text);
+                let previous = store::latest_run_for_trigger(
+                    conn,
+                    &Trigger::UserMessage {
+                        message_id: id.clone(),
+                        attempt: 0,
+                    },
+                )?;
+                if let Some(previous) = &previous {
+                    user.images = run_input(conn, &previous.run_id)?.images;
+                }
+                result.push(user);
+                if let Some(previous) = previous {
+                    result.extend(replay(conn, &previous)?);
+                }
+            }
+            "engine_reply" => {
+                if let Some(previous) = store::get(conn, &id)? {
+                    result.push(run_input(conn, &id)?);
+                    result.extend(replay(conn, &previous)?);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((result, reset))
+}
+fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec<HistoryItem>> {
+    let events = store::events(conn, &run.run_id, 0)?;
+    let mut items = run_loop::replay_items(&events)?;
+    for item in &mut items {
+        for tool in &mut item.tool_items {
+            if let ToolItem::Output { call_id, output } = tool {
+                if output["status"] == "suspend" {
+                    if let Some(value) = resolution(conn, run, call_id)? {
+                        *output = json!({"status":"resolved","value":value});
+                    }
+                }
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Final model boundary: full replay is budgeted/fenced here, not just the base
+/// context before run_loop appends its events. Compaction never rewrites transcript.
+struct RunGatewayCall<'a> {
+    path: &'a Path,
+    provider: &'a Provider,
+    connection: &'a Connection,
+    run_id: &'a str,
+    cancel: &'a AtomicBool,
+    source_revision: u64,
+}
+impl RunGatewayCall<'_> {
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        let mut request = request.clone();
+        // Typed function outputs have no role-bearing text. Avoid fabricating a
+        // free-form Tool message when context fences an empty Role::Tool.text.
+        for entry in &mut request.input {
+            if entry.role == Role::Tool && entry.text.is_empty() && !entry.tool_items.is_empty() {
+                entry.role = Role::Assistant;
+            }
+        }
+        let run = store::required(self.connection, self.run_id)?;
+        let original = run_input(self.connection, self.run_id)?;
+        let (_, reset) = history(self.connection, &run, &original)?;
+        let reset_index = reset
+            .as_ref()
+            .and_then(|id| request.input.iter().position(|i| &i.entry_id == id))
+            .map_or(0, |n| n + 1);
+        let eligible = &request.input[reset_index..];
+        let segment = eligible
+            .first()
+            .map(|i| i.entry_id.as_str())
+            .unwrap_or(&original.entry_id);
+        let mut summary =
+            compaction::latest_in_segment(self.connection, &run.conversation_id, segment)?;
+        // A later head is not applicable to a regenerated old turn. Walk parents;
+        // a new root for that old turn stays ephemeral, never poisoning the head.
+        let head = summary.as_ref().map(|s| s.summary_id.clone());
+        while let Some(s) = &summary {
+            if eligible
+                .iter()
+                .any(|i| i.entry_id == s.resume_from_entry_inclusive)
+            {
+                break;
+            }
+            summary=match &s.previous_summary_id {Some(id)=>self.connection.query_row("SELECT record FROM engine_summaries WHERE summary_id=?1 AND record IS NOT NULL",[id],|r|r.get::<_,String>(0)).optional()?.map(|s|serde_json::from_str(&s)).transpose()?,None=>None};
+        }
+        let ephemeral =
+            head.is_some() && summary.as_ref().map(|s| s.summary_id.as_str()) != head.as_deref();
+        let budget = budget(self.connection)?;
+        let vault = vault(self.path)?;
+        let mut pending = HashSet::new();
+        for status in [
+            RunStatus::Running,
+            RunStatus::Interrupted,
+            RunStatus::AwaitingApproval,
+            RunStatus::AwaitingHumanInput,
+            RunStatus::AwaitingChildren,
+        ] {
+            for other in store::runs_with_status(self.connection, status)? {
+                if other.conversation_id == run.conversation_id {
+                    let events = store::events(self.connection, &other.run_id, 0)?;
+                    let settled: HashSet<_> = events
+                        .iter()
+                        .filter(|e| e.kind == RunEventKind::ToolResult)
+                        .filter_map(|e| e.payload["call_id"].as_str())
+                        .collect();
+                    for event in &events {
+                        if event.kind == RunEventKind::ToolCall {
+                            if let Some(id) = event.payload["call_id"].as_str() {
+                                if !settled.contains(id) {
+                                    pending.insert(id.into());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        loop {
+            let start = summary
+                .as_ref()
+                .and_then(|s| {
+                    eligible
+                        .iter()
+                        .position(|i| i.entry_id == s.resume_from_entry_inclusive)
+                })
+                .unwrap_or(0);
+            let characters = eligible[start..]
+                .iter()
+                .map(assembler::input_characters)
+                .collect::<grokbot_engine::contracts::Result<Vec<_>>>()?
+                .into_iter()
+                .sum::<usize>()
+                + request.instructions.chars().count()
+                + summary.as_ref().map_or(0, |s| s.text.chars().count());
+            if eligible.len().saturating_sub(start) < 2
+                || !compaction::should_compact(characters, &budget)?
+            {
+                break;
+            }
+            let mut services = Services {
+                path: self.path,
+                provider: self.provider,
+                connection: self.connection,
+                cancel: Arc::new(AtomicBool::new(false)),
+            };
+            let reserved = run_loop::with_run_events(
+                self.connection,
+                &mut services,
+                self.run_id,
+                |conn, _| {
+                    let mut usage = store::budget_usage(conn, self.run_id, now() as i64)?;
+                    // run_loop reserves the ordinary response AFTER context(). This
+                    // boundary already has that reservation: leave it available.
+                    if usage.model_calls >= run.budgets.model_calls
+                        || self.cancel.load(Ordering::SeqCst)
+                    {
+                        return Ok(false);
+                    }
+                    usage.model_calls += 1;
+                    store::save_budget_usage(conn, self.run_id, &usage)?;
+                    Ok(true)
+                },
+            )?;
+            if !reserved {
+                break;
+            }
+            let revision = self.source_revision;
+            let options = compaction::SummaryOptions {
+                source_revision: revision,
+                pending_call_ids: pending.clone(),
+                budget: budget.clone(),
+            };
+            let clean: Vec<HistoryItem> = serde_json::from_value(redact::redact_value(
+                &vault,
+                &serde_json::to_value(eligible)?,
+            )?)?;
+            let gateway = ProviderGateway {
+                provider: self.provider,
+                cancel: self.cancel,
+                metadata: None,
+            };
+            let mut next = compaction::summarize_with_options(
+                &gateway,
+                &request.model,
+                &run.conversation_id,
+                &clean,
+                summary.as_ref(),
+                &options,
+            )?;
+            next.text = redact::redact(&vault, &next.text)?;
+            if !ephemeral {
+                let tx = super::write_transaction(self.connection)?;
+                if compaction::revision(&tx, &run.conversation_id)? != revision {
+                    return Err(Error::Conflict("context source changed".into()));
+                }
+                compaction::save_with_history_pending_at_revision(
+                    &tx, &next, &clean, &pending, revision,
+                )
+                .map_err(|_| Error::Conflict("summary head changed; rebuild context".into()))?;
+                super::conversations::append_entry(
+                    &tx,
+                    &run.conversation_id,
+                    "engine_summary",
+                    &next.summary_id,
+                    now(),
+                )
+                .map_err(engine_error)?;
+                tx.commit()?;
+            }
+            if summary
+                .as_ref()
+                .is_some_and(|s| s.resume_from_entry_inclusive == next.resume_from_entry_inclusive)
+            {
+                break;
+            }
+            summary = Some(next);
+        }
+        let Some(current) = request.input.last() else {
+            return Err(Error::InvalidInput("empty run input".into()));
+        };
+        let mut context_request = ContextRequest {
+            run_id: run.run_id.clone(),
+            trigger: run.trigger,
+            bot_id: run.bot_id,
+            conversation_id: run.conversation_id,
+            current_message: current.clone(),
+        };
+        // Keep built-in tool protocol with the app contract, BEFORE bot identity.
+        let (instructions, protocol) = request
+            .instructions
+            .rsplit_once("\nUse begin_task")
+            .unwrap_or((&request.instructions, ""));
+        let instructions = if protocol.is_empty() {
+            instructions.to_owned()
+        } else {
+            instructions.replacen(
+                BASE_INSTRUCTIONS,
+                &format!("{BASE_INSTRUCTIONS}\nUse begin_task{protocol}"),
+                1,
+            )
+        };
+        let block = ContextBlock {
+            source: ContextSource::AppContract,
+            priority: 0,
+            budget: instructions.chars().count(),
+            text: instructions,
+        };
+        context_request.current_message = serde_json::from_value(redact::redact_value(
+            &vault,
+            &serde_json::to_value(&context_request.current_message)?,
+        )?)?;
+        let mut assembled = assembler::assemble_input(
+            &context_request,
+            &[block],
+            &request.input,
+            summary.as_ref(),
+            reset.as_deref(),
+            &budget,
+        )?;
+        // An already-fenced tool result remains data under the next pass too.
+        let mut outgoing = request.clone();
+        outgoing.instructions = assembled
+            .blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        outgoing.input = std::mem::take(&mut assembled.input);
+        outgoing = serde_json::from_value(redact::redact_value(
+            &vault,
+            &serde_json::to_value(outgoing)?,
+        )?)?;
+        if compaction::revision(self.connection, &context_request.conversation_id)?
+            != self.source_revision
+        {
+            return Err(Error::Conflict("context source changed".into()));
+        }
+        let gateway = ProviderGateway {
+            provider: self.provider,
+            cancel: self.cancel,
+            metadata: Some((self.path, self.run_id)),
+        };
+        gateway.stream(&outgoing, &mut |event| {
+            let event = serde_json::from_value(redact::redact_value(
+                &vault,
+                &serde_json::to_value(event)?,
+            )?)?;
+            emit(event)
+        })
+    }
+}
+struct ProviderGateway<'a> {
+    provider: &'a Provider,
+    cancel: &'a AtomicBool,
+    metadata: Option<(&'a Path, &'a str)>,
+}
+impl ModelGateway for ProviderGateway<'_> {
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        if request.model == "simulated" {
+            return crate::gateway::SimulatedGateway.stream(request, emit);
+        }
+        self.provider.stream_run(request,self.cancel,&mut |notice,failure| {
+            if let Some((path,id))=self.metadata {
+                let conn=database(path)?;
+                let vault=vault(path)?;
+                let error=failure.map(|f|redact::redact(&vault,&f.message)).transpose()?;
+                conn.execute("UPDATE wrapper_engine_runs SET notice=COALESCE(?2,notice),error=COALESCE(?3,error),error_kind=COALESCE(?4,error_kind) WHERE run_id=?1",params![id,notice,error,failure.map(|f|f.kind)])?;
+            }
+            Ok(())
+        },emit)
+    }
+}
+/// Projection deliberately differs from replay: Stop, failure and duration-budget
+/// exhaustion keep the last visible partial response; a crashed response does not
+/// contaminate the next model call or duplicate a recovered reply (loop r2 §6).
+fn projected_text(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<String> {
+    let events = store::events(conn, &run.run_id, 0)?;
+    let completed: HashSet<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
+        .filter_map(|e| e.payload["response"].as_u64())
+        .collect();
+    let last = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == RunEventKind::TextDelta)
+        .and_then(|e| e.payload["response"].as_u64());
+    let last_interrupted = events
+        .iter()
+        .rfind(|e| e.kind == RunEventKind::Interrupted)
+        .map_or(0, |e| e.seq);
+    let mut text = String::new();
+    for event in &events {
+        if event.kind != RunEventKind::TextDelta {
+            continue;
+        }
+        let response = event.payload["response"].as_u64();
+        let visible = response.is_some_and(|r| completed.contains(&r))
+            || (response == last
+                && (run.status == RunStatus::Interrupted || event.seq > last_interrupted)
+                && run.turn_end != Some(TurnEnd::Superseded));
+        if visible {
+            text.push_str(event.payload["text"].as_str().unwrap_or_default());
+        }
+    }
+    Ok(text)
+}
+fn run_reply(
+    conn: &Connection,
+    run: &Run,
+    id: String,
+    proposals: Vec<Proposal>,
+) -> Result<Message, ApiError> {
+    let body = projected_text(conn, run)?;
+    let metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
+        "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
+        [&run.run_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let (state, error) = match run.status {
+        RunStatus::Queued | RunStatus::Running => ("streaming", None),
+        RunStatus::Interrupted => ("failed", Some(INTERRUPTED.into())),
+        RunStatus::Failed => ("failed", metadata.0.or_else(|| Some(INTERRUPTED.into()))),
+        RunStatus::Cancelled => ("stopped", None),
+        _ => ("echoed", None),
+    };
+    Ok(Message {
+        id,
+        role: "assistant",
+        body,
+        state,
+        created_at: run.started_at.max(0) as u64,
+        error,
+        error_kind: metadata.1,
+        notice: metadata.2,
+        proposals,
+        kind: "message".into(),
+        payload: Value::Null,
+        attachments: vec![],
+    })
+}
 pub fn reply(
     ctx: &super::Context<'_>,
     conversation: &str,
     message: &str,
     proposals: Vec<Proposal>,
 ) -> Result<Option<Message>, ApiError> {
-    let reply: Option<(String, u64)> = ctx.connection.query_row("SELECT reply, created_at FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, conversation, message], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-    let Some((body, created_at)) = reply else {
+    let Some(run) = store::latest_run_for_trigger(
+        ctx.connection,
+        &Trigger::UserMessage {
+            message_id: message.into(),
+            attempt: 0,
+        },
+    )?
+    .filter(|r| r.conversation_id == conversation) else {
         return Ok(None);
     };
-    let generation: Option<GenerationRow> = ctx.connection.query_row("SELECT status, error, error_kind, notice FROM wrapper_generation WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![ACCOUNT, conversation, message], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-    let (state, error, error_kind, notice) = match generation {
-        Some((status, error, kind, notice)) => (
-            match status.as_str() {
-                "streaming" => "streaming",
-                "failed" => "failed",
-                "stopped" => "stopped",
-                _ => "echoed",
-            },
-            error,
-            kind,
-            notice,
-        ),
-        None => ("echoed", None, None, None),
-    };
-    Ok(Some(Message {
-        id: format!("reply-{message}"),
+    Ok(Some(run_reply(
+        ctx.connection,
+        &run,
+        format!("reply-{message}"),
+        proposals,
+    )?))
+}
+pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {
+    if kind == "engine_reply" {
+        let run = store::get(ctx.connection, id).ok()??;
+        return run_reply(ctx.connection, &run, format!("reply-{id}"), vec![]).ok();
+    }
+    if kind == "engine_reset" {
+        return Some(Message {
+            id: id.into(),
+            role: "assistant",
+            body: "Nouvelle conversation — la mémoire est conservée.".into(),
+            state: "echoed",
+            created_at: ctx.now_ms,
+            error: None,
+            error_kind: None,
+            notice: None,
+            proposals: vec![],
+            kind: "reset".into(),
+            payload: json!({"reset":true}),
+            attachments: vec![],
+        });
+    }
+    if kind == "engine_summary" {
+        let record: String = ctx
+            .connection
+            .query_row(
+                "SELECT record FROM engine_summaries WHERE summary_id=?1 AND record IS NOT NULL",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
+        let summary: Summary = serde_json::from_str(&record).ok()?;
+        return Some(card(
+            id,
+            "summary",
+            summary.text.clone(),
+            serde_json::to_value(summary).ok()?,
+            ctx.now_ms,
+        ));
+    }
+    if !matches!(kind, "engine_tool" | "engine_task") {
+        return None;
+    }
+    let (run_id, seq) = id.rsplit_once(':')?;
+    let seq: u64 = seq.parse().ok()?;
+    let run = store::get(ctx.connection, run_id).ok()??;
+    if ctx
+        .conversation_id
+        .is_some_and(|id| id != run.conversation_id)
+    {
+        return None;
+    }
+    let event = store::events(ctx.connection, run_id, seq.checked_sub(1)?)
+        .ok()?
+        .into_iter()
+        .next()?;
+    if kind == "engine_task" {
+        return Some(card(
+            id,
+            "task",
+            String::new(),
+            json!({"run_id":run_id,"task_status":run.task_status,"turn_end":run.turn_end,"status":run.status}),
+            run.started_at.max(0) as u64,
+        ));
+    }
+    let call_id = event.payload["call_id"].as_str()?;
+    let outcome = store::events(ctx.connection, run_id, seq)
+        .ok()?
+        .into_iter()
+        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call_id)
+        .map(|e| e.payload["outcome"].clone());
+    Some(card(
+        id,
+        "tool",
+        String::new(),
+        json!({"run_id":run_id,"call":event.payload,"outcome":outcome}),
+        run.started_at.max(0) as u64,
+    ))
+}
+fn card(id: &str, kind: &str, body: String, payload: Value, created_at: u64) -> Message {
+    Message {
+        id: id.into(),
         role: "assistant",
         body,
-        state,
+        state: "echoed",
         created_at,
-        error,
-        error_kind,
-        notice,
-        proposals,
-        kind: "message".into(),
-        payload: Value::Null,
-        attachments: Vec::new(),
-    }))
+        error: None,
+        error_kind: None,
+        notice: None,
+        proposals: vec![],
+        kind: kind.into(),
+        payload,
+        attachments: vec![],
+    }
 }
-
+pub fn state(ctx: &super::Context<'_>) -> Value {
+    let runs = [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::Interrupted,
+        RunStatus::AwaitingApproval,
+        RunStatus::AwaitingHumanInput,
+        RunStatus::AwaitingChildren,
+    ]
+    .into_iter()
+    .flat_map(|s| store::runs_with_status(ctx.connection, s).unwrap_or_default())
+    .collect::<Vec<_>>();
+    json!({"runs":runs,"context_budget":budget(ctx.connection).ok()})
+}
+pub fn on_run_event(_: &super::Context<'_>, _: &RunEvent) {}
 pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {
     let block = |source, priority, text: String| ContextBlock {
         source,
@@ -634,14 +1799,11 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
         super::priority::APP,
         BASE_INSTRUCTIONS.into(),
     )];
-    if let Ok(Some(bot)) = ctx.connection.query_row(
-        "SELECT id, name, color, description, instructions, template, customized, deleted, shape FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
-        params![ACCOUNT, request.bot_id], bot_from_row,
-    ).optional() {
-        let mut identity = format!("Tu t'appelles {}.", bot.name);
-        if !bot.description.is_empty() { identity.push_str(&format!("\n\nTon rôle, tel que les autres le voient : {}", bot.description)); }
-        blocks.push(block(ContextSource::BotIdentity, super::priority::IDENTITY, identity));
-        if !bot.instructions.is_empty() { blocks.push(block(ContextSource::BotInstructions, super::priority::INSTRUCTIONS, format!("Consignes privées sur ta façon de te comporter :\n{}", bot.instructions))); }
+    if let Ok(Some(bot))=ctx.connection.query_row("SELECT id,name,color,description,instructions,template,customized,deleted,shape FROM wrapper_bots WHERE account_id=?1 AND id=?2",params![ACCOUNT,request.bot_id],bot_from_row).optional(){
+        let mut identity=format!("Tu t'appelles {}.",bot.name);
+        if !bot.description.is_empty(){identity.push_str(&format!("\n\nTon rôle, tel que les autres le voient : {}",bot.description));}
+        blocks.push(block(ContextSource::BotIdentity,super::priority::IDENTITY,identity));
+        if !bot.instructions.is_empty(){blocks.push(block(ContextSource::BotInstructions,super::priority::INSTRUCTIONS,format!("Consignes privées sur ta façon de te comporter :\n{}",bot.instructions)));}
     }
     blocks.push(block(
         ContextSource::CurrentMessage,
@@ -650,85 +1812,175 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     ));
     blocks
 }
-
 pub fn context_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBlock>, ApiError> {
     app.require_conversation(conversation_id)?;
-    let conversation = app
-        .conversations()?
-        .into_iter()
-        .find(|item| item.id == conversation_id)
-        .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?;
-    let current = conversation
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user");
-    let message_id = current.map_or("preview", |message| message.id.as_str());
-    let request = ContextRequest {
+    let bot: String = app.connection.query_row(
+        "SELECT bot_id FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+        params![ACCOUNT, conversation_id],
+        |r| r.get(0),
+    )?;
+    let latest:Option<String>=app.connection.query_row("SELECT message_id FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='submission' AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='engine_reset'),-1) ORDER BY ordinal DESC LIMIT 1",params![ACCOUNT,conversation_id],|r|r.get(0)).optional()?;
+    let text=latest.as_deref().and_then(|id|app.connection.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation_id,id],|r|r.get(0)).optional().ok().flatten()).unwrap_or_default();
+    let current = item(latest.as_deref().unwrap_or("preview"), Role::User, text);
+    let run = Run {
         run_id: "preview".into(),
+        bot_id: bot.clone(),
+        conversation_id: conversation_id.into(),
         trigger: Trigger::UserMessage {
-            message_id: message_id.into(),
+            message_id: current.entry_id.clone(),
             attempt: 0,
         },
-        bot_id: conversation.bot_id.clone(),
+        kind: RunKind::Chat,
+        status: RunStatus::Queued,
+        task_status: None,
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: now() as i64,
+    };
+    let mut request = ContextRequest {
+        run_id: run.run_id.clone(),
+        trigger: run.trigger.clone(),
+        bot_id: bot.clone(),
         conversation_id: conversation_id.into(),
-        current_message: HistoryItem {
-            entry_id: message_id.into(),
-            role: Role::User,
-            text: current.map_or(String::new(), |message| message.body.clone()),
-            images: Vec::new(),
-            tool_items: Vec::new(),
-        },
+        current_message: current.clone(),
     };
     let mut ctx = app.feature_context();
-    ctx.bot_id = Some(&conversation.bot_id);
+    ctx.bot_id = Some(&bot);
     ctx.conversation_id = Some(conversation_id);
     let mut blocks = super::context(&ctx, &request);
-    if let Some(current) = current {
-        let history = app.history(conversation_id, &current.id)?;
-        // history() includes the current message only after acceptance. A queued
-        // input must not accidentally remove the preceding assistant response.
-        let included_current = usize::from(matches!(current.state, "accepted" | "echoed"));
-        let text = history
+    blocks.retain(|b| b.source != ContextSource::CurrentMessage);
+    if let Some(images) = take_image_inputs(&mut blocks)? {
+        request.current_message.images = images;
+    }
+    let (history, reset) = history(&app.connection, &run, &current)?;
+    Ok(assembler::assemble(
+        &request,
+        &blocks,
+        &history,
+        None,
+        reset.as_deref(),
+        &budget(&app.connection)?,
+    )?)
+}
+fn retitle(
+    conn: &Connection,
+    provider: &Provider,
+    id: &str,
+    cancel: &AtomicBool,
+    path: &Path,
+) -> grokbot_engine::contracts::Result<()> {
+    let run = store::required(conn, id)?;
+    if run.status != RunStatus::Finished || cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let Trigger::UserMessage { attempt: 0, .. } = run.trigger else {
+        return Ok(());
+    };
+    let current = run_input(conn, id)?;
+    let (history, _) = history(conn, &run, &current)?;
+    let turns = history.iter().filter(|i| i.role == Role::User).count() + 1;
+    if !matches!(turns, 1 | 3) {
+        return Ok(());
+    }
+    let automatic:bool=conn.query_row("SELECT title_customized=0 AND deleted=0 FROM wrapper_conversations WHERE account_id=?1 AND id=?2",params![ACCOUNT,run.conversation_id],|r|r.get(0))?;
+    if !automatic {
+        return Ok(());
+    }
+    let claimed=conn.execute("UPDATE wrapper_engine_runs SET title_state='running' WHERE run_id=?1 AND title_state='none'",[id])?;
+    if claimed == 0 {
+        return Ok(());
+    }
+    let result = (|| -> grokbot_engine::contracts::Result<()> {
+        let mut transcript = history;
+        transcript.push(current);
+        transcript.push(item("reply", Role::Assistant, projected_text(conn, &run)?));
+        let text = transcript
             .iter()
-            .take(history.len().saturating_sub(included_current))
-            .map(|(role, text)| format!("{role}: {text}"))
+            .filter(|i| !i.text.is_empty())
+            .map(|i| {
+                format!(
+                    "{} : {}",
+                    if i.role == Role::User {
+                        "Utilisateur"
+                    } else {
+                        "Assistant"
+                    },
+                    i.text.chars().take(700).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
-        if !text.is_empty() {
-            blocks.push(ContextBlock {
-                source: ContextSource::History,
-                priority: super::priority::HISTORY,
-                budget: text.chars().count(),
-                text,
-            });
+        let text = redact::redact(&vault(path)?, &text)?;
+        let model = conn.query_row(
+            "SELECT model FROM wrapper_engine_runs WHERE run_id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let mut title = String::new();
+        let mut completed = false;
+        ProviderGateway{provider,cancel,metadata:None}.stream(&ModelRequest{model,instructions:"Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.".into(),input:vec![item("title",Role::User,text)],tools:vec![],effort:None,service_tier:None},&mut |event|{
+            match event {
+                ModelEvent::TextDelta{text}=>title.push_str(&text),
+                ModelEvent::Completed=>completed=true,
+                ModelEvent::Reasoning{..}=>{},
+                _=>return Err(Error::InvalidInput("title generation incomplete".into())),
+            }
+            Ok(())
+        })?;
+        if !completed {
+            return Err(Error::InvalidInput("title generation incomplete".into()));
         }
-    }
-    blocks.sort_by_key(|block| block.priority);
-    Ok(blocks)
+        let title = redact::redact(&vault(path)?, &title)?;
+        let line = title
+            .lines()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .trim_matches(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '\'' | '«' | '»' | '“' | '”' | '`' | '*' | '#' | '_'
+                    )
+            })
+            .trim_end_matches(['.', ':', ' ']);
+        let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = if title.chars().count() > 60 {
+            format!("{}…", title.chars().take(59).collect::<String>().trim_end())
+        } else {
+            title
+        };
+        if !title.is_empty() {
+            conn.execute("UPDATE wrapper_conversations SET title=?3 WHERE account_id=?1 AND id=?2 AND title_customized=0 AND deleted=0",params![ACCOUNT,run.conversation_id,title])?;
+        }
+        Ok(())
+    })();
+    conn.execute(
+        "UPDATE wrapper_engine_runs SET title_state='done' WHERE run_id=?1",
+        [id],
+    )?;
+    result
 }
-
 pub(crate) struct LocalTransport<'a> {
     pub(crate) connection: &'a Connection,
     pub(crate) lose_reply: bool,
+    #[cfg(test)]
     pub(crate) live: bool,
     pub(crate) error: Option<ApiError>,
 }
 impl LocalTransport<'_> {
     fn accept(&self, request: &SendRequest) -> Result<SendOutcome, ApiError> {
+        #[cfg(test)]
+        let _ = self.live;
         let account = request.actor().account_id.as_str();
         let conversation = request.conversation_id().as_str();
         let message = request.message_id().as_str();
         let tx = super::write_transaction(self.connection)?;
-        let existing: Option<String> = tx.query_row("SELECT body FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3", params![account, conversation, message], |r| r.get(0)).optional()?;
-        let existing_reply_absent = existing.is_none();
+        let existing:Option<String>=tx.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![account,conversation,message],|r|r.get(0)).optional()?;
         if existing.is_some_and(|body| body != request.body()) {
             return Ok(SendOutcome::Refused(Refusal::Conflict));
         }
-        tx.execute("INSERT INTO wrapper_remote (account_id, conversation_id, message_id, body, reply, created_at, send_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET send_count = send_count + 1", params![account, conversation, message, request.body(), if self.live { "" } else { demo_reply(request.body()) }, now()])?;
-        if self.live && existing_reply_absent {
-            tx.execute("INSERT OR IGNORE INTO wrapper_generation (account_id, conversation_id, message_id, status, updated_at) VALUES (?1, ?2, ?3, 'streaming', ?4)", params![account, conversation, message, now()])?;
-        }
+        tx.execute("INSERT INTO wrapper_remote(account_id,conversation_id,message_id,body,reply,created_at,send_count) VALUES (?1,?2,?3,?4,'',?5,1) ON CONFLICT(account_id,conversation_id,message_id) DO UPDATE SET send_count=send_count+1",params![account,conversation,message,request.body(),now()])?;
         tx.commit()?;
         Ok(if self.lose_reply {
             SendOutcome::OutcomeUnknown
@@ -752,7 +2004,7 @@ impl SubmissionTransport for LocalTransport<'_> {
         }
     }
     fn lookup(&mut self, request: &ReconciliationRequest) -> LookupOutcome {
-        let found: rusqlite::Result<bool> = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3)", params![request.actor().account_id.as_str(), request.conversation_id().as_str(), request.message_id().as_str()], |r| r.get(0));
+        let found:rusqlite::Result<bool>=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3)",params![request.actor().account_id.as_str(),request.conversation_id().as_str(),request.message_id().as_str()],|r|r.get(0));
         match found {
             Ok(true) => LookupOutcome::Found(DeliveryReceipt {
                 account_id: request.actor().account_id.clone(),
@@ -767,30 +2019,53 @@ impl SubmissionTransport for LocalTransport<'_> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn composed_instructions_put_identity_role_and_private_rules_after_the_app_contract() {
-        let bot = Bot {
-            id: "bot-1".into(),
-            name: "Juriste".into(),
-            color: "violet".into(),
-            shape: "nuage".into(),
-            description: "Relit vos contrats.".into(),
-            instructions: "Cite toujours l'article.".into(),
-            is_default: false,
-            template: None,
-            customized: false,
-            deleted: false,
-        };
-        assert_eq!(compose_instructions(&bot, &[]), "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.\n\nTu t'appelles Juriste.\n\nTon rôle, tel que les autres le voient : Relit vos contrats.\n\nConsignes privées sur ta façon de te comporter :\nCite toujours l'article.");
-        let bare = Bot {
-            description: String::new(),
-            instructions: String::new(),
-            ..bot
-        };
-        assert!(compose_instructions(&bare, &[]).ends_with("$$...$$.\n\nTu t'appelles Juriste."));
+struct RunGateway<'a> {
+    path: &'a Path,
+    provider: &'a Provider,
+    run_id: &'a str,
+    cancel: &'a AtomicBool,
+}
+impl ModelGateway for RunGateway<'_> {
+    fn stream(
+        &self,
+        request: &ModelRequest,
+        emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        let conn = database(self.path)?;
+        for _ in 0..3 {
+            let run = store::required(&conn, self.run_id)?;
+            // Snapshot BEFORE reading capability context/history/replay. Forgetting
+            // bumps this revision; stale summaries and requests are discarded.
+            let source_revision = compaction::revision(&conn, &run.conversation_id)?;
+            let mut services = Services {
+                path: self.path,
+                provider: self.provider,
+                connection: &conn,
+                cancel: Arc::new(AtomicBool::new(false)),
+            };
+            let mut fresh = services.context(&run)?;
+            fresh.input.extend(replay(&conn, &run)?);
+            fresh.tools = request.tools.clone();
+            if let Some((_, protocol)) = request.instructions.rsplit_once("\nUse begin_task") {
+                fresh
+                    .instructions
+                    .push_str(&format!("\nUse begin_task{protocol}"));
+            }
+            let result = RunGatewayCall {
+                path: self.path,
+                provider: self.provider,
+                connection: &conn,
+                run_id: self.run_id,
+                cancel: self.cancel,
+                source_revision,
+            }
+            .stream(&fresh, emit);
+            if !matches!(&result, Err(Error::Conflict(_))) {
+                return result;
+            }
+        }
+        Err(Error::InvalidInput(
+            "context changed repeatedly; retry this response".into(),
+        ))
     }
 }

@@ -29,6 +29,10 @@
     id: "memory",
     botSection(bot, container) {
       const section = node("section", "memory-panel");
+      // Enter on a checkbox otherwise implicitly submits the enclosing bot form.
+      section.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && event.target instanceof HTMLInputElement) event.preventDefault();
+      });
       section.setAttribute("aria-label", "Mémoire du bot");
       section.append(node("h3", "", "Mémoire"));
       container.append(section);
@@ -40,6 +44,7 @@
       const processed = new Set();
       const totals = { created: 0, already: 0, kept: 0 };
       let facts = [], alive = true, busy = false, loaded = false, revision = 0;
+      let editingId;
       const controls = node("fieldset", "memory-controls");
       const toolbar = node("div", "memory-toolbar");
       const allLabel = node("label", "memory-select-all");
@@ -60,7 +65,8 @@
       controls.append(toolbar, list, editor);
       section.append(node("p", "memory-note", "Privé : ce bot seulement. Équipe : tous les bots de cet espace local. Les faits sensibles restent privés. Oublier n’est pas réinitialiser une conversation."), status, result, controls, history);
 
-      function available() { return facts.filter((fact) => !processed.has(fact.fact_id)); }
+      // Already-shared facts must not replay a cached receipt as a new sharing.
+      function available() { return facts.filter((fact) => fact.scope !== "team" && !processed.has(fact.fact_id)); }
       function updateSelection() {
         const eligible = available();
         all.disabled = !loaded || !eligible.length || bot.deleted;
@@ -76,7 +82,8 @@
         render();
       });
       function showTotals() {
-        result.textContent = `Bilan de cette ouverture : ${totals.created + totals.already} partagés (${totals.created} nouveaux, ${totals.already} déjà en équipe) · ${totals.kept} gardés privés.`;
+        const shared = totals.created + totals.already;
+        result.textContent = `Bilan de cette ouverture : ${shared} ${shared === 1 ? "partagé" : "partagés"} (${totals.created} ${totals.created === 1 ? "nouveau" : "nouveaux"}, ${totals.already} déjà en équipe) · ${totals.kept} ${totals.kept === 1 ? "gardé privé" : "gardés privés"}.`;
       }
       function render() {
         if (!alive) return;
@@ -92,8 +99,7 @@
           const check = node("input");
           check.type = "checkbox";
           check.checked = selected.has(fact.fact_id) || processed.has(fact.fact_id);
-          check.disabled = processed.has(fact.fact_id) || bot.deleted;
-          check.setAttribute("aria-label", `Sélectionner ${fact.fact_id}`);
+          check.disabled = processed.has(fact.fact_id) || fact.scope === "team" || bot.deleted;
           check.addEventListener("change", () => {
             if (check.checked) selected.add(fact.fact_id); else selected.delete(fact.fact_id);
             updateSelection();
@@ -102,7 +108,7 @@
           const owner = panels.state?.bots?.find((item) => item.id === fact.bot_id);
           const scope = fact.scope === "team" ? "Équipe" : "Privé";
           const date = new Date(fact.learned_at);
-          row.append(label, node("code", "memory-id", fact.fact_id), node("p", "memory-meta", `${scope}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || fact.bot_id}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
+          row.append(label, node("code", "memory-id", fact.fact_id), node("p", "memory-meta", `${scope}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || fact.bot_id}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
           const actions = node("div", "memory-actions");
           // Models may mutate only their own facts. The user can purge a visible
           // team fact through its owner, including a deleted owner (wrapper r2).
@@ -124,6 +130,7 @@
         controls.disabled = busy;
         section.setAttribute("aria-busy", String(busy));
         updateSelection();
+        if (editingId && !facts.some((fact) => fact.fact_id === editingId)) closeEditor();
       }
       async function readFacts() {
         const data = await panels.api("/api/memory", { bot_id: bot.id });
@@ -148,14 +155,15 @@
           if (alive && request === revision) { busy = false; render(); }
         }
       }
-      function closeEditor() { editor.replaceChildren(); editor.hidden = true; }
-      function openEditor() {
+      function closeEditor() { editingId = undefined; editor.replaceChildren(); editor.hidden = true; }
+      function openEditor(id) {
         closeEditor();
+        editingId = id;
         editor.hidden = false;
         return button("Annuler", closeEditor);
       }
       function edit(fact) {
-        const cancel = openEditor();
+        const cancel = openEditor(fact.fact_id);
         const label = node("label", "memory-edit-label", `Corriger ${fact.fact_id}`);
         const input = node("textarea", "text-input");
         input.rows = 3;
@@ -188,7 +196,7 @@
         input.focus();
       }
       function confirmForget(fact) {
-        const cancel = openEditor();
+        const cancel = openEditor(fact.fact_id);
         editor.append(node("p", "memory-note", `Oublier ${fact.fact_id} et ses versions précédentes ?${fact.scope === "team" ? " Ce fait sera retiré pour tous les bots de l’espace." : ""} Cette action ne réinitialise pas la conversation.`), button("Confirmer l’oubli", () => {
           mutate("/api/memory/forget", { bot_id: fact.bot_id, fact_id: fact.fact_id }, (data) => {
             for (const id of data.forgotten) forgotten.set(id, { fact_id: id, bot_id: fact.bot_id, scope: fact.scope });

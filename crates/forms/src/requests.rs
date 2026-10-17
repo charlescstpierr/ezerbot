@@ -49,8 +49,8 @@ pub enum RequestStatus {
     Pending,
     Resolved { resolution_id: String },
     Denied,
-    Expired,
-    Cancelled,
+    Expired { resolution_id: String },
+    Cancelled { resolution_id: Option<String> },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HumanInputRequest {
@@ -214,8 +214,11 @@ fn decode(
             resolution_id: resolution_id.ok_or_else(|| invalid("missing resolution identifier"))?,
         },
         "denied" => RequestStatus::Denied,
-        "expired" => RequestStatus::Expired,
-        "cancelled" => RequestStatus::Cancelled,
+        "expired" => RequestStatus::Expired {
+            resolution_id: resolution_id
+                .ok_or_else(|| invalid("missing expiry resolution identifier"))?,
+        },
+        "cancelled" => RequestStatus::Cancelled { resolution_id },
         _ => return Err(invalid("unknown human-input status")),
     };
     Ok(HumanInputRequest {
@@ -331,7 +334,7 @@ pub fn submit(
         return Err(invalid("use the typed approval or secret resolution API"));
     };
     validate_values(fields, values)?;
-    resolve(conn, &request, submission_id, values, false)
+    resolve(conn, &request, submission_id, values, "resolved")
 }
 
 /// Only a vault reference is persisted. Raw secrets are never accepted here.
@@ -353,7 +356,7 @@ pub fn submit_secret_ref(
         &request,
         submission_id,
         &serde_json::to_value(secret)?,
-        false,
+        "resolved",
     )
 }
 
@@ -362,7 +365,7 @@ pub(crate) fn resolve(
     request: &HumanInputRequest,
     submission_id: &str,
     values: &Value,
-    denied: bool,
+    status: &str,
 ) -> Result<ResumeReceipt> {
     require_transaction(conn)?;
     if request.status != RequestStatus::Pending {
@@ -378,17 +381,23 @@ pub(crate) fn resolve(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
-    conn.execute(
-        "INSERT INTO forms_resolutions (resolution_id, entry_id, submission_id, values_json) VALUES (?1, ?2, ?3, ?4)",
-        params![resolution_id, request.entry_id, submission_id, serde_json::to_string(values)?],
+    let inserted = conn.execute(
+        "INSERT INTO forms_resolutions (resolution_id, entry_id, submission_id, values_json)
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT(entry_id) DO NOTHING",
+        params![
+            resolution_id,
+            request.entry_id,
+            submission_id,
+            serde_json::to_string(values)?
+        ],
     )?;
+    if inserted == 0 {
+        return replay(conn, &request.entry_id, submission_id)?
+            .ok_or_else(|| invalid("request already has a different submission"));
+    }
     let changed = conn.execute(
         "UPDATE forms_requests SET status=?1, resolution_id=?2 WHERE id=?3 AND status='pending'",
-        params![
-            if denied { "denied" } else { "resolved" },
-            resolution_id,
-            request.id
-        ],
+        params![status, resolution_id, request.id],
     )?;
     if changed != 1 {
         return Err(invalid("human-input request is no longer pending"));
@@ -465,7 +474,9 @@ pub fn resolved_values(conn: &Connection, resolution_id: &str) -> Result<Value> 
 pub fn cancel_for_run(conn: &Connection, run_id: &str) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE forms_requests SET status='cancelled' WHERE run_id=?1 AND
-         (status='pending' OR (status='resolved' AND json_extract(kind_json, '$.kind')='approval'))",
+         (status='pending' OR (status='resolved' AND json_extract(kind_json, '$.kind')='approval'
+          AND EXISTS (SELECT 1 FROM forms_approval_grants g
+                      WHERE g.request_id=forms_requests.id AND g.consumed_at IS NULL)))",
         [run_id],
     )?)
 }
@@ -695,6 +706,22 @@ pub(crate) mod requests_tests {
             resolved_values(&conn, &result.resolution_id).unwrap(),
             json!({"name":"API_TOKEN"})
         );
+    }
+
+    #[test]
+    fn requests_stale_submission_conflict_is_typed_and_same_id_replays() {
+        let conn = database();
+        let stale = form();
+        create(&conn, &stale).unwrap();
+        with_tx(&conn, |conn| -> Result<()> {
+            let first = submit(conn, "entry-1", "first", &serde_json::json!({"text":"keep"}))?;
+            let same = resolve(conn, &stale, "first", &serde_json::json!({"text":"changed"}), "resolved")?;
+            assert_eq!(same, first);
+            let error = resolve(conn, &stale, "second", &serde_json::json!({"text":"changed"}), "resolved").unwrap_err();
+            assert!(matches!(error, Error::InvalidInput(ref reason) if reason == "request already has a different submission"));
+            assert_eq!(resolved_values(conn, &first.resolution_id)?, serde_json::json!({"text":"keep"}));
+            Ok(())
+        }).unwrap();
     }
 
     #[test]

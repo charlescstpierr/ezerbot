@@ -2,16 +2,19 @@
 //!
 //! `reports/goal-permissions-secrets.md` PS01–PS05 establish binding to an action,
 //! separate retirement from cancellation, and save Always rules before resolution.
-//! This local core uses exact canonical argument digests, not broad textual rules.
-//! Only the user's principal-bot conversation may call [`decide`]; the wrapper
-//! authenticates that interaction and supplies the trusted ApprovalRoute. Stored
-//! exact-match rules let [`auto_review`] resolve subsequent identical requests.
+//! Single-use grants bind exact canonical argument digests. Persisted Global
+//! permissions cover the same tool across calls; Subject rules retain the digest.
+//! Decisions must originate in the request's principal-bot conversation; the
+//! wrapper authenticates the user and supplies the trusted ApprovalRoute. Stored
+//! permissions let [`auto_review`] resolve subsequent requests.
 use crate::requests::{self, invalid, HumanInputRequest, InputKind, RequestStatus};
 use grokbot_engine::contracts::{ApprovalRoute, Result, ResumeReceipt};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+pub const EXPIRY_SUBMISSION_ID: &str = "expiry";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,8 +25,9 @@ pub enum ApprovalDecision {
     Never { scope: RuleScope },
 }
 
-/// PS01 policy scope. This core keeps every stored rule additionally bound to
-/// the exact action digest and trusted route; scope never weakens that binding.
+/// PS01 policy scope: Call is one-use, Subject binds the exact digest (no local
+/// subject extractor exists), Global covers the tool for this requesting/main bot
+/// pair. Each resulting execution grant still binds its own exact action digest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleScope {
@@ -45,13 +49,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS forms_approval_grants (
             request_id TEXT PRIMARY KEY, tool TEXT NOT NULL, args_digest TEXT NOT NULL,
-            expires_at INTEGER NOT NULL, consumed_at INTEGER
+            consumed_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS forms_approval_rules (
             requesting_bot_id TEXT NOT NULL, target_bot_id TEXT NOT NULL,
             target_conversation_id TEXT NOT NULL, tool TEXT NOT NULL, args_digest TEXT NOT NULL,
             scope TEXT NOT NULL, allow INTEGER NOT NULL CHECK(allow IN (0,1)),
-            PRIMARY KEY(requesting_bot_id, target_bot_id, target_conversation_id, tool, args_digest, scope)
+            PRIMARY KEY(requesting_bot_id, target_bot_id, tool, args_digest, scope)
         );",
     )?;
     Ok(())
@@ -92,28 +96,36 @@ fn approval(conn: &Connection, id: &str) -> Result<HumanInputRequest> {
     Ok(request)
 }
 
-fn expire(conn: &Connection, request: &HumanInputRequest, now_ms: i64) -> Result<()> {
-    if let InputKind::Approval { expires_at, .. } = request.kind {
-        if now_ms >= expires_at {
-            conn.execute(
-                "UPDATE forms_requests SET status='expired' WHERE id=?1 AND status IN ('pending','resolved')",
-                [&request.id],
-            )?;
-            return Err(invalid("approval expired"));
-        }
-    }
-    Ok(())
-}
-
-/// Persist expiry for UI/tick callers, even when a later attempted decision fails
-/// and its transaction is rolled back. Expiry never revokes a completed effect.
-pub fn expire_pending(conn: &Connection, now_ms: i64) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE forms_requests SET status='expired' WHERE status IN ('pending','resolved')
+/// Resolve overdue *pending decisions*, without expiring an already granted
+/// action. The caller enqueues and attaches each Approval wake in this same
+/// transaction, just as for Deny. The deterministic submission ID is `expiry`.
+pub fn expire_pending(
+    conn: &Connection,
+    now_ms: i64,
+) -> Result<Vec<(HumanInputRequest, ResumeReceipt)>> {
+    requests::require_transaction(conn)?;
+    let mut statement = conn.prepare(
+        "SELECT id FROM forms_requests WHERE status='pending'
          AND json_extract(kind_json, '$.kind')='approval'
-         AND json_extract(kind_json, '$.expires_at')<=?1",
-        [now_ms],
-    )?)
+         AND json_extract(kind_json, '$.expires_at')<=?1 ORDER BY rowid",
+    )?;
+    let ids = statement
+        .query_map([now_ms], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut expired = Vec::new();
+    for id in ids {
+        let request = approval(conn, &id)?;
+        let receipt = requests::resolve(
+            conn,
+            &request,
+            EXPIRY_SUBMISSION_ID,
+            &Value::String("expired".into()),
+            "expired",
+        )?;
+        let request = approval(conn, &id)?;
+        expired.push((request, receipt));
+    }
+    Ok(expired)
 }
 
 /// The wrapper resolves and enqueues/attaches the wake in its transaction. Denial
@@ -124,11 +136,17 @@ pub fn expire_pending(conn: &Connection, now_ms: i64) -> Result<usize> {
 pub fn decide(
     conn: &Connection,
     id: &str,
+    deciding_conversation_id: &str,
     submission_id: &str,
     decision: ApprovalDecision,
     now_ms: i64,
 ) -> Result<ResumeReceipt> {
     let request = approval(conn, id)?;
+    if deciding_conversation_id != request.route.target_conversation_id {
+        return Err(invalid(
+            "approval must be decided in the principal conversation",
+        ));
+    }
     if let Some(receipt) = requests::replay(conn, &request.entry_id, submission_id)? {
         return Ok(receipt);
     }
@@ -136,7 +154,6 @@ pub fn decide(
     if request.status != RequestStatus::Pending {
         return Err(invalid("approval is no longer pending"));
     }
-    expire(conn, &request, now_ms)?;
     let InputKind::Approval {
         tool,
         args_digest,
@@ -145,6 +162,11 @@ pub fn decide(
     else {
         unreachable!()
     };
+    if now_ms >= *expires_at {
+        // Do not write and then return Err: the caller would roll expiry back.
+        // expire_pending returns the durable resolution/wake work to its caller.
+        return Err(invalid("approval expired"));
+    }
     let effective = match decision {
         ApprovalDecision::AlwaysAllow { scope } => {
             if scope == RuleScope::Call || save_rule(conn, &request, scope, true).is_err() {
@@ -173,12 +195,12 @@ pub fn decide(
         &request,
         submission_id,
         &serde_json::to_value(effective)?,
-        denied,
+        if denied { "denied" } else { "resolved" },
     )?;
     if !denied {
         conn.execute(
-            "INSERT INTO forms_approval_grants (request_id, tool, args_digest, expires_at) VALUES (?1,?2,?3,?4)",
-            params![id, tool, args_digest, expires_at],
+            "INSERT INTO forms_approval_grants (request_id, tool, args_digest) VALUES (?1,?2,?3)",
+            params![id, tool, args_digest],
         )?;
     }
     Ok(receipt)
@@ -201,14 +223,14 @@ fn save_rule(
         "INSERT INTO forms_approval_rules
          (requesting_bot_id,target_bot_id,target_conversation_id,tool,args_digest,scope,allow)
          VALUES (?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(requesting_bot_id,target_bot_id,target_conversation_id,tool,args_digest,scope)
-         DO UPDATE SET allow=excluded.allow",
+         ON CONFLICT(requesting_bot_id,target_bot_id,tool,args_digest,scope)
+         DO UPDATE SET allow=excluded.allow, target_conversation_id=excluded.target_conversation_id",
         params![
             route.requesting_bot_id,
             route.target_bot_id,
             route.target_conversation_id,
             tool,
-            args_digest,
+            if scope == RuleScope::Global { "" } else { args_digest.as_str() },
             serde_json::to_string(&scope)?,
             allow
         ],
@@ -222,11 +244,15 @@ fn save_rule(
 pub fn consume_allow_once(
     conn: &Connection,
     id: &str,
+    run_id: &str,
     tool: &str,
     arguments: &Value,
     now_ms: i64,
 ) -> Result<()> {
     let request = approval(conn, id)?;
+    if request.run_id != run_id {
+        return Err(invalid("approval belongs to a different run"));
+    }
     let digest = args_digest(tool, arguments)?;
     let InputKind::Approval {
         tool: approved_tool,
@@ -239,12 +265,11 @@ pub fn consume_allow_once(
     if approved_tool != tool || approved_digest != &digest {
         return Err(invalid("approval does not match tool and argument digest"));
     }
-    expire(conn, &request, now_ms)?;
     let changed = conn.execute(
         "UPDATE forms_approval_grants SET consumed_at=?1 WHERE request_id=?2 AND tool=?3 AND args_digest=?4
-         AND consumed_at IS NULL AND expires_at>?1
-         AND EXISTS (SELECT 1 FROM forms_requests WHERE id=?2 AND status='resolved')",
-        params![now_ms, id, tool, digest],
+         AND consumed_at IS NULL
+         AND EXISTS (SELECT 1 FROM forms_requests WHERE id=?2 AND run_id=?5 AND status='resolved')",
+        params![now_ms, id, tool, digest, run_id],
     )?;
     if changed != 1 {
         return Err(invalid("approval is not allowed or was already consumed"));
@@ -252,7 +277,9 @@ pub fn consume_allow_once(
     Ok(())
 }
 
-/// Exact persisted user rules only; no heuristic/model reviewer is invented.
+/// Persisted user permissions only; no heuristic/model reviewer is invented.
+/// Rule identity excludes the display conversation so a new principal thread
+/// does not silently discard permissions. Each grant still binds this run/call.
 /// New requests without a matching rule remain pending for the user in the main
 /// bot conversation. Even a rule-approved request receives a single-use grant.
 pub fn auto_review(
@@ -278,11 +305,10 @@ pub fn auto_review(
     let allow: Option<bool> = conn
         .query_row(
             "SELECT allow FROM forms_approval_rules WHERE requesting_bot_id=?1 AND target_bot_id=?2
-         AND target_conversation_id=?3 AND tool=?4 AND args_digest=?5 ORDER BY allow ASC LIMIT 1",
+             AND tool=?3 AND (args_digest=?4 OR scope='\"global\"') ORDER BY allow ASC LIMIT 1",
             params![
                 route.requesting_bot_id,
                 route.target_bot_id,
-                route.target_conversation_id,
                 tool,
                 args_digest
             ],
@@ -295,6 +321,7 @@ pub fn auto_review(
     decide(
         conn,
         id,
+        &request.route.target_conversation_id,
         submission_id,
         if allow {
             ApprovalDecision::AllowOnce
@@ -341,11 +368,10 @@ pub fn list_rules(conn: &Connection) -> Result<Vec<ApprovalRule>> {
 pub fn revoke_rule(conn: &Connection, rule: &ApprovalRule) -> Result<bool> {
     Ok(conn.execute(
         "DELETE FROM forms_approval_rules WHERE requesting_bot_id=?1 AND target_bot_id=?2
-         AND target_conversation_id=?3 AND tool=?4 AND args_digest=?5 AND scope=?6",
+         AND tool=?3 AND args_digest=?4 AND scope=?5",
         params![
             rule.route.requesting_bot_id,
             rule.route.target_bot_id,
-            rule.route.target_conversation_id,
             rule.tool,
             rule.args_digest,
             serde_json::to_string(&rule.scope)?
@@ -377,6 +403,35 @@ mod approvals_tests {
             },
             status: RequestStatus::Pending,
         }
+    }
+
+    // Most tests use this fixed trusted execution/display context. Tests of
+    // rejected contexts call the public APIs explicitly via super::.
+    fn decide(
+        conn: &Connection,
+        id: &str,
+        submission_id: &str,
+        decision: ApprovalDecision,
+        now_ms: i64,
+    ) -> Result<ResumeReceipt> {
+        super::decide(
+            conn,
+            id,
+            "main-conversation",
+            submission_id,
+            decision,
+            now_ms,
+        )
+    }
+
+    fn consume_allow_once(
+        conn: &Connection,
+        id: &str,
+        tool: &str,
+        arguments: &Value,
+        now_ms: i64,
+    ) -> Result<()> {
+        super::consume_allow_once(conn, id, "child-run", tool, arguments, now_ms)
     }
 
     fn allow(conn: &Connection) -> ResumeReceipt {
@@ -446,14 +501,184 @@ mod approvals_tests {
             100
         ))
         .is_err());
-        allow(&conn);
-        assert!(
-            consume_allow_once(&conn, "a", "write", &json!({"path":"a","value":1}), 100).is_err()
+        assert!(expire_pending(&conn, 100).is_err());
+        let expired = with_tx(&conn, |conn| expire_pending(conn, 100)).unwrap();
+        assert_eq!(expired.len(), 1);
+        let (request, receipt) = &expired[0];
+        assert_eq!(
+            request.status,
+            RequestStatus::Expired {
+                resolution_id: receipt.resolution_id.clone()
+            }
         );
         assert_eq!(
-            requests::get(&conn, "a").unwrap().unwrap().status,
-            RequestStatus::Expired
+            requests::resolved_values(&conn, &receipt.resolution_id).unwrap(),
+            json!("expired")
         );
+        assert_eq!(
+            requests::receipt(&conn, "e", EXPIRY_SUBMISSION_ID).unwrap(),
+            *receipt
+        );
+        with_tx(&conn, |conn| {
+            requests::attach_wake(
+                conn,
+                &receipt.resolution_id,
+                &grokbot_engine::store::Wake {
+                    wake_id: "expiry-wake".into(),
+                    run_id: request.run_id.clone(),
+                    cause: grokbot_engine::contracts::WakeCause::Approval,
+                    reference: receipt.resolution_id.clone(),
+                    status: grokbot_engine::contracts::WakeStatus::Pending,
+                },
+            )
+        })
+        .unwrap();
+        assert!(with_tx(&conn, |conn| expire_pending(conn, 200))
+            .unwrap()
+            .is_empty());
+        assert!(
+            consume_allow_once(&conn, "a", "write", &json!({"path":"a","value":1}), 200).is_err()
+        );
+    }
+
+    #[test]
+    fn approved_action_survives_late_tick_and_execution_history_is_terminal() {
+        let conn = database();
+        requests::create(&conn, &request("a", "e")).unwrap();
+        let granted = with_tx(&conn, |conn| {
+            decide(conn, "a", "s", ApprovalDecision::AllowOnce, 99)
+        })
+        .unwrap();
+        assert!(with_tx(&conn, |conn| expire_pending(conn, 101))
+            .unwrap()
+            .is_empty());
+        with_tx(&conn, |conn| {
+            consume_allow_once(conn, "a", "write", &json!({"path":"a","value":1}), 200)
+        })
+        .unwrap();
+        assert!(with_tx(&conn, |conn| expire_pending(conn, 300))
+            .unwrap()
+            .is_empty());
+        assert_eq!(requests::cancel_for_run(&conn, "child-run").unwrap(), 0);
+        assert_eq!(
+            requests::get(&conn, "a").unwrap().unwrap().status,
+            RequestStatus::Resolved {
+                resolution_id: granted.resolution_id
+            }
+        );
+    }
+
+    #[test]
+    fn cancelled_unconsumed_approval_keeps_its_resolution() {
+        let conn = database();
+        requests::create(&conn, &request("a", "e")).unwrap();
+        let granted = allow(&conn);
+        assert_eq!(requests::cancel_for_run(&conn, "child-run").unwrap(), 1);
+        assert_eq!(
+            requests::get(&conn, "a").unwrap().unwrap().status,
+            RequestStatus::Cancelled {
+                resolution_id: Some(granted.resolution_id.clone())
+            }
+        );
+        assert_eq!(requests::receipt(&conn, "e", "s").unwrap(), granted);
+        assert!(
+            consume_allow_once(&conn, "a", "write", &json!({"path":"a","value":1}), 2).is_err()
+        );
+    }
+
+    #[test]
+    fn approvals_enforce_deciding_conversation_and_consuming_run() {
+        let conn = database();
+        requests::create(&conn, &request("a", "e")).unwrap();
+        assert!(with_tx(&conn, |conn| super::decide(
+            conn,
+            "a",
+            "child-conversation",
+            "s",
+            ApprovalDecision::AllowOnce,
+            1
+        ))
+        .is_err());
+        let granted = allow(&conn);
+        assert!(super::decide(
+            &conn,
+            "a",
+            "child-conversation",
+            "s",
+            ApprovalDecision::AllowOnce,
+            2
+        )
+        .is_err());
+        let args = json!({"path":"a","value":1});
+        assert!(super::consume_allow_once(&conn, "a", "different-run", "write", &args, 2).is_err());
+        consume_allow_once(&conn, "a", "write", &args, 2).unwrap();
+        assert_eq!(requests::receipt(&conn, "e", "s").unwrap(), granted);
+    }
+
+    #[test]
+    fn global_permission_covers_new_arguments_but_each_grant_remains_bound() {
+        let conn = database();
+        requests::create(&conn, &request("a", "e")).unwrap();
+        with_tx(&conn, |conn| {
+            decide(
+                conn,
+                "a",
+                "s",
+                ApprovalDecision::AlwaysAllow {
+                    scope: RuleScope::Global,
+                },
+                1,
+            )
+        })
+        .unwrap();
+        let mut next = request("b", "f");
+        next.route.target_conversation_id = "new-principal-thread".into();
+        if let InputKind::Approval {
+            args_digest: digest,
+            ..
+        } = &mut next.kind
+        {
+            *digest = args_digest("write", &json!({"path":"b","value":2})).unwrap();
+        }
+        requests::create(&conn, &next).unwrap();
+        with_tx(&conn, |conn| auto_review(conn, "b", "auto", 2))
+            .unwrap()
+            .unwrap();
+        assert!(
+            consume_allow_once(&conn, "b", "write", &json!({"path":"c","value":3}), 3).is_err()
+        );
+        consume_allow_once(&conn, "b", "write", &json!({"path":"b","value":2}), 3).unwrap();
+        assert!(
+            consume_allow_once(&conn, "a", "write", &json!({"path":"b","value":2}), 3).is_err()
+        );
+        let rules = list_rules(&conn).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].args_digest, "");
+        assert_eq!(rules[0].scope, RuleScope::Global);
+        requests::create(&conn, &request("block", "block-entry")).unwrap();
+        with_tx(&conn, |conn| {
+            decide(
+                conn,
+                "block",
+                "s",
+                ApprovalDecision::Never {
+                    scope: RuleScope::Global,
+                },
+                1,
+            )
+        })
+        .unwrap();
+        next.id = "c".into();
+        next.entry_id = "g".into();
+        requests::create(&conn, &next).unwrap();
+        with_tx(&conn, |conn| auto_review(conn, "c", "auto", 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            requests::get(&conn, "c").unwrap().unwrap().status,
+            RequestStatus::Denied
+        );
+        assert!(revoke_rule(&conn, &list_rules(&conn).unwrap()[0]).unwrap());
     }
 
     #[test]
@@ -684,13 +909,18 @@ mod approvals_tests {
         conn.execute_batch("PRAGMA user_version=42").unwrap();
         requests::create(&conn, &request("a", "e")).unwrap();
         requests::create(&conn, &form()).unwrap();
-        assert_eq!(expire_pending(&conn, 99).unwrap(), 0);
-        assert_eq!(expire_pending(&conn, 100).unwrap(), 1);
-        assert_eq!(expire_pending(&conn, 101).unwrap(), 0);
-        assert_eq!(
-            requests::get(&conn, "a").unwrap().unwrap().status,
-            RequestStatus::Expired
-        );
+        assert!(with_tx(&conn, |conn| expire_pending(conn, 99))
+            .unwrap()
+            .is_empty());
+        let expired = with_tx(&conn, |conn| expire_pending(conn, 100)).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert!(with_tx(&conn, |conn| expire_pending(conn, 101))
+            .unwrap()
+            .is_empty());
+        let expected = RequestStatus::Expired {
+            resolution_id: expired[0].1.resolution_id.clone(),
+        };
+        assert_eq!(requests::get(&conn, "a").unwrap().unwrap().status, expected);
         assert_eq!(
             requests::get(&conn, "request-1").unwrap().unwrap().status,
             RequestStatus::Pending
@@ -701,20 +931,29 @@ mod approvals_tests {
                 .unwrap(),
             42
         );
-        assert_eq!(
-            requests::get(&conn, "a").unwrap().unwrap().status,
-            RequestStatus::Expired
-        );
+        assert_eq!(requests::get(&conn, "a").unwrap().unwrap().status, expected);
     }
 
     #[test]
     fn approvals_single_use_is_atomic_across_connections() {
         use std::sync::{Arc, Barrier};
-        let uri = format!(
-            "file:forms-approval-{}?mode=memory&cache=shared",
-            std::process::id()
-        );
-        let conn = Connection::open(&uri).unwrap();
+        struct TempDb(std::path::PathBuf);
+        impl Drop for TempDb {
+            fn drop(&mut self) {
+                for suffix in ["", "-wal", "-shm"] {
+                    let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+                }
+            }
+        }
+        let mut random = [0_u8; 8];
+        getrandom::getrandom(&mut random).unwrap();
+        let file = TempDb(std::env::temp_dir().join(format!(
+            "forms-approval-{}-{:x}.sqlite",
+            std::process::id(),
+            u64::from_ne_bytes(random)
+        )));
+        let conn = Connection::open(&file.0).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
         crate::migrate(&conn).unwrap();
         requests::create(&conn, &request("a", "e")).unwrap();
         allow(&conn);
@@ -722,22 +961,30 @@ mod approvals_tests {
         let attempts: Vec<_> = (0..2)
             .map(|_| {
                 let barrier = Arc::clone(&barrier);
-                let uri = uri.clone();
-                std::thread::spawn(move || {
-                    let conn = Connection::open(uri).unwrap();
+                let path = file.0.clone();
+                std::thread::spawn(move || -> Result<()> {
+                    let conn = Connection::open(path)?;
+                    conn.busy_timeout(std::time::Duration::from_secs(5))?;
                     barrier.wait();
-                    consume_allow_once(&conn, "a", "write", &json!({"path":"a","value":1}), 2)
-                        .is_ok()
+                    let tx = rusqlite::Transaction::new_unchecked(
+                        &conn,
+                        rusqlite::TransactionBehavior::Immediate,
+                    )?;
+                    consume_allow_once(&tx, "a", "write", &json!({"path":"a","value":1}), 2)?;
+                    tx.commit()?;
+                    Ok(())
                 })
             })
             .collect();
-        assert_eq!(
-            attempts
-                .into_iter()
-                .map(|attempt| attempt.join().unwrap())
-                .filter(|allowed| *allowed)
-                .count(),
-            1
+        let results: Vec<_> = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let error = results.into_iter().find_map(|result| result.err()).unwrap();
+        assert!(
+            matches!(error, grokbot_engine::contracts::Error::InvalidInput(ref reason) if reason.contains("already consumed")),
+            "{error}"
         );
         assert!(
             consume_allow_once(&conn, "a", "write", &json!({"path":"a","value":1}), 3).is_err()

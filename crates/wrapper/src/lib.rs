@@ -12,6 +12,10 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod features;
 
+// The model gateway keeps the root compatibility name while generation belongs
+// to its feature module (including the offline simulated reply).
+pub(crate) use features::engine::demo_reply;
+
 pub use provider::{Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};

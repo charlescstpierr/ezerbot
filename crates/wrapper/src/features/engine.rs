@@ -159,7 +159,7 @@ const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule l
 const DEMO_CODE: &str = "Voici un exemple de code. Le mode local simule les réponses.\n\n```rust\nfn saluer(nom: &str) -> String {\n    format!(\"Bonjour, {nom} !\")\n}\n\nfn main() {\n    println!(\"{}\", saluer(\"Grokbot\"));\n}\n```\n\nLe bouton en haut du bloc copie le code.";
 const DEMO_TABLE: &str = "Voici un tableau d'exemple. Le mode local simule les réponses.\n\n| Élément | Rôle | État |\n| --- | --- | --- |\n| Moteur Rust | Garde l'historique | Actif |\n| Interface | Affiche la conversation | Active |\n| Service d'IA | Répond aux messages | **Non connecté** |\n\nLa formule $E = mc^2$ s'affiche aussi.";
 
-fn demo_reply(body: &str) -> &'static str {
+pub(crate) fn demo_reply(body: &str) -> &'static str {
     let body = body.to_lowercase();
     let mentions = |words: &[&str]| words.iter().any(|word| body.contains(word));
     if mentions(&["diagramme", "schéma", "schema", "mermaid"]) {

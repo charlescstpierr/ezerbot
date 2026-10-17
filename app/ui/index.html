@@ -101,15 +101,17 @@
       <div class="messages" id="messages" aria-live="polite" aria-relevant="additions text" hidden></div>
     </section>
 
-    <div class="composer-area">
+    <div class="composer-dock">
       <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-      <form class="composer" id="composer-form">
-        <div id="composer-input" class="composer-input"></div>
-        <div id="composer-attachments"></div>
-        <div class="composer-bottom"><span class="composer-model"><span class="composer-mascot" data-mascot="composer" aria-hidden="true"></span><span class="composer-tools" id="composer-tools"></span></span><button class="send-button" id="send-button" type="submit" aria-label="Envoyer le message" title="Envoyer le message" disabled><svg class="icon"><use href="#i-send"/></svg></button></div>
-        <div class="popover picker" id="picker" role="menu" hidden></div>
-      </form>
-      <div class="composer-caption"><span id="composer-hint">Entrée pour envoyer <span class="caption-dot">·</span> ⇧ Entrée pour une nouvelle ligne</span><span class="simulation-note" id="mode-note"></span></div>
+      <div class="composer-area">
+        <form class="composer" id="composer-form">
+          <div id="composer-input" class="composer-input"></div>
+          <div id="composer-attachments"></div>
+          <div class="composer-bottom"><span class="composer-model"><span class="composer-mascot" data-mascot="composer" aria-hidden="true"></span><span class="composer-tools" id="composer-tools"></span></span><button class="send-button" id="send-button" type="submit" aria-label="Envoyer le message" title="Envoyer le message" disabled><svg class="icon"><use href="#i-send"/></svg></button></div>
+          <div class="popover picker" id="picker" role="menu" hidden></div>
+        </form>
+        <div class="composer-caption"><span id="composer-hint">Entrée pour envoyer <span class="caption-dot">·</span> ⇧ Entrée pour une nouvelle ligne</span><span class="simulation-note" id="mode-note"></span></div>
+      </div>
     </div>
   </main>
 

@@ -5,7 +5,7 @@
   if (!panels) return;
   const BATCH_BYTES = 8 * 1024 * 1024;
   const EXTENSIONS = ["txt", "md", "markdown", "csv", "json", "yaml", "yml"];
-  const normalizeName = (name) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const displayName = (skill) => skill.display_name || skill.name;
   function supportedText(path) {
     const base = path.split(/[\\/]/).pop();
     const dot = base.lastIndexOf(".");
@@ -27,7 +27,7 @@
     el.addEventListener("click", action);
     return el;
   };
-  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom normalisé ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre de a à z ou un chiffre." }[value] || value);
+  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
   function session(botId) {
     if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "" });
     return sessions.get(botId);
@@ -203,18 +203,18 @@
     });
     function showVersion() {
       const version = versions.find((item) => String(item.version) === select.value);
-      preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${version.content.name}\n${version.content.description}\n\n${version.content.body}` : "";
+      preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${displayName(version.content)}\n${version.content.description}\n\n${version.content.editable_body ?? version.content.body}` : "";
     }
     select.addEventListener("change", showVersion);
     function populate(skill, allVersions) {
       current = skill; versions = allVersions;
-      name.value = skill?.content.name || "";
+      name.value = skill ? displayName(skill.content) : "";
       description.value = skill?.content.description || "";
-      body.value = skill?.content.body || "";
+      body.value = skill?.content.editable_body ?? skill?.content.body ?? "";
       // Textareas normalize CRLF. Compare with the displayed initial values so
       // editing a description never silently rewrites an untouched imported body.
       baseline = { name: name.value, description: description.value, body: body.value };
-      versionLabel.textContent = skill ? `Version ${skill.version} · ${skill.skill_id}` : "Le nom sera normalisé; les collisions reçoivent un suffixe.";
+      versionLabel.textContent = skill ? `Version ${skill.version} · ${skill.skill_id}` : "Le nom affiché conserve ses accents. Une clé technique est créée automatiquement.";
       history.hidden = !skill; history.open = false;
       removeButton.hidden = !skill; confirmation.hidden = true;
       reload.hidden = true;
@@ -271,9 +271,10 @@
       event.preventDefault();
       if (fields.disabled) return;
       const values = { name: name.value, description: description.value, body: body.value };
-      const normalized = normalizeName(values.name);
-      if (!normalized) { error.textContent = "Le nom doit contenir une lettre de a à z ou un chiffre."; name.focus(); return; }
-      if (normalized !== current?.content.name && normalized.length > 128) { error.textContent = reason("name-too-large"); name.focus(); return; }
+      if (!values.name.trim()) { error.textContent = "Ajoutez un nom à cette skill."; name.focus(); return; }
+      // The host owns lookup-key transliteration and collision handling; this
+      // field is the human title, not an ASCII slug.
+      if ((!current || values.name !== baseline.name) && [...values.name.trim()].length > 128) { error.textContent = reason("name-too-large"); name.focus(); return; }
       if ((!current || values.description !== baseline.description) && [...values.description].length > 1024) { error.textContent = reason("description-too-large"); description.focus(); return; }
       if (!values.body.trim()) { error.textContent = "Ajoutez un contenu à cette skill."; body.focus(); return; }
       // Imported annotations can make an unchanged body longer than the limit.
@@ -282,7 +283,7 @@
       }
       const changes = current ? Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== baseline[key])) : values;
       if (current && !Object.keys(changes).length) { dialog.close(); return; }
-      void mutate(current ? "/api/skills/update" : "/api/skills", { bot_id: bot.id, ...(current ? { skill_id: current.skill_id, expected_version: current.version } : {}), ...changes }, ({ skill }) => `Skill « ${skill.content.name} » enregistrée.`);
+      void mutate(current ? "/api/skills/update" : "/api/skills", { bot_id: bot.id, ...(current ? { skill_id: current.skill_id, expected_version: current.version } : {}), ...changes }, ({ skill }) => `Skill « ${displayName(skill.content)} » enregistrée.`);
     });
     async function remove() {
       if (!current || fields.disabled) return;
@@ -302,9 +303,9 @@
         if (!skills.length) list.append(node("li", "skills-note", panels.state.skills?.error || "Aucune skill pour ce bot."));
         for (const skill of skills) {
           const row = node("li", "skills-row"), copy = node("div");
-          copy.append(node("strong", "", skill.name + (skill.name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version} · ${skill.skill_id}`));
+          copy.append(node("strong", "", displayName(skill) + (skill.display_name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version} · ${skill.skill_id}`));
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
-          edit.setAttribute("aria-label", `Modifier / historique : ${skill.name}`); edit.disabled = locked;
+          edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;
           row.append(copy, edit); list.append(row);
         }

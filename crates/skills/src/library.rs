@@ -3,6 +3,7 @@
 //!
 //! Name slugs and `-2`, `-3`, … collisions follow SR03 in
 //! `reports/server-orchestration-residual.md` (the shipped `Lye`/`rt` helpers).
+//! Human titles are retained separately from those technical lookup keys.
 //! Stable IDs, optimistic versions, body digests and tombstones are local design
 //! choices: CM13/CM15 in `reports/goal-context-memory-learning.md` do not establish
 //! a server-side history or conflict protocol. Deletion releases the active name,
@@ -22,7 +23,9 @@ pub enum Origin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillContent {
+    /// Normalized lookup key; never use this as the human-facing title.
     pub name: String,
+    pub display_name: String,
     pub description: String,
     pub body: String,
     pub origin: Origin,
@@ -38,7 +41,8 @@ pub struct Skill {
     pub deleted: bool,
 }
 
-const COLUMNS: &str = "skill_id, bot_id, name, description, body, origin, version, digest, deleted";
+const COLUMNS: &str =
+    "skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name";
 // Resolve collisions inside the writing statement, under SQLite's writer lock.
 // A separate availability read would race another bot run's add/rename.
 const AVAILABLE_NAME: &str = "
@@ -66,7 +70,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )
         .optional()?;
     match version {
-        Some(1) => return Ok(()),
+        Some(2) => return Ok(()),
+        Some(1) => return migrate_display_names(conn),
         None | Some(0) => {}
         Some(version) => {
             return Err(Error::InvalidInput(format!(
@@ -117,20 +122,113 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         INSERT INTO component_versions(component, version) VALUES ('skills', 1)
             ON CONFLICT(component) DO UPDATE SET version = excluded.version;",
     )?;
-    Ok(())
+    migrate_display_names(conn)
 }
 
-/// Match the client's lowercase ASCII slug, collapsing punctuation into hyphens.
+fn migrate_display_names(conn: &Connection) -> Result<()> {
+    // A savepoint also works inside the host's migration transaction.
+    conn.execute_batch("SAVEPOINT skills_display_names;")?;
+    let result = (|| -> Result<()> {
+        conn.execute_batch(
+            "ALTER TABLE skills_library ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+             ALTER TABLE skills_versions ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+             DROP TRIGGER skills_snapshot_added;
+             DROP TRIGGER skills_snapshot_updated;",
+        )?;
+        for table in ["skills_library", "skills_versions"] {
+            let mut statement = conn.prepare(&format!(
+                "SELECT skill_id, version, name, body FROM {table}"
+            ))?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            // Stream history one body at a time; a long-lived bot can have
+            // many 256K-character snapshots. The indexed key is never changed.
+            for row in rows {
+                let (id, version, name, body) = row?;
+                let display = crate::import::legacy_display_name(&body, &name);
+                conn.execute(
+                    &format!(
+                        "UPDATE {table} SET display_name = ?1 WHERE skill_id = ?2 AND version = ?3"
+                    ),
+                    params![display, id, version],
+                )?;
+            }
+        }
+        for (trigger, event) in [
+            ("skills_snapshot_added", "INSERT"),
+            ("skills_snapshot_updated", "UPDATE"),
+        ] {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER {trigger} AFTER {event} ON skills_library BEGIN
+                    INSERT INTO skills_versions ({COLUMNS})
+                    VALUES (NEW.skill_id, NEW.bot_id, NEW.name, NEW.description, NEW.body,
+                        NEW.origin, NEW.version, NEW.digest, NEW.deleted, NEW.display_name);
+                 END;"
+            ))?;
+        }
+        conn.execute(
+            "UPDATE component_versions SET version = 2 WHERE component = 'skills'",
+            [],
+        )?;
+        Ok(())
+    })();
+    if result.is_ok() {
+        conn.execute_batch("RELEASE skills_display_names;")?;
+    } else {
+        conn.execute_batch("ROLLBACK TO skills_display_names; RELEASE skills_display_names;")?;
+    }
+    result
+}
+
+/// Lowercase lookup slug, transliterating Latin accents before collapsing punctuation.
 /// An empty result is invalid for library writes; import can choose its fallback.
 pub fn normalize_name(name: &str) -> String {
     let mut normalized = String::new();
     let mut separator = false;
     for character in name.trim().to_lowercase().chars() {
-        if character.is_ascii_lowercase() || character.is_ascii_digit() {
+        // No extra dependency/lockfile churn for the French/Latin titles used
+        // by this app. Ignore decomposed combining accents as well.
+        let latin = match character {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+            'ç' | 'ć' | 'č' | 'ĉ' | 'ċ' => "c",
+            'ď' | 'đ' | 'ð' => "d",
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+            'ĥ' | 'ħ' => "h",
+            'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+            'ĵ' => "j",
+            'ķ' => "k",
+            'ĺ' | 'ļ' | 'ľ' | 'ł' => "l",
+            'ñ' | 'ń' | 'ņ' | 'ň' => "n",
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+            'ŕ' | 'ŗ' | 'ř' => "r",
+            'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => "s",
+            'ţ' | 'ť' | 'ŧ' | 'ț' => "t",
+            'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+            'ŵ' => "w",
+            'ý' | 'ÿ' | 'ŷ' => "y",
+            'ź' | 'ż' | 'ž' => "z",
+            'æ' => "ae",
+            'œ' => "oe",
+            'ß' => "ss",
+            '\u{0300}'..='\u{036f}' => continue,
+            _ => "",
+        };
+        if !latin.is_empty() || character.is_ascii_alphanumeric() {
             if separator && !normalized.is_empty() {
                 normalized.push('-');
             }
-            normalized.push(character);
+            if latin.is_empty() {
+                normalized.push(character);
+            } else {
+                normalized.push_str(latin);
+            }
             separator = false;
         } else {
             separator = true;
@@ -156,14 +254,15 @@ pub fn add(conn: &Connection, bot_id: &str, content: &SkillContent) -> Result<Sk
     Ok(conn.query_row(
         &format!(
             "INSERT INTO skills_library
-                (skill_id, bot_id, name, description, body, origin, version, digest, deleted)
+                (skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name)
              VALUES (:skill_id, :bot_id, ({AVAILABLE_NAME}), :description, :body,
-                     :origin, 1, :digest, 0) RETURNING {COLUMNS}"
+                     :origin, 1, :digest, 0, :display_name) RETURNING {COLUMNS}"
         ),
         named_params! {
             ":skill_id": skill_id,
             ":bot_id": bot_id,
             ":name": validated_name(&content.name)?,
+            ":display_name": content.display_name.trim(),
             ":description": content.description,
             ":body": content.body,
             ":origin": serde_json::to_string(&content.origin)?,
@@ -254,13 +353,14 @@ fn revise(
         &format!(
             "UPDATE skills_library
              SET name = CASE WHEN :deleted THEN :name ELSE ({AVAILABLE_NAME}) END,
-                 description = :description, body = :body, origin = :origin,
+                 display_name = :display_name, description = :description, body = :body, origin = :origin,
                  version = :version, digest = :digest, deleted = :deleted
              WHERE skill_id = :skill_id AND version = :expected_version AND deleted = 0
              RETURNING {COLUMNS}"
         ),
         named_params! {
             ":name": skill.content.name,
+            ":display_name": skill.content.display_name.trim(),
             ":bot_id": skill.bot_id,
             ":description": skill.content.description,
             ":body": skill.content.body,
@@ -297,6 +397,7 @@ fn read_skill(row: &Row<'_>) -> rusqlite::Result<Skill> {
         bot_id: row.get(1)?,
         content: SkillContent {
             name: row.get(2)?,
+            display_name: row.get(9)?,
             description: row.get(3)?,
             body: row.get(4)?,
             origin,
@@ -320,10 +421,47 @@ mod tests {
     fn content(name: &str, body: &str) -> SkillContent {
         SkillContent {
             name: name.into(),
+            display_name: name.trim().into(),
             description: "A useful skill".into(),
             body: body.into(),
             origin: Origin::Manual,
         }
+    }
+
+    #[test]
+    fn v1_migration_recovers_accented_titles_without_revising_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE component_versions(component TEXT PRIMARY KEY, version INTEGER NOT NULL);
+             INSERT INTO component_versions VALUES ('skills', 1);
+             CREATE TABLE skills_library(skill_id TEXT PRIMARY KEY, bot_id TEXT, name TEXT, description TEXT, body TEXT, origin TEXT, version INTEGER, digest TEXT, deleted INTEGER);
+             CREATE TABLE skills_versions(skill_id TEXT, bot_id TEXT, name TEXT, description TEXT, body TEXT, origin TEXT, version INTEGER, digest TEXT, deleted INTEGER, PRIMARY KEY(skill_id, version));
+             CREATE TRIGGER skills_snapshot_added AFTER INSERT ON skills_library BEGIN SELECT 1; END;
+             CREATE TRIGGER skills_snapshot_updated AFTER UPDATE ON skills_library BEGIN SELECT 1; END;"
+        ).unwrap();
+        let body = "---\nname: Résumé express\norigin: upload\n---\nTexte.";
+        conn.execute("INSERT INTO skills_library VALUES ('skill_old', 'bot', 'r-sum-express', '', ?1, ?2, 1, 'original-digest', 0)", params![body, serde_json::to_string(&Origin::Manual).unwrap()]).unwrap();
+        conn.execute_batch("INSERT INTO skills_versions SELECT * FROM skills_library;")
+            .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let first = list(&conn, "bot").unwrap().remove(0);
+        assert_eq!(first.content.display_name, "Résumé express");
+        assert_eq!(first.content.name, "r-sum-express");
+        assert_eq!(first.content.body, body);
+        assert_eq!(first.digest, "original-digest");
+        assert_eq!(first.version, 1);
+        assert_eq!(
+            history(&conn, &first.skill_id).unwrap(),
+            vec![first.clone()]
+        );
+        let mut changed = first.content.clone();
+        changed.display_name = "Résumé révisé".into();
+        let updated = update(&conn, &first.skill_id, 1, &changed).unwrap();
+        assert_eq!(
+            history(&conn, &first.skill_id).unwrap(),
+            vec![first, updated]
+        );
     }
 
     #[test]
@@ -376,7 +514,13 @@ mod tests {
         assert_ne!(first.skill_id, second.skill_id);
         assert!(list(&conn, "absent").unwrap().is_empty());
         assert_eq!(normalize_name("__HELLO / world. 42__"), "hello-world-42");
-        assert_eq!(normalize_name("Été / 東京"), "t");
+        assert_eq!(normalize_name("Été / 東京"), "ete");
+        assert_eq!(normalize_name("Résumé express"), "resume-express");
+        assert_eq!(
+            normalize_name("Re\u{301}sume\u{301} express"),
+            "resume-express"
+        );
+        assert_eq!(normalize_name("Cœur à cœur"), "coeur-a-coeur");
         assert!(add(&conn, "bot-a", &content(" --- ", "bad")).is_err());
         assert!(add(&conn, " ", &content("Valid", "bad")).is_err());
     }
@@ -471,7 +615,7 @@ mod tests {
         );
         assert_eq!(get_version(&conn, &first.skill_id, 1).unwrap(), Some(first));
         conn.execute(
-            "UPDATE component_versions SET version = 2 WHERE component = 'skills'",
+            "UPDATE component_versions SET version = 99 WHERE component = 'skills'",
             [],
         )
         .unwrap();

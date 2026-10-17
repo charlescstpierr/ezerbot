@@ -129,6 +129,141 @@ fn import_reports_per_file_and_survives_restart() {
 }
 
 #[test]
+fn accented_titles_survive_import_edit_history_and_restart() {
+    let db = Database::new();
+    let mut app = db.open();
+    let upload = json!({"path":"resume.md", "content":"---\nname: Résumé express\ndescription: Trois puces\ncustom: gardé\n---\nTexte à résumer."});
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[upload.clone()]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let original = listing(&mut app, "grokbot")[0].clone();
+    assert_eq!(original["content"]["name"], "resume-express");
+    assert_eq!(original["content"]["display_name"], "Résumé express");
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["skills"]["by_bot"]["grokbot"][0]["display_name"],
+        "Résumé express"
+    );
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    let editable = versions["versions"][0]["content"]["editable_body"]
+        .as_str()
+        .unwrap();
+    assert!(editable.contains("custom: gardé"));
+    assert!(!editable.contains("origin:"));
+    assert!(!editable.contains("upload-extension:"));
+    let noop = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":"Résumé express", "body":editable}),
+    );
+    assert_eq!(noop["skill"], original);
+    let edited = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":"Résumé Express", "body":editable.replace("Texte à résumer.", "Contenu révisé.")}),
+    );
+    assert_eq!(edited["skill"]["content"]["name"], "resume-express");
+    assert_eq!(edited["skill"]["content"]["display_name"], "Résumé Express");
+    assert_eq!(
+        edited["skill"]["content"]["origin"],
+        original["content"]["origin"]
+    );
+    assert!(edited["skill"]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("origin: upload\nupload-extension: .md"));
+    assert!(matches!(
+        app.invoke_tool("grokbot", "read_skill", json!({"name":"Résumé Express"}))
+            .unwrap(),
+        ToolOutcome::Done { .. }
+    ));
+    drop(app);
+    let mut app = db.open();
+    assert_eq!(listing(&mut app, "grokbot")[0], edited["skill"]);
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    assert_eq!(
+        versions["versions"][0]["content"]["display_name"],
+        "Résumé express"
+    );
+    assert_eq!(
+        versions["versions"][1]["content"]["display_name"],
+        "Résumé Express"
+    );
+    let manual = add(&mut app, "grokbot", "Été à Montréal", "Corps");
+    assert_eq!(manual["content"]["display_name"], "Été à Montréal");
+    assert_eq!(manual["content"]["name"], "ete-a-montreal");
+}
+
+#[test]
+fn restored_legacy_titles_are_searchable_and_readable() {
+    let db = Database::new();
+    let app = db.open();
+    let legacy = grokbot_skills::library::add(
+        app.feature_context().connection,
+        "grokbot",
+        &grokbot_skills::library::SkillContent {
+            name: "r-sum-express".into(),
+            display_name: "Résumé express".into(),
+            description: String::new(),
+            body: "Corps hérité".into(),
+            origin: grokbot_skills::library::Origin::Manual,
+        },
+    )
+    .unwrap();
+    for name in ["Résumé express", "resume-express", "r-sum-express"] {
+        let output = tool_output(&app, "read_skill", json!({"name":name}));
+        assert_eq!(output["skill_id"], legacy.skill_id);
+        assert_eq!(output["body"], "Corps hérité");
+    }
+    for query in ["résumé", "resume"] {
+        let page = tool_output(&app, "list_skills", json!({"query":query}));
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["skills"][0]["skill_id"], legacy.skill_id);
+    }
+}
+
+#[test]
+fn body_replacement_keeps_all_host_managed_upload_fields() {
+    let db = Database::new();
+    let mut app = db.open();
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{"path":"ton-chaleureux.txt", "content":"Ton chaleureux."}]}),
+    );
+    let original = listing(&mut app, "grokbot")[0].clone();
+    let id = original["skill_id"].clone();
+    let updated = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":"---\ncustom: conservé\norigin: model\nupload-name: faux\n---\nNouveau texte\norigin: exemple dans le corps"}),
+    );
+    let body = updated["skill"]["content"]["body"].as_str().unwrap();
+    assert!(body.contains("custom: conservé"));
+    assert!(
+        body.contains("origin: upload\nupload-extension: .txt\nupload-name: 'ton-chaleureux.txt'")
+    );
+    assert!(!body.contains("origin: model"));
+    assert!(!body.contains("upload-name: faux"));
+    assert!(body.ends_with("origin: exemple dans le corps"));
+    assert_eq!(
+        updated["skill"]["content"]["origin"],
+        original["content"]["origin"]
+    );
+}
+
+#[test]
 fn skills_are_scoped_per_bot() {
     let db = Database::new();
     let mut app = db.open();
@@ -937,7 +1072,7 @@ fn list_search_normalizes_word_names_and_unicode_description_case() {
 }
 
 #[test]
-fn manual_names_are_bounded_and_normalized_before_noop_comparison() {
+fn manual_names_are_bounded_and_trimmed_before_noop_comparison() {
     let db = Database::new();
     let mut app = db.open();
     let original = add(&mut app, "grokbot", "Deploy Safely", "body");
@@ -945,7 +1080,7 @@ fn manual_names_are_bounded_and_normalized_before_noop_comparison() {
     let same = post(
         &mut app,
         "/api/skills/update",
-        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":" DEPLOY__Safely!! "}),
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":" Deploy Safely "}),
     );
     assert_eq!(same["skill"], original);
     let history = post(
@@ -1111,7 +1246,14 @@ fn imported_long_fields_can_be_resubmitted_unchanged_by_full_editor_form() {
         original["content"]["description"]
     );
     assert_eq!(updated["content"]["origin"], original["content"]["origin"]);
-    assert_eq!(updated["content"]["body"], "edited body");
+    assert_eq!(
+        grokbot_skills::import::editable_body(updated["content"]["body"].as_str().unwrap()),
+        "edited body"
+    );
+    assert!(updated["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("origin: upload\nupload-extension: .md"));
     let unchanged = post(
         &mut app,
         "/api/skills/update",

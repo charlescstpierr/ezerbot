@@ -107,6 +107,11 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
         ImportedSkill {
             content: SkillContent {
                 name,
+                display_name: if library::normalize_name(&title).is_empty() {
+                    "skill".into()
+                } else {
+                    title.trim().into()
+                },
                 description: field(header, "description"),
                 body,
                 origin: Origin::Upload {
@@ -189,7 +194,10 @@ fn import_files(
                     } else {
                         let reusable = front_name.as_ref().and_then(|front| {
                             known.iter().position(|skill| {
-                                skill.content.name == imported.content.name
+                                (skill.content.name == imported.content.name
+                                    || (skill.content.name == legacy_slug(front)
+                                        && skill.content.display_name
+                                            == imported.content.display_name))
                                     && !planned.contains(&skill.content.name)
                                     && field(
                                         frontmatter(&skill.content.body).map_or("", |(h, _)| h),
@@ -206,7 +214,13 @@ fn import_files(
                                 reason: "too-many-skills".into(),
                             }
                         } else {
-                            match write(reusable.map(|index| &known[index]), &imported.content) {
+                            let existing = reusable.map(|index| &known[index]);
+                            let mut content = imported.content;
+                            if let Some(existing) = existing {
+                                // Pre-fix uploads retain their lookup key and stable ID.
+                                content.name = existing.content.name.clone();
+                            }
+                            match write(existing, &content) {
                                 Ok(skill) => {
                                     planned.insert(skill.content.name.clone());
                                     let status = ImportStatus::Written {
@@ -304,12 +318,76 @@ fn heading(body: &str) -> Option<&str> {
 }
 
 fn normalize(title: &str) -> String {
+    library::normalize_name(title)
+}
+
+/// Recover the title of a pre-display-name upload without changing its stable
+/// lookup key, digest, version or body. Don't undo a later manual rename.
+pub(crate) fn legacy_display_name(body: &str, name: &str) -> String {
+    let title = field(frontmatter(body).map_or("", |(header, _)| header), "name");
+    let legacy = legacy_slug(&title);
+    if !legacy.is_empty()
+        && (name == legacy
+            || name
+                .strip_prefix(&format!("{legacy}-"))
+                .is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+                }))
+    {
+        title
+    } else {
+        name.into()
+    }
+}
+
+fn legacy_slug(title: &str) -> String {
     title
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+const MANAGED_KEYS: [&str; 3] = ["origin:", "upload-extension:", "upload-name:"];
+fn managed(line: &str) -> bool {
+    MANAGED_KEYS.iter().any(|key| line.starts_with(key))
+}
+
+/// Only host-owned top-level, single-line fields are hidden. User frontmatter,
+/// fenced examples and similarly named fields in the Markdown body are intact.
+pub fn editable_body(text: &str) -> String {
+    let Some((header, body)) = frontmatter(text) else {
+        return text.into();
+    };
+    if !header.lines().any(managed) {
+        return text.into();
+    }
+    let lines: Vec<_> = header.lines().filter(|line| !managed(line)).collect();
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        body.into()
+    } else {
+        format!("---\n{}\n---\n{body}", lines.join("\n"))
+    }
+}
+
+/// Reattach the original host provenance on edits, even when the user removes
+/// all frontmatter or tries to replace its managed fields. Never parse body YAML.
+pub fn preserve_managed_frontmatter(original: &str, edited: &str) -> String {
+    let Some((header, _)) = frontmatter(original) else {
+        return edited.into();
+    };
+    let metadata: Vec<_> = header.lines().filter(|line| managed(line)).collect();
+    if metadata.is_empty() {
+        return edited.into();
+    }
+    let clean = editable_body(edited);
+    let (header, body) = frontmatter(&clean).unwrap_or(("", &clean));
+    let separator = if header.is_empty() { "" } else { "\n" };
+    format!(
+        "---\n{header}{separator}{}\n---\n{body}",
+        metadata.join("\n")
+    )
 }
 
 fn annotate(text: &str, title: &str, has_name: bool, extension: &str, file_name: &str) -> String {
@@ -406,6 +484,83 @@ mod tests {
         ] {
             assert_eq!(convert(&file(path, text)).unwrap().content.name, expected);
         }
+    }
+
+    #[test]
+    fn accents_are_preserved_in_titles_and_transliterated_in_lookup_names() {
+        for (path, text) in [
+            ("resume.md", "---\nname: Résumé express\n---\nCorps"),
+            ("resume.md", "# Résumé express\nCorps"),
+            ("Résumé express/SKILL.md", "Corps"),
+            ("Résumé express.txt", "Corps"),
+        ] {
+            let content = convert(&file(path, text)).unwrap().content;
+            assert_eq!(content.name, "resume-express");
+            assert_eq!(content.display_name, "Résumé express");
+        }
+        let conn = database();
+        let first = file("resume.md", "---\nname: Résumé express\n---\nv1");
+        import_batch(&conn, "bot", &[first.clone(), first]).unwrap();
+        let id = library::list(&conn, "bot").unwrap()[0].skill_id.clone();
+        import_batch(
+            &conn,
+            "bot",
+            &[file("resume.md", "---\nname: Résumé express\n---\nv2")],
+        )
+        .unwrap();
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].skill_id, id);
+        assert_eq!(saved[0].version, 2);
+    }
+
+    #[test]
+    fn legacy_accented_lookup_keys_are_reused_instead_of_duplicated() {
+        let conn = database();
+        let mut old = convert(&file("resume.md", "---\nname: Résumé express\n---\nv1"))
+            .unwrap()
+            .content;
+        old.name = "r-sum-express".into();
+        let first = library::add(&conn, "bot", &old).unwrap();
+        import_batch(
+            &conn,
+            "bot",
+            &[file("resume.md", "---\nname: Résumé express\n---\nv2")],
+        )
+        .unwrap();
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].skill_id, first.skill_id);
+        assert_eq!(saved[0].content.name, "r-sum-express");
+        assert_eq!(saved[0].content.display_name, "Résumé express");
+        assert_eq!(saved[0].version, 2);
+    }
+
+    #[test]
+    fn editable_frontmatter_hides_only_host_fields_and_preserves_them_on_save() {
+        let original = "---\r\nname: Été\r\ncustom: gardé\r\norigin: upload\r\nupload-extension: .txt\r\nupload-name: 'été.txt'\r\n---\r\n\r\norigin: exemple\r\n";
+        let editable = editable_body(original);
+        assert!(editable.contains("name: Été\ncustom: gardé"));
+        assert!(editable.ends_with("origin: exemple\r\n"));
+        assert!(!editable.contains("origin: upload"));
+        let saved = preserve_managed_frontmatter(
+            original,
+            "---\ncustom: nouveau\norigin: model\n---\nCorps",
+        );
+        assert!(saved.contains(
+            "custom: nouveau\norigin: upload\nupload-extension: .txt\nupload-name: 'été.txt'"
+        ));
+        assert!(saved.ends_with("Corps"));
+        assert!(preserve_managed_frontmatter(original, "Corps seul").ends_with("---\nCorps seul"));
+        for text in [
+            "origin: exemple\nTexte",
+            "---\ncustom: valeur\n---\nTexte",
+            "---\norigin: exemple sans fermeture",
+        ] {
+            assert_eq!(editable_body(text), text);
+            assert_eq!(preserve_managed_frontmatter("Corps manuel", text), text);
+        }
+        assert_eq!(editable_body("---\norigin: upload\n---\nCorps"), "Corps");
     }
 
     #[test]

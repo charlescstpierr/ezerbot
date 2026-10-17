@@ -152,9 +152,18 @@ fn handle(
             };
             require_bot(app, &input.bot_id)?;
             owned_skill(&app.connection, &input.bot_id, &input.skill_id)?;
-            Ok(
-                json!({"versions": library::history(&app.connection, &input.skill_id).map_err(skill_error)?}),
-            )
+            let versions =
+                library::history(&app.connection, &input.skill_id).map_err(skill_error)?;
+            let versions: Vec<_> = versions
+                .into_iter()
+                .map(|skill| {
+                    let editable = import::editable_body(&skill.content.body);
+                    let mut value = json!(skill);
+                    value["content"]["editable_body"] = json!(editable);
+                    value
+                })
+                .collect();
+            Ok(json!({"versions": versions}))
         }
         (_, "/api/skills") => {
             let input: WriteInput = parse(body)?;
@@ -194,8 +203,9 @@ fn handle(
                 .ok_or_else(|| ApiError::new(500, "Version courante de skill introuvable."))?;
             let mut content = current.content.clone();
             if let Some(name) = input.name {
-                if library::normalize_name(&name) != current.content.name {
+                if name.trim() != current.content.display_name {
                     content.name = manual_name(&name)?;
+                    content.display_name = name.trim().into();
                 }
             }
             if let Some(description) = input.description {
@@ -205,9 +215,12 @@ fn handle(
                 }
             }
             if let Some(body) = input.body {
-                if body != current.content.body {
+                if body != current.content.body
+                    && body != import::editable_body(&current.content.body)
+                {
                     validate_body(&body)?;
-                    content.body = body;
+                    content.body =
+                        import::preserve_managed_frontmatter(&current.content.body, &body);
                 }
             }
             // Omitted fields and upload provenance survive manual edits. Do not
@@ -305,6 +318,7 @@ fn manual_content(
     validate_description(&description)?;
     Ok(SkillContent {
         name: manual_name(&name)?,
+        display_name: name.trim().into(),
         description,
         body,
         origin: Origin::Manual,
@@ -312,6 +326,9 @@ fn manual_content(
 }
 
 fn manual_name(name: &str) -> Result<String, ApiError> {
+    if name.trim().chars().count() > NAME_PREVIEW {
+        return Err(ApiError::new(400, "name-too-large"));
+    }
     let name = library::normalize_name(name);
     if name.is_empty() {
         Err(ApiError::new(
@@ -390,6 +407,7 @@ fn index(
     let mut statement = conn.prepare(
         "SELECT s.skill_id, s.bot_id, substr(s.name, 1, ?3), substr(s.description, 1, ?4),
                 s.version, s.digest, length(s.name) > ?3, length(s.description) > ?4,
+                substr(s.display_name, 1, ?3), length(s.display_name) > ?3,
                 (?5 IS NULL OR instr(s.name, ?5) > 0 OR (?6 <> '' AND instr(s.name, ?6) > 0))
          FROM skills_library AS s
          WHERE s.deleted = 0 AND (?1 IS NULL OR s.bot_id = ?1)
@@ -401,14 +419,15 @@ fn index(
             "name": row.get::<_, String>(2)?, "description": row.get::<_, String>(3)?,
             "version": row.get::<_, u64>(4)?, "digest": row.get::<_, String>(5)?,
             "name_truncated": row.get::<_, bool>(6)?, "description_truncated": row.get::<_, bool>(7)?,
-        }), row.get::<_, bool>(8)?))
+            "display_name": row.get::<_, String>(8)?, "display_name_truncated": row.get::<_, bool>(9)?,
+        }), row.get::<_, bool>(10)?))
     })?;
     let mut matching = Vec::new();
     for row in rows {
         let (skill, name_matches) = row?;
-        // SQLite lower() handles ASCII only. Unicode-fold the bounded description
-        // excerpt in Rust; full names are matched by SQL without transferring
-        // potentially huge imported names. Pagination is exhaustive without query.
+        // SQLite lower() handles ASCII only. Fold bounded display titles and
+        // description excerpts here, including restored pre-fix accented titles.
+        // Full lookup keys still match in SQL; pagination is exhaustive without query.
         if name_matches
             || query.is_some_and(|query| {
                 skill["description"]
@@ -416,6 +435,12 @@ fn index(
                     .unwrap_or_default()
                     .to_lowercase()
                     .contains(query)
+                    || skill["display_name"].as_str().is_some_and(|title| {
+                        title.to_lowercase().contains(query)
+                            || normalized.as_ref().is_some_and(|key| {
+                                !key.is_empty() && library::normalize_name(title).contains(key)
+                            })
+                    })
             })
         {
             matching.push(skill);
@@ -494,10 +519,33 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             }
         };
         // The bot scope is supplied only by the executor, even for ID lookup.
-        let found: Option<(String, u64, String, String, bool)> = ctx.connection.query_row(
-            "SELECT skill_id, version, body, substr(name, 1, ?4), length(name) > ?4 FROM skills_library
-             WHERE bot_id = ?1 AND deleted = 0 AND ((?2 IS NOT NULL AND name = ?2) OR (?3 IS NOT NULL AND skill_id = ?3))",
-            params![bot, name, id, NAME_PREVIEW], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()?;
+        type LoadedSkill = (String, u64, String, String, bool);
+        let load = |name: Option<&str>,
+                    id: Option<&str>|
+         -> rusqlite::Result<Option<LoadedSkill>> {
+            ctx.connection.query_row(
+                "SELECT skill_id, version, body, substr(name, 1, ?4), length(name) > ?4 FROM skills_library
+                 WHERE bot_id = ?1 AND deleted = 0 AND ((?2 IS NOT NULL AND name = ?2) OR (?3 IS NOT NULL AND skill_id = ?3))",
+                params![bot, name, id, NAME_PREVIEW], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()
+        };
+        let mut found = load(name.as_deref(), id.as_deref())?;
+        if found.is_none() {
+            if let Some(name) = &name {
+                // Old uploads keep their original lookup key. Their restored
+                // human title is also readable; canonical keys win on ambiguity.
+                let alias = index(ctx.connection, Some(bot), Some(name))?
+                    .into_iter()
+                    .find(|skill| {
+                        skill["display_name_truncated"] == false
+                            && library::normalize_name(
+                                skill["display_name"].as_str().unwrap_or_default(),
+                            ) == *name
+                    });
+                if let Some(alias) = alias {
+                    found = load(None, alias["skill_id"].as_str())?;
+                }
+            }
+        }
         let (id, version, body, name, name_truncated) =
             found.ok_or_else(|| ApiError::new(404, "Skill introuvable."))?;
         // The assembler fences ToolResult data; keep the requested raw body.

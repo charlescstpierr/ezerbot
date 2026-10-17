@@ -11,6 +11,7 @@ use grokbot_engine::contracts::{Error, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 /// JavaScript string length (UTF-16 code units), not UTF-8 bytes or scalar values.
 pub const MAX_SKILL_CHARACTERS: usize = 256_000;
@@ -45,6 +46,10 @@ pub struct ImportItem {
 }
 
 pub fn convert(file: &ImportFile) -> Result<ImportedSkill> {
+    convert_parts(file).map(|(imported, _)| imported)
+}
+
+fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
     let path = file.path.replace('\\', "/");
     let parts: Vec<_> = path
         .split('/')
@@ -66,7 +71,7 @@ pub fn convert(file: &ImportFile) -> Result<ImportedSkill> {
     let text = std::str::from_utf8(&file.bytes).map_err(|_| invalid("unsupported"))?;
     // TextDecoder("utf-8") consumes a leading BOM.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    if text.trim().is_empty() {
+    if text.trim_matches(js_space).is_empty() {
         return Err(invalid("empty"));
     }
     if text.encode_utf16().count() > MAX_SKILL_CHARACTERS {
@@ -74,7 +79,7 @@ pub fn convert(file: &ImportFile) -> Result<ImportedSkill> {
     }
 
     let (header, body) = frontmatter(text).unwrap_or(("", text));
-    let front_name = field(header, "name");
+    let front_name = field(header, "name").trim_matches(js_space).to_owned();
     let has_name = !normalize(&front_name).is_empty();
     let fallback = if file_name == "SKILL.md" && parts.len() > 1 {
         parts[parts.len() - 2]
@@ -97,70 +102,124 @@ pub fn convert(file: &ImportFile) -> Result<ImportedSkill> {
     };
     let body = annotate(text, &title, has_name, extension, upload_name);
     let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
-    Ok(ImportedSkill {
-        content: SkillContent {
-            name,
-            description: field(header, "description"),
-            body,
-            origin: Origin::Upload {
-                extension: extension.into(),
-                name: file_name.into(),
+    Ok((
+        ImportedSkill {
+            content: SkillContent {
+                name,
+                description: field(header, "description"),
+                body,
+                origin: Origin::Upload {
+                    extension: extension.into(),
+                    name: file_name.into(),
+                },
             },
+            digest,
         },
-        digest,
-    })
+        has_name.then_some(front_name),
+    ))
 }
 
-/// A listing failure aborts before writing. Conversion, capacity and write errors
-/// are instead reported per file, in input order. Duplicate retries do not consume
-/// capacity, including at the cap; only successful writes reserve names/slots.
+/// A listing failure aborts before writing. Conversion, capacity and ordinary write
+/// errors are reported per file. Matching named frontmatter updates the existing
+/// version once per batch, even at capacity (SR03 `ut` / `plannedInDrop`).
+///
+/// Concurrent callers MUST hold a caller-owned `BEGIN IMMEDIATE` transaction
+/// (`with_tx`) across this call: capacity and digest checks are read-then-write.
+/// We never begin/commit/roll back. If SQLite loses that transaction, abort with
+/// an error rather than reporting rolled-back successes or writing in autocommit.
 pub fn import_batch(
     conn: &Connection,
     bot_id: &str,
     files: &[ImportFile],
 ) -> Result<Vec<ImportItem>> {
     let known = library::list(conn, bot_id)?;
-    Ok(import_files(files, known, |content| {
-        library::add(conn, bot_id, content)
-    }))
+    persist_files(conn, files, known, |existing, content| match existing {
+        Some(skill) => library::update(conn, &skill.skill_id, skill.version, content),
+        None => library::add(conn, bot_id, content),
+    })
+}
+
+fn persist_files(
+    conn: &Connection,
+    files: &[ImportFile],
+    known: Vec<Skill>,
+    mut write: impl FnMut(Option<&Skill>, &SkillContent) -> Result<Skill>,
+) -> Result<Vec<ImportItem>> {
+    let in_tx = !conn.is_autocommit();
+    let mut lost = false;
+    let report = import_files(files, known, |existing, content| {
+        if lost {
+            return Err(invalid("import transaction was rolled back by SQLite"));
+        }
+        let result = write(existing, content);
+        if in_tx && conn.is_autocommit() {
+            lost = true;
+        }
+        result
+    });
+    if lost {
+        Err(invalid("import transaction was rolled back by SQLite"))
+    } else {
+        Ok(report)
+    }
 }
 
 fn import_files(
     files: &[ImportFile],
     mut known: Vec<Skill>,
-    mut write: impl FnMut(&SkillContent) -> Result<Skill>,
+    mut write: impl FnMut(Option<&Skill>, &SkillContent) -> Result<Skill>,
 ) -> Vec<ImportItem> {
     known.retain(|skill| !skill.deleted);
+    let mut planned = HashSet::new();
     files
         .iter()
         .map(|file| {
-            let status = match convert(file) {
+            let status = match convert_parts(file) {
                 Err(error) => ImportStatus::Skipped {
                     reason: error.to_string(),
                 },
-                Ok(imported) => {
+                Ok((imported, front_name)) => {
                     if let Some(skill) = known.iter().find(|skill| skill.digest == imported.digest)
                     {
+                        planned.insert(skill.content.name.clone());
                         ImportStatus::Duplicate {
                             skill_id: skill.skill_id.clone(),
                         }
-                    } else if known.len() >= MAX_SKILLS_PER_BOT {
-                        ImportStatus::Skipped {
-                            reason: "too-many-skills".into(),
-                        }
                     } else {
-                        // The library owns normalization, collision suffixes and version history.
-                        match write(&imported.content) {
-                            Ok(skill) => {
-                                let status = ImportStatus::Written {
-                                    skill_id: skill.skill_id.clone(),
-                                };
-                                known.push(skill);
-                                status
+                        let reusable = front_name.as_ref().and_then(|front| {
+                            known.iter().position(|skill| {
+                                skill.content.name == imported.content.name
+                                    && !planned.contains(&skill.content.name)
+                                    && field(
+                                        frontmatter(&skill.content.body).map_or("", |(h, _)| h),
+                                        "name",
+                                    )
+                                    .trim_matches(js_space)
+                                        == front
+                            })
+                        });
+                        planned.insert(imported.content.name.clone());
+                        if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
+                            ImportStatus::Skipped {
+                                reason: "too-many-skills".into(),
                             }
-                            Err(error) => ImportStatus::Skipped {
-                                reason: format!("write-failed: {error}"),
-                            },
+                        } else {
+                            match write(reusable.map(|index| &known[index]), &imported.content) {
+                                Ok(skill) => {
+                                    planned.insert(skill.content.name.clone());
+                                    let status = ImportStatus::Written {
+                                        skill_id: skill.skill_id.clone(),
+                                    };
+                                    match reusable {
+                                        Some(index) => known[index] = skill,
+                                        None => known.push(skill),
+                                    }
+                                    status
+                                }
+                                Err(error) => ImportStatus::Skipped {
+                                    reason: format!("write-failed: {error}"),
+                                },
+                            }
                         }
                     }
                 }
@@ -177,6 +236,10 @@ fn invalid(reason: &str) -> Error {
     Error::InvalidInput(reason.into())
 }
 
+fn js_space(c: char) -> bool {
+    c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}')
+}
+
 // These intentionally parse only top-level single-line fields, like ny/rk in the
 // recovered client (index.eager-app-BfVhIMYf.js:49261/49359), not arbitrary YAML.
 fn frontmatter(text: &str) -> Option<(&str, &str)> {
@@ -185,8 +248,11 @@ fn frontmatter(text: &str) -> Option<(&str, &str)> {
         .or_else(|| text.strip_prefix("---\n"))?;
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
-        let marker = line.strip_suffix('\n').unwrap_or(line);
-        if marker.strip_suffix('\r').unwrap_or(marker) == "---" {
+        let marker = line
+            .strip_suffix("\r\n")
+            .or_else(|| line.strip_suffix('\n'))
+            .unwrap_or(line);
+        if offset > 0 && marker == "---" {
             let header = &rest[..offset];
             let header = header.strip_suffix('\n').unwrap_or(header);
             return Some((
@@ -205,7 +271,7 @@ fn field(header: &str, key: &str) -> String {
         .lines()
         .find_map(|line| line.strip_prefix(&prefix))
         .unwrap_or("")
-        .trim();
+        .trim_matches(js_space);
     for quote in ['\'', '"'] {
         if let Some(value) = value
             .strip_prefix(quote)
@@ -218,7 +284,9 @@ fn field(header: &str, key: &str) -> String {
 }
 
 fn heading(body: &str) -> Option<&str> {
-    let line = body.lines().find(|line| !line.trim().is_empty())?;
+    let line = body
+        .lines()
+        .find(|line| !line.trim_matches(js_space).is_empty())?;
     let title = line.strip_prefix('#')?;
     if !title.starts_with([' ', '\t']) {
         return None;
@@ -243,35 +311,40 @@ fn normalize(title: &str) -> String {
 }
 
 fn annotate(text: &str, title: &str, has_name: bool, extension: &str, file_name: &str) -> String {
-    let (header, body) = frontmatter(text).unwrap_or(("", text));
-    let mut lines: Vec<String> = header
-        .lines()
-        .filter(|line| {
-            !["origin:", "upload-extension:", "upload-name:"]
-                .iter()
-                .any(|key| line.starts_with(key))
-        })
-        .map(|line| {
-            if !has_name && line.starts_with("name:") {
-                format!("name: {title}")
-            } else {
-                line.into()
-            }
-        })
-        .collect();
+    let parsed = frontmatter(text);
+    let (header, body) = parsed.unwrap_or(("", text));
+    // split (not lines) preserves the empty header/last line, like JS /\r?\n/.
+    let mut lines: Vec<String> = if parsed.is_some() {
+        header
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .filter(|line| {
+                !["origin:", "upload-extension:", "upload-name:"]
+                    .iter()
+                    .any(|key| line.starts_with(key))
+            })
+            .map(|line| {
+                if !has_name && line.starts_with("name:") {
+                    format!("name: {title}")
+                } else {
+                    line.into()
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if !has_name && !header.lines().any(|line| line.starts_with("name:")) {
         lines.insert(0, format!("name: {title}"));
     }
     lines.push("origin: upload".into());
     lines.push(format!("upload-extension: {extension}"));
     let file_name = file_name.replace(['\r', '\n'], " ");
-    if !file_name.trim().is_empty() {
-        lines.push(format!(
-            "upload-name: '{}'",
-            file_name.trim().replace('\'', "''")
-        ));
+    let file_name = file_name.trim_matches(js_space);
+    if !file_name.is_empty() {
+        lines.push(format!("upload-name: '{}'", file_name.replace('\'', "''")));
     }
-    let body = if header.is_empty() {
+    let body = if parsed.is_none() {
         body.trim_start_matches('\n')
     } else {
         body
@@ -356,7 +429,7 @@ mod tests {
                 file("", "text"),
             ],
             vec![],
-            |_| panic!("must not write"),
+            |_, _| panic!("must not write"),
         );
         assert!(reports
             .iter()
@@ -376,6 +449,20 @@ mod tests {
             assert!(imported.content.body.ends_with("\nbody\r\n"));
         }
         assert!(convert(&file(".md", "text")).is_err());
+        assert_eq!(
+            convert(&file("file.txt", "\u{feff}\u{feff}"))
+                .unwrap_err()
+                .to_string(),
+            "empty"
+        );
+        assert!(convert(&file("file.txt", "\u{85}")).is_ok());
+        assert_eq!(
+            convert(&file("file.md", "\n\u{feff}\n# Title"))
+                .unwrap()
+                .content
+                .name,
+            "title"
+        );
     }
 
     #[test]
@@ -429,32 +516,34 @@ mod tests {
 
     #[test]
     fn cap_of_250_counts_existing() {
+        let conn = database();
         let content = convert(&file("existing.txt", "existing")).unwrap().content;
-        let known = (0..249).map(|i| skill(i, &content)).collect();
-        let mut writes = 0;
-        let reports = import_files(
-            &[file("one.txt", "one"), file("two.txt", "two")],
-            known,
-            |content| {
-                writes += 1;
-                Ok(skill(249, content))
-            },
-        );
-        assert_eq!(writes, 1);
-        assert!(matches!(reports[0].status, ImportStatus::Written { .. }));
+        let mut last = None;
+        for _ in 0..250 {
+            last = Some(library::add(&conn, "bot", &content).unwrap());
+        }
+        let input = file("one.txt", "one");
+        let reports = import_batch(&conn, "bot", std::slice::from_ref(&input)).unwrap();
         assert_eq!(
-            reports[1].status,
+            reports[0].status,
             ImportStatus::Skipped {
                 reason: "too-many-skills".into()
             }
         );
+        let last = last.unwrap();
+        library::delete(&conn, &last.skill_id, last.version).unwrap();
+        let reports = import_batch(&conn, "bot", std::slice::from_ref(&input)).unwrap();
+        assert!(matches!(reports[0].status, ImportStatus::Written { .. }));
+        assert_eq!(library::list(&conn, "bot").unwrap().len(), 250);
+        let retry = import_batch(&conn, "bot", &[input]).unwrap();
+        assert!(matches!(retry[0].status, ImportStatus::Duplicate { .. }));
     }
 
     #[test]
     fn same_digest_reimport_is_duplicate() {
         let input = file("file.md", "# Title\nbody");
         let imported = convert(&input).unwrap();
-        let reports = import_files(&[input.clone(), input.clone()], vec![], |content| {
+        let reports = import_files(&[input.clone(), input.clone()], vec![], |_, content| {
             Ok(skill(1, content))
         });
         assert_eq!(
@@ -469,7 +558,7 @@ mod tests {
                 skill_id: "skill_1".into()
             }
         );
-        let reports = import_files(&[input], vec![skill(1, &imported.content); 250], |_| {
+        let reports = import_files(&[input], vec![skill(1, &imported.content); 250], |_, _| {
             panic!("duplicate at cap must not write")
         });
         assert_eq!(
@@ -488,7 +577,7 @@ mod tests {
             file("three.txt", "three"),
         ];
         let mut writes = Vec::new();
-        let reports = import_files(&files, vec![], |content| {
+        let reports = import_files(&files, vec![], |_, content| {
             writes.push(content.name.clone());
             if content.name == "two" {
                 Err(invalid("rejected"))
@@ -519,7 +608,7 @@ mod tests {
         let input = file("file.txt", "body");
         let mut deleted = skill(1, &convert(&input).unwrap().content);
         deleted.deleted = true;
-        let reports = import_files(&[input], vec![deleted; 250], |content| {
+        let reports = import_files(&[input], vec![deleted; 250], |_, content| {
             Ok(skill(2, content))
         });
         assert_eq!(
@@ -528,5 +617,176 @@ mod tests {
                 skill_id: "skill_2".into()
             }
         );
+    }
+
+    fn database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate(&conn).unwrap();
+        conn
+    }
+
+    fn written_id(report: &[ImportItem]) -> &str {
+        match &report[0].status {
+            ImportStatus::Written { skill_id } => skill_id,
+            status => panic!("expected Written, got {status:?}"),
+        }
+    }
+
+    #[test]
+    fn import_batch_persists_and_second_call_is_duplicate() {
+        let conn = database();
+        let input = file("file.md", "# Title\nbody");
+        let first = import_batch(&conn, "bot", std::slice::from_ref(&input)).unwrap();
+        let second = import_batch(&conn, "bot", std::slice::from_ref(&input)).unwrap();
+        assert_eq!(
+            second[0].status,
+            ImportStatus::Duplicate {
+                skill_id: written_id(&first).into()
+            }
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].digest, convert(&input).unwrap().digest);
+        // Digests are scoped to a bot, not the entire workspace.
+        assert!(matches!(
+            import_batch(&conn, "other-bot", &[input]).unwrap()[0].status,
+            ImportStatus::Written { .. }
+        ));
+    }
+
+    #[test]
+    fn reupload_with_same_frontmatter_name_updates_in_place() {
+        let conn = database();
+        let first = import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv1")],
+        )
+        .unwrap();
+        let second = import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: ' Deploy '\n---\nv2")],
+        )
+        .unwrap();
+        assert_eq!(written_id(&first), written_id(&second));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].content.name, "deploy");
+        assert_eq!(saved[0].version, 2);
+        assert!(saved[0].content.body.ends_with("v2"));
+        assert_eq!(
+            library::history(&conn, written_id(&first)).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn same_frontmatter_name_twice_in_one_drop_gets_suffix() {
+        let conn = database();
+        import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv0")],
+        )
+        .unwrap();
+        let reports = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("one/SKILL.md", "---\nname: Deploy\n---\nv1"),
+                file("two/SKILL.md", "---\nname: Deploy\n---\nv2"),
+            ],
+        )
+        .unwrap();
+        assert_ne!(written_id(&reports), written_id(&reports[1..]));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .map(|skill| skill.content.name.as_str())
+                .collect::<Vec<_>>(),
+            ["deploy", "deploy-2"]
+        );
+        assert_eq!(saved[0].version, 2);
+        assert_eq!(saved[1].version, 1);
+    }
+
+    #[test]
+    fn frontmatter_reuse_requires_exact_title_and_unclaimed_name() {
+        let conn = database();
+        let input = file("deploy/SKILL.md", "---\nname: Deploy\n---\nv1");
+        let first = import_batch(&conn, "bot", std::slice::from_ref(&input)).unwrap();
+        let reports = import_batch(
+            &conn,
+            "bot",
+            &[
+                input,
+                file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
+                file("deploy/SKILL.md", "---\nname: DEPLOY\n---\nv3"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            reports[0].status,
+            ImportStatus::Duplicate {
+                skill_id: written_id(&first).into()
+            }
+        );
+        assert_ne!(written_id(&reports[1..]), written_id(&first));
+        assert_eq!(library::list(&conn, "bot").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn named_reupload_can_update_at_capacity() {
+        let conn = database();
+        let input = file("deploy/SKILL.md", "---\nname: Deploy\n---\nv1");
+        let first = import_batch(&conn, "bot", &[input]).unwrap();
+        let content = convert(&file("other.txt", "other")).unwrap().content;
+        for _ in 0..249 {
+            library::add(&conn, "bot", &content).unwrap();
+        }
+        let second = import_batch(
+            &conn,
+            "bot",
+            &[file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2")],
+        )
+        .unwrap();
+        assert_eq!(written_id(&first), written_id(&second));
+        assert_eq!(library::list(&conn, "bot").unwrap().len(), 250);
+    }
+
+    #[test]
+    fn lost_transaction_stops_writes_and_refuses_false_report() {
+        let conn = database();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let files = [file("a.txt", "a"), file("b.txt", "b"), file("c.txt", "c")];
+        let mut writes = 0;
+        let result = persist_files(&conn, &files, vec![], |_, content| {
+            writes += 1;
+            if writes == 2 {
+                conn.execute_batch("ROLLBACK").unwrap();
+                Err(invalid("simulated SQLite transaction loss"))
+            } else {
+                library::add(&conn, "bot", content)
+            }
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "import transaction was rolled back by SQLite"
+        );
+        assert_eq!(writes, 2);
+        assert!(conn.is_autocommit());
+        assert!(library::list(&conn, "bot").unwrap().is_empty());
+    }
+
+    #[test]
+    fn horizontal_rules_and_empty_frontmatter_preserve_client_content() {
+        let imported = convert(&file("a.md", "---\n---\n# Head")).unwrap();
+        assert_eq!(imported.content.name, "a");
+        assert!(imported.content.body.ends_with("\n\n---\n---\n# Head"));
+        assert!(frontmatter("---\nname: a\n---\r").is_none());
+        let imported = convert(&file("a.md", "---\n\n---\nbody")).unwrap();
+        assert_eq!(imported.content.body, "---\nname: a\n\norigin: upload\nupload-extension: .md\nupload-name: 'a.md'\n---\n\nbody");
     }
 }

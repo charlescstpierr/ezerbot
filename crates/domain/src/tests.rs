@@ -404,7 +404,7 @@ fn annulation_de_run() {
     .is_ok());
     assert!(RunState::Queued
         .begin_cancel(InterruptionReason::User)
-        .is_err());
+        .is_ok());
     assert!(RunState::Succeeded
         .begin_cancel(InterruptionReason::User)
         .is_err());
@@ -423,6 +423,35 @@ fn annulation_de_run() {
     }
     .finish_cancel(CheckpointId::new("cp4").unwrap())
     .is_err());
+}
+
+#[test]
+fn queued_run_can_be_cancelled() {
+    let cancelled = RunState::Queued
+        .begin_cancel(InterruptionReason::User)
+        .unwrap()
+        .finish_cancel(CheckpointId::new("before-start").unwrap())
+        .unwrap();
+    assert_eq!(
+        cancelled.dispose_tool_result(),
+        EffectDisposition::IgnoredAfterInterruption
+    );
+}
+
+#[test]
+fn awaiting_children_accepts_results_until_cancelled() {
+    let waiting = RunState::AwaitingChildren {
+        children: vec![RunId::new("child-1").unwrap()],
+    };
+    assert_eq!(waiting.dispose_tool_result(), EffectDisposition::Applied);
+    let cancelling = waiting.begin_cancel(InterruptionReason::User).unwrap();
+    assert_eq!(
+        cancelling.dispose_tool_result(),
+        EffectDisposition::IgnoredAfterInterruption
+    );
+    assert!(cancelling
+        .finish_cancel(CheckpointId::new("last-parent-event").unwrap())
+        .is_ok());
 }
 
 #[test]

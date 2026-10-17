@@ -1,6 +1,6 @@
 //! Exécution, interruption et décision d'approbation.
 
-use crate::id::{ActionGrantId, ApprovalId, CheckpointId, HumanInputId};
+use crate::id::{ActionGrantId, ApprovalId, CheckpointId, HumanInputId, RunId};
 use crate::submission::TransitionError;
 
 /// Raison pour laquelle une exécution est en cours d'annulation.
@@ -56,6 +56,11 @@ pub enum RunState {
         /// Demande de saisie ouverte.
         request: HumanInputId,
     },
+    /// En attente des sous-exécutions sélectionnées.
+    AwaitingChildren {
+        /// Exécutions enfants attendues, distinctes de l'exécution parente.
+        children: Vec<RunId>,
+    },
     /// Annulation demandée, pas encore terminée.
     Cancelling {
         /// Raison de l'annulation.
@@ -78,7 +83,7 @@ pub enum RunState {
 impl RunState {
     /// Indique si un résultat d'outil arrivé maintenant serait pris en compte.
     ///
-    /// `Applied` pour `Queued`, `Running`, `AwaitingApproval` et `AwaitingHumanInput`.
+    /// `Applied` pour les états actifs, y compris `AwaitingChildren`.
     /// `IgnoredAfterInterruption` pour `Cancelling`, `Succeeded`, `Failed` et `Cancelled`.
     /// L'état n'est pas modifié : une réponse tardive ne fait pas réussir une exécution annulée.
     pub fn dispose_tool_result(&self) -> EffectDisposition {
@@ -86,7 +91,8 @@ impl RunState {
             Self::Queued
             | Self::Running { .. }
             | Self::AwaitingApproval { .. }
-            | Self::AwaitingHumanInput { .. } => EffectDisposition::Applied,
+            | Self::AwaitingHumanInput { .. }
+            | Self::AwaitingChildren { .. } => EffectDisposition::Applied,
             Self::Cancelling { .. }
             | Self::Succeeded
             | Self::Failed { .. }
@@ -94,7 +100,7 @@ impl RunState {
         }
     }
 
-    /// `Running`, `AwaitingApproval` ou `AwaitingHumanInput` → `Cancelling`.
+    /// Tout état actif, y compris `Queued` et `AwaitingChildren` → `Cancelling`.
     ///
     /// Si l'état est déjà `Cancelling` pour la même raison, rend `Ok(self)`.
     pub fn begin_cancel(self, reason: InterruptionReason) -> Result<Self, TransitionError> {
@@ -104,9 +110,11 @@ impl RunState {
             }
         }
         match self {
-            Self::Running { .. }
+            Self::Queued
+            | Self::Running { .. }
             | Self::AwaitingApproval { .. }
-            | Self::AwaitingHumanInput { .. } => Ok(Self::Cancelling { reason }),
+            | Self::AwaitingHumanInput { .. }
+            | Self::AwaitingChildren { .. } => Ok(Self::Cancelling { reason }),
             other => Err(other.reject("begin_cancel")),
         }
     }
@@ -125,6 +133,7 @@ impl RunState {
             Self::Running { .. } => "RunState::Running",
             Self::AwaitingApproval { .. } => "RunState::AwaitingApproval",
             Self::AwaitingHumanInput { .. } => "RunState::AwaitingHumanInput",
+            Self::AwaitingChildren { .. } => "RunState::AwaitingChildren",
             Self::Cancelling { .. } => "RunState::Cancelling",
             Self::Succeeded => "RunState::Succeeded",
             Self::Failed { .. } => "RunState::Failed",

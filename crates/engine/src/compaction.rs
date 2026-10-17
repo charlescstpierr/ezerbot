@@ -7,8 +7,8 @@
 //! should_compact BEFORE context budgeting can discard older entries, accounts
 //! for the model call in the run budget, and never calls the model in a DB tx.
 //!
-//! Mutations require a caller-owned transaction. Prefer save_with_history: it
-//! records exact source IDs for forgetting. The scaffold's save lacks source
+//! Mutations require a caller-owned transaction. Prefer the pending/revision-
+//! checked save: it records exact source IDs for forgetting. The scaffold's save lacks source
 //! membership, so invalidate_covering conservatively invalidates such summaries
 //! for ANY entry in their conversation. Invalidation erases summary text and all
 //! descendants, retaining ID tombstones so stale saves cannot resurrect it.
@@ -18,6 +18,11 @@
 //! Each reset segment has its own lineage, keyed by its first eligible entry.
 //! Hosts use latest_in_segment, not latest, when selecting a turn's summary.
 //! Only calls explicitly listed as pending pin a boundary; abandoned calls do not.
+//! IMPORTANT: resumable hosts must not use the compatibility APIs with an empty
+//! pending set. Include calls from AwaitingHumanInput/AwaitingChildren AND from
+//! resumable Interrupted runs, or a late output can cross a summarized call.
+//! For old-turn regeneration within a segment, a newly generated root can be
+//! used ephemerally for that run; do not persist it over a later segment head.
 use crate::contracts::{
     ContextBudget, Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest, Result, Role,
     Summary, ToolItem,
@@ -28,10 +33,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_SUMMARY_CHARACTERS: usize = 16_000;
+const MIN_EVIDENCE_CHARACTERS: usize = 256;
 
 /// The host snapshots source_revision before reading history/model generation,
-/// and supplies IDs of genuinely suspended tool calls. Missing-result calls not
-/// listed here are abandoned (e.g. Stop), not indefinitely pending exchanges.
+/// and supplies IDs of genuinely suspended or resumable interrupted tool calls.
+/// Missing-result calls not listed here are abandoned (e.g. Stop), not pending.
 #[derive(Clone, Debug, Default)]
 pub struct SummaryOptions {
     pub source_revision: u64,
@@ -110,6 +116,7 @@ pub fn should_compact(characters: usize, budget: &ContextBudget) -> Result<bool>
 /// by the slice, never lexically. This compatibility API assumes no calls remain
 /// pending and uses revision zero; concurrent/resumable hosts use the options API.
 /// Failed, incomplete, empty or tool-producing responses never become summaries.
+/// WARNING: resumable hosts must use summarize_with_options with live pending IDs.
 pub fn summarize(
     gateway: &dyn ModelGateway,
     model: &str,
@@ -129,8 +136,10 @@ pub fn summarize(
 
 /// Bounded, revision-aware summarization. Complete tool exchanges and explicitly
 /// pending calls remain indivisible. Text/captions/tool arguments/results are
-/// capped with markers; if needed, only the largest fitting complete prefix is
-/// summarized. Subsequent calls can compact the remaining source in more chunks.
+/// adaptively capped with markers; if even the smallest complete prefix cannot
+/// fit, reduce body caps and finally omit tool bodies (never IDs/names). Reserve
+/// summary output and estimation headroom, then choose the largest fitting
+/// complete prefix. Subsequent calls compact the remaining source in more chunks.
 pub fn summarize_with_options(
     gateway: &dyn ModelGateway,
     model: &str,
@@ -142,7 +151,7 @@ pub fn summarize_with_options(
     if model.trim().is_empty() || conversation_id.trim().is_empty() {
         return Err(invalid("model and conversation ID are required"));
     }
-    let limit = character_limit(&options.budget)?;
+    let limit = compaction_input_limit(&options.budget)?;
     let positions = positions(history)?;
     let start = start(history, &positions, conversation_id, previous)?;
     let exchanges = exchanges(&history[start..])?;
@@ -157,31 +166,51 @@ pub fn summarize_with_options(
             "no complete history prefix is available for compaction",
         ));
     }
-    let entries = history[start..max_cut]
-        .iter()
-        .map(|entry| evidence_entry(entry, &exchanges, &options.pending_call_ids))
-        .collect::<Result<Vec<_>>>()?;
-    // Serialized input accounting is monotone in prefix length. Binary search
-    // avoids repeatedly serializing every growing prefix in a long transcript.
-    let (mut low, mut high) = (0, entries.len() + 1);
-    while low + 1 < high {
-        let middle = low + (high - low) / 2;
-        let input = summary_source(previous, &entries[..middle])?;
-        if crate::context::input_characters(&input)?.saturating_add(INSTRUCTIONS.chars().count())
-            <= limit
-        {
-            low = middle;
-        } else {
-            high = middle;
+    let mut cap = MAX_SUMMARY_CHARACTERS;
+    let mut omit_tools = false;
+    let (cut, input) = loop {
+        let entries = history[start..max_cut]
+            .iter()
+            .map(|entry| {
+                evidence_entry(
+                    entry,
+                    &exchanges,
+                    &options.pending_call_ids,
+                    cap,
+                    omit_tools,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Account after ALL JSON/delimiter escaping, not just raw field length.
+        // Binary search avoids serializing every growing prefix of long history.
+        let (mut low, mut high) = (0, entries.len() + 1);
+        while low + 1 < high {
+            let middle = low + (high - low) / 2;
+            let input = summary_source(previous, &entries[..middle], cap)?;
+            if crate::context::input_characters(&input)?
+                .saturating_add(INSTRUCTIONS.chars().count())
+                <= limit
+            {
+                low = middle;
+            } else {
+                high = middle;
+            }
         }
-    }
-    let cut = safe_cut(start + low, start, &exchanges, &options.pending_call_ids);
-    if cut <= start {
-        return Err(invalid(
-            "no complete history prefix fits the compaction input budget",
-        ));
-    }
-    let input = summary_source(previous, &entries[..cut - start])?;
+        let cut = safe_cut(start + low, start, &exchanges, &options.pending_call_ids);
+        if cut > start {
+            break (cut, summary_source(previous, &entries[..cut - start], cap)?);
+        }
+        if omit_tools {
+            return Err(invalid(
+                "no complete history prefix fits the compaction input budget",
+            ));
+        }
+        if cap > MIN_EVIDENCE_CHARACTERS {
+            cap = (cap / 2).max(MIN_EVIDENCE_CHARACTERS);
+        } else {
+            omit_tools = true;
+        }
+    };
     let evidence = &input.text;
     let request = ModelRequest {
         model: model.into(),
@@ -250,51 +279,74 @@ fn character_limit(budget: &ContextBudget) -> Result<usize> {
         .ok_or_else(|| invalid("context character budget must be positive and not overflow"))
 }
 
-fn bounded(text: &str) -> String {
+/// Leave the configured percentage as estimation margin, and reserve the full
+/// maximum summary output. Impossibly small configurations fail closed before
+/// the gateway call rather than sending a request certain to exceed its window.
+fn compaction_input_limit(budget: &ContextBudget) -> Result<usize> {
+    let limit = character_limit(budget)?;
+    if !(1..=100).contains(&budget.compaction_percent) {
+        return Err(invalid("compaction percentage must be between 1 and 100"));
+    }
+    let target = ((limit as u128) * u128::from(budget.compaction_percent) / 100) as usize;
+    Ok(target.saturating_sub(MAX_SUMMARY_CHARACTERS).max(1))
+}
+
+fn bounded(text: &str, cap: usize) -> String {
     let count = text.chars().count();
-    if count <= MAX_SUMMARY_CHARACTERS {
+    if count <= cap {
         return text.into();
     }
     let marker = format!("\n[truncated; original {count} characters]");
     let prefix: String = text
         .chars()
-        .take(MAX_SUMMARY_CHARACTERS - marker.chars().count())
+        .take(cap.saturating_sub(marker.chars().count()))
         .collect();
     format!("{prefix}{marker}")
+}
+
+fn tool_body(text: &str, cap: usize, omit: bool) -> String {
+    if omit && text.chars().count() > cap {
+        format!("[omitted; original {} characters]", text.chars().count())
+    } else {
+        bounded(text, cap)
+    }
 }
 
 fn evidence_entry(
     entry: &HistoryItem,
     exchanges: &[Exchange<'_>],
     pending: &HashSet<String>,
+    cap: usize,
+    omit_tools: bool,
 ) -> Result<serde_json::Value> {
     let tools = entry.tool_items.iter().map(|tool| Ok(match tool {
         ToolItem::Call { call } => json!({
             "kind": "call", "call_id": call.call_id, "name": call.name,
-            "arguments": bounded(&serde_json::to_string(&call.arguments)?),
+            "arguments": tool_body(&serde_json::to_string(&call.arguments)?, cap, omit_tools),
             "abandoned": exchanges.iter().any(|e| e.call_id == call.call_id && e.output.is_none() && !pending.contains(e.call_id)),
         }),
         ToolItem::Output { call_id, output } => json!({
             "kind": "output", "call_id": call_id,
-            "output": bounded(&match output { serde_json::Value::String(text) => text.clone(), _ => serde_json::to_string(output)? }),
+            "output": tool_body(&match output { serde_json::Value::String(text) => text.clone(), _ => serde_json::to_string(output)? }, cap, omit_tools),
         }),
     })).collect::<Result<Vec<_>>>()?;
     let images: Vec<_> = entry.images.iter().map(|image| json!({
-        "attachment_id": image.attachment_id, "caption": image.caption.as_deref().map(bounded),
+        "attachment_id": image.attachment_id, "caption": image.caption.as_deref().map(|text| bounded(text, cap)),
     })).collect();
     Ok(
-        json!({"entry_id": entry.entry_id, "role": entry.role, "text": bounded(&entry.text), "images": images, "tool_items": tools}),
+        json!({"entry_id": entry.entry_id, "role": entry.role, "text": bounded(&entry.text, cap), "images": images, "tool_items": tools}),
     )
 }
 
 fn summary_source(
     previous: Option<&Summary>,
     entries: &[serde_json::Value],
+    cap: usize,
 ) -> Result<HistoryItem> {
     // Escape delimiters so quoted tool/caption text cannot close the envelope;
     // historical calls are evidence, never live function calls to the gateway.
     let evidence = serde_json::to_string(&json!({
-        "previous_summary": previous.map(|summary| &summary.text), "entries": entries,
+        "previous_summary": previous.map(|summary| bounded(&summary.text, cap)), "entries": entries,
     }))?
     .replace('<', "\\u003c")
     .replace('>', "\\u003e");
@@ -327,6 +379,7 @@ fn safe_cut(
 
 /// Compatibility path without source membership or a reset-segment selector.
 /// Use exact saves for turn-aware callers. Forgetting remains conservative.
+/// WARNING: resumable hosts must use save_with_history_pending_at_revision.
 pub fn save(conn: &Connection, summary: &Summary) -> Result<()> {
     save_inner(conn, summary, None, None)
 }
@@ -334,6 +387,7 @@ pub fn save(conn: &Connection, summary: &Summary) -> Result<()> {
 /// Persist exact coverage using the same eligible history supplied to summarize.
 /// The full prior prefix is optional: inherited coverage follows the parent link.
 /// Boundaries are validated before any writes. Call in the host's transaction.
+/// WARNING: assumes no pending tools; resumable hosts must use the pending API.
 pub fn save_with_history(
     conn: &Connection,
     summary: &Summary,
@@ -488,6 +542,19 @@ fn save_inner(
         return Err(invalid(
             "compatibility root requires an unambiguous empty lineage",
         ));
+    }
+    if summary.previous_summary_id.is_none() {
+        if let Some(root) = root_segment {
+            let covered: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_summary_entries e JOIN engine_summaries s ON e.summary_id=s.summary_id WHERE s.conversation_id=?1 AND s.record IS NOT NULL AND e.entry_id=?2)",
+                params![summary.conversation_id, root], |row| row.get(0),
+            )?;
+            if covered {
+                return Err(invalid(
+                    "root segment starts inside an existing summarized segment",
+                ));
+            }
+        }
     }
     let segment = segment.unwrap_or(""); // isolated compatibility-only segment
     if latest_in_segment(conn, &summary.conversation_id, segment)?
@@ -1319,7 +1386,7 @@ mod compaction_tests {
             .collect();
         let options = SummaryOptions {
             budget: ContextBudget {
-                estimated_tokens: 2000,
+                estimated_tokens: 8000,
                 ..ContextBudget::default()
             },
             ..SummaryOptions::default()
@@ -1341,7 +1408,7 @@ mod compaction_tests {
             assert!(
                 crate::context::input_characters(&request.input[0]).unwrap()
                     + request.instructions.chars().count()
-                    <= 8000
+                    <= compaction_input_limit(&options.budget).unwrap()
             );
             save_exact(&conn, &summary, &history);
             calls += 1;
@@ -1352,6 +1419,228 @@ mod compaction_tests {
             previous = Some(summary);
         }
         assert!(calls > 1);
+    }
+
+    fn assert_request_headroom(gateway: &Gateway, budget: &ContextBudget) {
+        let requests = gateway.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        let input = crate::context::input_characters(&request.input[0]).unwrap()
+            + request.instructions.chars().count();
+        assert!(input <= compaction_input_limit(budget).unwrap());
+        assert!(input + MAX_SUMMARY_CHARACTERS <= character_limit(budget).unwrap());
+        assert!(request.tools.is_empty());
+        assert!(request.input[0].tool_items.is_empty());
+    }
+
+    fn html_tool_batch(history: &mut [HistoryItem], index: usize, count: usize) {
+        for number in 0..count {
+            let id = format!("html-{number}");
+            history[index].tool_items.push(call(&id));
+            history[index].tool_items.push(ToolItem::Output {
+                call_id: id,
+                output: json!("<div>\"x\"</div>\n".repeat(2000)),
+            });
+        }
+    }
+
+    #[test]
+    fn default_budget_compacts_twenty_four_html_outputs_in_one_entry() {
+        let conn = conn();
+        let mut history = history(&["u1", "a1", "u2", "a2"]);
+        html_tool_batch(&mut history, 1, 24);
+        let first_gateway = Gateway::text("First summary.");
+        let first = summarize(&first_gateway, "model", "conversation", &history, None).unwrap();
+        assert_eq!(first.resume_from_entry_inclusive, "a1");
+        assert_request_headroom(&first_gateway, &ContextBudget::default());
+        save_exact(&conn, &first, &history);
+        for index in 0..57 {
+            history.push(entry(&format!("later-{index}")));
+        }
+        let next_gateway = Gateway::text("HTML results summarized.");
+        let next = summarize(
+            &next_gateway,
+            "model",
+            "conversation",
+            &history,
+            Some(&first),
+        )
+        .unwrap();
+        assert_ne!(next.resume_from_entry_inclusive, "a1");
+        assert_request_headroom(&next_gateway, &ContextBudget::default());
+        assert!(next_gateway.requests.lock().unwrap()[0].input[0]
+            .text
+            .contains("[truncated; original"));
+        save_exact(&conn, &next, &history);
+    }
+
+    #[test]
+    fn eight_thousand_token_budget_compacts_escaped_html_output() {
+        let mut history = history(&["call", "result", "tail"]);
+        history[0].tool_items.push(call("html"));
+        history[1].tool_items.push(ToolItem::Output {
+            call_id: "html".into(),
+            output: json!("<a>".repeat(50_000)),
+        });
+        let options = SummaryOptions {
+            budget: ContextBudget {
+                estimated_tokens: 8000,
+                ..ContextBudget::default()
+            },
+            ..SummaryOptions::default()
+        };
+        let gateway = Gateway::text("HTML result.");
+        let summary =
+            summarize_with_options(&gateway, "model", "conversation", &history, None, &options)
+                .unwrap();
+        assert_eq!(summary.resume_from_entry_inclusive, "tail");
+        assert_request_headroom(&gateway, &options.budget);
+    }
+
+    #[test]
+    fn floor_omits_tool_bodies_when_escaped_batch_still_cannot_fit() {
+        let mut history = history(&["batch", "tail"]);
+        html_tool_batch(&mut history, 0, 24);
+        let options = SummaryOptions {
+            budget: ContextBudget {
+                estimated_tokens: 12_000,
+                ..ContextBudget::default()
+            },
+            ..SummaryOptions::default()
+        };
+        let gateway = Gateway::text("Many results with omitted bodies.");
+        let summary =
+            summarize_with_options(&gateway, "model", "conversation", &history, None, &options)
+                .unwrap();
+        assert_eq!(summary.resume_from_entry_inclusive, "tail");
+        assert_request_headroom(&gateway, &options.budget);
+        let requests = gateway.requests.lock().unwrap();
+        let input = &requests[0].input[0].text;
+        assert!(input.contains("[omitted; original"));
+        for index in 0..24 {
+            assert!(input.contains(&format!("html-{index}")));
+        }
+        assert!(input.contains("read_skill"));
+    }
+
+    #[test]
+    fn previous_summary_is_adaptively_bounded_with_small_window() {
+        let conn = conn();
+        let mut history = history(&["old", "middle", "tail"]);
+        let previous = summarize(
+            &Gateway::text(&"<".repeat(MAX_SUMMARY_CHARACTERS)),
+            "model",
+            "conversation",
+            &history[..2],
+            None,
+        )
+        .unwrap();
+        save_exact(&conn, &previous, &history[..2]);
+        history[1].text = "<a>".repeat(50_000);
+        let options = SummaryOptions {
+            budget: ContextBudget {
+                estimated_tokens: 8000,
+                ..ContextBudget::default()
+            },
+            ..SummaryOptions::default()
+        };
+        let gateway = Gateway::text("A smaller rolling summary.");
+        let summary = summarize_with_options(
+            &gateway,
+            "model",
+            "conversation",
+            &history,
+            Some(&previous),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(summary.resume_from_entry_inclusive, "tail");
+        assert_eq!(previous.text.chars().count(), MAX_SUMMARY_CHARACTERS);
+        assert_request_headroom(&gateway, &options.budget);
+        save_exact(&conn, &summary, &history);
+    }
+
+    #[test]
+    fn impossible_window_fails_without_model_call() {
+        let gateway = Gateway::text("must not be called");
+        let options = SummaryOptions {
+            budget: ContextBudget {
+                estimated_tokens: 1,
+                ..ContextBudget::default()
+            },
+            ..SummaryOptions::default()
+        };
+        assert!(summarize_with_options(
+            &gateway,
+            "model",
+            "conversation",
+            &history(&["old", "tail"]),
+            None,
+            &options
+        )
+        .is_err());
+        assert!(gateway.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trimmed_root_inside_live_coverage_is_rejected() {
+        let conn = conn();
+        let history = history(&["u1", "a1", "u2", "a2", "u3"]);
+        let head = generated(&history, None);
+        save_exact(&conn, &head, &history);
+        let trimmed_root = generated(&history[2..], None);
+        assert!(with_tx(&conn, |conn| save_with_history(
+            conn,
+            &trimmed_root,
+            &history[2..]
+        ))
+        .is_err());
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "u1").unwrap(),
+            Some(head)
+        );
+        assert!(latest_in_segment(&conn, "conversation", "u2")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn older_turn_can_use_ephemeral_summary_without_replacing_live_head() {
+        let conn = conn();
+        let history = history(&["u1", "a1", "u2", "a2", "u3"]);
+        let head = generated(&history, None);
+        save_exact(&conn, &head, &history);
+        let old = &history[..3];
+        let ephemeral = generated(old, None);
+        let request = ContextRequest {
+            run_id: "regen".into(),
+            bot_id: "bot".into(),
+            conversation_id: "conversation".into(),
+            trigger: Trigger::UserMessage {
+                message_id: "u2".into(),
+                attempt: 1,
+            },
+            current_message: old[2].clone(),
+        };
+        let blocks = [ContextBlock {
+            source: ContextSource::AppContract,
+            priority: 0,
+            budget: 1000,
+            text: "app policy".into(),
+        }];
+        let assembled = crate::context::assemble_input(
+            &request,
+            &blocks,
+            old,
+            Some(&ephemeral),
+            None,
+            &ContextBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(assembled.input, vec![request.current_message]);
+        assert_eq!(
+            latest_in_segment(&conn, "conversation", "u1").unwrap(),
+            Some(head)
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use grokbot_attachments::{precaption, staging};
 use grokbot_domain::{AccountId, SubmissionState};
 use grokbot_engine::contracts::{ContextBlock, ContextRequest, ContextSource, ImageInput};
 use grokbot_store::SessionStore;
+use grokbot_submission_journal::CommittedSubmission;
 use precaption::{CacheKey, CaptionClaim, CaptionMessage, CaptionStatus};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ empty_hooks!(tools, call_tool, entry, on_run_event);
 const MAX_ACTIVE_JOBS: usize = 4;
 const MAX_MESSAGE_IMAGES: usize = 10;
 const AUTOMATIC_RETRY_MS: u64 = 60_000;
+const MAX_AUTOMATIC_RETRY_MS: u64 = 3_600_000;
+const MAX_AUTOMATIC_ATTEMPTS: u32 = 5;
 const BMP_CAPTION: &str = "Image BMP jointe : ce format ne peut pas être décrit par le modèle.";
 
 // A timed-out HTTP worker still holds its slot until the actual network call
@@ -88,11 +91,20 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_attachment_retry (
             conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
             attachment_id TEXT NOT NULL, model TEXT NOT NULL, next_attempt INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(conversation_id, message_id, attachment_id, model)
         );",
     )?;
+    // Upgrade databases opened by the initial adapter, without resetting budgets.
+    let has_attempts: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_attachment_retry') WHERE name = 'attempts')", [], |row| row.get(0))?;
+    if !has_attempts {
+        conn.execute(
+            "ALTER TABLE wrapper_attachment_retry ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     conn.execute(
-        "INSERT INTO component_versions(component, version) VALUES ('attachments', 1)
+        "INSERT INTO component_versions(component, version) VALUES ('attachments', 2)
          ON CONFLICT(component) DO UPDATE SET version = MAX(version, excluded.version)",
         [],
     )?;
@@ -177,7 +189,9 @@ fn start_precaption(app: &App, body: &[u8]) -> Result<Value, ApiError> {
         None => resolved_model(&ctx)
             .ok_or_else(|| ApiError::new(409, "Le catalogue de modèles est en préparation."))?,
     };
-    let projection = caption_projection(&ctx, &input.conversation_id, &input.draft, None)?;
+    let records = submissions(&ctx)?;
+    let projection =
+        caption_projection(&ctx, &records, &input.conversation_id, &input.draft, None)?;
     prepare_caption(
         &ctx,
         &input.conversation_id,
@@ -185,6 +199,7 @@ fn start_precaption(app: &App, body: &[u8]) -> Result<Value, ApiError> {
         &model,
         &projection,
         input.retry,
+        None,
     )
 }
 
@@ -194,8 +209,17 @@ fn local_skip(id: &str, model: Option<&str>) -> Value {
     json!({"attachment_id": id, "model": model, "caption": {"status": "skipped", "retry_after": 0}, "retry_after": 0})
 }
 
+fn submissions(ctx: &Context<'_>) -> Result<Vec<CommittedSubmission>, ApiError> {
+    Ok(SessionStore::open(
+        ctx.db_path,
+        &AccountId::new(ACCOUNT).expect("constant account"),
+    )?
+    .list_submissions()?)
+}
+
 fn caption_projection(
     ctx: &Context<'_>,
+    records: &[CommittedSubmission],
     conversation: &str,
     draft: &str,
     before: Option<&str>,
@@ -208,40 +232,75 @@ fn caption_projection(
         "SELECT COALESCE(MAX(ordinal), 0) FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND kind = 'reset' AND ordinal < ?3",
         params![ACCOUNT, conversation, end], |row| row.get(0),
     )?;
-    let reader = SessionStore::open(
-        ctx.db_path,
-        &AccountId::new(ACCOUNT).expect("constant account"),
+    let accepted: HashMap<_, _> = records
+        .iter()
+        .filter(|record| {
+            record.conversation_id.as_str() == conversation
+                && matches!(
+                    &record.state,
+                    SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
+                )
+        })
+        .map(|record| (record.message_id.as_str(), record.body.as_str()))
+        .collect();
+    let mut query = ctx.connection.prepare(
+        "SELECT message_id FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2
+         AND kind = 'submission' AND ordinal > ?3 AND ordinal < ?4 ORDER BY ordinal DESC",
     )?;
+    let mut rows = query.query(params![ACCOUNT, conversation, reset, end])?;
     let mut messages = Vec::new();
-    // Only durable, accepted human submissions are pure human messages. Capability
-    // entries (structured authors/channels/agents) never enter this projection.
-    for record in reader.list_submissions()? {
-        if record.conversation_id.as_str() != conversation
-            || !matches!(
-                record.state,
-                SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
-            )
-        {
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let Some(text) = accepted
+            .get(id.as_str())
+            .filter(|text| !text.trim().is_empty())
+        else {
             continue;
-        }
-        let ordinal = ctx.connection.query_row(
-            "SELECT ordinal FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3 AND kind = 'submission'",
-            params![ACCOUNT, conversation, record.message_id.as_str()], |row| row.get::<_, i64>(0),
-        ).optional()?;
-        if let Some(ordinal) = ordinal.filter(|ordinal| *ordinal > reset && *ordinal < end) {
-            let message: CaptionMessage = serde_json::from_value(json!({"entry_id": record.message_id.as_str(), "role": "user", "text": record.body}))
+        };
+        let message: CaptionMessage =
+            serde_json::from_value(json!({"entry_id": id, "role": "user", "text": text}))
                 .map_err(|_| ApiError::new(500, "Historique d'image illisible."))?;
-            messages.push((ordinal, message));
+        messages.push(message);
+        if messages.len() == precaption::HUMAN_CONTEXT_MESSAGES {
+            break;
         }
     }
-    messages.sort_by_key(|(ordinal, _)| *ordinal);
-    Ok(precaption::project(
-        draft,
-        &messages
-            .into_iter()
-            .map(|(_, message)| message)
-            .collect::<Vec<_>>(),
-    )?)
+    messages.reverse();
+    Ok(precaption::project(draft, &messages)?)
+}
+
+struct AutomaticAttempt<'a> {
+    message: &'a str,
+    previous: u32,
+    now_ms: u64,
+}
+
+fn record_retry(
+    conn: &Connection,
+    conversation: &str,
+    id: &str,
+    model: &str,
+    attempt: &AutomaticAttempt<'_>,
+    capacity_full: bool,
+) -> Result<(), ApiError> {
+    let attempts = attempt
+        .previous
+        .saturating_add(u32::from(!capacity_full))
+        .min(MAX_AUTOMATIC_ATTEMPTS);
+    let delay = if capacity_full {
+        1_000
+    } else {
+        AUTOMATIC_RETRY_MS
+            .saturating_mul(1u64 << attempt.previous.min(6))
+            .min(MAX_AUTOMATIC_RETRY_MS)
+    };
+    conn.execute(
+        "INSERT INTO wrapper_attachment_retry(conversation_id, message_id, attachment_id, model, next_attempt, attempts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(conversation_id, message_id, attachment_id, model)
+         DO UPDATE SET next_attempt = MAX(next_attempt, excluded.next_attempt), attempts = MAX(attempts, excluded.attempts)",
+        params![conversation, attempt.message, id, model, attempt.now_ms.saturating_add(delay), attempts],
+    )?;
+    Ok(())
 }
 
 fn prepare_caption(
@@ -251,6 +310,7 @@ fn prepare_caption(
     model: &str,
     projection: &precaption::PrecaptionContext,
     retry: bool,
+    automatic: Option<&AutomaticAttempt<'_>>,
 ) -> Result<Value, ApiError> {
     let key = precaption::cache_key(&attachment.sha256, model, projection)?;
     let started_at = now() as i64;
@@ -262,16 +322,18 @@ fn prepare_caption(
         .as_ref()
         .is_none_or(|status| status.retry_allowed(started_at))
         && precaption::backoff_until(ctx.connection)?.is_none_or(|until| until <= started_at);
-    // Reading, hashing and base64 encoding up to 20 MiB happen BEFORE taking the
-    // writer lock. The immutable content-addressed blob cannot change underneath.
+    // The immutable blob is read/hashed/base64-encoded by the background worker,
+    // never on the HTTP tick thread and never under this writer transaction.
     let prepared = if eligible {
+        // A capacity 429 intentionally precedes begin/usage recording. It performs
+        // no claim; the next composer poll/automatic retry records usage normally.
         let slot = network_slot(ctx.db_path)?;
         let request = json!({
             "model": model, "instructions": VISION_INSTRUCTIONS,
             "store": false, "stream": true,
             "input": [{"role": "user", "content": [
                 {"type": "input_text", "text": serde_json::to_string(projection).map_err(|_| ApiError::new(500, "Contexte illisible."))?},
-                {"type": "input_image", "image_url": data_url(ctx, attachment)?},
+                {"type": "input_image"},
             ]}],
         });
         Some((slot, request))
@@ -302,6 +364,20 @@ fn prepare_caption(
         if active >= MAX_ACTIVE_JOBS {
             return Err(ApiError::new(429, "Trop d'images en préparation."));
         }
+        if let Some(attempt) = automatic {
+            let used: u32 = tx.query_row(
+                "SELECT attempts FROM wrapper_attachment_retry WHERE conversation_id = ?1 AND message_id = ?2 AND attachment_id = ?3 AND model = ?4",
+                params![conversation, attempt.message, attachment.id, model], |row| row.get(0),
+            ).optional()?.unwrap_or(0);
+            if used >= MAX_AUTOMATIC_ATTEMPTS {
+                return Err(ApiError::new(
+                    409,
+                    "La prédescription automatique est épuisée.",
+                ));
+            }
+            // Budget and durable job commit together, before any network effect.
+            record_retry(&tx, conversation, &attachment.id, model, attempt, false)?;
+        }
         let job = Job {
             key: key.clone(),
             claim,
@@ -316,7 +392,14 @@ fn prepare_caption(
             ],
         )?;
         tx.commit()?;
-        launch(ctx.db_path.into(), ctx.provider.clone(), job, request, slot)?;
+        launch(
+            ctx.db_path.into(),
+            ctx.provider.clone(),
+            job,
+            request,
+            attachment.clone(),
+            slot,
+        )?;
     } else {
         tx.commit()?;
     }
@@ -341,6 +424,7 @@ fn launch(
     provider: Provider,
     job: Job,
     request: Value,
+    attachment: staging::Attachment,
     slot: NetworkSlot,
 ) -> Result<(), ApiError> {
     let fallback_db = db.clone();
@@ -353,11 +437,12 @@ fn launch(
             // An expired monitor cannot release a still-live HTTP worker's slot.
             let slot = Arc::new(slot);
             let worker_slot = Arc::clone(&slot);
+            let worker_db = db.clone();
             let worker = std::thread::Builder::new()
                 .name("image-vision".into())
                 .spawn(move || {
                     let _slot = worker_slot;
-                    let _ = send.send(vision(&provider, request));
+                    let _ = send.send(vision(&provider, &worker_db, &attachment, request));
                 });
             let remaining = job
                 .claim
@@ -376,7 +461,7 @@ fn launch(
                         reason: "Délai de prédescription dépassé.".into(),
                     })
             };
-            // The network worker owns no database handle. A timeout drops its receiver,
+            // The network worker never writes SQLite. A timeout drops its receiver,
             // so even a late HTTP success cannot overwrite a new lease or its backoff.
             if let Ok(conn) = Connection::open(&db) {
                 let _ = conn.busy_timeout(Duration::from_secs(3));
@@ -412,7 +497,27 @@ fn finish_job(conn: &Connection, job: &Job, status: &CaptionStatus) -> Result<()
     Ok(())
 }
 
-fn vision(provider: &Provider, request: Value) -> CaptionStatus {
+fn vision(
+    provider: &Provider,
+    db: &Path,
+    attachment: &staging::Attachment,
+    mut request: Value,
+) -> CaptionStatus {
+    let image_url = (|| -> Result<String, ApiError> {
+        // Read-only and scoped to encoding: close before HTTP, never create a DB
+        // if a timed-out worker outlives removal of its original workspace.
+        let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(3))?;
+        Ok(format!(
+            "data:{};base64,{}",
+            attachment.image_type.mime_type(),
+            STANDARD.encode(staging::read(&conn, db, &attachment.id)?)
+        ))
+    })();
+    let Ok(image_url) = image_url else {
+        return vision_failed();
+    };
+    request["input"][0]["content"][1]["image_url"] = Value::String(image_url);
     let response = match provider.responses(request) {
         Ok(response) => response,
         // Unsupported images and explicit provider refusals are Skipped. Network,
@@ -564,10 +669,48 @@ pub fn tick(ctx: &Context<'_>) {
     let _ = ensure_linked_captions(ctx);
 }
 
-/// Sending before the composer debounce, a 429, or a failed preparation must not
-/// permanently erase an image from later context. Retry from durable links, using
-/// the sending message's body and only the history preceding that message.
+/// Keep exhausted budgets for live failed links (otherwise a restart would reset
+/// the cap), but remove obsolete counters once captions succeed or links disappear.
+fn maintain_retry_rows(ctx: &Context<'_>) -> Result<(), ApiError> {
+    let any: bool = ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_attachment_retry r WHERE
+         NOT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = r.conversation_id AND deleted = 0)
+         OR NOT EXISTS(SELECT 1 FROM attachments_message_links WHERE conversation_id = r.conversation_id AND message_id = r.message_id AND attachment_id = r.attachment_id)
+         OR EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+             JOIN attachments_staged a ON a.id = r.attachment_id
+             WHERE u.conversation_id = r.conversation_id AND u.sha256 = a.sha256 AND
+                 (json_extract(c.status, '$.status') = 'ready' OR (r.attempts < ?2 AND u.model = r.model AND json_extract(c.status, '$.status') = 'skipped'))))",
+        params![ACCOUNT, MAX_AUTOMATIC_ATTEMPTS], |row| row.get(0),
+    )?;
+    if !any {
+        return Ok(());
+    }
+    let tx = write_transaction(ctx.connection)?;
+    tx.execute(
+        "DELETE FROM wrapper_attachment_retry AS r WHERE
+         NOT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = r.conversation_id AND deleted = 0)
+         OR NOT EXISTS(SELECT 1 FROM attachments_message_links WHERE conversation_id = r.conversation_id AND message_id = r.message_id AND attachment_id = r.attachment_id)
+         OR EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+             JOIN attachments_staged a ON a.id = r.attachment_id
+             WHERE u.conversation_id = r.conversation_id AND u.sha256 = a.sha256 AND json_extract(c.status, '$.status') = 'ready')",
+        [ACCOUNT],
+    )?;
+    tx.execute(
+        "UPDATE wrapper_attachment_retry AS r SET attempts = ?1 WHERE attempts < ?1
+         AND EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+             JOIN attachments_staged a ON a.id = r.attachment_id
+             WHERE u.conversation_id = r.conversation_id AND u.sha256 = a.sha256 AND u.model = r.model AND json_extract(c.status, '$.status') = 'skipped')",
+        [MAX_AUTOMATIC_ATTEMPTS],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Recover missed composer preparation, but never generate an endless background
+/// upload loop. Five durable attempts, exponential backoff, and terminal service
+/// skips bound automatic cost. Only explicit composer actions can retry a skip.
 fn ensure_linked_captions(ctx: &Context<'_>) -> Result<(), ApiError> {
+    maintain_retry_rows(ctx)?;
     if !ctx.provider.connected() {
         return Ok(());
     }
@@ -578,81 +721,112 @@ fn ensure_linked_captions(ctx: &Context<'_>) -> Result<(), ApiError> {
         return Ok(());
     }
     let mut query = ctx.connection.prepare(
-        "SELECT l.conversation_id, l.message_id, l.attachment_id
-         FROM attachments_message_links l
+        "SELECT l.conversation_id, l.message_id, l.attachment_id, COALESCE(r.attempts, 0),
+             EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+                 WHERE u.conversation_id = l.conversation_id AND u.sha256 = a.sha256 AND u.model = ?2 AND json_extract(c.status, '$.status') = 'skipped')
+         FROM attachments_message_links l JOIN attachments_staged a ON a.id = l.attachment_id AND a.image_type <> 'image/bmp'
          JOIN wrapper_conversations c ON c.account_id = ?1 AND c.id = l.conversation_id AND c.deleted = 0
          JOIN wrapper_messages m ON m.account_id = ?1 AND m.conversation_id = l.conversation_id AND m.message_id = l.message_id AND m.kind = 'submission'
          LEFT JOIN wrapper_attachment_retry r ON r.conversation_id = l.conversation_id AND r.message_id = l.message_id AND r.attachment_id = l.attachment_id AND r.model = ?2
-         WHERE COALESCE(r.next_attempt, 0) <= ?3
+         WHERE COALESCE(r.next_attempt, 0) <= ?3 AND COALESCE(r.attempts, 0) < ?4
          AND m.ordinal > COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = l.conversation_id AND kind = 'reset'), 0)
+         AND NOT EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
+             WHERE u.conversation_id = l.conversation_id AND u.sha256 = a.sha256 AND
+             (json_extract(c.status, '$.status') = 'ready' OR (u.model = ?2 AND json_extract(c.status, '$.status') = 'pending' AND json_extract(c.status, '$.started_at') > ?5)))
          ORDER BY m.ordinal, l.ordinal",
     )?;
     let links = query
-        .query_map(params![ACCOUNT, model, ctx.now_ms], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
+        .query_map(
+            params![
+                ACCOUNT,
+                model,
+                ctx.now_ms,
+                MAX_AUTOMATIC_ATTEMPTS,
+                (ctx.now_ms as i64).saturating_sub(precaption::CAPTION_DEADLINE_MS as i64)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let reader = SessionStore::open(
-        ctx.db_path,
-        &AccountId::new(ACCOUNT).expect("constant account"),
-    )?;
-    let accepted: HashMap<_, _> = reader
-        .list_submissions()?
-        .into_iter()
+    let mut candidates = Vec::new();
+    for (conversation, message, id, attempts, skipped) in links {
+        if skipped {
+            // Includes a composer refusal before send, even if no automatic
+            // retry row existed. Expiry of the global cooldown must not rearm it.
+            let tx = write_transaction(ctx.connection)?;
+            record_retry(
+                &tx,
+                &conversation,
+                &id,
+                &model,
+                &AutomaticAttempt {
+                    message: &message,
+                    previous: MAX_AUTOMATIC_ATTEMPTS,
+                    now_ms: ctx.now_ms,
+                },
+                false,
+            )?;
+            tx.commit()?;
+        } else {
+            candidates.push((conversation, message, id, attempts));
+        }
+    }
+    // Most ticks stop here: no full account journal load for ready/exhausted links.
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let records = submissions(ctx)?;
+    let accepted: HashMap<_, _> = records
+        .iter()
         .filter(|record| {
             matches!(
-                record.state,
+                &record.state,
                 SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
             )
         })
         .map(|record| {
             (
-                (
-                    record.conversation_id.as_str().to_owned(),
-                    record.message_id.as_str().to_owned(),
-                ),
-                record.body,
+                (record.conversation_id.as_str(), record.message_id.as_str()),
+                record.body.as_str(),
             )
         })
         .collect();
     let mut attempted = 0;
-    for (conversation, message, id) in links {
-        let Some(body) = accepted.get(&(conversation.clone(), message.clone())) else {
+    for (conversation, message, id, attempts) in candidates {
+        let Some(body) = accepted.get(&(conversation.as_str(), message.as_str())) else {
             continue;
         };
         let Some(attachment) = staging::get(ctx.connection, &id)? else {
             continue;
         };
-        if attachment.image_type == staging::ImageType::Bmp
-            || caption_for(ctx.connection, &conversation, &attachment.sha256, &model)?.is_some()
-        {
-            continue;
-        }
-        let pending: bool = ctx.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachments_caption_uses u JOIN attachments_caption_cache c USING(sha256, model, context_digest)
-             WHERE u.conversation_id = ?1 AND u.sha256 = ?2 AND u.model = ?3 AND json_extract(c.status, '$.status') = 'pending'
-             AND json_extract(c.status, '$.started_at') > ?4)",
-            params![conversation, attachment.sha256, model, (ctx.now_ms as i64).saturating_sub(precaption::CAPTION_DEADLINE_MS as i64)], |row| row.get(0),
-        )?;
-        if pending {
-            continue;
-        }
-        let projection = caption_projection(ctx, &conversation, body, Some(&message))?;
-        let result = prepare_caption(ctx, &conversation, &attachment, &model, &projection, true);
+        let projection = caption_projection(ctx, &records, &conversation, body, Some(&message))?;
+        let attempt = AutomaticAttempt {
+            message: &message,
+            previous: attempts,
+            now_ms: ctx.now_ms,
+        };
+        let result = prepare_caption(
+            ctx,
+            &conversation,
+            &attachment,
+            &model,
+            &projection,
+            true,
+            Some(&attempt),
+        );
         attempted += 1;
         let full = result.as_ref().is_err_and(|error| error.status == 429);
-        let delay = if full { 1_000 } else { AUTOMATIC_RETRY_MS };
         let tx = write_transaction(ctx.connection)?;
-        tx.execute(
-            "INSERT INTO wrapper_attachment_retry(conversation_id, message_id, attachment_id, model, next_attempt)
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(conversation_id, message_id, attachment_id, model)
-             DO UPDATE SET next_attempt = excluded.next_attempt",
-            params![conversation, message, id, model, ctx.now_ms.saturating_add(delay)],
-        )?;
+        // Idempotent with the reservation committed alongside the job. Also
+        // bounds local preparation errors; a 429 does not consume the budget.
+        record_retry(&tx, &conversation, &id, &model, &attempt, full)?;
         tx.commit()?;
         if full || attempted >= MAX_ACTIVE_JOBS {
             break;

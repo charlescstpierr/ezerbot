@@ -238,6 +238,8 @@ fn live_network_workers_remain_bounded_after_persisted_jobs_expire() {
     fixture.conversation("chat");
     let image = fixture.upload(PNG);
     let id = image["id"].as_str().unwrap();
+    fixture.conversation("control");
+    fixture.send("chat", "sent-image", "sent", &[id.into()]);
     fixture.connect();
     let server = GatedVision::new();
     let mut endpoints = fixture.server.endpoints();
@@ -249,7 +251,7 @@ fn live_network_workers_remain_bounded_after_persisted_jobs_expire() {
     fixture.app = App::open_with(&fixture.directory.join("app.sqlite"), provider.clone()).unwrap();
     fixture.provider = provider;
     for i in 0..4 {
-        fixture.caption("chat", id, &format!("blocked {i}"));
+        fixture.caption("control", id, &format!("blocked {i}"));
     }
     wait("four blocked HTTP workers", || {
         server.seen.load(Ordering::Acquire) == 4
@@ -269,6 +271,18 @@ fn live_network_workers_remain_bounded_after_persisted_jobs_expire() {
     assert_eq!(
         attachments::state(&fixture.app.feature_context())["network_workers"],
         4
+    );
+    assert_eq!(
+        fixture
+            .db()
+            .query_row(
+                "SELECT attempts FROM wrapper_attachment_retry WHERE conversation_id = 'chat'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0,
+        "a network-capacity 429 must not spend the automatic retry budget"
     );
     let input = json!({"conversation_id": "chat", "attachment_id": id, "draft": "fifth"});
     assert_eq!(
@@ -297,6 +311,19 @@ fn live_network_workers_remain_bounded_after_persisted_jobs_expire() {
         attachments::state(&fixture.app.feature_context())["network_workers"] == 0
     });
     assert_eq!(server.seen.load(Ordering::Acquire), 5);
+}
+
+fn wait_idle(fixture: &Fixture) {
+    wait("vision workers and persistence", || {
+        fixture
+            .db()
+            .query_row("SELECT COUNT(*) FROM wrapper_attachment_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 0
+            && attachments::state(&fixture.app.feature_context())["network_workers"] == 0
+    });
 }
 
 fn clock_ms() -> u64 {
@@ -396,6 +423,233 @@ fn automatic_caption_failure_retries_after_a_bounded_backoff() {
         .is_some()
     });
     assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 2);
+    fixture.app.tick(now + 60_001);
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT COUNT(*) FROM wrapper_attachment_retry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0,
+        "ready captions retire automatic counters"
+    );
+}
+
+#[test]
+fn automatic_permanent_failure_stops_after_five_attempts_across_restart() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("chat");
+    let image = fixture.upload(PNG);
+    fixture.send(
+        "chat",
+        "image",
+        "look",
+        &[image["id"].as_str().unwrap().into()],
+    );
+    fixture.connect();
+    for _ in 0..20 {
+        fixture.reply(ScriptedResponse::json(
+            400,
+            json!({"error": {"message": "Invalid image data"}}),
+        ));
+    }
+    let now = clock_ms();
+    for hour in 0..20u64 {
+        fixture.app.tick(now + hour * 3_600_000);
+        wait_idle(&fixture);
+        let (attempts, next): (u32, u64) = fixture
+            .db()
+            .query_row(
+                "SELECT attempts, next_attempt FROM wrapper_attachment_retry",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, (hour + 1).min(5) as u32);
+        assert_eq!(
+            fixture.server.seen.lock().unwrap().bodies.len(),
+            (hour + 1).min(5) as usize
+        );
+        if hour < 5 {
+            assert_eq!(next, now + hour * 3_600_000 + 60_000 * (1 << hour));
+        }
+        if hour == 4 {
+            fixture.app = App::open_with(
+                &fixture.directory.join("app.sqlite"),
+                fixture.provider.clone(),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn expire_service_backoff(fixture: &Fixture) {
+    let conn = fixture.db();
+    conn.execute("UPDATE attachments_caption_cache SET status = json_set(status, '$.retry_after', 0) WHERE json_extract(status, '$.status') = 'skipped'", []).unwrap();
+    conn.execute(
+        "UPDATE attachments_precaption_backoff SET retry_after = 0",
+        [],
+    )
+    .unwrap();
+}
+
+#[test]
+fn automatic_service_refusal_is_terminal_and_never_rearms_global_backoff() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("chat");
+    let image = fixture.upload(PNG);
+    fixture.send(
+        "chat",
+        "image",
+        "look",
+        &[image["id"].as_str().unwrap().into()],
+    );
+    fixture.connect();
+    fixture.reply(ScriptedResponse::events(&[
+        json!({"type": "response.refusal.done", "refusal": "cannot describe"}),
+    ]));
+    let now = clock_ms();
+    fixture.app.tick(now);
+    wait_idle(&fixture);
+    assert!(precaption::backoff_until(&fixture.db()).unwrap().unwrap() > now as i64);
+    for hour in 1..=4 {
+        expire_service_backoff(&fixture);
+        fixture.app.tick(now + hour * 3_600_000);
+        wait_idle(&fixture);
+        assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 1);
+        assert_eq!(precaption::backoff_until(&fixture.db()).unwrap(), Some(0));
+        assert_eq!(
+            fixture
+                .db()
+                .query_row("SELECT attempts FROM wrapper_attachment_retry", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .unwrap(),
+            5
+        );
+    }
+    let mut bytes = PNG.to_vec();
+    bytes.push(99);
+    let fresh = fixture.upload(&bytes);
+    fixture.reply(ready("fresh composer caption"));
+    fixture.caption("chat", fresh["id"].as_str().unwrap(), "fresh");
+    assert_eq!(
+        fixture.settled("chat", fresh["id"].as_str().unwrap(), "fresh")["caption"]["text"],
+        "fresh composer caption"
+    );
+}
+
+#[test]
+fn composer_service_refusal_before_send_is_not_automatically_retried() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("chat");
+    let image = fixture.upload(PNG);
+    let id = image["id"].as_str().unwrap();
+    fixture.connect();
+    fixture.reply(ScriptedResponse::events(&[
+        json!({"type": "response.refusal.delta", "delta": "no"}),
+    ]));
+    fixture.caption("chat", id, "draft");
+    fixture.settled("chat", id, "draft");
+    wait_idle(&fixture);
+    fixture.disconnect();
+    fixture.send("chat", "image", "sent draft", &[id.into()]);
+    fixture.connect();
+    expire_service_backoff(&fixture);
+    fixture.app.tick(clock_ms() + 3_600_000);
+    wait_idle(&fixture);
+    assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 1);
+    assert_eq!(precaption::backoff_until(&fixture.db()).unwrap(), Some(0));
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT attempts FROM wrapper_attachment_retry", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .unwrap(),
+        5
+    );
+}
+
+#[test]
+fn obsolete_retry_rows_are_purged_for_deleted_conversations_and_unlinked_messages() {
+    let mut fixture = Fixture::new();
+    fixture.conversation("deleted");
+    fixture.conversation("unlinked");
+    let image = fixture.upload(PNG);
+    let id = image["id"].as_str().unwrap();
+    for conversation in ["deleted", "unlinked"] {
+        fixture.send(conversation, "image", "look", &[id.into()]);
+        fixture.db().execute("INSERT INTO wrapper_attachment_retry(conversation_id, message_id, attachment_id, model, next_attempt, attempts) VALUES (?1, 'image', ?2, 'gpt-test', 0, 5)", [conversation, id]).unwrap();
+    }
+    fixture.post("/api/conversations/delete", json!({"id": "deleted"}));
+    fixture
+        .db()
+        .execute(
+            "DELETE FROM attachments_message_links WHERE conversation_id = 'unlinked'",
+            [],
+        )
+        .unwrap();
+    fixture.app.tick(clock_ms());
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT COUNT(*) FROM wrapper_attachment_retry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn legacy_retry_rows_gain_attempts_without_losing_existing_budgets() {
+    let mut fixture = Fixture::new();
+    fixture
+        .db()
+        .execute_batch(
+            "DROP TABLE wrapper_attachment_retry; CREATE TABLE wrapper_attachment_retry (
+        conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, attachment_id TEXT NOT NULL,
+        model TEXT NOT NULL, next_attempt INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, message_id, attachment_id, model));
+        INSERT INTO wrapper_attachment_retry VALUES ('c', 'm', 'a', 'gpt-test', 123456);",
+        )
+        .unwrap();
+    fixture.app = App::open_with(
+        &fixture.directory.join("app.sqlite"),
+        fixture.provider.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT attempts FROM wrapper_attachment_retry", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .unwrap(),
+        0
+    );
+    fixture
+        .db()
+        .execute("UPDATE wrapper_attachment_retry SET attempts = 4", [])
+        .unwrap();
+    fixture.app = App::open_with(
+        &fixture.directory.join("app.sqlite"),
+        fixture.provider.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .db()
+            .query_row(
+                "SELECT attempts, next_attempt FROM wrapper_attachment_retry",
+                [],
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u64>(1)?))
+            )
+            .unwrap(),
+        (4, 123456)
+    );
 }
 
 #[test]

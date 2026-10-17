@@ -140,8 +140,10 @@
     return extensions[file.name?.split(".").pop().toLowerCase()] || null;
   }
   function onFiles(files, event, ctx) {
-    // Office/iWork copies include a PNG rendition alongside the intended text.
-    if (event?.clipboardData?.getData("text/plain").trim()) return false;
+    // Office/iWork copies include a PNG rendition of the intended text. Browser
+    // "Copy Image" also carries its URL, and RTFD may carry an object mark.
+    const text = event?.clipboardData?.getData("text/plain").replace(/\uFFFC/g, "").trim();
+    if (text && !/^(?:[a-z][a-z0-9+.-]*:\/\/|data:|blob:)\S*$/i.test(text)) return false;
     const candidates = files.filter((file) => mime(file));
     if (!candidates.length) { panels.notify("Joignez une image PNG, JPEG, GIF, WebP ou BMP."); return false; }
     const group = bucket(ctx);
@@ -200,6 +202,7 @@
     item.revision++;
     item.controller?.abort();
     item.polling = false;
+    item.retry = false;
     item.caption = "waiting";
     item.error = null;
     if (active(group)) {
@@ -242,11 +245,16 @@
         signal: controller.signal,
       });
       const result = await response.json();
-      // Capacity/catalog refusals precede any claim. Keep polling the same key
-      // with retry=false; the existing DEADLINE bounds this transient wait.
-      if (response.status === 429 || response.status === 409) return;
-      if (!response.ok) throw new Error(result.error || "La description n’est pas disponible.");
       if (!present(group, item) || revision !== item.revision) return;
+      // Capacity/catalog refusals precede any claim. Retain an explicit retry
+      // until admitted, then poll normally. DEADLINE bounds the transient wait;
+      // other conflicts must surface their actual error rather than time out.
+      if (response.status === 429 || (response.status === 409 && !context.state.provider?.models_ready)) {
+        item.retry = retry;
+        return;
+      }
+      if (!response.ok) throw new Error(result.error || "La description n’est pas disponible.");
+      item.retry = false;
       const status = result.caption?.status;
       if (!["pending", "ready", "skipped", "failed"].includes(status)) throw new Error("État de description illisible.");
       backoff(Math.max(Number(result.retry_after) || 0, status === "skipped" ? Number(result.caption.retry_after) || 0 : 0));
@@ -325,7 +333,7 @@
       sync(ctx);
       const group = bucket();
       for (const item of group.items) {
-        if (item.caption === "pending" && !item.polling) prepare(group, item);
+        if (item.caption === "pending" && !item.polling) prepare(group, item, Boolean(item.retry));
         else if (item.caption === "waiting" && !item.timer && item.upload === "ready") schedule(group, item);
       }
     },

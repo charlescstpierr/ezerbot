@@ -1,6 +1,8 @@
 //! Content-addressed image staging. Bytes live in `<base>.attachments/<sha256>`,
 //! never in the submission journal. Only magic-byte detection is performed, not
 //! image decoding. The wrapper owns transactions and component schema versions.
+//! Crash-left temporary files are swept after one hour. Unreferenced staged
+//! blobs (including those left by rolled-back messages) await a later GC slice.
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,15 +64,26 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 }
 
 pub fn sniff(bytes: &[u8]) -> Result<ImageType> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") && &bytes[12..16] == b"IHDR" {
         Ok(ImageType::Png)
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
+    } else if bytes.len() >= 4 && bytes.starts_with(b"\xff\xd8\xff") {
         Ok(ImageType::Jpeg)
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+    } else if bytes.len() >= 13 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
         Ok(ImageType::Gif)
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+    } else if bytes.len() >= 16
+        && bytes.starts_with(b"RIFF")
+        && &bytes[8..12] == b"WEBP"
+        && matches!(&bytes[12..16], b"VP8 " | b"VP8L" | b"VP8X")
+    {
         Ok(ImageType::Webp)
-    } else if bytes.starts_with(b"BM") {
+    } else if bytes.len() >= 26
+        && bytes.starts_with(b"BM")
+        && u32::from_le_bytes(bytes[2..6].try_into().unwrap()) as usize == bytes.len()
+        && matches!(
+            u32::from_le_bytes(bytes[14..18].try_into().unwrap()),
+            12 | 40 | 52 | 56 | 64 | 108 | 124
+        )
+    {
         Ok(ImageType::Bmp)
     } else {
         Err(Error::InvalidInput("unsupported image signature".into()))
@@ -87,13 +101,56 @@ pub(crate) fn valid_digest(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
+fn blob_directory(base_path: &Path) -> PathBuf {
+    let mut directory = base_path.as_os_str().to_os_string();
+    directory.push(".attachments");
+    PathBuf::from(directory)
+}
+
 fn blob_path(base_path: &Path, sha256: &str) -> Result<PathBuf> {
     if !valid_digest(sha256) {
         return Err(Error::InvalidInput("invalid attachment SHA-256".into()));
     }
-    let mut directory = base_path.as_os_str().to_os_string();
-    directory.push(".attachments");
-    Ok(PathBuf::from(directory).join(sha256))
+    Ok(blob_directory(base_path).join(sha256))
+}
+
+/// Remove only our regular, hour-old temporary files, never content blobs or
+/// fresh uploads. Also callable at host startup; staging invokes it automatically.
+pub fn sweep_temporaries(base_path: &Path) -> Result<usize> {
+    let cutoff = SystemTime::now() - Duration::from_secs(3_600);
+    let entries = match fs::read_dir(blob_directory(base_path)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(sha) = name
+            .to_str()
+            .and_then(|s| s.strip_prefix('.'))
+            .and_then(|s| s.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        if !valid_digest(sha) || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.modified()? <= cutoff {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Publish a complete file atomically so concurrent readers cannot see a partial
@@ -113,6 +170,13 @@ fn write_blob(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        fs::File::open(directory)?.sync_all()?;
+        // Persist the attachments directory's entry as well if just created.
+        let parent = directory
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
@@ -128,6 +192,7 @@ pub fn stage(conn: &Connection, base_path: &Path, bytes: &[u8], now_ms: i64) -> 
         ));
     }
     let image_type = sniff(bytes)?;
+    sweep_temporaries(base_path)?;
     let sha256 = digest(bytes);
     let id = format!("attachment_{sha256}");
     write_blob(&blob_path(base_path, &sha256)?, bytes)?;
@@ -253,7 +318,8 @@ pub fn for_message(conn: &Connection, message_id: &str) -> Result<Vec<Attachment
 mod tests {
     use super::*;
 
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nimage payload";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01image payload";
+    const GIF: &[u8] = b"GIF89a\x01\0\x01\0\0\0\0payload";
 
     struct Fixture {
         directory: PathBuf,
@@ -285,13 +351,17 @@ mod tests {
 
     #[test]
     fn mime_sniffed_from_magic_bytes() {
+        let mut bmp = vec![0; 26];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&26_u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&12_u32.to_le_bytes());
         for (bytes, expected) in [
             (PNG, ImageType::Png),
             (&b"\xff\xd8\xff\xe0"[..], ImageType::Jpeg),
-            (&b"GIF87a"[..], ImageType::Gif),
-            (&b"GIF89a"[..], ImageType::Gif),
+            (&b"GIF87a\x01\0\x01\0\0\0\0"[..], ImageType::Gif),
+            (GIF, ImageType::Gif),
             (&b"RIFF\x10\0\0\0WEBPVP8 "[..], ImageType::Webp),
-            (&b"BM\0\0"[..], ImageType::Bmp),
+            (bmp.as_slice(), ImageType::Bmp),
         ] {
             assert_eq!(sniff(bytes).unwrap(), expected);
             assert!(expected.mime_type().starts_with("image/"));
@@ -302,9 +372,50 @@ mod tests {
             b"RIFF1234WAVE",
             b"\x89PNG",
             b"<svg/>",
+            b"BMW is a car brand, not a bitmap image",
+            b"BM",
+            b"\xff\xd8\xff",
+            b"\x89PNG\r\n\x1a\n",
+            b"GIF87a",
+            b"GIF89a",
+            b"RIFF\0\0\0\0WEBP",
+            b"RIFF1234WEBPFAKE",
         ] {
             assert!(sniff(invalid).is_err());
         }
+        bmp[2] = 27;
+        assert!(sniff(&bmp).is_err());
+        bmp[2] = 26;
+        bmp[14] = 11;
+        assert!(sniff(&bmp).is_err());
+        let mut fake_png = PNG.to_vec();
+        fake_png[12] = b'X';
+        assert!(sniff(&fake_png).is_err());
+    }
+
+    #[test]
+    fn stale_temporaries_are_swept_without_removing_blobs_or_live_uploads() {
+        let f = Fixture::new();
+        assert_eq!(sweep_temporaries(&f.base).unwrap(), 0);
+        let attachment = stage(&f.conn, &f.base, PNG, 0).unwrap();
+        let directory = blob_directory(&f.base);
+        let old = directory.join(format!(".{}.tmp", digest(b"old")));
+        let fresh = directory.join(format!(".{}.tmp", digest(b"fresh")));
+        let foreign = directory.join(".foreign.tmp");
+        for path in [&old, &fresh, &foreign] {
+            fs::write(path, b"temporary").unwrap();
+        }
+        fs::File::open(&old)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(3_601)),
+            )
+            .unwrap();
+        assert_eq!(sweep_temporaries(&f.base).unwrap(), 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(foreign.exists());
+        assert_eq!(read(&f.conn, &f.base, &attachment.id).unwrap(), PNG);
     }
 
     #[test]
@@ -344,7 +455,7 @@ mod tests {
     fn links_preserve_order_are_idempotent_and_validate_all_ids() {
         let f = Fixture::new();
         let a = stage(&f.conn, &f.base, PNG, 1).unwrap();
-        let b = stage(&f.conn, &f.base, b"GIF89aother", 2).unwrap();
+        let b = stage(&f.conn, &f.base, GIF, 2).unwrap();
         let ids = vec![b.id.clone(), a.id.clone(), b.id.clone()];
         link_attachments(&f.conn, "conversation", "message", &ids).unwrap();
         link_attachments(&f.conn, "conversation", "message", &ids).unwrap();
@@ -369,7 +480,7 @@ mod tests {
         assert_eq!(version, 77);
         let tx = f.conn.unchecked_transaction().unwrap();
         let a = stage(&tx, &f.base, PNG, 1).unwrap();
-        link_attachments(&tx, "conversation", "message", &[a.id.clone()]).unwrap();
+        link_attachments(&tx, "conversation", "message", std::slice::from_ref(&a.id)).unwrap();
         tx.rollback().unwrap();
         assert!(get(&f.conn, &a.id).unwrap().is_none());
         assert!(for_message(&f.conn, "message").unwrap().is_empty());

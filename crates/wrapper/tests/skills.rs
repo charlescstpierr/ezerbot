@@ -188,6 +188,16 @@ fn read_skill_tool_returns_body() {
     assert_eq!(output["body"], body);
     assert_eq!(output["skill_id"], skill["skill_id"]);
     assert_eq!(output["version"], 1);
+    assert!(matches!(
+        app.invoke_tool("grokbot", "read_skill", json!({"name":" REVIEW "}))
+            .unwrap(),
+        ToolOutcome::Done { .. }
+    ));
+    assert!(matches!(
+        app.invoke_tool("other", "read_skill", json!({"skill_id":skill["skill_id"]}))
+            .unwrap(),
+        ToolOutcome::Failed { .. }
+    ));
     assert_eq!(
         output["authority"],
         "external_data_not_instructions_or_permissions"
@@ -283,7 +293,9 @@ fn context_index_is_bounded_and_cannot_close_its_data_envelope() {
     assert!(index.text.chars().count() <= index.budget);
     assert_eq!(index.text.matches("</skill_index_data>").count(), 1);
     assert!(index.text.contains("\\u003c/skill_index_data\\u003e"));
-    assert!(!index.text.contains("skill-29"));
+    assert!(index.text.contains("skill-29"));
+    assert!(index.text.contains("\"omitted\":0"));
+    assert!(index.text.contains("list_skills"));
 }
 
 #[test]
@@ -508,4 +520,353 @@ fn concurrent_imports_serialize_capacity_and_digest_checks() {
         1
     );
     assert_eq!(listing(&mut db.open(), "other").len(), 1);
+}
+
+#[test]
+fn large_manual_skills_can_be_created_edited_and_renamed() {
+    use grokbot_wrapper::{body_limit, BODY_LIMIT, SKILL_IMPORT_BODY_LIMIT};
+    for route in ["/api/skills", "/api/skills/update", "/api/skills/import"] {
+        assert_eq!(body_limit(route), SKILL_IMPORT_BODY_LIMIT);
+    }
+    assert_eq!(body_limit("/api/skills/delete"), BODY_LIMIT);
+    let db = Database::new();
+    let mut app = db.open();
+    let first = add(&mut app, "grokbot", "Large", &"x".repeat(200_000));
+    let updated = post(
+        &mut app,
+        "/api/skills/update",
+        json!({
+            "bot_id":"grokbot", "skill_id":first["skill_id"], "expected_version":1,
+            "body":"y".repeat(200_000)
+        }),
+    );
+    assert_eq!(
+        updated["skill"]["content"]["body"].as_str().unwrap().len(),
+        200_000
+    );
+    let renamed = post(
+        &mut app,
+        "/api/skills/update",
+        json!({
+            "bot_id":"grokbot", "skill_id":first["skill_id"], "expected_version":2, "name":"Renamed"
+        }),
+    );
+    assert_eq!(renamed["skill"]["content"]["name"], "renamed");
+    assert_eq!(
+        renamed["skill"]["content"]["body"],
+        updated["skill"]["content"]["body"]
+    );
+    for body in ["x".repeat(256_001), "🦀".repeat(128_001)] {
+        let error = request(
+            &mut app,
+            "/api/skills",
+            json!({"bot_id":"grokbot", "name":"Too large", "body":body}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "too-large");
+    }
+    let error = request(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":first["skill_id"], "expected_version":3, "body":"x".repeat(256_001)})).unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "too-large");
+    let accepted = add(&mut app, "grokbot", "At the limit", &"x".repeat(256_000));
+    assert_eq!(accepted["content"]["body"].as_str().unwrap().len(), 256_000);
+}
+
+#[test]
+fn sparse_updates_preserve_description_body_and_upload_provenance() {
+    let db = Database::new();
+    let mut app = db.open();
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{
+            "path":"deploy/SKILL.md", "content":format!("---\nname: Deploy\ndescription: Original description\n---\n{}", "x".repeat(200_000))
+        }]}),
+    );
+    let original = listing(&mut app, "grokbot")[0].clone();
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    let renamed = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "name":"Deploy safely"}),
+    )["skill"]
+        .clone();
+    assert_eq!(
+        renamed["content"]["description"],
+        original["content"]["description"]
+    );
+    assert_eq!(renamed["content"]["body"], original["content"]["body"]);
+    assert_eq!(renamed["content"]["origin"], original["content"]["origin"]);
+    let corrected = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "body":"corrected body"}),
+    )["skill"]
+        .clone();
+    assert_eq!(corrected["content"]["description"], "Original description");
+    assert_eq!(corrected["content"]["origin"]["kind"], "upload");
+    assert_eq!(corrected["content"]["name"], "deploy-safely");
+    let unchanged = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "body":"corrected body"}),
+    )["skill"]
+        .clone();
+    assert_eq!(unchanged["version"], 3);
+    let cleared = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":3, "description":""}),
+    )["skill"]
+        .clone();
+    assert_eq!(cleared["content"]["description"], "");
+    assert_eq!(cleared["content"]["origin"], original["content"]["origin"]);
+    assert_eq!(
+        request(
+            &mut app,
+            "/api/skills/update",
+            json!({"bot_id":"grokbot", "skill_id":id, "expected_version":4})
+        )
+        .unwrap_err()
+        .status,
+        400
+    );
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id":id}),
+    );
+    assert_eq!(versions["versions"].as_array().unwrap().len(), 4);
+}
+
+fn tool_output(app: &App, name: &str, args: Value) -> Value {
+    match app.invoke_tool("grokbot", name, args).unwrap() {
+        ToolOutcome::Done { output } => output,
+        other => panic!("expected success, got {other:?}"),
+    }
+}
+
+#[test]
+fn omitted_long_names_are_discoverable_by_paginated_search_and_readable_by_id() {
+    let db = Database::new();
+    let mut app = db.open();
+    create_bot(&mut app);
+    let mut ids = Vec::new();
+    for i in 0..80 {
+        ids.push(
+            add(
+                &mut app,
+                "grokbot",
+                &format!("long-{i:02}-{}", "x".repeat(180)),
+                &format!("body-{i}"),
+            )["skill_id"]
+                .clone(),
+        );
+    }
+    add(&mut app, "other", "Foreign", "foreign-body");
+    let conversation = conversation(&mut app, "grokbot");
+    let blocks = app.context_preview(&conversation).unwrap();
+    let index = blocks
+        .iter()
+        .find(|block| block.source == ContextSource::SkillIndex)
+        .unwrap();
+    assert!(index.text.chars().count() <= index.budget);
+    assert!(index.text.contains("list_skills"));
+    let marker: Value = index
+        .text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value.get("omitted").is_some())
+        .unwrap();
+    assert!(marker["omitted"].as_u64().unwrap() > 0);
+    assert!(!index.text.contains("long-79-"));
+    let page = tool_output(&app, "list_skills", json!({"query":"LONG-79", "limit":1}));
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["skills"][0]["skill_id"], ids[79]);
+    assert!(page["skills"][0]["name"].as_str().unwrap().len() <= 128);
+    assert_eq!(page["skills"][0]["name_truncated"], true);
+    let read = tool_output(
+        &app,
+        "read_skill",
+        json!({"skill_id":page["skills"][0]["skill_id"]}),
+    );
+    assert_eq!(read["body"], "body-79");
+    let mut offset = 0;
+    let mut discovered = Vec::new();
+    loop {
+        let page = tool_output(&app, "list_skills", json!({"offset":offset, "limit":17}));
+        assert_eq!(page["total"], 80);
+        assert!(page["skills"].as_array().unwrap().len() <= 17);
+        discovered.extend(
+            page["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|skill| skill["skill_id"].clone()),
+        );
+        if let Some(next) = page["next_offset"].as_u64() {
+            offset = next;
+        } else {
+            break;
+        }
+    }
+    assert_eq!(discovered, ids);
+    for args in [
+        json!({"limit":51}),
+        json!({"offset":-1}),
+        json!({"query":"x".repeat(257)}),
+        json!({"bot_id":"other"}),
+    ] {
+        assert!(matches!(
+            app.invoke_tool("grokbot", "list_skills", args).unwrap(),
+            ToolOutcome::Failed { .. }
+        ));
+    }
+}
+
+#[test]
+fn state_and_tool_metadata_bound_oversized_imported_fields() {
+    let db = Database::new();
+    let mut app = db.open();
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[{
+            "path":"huge.md", "content":format!("---\nname: {}\ndescription: {}\n---\nbody", "z".repeat(10_000), "d".repeat(200_000))
+        }]}),
+    );
+    assert_eq!(report_status(&report, 0), "written");
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let metadata = &state["skills"]["by_bot"]["grokbot"][0];
+    assert_eq!(metadata["name"].as_str().unwrap().chars().count(), 128);
+    assert_eq!(
+        metadata["description"].as_str().unwrap().chars().count(),
+        512
+    );
+    assert_eq!(metadata["name_truncated"], true);
+    assert_eq!(metadata["description_truncated"], true);
+    assert!(state["skills"].to_string().len() < 2_000);
+    let page = tool_output(&app, "list_skills", json!({}));
+    assert!(page.to_string().len() < 2_000);
+    assert!(page["skills"][0].get("body").is_none());
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    // Preserved imported descriptions may exceed the manual edit limit; a
+    // sparse body edit must not erase or unnecessarily revalidate that field.
+    let updated = post(
+        &mut app,
+        "/api/skills/update",
+        json!({"bot_id":"grokbot", "skill_id":id, "expected_version":1, "body":"edited"}),
+    );
+    assert_eq!(
+        updated["skill"]["content"]["description"]
+            .as_str()
+            .unwrap()
+            .len(),
+        200_000
+    );
+    let error = request(
+        &mut app,
+        "/api/skills",
+        json!({"bot_id":"grokbot", "name":"Manual", "description":"d".repeat(1025), "body":"body"}),
+    )
+    .unwrap_err();
+    assert_eq!(error.status, 400);
+    let error = request(&mut app, "/api/skills/update", json!({"bot_id":"grokbot", "skill_id":id, "expected_version":2, "description":"d".repeat(1025)})).unwrap_err();
+    assert_eq!(error.status, 400);
+}
+
+#[test]
+fn base64_uploads_preserve_text_and_report_binary_refusals() {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let db = Database::new();
+    let mut app = db.open();
+    let result = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"text.md", "base64":BASE64.encode("# Text\nValid 🦀 text".as_bytes())},
+            {"path":"binary.txt", "base64":BASE64.encode([0,1,2])},
+            {"path":"invalid.txt", "base64":BASE64.encode([255])}
+        ]}),
+    );
+    assert_eq!(report_status(&result, 0), "written");
+    assert_eq!(report_status(&result, 1), "skipped");
+    assert_eq!(report_status(&result, 2), "skipped");
+    assert!(listing(&mut app, "grokbot")[0]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Valid 🦀 text"));
+    let error = request(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"would-write.txt", "content":"not written"}, {"path":"bad.txt", "base64":"%%%"}
+        ]}),
+    )
+    .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(listing(&mut app, "grokbot").len(), 1);
+}
+
+#[test]
+fn import_file_count_is_bounded_before_any_writes() {
+    let db = Database::new();
+    let mut app = db.open();
+    let file = json!({"path":"same.txt", "content":"same body"});
+    let error = request(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":vec![file.clone();1001]}),
+    )
+    .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(error.message.starts_with("too-many-files"));
+    assert!(listing(&mut app, "grokbot").is_empty());
+    let result = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":vec![file;1000]}),
+    );
+    assert_eq!(result["report"].as_array().unwrap().len(), 1000);
+    assert_eq!(report_status(&result, 0), "written");
+    assert_eq!(report_status(&result, 999), "duplicate");
+}
+
+#[test]
+fn separate_import_requests_document_request_scoped_name_reuse() {
+    let db = Database::new();
+    let mut app = db.open();
+    create_bot(&mut app);
+    let first = json!({"path":"a/SKILL.md", "content":"---\nname: Deploy\n---\na"});
+    let second = json!({"path":"b/SKILL.md", "content":"---\nname: Deploy\n---\nb"});
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[first.clone(),second.clone()]}),
+    );
+    let chunk1 = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"other", "files":[first]}),
+    );
+    let chunk2 = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"other", "files":[second]}),
+    );
+    assert_eq!(chunk1["scope"], "request");
+    assert_eq!(chunk2["scope"], "request");
+    assert_eq!(
+        chunk1["report"][0]["status"]["skill_id"],
+        chunk2["report"][0]["status"]["skill_id"]
+    );
+    assert_eq!(listing(&mut app, "grokbot").len(), 2);
+    assert_eq!(listing(&mut app, "other").len(), 1);
+    let history = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"other", "skill_id":chunk1["report"][0]["status"]["skill_id"]}),
+    );
+    assert_eq!(history["versions"].as_array().unwrap().len(), 2);
 }

@@ -39,7 +39,7 @@ pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 pub fn body_limit(path: &str) -> usize {
     match path {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
-        "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
+        "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
         _ => BODY_LIMIT,
     }
 }

@@ -51,30 +51,32 @@ Ces fonctions sont implémentées dans notre reconstruction, pas récupérées d
 | Skills | Bibliothèque par bot, éditeur, versions et import texte/fichiers/dossiers | 250 skills; pas d’apprentissage Teach ni de marketplace |
 | Mémoire | Faits privés/équipe, correction, oubli et partage par lots | « Équipe » = tous les bots locaux; oublier ne supprime pas vos messages |
 | Runs et contexte | Boucle modèle/outils, reprise durable, arrêt, relance, tâches et compaction | Budgets locaux; tâche terminée seulement par `complete_task` |
-| Formulaires, approbations, secrets | Cartes typées, reçu de reprise, décisions utilisateur dans le chat principal, coffre séparé | Règles persistées évaluées automatiquement; réviseur en langage naturel encore absent |
+| Formulaires, approbations, secrets | Cartes typées, reçu de reprise, coffre séparé; infrastructure d’approbation testée | Aucun outil livré n’exige encore de carte d’approbation; règles Toujours évaluées, réviseur en langage naturel absent |
 | Routines | Cron, intervalle ou date unique; prompt libre ou skill épinglée; historique | Moteur ouvert requis; proposition du modèle activée après confirmation dans le chat principal, sans carte d’approbation séparée |
 | Délégation | Enfants parallèles, contexte sélectionné, résultats au parent et arrêt en cascade | 4 actifs, 3 par racine, profondeur 3, file 16; fils de tâche en lecture seule dans l’interface |
-| Images | Collage, dépôt/sélecteur, miniature et prédescription avec le brouillon | 20 Mio/image; vision dépendante du modèle; seuls les textes de légende circulent ensuite |
+| Images | Collage, dépôt/sélecteur, miniature et prédescription avec le brouillon | 20 Mio/image; vision dépendante du modèle; légendes aux tours suivants et à la compaction, pas encore transmises automatiquement aux enfants |
 
-Les paramètres d’un bot donnent accès aux skills et à la mémoire; le panneau Routines se trouve aussi dans les paramètres généraux. Les cartes d’outil, de tâche et de résumé apparaissent dans le fil. Aucun outil shell, accès à l’ordinateur, MCP ou connecteur externe n’est encore fourni. Les approbations de sous-bots, routines ou outils protégés sont présentées à l’utilisateur dans une conversation du bot principal; ce dernier ne les accepte pas à sa place. Les limites et suites restantes figurent dans [MANQUES_COMPLETS.md](MANQUES_COMPLETS.md#capacités-locales-livrées-et-suites).
+Les paramètres d’un bot donnent accès aux skills et à la mémoire; le panneau Routines se trouve aussi dans les paramètres généraux. Les cartes d’outil, de tâche et de résumé apparaissent dans le fil. Aucun outil shell, accès à l’ordinateur, MCP ou connecteur externe n’est encore fourni. Le routage des approbations vers une conversation de `grokbot`, pour décision par l’utilisateur, est en place et testé; aucun outil livré n’exige encore d’approbation. L’activation d’une routine passe par une confirmation dans le chat principal, pas par une carte. Les limites et suites restantes figurent dans [MANQUES_COMPLETS.md](MANQUES_COMPLETS.md#capacités-locales-livrées-et-suites).
 
 ## Essayer et vérifier le socle Rust
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
+# Dans le dossier principal avec les archives REA (inputs/, artifacts/client/ et artifacts/formatted/) :
 python3 tools/verify-rust.py
+# Les commandes suivantes fonctionnent aussi dans une copie isolée :
 cargo run --locked -p grokbot-try -- demo --db try-data/session.sqlite
 cargo run --locked -p grokbot-try -- status --db try-data/session.sqlite
 cargo run --locked -p grokbot-try -- flow --db try-data/flow.sqlite
 cargo run --locked -p grokbot-try -- status --db try-data/flow.sqlite
 cargo build --locked -p grokbot-wrapper
-python3 tools/verify-wrapper.py --report /tmp/grokbot-wrapper-verification.json
+python3 tools/verify-wrapper.py
 python3 tools/verify-app.py # contrôle natif séparé, après ouverture de l’app Mac
 ```
 
 La démo exige un chemin neuf et refuse de remplacer une base existante. `status` relit le compte fictif de la démo. Les bibliothèques ouvrent SQLite avec un `AccountId` explicite. Le toolchain Rust est installé dans `~/.cargo/bin`, même si le shell ne l'inclut pas dans son PATH.
 
-[Consolidation Rust](reports/consolidation-rust.md) décrit les premières corrections. [Orchestration durable](reports/orchestration-rust.md) décrit les commandes avant transport, les snapshots gardés et les essais de processus. [rust-verification.json](evidence/rust-verification.json) conserve les commandes, résultats et empreintes du code vérifié. Les preuves statiques de l'original restent distinctes de ces tests du système indépendant. Les fichiers `evidence/*verification.json` versionnés sont des instantanés historiques, pas une certification du code courant. La passe documentaire des sept capacités a relancé le build `--locked` et la vérification HTTP avec un rapport hors dépôt; aucun nouveau JSON de preuve n’est versionné. Les contrôles natifs de cette livraison restent à faire par le capitaine.
+[Consolidation Rust](reports/consolidation-rust.md) décrit les premières corrections. [Orchestration durable](reports/orchestration-rust.md) décrit les commandes avant transport, les snapshots gardés et les essais de processus. La passe dans une copie isolée a obtenu **791 tests passants** (doctests compris), fmt, clippy strict, scénarios SQLite et **60 contrôles HTTP/SQLite passants**, après build `--locked`. `verify-rust.py` doit cependant être lancé dans le **dossier principal contenant les archives REA** : ses contrôles `saved evidence` et `static dossier` ne peuvent pas aboutir dans une copie sans les 1 011 chemins archivés ni l’ASAR. Ce sont des limites d’environnement, pas des échecs du code Rust. Les JSON [Rust](evidence/rust-verification.json) et [HTTP](evidence/wrapper-verification.json) conservés dans le diff livré restent les versions de `main`, pas les rapports de cette passe isolée; ils ne certifient donc pas ces nouveaux comptes. Les preuves statiques de l’original restent distinctes des tests indépendants. Les contrôles natifs de cette livraison restent à faire par le capitaine.
 
 Le dépôt Git versionne les sources, les ressources de l’interface, les scripts, les rapports et les preuves résumées. Les archives locales `inputs/`, `artifacts/client/`, `artifacts/formatted/` et `evidence/rea-bundle.json` sont conservées sur disque et exclues de Git, comme les builds et captures de contrôle. Après un clone, construire l’app ne nécessite pas ces archives; les vérifications de rétro-ingénierie nécessitent de les recopier depuis ce dossier de sauvegarde.
 

@@ -212,7 +212,9 @@ fn read_skill_tool_returns_body() {
     ));
     assert!(grokbot_wrapper::features::skills::tools()
         .iter()
-        .any(|spec| spec.name == "read_skill" && !spec.requires_approval));
+        .any(|spec| spec.name == "read_skill"
+            && !spec.description.is_empty()
+            && !spec.requires_approval));
     post(
         &mut app,
         "/api/skills/delete",

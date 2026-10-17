@@ -1,10 +1,18 @@
-//! Text conversion signatures. Rules: server-orchestration-residual.md SR03/SR04.
-//! `convert` is pure; `import_batch` will persist serially with per-file outcomes.
-use crate::library::SkillContent;
-use grokbot_engine::contracts::{pending, Result};
+//! Text uploads, following `reports/server-orchestration-residual.md` SR03/SR04
+//! (REA parent ev_a8b822a62831e30bd01eb4c4488b36f0bd50cb8ccc41d83e2dcff4e00cf82a4d).
+//! The recovered importer (anchors A11–A17) checks the first 8192 bytes for NUL,
+//! validates UTF-8, counts UTF-16 units, and annotates the preserved document.
+//! Names follow the plan's frontmatter → heading → SKILL.md directory → filename
+//! precedence. Digest deduplication and exact per-file reports are local choices.
+//! `convert` is pure. Writes are serial and failures do not roll back earlier
+//! successes (SR04, A19). The caller owns transactions and HTTP batch limits.
+use crate::library::{self, Origin, Skill, SkillContent};
+use grokbot_engine::contracts::{Error, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+/// JavaScript string length (UTF-16 code units), not UTF-8 bytes or scalar values.
 pub const MAX_SKILL_CHARACTERS: usize = 256_000;
 pub const MAX_SKILLS_PER_BOT: usize = 250;
 pub const IMPORT_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -36,13 +44,489 @@ pub struct ImportItem {
     pub status: ImportStatus,
 }
 
-pub fn convert(_file: &ImportFile) -> Result<ImportedSkill> {
-    pending("skills.import")
+pub fn convert(file: &ImportFile) -> Result<ImportedSkill> {
+    let path = file.path.replace('\\', "/");
+    let parts: Vec<_> = path
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    let file_name = parts.last().copied().ok_or_else(|| invalid("empty-path"))?;
+    let dot = file_name
+        .rfind('.')
+        .filter(|&i| i > 0)
+        .ok_or_else(|| invalid("unsupported"))?;
+    let extension = &file_name[dot..];
+    if !matches!(
+        extension.to_ascii_lowercase().as_str(),
+        ".txt" | ".md" | ".markdown" | ".csv" | ".json" | ".yaml" | ".yml"
+    ) || file.bytes.iter().take(8192).any(|&b| b == 0)
+    {
+        return Err(invalid("unsupported"));
+    }
+    let text = std::str::from_utf8(&file.bytes).map_err(|_| invalid("unsupported"))?;
+    // TextDecoder("utf-8") consumes a leading BOM.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.trim().is_empty() {
+        return Err(invalid("empty"));
+    }
+    if text.encode_utf16().count() > MAX_SKILL_CHARACTERS {
+        return Err(invalid("too-large"));
+    }
+
+    let (header, body) = frontmatter(text).unwrap_or(("", text));
+    let front_name = field(header, "name");
+    let has_name = !normalize(&front_name).is_empty();
+    let fallback = if file_name == "SKILL.md" && parts.len() > 1 {
+        parts[parts.len() - 2]
+    } else {
+        &file_name[..dot]
+    };
+    let title = if has_name {
+        front_name.clone()
+    } else {
+        heading(body).unwrap_or(fallback).replace(['\r', '\n'], " ")
+    };
+    let mut name = normalize(&title);
+    if name.is_empty() {
+        name = "skill".into();
+    }
+    let upload_name = if has_name || file_name == "SKILL.md" {
+        ""
+    } else {
+        file_name
+    };
+    let body = annotate(text, &title, has_name, extension, upload_name);
+    let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+    Ok(ImportedSkill {
+        content: SkillContent {
+            name,
+            description: field(header, "description"),
+            body,
+            origin: Origin::Upload {
+                extension: extension.into(),
+                name: file_name.into(),
+            },
+        },
+        digest,
+    })
 }
+
+/// A listing failure aborts before writing. Conversion, capacity and write errors
+/// are instead reported per file, in input order. Duplicate retries do not consume
+/// capacity, including at the cap; only successful writes reserve names/slots.
 pub fn import_batch(
-    _conn: &Connection,
-    _bot_id: &str,
-    _files: &[ImportFile],
+    conn: &Connection,
+    bot_id: &str,
+    files: &[ImportFile],
 ) -> Result<Vec<ImportItem>> {
-    pending("skills.import")
+    let known = library::list(conn, bot_id)?;
+    Ok(import_files(files, known, |content| {
+        library::add(conn, bot_id, content)
+    }))
+}
+
+fn import_files(
+    files: &[ImportFile],
+    mut known: Vec<Skill>,
+    mut write: impl FnMut(&SkillContent) -> Result<Skill>,
+) -> Vec<ImportItem> {
+    known.retain(|skill| !skill.deleted);
+    files
+        .iter()
+        .map(|file| {
+            let status = match convert(file) {
+                Err(error) => ImportStatus::Skipped {
+                    reason: error.to_string(),
+                },
+                Ok(imported) => {
+                    if let Some(skill) = known.iter().find(|skill| skill.digest == imported.digest)
+                    {
+                        ImportStatus::Duplicate {
+                            skill_id: skill.skill_id.clone(),
+                        }
+                    } else if known.len() >= MAX_SKILLS_PER_BOT {
+                        ImportStatus::Skipped {
+                            reason: "too-many-skills".into(),
+                        }
+                    } else {
+                        // The library owns normalization, collision suffixes and version history.
+                        match write(&imported.content) {
+                            Ok(skill) => {
+                                let status = ImportStatus::Written {
+                                    skill_id: skill.skill_id.clone(),
+                                };
+                                known.push(skill);
+                                status
+                            }
+                            Err(error) => ImportStatus::Skipped {
+                                reason: format!("write-failed: {error}"),
+                            },
+                        }
+                    }
+                }
+            };
+            ImportItem {
+                file_name: file.path.clone(),
+                status,
+            }
+        })
+        .collect()
+}
+
+fn invalid(reason: &str) -> Error {
+    Error::InvalidInput(reason.into())
+}
+
+// These intentionally parse only top-level single-line fields, like ny/rk in the
+// recovered client (index.eager-app-BfVhIMYf.js:49261/49359), not arbitrary YAML.
+fn frontmatter(text: &str) -> Option<(&str, &str)> {
+    let rest = text
+        .strip_prefix("---\r\n")
+        .or_else(|| text.strip_prefix("---\n"))?;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let marker = line.strip_suffix('\n').unwrap_or(line);
+        if marker.strip_suffix('\r').unwrap_or(marker) == "---" {
+            let header = &rest[..offset];
+            let header = header.strip_suffix('\n').unwrap_or(header);
+            return Some((
+                header.strip_suffix('\r').unwrap_or(header),
+                &rest[offset + line.len()..],
+            ));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn field(header: &str, key: &str) -> String {
+    let prefix = format!("{key}:");
+    let value = header
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or("")
+        .trim();
+    for quote in ['\'', '"'] {
+        if let Some(value) = value
+            .strip_prefix(quote)
+            .and_then(|v| v.strip_suffix(quote))
+        {
+            return value.into();
+        }
+    }
+    value.into()
+}
+
+fn heading(body: &str) -> Option<&str> {
+    let line = body.lines().find(|line| !line.trim().is_empty())?;
+    let title = line.strip_prefix('#')?;
+    if !title.starts_with([' ', '\t']) {
+        return None;
+    }
+    let title = title.trim_matches([' ', '\t']);
+    let without_hashes = title.trim_end_matches('#');
+    let title = if without_hashes.ends_with([' ', '\t']) {
+        without_hashes.trim_end_matches([' ', '\t'])
+    } else {
+        title
+    };
+    (!title.is_empty()).then_some(title)
+}
+
+fn normalize(title: &str) -> String {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn annotate(text: &str, title: &str, has_name: bool, extension: &str, file_name: &str) -> String {
+    let (header, body) = frontmatter(text).unwrap_or(("", text));
+    let mut lines: Vec<String> = header
+        .lines()
+        .filter(|line| {
+            !["origin:", "upload-extension:", "upload-name:"]
+                .iter()
+                .any(|key| line.starts_with(key))
+        })
+        .map(|line| {
+            if !has_name && line.starts_with("name:") {
+                format!("name: {title}")
+            } else {
+                line.into()
+            }
+        })
+        .collect();
+    if !has_name && !header.lines().any(|line| line.starts_with("name:")) {
+        lines.insert(0, format!("name: {title}"));
+    }
+    lines.push("origin: upload".into());
+    lines.push(format!("upload-extension: {extension}"));
+    let file_name = file_name.replace(['\r', '\n'], " ");
+    if !file_name.trim().is_empty() {
+        lines.push(format!(
+            "upload-name: '{}'",
+            file_name.trim().replace('\'', "''")
+        ));
+    }
+    let body = if header.is_empty() {
+        body.trim_start_matches('\n')
+    } else {
+        body
+    };
+    let separator = if body.is_empty() || body.starts_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    format!("---\n{}\n---\n{separator}{body}", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, text: &str) -> ImportFile {
+        ImportFile {
+            path: path.into(),
+            bytes: text.as_bytes().to_vec(),
+        }
+    }
+
+    fn skill(id: usize, content: &SkillContent) -> Skill {
+        Skill {
+            skill_id: format!("skill_{id}"),
+            bot_id: "bot".into(),
+            content: content.clone(),
+            version: 1,
+            digest: format!("{:x}", Sha256::digest(content.body.as_bytes())),
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn name_prefers_frontmatter_then_heading_then_skill_dir_then_filename() {
+        for (path, text, expected) in [
+            (
+                "folder/SKILL.md",
+                "---\nname: 'Front Matter'\ndescription: \"A description\"\n---\n# Heading",
+                "front-matter",
+            ),
+            ("folder/SKILL.md", "\n# A heading ###\nbody", "a-heading"),
+            ("Parent Folder/SKILL.md", "plain body", "parent-folder"),
+            ("Other File.markdown", "plain body", "other-file"),
+            (
+                "./one\\Parent Folder\\SKILL.md",
+                "plain body",
+                "parent-folder",
+            ),
+            ("no-heading.md", "intro\n# Not first", "no-heading"),
+            ("fallback.md", "---\nname: ???\n---\n# Heading", "heading"),
+            ("☃.txt", "plain body", "skill"),
+        ] {
+            assert_eq!(convert(&file(path, text)).unwrap().content.name, expected);
+        }
+    }
+
+    #[test]
+    fn binary_and_invalid_utf8_are_skipped() {
+        for bytes in [
+            b"hello\0world".to_vec(),
+            vec![0xff],
+            vec![0xc0, 0xaf],
+            vec![0xed, 0xa0, 0x80],
+            vec![0xe2, 0x82],
+        ] {
+            assert_eq!(
+                convert(&ImportFile {
+                    path: "file.txt".into(),
+                    bytes
+                })
+                .unwrap_err()
+                .to_string(),
+                "unsupported"
+            );
+        }
+        let reports = import_files(
+            &[
+                file("bad.pdf", "text"),
+                file("empty.txt", " \n\t"),
+                file("", "text"),
+            ],
+            vec![],
+            |_| panic!("must not write"),
+        );
+        assert!(reports
+            .iter()
+            .all(|item| matches!(item.status, ImportStatus::Skipped { .. })));
+    }
+
+    #[test]
+    fn accepted_extensions_bom_and_crlf() {
+        for extension in ["txt", "MD", "markdown", "csv", "json", "yaml", "yml"] {
+            let imported = convert(&file(
+                &format!("file.{extension}"),
+                "\u{feff}---\r\nname: Test\r\ndescription: 'Description'\r\n---\r\n\r\nbody\r\n",
+            ))
+            .unwrap();
+            assert_eq!(imported.content.name, "test");
+            assert_eq!(imported.content.description, "Description");
+            assert!(imported.content.body.ends_with("\nbody\r\n"));
+        }
+        assert!(convert(&file(".md", "text")).is_err());
+    }
+
+    #[test]
+    fn content_over_256000_chars_is_skipped() {
+        assert!(convert(&file("file.txt", &"a".repeat(MAX_SKILL_CHARACTERS))).is_ok());
+        assert_eq!(
+            convert(&file("file.txt", &"a".repeat(MAX_SKILL_CHARACTERS + 1)))
+                .unwrap_err()
+                .to_string(),
+            "too-large"
+        );
+        // Match JS length: an emoji occupies two units, an accented letter one.
+        assert!(convert(&file("file.txt", &"é".repeat(MAX_SKILL_CHARACTERS))).is_ok());
+        assert!(convert(&file("file.txt", &"😀".repeat(MAX_SKILL_CHARACTERS / 2))).is_ok());
+        assert!(convert(&file(
+            "file.txt",
+            &"😀".repeat(MAX_SKILL_CHARACTERS / 2 + 1)
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn frontmatter_records_upload_origin() {
+        let imported = convert(&file("O'Brien.md", "---\nname: Custom\ndescription: Desc\norigin: model\nupload-extension: .bad\nupload-name: old\nother: retained\n---\n\n# Body\n")).unwrap();
+        assert_eq!(imported.content.description, "Desc");
+        assert_eq!(
+            imported.content.origin,
+            Origin::Upload {
+                extension: ".md".into(),
+                name: "O'Brien.md".into()
+            }
+        );
+        assert_eq!(imported.content.body, "---\nname: Custom\ndescription: Desc\nother: retained\norigin: upload\nupload-extension: .md\n---\n\n# Body\n");
+        let imported = convert(&file("O'Brien.md", "# Title\n\nbody")).unwrap();
+        assert!(imported.content.body.contains("name: Title\n"));
+        assert!(imported
+            .content
+            .body
+            .contains("upload-name: 'O''Brien.md'\n"));
+        assert!(imported.content.body.ends_with("# Title\n\nbody"));
+        assert!(!convert(&file("dir/SKILL.md", "body"))
+            .unwrap()
+            .content
+            .body
+            .contains("upload-name:"));
+        assert_eq!(
+            imported.digest,
+            format!("{:x}", Sha256::digest(imported.content.body.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn cap_of_250_counts_existing() {
+        let content = convert(&file("existing.txt", "existing")).unwrap().content;
+        let known = (0..249).map(|i| skill(i, &content)).collect();
+        let mut writes = 0;
+        let reports = import_files(
+            &[file("one.txt", "one"), file("two.txt", "two")],
+            known,
+            |content| {
+                writes += 1;
+                Ok(skill(249, content))
+            },
+        );
+        assert_eq!(writes, 1);
+        assert!(matches!(reports[0].status, ImportStatus::Written { .. }));
+        assert_eq!(
+            reports[1].status,
+            ImportStatus::Skipped {
+                reason: "too-many-skills".into()
+            }
+        );
+    }
+
+    #[test]
+    fn same_digest_reimport_is_duplicate() {
+        let input = file("file.md", "# Title\nbody");
+        let imported = convert(&input).unwrap();
+        let reports = import_files(&[input.clone(), input.clone()], vec![], |content| {
+            Ok(skill(1, content))
+        });
+        assert_eq!(
+            reports[0].status,
+            ImportStatus::Written {
+                skill_id: "skill_1".into()
+            }
+        );
+        assert_eq!(
+            reports[1].status,
+            ImportStatus::Duplicate {
+                skill_id: "skill_1".into()
+            }
+        );
+        let reports = import_files(&[input], vec![skill(1, &imported.content); 250], |_| {
+            panic!("duplicate at cap must not write")
+        });
+        assert_eq!(
+            reports[0].status,
+            ImportStatus::Duplicate {
+                skill_id: "skill_1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn write_failure_keeps_successes_and_continues_in_order() {
+        let files = [
+            file("one.txt", "one"),
+            file("two.txt", "two"),
+            file("three.txt", "three"),
+        ];
+        let mut writes = Vec::new();
+        let reports = import_files(&files, vec![], |content| {
+            writes.push(content.name.clone());
+            if content.name == "two" {
+                Err(invalid("rejected"))
+            } else {
+                Ok(skill(writes.len(), content))
+            }
+        });
+        assert_eq!(writes, ["one", "two", "three"]);
+        assert_eq!(
+            reports
+                .iter()
+                .map(|item| item.file_name.as_str())
+                .collect::<Vec<_>>(),
+            ["one.txt", "two.txt", "three.txt"]
+        );
+        assert!(matches!(reports[0].status, ImportStatus::Written { .. }));
+        assert_eq!(
+            reports[1].status,
+            ImportStatus::Skipped {
+                reason: "write-failed: rejected".into()
+            }
+        );
+        assert!(matches!(reports[2].status, ImportStatus::Written { .. }));
+    }
+
+    #[test]
+    fn deleted_skills_do_not_consume_capacity_or_block_reimport() {
+        let input = file("file.txt", "body");
+        let mut deleted = skill(1, &convert(&input).unwrap().content);
+        deleted.deleted = true;
+        let reports = import_files(&[input], vec![deleted; 250], |content| {
+            Ok(skill(2, content))
+        });
+        assert_eq!(
+            reports[0].status,
+            ImportStatus::Written {
+                skill_id: "skill_2".into()
+            }
+        );
+    }
 }

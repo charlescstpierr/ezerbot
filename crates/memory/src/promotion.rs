@@ -32,12 +32,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Promote at most 100 IDs owned by `bot_id`. Duplicate IDs count once; a batch
-/// is identified by its sorted unique selection, so reordering it is a replay.
-/// Replaying returns the original report, including `created`, even after reopen.
-/// Unknown, foreign, superseded or forgotten IDs reject the batch before writes;
-/// a stale receipt cannot resurrect an inactive fact. Use a different selection
-/// to get a fresh report classifying previously promoted IDs as already in team.
+/// Promote at most 100 owned private or workspace-visible team IDs. Duplicate
+/// IDs count once; a sorted unique selection identifies a durable batch receipt.
+/// Replays return the original report even after correction/forgetting: receipts
+/// contain only IDs/counts and never mutate facts. New batches reject unknown,
+/// foreign-private or inactive IDs before writes, while foreign team facts count
+/// as already in team.
 pub fn promote(conn: &Connection, bot_id: &str, fact_ids: &[String]) -> Result<PromotionReport> {
     if bot_id.trim().is_empty() || fact_ids.len() > MAX_PROMOTION_BATCH {
         return Err(Error::InvalidInput(
@@ -49,15 +49,6 @@ pub fn promote(conn: &Connection, bot_id: &str, fact_ids: &[String]) -> Result<P
     ids.dedup();
     if ids.is_empty() {
         return Ok(PromotionReport::default());
-    }
-    let mut selected = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let fact = facts::get(conn, id)?
-            .filter(|fact| fact.bot_id == bot_id && fact.status == FactStatus::Active)
-            .ok_or_else(|| {
-                Error::InvalidInput("unknown or unavailable fact for promotion".into())
-            })?;
-        selected.push(fact);
     }
     let key = serde_json::to_string(&ids)?;
     let receipt: Option<String> = conn
@@ -71,6 +62,18 @@ pub fn promote(conn: &Connection, bot_id: &str, fact_ids: &[String]) -> Result<P
         return Ok(serde_json::from_str(&receipt)?);
     }
 
+    let mut selected = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let fact = facts::get(conn, id)?
+            .filter(|fact| {
+                fact.status == FactStatus::Active
+                    && (fact.bot_id == bot_id || fact.scope == Scope::Team)
+            })
+            .ok_or_else(|| {
+                Error::InvalidInput("unknown or unavailable fact for promotion".into())
+            })?;
+        selected.push(fact);
+    }
     let mut report = PromotionReport::default();
     for fact in selected {
         if fact.sensitive {
@@ -102,7 +105,7 @@ pub fn promote(conn: &Connection, bot_id: &str, fact_ids: &[String]) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::tests::{database, fact};
+    use crate::facts::tests::{correction_provenance, database, fact, NOW_MS};
     use grokbot_engine::contracts::with_tx;
 
     #[test]
@@ -147,7 +150,7 @@ mod tests {
             with_tx(&conn, |conn| promote(conn, "a", &replay)).unwrap(),
             report
         );
-        let overlap = promote(&conn, "a", &[first.fact_id.clone()]).unwrap();
+        let overlap = promote(&conn, "a", std::slice::from_ref(&first.fact_id)).unwrap();
         assert_eq!(overlap.already_in_team, vec![first.fact_id]);
         assert!(overlap.created.is_empty());
         assert_eq!(facts::list_active(&conn, "b").unwrap().len(), 2);
@@ -171,8 +174,17 @@ mod tests {
         assert_eq!(promote(&conn, "a", &ids).unwrap(), report);
         assert_eq!(facts::get(&conn, &ids[0]).unwrap(), Some(sensitive.clone()));
         assert!(facts::list_active(&conn, "b").unwrap().is_empty());
-        let corrected =
-            with_tx(&conn, |conn| facts::correct(conn, &ids[0], "still private")).unwrap();
+        let corrected = with_tx(&conn, |conn| {
+            facts::correct(
+                conn,
+                "a",
+                &ids[0],
+                "still private",
+                &correction_provenance(),
+                NOW_MS,
+            )
+        })
+        .unwrap();
         assert!(corrected.sensitive);
         assert_eq!(corrected.scope, Scope::Private);
         sensitive.fact_id.clear();
@@ -186,7 +198,10 @@ mod tests {
         let first = facts::remember(&conn, &fact(1, "a")).unwrap();
         let second = facts::remember(&conn, &fact(2, "a")).unwrap();
         let foreign = facts::remember(&conn, &fact(3, "b")).unwrap();
-        with_tx(&conn, |conn| promote(conn, "a", &[first.fact_id.clone()])).unwrap();
+        let first_report = with_tx(&conn, |conn| {
+            promote(conn, "a", std::slice::from_ref(&first.fact_id))
+        })
+        .unwrap();
         for invalid_ids in [
             vec![second.fact_id.clone(), "missing".into()],
             vec![second.fact_id.clone(), foreign.fact_id.clone()],
@@ -202,10 +217,22 @@ mod tests {
             facts::get(&conn, &second.fact_id).unwrap().unwrap().scope,
             Scope::Private
         );
-        facts::forget(&conn, &first.fact_id).unwrap();
-        assert!(promote(&conn, "a", &[first.fact_id]).is_err());
-        let corrected =
-            with_tx(&conn, |conn| facts::correct(conn, &second.fact_id, "new")).unwrap();
+        facts::forget(&conn, "a", &first.fact_id).unwrap();
+        assert_eq!(
+            promote(&conn, "a", std::slice::from_ref(&first.fact_id)).unwrap(),
+            first_report
+        );
+        let corrected = with_tx(&conn, |conn| {
+            facts::correct(
+                conn,
+                "a",
+                &second.fact_id,
+                "new",
+                &correction_provenance(),
+                NOW_MS,
+            )
+        })
+        .unwrap();
         assert!(promote(&conn, "a", &[second.fact_id]).is_err());
         assert_eq!(
             facts::get(&conn, &corrected.fact_id)
@@ -236,34 +263,96 @@ mod tests {
     }
 
     #[test]
+    fn selecting_all_visible_facts_accepts_foreign_team_facts() {
+        let conn = database();
+        let owned = facts::remember(&conn, &fact(1, "a")).unwrap();
+        let mut shared = fact(2, "b");
+        shared.scope = Scope::Team;
+        facts::remember(&conn, &shared).unwrap();
+        let foreign_private = facts::remember(&conn, &fact(3, "b")).unwrap();
+        let ids = facts::list_active(&conn, "a")
+            .unwrap()
+            .into_iter()
+            .map(|fact| fact.fact_id)
+            .collect::<Vec<_>>();
+        let report = with_tx(&conn, |conn| promote(conn, "a", &ids)).unwrap();
+        assert_eq!(report.created, vec![owned.fact_id]);
+        assert_eq!(report.already_in_team, vec![shared.fact_id]);
+        assert_eq!(report.kept_private_count, 0);
+        assert!(promote(&conn, "a", &[foreign_private.fact_id]).is_err());
+    }
+
+    #[test]
+    fn promotion_replay_after_correction_and_forgetting_never_resurrects_text() {
+        let conn = database();
+        let first = facts::remember(&conn, &fact(1, "a")).unwrap();
+        let second = facts::remember(&conn, &fact(2, "a")).unwrap();
+        let ids = vec![first.fact_id.clone(), second.fact_id.clone()];
+        let report = with_tx(&conn, |conn| promote(conn, "a", &ids)).unwrap();
+        let corrected = with_tx(&conn, |conn| {
+            facts::correct(
+                conn,
+                "a",
+                &first.fact_id,
+                "new shared text",
+                &correction_provenance(),
+                NOW_MS,
+            )
+        })
+        .unwrap();
+        with_tx(&conn, |conn| facts::forget(conn, "a", &second.fact_id)).unwrap();
+        assert_eq!(promote(&conn, "a", &ids).unwrap(), report);
+        assert_eq!(
+            facts::list_active(&conn, "b").unwrap(),
+            vec![corrected.clone()]
+        );
+        assert_eq!(
+            facts::get(&conn, &first.fact_id).unwrap().unwrap().status,
+            FactStatus::Superseded {
+                by: corrected.fact_id
+            }
+        );
+        let forgotten = facts::get(&conn, &second.fact_id).unwrap().unwrap();
+        assert_eq!(forgotten.status, FactStatus::Forgotten);
+        assert!(forgotten.text.is_empty());
+        assert!(promote(&conn, "a", std::slice::from_ref(&second.fact_id)).is_err());
+    }
+
+    #[test]
     fn facts_and_replay_survive_reopening_database() {
-        let path = std::env::temp_dir().join(format!(
+        struct TempDatabase(std::path::PathBuf);
+        impl Drop for TempDatabase {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let path = TempDatabase(std::env::temp_dir().join(format!(
             "grokbot-memory-{}-{}.sqlite",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
-        ));
-        let ids = vec!["fact_1".into()];
+        )));
+        let ids = vec![fact(1, "a").fact_id];
         let report = {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(&path.0).unwrap();
             crate::migrate(&conn).unwrap();
             facts::remember(&conn, &fact(1, "a")).unwrap();
             with_tx(&conn, |conn| promote(conn, "a", &ids)).unwrap()
         };
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(&path.0).unwrap();
             crate::migrate(&conn).unwrap();
             assert_eq!(promote(&conn, "a", &ids).unwrap(), report);
             assert_eq!(facts::list_active(&conn, "b").unwrap().len(), 1);
-            facts::forget(&conn, &ids[0]).unwrap();
+            facts::forget(&conn, "a", &ids[0]).unwrap();
         }
         {
-            let conn = Connection::open(&path).unwrap();
+            let conn = Connection::open(&path.0).unwrap();
             assert_eq!(facts::get(&conn, &ids[0]).unwrap().unwrap().text, "");
             assert!(facts::list_active(&conn, "b").unwrap().is_empty());
+            assert_eq!(promote(&conn, "a", &ids).unwrap(), report);
         }
-        std::fs::remove_file(path).unwrap();
     }
 }

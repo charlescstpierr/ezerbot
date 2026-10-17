@@ -3,12 +3,15 @@
 //! sharing, but not correction/forgetting: supersession and tombstones are local
 //! design choices. Run-trace redaction belongs to gb-memory-forget.
 //!
-//! The caller owns transactions and component schema versions. In particular,
-//! wrap `correct` in the caller's transaction to commit both writes together.
+//! The caller owns transactions and component schema versions. Wrap `correct`
+//! and `forget` with their tool events/redaction in the caller's transaction.
+//! Forgetting returns pre-wipe snapshots, including predecessor provenance.
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Local safety limit, in Unicode characters, applied to new and corrected facts.
+pub const MAX_FACT_CHARS: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,21 +82,28 @@ pub fn remember(conn: &Connection, fact: &Fact) -> Result<Fact> {
     if fact.bot_id.trim().is_empty() || fact.text.trim().is_empty() {
         return Err(invalid("a fact needs a bot and nonempty text"));
     }
+    if fact.text.chars().take(MAX_FACT_CHARS + 1).count() > MAX_FACT_CHARS {
+        return Err(invalid("fact text exceeds 2000 characters"));
+    }
     if fact.status != FactStatus::Active || (fact.sensitive && fact.scope == Scope::Team) {
         return Err(invalid(
             "new facts must be active; sensitive facts must be private",
         ));
     }
+    if !fact.fact_id.is_empty()
+        && (fact.fact_id.len() != 37
+            || !fact.fact_id.strip_prefix("fact_").is_some_and(|hex| {
+                hex.bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            }))
+    {
+        return Err(invalid(
+            "fact IDs must be fact_ followed by 32 lowercase hex digits",
+        ));
+    }
     let mut fact = fact.clone();
     if fact.fact_id.is_empty() {
         fact.fact_id = new_id()?;
-    }
-    if !fact
-        .fact_id
-        .strip_prefix("fact_")
-        .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
-        return Err(invalid("fact IDs must have the form fact_<hex>"));
     }
     conn.execute(
         "INSERT INTO memory_facts
@@ -138,25 +148,38 @@ pub fn list_active(conn: &Connection, bot_id: &str) -> Result<Vec<Fact>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Create a replacement with a fresh ID/date, preserving provenance, owner,
-/// scope and sensitivity. The old text remains in its superseded record.
-pub fn correct(conn: &Connection, fact_id: &str, new_text: &str) -> Result<Fact> {
-    let mut replacement = get(conn, fact_id)?.ok_or_else(|| invalid("unknown fact"))?;
+/// Only the owning bot may correct a fact, including team facts. The replacement
+/// keeps owner/scope/sensitivity but records the correction's own provenance.
+/// `now_ms` is injected UTC Unix milliseconds; dates remain monotone even when
+/// an imported predecessor has a future date. The old text is not overwritten.
+pub fn correct(
+    conn: &Connection,
+    bot_id: &str,
+    fact_id: &str,
+    new_text: &str,
+    provenance: &Provenance,
+    now_ms: i64,
+) -> Result<Fact> {
+    let mut replacement = get(conn, fact_id)?
+        .filter(|fact| fact.bot_id == bot_id)
+        .ok_or_else(|| invalid("unknown or unavailable fact for correction"))?;
     if replacement.status != FactStatus::Active {
         return Err(invalid("only active facts can be corrected"));
     }
+    replacement.learned_at = now_ms.max(
+        replacement
+            .learned_at
+            .checked_add(1)
+            .ok_or_else(|| invalid("fact timestamp is exhausted"))?,
+    );
     replacement.fact_id.clear();
     replacement.text = new_text.into();
-    replacement.learned_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .ok_or_else(|| invalid("system clock is outside the supported time range"))?;
+    replacement.provenance = provenance.clone();
     let replacement = remember(conn, &replacement)?;
     let changed = conn.execute(
         "UPDATE memory_facts SET status = 'superseded', superseded_by = ?1
-         WHERE fact_id = ?2 AND status = 'active'",
-        params![replacement.fact_id, fact_id],
+         WHERE fact_id = ?2 AND bot_id = ?3 AND status = 'active'",
+        params![replacement.fact_id, fact_id, bot_id],
     )?;
     if changed != 1 {
         return Err(invalid(
@@ -166,18 +189,37 @@ pub fn correct(conn: &Connection, fact_id: &str, new_text: &str) -> Result<Fact>
     Ok(replacement)
 }
 
-/// Wipe the stored text, retaining the stable ID, date and provenance needed by
-/// the wrapper to redact run traces. Repeated forgetting is harmless.
-pub fn forget(conn: &Connection, fact_id: &str) -> Result<()> {
-    if conn.execute(
-        "UPDATE memory_facts SET text = '', status = 'forgotten', superseded_by = NULL
-         WHERE fact_id = ?1",
-        [fact_id],
-    )? == 0
-    {
-        return Err(invalid("unknown fact"));
+/// Wipe this owned fact and all superseded predecessors. Return their snapshots
+/// BEFORE erasure so the caller can redact every text and invalidate summaries
+/// covering every provenance, in the same transaction. IDs/dates remain as
+/// tombstones. Repeated forgetting is harmless and returns empty-text snapshots.
+pub fn forget(conn: &Connection, bot_id: &str, fact_id: &str) -> Result<Vec<Fact>> {
+    // Fully collect the chain before clearing links; an UPDATE with a live
+    // recursive selection could lose predecessors as superseded_by becomes NULL.
+    let mut statement = conn.prepare(
+        "WITH RECURSIVE lineage(id) AS (
+            SELECT fact_id FROM memory_facts WHERE fact_id = ?1 AND bot_id = ?2
+            UNION
+            SELECT f.fact_id FROM memory_facts f JOIN lineage l ON f.superseded_by = l.id
+                WHERE f.bot_id = ?2
+         )
+         SELECT f.* FROM memory_facts f JOIN lineage l ON f.fact_id = l.id
+         ORDER BY f.learned_at ASC, f.fact_id ASC",
+    )?;
+    let snapshots = statement
+        .query_map(params![fact_id, bot_id], read_fact)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if snapshots.is_empty() {
+        return Err(invalid("unknown or unavailable fact for forgetting"));
     }
-    Ok(())
+    for fact in &snapshots {
+        conn.execute(
+            "UPDATE memory_facts SET text = '', status = 'forgotten', superseded_by = NULL
+             WHERE fact_id = ?1 AND bot_id = ?2",
+            params![fact.fact_id, bot_id],
+        )?;
+    }
+    Ok(snapshots)
 }
 
 fn new_id() -> Result<String> {
@@ -236,9 +278,19 @@ pub(crate) mod tests {
         conn
     }
 
+    pub(crate) const NOW_MS: i64 = 1_800_000_000_000;
+
+    pub(crate) fn correction_provenance() -> Provenance {
+        Provenance {
+            conversation_id: Some("conversation-correction".into()),
+            entry_id: Some("entry-correction".into()),
+            source: Source::UserStated,
+        }
+    }
+
     pub(crate) fn fact(id: usize, bot: &str) -> Fact {
         Fact {
-            fact_id: format!("fact_{id:x}"),
+            fact_id: format!("fact_{id:032x}"),
             bot_id: bot.into(),
             scope: Scope::Private,
             text: format!("Fait {id} — français 🦀"),
@@ -247,7 +299,7 @@ pub(crate) mod tests {
                 entry_id: Some("entry-1".into()),
                 source: Source::UserStated,
             },
-            learned_at: id as i64,
+            learned_at: 1_700_000_000_000 + id as i64,
             status: FactStatus::Active,
             sensitive: false,
         }
@@ -256,8 +308,21 @@ pub(crate) mod tests {
     #[test]
     fn correct_supersedes_without_overwrite() {
         let conn = database();
-        let old = remember(&conn, &fact(1, "a")).unwrap();
-        let new = with_tx(&conn, |conn| correct(conn, &old.fact_id, "Texte corrigé")).unwrap();
+        let mut inferred = fact(1, "a");
+        inferred.provenance.source = Source::ModelInferred;
+        let old = remember(&conn, &inferred).unwrap();
+        let provenance = correction_provenance();
+        let new = with_tx(&conn, |conn| {
+            correct(
+                conn,
+                "a",
+                &old.fact_id,
+                "Texte corrigé",
+                &provenance,
+                NOW_MS,
+            )
+        })
+        .unwrap();
         let stored = get(&conn, &old.fact_id).unwrap().unwrap();
         assert_eq!(stored.text, old.text);
         assert_eq!(
@@ -268,26 +333,45 @@ pub(crate) mod tests {
         );
         assert_ne!(new.fact_id, old.fact_id);
         assert_eq!(new.text, "Texte corrigé");
-        assert_eq!(new.provenance, old.provenance);
+        assert_eq!(new.provenance, provenance);
+        assert_ne!(new.provenance, old.provenance);
+        assert_eq!(stored.provenance, old.provenance);
         assert_eq!(new.scope, old.scope);
-        assert!(new.learned_at > old.learned_at);
+        assert_eq!(new.learned_at, NOW_MS);
         assert_eq!(list_active(&conn, "a").unwrap(), vec![new]);
-        assert!(correct(&conn, &old.fact_id, "stale correction").is_err());
+        assert!(correct(
+            &conn,
+            "a",
+            &old.fact_id,
+            "stale correction",
+            &provenance,
+            NOW_MS
+        )
+        .is_err());
     }
 
     #[test]
     fn forget_wipes_text_keeps_id() {
         let conn = database();
         let old = remember(&conn, &fact(1, "a")).unwrap();
-        forget(&conn, &old.fact_id).unwrap();
-        forget(&conn, &old.fact_id).unwrap();
+        let snapshots = with_tx(&conn, |conn| forget(conn, "a", &old.fact_id)).unwrap();
+        assert_eq!(snapshots, vec![old.clone()]);
+        assert!(forget(&conn, "a", &old.fact_id).unwrap()[0].text.is_empty());
         let forgotten = get(&conn, &old.fact_id).unwrap().unwrap();
         assert_eq!(forgotten.fact_id, old.fact_id);
         assert_eq!(forgotten.learned_at, old.learned_at);
         assert_eq!(forgotten.provenance, old.provenance);
         assert_eq!(forgotten.text, "");
         assert_eq!(forgotten.status, FactStatus::Forgotten);
-        assert!(correct(&conn, &old.fact_id, "cannot revive").is_err());
+        assert!(correct(
+            &conn,
+            "a",
+            &old.fact_id,
+            "cannot revive",
+            &correction_provenance(),
+            NOW_MS
+        )
+        .is_err());
         assert!(remember(&conn, &old).is_err());
     }
 
@@ -297,7 +381,7 @@ pub(crate) mod tests {
         let mut shared = fact(1, "a");
         shared.scope = Scope::Team;
         remember(&conn, &shared).unwrap();
-        forget(&conn, &shared.fact_id).unwrap();
+        forget(&conn, "a", &shared.fact_id).unwrap();
         assert!(list_active(&conn, "a").unwrap().is_empty());
         assert!(list_active(&conn, "b").unwrap().is_empty());
     }
@@ -328,13 +412,20 @@ pub(crate) mod tests {
             42
         );
         let failed: Result<()> = with_tx(&conn, |conn| {
-            remember(conn, &fact(1, "a"))?;
-            correct(conn, "fact_1", "replacement")?;
+            let original = remember(conn, &fact(1, "a"))?;
+            correct(
+                conn,
+                "a",
+                &original.fact_id,
+                "replacement",
+                &correction_provenance(),
+                NOW_MS,
+            )?;
             Err(invalid("roll back"))
         });
         assert!(failed.is_err());
         assert!(list_active(&conn, "a").unwrap().is_empty());
-        assert!(get(&conn, "fact_1").unwrap().is_none());
+        assert!(get(&conn, &fact(1, "a").fact_id).unwrap().is_none());
         assert!(conn.is_autocommit());
     }
 
@@ -350,6 +441,179 @@ pub(crate) mod tests {
         value.text = " \n\t".into();
         assert!(remember(&conn, &value).is_err());
         assert!(get(&conn, "absent").unwrap().is_none());
-        assert!(forget(&conn, "absent").is_err());
+        assert!(forget(&conn, "a", "absent").is_err());
+    }
+
+    #[test]
+    fn forget_wipes_superseded_predecessors() {
+        let conn = database();
+        let mut original = fact(1, "a");
+        original.scope = Scope::Team;
+        original.text = "Mon adresse est 12 rue Secrète".into();
+        let old = remember(&conn, &original).unwrap();
+        let provenance = correction_provenance();
+        let middle = with_tx(&conn, |conn| {
+            correct(
+                conn,
+                "a",
+                &old.fact_id,
+                "14 rue Secrète",
+                &provenance,
+                NOW_MS,
+            )
+        })
+        .unwrap();
+        let last_provenance = Provenance {
+            conversation_id: Some("conversation-3".into()),
+            entry_id: Some("entry-3".into()),
+            source: Source::Imported,
+        };
+        let last = with_tx(&conn, |conn| {
+            correct(
+                conn,
+                "a",
+                &middle.fact_id,
+                "16 rue Secrète",
+                &last_provenance,
+                NOW_MS + 1,
+            )
+        })
+        .unwrap();
+        let snapshots = with_tx(&conn, |conn| forget(conn, "a", &last.fact_id)).unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|fact| fact.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![old.text.as_str(), middle.text.as_str(), last.text.as_str()]
+        );
+        assert_eq!(snapshots[0].provenance, old.provenance);
+        assert_eq!(snapshots[1].provenance, provenance);
+        assert_eq!(snapshots[2].provenance, last_provenance);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM memory_facts WHERE text != ''",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        for snapshot in snapshots {
+            let erased = get(&conn, &snapshot.fact_id).unwrap().unwrap();
+            assert!(erased.text.is_empty());
+            assert_eq!(erased.status, FactStatus::Forgotten);
+            assert_eq!(erased.learned_at, snapshot.learned_at);
+        }
+        assert!(list_active(&conn, "a").unwrap().is_empty());
+        assert!(list_active(&conn, "b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn mutation_requires_owner_even_for_team_facts() {
+        let conn = database();
+        let mut shared = fact(1, "a");
+        shared.scope = Scope::Team;
+        let original = remember(&conn, &shared).unwrap();
+        assert!(correct(
+            &conn,
+            "b",
+            &shared.fact_id,
+            "injected edit",
+            &correction_provenance(),
+            NOW_MS
+        )
+        .is_err());
+        assert!(forget(&conn, "b", &shared.fact_id).is_err());
+        assert_eq!(get(&conn, &shared.fact_id).unwrap(), Some(original));
+        assert_eq!(list_active(&conn, "b").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn forget_snapshot_and_wipe_rollback_together() {
+        let conn = database();
+        let old = remember(&conn, &fact(1, "a")).unwrap();
+        let replacement = with_tx(&conn, |conn| {
+            correct(
+                conn,
+                "a",
+                &old.fact_id,
+                "replacement",
+                &correction_provenance(),
+                NOW_MS,
+            )
+        })
+        .unwrap();
+        let failed: Result<()> = with_tx(&conn, |conn| {
+            assert_eq!(forget(conn, "a", &replacement.fact_id)?.len(), 2);
+            Err(invalid("trace redaction failed"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(get(&conn, &old.fact_id).unwrap().unwrap().text, old.text);
+        assert_eq!(get(&conn, &replacement.fact_id).unwrap(), Some(replacement));
+    }
+
+    #[test]
+    fn text_and_supplied_id_are_bounded() {
+        let conn = database();
+        let mut value = fact(1, "a");
+        value.text = "🦀".repeat(MAX_FACT_CHARS);
+        remember(&conn, &value).unwrap();
+        value.fact_id = fact(2, "a").fact_id;
+        value.text.push('é');
+        assert!(remember(&conn, &value).is_err());
+        value.text = "valid".into();
+        for id in [
+            "fact_1".into(),
+            format!("fact_{}", "1".repeat(100_000)),
+            format!("fact_{}", "A".repeat(32)),
+            format!("fact_{}", "g".repeat(32)),
+        ] {
+            value.fact_id = id;
+            assert!(remember(&conn, &value).is_err());
+        }
+        assert!(correct(
+            &conn,
+            "a",
+            &fact(1, "a").fact_id,
+            &"x".repeat(MAX_FACT_CHARS + 1),
+            &correction_provenance(),
+            NOW_MS
+        )
+        .is_err());
+        assert_eq!(list_active(&conn, "a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn correction_dates_use_injected_clock_and_surpass_future_imports() {
+        let conn = database();
+        let mut future = fact(1, "a");
+        future.learned_at = NOW_MS + 60_000;
+        remember(&conn, &future).unwrap();
+        let replacement = with_tx(&conn, |conn| {
+            correct(
+                conn,
+                "a",
+                &future.fact_id,
+                "corrected",
+                &correction_provenance(),
+                NOW_MS,
+            )
+        })
+        .unwrap();
+        assert_eq!(replacement.learned_at, future.learned_at + 1);
+        let mut exhausted = fact(2, "a");
+        exhausted.learned_at = i64::MAX;
+        remember(&conn, &exhausted).unwrap();
+        assert!(correct(
+            &conn,
+            "a",
+            &exhausted.fact_id,
+            "overflow",
+            &correction_provenance(),
+            NOW_MS
+        )
+        .is_err());
+        assert_eq!(get(&conn, &exhausted.fact_id).unwrap(), Some(exhausted));
     }
 }

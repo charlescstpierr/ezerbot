@@ -65,7 +65,20 @@ def verify_ui_regressions():
                     if previous:
                         chrome('selectpage', previous.group(1))
                 previous_page_id = previous.group(1) if previous else None
-                chrome('newpage', url)
+                old_page_ids = set(re.findall(r'^\s*(\d+),', pages, re.MULTILINE))
+                try:
+                    chrome('newpage', url)
+                except AssertionError as error:
+                    if 'Navigation timeout' not in str(error):
+                        raise
+                    # A timed-out navigation may still have created its page. Retry
+                    # that page once instead of leaking another tab with the same URL.
+                    created = set(re.findall(r'^\s*(\d+),', chrome('pages'), re.MULTILINE)) - old_page_ids
+                    if len(created) != 1:
+                        raise
+                    page_id = created.pop()
+                    chrome('selectpage', page_id)
+                    chrome('open', url)
                 page = re.search(r'^\s*(\d+),' + re.escape(url) + r'/?\s*,true\s*$', chrome('pages'), re.MULTILINE)
                 if not page:
                     raise AssertionError('Could not identify the isolated browser page')
@@ -88,7 +101,7 @@ def verify_ui_regressions():
   const until = async predicate => {
     const deadline = Date.now() + 10000;
     while (!(await predicate())) {
-      if (Date.now() > deadline) throw new Error('UI did not settle');
+      if (Date.now() > deadline) throw new Error(`UI did not settle: ${predicate}`);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   };
@@ -154,12 +167,35 @@ def verify_ui_regressions():
     return originalFetch(...arguments_);
   };
   $('composer-form').requestSubmit();
+  check('submitted composer is cleared before awaiting conversation creation', empty());
   choose('Rédacteur');
   check('bot choice is frozen while send creates its conversation', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot');
+  await type('Suite tapée pendant la création');
   release();
   await until(() => !$('new-chat').disabled);
   window.fetch = originalFetch;
-  check('in-flight send keeps the original recipient', (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected')).bot_id === 'grokbot');
+  const inFlightConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
+  check('in-flight send keeps the original recipient', inFlightConversation.bot_id === 'grokbot');
+  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null);
+  check('in-flight edits are not appended to the submitted message', inFlightConversation.messages.some(item => item.role === 'user' && item.body === 'Choix figé pendant l’envoi'));
+  cmdN(); await type('Message à restaurer');
+  const beforeFailure = (await saved()).conversations.length;
+  let failCreation;
+  const failureGate = new Promise(resolve => { failCreation = resolve; });
+  window.fetch = async (...arguments_) => {
+    if (arguments_[0] === '/api/conversations') {
+      await failureGate;
+      return new Response(JSON.stringify({error:'Création refusée pour le test'}), {status:503, headers:{'Content-Type':'application/json'}});
+    }
+    return originalFetch(...arguments_);
+  };
+  $('composer-form').requestSubmit();
+  await type('Suite à conserver'); failCreation();
+  await until(() => !$('new-chat').disabled);
+  window.fetch = originalFetch;
+  check('failed creation restores both submitted and subsequent draft text', editor().getText({blockSeparator:'\n'}) === 'Message à restaurer\nSuite à conserver' && localStorage.getItem('grokbot.draft.new') === 'Message à restaurer\nSuite à conserver');
+  check('failed creation does not persist an empty thread', (await saved()).conversations.length === beforeFailure);
+  editor().commands.selectAll(); editor().commands.deleteSelection();
   // Old versions could already have persisted an empty thread with a different bot.
   const legacy = (await api('/api/conversations', {bot_id:'qa-redacteur'})).conversation;
   await window.GrokbotPanels.refresh();
@@ -212,6 +248,49 @@ def verify_ui_regressions():
   await until(() => !$('new-chat').disabled);
   const newBotConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
   check('created bot receives the preserved draft', newBotConversation.bot_id === newBot.id && newBotConversation.messages.some(item => item.role === 'user' && item.body === createdDraft));
+  // Real image input: the attachment panel owns staging and binds images to a thread.
+  const stageImage = async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 4; canvas.height = 4;
+    const context = canvas.getContext('2d'); context.fillStyle = '#639'; context.fillRect(0, 0, 4, 4);
+    const image = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const transfer = new DataTransfer(); transfer.items.add(new File([image], 'photo-regression.png', {type:'image/png'}));
+    const picker = document.querySelector('.attachment-picker'); picker.files = transfer.files;
+    picker.dispatchEvent(new Event('change', {bubbles:true}));
+  };
+  cmdN(); choose('Grokbot'); await type('Décris cette photo');
+  const beforeImage = (await saved()).conversations.length;
+  let allowUpload;
+  const uploadGate = new Promise(resolve => { allowUpload = resolve; });
+  window.fetch = async (...arguments_) => {
+    if (arguments_[0] === '/api/attachments') await uploadGate;
+    return originalFetch(...arguments_);
+  };
+  await stageImage(); choose('Rédacteur');
+  check('pending image upload already pins the displayed bot', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && Boolean(document.querySelector('.attachment-chip')));
+  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Grokbot'));
+  allowUpload();
+  await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
+  window.fetch = originalFetch;
+  const imageConversationId = localStorage.getItem('grokbot.selected');
+  choose('Rédacteur');
+  check('ready staged image cannot be abandoned by a bot chip', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1 && editor().getText() === 'Décris cette photo');
+  document.querySelector('.add-bot').click(); $('bot-name').value = 'Bot image'; $('bot-form').requestSubmit();
+  await until(() => !$('bot-dialog').open);
+  check('creating a bot also retains staged image and current recipient', chip() === 'Grokbot' && $('workspace-label').textContent === 'Grokbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
+  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez l’image jointe'));
+  $('composer-form').requestSubmit();
+  await until(() => !$('new-chat').disabled);
+  const imageState = await saved();
+  const imageConversation = imageState.conversations.find(item => item.id === imageConversationId);
+  check('image is sent to the bot displayed on chip and breadcrumb', imageConversation.bot_id === 'grokbot' && imageConversation.messages.some(item => item.role === 'user' && item.body === 'Décris cette photo' && item.attachments?.length === 1));
+  check('sending staged image reuses its thread without leaving another empty one', imageState.conversations.length === beforeImage + 1 && imageState.conversations.filter(item => !item.messages.length).length === 1);
+  check('accepted image is removed from the composer', !document.querySelector('.attachment-chip'));
+  cmdN(); choose('Bot image');
+  check('newly created bot can be chosen after image is sent', chip() === 'Bot image' && $('workspace-label').textContent === 'Bot image');
+  await stageImage();
+  await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
+  document.querySelector('.attachment-remove').click(); choose('Rédacteur');
+  check('explicit image removal permits changing the bot', !document.querySelector('.attachment-chip') && chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
   return {scope:'Real app.js, bundled Tiptap editor and isolated simulated wrapper', checks};
 }''')
                 value = re.search(r'^result: (.+)$', result, re.MULTILINE)

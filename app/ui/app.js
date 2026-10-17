@@ -325,8 +325,13 @@
     if (focus) ui.input.focus();
   }
 
+  // Images staged before the first message belong to the current bot/thread.
+  function stagedOnEmptyThread() {
+    return Boolean(!currentConversation()?.messages.length && $("composer-attachments").querySelector(".attachment-chip"));
+  }
+
   function leaveEmptyThread() {
-    if (!currentConversation() || currentConversation().messages.length) return;
+    if (!currentConversation() || currentConversation().messages.length || stagedOnEmptyThread()) return;
     const draft = ui.input.value;
     // Move the text, not a copy: selectConversation will remove the old draft key.
     setComposerText("");
@@ -393,6 +398,10 @@
       chip.append(botAvatar(bot), element("span", "", bot.name));
       chip.addEventListener("click", () => {
         if (busy) return;
+        if (stagedOnEmptyThread()) {
+          notify(`Retirez l’image jointe pour changer de bot, ou envoyez-la à ${currentBot()?.name || "ce bot"}.`);
+          return;
+        }
         chosenBotId = bot.id;
         writePreference("grokbot.bot", bot.id);
         // Preserve both drafts when leaving a persisted empty thread from an old version.
@@ -483,15 +492,20 @@
         ? await api("/api/bots/update", { id: existing.id, ...changes })
         : await api("/api/bots", { id: draftBotId, ...changes });
       upsertBot(bot);
+      const keepStagedBot = !existing && stagedOnEmptyThread();
       if (!existing) {
         draftBotId = null;
-        chosenBotId = bot.id;
-        writePreference("grokbot.bot", bot.id);
-        leaveEmptyThread();
+        if (!keepStagedBot) {
+          chosenBotId = bot.id;
+          writePreference("grokbot.bot", bot.id);
+          leaveEmptyThread();
+        }
       }
       $("bot-dialog").close();
       render();
-      notify(existing ? "Bot enregistré." : `${bot.name} est prêt.`);
+      notify(existing ? "Bot enregistré." : keepStagedBot
+        ? `${bot.name} est prêt. Retirez l’image jointe pour le choisir, ou envoyez-la à ${currentBot()?.name || "ce bot"}.`
+        : `${bot.name} est prêt.`);
     } catch (error) { notify(error.message); }
     finally { $("bot-save").disabled = false; }
   }
@@ -714,7 +728,8 @@
     const live = streamingMessage();
     if (live) { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
-    const body = ui.input.value.trim();
+    const submittedDraft = ui.input.value;
+    const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
     let conversation = currentConversation();
     busy = true;
@@ -722,8 +737,16 @@
     updateComposer();
     let messageId;
     let delivered = false;
-    let previousDraftKey = draftKey();
+    const previousDraftKey = draftKey();
+    const restoreDraft = () => {
+      const remainder = ui.input.value;
+      setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
+      saveDraft();
+    };
     try {
+      // Consume only the submitted text, before creation can yield to another edit.
+      setComposerText("");
+      removePreference(previousDraftKey);
       if (!conversation) {
         const created = await api("/api/conversations", { bot_id: chosenBot()?.id });
         upsertConversation(created.conversation);
@@ -734,9 +757,8 @@
       messageId = crypto.randomUUID();
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
-      setComposerText("");
       removePreference(previousDraftKey);
-      removePreference(draftKey());
+      saveDraft(); // Keep any text typed while conversation creation was in flight.
       render();
       scrollToLatest();
       const response = await api("/api/send", {
@@ -754,7 +776,7 @@
         try {
           await refresh();
           const savedMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (!savedMessage) { pendingSends.delete(messageId); setComposerText(body); saveDraft(); }
+          if (!savedMessage) { pendingSends.delete(messageId); restoreDraft(); }
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
@@ -762,7 +784,7 @@
           render();
           showConnectionError(error);
         }
-      } else { notify(error.message); }
+      } else { restoreDraft(); notify(error.message); }
     } finally {
       busy = false;
       submissionActivity = null;

@@ -123,7 +123,13 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         body TEXT NOT NULL, created_at INTEGER NOT NULL
     ); CREATE TABLE IF NOT EXISTS wrapper_routine_provenance (
         routine_id TEXT PRIMARY KEY, model_edited_at INTEGER NOT NULL
-    ); INSERT INTO component_versions(component,version) VALUES ('wrapper.routines',1)
+    ); CREATE TABLE IF NOT EXISTS wrapper_routine_consents (
+        conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
+        routine_id TEXT NOT NULL, PRIMARY KEY(conversation_id,message_id)
+    ); INSERT OR IGNORE INTO wrapper_routine_consents
+       SELECT conversation_id,confirmed_message_id,routine_id FROM wrapper_routine_confirmation
+       WHERE confirmed_message_id IS NOT NULL ORDER BY after_ordinal DESC;
+    INSERT INTO component_versions(component,version) VALUES ('wrapper.routines',1)
        ON CONFLICT(component) DO NOTHING;",
     )?;
     let version: i64 = conn.query_row(
@@ -138,6 +144,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 }
 fn clock(ctx: &Context<'_>) -> Result<i64, ApiError> {
     i64::try_from(ctx.now_ms).map_err(|_| ApiError::new(400, "Invalid routine clock"))
+}
+fn clock_value(ctx: &Context<'_>) -> Result<Value, ApiError> {
+    let local: Option<String> = ctx.connection.query_row(
+        "SELECT strftime('%Y-%m-%d %H:%M:%f',?1/1000.0,'unixepoch','localtime')",
+        [clock(ctx)?],
+        |row| row.get(0),
+    )?;
+    Ok(json!({"now_utc_ms":ctx.now_ms,"local_time_zone":local_zone(),"local_time":local}))
 }
 fn random(conn: &Connection) -> Result<String, ApiError> {
     Ok(conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?)
@@ -253,14 +267,12 @@ fn readable_schedule(conn: &Connection, r: &Routine) -> Result<String, ApiError>
             }
         }
         Schedule::Once { at } => {
-            let date: Option<String> = conn.query_row(
-                "SELECT strftime('%Y-%m-%d %H:%M:%f UTC',?1/1000.0,'unixepoch')",
-                [at],
-                |row| row.get(0),
-            )?;
+            let (utc,local):(Option<String>,Option<String>)=conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f UTC',?1/1000.0,'unixepoch'),strftime('%Y-%m-%d %H:%M',?1/1000.0,'unixepoch','localtime')",[at],|row|Ok((row.get(0)?,row.get(1)?)))?;
             format!(
-                "Une fois : {}",
-                date.unwrap_or_else(|| format!("instant UTC {at} millisecondes Unix"))
+                "Une fois : {} (heure de cet hôte, {}), soit {}",
+                local.unwrap_or_else(|| "date locale hors plage".into()),
+                local_zone(),
+                utc.unwrap_or_else(|| format!("instant UTC {at} millisecondes Unix"))
             )
         }
     })
@@ -300,7 +312,7 @@ fn ask_confirmation(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
         readable_schedule(ctx.connection, r)?,
         r.time_zone
     );
-    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer.",fenced_data(&data));
+    let text=format!("Routine en pause — texte proposé par un bot, non vérifié :\n\n{}\n\nConfirmez-vous son activation ? Répondez « oui » au prochain tour, ou nommez explicitement la routine à activer. Si plusieurs routines portent ce nom, indiquez son identifiant.",fenced_data(&data));
     let existing:Option<String>=ctx.connection.query_row("SELECT m.message_id FROM wrapper_routine_confirmation c JOIN wrapper_conversations v ON v.account_id=?1 AND v.id=c.conversation_id AND v.deleted=0 JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=c.conversation_id AND m.ordinal=c.after_ordinal WHERE c.routine_id=?2 AND c.conversation_id=?3 AND c.confirmed_message_id IS NULL",params![ACCOUNT,r.routine_id,conversation],|row|row.get(0)).optional()?;
     let notice = match existing {
         Some(id) => {
@@ -394,10 +406,11 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
             "DELETE FROM wrapper_routine_provenance WHERE routine_id=?1",
             [&r.routine_id],
         )?;
-        // A human edit supersedes the old conversational confirmation request.
-        ctx.connection.execute(
-            "DELETE FROM wrapper_routine_confirmation WHERE routine_id=?1",
-            [&r.routine_id],
+        // Close both the durable request and its visible question.
+        close_confirmation(
+            ctx.connection,
+            &r.routine_id,
+            "Demande close : routine modifiée depuis le panneau.",
         )?;
     }
     ctx.connection.execute(
@@ -416,6 +429,14 @@ fn enable(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
         ));
     }
     routine::set_enabled(ctx.connection, &r.routine_id, true, clock(ctx)?)?;
+    Ok(())
+}
+fn close_confirmation(conn: &Connection, id: &str, message: &str) -> Result<(), ApiError> {
+    conn.execute("UPDATE wrapper_routine_notices SET body=?3 WHERE id IN (SELECT m.message_id FROM wrapper_routine_confirmation c JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=c.conversation_id AND m.ordinal=c.after_ordinal WHERE c.routine_id=?2)",params![ACCOUNT,id,message])?;
+    conn.execute(
+        "DELETE FROM wrapper_routine_confirmation WHERE routine_id=?1",
+        [id],
+    )?;
     Ok(())
 }
 fn routine_value(conn: &Connection, r: &Routine) -> Result<Value, ApiError> {
@@ -525,12 +546,10 @@ pub fn routes(
                     "/api/routines/history" => history(&tx, &r.routine_id)?,
                     "/api/routines/delete" => {
                         routine::delete(&tx, &r.routine_id)?;
-                        // Retire the visible question too: context_preview can
-                        // include projected assistant messages as history.
-                        tx.execute("UPDATE wrapper_routine_notices SET body='Cette demande de routine a été annulée (routine supprimée).' WHERE id IN (SELECT m.message_id FROM wrapper_routine_confirmation c JOIN wrapper_messages m ON m.account_id=?1 AND m.conversation_id=c.conversation_id AND m.ordinal=c.after_ordinal WHERE c.routine_id=?2)",params![ACCOUNT,r.routine_id])?;
-                        tx.execute(
-                            "DELETE FROM wrapper_routine_confirmation WHERE routine_id=?1",
-                            [&r.routine_id],
+                        close_confirmation(
+                            &tx,
+                            &r.routine_id,
+                            "Cette demande de routine a été annulée (routine supprimée).",
                         )?;
                         json!({"ok":true})
                     }
@@ -540,9 +559,10 @@ pub fn routes(
                     }
                     "/api/routines/resume" => {
                         enable(&ctx, &r)?;
-                        tx.execute(
-                            "DELETE FROM wrapper_routine_confirmation WHERE routine_id=?1",
-                            [&r.routine_id],
+                        close_confirmation(
+                            &tx,
+                            &r.routine_id,
+                            "Demande close : routine activée depuis le panneau.",
                         )?;
                         json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
                     }
@@ -607,22 +627,37 @@ pub fn context(
                 row.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut routines = routine::list(ctx.connection, &request.bot_id)?;
+        if rows.is_empty() && routines.is_empty() {
+            return Ok(String::new());
+        }
+        let total = routines.len();
+        routines.sort_by(|a, b| {
+            b.modified_at
+                .cmp(&a.modified_at)
+                .then_with(|| a.routine_id.cmp(&b.routine_id))
+        });
         let mut index = Vec::new();
-        for r in routine::list(ctx.connection, &request.bot_id)? {
-            let mut metadata = routine_value(ctx.connection, &r)?;
+        for r in routines.iter().take(20) {
+            let mut metadata = routine_value(ctx.connection, r)?;
             metadata
                 .as_object_mut()
                 .expect("routine object")
                 .remove("body");
             index.push(metadata);
         }
-        Ok(json!({"now_utc_ms":ctx.now_ms,"local_time_zone":local_zone(),"pending_routine_confirmations":rows,"routines":index}).to_string())
+        Ok(
+            json!({"pending_routine_confirmations":rows,"routines":index,"routines_total":total})
+                .to_string(),
+        )
     };
     match load() {
         Ok(text) if !text.is_empty() => vec![grokbot_engine::contracts::ContextBlock {
             source: grokbot_engine::contracts::ContextSource::ToolResult,
-            priority: 80,
-            budget: 8_000,
+            // ToolResult shares its category with image captions. Never lower
+            // their 16K ceiling, and let history/captions consume it first.
+            priority: super::priority::HISTORY + 5,
+            budget: 16_000,
             text,
         }],
         _ => vec![],
@@ -661,9 +696,10 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<crate::Message> 
 pub fn tools() -> Vec<ToolSpec> {
     let properties = json!({"name":{"type":"string"},"prompt":{"type":"string"},"body":{"type":"object"},"schedule":{"type":"string"},"trigger":{"type":"object"},"time_zone":{"type":"string"}});
     vec![
-        ToolSpec { name:"create_routine".into(), description:"Create a paused, untrusted routine for this bot. Use prompt or a pinned skill body, and schedule or trigger. The executable body must fit the complete 2000-character conversational preview. Use the clock and local_time_zone in context. Ask the user in the returned principal conversation to confirm before enabling; creation is NOT activation.".into(), schema:json!({"type":"object","properties":properties,"required":["name"],"additionalProperties":false}), requires_approval:false },
-        ToolSpec { name:"update_routine".into(), description:"Edit this bot's routine with its modified_at and schedule_version tokens. Pauses it and requires a new conversational confirmation before activation; the executable body must fit the complete 2000-character preview.".into(), schema:json!({"type":"object","properties":{ "routine_id":{"type":"string"},"modified_at":{"type":"integer"},"schedule_version":{"type":"integer"},"name":{"type":"string"},"prompt":{"type":"string"},"body":{"type":"object"},"schedule":{"type":"string"},"trigger":{"type":"object"},"time_zone":{"type":"string"}},"required":["routine_id","modified_at","schedule_version"],"additionalProperties":false}), requires_approval:false },
-        ToolSpec { name:"enable_routine".into(), description:"Omit confirm (or use false) to ask/reuse a confirmation question in the principal chat. Only after the user affirms that question, call with confirm:true. The host derives the current user turn itself and verifies consent for the unchanged routine; never invent a message ID. Generic yes/ok applies only to the first user turn after the question; later activation must name the routine. No separate approval card is used.".into(), schema:json!({"type":"object","properties":{"routine_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["routine_id"],"additionalProperties":false}), requires_approval:false },
+        ToolSpec { name:"routine_clock".into(),description:"Get the current UTC milliseconds, detected local IANA timezone and local datetime before calculating a routine date or one-shot at. Call only when scheduling needs the clock; it is not permanent chat context.".into(),schema:json!({"type":"object","properties":{},"additionalProperties":false}),requires_approval:false },
+        ToolSpec { name:"create_routine".into(), description:"Create a paused, untrusted routine for this bot. Use prompt or a pinned skill body, and schedule or trigger. The executable body must fit the complete 2000-character conversational preview. Call routine_clock before calculating a one-shot at or a date; use its detected local_time_zone unless the user specified another. Ask the user in the returned principal conversation to confirm before enabling; creation is NOT activation.".into(), schema:json!({"type":"object","properties":properties,"required":["name"],"additionalProperties":false}), requires_approval:false },
+        ToolSpec { name:"update_routine".into(), description:"Edit this bot's routine with its modified_at and schedule_version tokens. Call routine_clock before calculating a one-shot at or date. Pauses it and requires a new conversational confirmation before activation; the executable body must fit the complete 2000-character preview.".into(), schema:json!({"type":"object","properties":{ "routine_id":{"type":"string"},"modified_at":{"type":"integer"},"schedule_version":{"type":"integer"},"name":{"type":"string"},"prompt":{"type":"string"},"body":{"type":"object"},"schedule":{"type":"string"},"trigger":{"type":"object"},"time_zone":{"type":"string"}},"required":["routine_id","modified_at","schedule_version"],"additionalProperties":false}), requires_approval:false },
+        ToolSpec { name:"enable_routine".into(), description:"Omit confirm (or use false) to ask/reuse a confirmation question in the principal chat. Only after the user affirms that question, call with confirm:true. The host derives the current user turn itself and verifies consent for the unchanged routine; never invent a message ID. Generic yes/ok applies only to the first user turn after the latest pending question. Each user turn can authorize only one routine; for homonymous routines use the exact routine ID. Later activation must name an unambiguous routine or its exact ID. No separate approval card is used.".into(), schema:json!({"type":"object","properties":{"routine_id":{"type":"string"},"confirm":{"type":"boolean"}},"required":["routine_id"],"additionalProperties":false}), requires_approval:false },
     ]
 }
 fn normalize_consent(text: &str) -> String {
@@ -674,6 +710,42 @@ fn normalize_consent(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+fn named_consent(
+    conn: &Connection,
+    conversation: &str,
+    r: &Routine,
+    text: &str,
+) -> Result<bool, ApiError> {
+    let Some(target) = text
+        .strip_prefix("activer la routine ")
+        .or_else(|| text.strip_prefix("enable routine "))
+    else {
+        return Ok(false);
+    };
+    // IDs take precedence over names, including a malicious name that copies
+    // another routine's ID. A name is eligible only when unambiguous here.
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT routine_id FROM scheduler_routines WHERE routine_id=?1",
+            [target],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = id {
+        return Ok(id == r.routine_id);
+    }
+    let mut stmt=conn.prepare("SELECT r.routine_id,r.name FROM wrapper_routine_confirmation c JOIN scheduler_routines r ON r.routine_id=c.routine_id AND r.deleted=0 WHERE c.conversation_id=?1 AND c.confirmed_message_id IS NULL")?;
+    let rows = stmt
+        .query_map([conversation], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let matches = rows
+        .iter()
+        .filter(|(_, name)| normalize_consent(name) == target)
+        .collect::<Vec<_>>();
+    Ok(matches.len() == 1 && matches[0].0 == r.routine_id)
 }
 fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiError> {
     validate_id(&input.routine_id)?;
@@ -713,6 +785,13 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
         .ok_or_else(|| ApiError::new(409, "Confirmation must be the current user turn"))?
         .to_owned();
     validate_id(&confirmation_message_id)?;
+    let used_for:Option<String>=ctx.connection.query_row("SELECT routine_id FROM wrapper_routine_consents WHERE conversation_id=?1 AND message_id=?2",params![run.conversation_id,confirmation_message_id],|row|row.get(0)).optional()?;
+    if used_for.is_some_and(|id| id != r.routine_id) {
+        return Err(ApiError::new(
+            409,
+            "This user turn already confirmed another routine; use a new turn and its exact ID",
+        ));
+    }
     let evidence: Option<(String,i64,i64,Option<String>)> = ctx.connection.query_row("SELECT conversation_id,after_ordinal,modified_at,confirmed_message_id FROM wrapper_routine_confirmation WHERE routine_id=?1",[&r.routine_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
     let (conversation, after, revision, confirmed) =
         evidence.ok_or_else(|| ApiError::new(409, "No pending conversational confirmation"))?;
@@ -729,8 +808,8 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
         ));
     }
     let text: Option<(String,bool)> = ctx.connection.query_row("SELECT r.body,NOT EXISTS (SELECT 1 FROM wrapper_messages s WHERE s.account_id=?1 AND s.conversation_id=?2 AND s.kind='submission' AND s.ordinal>?4 AND s.ordinal<m.ordinal) FROM wrapper_remote r JOIN wrapper_messages m ON m.account_id=r.account_id AND m.conversation_id=r.conversation_id AND m.message_id=r.message_id JOIN wrapper_conversations c ON c.account_id=m.account_id AND c.id=m.conversation_id WHERE r.account_id=?1 AND r.conversation_id=?2 AND r.message_id=?3 AND m.kind='submission' AND m.ordinal>?4 AND NOT EXISTS(SELECT 1 FROM wrapper_messages later WHERE later.account_id=?1 AND later.conversation_id=?2 AND later.kind='submission' AND later.ordinal>m.ordinal) AND c.bot_id=?5 AND c.kind='chat' AND c.deleted=0", params![ACCOUNT,conversation,confirmation_message_id,after,DEFAULT_BOT.id], |row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-    let latest_notice: i64 = ctx.connection.query_row("SELECT COALESCE(MAX(ordinal),0) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='routine_confirmation'",params![ACCOUNT,conversation],|row|row.get(0))?;
-    let affirmative = text.is_some_and(|(text, first_user)| {
+    let latest_notice: i64 = ctx.connection.query_row("SELECT COALESCE(MAX(c.after_ordinal),0) FROM wrapper_routine_confirmation c JOIN scheduler_routines r ON r.routine_id=c.routine_id AND r.deleted=0 WHERE c.conversation_id=?1 AND c.confirmed_message_id IS NULL",[&conversation],|row|row.get(0))?;
+    let affirmative = if let Some((text, first_user)) = text {
         let t = normalize_consent(&text);
         let generic = matches!(
             t.as_str(),
@@ -750,11 +829,10 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
                 | "yes go"
         );
         (first_user && latest_notice == after && generic)
-            || [&r.name, &r.routine_id].iter().any(|name| {
-                t == format!("activer la routine {}", normalize_consent(name))
-                    || t == format!("enable routine {}", normalize_consent(name))
-            })
-    });
+            || named_consent(ctx.connection, &conversation, &r, &t)?
+    } else {
+        false
+    };
     if !affirmative {
         return Err(ApiError::new(
             409,
@@ -762,6 +840,9 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
         ));
     }
     enable(ctx, &r)?;
+    // One user utterance authorizes exactly one routine. This also prevents a
+    // generic yes from falling through to older questions as newer ones resolve.
+    ctx.connection.execute("INSERT INTO wrapper_routine_consents VALUES (?1,?2,?3) ON CONFLICT(conversation_id,message_id) DO NOTHING",params![conversation,confirmation_message_id,r.routine_id])?;
     ctx.connection.execute(
         "UPDATE wrapper_routine_confirmation SET confirmed_message_id=?2 WHERE routine_id=?1",
         params![r.routine_id, confirmation_message_id],
@@ -771,7 +852,7 @@ fn confirmed_enable(ctx: &Context<'_>, input: Enable) -> Result<Routine, ApiErro
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
     if !matches!(
         call.name.as_str(),
-        "create_routine" | "update_routine" | "enable_routine"
+        "create_routine" | "update_routine" | "enable_routine" | "routine_clock"
     ) {
         return None;
     }
@@ -796,6 +877,13 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
         if !call.arguments.is_object() {
             return Err(ApiError::new(400, "Object arguments required"));
         }
+        if call.name == "routine_clock" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = parse(call.arguments.to_string().as_bytes())?;
+            return clock_value(ctx);
+        }
         let mut args = call.arguments.clone();
         let r = match call.name.as_str() {
             "create_routine" => {
@@ -815,9 +903,11 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             _ => confirmed_enable(ctx, parse(args.to_string().as_bytes())?)?,
         };
         let confirmation: Option<String> = ctx.connection.query_row("SELECT conversation_id FROM wrapper_routine_confirmation WHERE routine_id=?1 AND confirmed_message_id IS NULL",[&r.routine_id],|row|row.get(0)).optional()?;
-        Ok(
-            json!({"routine":routine_value(ctx.connection,&r)?,"confirmation_required":confirmation.is_some(),"confirmation_conversation_id":confirmation}),
-        )
+        let mut output = clock_value(ctx)?;
+        output["routine"] = routine_value(ctx.connection, &r)?;
+        output["confirmation_required"] = json!(confirmation.is_some());
+        output["confirmation_conversation_id"] = json!(confirmation);
+        Ok(output)
     })();
     if result.is_err() {
         if let Err(error) = ctx
@@ -895,7 +985,11 @@ pub fn on_run_event(ctx: &Context<'_>, event: &RunEvent) {
         }
     }
 }
-fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<(), ApiError> {
+enum Dispatch {
+    Processed,
+    Deferred(&'static str),
+}
+fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
     let r = routine::get(ctx.connection, &o.routine_id)?
         .ok_or_else(|| ApiError::new(404, "Routine removed"))?;
     require_bot(ctx.connection, &r.bot_id)?;
@@ -906,19 +1000,22 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<(), ApiError> {
         let tx = write_transaction(ctx.connection)?;
         react(&tx, &run)?;
         tx.commit()?;
-        return Ok(());
+        return Ok(Dispatch::Processed);
     }
     // The host tick is serial with HTTP mutations. Recheck dispatchability after
     // materialization so pause/edit/delete cannot launch stale scheduled intent.
     if o.manual_nonce.is_none() && (!r.enabled || r.schedule_version != o.schedule_version) {
-        return Ok(());
+        occurrences::mark_failed(ctx.connection, &o.occurrence_id, "Routine paused or edited")?;
+        return Ok(Dispatch::Deferred("Routine paused or edited"));
     }
     if o.manual_nonce.is_none() {
         let active:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM engine_runs WHERE conversation_id=?1 AND status NOT IN ('finished','failed','cancelled'))",[&r.conversation_id],|row|row.get(0))?;
         // Preserve only the newest pending intent through scheduler catch-up;
         // never overlap automatic runs in this routine's conversation.
         if active {
-            return Ok(());
+            return Ok(Dispatch::Deferred(
+                "Run précédent en attente ; occurrence reportée",
+            ));
         }
     }
     let text = prompt(ctx.connection, &r.bot_id, &r.body)?;
@@ -946,7 +1043,7 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<(), ApiError> {
     launch.connection = &tx;
     react(launch.connection, &run)?;
     tx.commit()?;
-    Ok(())
+    Ok(Dispatch::Processed)
 }
 fn validate_dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<(), ApiError> {
     let r = routine::get(ctx.connection, &o.routine_id)?
@@ -978,6 +1075,10 @@ pub fn tick(ctx: &Context<'_>) {
                 react(&tx, &run)?;
             }
         }
+        // Retire suppressed intent immediately instead of holding an idle write
+        // lock every tick until the one-hour late window elapses.
+        tx.execute("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR (o.manual_nonce IS NULL AND (r.enabled=0 OR r.schedule_version!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",[])?;
+        tx.execute("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR (o.manual_nonce IS NULL AND (r.enabled=0 OR r.schedule_version!=o.schedule_version))))",[])?;
         let pending = occurrences::materialize_due(&tx, clock(ctx)?, &CatchUpPolicy::default())?;
         tx.commit()?;
         Ok(pending)
@@ -1003,7 +1104,10 @@ pub fn tick(ctx: &Context<'_>) {
             continue;
         }
         match dispatch(ctx, &o) {
-            Ok(()) => {
+            Ok(Dispatch::Deferred(reason)) => {
+                let _=ctx.connection.execute("INSERT INTO wrapper_routine_errors VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",params![o.routine_id,reason]);
+            }
+            Ok(Dispatch::Processed) => {
                 let _ = ctx.connection.execute(
                     "DELETE FROM wrapper_routine_errors WHERE routine_id=?1",
                     [&o.routine_id],

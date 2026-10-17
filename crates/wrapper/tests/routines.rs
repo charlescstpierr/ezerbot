@@ -276,8 +276,8 @@ fn immediate_consent_accepts_native_punctuation_and_politeness_without_model_mes
 }
 
 #[test]
-fn default_timezone_matches_detected_host_and_context_supplies_injected_clock_even_without_routines(
-) {
+fn default_timezone_matches_host_and_on_demand_clock_uses_injected_time_without_permanent_context()
+{
     let mut f = Fixture::new(false);
     let conv = f.post("/api/conversations", json!({"title":"Clock"}))["conversation"]["id"]
         .as_str()
@@ -301,11 +301,36 @@ fn default_timezone_matches_detected_host_and_context_supplies_injected_clock_ev
             tool_items: vec![],
         },
     };
-    let blocks = features::routines::context(&ctx, &request);
-    let data: Value = serde_json::from_str(&blocks[0].text).unwrap();
+    assert!(features::routines::context(&ctx, &request).is_empty());
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    ctx.connection = &tx;
+    ctx.bot_id = Some("grokbot");
+    let data = output(
+        features::routines::call_tool(
+            &ctx,
+            &ToolCall {
+                call_id: "clock".into(),
+                name: "routine_clock".into(),
+                arguments: json!({}),
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(data["now_utc_ms"], ctx.now_ms);
     assert_eq!(data["local_time_zone"], features::routines::local_zone());
+    let expected: String = tx
+        .query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M:%f',?1/1000.0,'unixepoch','localtime')",
+            [ctx.now_ms],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(data["local_time"], expected);
+    tx.commit().unwrap();
     let created = model_create(&f, "Morning", "Morning report");
+    assert!(created["now_utc_ms"].is_u64());
+    assert_eq!(created["local_time_zone"], features::routines::local_zone());
     assert_eq!(
         created["routine"]["time_zone"],
         features::routines::local_zone()
@@ -579,10 +604,27 @@ fn automatic_occurrences_do_not_overlap_an_active_run_in_the_routine_thread() {
         OccurrenceStatus::Pending
     );
     let tx = features::write_transaction(&db).unwrap();
+    let deferred: String = tx
+        .query_row(
+            "SELECT error FROM wrapper_routine_errors WHERE routine_id=?1",
+            [&r.routine_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(deferred.contains("reportée"));
     grokbot_engine::model::cancel(&tx, "active-run", TurnEnd::Stopped).unwrap();
     tx.commit().unwrap();
     f.tick_due(&r);
     assert_eq!(f.count(), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM wrapper_routine_errors WHERE routine_id=?1",
+            [&r.routine_id],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -600,6 +642,299 @@ fn long_model_edits_fail_atomically_without_changing_a_trusted_active_routine() 
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
+        0
+    );
+}
+
+fn context_request(conversation: &str) -> ContextRequest {
+    ContextRequest {
+        run_id: "preview".into(),
+        trigger: Trigger::UserMessage {
+            message_id: format!("{conversation}/current"),
+            attempt: 0,
+        },
+        bot_id: "grokbot".into(),
+        conversation_id: conversation.into(),
+        current_message: HistoryItem {
+            entry_id: "current".into(),
+            role: Role::User,
+            text: "What does the image show?".into(),
+            images: vec![],
+            tool_items: vec![],
+        },
+    }
+}
+
+#[test]
+fn routine_context_is_relevant_stable_and_does_not_reduce_historical_caption_budget() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Report");
+    let request = context_request(&r.conversation_id);
+    let mut ctx = f.app.feature_context();
+    let blocks = features::routines::context(&ctx, &request);
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].budget, 16_000);
+    assert!(blocks[0].priority > features::priority::HISTORY);
+    assert!(!blocks[0].text.contains("now_utc_ms"));
+    ctx.now_ms += 999_999;
+    assert_eq!(
+        features::routines::context(&ctx, &request)[0].text,
+        blocks[0].text
+    );
+    let app = ContextBlock {
+        source: ContextSource::AppContract,
+        priority: 0,
+        budget: 10_000,
+        text: "policy".into(),
+    };
+    let caption = ContextBlock {
+        source: ContextSource::ImageCaption,
+        priority: 90,
+        budget: 16_000,
+        text: format!(
+            "<untrusted-image-captions>\n{}\n</untrusted-image-captions>",
+            "c".repeat(12_000)
+        ),
+    };
+    let before = grokbot_engine::context::assemble_input(
+        &request,
+        &[app.clone(), caption.clone()],
+        &[],
+        None,
+        None,
+        &ContextBudget::default(),
+    )
+    .unwrap();
+    let after = grokbot_engine::context::assemble_input(
+        &request,
+        &[app, caption, blocks[0].clone()],
+        &[],
+        None,
+        None,
+        &ContextBudget::default(),
+    )
+    .unwrap();
+    let before = before
+        .blocks
+        .iter()
+        .find(|b| b.source == ContextSource::ImageCaption)
+        .unwrap();
+    let after = after
+        .blocks
+        .iter()
+        .find(|b| b.source == ContextSource::ImageCaption)
+        .unwrap();
+    assert_eq!(before.text, after.text);
+    assert!(!after
+        .text
+        .contains(grokbot_engine::context::TRUNCATION_MARKER));
+}
+
+#[test]
+fn named_consent_requires_unambiguous_pending_name_or_the_exact_routine_id() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Rapport!", "Legitimate report");
+    let b = model_create(&f, "rapport,", "Different report");
+    let conv = a["confirmation_conversation_id"].as_str().unwrap();
+    let aid = a["routine"]["routine_id"].as_str().unwrap();
+    let bid = b["routine"]["routine_id"].as_str().unwrap();
+    f.post("/api/send",json!({"conversation_id":conv,"message_id":"ambiguous","body":"activer la routine Rapport"}));
+    for id in [aid, bid] {
+        assert!(matches!(
+            confirm_current(&f, conv, "ambiguous", id),
+            ToolOutcome::Failed { .. }
+        ));
+        assert!(!routine::get(&f.db(), id).unwrap().unwrap().enabled);
+    }
+    f.post("/api/send",json!({"conversation_id":conv,"message_id":"exact","body":format!("activer la routine {aid}")}));
+    assert!(matches!(
+        confirm_current(&f, conv, "exact", bid),
+        ToolOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        output(confirm_current(&f, conv, "exact", aid))["routine"]["enabled"],
+        true
+    );
+    assert!(!routine::get(&f.db(), bid).unwrap().unwrap().enabled);
+    assert_eq!(
+        output(confirm_current(&f, conv, "exact", aid))["routine"]["enabled"],
+        true
+    ); // idempotent same intent
+}
+
+#[test]
+fn one_generic_yes_cannot_fall_through_to_multiple_pending_routines() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Older", "A");
+    let b = model_create(&f, "Newer", "B");
+    let conv = a["confirmation_conversation_id"].as_str().unwrap();
+    let aid = a["routine"]["routine_id"].as_str().unwrap();
+    let bid = b["routine"]["routine_id"].as_str().unwrap();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"single-yes","body":"oui"}),
+    );
+    assert_eq!(
+        output(confirm_current(&f, conv, "single-yes", bid))["routine"]["enabled"],
+        true
+    );
+    assert!(matches!(
+        confirm_current(&f, conv, "single-yes", aid),
+        ToolOutcome::Failed { .. }
+    ));
+    assert!(!routine::get(&f.db(), aid).unwrap().unwrap().enabled);
+    // Upgrade/reopen reconstructs durable consumption from pre-receipt resolved
+    // questions, so the same old user message cannot authorize another routine.
+    f.db()
+        .execute("DELETE FROM wrapper_routine_consents", [])
+        .unwrap();
+    f.reopen();
+    assert!(matches!(
+        confirm_current(&f, conv, "single-yes", aid),
+        ToolOutcome::Failed { .. }
+    ));
+}
+
+#[test]
+fn a_routine_name_cannot_impersonate_another_routines_exact_id() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Legitimate", "A");
+    let aid = a["routine"]["routine_id"].as_str().unwrap();
+    let impostor = model_create(&f, aid, "Other body");
+    let conv = a["confirmation_conversation_id"].as_str().unwrap();
+    let iid = impostor["routine"]["routine_id"].as_str().unwrap();
+    f.post("/api/send",json!({"conversation_id":conv,"message_id":"exact-id","body":format!("activer la routine {aid}")}));
+    assert!(matches!(
+        confirm_current(&f, conv, "exact-id", iid),
+        ToolOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        output(confirm_current(&f, conv, "exact-id", aid))["routine"]["enabled"],
+        true
+    );
+}
+
+#[test]
+fn cancelled_newer_questions_do_not_block_generic_consent_for_the_latest_pending_question() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Remaining", "A");
+    let b = model_create(&f, "Cancelled", "B");
+    let conv = a["confirmation_conversation_id"].as_str().unwrap();
+    let aid = a["routine"]["routine_id"].as_str().unwrap();
+    f.post(
+        "/api/routines/delete",
+        json!({"bot_id":"grokbot","routine_id":b["routine"]["routine_id"]}),
+    );
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conv,"message_id":"yes-remaining","body":"oui"}),
+    );
+    assert_eq!(
+        output(confirm_current(&f, conv, "yes-remaining", aid))["routine"]["enabled"],
+        true
+    );
+}
+
+#[test]
+fn panel_edits_and_resume_close_visible_confirmation_questions() {
+    let mut f = Fixture::new(false);
+    let a = model_create(&f, "Panel edit", "A");
+    let r = &a["routine"];
+    f.post("/api/routines/update",json!({"bot_id":"grokbot","routine_id":r["routine_id"],"modified_at":r["modified_at"],"schedule_version":r["schedule_version"],"prompt":"User edit"}));
+    let b = model_create(&f, "Panel resume", "B");
+    f.post(
+        "/api/routines/resume",
+        json!({"bot_id":"grokbot","routine_id":b["routine"]["routine_id"]}),
+    );
+    let db = f.db();
+    let texts = db
+        .prepare("SELECT body FROM wrapper_routine_notices")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(texts.len(), 2);
+    assert!(texts
+        .iter()
+        .all(|t| t.contains("Demande close") && !t.contains("Confirmez-vous")));
+}
+
+#[test]
+fn one_shot_consent_shows_the_host_local_datetime_and_explicit_utc() {
+    let f = Fixture::new(false);
+    let at = now() + 86_400_000;
+    let result = output(
+        f.app
+            .invoke_tool(
+                "grokbot",
+                "create_routine",
+                json!({"name":"Local once","prompt":"Reminder","trigger":{"kind":"once","at":at}}),
+            )
+            .unwrap(),
+    );
+    let expected: String = f
+        .db()
+        .query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M',?1/1000.0,'unixepoch','localtime')",
+            [at],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let text: String = f
+        .db()
+        .query_row(
+            "SELECT body FROM wrapper_routine_notices LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(text.contains(&expected));
+    assert!(text.contains("UTC"));
+    assert!(text.contains(&features::routines::local_zone()));
+    assert!(result["local_time"].is_string());
+}
+
+#[test]
+fn routine_context_index_is_bounded_and_reports_the_total() {
+    let mut f = Fixture::new(false);
+    let mut conv = String::new();
+    for _ in 0..25 {
+        conv = f.create("Report").conversation_id;
+    }
+    let blocks = features::routines::context(&f.app.feature_context(), &context_request(&conv));
+    let index: Value = serde_json::from_str(&blocks[0].text).unwrap();
+    assert_eq!(index["routines_total"], 25);
+    assert_eq!(index["routines"].as_array().unwrap().len(), 20);
+}
+
+#[test]
+fn pausing_retires_unattached_automatic_intent_instead_of_polling_it_for_an_hour() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Pause intent");
+    let db = f.db();
+    let tx = features::write_transaction(&db).unwrap();
+    let o = occurrences::materialize_due(&tx, r.modified_at + 60_000, &CatchUpPolicy::default())
+        .unwrap()
+        .remove(0);
+    tx.commit().unwrap();
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id}),
+    );
+    let mut ctx = f.app.feature_context();
+    ctx.now_ms = (r.modified_at + 60_000) as u64;
+    features::routines::tick(&ctx);
+    assert!(
+        matches!(occurrences::get(&db,&o.occurrence_id).unwrap().unwrap().status,OccurrenceStatus::Failed{reason} if reason.contains("paused"))
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM scheduler_occurrences WHERE status IN ('pending','running')",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
         0
     );
 }

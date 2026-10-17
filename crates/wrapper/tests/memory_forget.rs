@@ -405,6 +405,153 @@ fn team_forget_redacts_other_bots_and_split_deltas_but_private_forget_does_not()
 }
 
 #[test]
+fn short_facts_preserve_protocol_keys_ids_and_replay() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    for (n, secret) in [
+        "name", "id", "text", "status", "remember", "a", "learn", "fact", "scope", "output",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let message = format!("short-{n}");
+        let id = f.learn(&c, &message, secret);
+        let run = f.run(&message);
+        let before = store::events(&f.db(), &run.run_id, 0).unwrap();
+        f.forget("grokbot", &id);
+        let after = store::events(&f.db(), &run.run_id, 0).unwrap();
+        assert_eq!(before.len(), after.len());
+        for (original, sanitized) in before.iter().zip(&after) {
+            assert_eq!(original.kind, sanitized.kind);
+            for key in ["name", "call_id", "response"] {
+                assert_eq!(
+                    original.payload[key], sanitized.payload[key],
+                    "{secret}: {key}"
+                );
+            }
+        }
+        let call = after
+            .iter()
+            .find(|event| event.kind == RunEventKind::ToolCall)
+            .unwrap();
+        assert_eq!(call.payload["arguments"]["text"], "[redacted]");
+        let result = after
+            .iter()
+            .find(|event| event.kind == RunEventKind::ToolResult)
+            .unwrap();
+        assert_eq!(result.payload["outcome"]["status"], "done");
+        assert_eq!(result.payload["outcome"]["output"]["fact"]["fact_id"], id);
+        assert_eq!(
+            result.payload["outcome"]["output"]["fact"]["text"],
+            "[redacted]"
+        );
+        assert!(run_loop::replay_items(&after).is_ok());
+        // An actual provider request must still be emitted and finish normally.
+        let count = f.bodies().len();
+        f.send(&c, &format!("after-short-{n}"), "Continue.");
+        assert!(f.bodies().len() > count);
+    }
+}
+
+#[test]
+fn task_content_is_redacted_without_changing_task_protocol() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "Private inference carried in task objective and completion.";
+    f.events(vec![
+        call("begin", "begin_task", json!({"objective":secret})),
+        call(
+            "remember-task",
+            "remember",
+            json!({"text":secret,"sensitive":true}),
+        ),
+        call("finish", "complete_task", json!({"summary":secret})),
+        complete(),
+    ]);
+    f.send(&c, "task", "Retain and summarize the inference.");
+    let id = facts::list_active(&f.db(), "grokbot").unwrap()[0]
+        .fact_id
+        .clone();
+    f.forget("grokbot", &id);
+    let run = f.run("task");
+    assert_eq!(
+        run.task_status,
+        Some(grokbot_engine::contracts::TaskStatus::Done {
+            summary: "[redacted]".into()
+        })
+    );
+    assert!(!contains(&f.state(), secret));
+    let events = store::events(&f.db(), &run.run_id, 0).unwrap();
+    assert!(run_loop::replay_items(&events).is_ok());
+    assert!(events.iter().all(|event| !contains(&event.payload, secret)));
+    let before = f.bodies().len();
+    f.send(&c, "after-task", "Continue.");
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, secret));
+    }
+}
+
+#[test]
+fn opaque_reasoning_is_discarded_with_forgotten_memory() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "Private inference: allergic to peanuts.";
+    let opaque = "ENC-REASONING-ABOUT-PEANUTS";
+    f.events(vec![
+        json!({"type":"response.output_item.done", "item":{"type":"reasoning", "id":"rs-private", "encrypted_content":opaque, "summary":[]}}),
+        call("remember-private", "remember", json!({"text":secret,"sensitive":true})),
+        complete(),
+    ]);
+    f.send(&c, "learn-opaque", "Retain the relevant inference.");
+    assert!(f.bodies().iter().any(|body| contains(body, opaque)));
+    let id = facts::list_active(&f.db(), "grokbot").unwrap()[0]
+        .fact_id
+        .clone();
+    f.forget("grokbot", &id);
+    assert!(store::events(&f.db(), &f.run("learn-opaque").run_id, 0)
+        .unwrap()
+        .iter()
+        .filter(|event| event.kind == RunEventKind::ToolCall)
+        .all(|event| event.payload.get("reasoning").is_none()));
+    let before = f.bodies().len();
+    f.send(&c, "after-opaque", "Continue without that memory.");
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, secret));
+        assert!(!contains(body, opaque));
+    }
+}
+
+#[test]
+fn failed_normalized_alias_is_also_forgotten() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "Durable inference: prefers green tea.";
+    let alias = "Durable  inference:\n prefers green tea.";
+    let id = f.learn(&c, "learn", secret);
+    f.events(vec![
+        call(
+            "failed-duplicate",
+            "remember",
+            json!({"text":alias,"sensitive":true}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "failed-duplicate", "Retain that inference again.");
+    assert!(store::events(&f.db(), &f.run("failed-duplicate").run_id, 0)
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == RunEventKind::ToolResult
+            && event.payload["outcome"]["status"] == "failed"));
+    f.forget("grokbot", &id);
+    let before = f.bodies().len();
+    f.send(&c, "after-failed-duplicate", "Continue.");
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, secret));
+        assert!(!contains(body, alias));
+    }
+}
+
+#[test]
 fn normalized_duplicate_arguments_are_also_forgotten() {
     let mut f = Fixture::new();
     let c = f.conversation("grokbot");
@@ -433,6 +580,161 @@ fn normalized_duplicate_arguments_are_also_forgotten() {
             assert!(!contains(body, text));
         }
     }
+}
+
+struct PausedStream {
+    api: String,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    sent: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+struct PausedBody {
+    first: std::io::Cursor<Vec<u8>>,
+    last: std::io::Cursor<Vec<u8>>,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+impl std::io::Read for PausedBody {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = std::io::Read::read(&mut self.first, out)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        let (lock, signal) = &*self.gate;
+        drop(
+            signal
+                .wait_while(lock.lock().unwrap(), |released| !*released)
+                .unwrap(),
+        );
+        std::io::Read::read(&mut self.last, out)
+    }
+}
+impl PausedStream {
+    fn new(secret: &str) -> Self {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let api = format!("http://{}/v1", server.server_addr());
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (gating, stopping, sending) = (gate.clone(), stop.clone(), sent.clone());
+        let secret = secret.to_string();
+        let thread = std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap()
+                else {
+                    continue;
+                };
+                let mut request_body = String::new();
+                request
+                    .as_reader()
+                    .read_to_string(&mut request_body)
+                    .unwrap();
+                if request.url() == "/v1/models" {
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(
+                            json!({"models":[{"slug":"gpt-test","visibility":"list"}]}).to_string(),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                .unwrap(),
+                        ),
+                    );
+                } else {
+                    // Enough bytes to flush before the gate, proving a model
+                    // response is already in flight at the instant of forget.
+                    let first = (0..150)
+                        .map(|_| format!("data: {}\n\n", text("warmup ")))
+                        .collect::<String>();
+                    let last = format!("data: {}\n\ndata: {}\n\n", text(&secret), complete());
+                    let body = PausedBody {
+                        first: std::io::Cursor::new(first.into_bytes()),
+                        last: std::io::Cursor::new(last.into_bytes()),
+                        gate: gating.clone(),
+                    };
+                    let _ = request.respond(tiny_http::Response::new(
+                        tiny_http::StatusCode(200),
+                        vec![
+                            tiny_http::Header::from_bytes("Content-Type", "text/event-stream")
+                                .unwrap(),
+                        ],
+                        body,
+                        None,
+                        None,
+                    ));
+                    sending.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            api,
+            gate,
+            stop,
+            sent,
+            thread: Some(thread),
+        }
+    }
+    fn release(&self) {
+        *self.gate.0.lock().unwrap() = true;
+        self.gate.1.notify_all();
+    }
+}
+impl Drop for PausedStream {
+    fn drop(&mut self) {
+        self.release();
+        self.stop.store(true, Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn forgetting_stops_concurrent_stream_before_late_plaintext_can_commit() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "A forgotten inference emitted after the forget commit.";
+    let id = f.learn(&c, "learn", secret);
+    let gated = PausedStream::new(secret);
+    let mut endpoints = f.server.endpoints();
+    endpoints.api = gated.api.clone();
+    let provider = Provider::with_endpoints(&f.path, endpoints, false);
+    f.app = App::open_with(&f.path, provider.clone()).unwrap();
+    wait("gated catalog", || {
+        provider.status()["models_ready"] == true
+    });
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"streaming","body":"Continue in the background."}),
+    );
+    let run = f.run("streaming");
+    wait("first committed streaming delta", || {
+        store::events(&f.db(), &run.run_id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == RunEventKind::TextDelta)
+    });
+    f.forget("grokbot", &id);
+    assert_eq!(
+        store::required(&f.db(), &run.run_id).unwrap().status,
+        grokbot_engine::model::RunStatus::Cancelled
+    );
+    gated.release();
+    wait("late model bytes sent", || {
+        gated.sent.load(Ordering::SeqCst)
+    });
+    let provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
+    f.app = App::open_with(&f.path, provider.clone()).unwrap();
+    wait("restored catalog", || {
+        provider.status()["models_ready"] == true
+    });
+    let before = f.bodies().len();
+    f.send(&c, "after-stream", "Continue with sanitized context.");
+    for body in &f.bodies()[before..] {
+        assert!(!contains(body, secret));
+    }
+    assert!(!contains(&f.state(), secret));
+    assert!(store::events(&f.db(), &run.run_id, 0)
+        .unwrap()
+        .iter()
+        .all(|event| !contains(&event.payload, secret)));
 }
 
 #[test]

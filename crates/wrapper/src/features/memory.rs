@@ -25,6 +25,7 @@ use grokbot_memory::{
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 /// Local character budget; whole JSON fact records are retained newest first.
 pub const CONTEXT_CHARS: usize = 12_000;
@@ -113,7 +114,7 @@ pub fn routes(
                 validate_id(&input.bot_id)?;
                 require_existing_bot(app, &input.bot_id)?;
                 let tx = super::write_transaction(&app.connection)?;
-                let output = forget(&tx, &input.bot_id, &input.fact_id)?;
+                let output = forget(&tx, &input.bot_id, &input.fact_id, None)?;
                 tx.commit()?;
                 output
             }
@@ -388,7 +389,7 @@ fn tool(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         }
         "forget_fact" => {
             let args: ForgetArgs = tool_args(call)?;
-            forget(ctx.connection, bot, &args.fact_id)
+            forget(ctx.connection, bot, &args.fact_id, ctx.run_id)
         }
         _ => unreachable!("filtered tool"),
     }
@@ -453,7 +454,12 @@ fn owned_fact(conn: &Connection, bot: &str, id: &str) -> Result<Fact, ApiError> 
         .ok_or_else(|| ApiError::new(404, "Fait introuvable pour ce bot."))
 }
 
-fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
+fn forget(
+    conn: &Connection,
+    bot: &str,
+    id: &str,
+    executing_run: Option<&str>,
+) -> Result<Value, ApiError> {
     let fact = owned_fact(conn, bot, id)?;
     if let FactStatus::Superseded { by } = fact.status {
         // Do not report successful forgetting while its active successor remains
@@ -468,7 +474,7 @@ fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
     // the snapshots. A correction may have happened in another conversation.
     for snapshot in &snapshots {
         if !snapshot.text.is_empty() {
-            redact_traces(conn, snapshot)?;
+            redact_traces(conn, snapshot, executing_run)?;
         }
     }
     Ok(json!({"forgotten": snapshots.iter().map(|fact| &fact.fact_id).collect::<Vec<_>>()}))
@@ -477,9 +483,12 @@ fn forget(conn: &Connection, bot: &str, id: &str) -> Result<Value, ApiError> {
 /// Redact before the caller commits either the route or the tool result. Team
 /// facts may have been echoed by any bot, including a since-deleted owner. A
 /// private fact must not alter another bot's independent journal.
-fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
-    use grokbot_engine::{compaction, run_loop, store};
-    use std::collections::BTreeSet;
+fn redact_traces(
+    conn: &Connection,
+    fact: &Fact,
+    executing_run: Option<&str>,
+) -> Result<(), ApiError> {
+    use grokbot_engine::{compaction, model, run_loop, store};
 
     // remember deduplicates after whitespace normalization (RC02). Its replay
     // arguments can therefore differ from the retained fact text. Recover only
@@ -510,6 +519,22 @@ fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
     } else {
         BTreeSet::from([fact.bot_id.clone()])
     };
+    // Failed memory calls can contain a whitespace variant too (e.g. a refused
+    // sensitivity change). They have no successful fact ID to join against.
+    for bot in &bots {
+        let mut statement = conn.prepare(
+            "SELECT json_extract(e.payload,'$.arguments.text') FROM engine_run_events e
+             JOIN engine_runs r USING(run_id) WHERE r.bot_id=?1 AND e.kind='tool_call'
+             AND json_extract(e.payload,'$.name') IN ('remember','correct_fact')
+             AND json_type(e.payload,'$.arguments.text')='text'",
+        )?;
+        for text in statement.query_map([bot], |row| row.get::<_, String>(0))? {
+            let text = text?;
+            if normalize(&text) == normalize(&fact.text) {
+                texts.insert(text);
+            }
+        }
+    }
     let mut covering = BTreeSet::new();
     let mut conversations = BTreeSet::new();
     if let (Some(conversation), Some(entry)) =
@@ -526,6 +551,14 @@ fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (run, conversation) in runs {
+            // Stop in-flight providers before their next callback can commit
+            // forgotten content. Never stop this forget_fact's own run: it is
+            // between model calls, and cancelling it would roll back the tool.
+            if Some(run.as_str()) != executing_run
+                && store::required(conn, &run)?.status == model::RunStatus::Running
+            {
+                model::cancel(conn, &run, grokbot_engine::contracts::TurnEnd::Stopped)?;
+            }
             // Replay coalesces streamed deltas. A phrase split over two events
             // is covered by the first entry's ID in a compaction summary.
             for item in run_loop::replay_items(&store::events(conn, &run, 0)?)? {
@@ -535,6 +568,7 @@ fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
                     covering.insert((conversation.clone(), item.entry_id));
                 }
             }
+            redact_run(conn, &run, &texts)?;
             conversations.insert(conversation);
         }
         let mut statement =
@@ -544,12 +578,6 @@ fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
                 .query_map(params![ACCOUNT, bot], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
-        // Longest aliases first, before a shorter one can obscure a match.
-        let mut texts = texts.iter().collect::<Vec<_>>();
-        texts.sort_by_key(|text| std::cmp::Reverse(text.len()));
-        for text in texts {
-            store::redact_payloads(conn, &bot, text)?;
-        }
     }
     for (conversation, entry) in covering {
         compaction::invalidate_covering(conn, &conversation, &entry)?;
@@ -568,13 +596,206 @@ fn redact_traces(conn: &Connection, fact: &Fact) -> Result<(), ApiError> {
     Ok(())
 }
 
+// The engine's generic redact_payloads also rewrites JSON keys/protocol IDs.
+// Keep this privacy exception local to the manifest until that helper becomes
+// content-aware: forgetting "name", "id" or a letter must not corrupt replay.
+fn redact_run(conn: &Connection, run_id: &str, texts: &BTreeSet<String>) -> Result<(), ApiError> {
+    use grokbot_engine::{contracts::TaskStatus, store};
+    let mut events = store::events(conn, run_id, 0)?;
+    let mut index = 0;
+    while index < events.len() {
+        if events[index].kind == RunEventKind::TextDelta {
+            let start = index;
+            while index < events.len() && events[index].kind == RunEventKind::TextDelta {
+                index += 1;
+            }
+            // Match across arbitrary streaming boundaries without touching
+            // response IDs, keys or any other protocol metadata.
+            let joined: String = events[start..index]
+                .iter()
+                .map(|e| delta_text(&e.payload))
+                .collect();
+            let ranges = redaction_ranges(&joined, texts);
+            let mut offset = 0;
+            for event in &mut events[start..index] {
+                let original = delta_text(&event.payload);
+                let end = offset + original.len();
+                let mut redacted = String::new();
+                let mut cursor = 0;
+                for &(first, last) in &ranges {
+                    if first >= end || last <= offset {
+                        continue;
+                    }
+                    let local_first = first.saturating_sub(offset);
+                    let local_last = last.min(end) - offset;
+                    redacted.push_str(&original[cursor..local_first]);
+                    if first >= offset {
+                        redacted.push_str("[redacted]");
+                    }
+                    cursor = local_last;
+                }
+                redacted.push_str(&original[cursor..]);
+                if redacted != original {
+                    if event.payload.is_string() {
+                        event.payload = Value::String(redacted);
+                    } else {
+                        event.payload["text"] = Value::String(redacted);
+                    }
+                    save_payload(conn, event)?;
+                }
+                offset = end;
+            }
+            continue;
+        }
+        let event = &mut events[index];
+        let original = event.payload.clone();
+        match event.kind {
+            RunEventKind::ToolCall => {
+                if let Some(arguments) = event.payload.get_mut("arguments") {
+                    redact_content(arguments, texts);
+                }
+                // Opaque provider state cannot be searched for a forgotten
+                // phrase. Discard it for the scoped bot's replay, not merely
+                // when the literal plaintext happens to occur in the cipher.
+                if let Some(payload) = event.payload.as_object_mut() {
+                    payload.remove("reasoning");
+                }
+            }
+            RunEventKind::ToolResult => {
+                if let Some(output) = event.payload.pointer_mut("/outcome/output") {
+                    redact_content(output, texts);
+                }
+                if let Some(reason) = event.payload.pointer_mut("/outcome/reason") {
+                    redact_content(reason, texts);
+                }
+            }
+            RunEventKind::TaskChanged => {
+                for key in ["objective", "summary", "task_status"] {
+                    if let Some(value) = event.payload.get_mut(key) {
+                        redact_content(value, texts);
+                    }
+                }
+            }
+            _ => {
+                if let Some(reason) = event.payload.get_mut("reason") {
+                    redact_content(reason, texts);
+                }
+            }
+        }
+        if event.payload != original {
+            save_payload(conn, event)?;
+        }
+        index += 1;
+    }
+    let mut run = store::required(conn, run_id)?;
+    if let Some(TaskStatus::Done { summary }) = &mut run.task_status {
+        let redacted = redact_string(summary, texts);
+        if redacted != *summary {
+            *summary = redacted;
+            conn.execute(
+                "UPDATE engine_runs SET record=?2 WHERE run_id=?1",
+                params![
+                    run_id,
+                    serde_json::to_string(&run).map_err(grokbot_engine::contracts::Error::from)?
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn save_payload(
+    conn: &Connection,
+    event: &grokbot_engine::contracts::RunEvent,
+) -> Result<(), ApiError> {
+    conn.execute(
+        "UPDATE engine_run_events SET payload=?3 WHERE run_id=?1 AND seq=?2",
+        params![
+            event.run_id,
+            event.seq,
+            serde_json::to_string(&event.payload)
+                .map_err(grokbot_engine::contracts::Error::from)?
+        ],
+    )?;
+    Ok(())
+}
+
+fn delta_text(payload: &Value) -> &str {
+    payload
+        .as_str()
+        .or_else(|| payload.get("text").and_then(Value::as_str))
+        .unwrap_or_default()
+}
+
+fn redact_content(value: &mut Value, texts: &BTreeSet<String>) {
+    match value {
+        Value::String(value) => *value = redact_string(value, texts),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| redact_content(value, texts)),
+        Value::Object(values) => {
+            for (key, value) in values {
+                // Content is mutable; record identity and enum discriminants
+                // are not. In particular keep fact IDs for correction/forget.
+                if !matches!(
+                    key.as_str(),
+                    "id" | "name" | "kind" | "type" | "status" | "scope" | "source" | "role"
+                ) && !key.ends_with("_id")
+                    && !key.ends_with("_ids")
+                {
+                    redact_content(value, texts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redaction_ranges(value: &str, texts: &BTreeSet<String>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut skip_until = 0;
+    for (start, _) in value.char_indices() {
+        if start < skip_until {
+            continue;
+        }
+        if value[start..].starts_with("[redacted]") {
+            skip_until = start + "[redacted]".len();
+            continue;
+        }
+        if let Some(length) = texts
+            .iter()
+            .filter(|text| !text.is_empty() && value[start..].starts_with(text.as_str()))
+            .map(String::len)
+            .max()
+        {
+            let end = start + length;
+            if let Some(last) = ranges.last_mut().filter(|last| start < last.1) {
+                last.1 = last.1.max(end);
+            } else {
+                ranges.push((start, end));
+            }
+        }
+    }
+    ranges
+}
+
+fn redact_string(value: &str, texts: &BTreeSet<String>) -> String {
+    let mut redacted = String::new();
+    let mut cursor = 0;
+    for (start, end) in redaction_ranges(value, texts) {
+        redacted.push_str(&value[cursor..start]);
+        redacted.push_str("[redacted]");
+        cursor = end;
+    }
+    redacted.push_str(&value[cursor..]);
+    redacted
+}
+
 fn contains_text(value: &Value, text: &str) -> bool {
     match value {
         Value::String(value) => value.contains(text),
         Value::Array(values) => values.iter().any(|value| contains_text(value, text)),
-        Value::Object(values) => values
-            .iter()
-            .any(|(key, value)| key.contains(text) || contains_text(value, text)),
+        Value::Object(values) => values.iter().any(|(_, value)| contains_text(value, text)),
         _ => false,
     }
 }

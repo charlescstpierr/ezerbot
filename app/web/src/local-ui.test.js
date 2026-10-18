@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 import { localCallView } from "./local-call.js";
+import { revealPendingApproval } from "./approval-follow.js";
 
 class Element {
   constructor(tag) { this.tagName=tag;this.children=[];this.listeners={}; }
@@ -17,7 +18,7 @@ function setup({scroll,ResizeObserver,dialog}={}) {
   const requests=[], notifications=[];
   const state={bots:[{id:"bot",name:"Mon bot"}],local:{bots:[],folders:["/tmp/<dossier>"]}};
   const panels={state,register(p){registration=p;},async api(path,body){requests.push({path,body});},async refresh(){},notify(message){notifications.push(message);}};
-  const window={GrokbotPanels:panels,ResizeObserver};
+  const window={GrokbotPanels:panels,GrokbotChat:{revealPendingApproval},ResizeObserver};
   const document={getElementById:id=>id==="chat-scroll"?scroll:id==="settings-dialog"?dialog:undefined,createElement:tag=>new Element(tag),createTextNode:text=>Object.assign(new Element("#text"),{textContent:text})};
   runInNewContext(readFileSync(new URL("../../ui/panels/local.js",import.meta.url),"utf8"),{window,document});
   const root=new Element("div");registration.settingsSection(root);

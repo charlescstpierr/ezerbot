@@ -325,6 +325,7 @@ test("local cards combine reviewer status, exact action and protected preview wi
 test("protected writes render one sensitive warning immediately before the decision controls", () => {
   const html = card("pending", "ask", { path: "/tmp/app/new.txt", content: "test", expected_sha256: null,
     apercu_local: { donnees_ezerbot: true, lignes_ajoutees: 1, lignes_supprimees: 0, lignes_proposees: 1, extrait: "@@ -0,0 +1,1 @@\\n+test\\n" } }, false, "write_file");
+  assert.match(html, /data-follow-actions="true"/);
   assert.equal(html.split('gb-local-sensitive-warning').length - 1, 1);
   assert.match(html, /Refusez sauf certitude\.<\/p><fieldset/);
   assert.ok(html.indexOf('gb-local-sensitive-warning') > html.indexOf("Empreinte et expiration"));
@@ -342,6 +343,7 @@ test("generic approval retains its code identifier instead of a local-action lab
   const html = card("pending", "ask", {}, false, "test_generic_tool");
   assert.match(html, /Outil : <code>test_generic_tool<\/code>/);
   assert.ok(!html.includes("Action : test_generic_tool"));
+  assert.ok(!html.includes("data-follow-actions"));
 });
 
 test("human fallback is attributed to the reviewer; pending review has decorative progress without disabling decisions", () => {

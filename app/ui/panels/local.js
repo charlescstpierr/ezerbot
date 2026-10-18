@@ -44,9 +44,12 @@
       resizeAnchor = token;
       resizePending = false;
       userScroll = null;
-      const actions = phase === "pending" ? target.querySelector?.("fieldset") : phase === "running" ? target.querySelector?.(".gb-local-stop") : null;
-      if (actions && target.getBoundingClientRect().height > scroll?.clientHeight) actions.scrollIntoView({ block: "end" });
-      else target.scrollIntoView({ block: "start" });
+      if (phase === "pending") window.GrokbotChat.revealPendingApproval(target, scroll);
+      else {
+        const stop = phase === "running" ? target.querySelector?.(".gb-local-stop") : null;
+        if (stop && target.getBoundingClientRect().height > scroll?.clientHeight) stop.scrollIntoView({ block: "end" });
+        else target.scrollIntoView({ block: "start" });
+      }
     };
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => settle(30)));
   }

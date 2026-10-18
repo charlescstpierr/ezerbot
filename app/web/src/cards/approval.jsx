@@ -42,7 +42,7 @@ export function Card({ message, busy, onAction }) {
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
     <HumanInputCard message={message} title="Approbation demandée" input={input}>
-      <div className="space-y-3">
+      <div className="space-y-3" data-follow-actions={localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
           <strong>Relecteur : </strong>{review.pending

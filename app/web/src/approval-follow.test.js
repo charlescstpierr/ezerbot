@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createApprovalFollow } from "./approval-follow.js";
+import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
 
 const card = (id, status = "pending") => ({ id, kind: "approval", payload: { status: { status } } });
@@ -47,6 +47,23 @@ test("existing requests and other conversations never steal focus", () => {
   assert.equal(follow.observe("other", [card("foreign")]), null);
   assert.equal(follow.observe("chat", [card("old")]), null);
   assert.equal(follow.observe("chat", [card("old"), card("new")]), "new");
+});
+
+test("post-commit shell follow and resize focus agree on tall local/settings decisions", () => {
+  for (const marked of [false, true]) for (const height of [250, 450]) {
+    const moves = [];
+    const actions = { scrollIntoView(options) { moves.push(["actions", options.block]); } };
+    const card = {
+      querySelector(selector) { assert.equal(selector, "[data-follow-actions] fieldset"); return marked ? actions : null; },
+      getBoundingClientRect() { return { height }; },
+      scrollIntoView(options) { moves.push(["card", options.block]); },
+    };
+    // A late shell layout cannot undo an earlier resize/commit decision.
+    revealPendingApproval(card, { clientHeight: 301 });
+    revealPendingApproval(card, { clientHeight: 301 });
+    const expected = marked && height > 301 ? ["actions", "end"] : ["card", "start"];
+    assert.deepEqual(moves, [expected, expected]);
+  }
 });
 
 test("first-message conversation binding preserves a user cancellation", () => {

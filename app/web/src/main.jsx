@@ -7,7 +7,7 @@ import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from 
 import { mentionMenu, readMentions } from "./mentions.js";
 import { pendingReply } from "./thread-order.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
-import { createApprovalFollow } from "./approval-follow.js";
+import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 
 const roots = new WeakMap();
 
@@ -18,6 +18,7 @@ window.GrokbotChat = {
   searchableMessageText,
   exportMessage,
   createApprovalFollow,
+  revealPendingApproval,
   formatAttachmentSize,
   documentBudgetMessage,
   createDocumentIcon: () => createDocumentIcon(document),

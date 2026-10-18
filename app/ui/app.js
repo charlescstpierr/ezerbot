@@ -846,7 +846,7 @@
     const id = approvalFollow.observe(conversation?.id, conversation?.messages || []);
     if (!id) return false;
     const card = [...ui.messages.querySelectorAll('[data-card-kind="approval"]')].find((node) => node.dataset.messageId === id);
-    if (card) card.scrollIntoView({ block: "start" });
+    if (card) window.GrokbotChat.revealPendingApproval(card, ui.scroll);
     return true; // React may not have committed the card yet; onLayout retries.
   }
 

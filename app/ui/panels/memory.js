@@ -15,6 +15,13 @@
   const settingInputs = new Map();
   function renderAutomaticSettings(state) {
     if (!settingsSection) return;
+    const availability = settingsSection.querySelector(".memory-auto-availability");
+    if (state?.memory_auto?.available === false) {
+      availability.hidden = false;
+      availability.textContent = !state?.provider?.connected ? "Connectez ChatGPT pour utiliser l’extraction automatique."
+        : !state?.provider?.models_ready ? "Vérification des petits modèles disponibles…"
+          : "Indisponible : aucun petit modèle dans votre offre.";
+    } else { availability.hidden = true; availability.textContent = ""; }
     const bots = (state?.bots || []).filter((bot) => !bot.deleted);
     const ids = new Set(bots.map((bot) => bot.id));
     for (const [id, input] of settingInputs) if (!ids.has(id)) { input.closest("label").remove(); settingInputs.delete(id); }
@@ -23,7 +30,7 @@
       if (!input) {
         const label = node("label", "setting-toggle memory-auto-toggle");
         const copy = node("span");
-        copy.append(node("strong", "", bot.name), node("small", "", "Retenir les préférences, l’identité et les projets après une réponse."));
+        copy.append(node("strong", "", bot.name));
         input = node("input"); input.type = "checkbox"; input.name = `automatic-${bot.id}`; input.setAttribute("role", "switch");
         const track = node("span", "toggle-track"); track.setAttribute("aria-hidden", "true");
         label.append(copy, input, track); settingsSection.append(label); settingInputs.set(bot.id, input);
@@ -57,7 +64,10 @@
     id: "memory",
     settingsSection(container) {
       settingsSection = node("section", "setting-section");
-      settingsSection.append(node("h3", "", "Mémoire automatique"), node("p", "", "Activée par défaut pour chaque bot. Au plus 3 faits par tour, privés au départ. Les secrets et les réponses aux formulaires sont exclus. Vous pouvez annuler ou modifier chaque fait dans le fil."));
+      settingsSection.append(node("h3", "", "Mémoire automatique"), node("p", "", "Activée par défaut pour retenir vos préférences, votre identité et vos projets après une réponse. Au plus 3 faits par tour, privés au départ. Les secrets et les réponses aux formulaires sont exclus. Vous pouvez annuler ou modifier chaque fait dans le fil."));
+      const availability = node("p", "memory-auto-availability");
+      availability.setAttribute("role", "status");
+      settingsSection.append(availability);
       container.append(settingsSection);
       renderAutomaticSettings(panels.state);
     },
@@ -69,12 +79,15 @@
     wantsPolling() { return panels.state?.memory_auto?.pending === true; },
     async onCardAction(message, action, detail) {
       if (message.kind !== "memory_auto") return false;
-      if (action === "undo") await panels.api("/api/memory/automatic/undo", { card_id: message.id });
-      else if (action === "correct") await panels.api("/api/memory/correct", { bot_id: message.payload.bot_id, fact_id: message.payload.fact_id, text: detail.text });
-      else return false;
-      await panels.refresh();
-      activeReload?.();
-      return true;
+      if (!["undo", "correct"].includes(action)) return false;
+      try {
+        if (action === "undo") await panels.api("/api/memory/automatic/undo", { card_id: message.id });
+        else await panels.api("/api/memory/correct", { bot_id: message.payload.bot_id, fact_id: message.payload.fact_id, text: detail.text });
+        return true;
+      } finally {
+        // Even a stale action must reconcile the card with the durable fact.
+        try { await panels.refresh(); } finally { activeReload?.(); }
+      }
     },
     botSection(bot, container) {
       const section = node("section", "memory-panel");
@@ -153,7 +166,7 @@
             if (check.checked) selected.add(fact.fact_id); else selected.delete(fact.fact_id);
             updateSelection();
           });
-          label.append(check, node("span", "memory-text", fact.text));
+          label.append(check, node("span", "memory-text", `« ${fact.text} »`));
           const owner = panels.state?.bots?.find((item) => item.id === fact.bot_id);
           const scope = fact.scope === "team" ? "Équipe" : "Privé";
           const date = new Date(fact.learned_at);
@@ -161,7 +174,7 @@
           const actions = node("div", "memory-actions");
           // Models may mutate only their own facts. The user can purge a visible
           // team fact through its owner, including a deleted owner (wrapper r2).
-          if (fact.bot_id === bot.id && !bot.deleted) actions.append(button("Corriger", () => edit(fact)));
+          if (fact.bot_id === bot.id && !bot.deleted) actions.append(button("Modifier", () => edit(fact)));
           actions.append(button("Oublier…", () => confirmForget(fact)));
           row.append(actions);
           list.append(row);
@@ -208,13 +221,13 @@
       }
       function edit(fact) {
         const cancel = openEditor(fact.fact_id);
-        const label = node("label", "memory-edit-label", "Corriger ce fait");
+        const label = node("label", "memory-edit-label", "Modifier ce fait");
         const input = node("textarea", "text-input");
         input.rows = 3;
         input.value = fact.text;
         label.append(input);
         const hint = node("p", "memory-note", "1 à 2 000 caractères. Une correction remplace le fait, sans changer sa portée ni sa sensibilité.");
-        const save = button("Enregistrer la correction", () => {
+        const save = button("Enregistrer la modification", () => {
           const text = input.value.trim();
           if (!text || [...text].length > 2000) { hint.textContent = "Saisissez entre 1 et 2 000 caractères."; input.focus(); return; }
           if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text)) {
@@ -226,7 +239,7 @@
             facts = facts.filter((item) => item.fact_id !== fact.fact_id);
             facts.unshift(data.fact);
             selected.delete(fact.fact_id);
-            status.textContent = "Fait corrigé.";
+            status.textContent = "Fait modifié.";
           });
         }, "primary-button");
         // Never submit the enclosing bot-profile form with Cmd/Ctrl+Enter.
@@ -261,6 +274,7 @@
           const data = await panels.api(path, body);
           apply(data); // Record confirmed forgetting even if the dialog closed.
           closeEditor(); // Drop the corrected/forgotten text from the DOM.
+          await panels.refresh(); // Reproject receipts in the conversation too.
           if (alive) {
             render();
             try { facts = await readFacts(); }
@@ -292,6 +306,7 @@
             totals.kept += data.kept_private_count;
             for (const id of batch) { processed.add(id); selected.delete(id); }
             showTotals(); // Kept-private IDs are processed too (MW03).
+            await panels.refresh();
           }
           if (alive) status.textContent = "Partage terminé.";
         } catch (error) {

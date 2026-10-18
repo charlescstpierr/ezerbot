@@ -30,6 +30,14 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         bot_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS memory_auto_jobs (
         run_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS memory_auto_admissions (
+        bot_id TEXT NOT NULL, conversation_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+        PRIMARY KEY(bot_id,conversation_id,entry_id));
+        INSERT OR IGNORE INTO memory_auto_admissions
+        SELECT r.bot_id,r.conversation_id,COALESCE(t.root_id,json_extract(w.input_json,'$.entry_id'))
+        FROM memory_auto_jobs j JOIN engine_runs r USING(run_id)
+        JOIN wrapper_engine_runs w USING(run_id) LEFT JOIN wrapper_group_turns t USING(run_id)
+        WHERE json_type(w.input_json,'$.entry_id')='text';
         CREATE TABLE IF NOT EXISTS memory_auto_cards (
         id TEXT PRIMARY KEY, run_id TEXT NOT NULL, fact_id TEXT NOT NULL,
         previous_id TEXT, source_hash TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0);
@@ -99,8 +107,7 @@ pub fn on_run_event(ctx: &Context<'_>, event: &RunEvent) {
     }
     let result = (|| -> Result<(), ApiError> {
         let run = store::required(ctx.connection, &event.run_id)?;
-        if run.status != RunStatus::Finished
-            || !matches!(run.trigger, Trigger::UserMessage { attempt: 0, .. })
+        if run.status != RunStatus::Finished || !matches!(run.trigger, Trigger::UserMessage { .. })
         {
             return Ok(());
         }
@@ -116,6 +123,18 @@ pub fn on_run_event(ctx: &Context<'_>, event: &RunEvent) {
             |r| r.get(0),
         )?;
         if live && enabled(ctx.connection, &run.bot_id)?.0 {
+            let Some(input) = authored_input(ctx.connection, &run)? else {
+                return Ok(());
+            };
+            // A retry may be the first successful turn. Reserve once per human
+            // message, not once per attempt/run, including extraction failures.
+            let admitted = ctx.connection.execute(
+                "INSERT OR IGNORE INTO memory_auto_admissions VALUES (?1,?2,?3)",
+                params![run.bot_id, run.conversation_id, input.entry_id],
+            )?;
+            if admitted == 0 {
+                return Ok(());
+            }
             ctx.connection.execute(
                 "INSERT OR IGNORE INTO memory_auto_jobs VALUES (?1,'queued',?2)",
                 params![run.run_id, ctx.now_ms],
@@ -192,14 +211,21 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let rows = stmt.query_map([ACCOUNT], |r| Ok(json!({"bot_id":r.get::<_,String>(0)?,"enabled":r.get::<_,bool>(1)?})))?.collect();
         rows
     })().unwrap_or_default();
-    let pending = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM memory_auto_jobs WHERE state='queued' OR (state='running' AND updated_at>?1))", [ctx.now_ms.saturating_sub(30_000)], |r| r.get::<_,bool>(0)).unwrap_or(false);
+    let connected = ctx.provider.connected();
+    let available = connected
+        && ctx
+            .provider
+            .models()
+            .iter()
+            .any(|m| m.slug.contains("mini") || m.slug.contains("nano"));
+    let pending = connected && ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM memory_auto_jobs WHERE state='queued' OR (state='running' AND updated_at>?1))", [ctx.now_ms.saturating_sub(30_000)], |r| r.get::<_,bool>(0)).unwrap_or(false);
     let revision = ctx
         .connection
         .query_row("SELECT COUNT(*) FROM memory_auto_cards", [], |r| {
             r.get::<_, i64>(0)
         })
         .unwrap_or(0);
-    json!({"settings":settings,"pending":pending,"revision":revision,"max_facts_per_turn":MAX_FACTS})
+    json!({"settings":settings,"available":available,"pending":pending,"revision":revision,"max_facts_per_turn":MAX_FACTS})
 }
 
 #[derive(Deserialize)]
@@ -234,9 +260,10 @@ pub fn routes(
         let row: Option<(String, Option<String>, String, bool)> = tx.query_row("SELECT fact_id,previous_id,source_hash,cancelled FROM memory_auto_cards WHERE id=?1", [&input.card_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let (id, previous, source_hash, cancelled) =
             row.ok_or_else(|| ApiError::new(404, "Carte mémoire introuvable."))?;
-        let fact = facts::get(&tx, &id)?.ok_or_else(|| ApiError::new(404, "Fait introuvable."))?;
+        let fact = current_fact(&tx, &id)?;
         if !cancelled {
-            if fact.status != FactStatus::Active {
+            let later_card:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_auto_cards WHERE fact_id=?1 AND id!=?2 AND cancelled=0)",params![fact.fact_id,input.card_id],|r|r.get(0))?;
+            if fact.status != FactStatus::Active || later_card {
                 return Err(ApiError::new(
                     409,
                     "Ce fait a changé. Consultez la mémoire du bot pour le modifier.",
@@ -244,7 +271,9 @@ pub fn routes(
             }
             block(&tx, &fact.bot_id, fact.scope, &source_hash)?;
             block(&tx, &fact.bot_id, fact.scope, &hash(&fact.text))?;
-            if let Some(previous) = previous {
+            // Editing a receipt keeps Annuler: it forgets the edited head.
+            // Only an unchanged automatic update restores its predecessor.
+            if let Some(previous) = previous.filter(|_| fact.fact_id == id) {
                 let old = facts::get(&tx, &previous)?
                     .ok_or_else(|| ApiError::new(409, "La version précédente est indisponible."))?;
                 if old.bot_id != fact.bot_id
@@ -255,20 +284,22 @@ pub fn routes(
                         "Ce fait a changé. Consultez la mémoire du bot.",
                     ));
                 }
-                facts::correct(
+                let restored = facts::correct(
                     &tx,
                     &fact.bot_id,
-                    &id,
+                    &fact.fact_id,
                     &old.text,
-                    &Provenance {
-                        source: Source::UserStated,
-                        conversation_id: None,
-                        entry_id: None,
-                    },
+                    &old.provenance,
                     crate::now() as i64,
                 )?;
+                // This is restoration, not a newly learned correction: keep the
+                // original learning date/source while retaining the lineage.
+                tx.execute(
+                    "UPDATE memory_facts SET learned_at=?2 WHERE fact_id=?1",
+                    params![restored.fact_id, old.learned_at],
+                )?;
             } else {
-                super::memory::forget(&tx, &fact.bot_id, &id, None)?;
+                super::memory::forget(&tx, &fact.bot_id, &fact.fact_id, None)?;
             }
             tx.execute(
                 "UPDATE memory_auto_cards SET cancelled=1 WHERE id=?1",
@@ -456,6 +487,65 @@ fn form_overlap(conn: &Connection, text: &str) -> Result<bool, ApiError> {
     }
     Ok(false)
 }
+fn without_routing_mentions(
+    conn: &Connection,
+    conversation: &str,
+    entry: &str,
+    text: &str,
+) -> Result<String, ApiError> {
+    let mentions: Vec<super::multibot::Mention> =
+        serde_json::from_value(super::multibot::mentions(conn, conversation, entry))
+            .map_err(|_| ApiError::new(500, "Mentions indisponibles."))?;
+    fn byte_offset(text: &str, offset: usize) -> Option<usize> {
+        let mut utf16 = 0;
+        for (byte, c) in text.char_indices() {
+            if utf16 == offset {
+                return Some(byte);
+            }
+            utf16 += c.len_utf16();
+        }
+        (utf16 == offset).then_some(text.len())
+    }
+    let mut ranges = Vec::new();
+    for mention in mentions {
+        let token = format!("@{}", mention.label);
+        let found = if let Some(offset) = mention.offset {
+            byte_offset(text, offset)
+                .filter(|&start| text.get(start..start + token.len()) == Some(token.as_str()))
+        } else {
+            // Legacy rich mentions have no offset. Match only a complete routing
+            // token, never a substring inside an address such as x@Ezerbot.fr.
+            text.match_indices(&token)
+                .find(|(start, _)| {
+                    let before = text[..*start].chars().next_back();
+                    let after = text[*start + token.len()..].chars().next();
+                    before.is_none_or(char::is_whitespace)
+                        && after.is_none_or(|c| {
+                            c.is_whitespace() || matches!(c, ',' | '!' | '?' | ':' | ';')
+                        })
+                })
+                .map(|(start, _)| start)
+        };
+        if let Some(start) = found {
+            ranges.push((start, start + token.len()));
+        }
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    let mut output = String::new();
+    let mut end = 0;
+    for (start, next) in ranges {
+        if start < end {
+            return Err(ApiError::new(500, "Mentions invalides."));
+        }
+        output.push_str(&text[end..start]);
+        output.push(' ');
+        end = next;
+    }
+    output.push_str(&text[end..]);
+    Ok(output.trim().to_owned())
+}
+
 fn authored_input(
     conn: &Connection,
     run: &grokbot_engine::model::Run,
@@ -496,15 +586,21 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
     if !on || !available(conn, &run.bot_id, &run.conversation_id)? {
         return Ok(());
     }
-    let Some(input) = authored_input(conn, &run)? else {
+    let Some(mut input) = authored_input(conn, &run)? else {
         return Ok(());
     };
+    let original = input.text.clone();
+    if original.chars().count() > INPUT_CHARS {
+        return Ok(());
+    }
+    input.text = without_routing_mentions(conn, &run.conversation_id, &input.entry_id, &original)?;
     if input.role != grokbot_engine::contracts::Role::User
         || !input.tool_items.is_empty()
         || input.text.trim().is_empty()
         || input.text.chars().count() > INPUT_CHARS
         || !input.images.is_empty()
         || unsafe_text(&input.text)
+        || blocked(conn, &run.bot_id, &original)?
         || blocked(conn, &run.bot_id, &input.text)?
     {
         return Ok(());
@@ -549,6 +645,7 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
     if enabled(&tx, &run.bot_id)? != (true, revision)
         || !available(&tx, &run.bot_id, &run.conversation_id)?
         || version != memory_version(&tx, &run.bot_id)?
+        || blocked(&tx, &run.bot_id, &original)?
         || blocked(&tx, &run.bot_id, &input.text)?
     {
         return Ok(());
@@ -560,6 +657,7 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
             "preference" | "identity" | "project"
         ) || !(4..=FACT_CHARS).contains(&text.chars().count())
             || !input.text.contains(text)
+            || !original.contains(text)
             || unsafe_text(text)
             || redact::redact(&vault, text)? != text
             || form_overlap(&tx, text)?
@@ -612,7 +710,7 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
             )?
         };
         let card_id = format!("auto-{}", fact.fact_id);
-        tx.execute("INSERT INTO memory_auto_cards(id,run_id,fact_id,previous_id,source_hash) VALUES (?1,?2,?3,?4,?5)",params![card_id,id,fact.fact_id,proposal.replace_id,hash(&input.text)])?;
+        tx.execute("INSERT INTO memory_auto_cards(id,run_id,fact_id,previous_id,source_hash) VALUES (?1,?2,?3,?4,?5)",params![card_id,id,fact.fact_id,proposal.replace_id,hash(&original)])?;
         super::conversations::append_entry(
             &tx,
             &run.conversation_id,
@@ -625,32 +723,40 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
     Ok(())
 }
 
+fn current_fact(conn: &Connection, id: &str) -> Result<Fact, ApiError> {
+    let mut fact = facts::get(conn, id)?.ok_or_else(|| ApiError::new(404, "Fait introuvable."))?;
+    for _ in 0..100 {
+        if let FactStatus::Superseded { by } = &fact.status {
+            fact = facts::get(conn, by)?.ok_or_else(|| ApiError::new(404, "Fait introuvable."))?;
+        } else {
+            return Ok(fact);
+        }
+    }
+    Err(ApiError::new(
+        409,
+        "Ce fait a trop de versions. Consultez la mémoire du bot.",
+    ))
+}
+
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind != "memory_auto" {
         return None;
     }
-    let (fact_id, cancelled, run_id): (String, bool, String) = ctx
+    let (fact_id, cancelled, run_id, replaced): (String, bool, String, bool) = ctx
         .connection
         .query_row(
-            "SELECT fact_id,cancelled,run_id FROM memory_auto_cards WHERE id=?1",
+            "SELECT fact_id,cancelled,run_id,previous_id IS NOT NULL FROM memory_auto_cards WHERE id=?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .ok()?;
     let run = store::get(ctx.connection, &run_id).ok()??;
     if ctx.conversation_id != Some(run.conversation_id.as_str()) {
         return None;
     }
-    let mut fact = facts::get(ctx.connection, &fact_id).ok()??;
-    // Edits use the ordinary correction path. Follow successors, not a retained
-    // copy of fact text; forgotten text therefore disappears from every card.
-    for _ in 0..100 {
-        if let FactStatus::Superseded { by } = &fact.status {
-            fact = facts::get(ctx.connection, by).ok()??;
-        } else {
-            break;
-        }
-    }
+    // Never retain a copy of text in a receipt; edits/forgetting are projected
+    // from the current lineage on each state refresh.
+    let fact = current_fact(ctx.connection, &fact_id).ok()?;
     let updated = fact.fact_id != fact_id
         && ctx
             .connection
@@ -672,7 +778,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         notice: None,
         proposals: vec![],
         kind: "memory_auto".into(),
-        payload: json!({"memory_run_id":run_id,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":fact.fact_id==fact_id}),
+        payload: json!({"memory_run_id":run_id,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
         attachments: vec![],
     })
 }

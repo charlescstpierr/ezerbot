@@ -113,7 +113,12 @@
       if (!panel.onCardAction) continue;
       try {
         if (await panel.onCardAction(message, action, detail, panelContext()) === true) return true;
-      } catch (error) { panelError(panel.id, error); notify(error.message); return false; }
+      } catch (error) {
+        // Memory receipts show actionable refusals inline (for example while a
+        // related reply is running), rather than losing the reason in a toast.
+        if (message.kind === "memory_auto") throw error;
+        panelError(panel.id, error); notify(error.message); return false;
+      }
     }
     notify("Cette action n’est pas disponible.");
     return false;

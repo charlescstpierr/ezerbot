@@ -235,7 +235,16 @@ fn deduplicates_updates_preserves_team_scope_and_undo_restores_previous() {
         .unwrap();
     assert_eq!(new.scope, Scope::Team);
     let card = f.cards(&c).pop().unwrap();
+    assert_eq!(card["payload"]["replaced"], true);
     f.post("/api/memory/automatic/undo", json!({"card_id":card["id"]}));
+    let restored = f
+        .facts("grokbot")
+        .into_iter()
+        .find(|v| v.text == original)
+        .unwrap();
+    assert_eq!(restored.provenance, old.provenance);
+    assert_eq!(restored.learned_at, old.learned_at);
+    assert_eq!(f.cards(&c)[0]["payload"]["can_undo"], true);
     assert!(!f.facts("grokbot").iter().any(|v| v.text == corrected));
     assert!(f
         .facts("grokbot")
@@ -440,6 +449,88 @@ fn manual_card_edit_uses_correction_and_forgotten_lineage_hides_all_card_text() 
 }
 
 #[test]
+fn edited_receipt_can_still_undo_and_forgets_the_current_lineage_head() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let text = "Je préfère le thé vert.";
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "one", text);
+    f.settle();
+    let card = f.cards(&c).pop().unwrap();
+    f.post("/api/memory/correct",json!({"bot_id":"grokbot","fact_id":card["payload"]["fact_id"],"text":"Je préfère le thé avec du miel."}));
+    assert_eq!(f.cards(&c)[0]["payload"]["can_undo"], true);
+    f.post("/api/memory/automatic/undo", json!({"card_id":card["id"]}));
+    assert!(f.facts("grokbot").is_empty());
+    assert_eq!(f.cards(&c)[0]["payload"]["text"], "");
+    f.reopen();
+    assert_eq!(f.cards(&c)[0]["payload"]["active"], false);
+}
+
+#[test]
+fn successful_retry_extracts_once_per_human_message_across_further_regenerations() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let text = "Je préfère le thé vert.";
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::json(
+            400,
+            json!({"error":{"code":"invalid_request_error","message":"Échec de test"}}),
+        ));
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"retry","body":text}),
+    );
+    wait("premier tour en échec", || {
+        f.messages(&c)
+            .iter()
+            .any(|m| m["id"] == "reply-retry" && m["state"] == "failed")
+    });
+    assert!(f.calls().is_empty());
+    f.script(json!([fact(text, None)]));
+    f.post(
+        "/api/regenerate",
+        json!({"conversation_id":c,"message_id":"retry"}),
+    );
+    wait("mémoire après relance", || {
+        f.state();
+        f.facts("grokbot").len() == 1
+    });
+    f.settle();
+    assert_eq!(f.calls().len(), 1);
+    assert_eq!(f.cards(&c).len(), 1);
+    f.reopen();
+    f.post(
+        "/api/regenerate",
+        json!({"conversation_id":c,"message_id":"retry"}),
+    );
+    wait("nouvelle régénération terminée", || {
+        f.state();
+        f.db().query_row("SELECT r.status FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')='retry' ORDER BY r.rowid DESC LIMIT 1",[],|r|r.get::<_,String>(0)).unwrap()=="finished"
+    });
+    f.settle();
+    assert_eq!(f.calls().len(), 1);
+    assert_eq!(f.cards(&c).len(), 1);
+}
+
+#[test]
+fn disconnected_queue_never_requests_perpetual_ui_polling() {
+    let mut f = Fixture::new();
+    f.post("/api/provider/signout", json!({}));
+    f.db()
+        .execute(
+            "INSERT INTO memory_auto_jobs VALUES ('offline','queued',1)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.state()["memory_auto"]["pending"], false);
+    assert_eq!(f.state()["memory_auto"]["available"], false);
+}
+
+#[test]
 fn cancelled_form_and_failed_turn_never_feed_extraction() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");
@@ -609,6 +700,80 @@ fn group_root_extracts_only_the_original_human_text_into_private_memory() {
 }
 
 #[test]
+fn rich_group_mentions_are_removed_but_email_values_remain_excluded() {
+    let mut f = Fixture::new();
+    f.bot();
+    let c = f.conv("grokbot");
+    f.post(
+        "/api/conversations/members/add",
+        json!({"conversation_id":c,"bot_id":"other","command_id":"member"}),
+    );
+    let text = "Je préfère les réponses structurées.";
+    f.script(json!([fact(text, None)]));
+    f.script(json!([fact(text, None)]));
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"everyone","body":format!("@everyone {text}"),"mentions":[{"id":"@everyone","label":"everyone","offset":0}]}));
+    wait("deux destinataires terminés", || {
+        f.state();
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE status='completed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 2
+    });
+    f.settle();
+    assert_eq!(f.calls().len(), 2);
+    assert_eq!(f.facts("grokbot").len(), 1);
+    assert_eq!(f.facts("other").len(), 1);
+    for call in f.calls() {
+        let data: Value =
+            serde_json::from_str(call["input"][0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(data["message"], text);
+    }
+    let project = "Je travaille sur le projet Boréal.";
+    f.script(json!([fact(project, None)]));
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"other-root","body":format!("🦀 @Autre {project}"),"mentions":[{"id":"other","label":"Autre","offset":3}]}));
+    wait("mention UTF-16 terminée", || {
+        f.state();
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE status='completed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 3
+    });
+    f.settle();
+    assert_eq!(f.calls().len(), 3);
+    assert_eq!(f.facts("other").len(), 2);
+    let data: Value = serde_json::from_str(
+        f.calls().last().unwrap()["input"][0]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!data["message"].as_str().unwrap().contains('@'));
+    assert!(data["message"].as_str().unwrap().contains('🦀'));
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"email","body":"@everyone Je préfère l’adresse x@exemple.fr.","mentions":[{"id":"@everyone","label":"everyone","offset":0}]}));
+    wait("tour avec adresse terminé", || {
+        f.state();
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE status='completed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 5
+    });
+    f.settle();
+    assert_eq!(f.calls().len(), 3);
+}
+
+#[test]
 fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");
@@ -642,6 +807,7 @@ fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
 #[test]
 fn no_small_model_skips_the_call_without_charging_a_large_model() {
     let mut f = Fixture::with_small_model(false);
+    assert_eq!(f.state()["memory_auto"]["available"], false);
     let c = f.conv("grokbot");
     f.send(&c, "one", "Je préfère le thé vert.");
     f.settle();

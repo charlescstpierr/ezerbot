@@ -23,9 +23,6 @@ export function orderThread(messages) {
     // A turn's status belongs after its last call, not on pre-call text.
     if ((message.notice || ["streaming", "failed", "stopped"].includes(message.state))
       && (!visible.length || indices.has(visible.at(-1).before))) visible.push({ body: "" });
-    // Usage alone belongs with the final text/copy controls, even if a task
-    // status card follows. Only a genuinely textless reply needs a usage row.
-    else if (message.payload?.usage && !visible.length) visible.push({ body: "" });
     visible.forEach((part, partIndex) => {
       const last = partIndex === visible.length - 1;
       const fragment = {
@@ -36,7 +33,6 @@ export function orderThread(messages) {
         key: `${message.id}#${partIndex}`,
         continuation: partIndex > 0,
         copyText: last ? message.body : null,
-        payload: { ...message.payload, usage: last ? message.payload.usage : undefined },
         body: part.body,
         state: last ? message.state : "echoed",
         notice: last ? message.notice : undefined,

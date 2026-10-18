@@ -194,9 +194,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
     measure();
     return () => { active = false; resize.disconnect(); mutations.disconnect(); };
   }, [message.body, appearance.key]);
-  const usage = message.payload?.usage;
-  const tokens = new Intl.NumberFormat("fr-FR");
-  if (!message.body?.trim() && !message.notice && !usage && !["streaming", "failed", "stopped"].includes(message.state)) return null;
+  if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming}>
       {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
@@ -211,9 +209,6 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           : streaming && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {message.notice && <p className="gb-notice">{message.notice}</p>}
-        {!streaming && usage && <p className="gb-token-usage" title={`Entrée : ${tokens.format(usage.input_tokens)} · Sortie : ${tokens.format(usage.output_tokens)} · Ensemble des appels de cette réponse`}>
-          Tokens : {tokens.format(usage.input_tokens + usage.output_tokens)}{usage.cached_input_tokens > 0 && <> · dont {tokens.format(usage.cached_input_tokens)} en cache</>}
-        </p>}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}

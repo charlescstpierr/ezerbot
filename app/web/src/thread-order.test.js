@@ -23,21 +23,40 @@ for (const state of ["streaming", "failed", "stopped"]) {
   });
 }
 
-test("usage appears once on the last fragment, including tool-only replies", () => {
-  const usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens: 11008 };
-  for (const parts of [[], [preCall], [preCall, { body: "Après." }]]) {
-    const message = reply("echoed", parts);
-    message.payload.usage = usage;
-    const fragments = orderThread([user, message, tool]).filter((m) => m.key);
-    assert.equal(fragments.filter((m) => m.payload.usage).length, 1);
-    assert.equal(fragments.at(-1).payload.usage, usage);
-    assert.equal(fragments.at(-1).copyText, message.body);
-    if (parts.length) assert.ok(fragments.at(-1).body);
+test("recorded usage never adds an empty reply or changes text/copy placement", () => {
+  for (const cached_input_tokens of [0, 11008]) {
+    for (const parts of [[], [preCall], [preCall, { body: "Après." }]]) {
+      const message = reply("echoed", parts);
+      const withoutUsage = orderThread([user, message, tool]);
+      message.payload.usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens };
+      const result = orderThread([user, message, tool]);
+      const presentation = (messages) => messages.map(({ payload, ...rest }) => rest);
+      assert.deepEqual(presentation(result), presentation(withoutUsage));
+      const fragments = result.filter((m) => m.key);
+      assert.ok(fragments.every((m) => m.body));
+      if (parts.length) assert.equal(fragments.at(-1).copyText, message.body);
+      else assert.deepEqual(result, [user, tool]);
+    }
   }
 });
 
+for (const state of ["streaming", "failed", "stopped"]) {
+  test(`recorded usage preserves the ${state} status and full-response copy`, () => {
+    const message = reply(state, [preCall], { error: "Erreur" });
+    message.payload.usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens: 11008 };
+    const fragments = orderThread([user, message, tool]).filter((m) => m.key);
+    assert.equal(fragments.length, 2);
+    assert.equal(fragments[0].body, "Avant.");
+    assert.equal(fragments[0].copyText, null);
+    assert.equal(fragments[1].body, "");
+    assert.equal(fragments[1].state, state);
+    assert.equal(fragments[1].error, "Erreur");
+    assert.equal(fragments[1].copyText, message.body);
+  });
+}
+
 for (const routine of [false, true]) {
-  test(`${routine ? "routine" : "delegated"} task status after text does not detach usage or copy`, () => {
+  test(`${routine ? "routine" : "delegated"} task status after text keeps copy without an empty reply`, () => {
     const task = { id: "task-end", kind: "task", payload: { run_id: "run", routine } };
     const message = reply("echoed", [{ body: "Résultat de la tâche.", before: task.id }]);
     const usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens: 11008 };
@@ -46,7 +65,6 @@ for (const routine of [false, true]) {
     assert.equal(result.length, 2);
     assert.equal(result[0].body, message.body);
     assert.equal(result[0].copyText, message.body);
-    assert.equal(result[0].payload.usage, usage);
     assert.equal(result[1], task);
     assert.equal(result.filter((m) => m.key && !m.body).length, 0);
   });

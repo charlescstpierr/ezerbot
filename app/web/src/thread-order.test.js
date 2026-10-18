@@ -228,3 +228,16 @@ test("group multi-call fragments keep their call order without stealing unrelate
   const result = orderThread([user, group, next, unrelated, tool, second]);
   assert.deepEqual(result.map((m) => m.body ?? m.id), ["Question", "Avant.", tool.id, "Puis.", second.id, "", next.body, unrelated.id]);
 });
+
+test("late automatic memories stay after their own reply, ahead of the next turn", () => {
+  const nextUser = { ...user, id: "next" };
+  const nextReply = { ...reply("echoed", [{ body: "Second." }]), id: "second", payload: { run_id: "second-run", parts: [{ body: "Second." }] } };
+  const receipts = ["a", "b"].map((id) => ({ id, kind: "memory_auto", payload: { memory_run_id: "run" } }));
+  const result = orderThread([user, reply("echoed", [{ body: "First." }]), nextUser, nextReply, ...receipts]);
+  assert.deepEqual(result.map((m) => m.id), ["question", "reply-question", "a", "b", "next", "second"]);
+});
+
+test("automatic memory with no visible reply keeps its durable fallback position", () => {
+  const receipt = { id: "memory", kind: "memory_auto", payload: { memory_run_id: "empty-run" } };
+  assert.deepEqual(orderThread([user, receipt]), [user, receipt]);
+});

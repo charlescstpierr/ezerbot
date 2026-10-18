@@ -24,6 +24,8 @@ pub enum Scope {
 pub enum Source {
     UserStated,
     ModelInferred,
+    /// Background extraction from an explicit, directly authored user turn.
+    Automatic,
     Imported,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,7 +2,8 @@
 //! `reports/goal-context-memory-learning.md`, RC02–RC04 in
 //! `reports/server-context-residual.md` establish listing by fact ID and separate
 //! promotion counts, not extraction/correction/forgetting internals. Those are
-//! local choices: model tools only, private on creation, no background extraction.
+//! local choices: private on creation; bounded background extraction is implemented
+//! separately in `memory_auto`.
 //!
 //! GET /api/memory?bot_id=<id> (default: grokbot), or POST /api/memory
 //! {bot_id}, lists active owned/private and workspace/team facts. POST children
@@ -407,7 +408,7 @@ fn provenance(
     source: Option<Source>,
 ) -> Result<Provenance, ApiError> {
     let source = source.unwrap_or(Source::ModelInferred);
-    if source == Source::Imported {
+    if !matches!(source, Source::UserStated | Source::ModelInferred) {
         return Err(ApiError::new(
             400,
             "Un outil modèle ne peut pas importer un fait.",
@@ -454,7 +455,7 @@ fn owned_fact(conn: &Connection, bot: &str, id: &str) -> Result<Fact, ApiError> 
         .ok_or_else(|| ApiError::new(404, "Fait introuvable pour ce bot."))
 }
 
-fn forget(
+pub(super) fn forget(
     conn: &Connection,
     bot: &str,
     id: &str,
@@ -470,6 +471,7 @@ fn forget(
         ));
     }
     let snapshots = facts::forget(conn, bot, id).map_err(memory_error)?;
+    super::memory_auto::block_forgotten(conn, &snapshots)?;
     // One pass over the entire lineage: redacting an older prefix first would
     // hide a later correction's match while leaving its added detail in replay.
     redact_traces(conn, &snapshots, executing_run)?;

@@ -932,6 +932,93 @@ impl Provider {
         Ok(parse_models(&body))
     }
 
+    /// One small, bounded best-effort call. No Fast tier, history, tools, retries
+    /// or user-visible failure. The catalogue is authoritative; prefer nano/mini
+    /// when available. If no small model is advertised, skip rather than charge
+    /// a large model implicitly.
+    pub(crate) fn extract_memory(
+        &self,
+        instructions: &str,
+        input: &str,
+    ) -> Result<String, Failure> {
+        use grokbot_engine::contracts::ModelEvent;
+        use std::io::Read;
+        let models = self.models();
+        let model = models
+            .iter()
+            .filter(|m| m.slug.contains("nano") || m.slug.contains("mini"))
+            .min_by_key(|m| {
+                if m.slug.contains("nano") {
+                    0
+                } else if m.slug.contains("mini") {
+                    1
+                } else {
+                    2
+                }
+            })
+            .ok_or_else(|| Failure::other("Modèle indisponible."))?;
+        let mut body = json!({"model":model.slug,"instructions":instructions,
+            "input":[{"role":"user","content":input}],"store":false,"stream":true,
+            "max_output_tokens":900});
+        if let Some(effort) = model
+            .efforts
+            .iter()
+            .min_by_key(|e| match e.effort.as_str() {
+                "none" => 0,
+                "minimal" => 1,
+                "low" => 2,
+                "medium" => 3,
+                _ => 4,
+            })
+        {
+            body["reasoning"] = json!({"effort":effort.effort});
+        }
+        // Background work never waits for credential rotation or refreshes it.
+        // A foreground call will renew an expiring token; skipping is harmless.
+        // Credential writes use atomic rename. A read-only snapshot needs no
+        // rotation lock (and cannot randomly lose a job to the UI's status read).
+        let credentials = self
+            .read()
+            .filter(Credentials::connected)
+            .filter(|c| c.expires_at > seconds() + 15)
+            .ok_or_else(Failure::signin)?;
+        let token = credentials.access_token.ok_or_else(Failure::signin)?;
+        let response = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .post(&format!("{}/responses", self.inner.endpoints.api))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "text/event-stream")
+            .send_json(body)
+            .map_err(|_| Failure::other("Extraction indisponible."))?;
+        let mut text = String::new();
+        let mut completed = false;
+        // Bound even a misbehaving server's SSE envelope, not only JSON output.
+        crate::gateway::stream_response(
+            BufReader::new(response.into_reader().take(24_000)),
+            &mut |event| {
+                match event {
+                    ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {
+                        text.push_str(&delta)
+                    }
+                    ModelEvent::Completed => completed = true,
+                    ModelEvent::Usage { .. } | ModelEvent::Reasoning { .. } => {}
+                    _ => {
+                        return Err(grokbot_engine::contracts::Error::InvalidInput(
+                            "memory extraction rejected".into(),
+                        ))
+                    }
+                }
+                Ok(())
+            },
+        )
+        .map_err(|_| Failure::other("Extraction ignorée."))?;
+        if !completed {
+            return Err(Failure::other("Extraction incomplète."));
+        }
+        Ok(text)
+    }
+
     /// Sends an unmodified Responses body and returns the raw JSON/SSE response.
     /// Authentication is renewed at most once after a 401; other failures are not retried.
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {

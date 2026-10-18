@@ -27,6 +27,10 @@ pub struct Seen {
     pub revoked: bool,
     /// FIFO replies for /v1/responses. An empty queue uses the original chat fixture.
     pub responses: VecDeque<ScriptedResponse>,
+    /// Automatic memory runs independently; never consume a chat's scripted reply.
+    pub memory_responses: VecDeque<ScriptedResponse>,
+    pub memory_model: bool,
+    pub memory_delay: Duration,
     /// Optional provider telemetry for default chat replies (titles remain independent).
     pub usage: Option<Value>,
     /// Hold a catalogue or a numbered response without locking observations.
@@ -150,6 +154,7 @@ impl FakeOpenAi {
                 } else {
                     None
                 };
+                let mut delay = Duration::ZERO;
                 let (status, content_type, payload) = match request.url() {
                     "/jwks" => (200, "application/json".to_owned(), JWKS.to_owned()),
                     "/token" => {
@@ -175,13 +180,16 @@ impl FakeOpenAi {
                     "/v1/models" => {
                         seen.model_requests += 1;
                         seen.bearer.push(bearer);
-                        let models = json!({"models": [
+                        let mut models = json!({"models": [
                             {"slug": "gpt-test", "display_name": "GPT Test", "description": "Modèle de test", "visibility": "list",
                              "default_reasoning_level": "medium", "default_reasoning_summary": "none",
                              "supported_reasoning_levels": [{"effort": "low", "description": "Léger"}, {"effort": "medium", "description": "Équilibré"}, {"effort": "high", "description": "Profond"}],
                              "service_tiers": [{"id": "priority", "name": "Fast", "description": "2x speed"}]},
                             {"slug": "internal", "display_name": "Internal", "visibility": "hide"},
                         ]});
+                        if seen.memory_model {
+                            models["models"].as_array_mut().unwrap().push(json!({"slug":"gpt-test-mini","display_name":"GPT Test Mini","visibility":"list","supported_reasoning_levels":[{"effort":"low","description":"Léger"}]}));
+                        }
                         (200, "application/json".into(), models.to_string())
                     }
                     "/v1/responses" => {
@@ -199,6 +207,17 @@ impl FakeOpenAi {
                                 "message":format!("Invalid 'prompt_cache_key': string too long. Expected a string with maximum length 64, but got a string with length {} instead.", key.chars().count()),
                             }});
                             (400, "application/json".into(), error.to_string())
+                        } else if request_body["instructions"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .starts_with("Extraction de mémoire automatique.")
+                        {
+                            let reply = seen.memory_responses.pop_front().unwrap_or_else(|| ScriptedResponse::events(&[
+                                json!({"type":"response.output_text.delta","delta":"{\"facts\":[]}"}),
+                                json!({"type":"response.completed"}),
+                            ]));
+                            delay = seen.memory_delay;
+                            (reply.status, reply.content_type, reply.body)
                         } else if let Some(reply) = seen.responses.pop_front() {
                             (reply.status, reply.content_type, reply.body)
                         } else if request_body["instructions"]
@@ -257,6 +276,7 @@ impl FakeOpenAi {
                 if let Some(delay) = response_delay {
                     std::thread::sleep(delay);
                 }
+                std::thread::sleep(delay);
                 let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
                 let _ = request.respond(
                     tiny_http::Response::from_string(payload)

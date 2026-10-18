@@ -1,3 +1,9 @@
+.memory-auto-toggle { margin-top: 16px; }
+.gb-memory-card .memory-text { margin: 0; }
+.gb-memory-card .memory-actions { margin-top: 6px; }
+.gb-memory-card label { font-size: 11px; }
+.gb-memory-card textarea { display: block; width: 100%; box-sizing: border-box; min-height: 76px; margin: 8px 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--text); font: inherit; resize: vertical; }
+.gb-memory-card button:disabled { opacity: .6; }
 .memory-panel { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 18px; min-width: 0; }
 .memory-panel h3 { margin: 0 0 10px; font-size: 13px; }
 .memory-panel h4 { margin: 14px 0 6px; font-size: 12px; }

@@ -104,5 +104,26 @@ export function orderThread(messages) {
     });
     ordered[first] = { ...ordered[first], continuation: true };
   }
-  return ordered.flatMap((message, index) => headings.has(index) ? [headings.get(index), message] : [message]);
+  const headed = ordered.flatMap((message, index) => headings.has(index) ? [headings.get(index), message] : [message]);
+  // Extraction may finish after the next user has already sent a message. Keep
+  // its discreet receipts below their own reply, never under that newer turn.
+  // memory_run_id is deliberately distinct from run_id: it must not move the
+  // reply's text behind its receipts in the ordinary tool-fragment algorithm.
+  const memories = new Map();
+  for (const message of headed) {
+    const runId = message.kind === "memory_auto" && message.payload?.memory_run_id;
+    if (runId) memories.set(runId, [...(memories.get(runId) || []), message]);
+  }
+  const attached = new Map(), relocated = new Set();
+  for (const [runId, receipts] of memories) {
+    let anchor;
+    for (let index = headed.length - 1; index >= 0; index--) {
+      const candidate = headed[index];
+      if (candidate.payload?.run_id === runId || candidate.payload?.parent_run_id === runId) { anchor = candidate; break; }
+    }
+    if (!anchor) continue;
+    attached.set(anchor, receipts);
+    for (const receipt of receipts) relocated.add(receipt);
+  }
+  return headed.flatMap((message) => relocated.has(message) ? [] : [message, ...(attached.get(message) || [])]);
 }

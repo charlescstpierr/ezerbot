@@ -89,6 +89,7 @@ pub mod engine;
 pub mod forms;
 pub mod mcp;
 pub mod memory;
+pub mod memory_auto;
 pub mod multibot;
 pub mod routines;
 pub mod skills;
@@ -123,6 +124,7 @@ registry!(
     multibot,
     skills,
     memory,
+    memory_auto,
     forms,
     routines,
     delegation,

@@ -11,7 +11,35 @@
   // window, including across section remounts, never their text or provenance.
   // A durable forgotten-history endpoint belongs to a separate server slice.
   const forgotten = new Map(), forgottenIds = new Set();
-  let activeReload;
+  let activeReload, settingsSection, automaticRevision;
+  const settingInputs = new Map();
+  function renderAutomaticSettings(state) {
+    if (!settingsSection) return;
+    const bots = (state?.bots || []).filter((bot) => !bot.deleted);
+    const ids = new Set(bots.map((bot) => bot.id));
+    for (const [id, input] of settingInputs) if (!ids.has(id)) { input.closest("label").remove(); settingInputs.delete(id); }
+    for (const bot of bots) {
+      let input = settingInputs.get(bot.id);
+      if (!input) {
+        const label = node("label", "setting-toggle memory-auto-toggle");
+        const copy = node("span");
+        copy.append(node("strong", "", bot.name), node("small", "", "Retenir les préférences, l’identité et les projets après une réponse."));
+        input = node("input"); input.type = "checkbox"; input.name = `automatic-${bot.id}`; input.setAttribute("role", "switch");
+        const track = node("span", "toggle-track"); track.setAttribute("aria-hidden", "true");
+        label.append(copy, input, track); settingsSection.append(label); settingInputs.set(bot.id, input);
+        input.addEventListener("change", async () => {
+          const enabled = input.checked;
+          input.disabled = true;
+          try { await panels.api("/api/memory/automatic", { bot_id: bot.id, enabled }); await panels.refresh(); }
+          catch (error) { input.checked = !enabled; panels.notify(error.message); }
+          finally { input.disabled = false; }
+        });
+      }
+      input.closest("label").querySelector("strong").textContent = bot.name;
+      input.setAttribute("aria-label", `Mémoire automatique — ${bot.name}`);
+      if (!input.disabled) input.checked = state?.memory_auto?.settings?.find((s) => s.bot_id === bot.id)?.enabled !== false;
+    }
+  }
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
     if (className) el.className = className;
@@ -27,6 +55,27 @@
 
   panels.register({
     id: "memory",
+    settingsSection(container) {
+      settingsSection = node("section", "setting-section");
+      settingsSection.append(node("h3", "", "Mémoire automatique"), node("p", "", "Activée par défaut pour chaque bot. Au plus 3 faits par tour, privés au départ. Les secrets et les réponses aux formulaires sont exclus. Vous pouvez annuler ou modifier chaque fait dans le fil."));
+      container.append(settingsSection);
+      renderAutomaticSettings(panels.state);
+    },
+    onState(state) {
+      renderAutomaticSettings(state);
+      const revision = state?.memory_auto?.revision;
+      if (revision !== automaticRevision) { automaticRevision = revision; activeReload?.(); }
+    },
+    wantsPolling() { return panels.state?.memory_auto?.pending === true; },
+    async onCardAction(message, action, detail) {
+      if (message.kind !== "memory_auto") return false;
+      if (action === "undo") await panels.api("/api/memory/automatic/undo", { card_id: message.id });
+      else if (action === "correct") await panels.api("/api/memory/correct", { bot_id: message.payload.bot_id, fact_id: message.payload.fact_id, text: detail.text });
+      else return false;
+      await panels.refresh();
+      activeReload?.();
+      return true;
+    },
     botSection(bot, container) {
       const section = node("section", "memory-panel");
       // Enter on a checkbox otherwise implicitly submits the enclosing bot form.
@@ -44,7 +93,7 @@
       const processed = new Set();
       const totals = { created: 0, already: 0, kept: 0 };
       let facts = [], alive = true, busy = false, loaded = false, revision = 0;
-      let editingId;
+      let editingId, reloadTimer;
       const controls = node("fieldset", "memory-controls");
       const toolbar = node("div", "memory-toolbar");
       const allLabel = node("label", "memory-select-all");
@@ -108,7 +157,7 @@
           const owner = panels.state?.bots?.find((item) => item.id === fact.bot_id);
           const scope = fact.scope === "team" ? "Équipe" : "Privé";
           const date = new Date(fact.learned_at);
-          row.append(label, node("p", "memory-meta", `${scope}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || "Bot indisponible"}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
+          row.append(label, node("p", "memory-meta", `${scope}${fact.provenance?.source === "automatic" ? " · Automatique" : ""}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || "Bot indisponible"}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
           const actions = node("div", "memory-actions");
           // Models may mutate only their own facts. The user can purge a visible
           // team fact through its owner, including a deleted owner (wrapper r2).
@@ -257,12 +306,19 @@
           } else activeReload?.();
         }
       }
-      activeReload = load;
+      function requestReload() {
+        if (!alive) return;
+        clearTimeout(reloadTimer);
+        if (busy) { reloadTimer = setTimeout(requestReload, 200); return; }
+        load();
+      }
+      activeReload = requestReload;
       load();
       return () => {
         alive = false;
+        clearTimeout(reloadTimer);
         revision++;
-        if (activeReload === load) activeReload = undefined;
+        if (activeReload === requestReload) activeReload = undefined;
         facts = [];
         selected.clear();
         closeEditor();

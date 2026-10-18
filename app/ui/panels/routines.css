@@ -11,6 +11,8 @@
 .routines-note { color: var(--muted); }
 .routines-warning { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-line); padding: 10px; border-radius: 7px; }
 .routines-error { color: var(--danger-text); }
+.routines-note > button { margin-left: 8px; }
+.routine-run-target { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: 8px; }
 .routines-note:empty, .routines-error:empty { display: none; }
 .routines-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .routines-dialog button:disabled { opacity: .5; cursor: default; }
@@ -21,6 +23,8 @@
 .routines-fields .text-input { margin-top: 6px; }
 .routines-fields > .routines-enabled { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .routines-content > button { margin-right: 8px; margin-bottom: 12px; }
+.routines-ranges { margin: 16px 0; }
+.routines-ranges > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .routines-fields textarea { white-space: pre-wrap; min-height: 130px; }
 .routines-preview { padding: 12px; border: 1px solid var(--line); background: var(--soft); border-radius: 7px; }
 .routines-skill-preview { padding: 12px; border: 1px solid var(--line); max-height: 320px; overflow: auto; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }

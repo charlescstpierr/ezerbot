@@ -102,6 +102,22 @@ struct Manual {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct History {
+    bot_id: String,
+    routine_id: String,
+    cursor: Option<String>,
+    ranges_cursor: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Resume {
+    bot_id: String,
+    routine_id: String,
+    modified_at: Option<i64>,
+    schedule_version: Option<u64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Enable {
     routine_id: String,
     #[serde(default)]
@@ -116,6 +132,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         routine_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
         after_ordinal INTEGER NOT NULL, modified_at INTEGER NOT NULL,
         confirmed_message_id TEXT
+    ); CREATE TABLE IF NOT EXISTS wrapper_routine_launches (
+        routine_id TEXT NOT NULL, nonce TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+        PRIMARY KEY(routine_id,nonce)
     ); CREATE TABLE IF NOT EXISTS wrapper_routine_errors (
         routine_id TEXT PRIMARY KEY, error TEXT NOT NULL
     ); CREATE TABLE IF NOT EXISTS wrapper_routine_notices (
@@ -571,14 +590,19 @@ pub fn routes(
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(ApiResponse::Json(json!({"routines":values})));
             }
-            let input: Id = if method == "GET" {
+            let input: History = if method == "GET" {
                 serde_json::from_value(query(q)?)
                     .map_err(|_| ApiError::new(400, "bot_id and routine_id required"))?
             } else {
                 parse(bytes)?
             };
             let r = owned(&app.connection, &input.bot_id, &input.routine_id)?;
-            return Ok(ApiResponse::Json(history(&app.connection, &r.routine_id)?));
+            return Ok(ApiResponse::Json(history(
+                &app.connection,
+                &r.routine_id,
+                input.cursor.as_deref(),
+                input.ranges_cursor.as_deref(),
+            )?));
         }
         let tx = write_transaction(&app.connection)?;
         let mut ctx = app.feature_context();
@@ -594,7 +618,48 @@ pub fn routes(
                 let input: Manual = parse(bytes)?;
                 owned(&tx, &input.bot_id, &input.routine_id)?;
                 validate_id(&input.nonce)?;
-                json!({"occurrence":occurrences::run_now(&tx,&input.routine_id,&input.nonce,clock(&ctx)?)?})
+                // Persist aliases for lost replies; coalesce concurrent clients
+                // while active and through CR16's 3-second cooldown. The immediate
+                // write transaction serializes lookup + insertion.
+                let existing: Option<String> = tx.query_row("SELECT occurrence_id FROM wrapper_routine_launches WHERE routine_id=?1 AND nonce=?2",params![input.routine_id,input.nonce],|r|r.get(0)).optional()?;
+                let existing = match existing {
+                    Some(id) => Some(id),
+                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
+                };
+                let occurrence = match existing {
+                    Some(id) => occurrences::get(&tx, &id)?
+                        .ok_or_else(|| ApiError::new(500, "Lancement introuvable. Réessayez."))?,
+                    None => {
+                        occurrences::run_now(&tx, &input.routine_id, &input.nonce, clock(&ctx)?)?
+                    }
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO wrapper_routine_launches VALUES (?1,?2,?3)",
+                    params![input.routine_id, input.nonce, occurrence.occurrence_id],
+                )?;
+                json!({"occurrence":occurrence})
+            }
+            "/api/routines/resume" => {
+                let input: Resume = parse(bytes)?;
+                let r = owned(&tx, &input.bot_id, &input.routine_id)?;
+                if !r.enabled
+                    && (input.modified_at.is_some_and(|v| v != r.modified_at)
+                        || input
+                            .schedule_version
+                            .is_some_and(|v| v != r.schedule_version))
+                {
+                    return Err(ApiError::new(
+                        409,
+                        "La routine a changé depuis votre lecture. Relisez-la avant de confirmer.",
+                    ));
+                }
+                enable(&ctx, &r)?;
+                close_confirmation(
+                    &tx,
+                    &r.routine_id,
+                    "Demande close : routine activée depuis le panneau.",
+                )?;
+                json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
             }
             _ => {
                 let input: Id = if method == "GET" {
@@ -605,7 +670,6 @@ pub fn routes(
                 };
                 let r = owned(&tx, &input.bot_id, &input.routine_id)?;
                 match route {
-                    "/api/routines/history" => history(&tx, &r.routine_id)?,
                     "/api/routines/delete" => {
                         routine::delete(&tx, &r.routine_id)?;
                         close_confirmation(
@@ -619,15 +683,6 @@ pub fn routes(
                         routine::set_enabled(&tx, &r.routine_id, false, clock(&ctx)?)?;
                         json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
                     }
-                    "/api/routines/resume" => {
-                        enable(&ctx, &r)?;
-                        close_confirmation(
-                            &tx,
-                            &r.routine_id,
-                            "Demande close : routine activée depuis le panneau.",
-                        )?;
-                        json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
-                    }
                     _ => unreachable!(),
                 }
             }
@@ -636,9 +691,55 @@ pub fn routes(
         Ok(ApiResponse::Json(result))
     })())
 }
-fn history(conn: &Connection, id: &str) -> Result<Value, ApiError> {
+fn history(
+    conn: &Connection,
+    id: &str,
+    cursor: Option<&str>,
+    ranges_cursor: Option<&str>,
+) -> Result<Value, ApiError> {
+    fn decode(text: Option<&str>) -> Result<Option<occurrences::HistoryCursor>, ApiError> {
+        text.map(|s| {
+            let (snapshot, after) = s.split_once('.').ok_or_else(|| {
+                ApiError::new(400, "Curseur d’historique invalide. Rouvrez l’historique.")
+            })?;
+            Ok(occurrences::HistoryCursor {
+                snapshot: snapshot
+                    .parse()
+                    .map_err(|_| ApiError::new(400, "Curseur d’historique invalide."))?,
+                after: after
+                    .parse()
+                    .map_err(|_| ApiError::new(400, "Curseur d’historique invalide."))?,
+            })
+        })
+        .transpose()
+    }
+    fn encode(c: occurrences::HistoryCursor) -> String {
+        format!("{}.{}", c.snapshot, c.after)
+    }
+    let tx = conn.unchecked_transaction()?;
+    let page = occurrences::history_page(&tx, id, decode(cursor)?)?;
+    let ranges = occurrences::missed_ranges_page(&tx, id, decode(ranges_cursor)?)?;
+    let running:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences WHERE routine_id=?1 AND status IN ('pending','running'))",[id],|r|r.get(0))?;
+    let mut items = Vec::new();
+    for occurrence in page.items {
+        let mut value = json!(occurrence);
+        let run_id: Option<String> = tx.query_row(
+            "SELECT run_id FROM scheduler_occurrences WHERE occurrence_id=?1",
+            [&occurrence.occurrence_id],
+            |r| r.get(0),
+        )?;
+        if let Some(run) = run_id.map(|id| store::get(&tx, &id)).transpose()?.flatten() {
+            value["run_id"] = json!(run.run_id);
+            value["conversation_id"] = json!(run.conversation_id);
+            value["message_id"] = json!(format!("reply-{}", run.run_id));
+        }
+        items.push(value);
+    }
+    tx.commit()?;
     Ok(
-        json!({"occurrences":occurrences::list(conn,id)?,"missed_ranges":occurrences::missed_ranges(conn,id)?}),
+        json!({"occurrences":items,"missed_ranges":ranges.items,"running":running,
+        "cursor":encode(page.cursor),"next_cursor":page.next.map(encode),
+        "ranges_cursor":encode(ranges.cursor),"next_ranges_cursor":ranges.next.map(encode)}),
     )
 }
 pub fn state(ctx: &Context<'_>) -> Value {
@@ -668,12 +769,15 @@ pub fn state(ctx: &Context<'_>) -> Value {
                     .as_object_mut()
                     .expect("routine object")
                     .remove("body");
-                list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation}));
+                let running:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences WHERE routine_id=?1 AND status IN ('pending','running'))",[&r.routine_id],|row|row.get(0))?;
+                list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation,"running":running}));
             }
         }
         Ok(json!({"items":list}))
     };
-    load().unwrap_or_else(|_| json!({"error":"Routine state unavailable"}))
+    load().unwrap_or_else(
+        |_| json!({"error":"Les routines sont indisponibles. Réessayez dans un instant."}),
+    )
 }
 // Arbitrary capability entries are not replayed as chat history by the engine.
 // Supply visible pending questions as quoted data to the principal model, also

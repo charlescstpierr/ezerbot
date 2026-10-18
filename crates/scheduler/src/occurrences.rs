@@ -84,6 +84,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          CREATE UNIQUE INDEX IF NOT EXISTS scheduler_manual_nonce
             ON scheduler_occurrences(routine_id, manual_nonce) WHERE manual_nonce IS NOT NULL;
          CREATE INDEX IF NOT EXISTS scheduler_pending ON scheduler_occurrences(status);
+         CREATE INDEX IF NOT EXISTS scheduler_history
+            ON scheduler_occurrences(routine_id, scheduled_at_utc DESC, occurrence_id DESC);
          CREATE TABLE IF NOT EXISTS scheduler_missed_ranges (
             routine_id TEXT NOT NULL REFERENCES scheduler_routines(routine_id),
             schedule_version INTEGER NOT NULL,
@@ -93,6 +95,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             time_zone TEXT NOT NULL,
             PRIMARY KEY(routine_id, schedule_version, from_inclusive)
          );
+         CREATE INDEX IF NOT EXISTS scheduler_range_history
+            ON scheduler_missed_ranges(routine_id, from_inclusive DESC, schedule_version DESC);
          INSERT INTO component_versions(component, version)
             VALUES ('scheduler.occurrences', 1) ON CONFLICT(component) DO NOTHING;",
     )?;
@@ -325,6 +329,136 @@ pub fn get(conn: &Connection, occurrence_id: &str) -> Result<Option<Occurrence>>
             from_row,
         )
         .optional()?)
+}
+
+/// Insertion watermark plus keyset position. New (even backdated) insertions
+/// cannot shift a page already being traversed. Status changes remain visible.
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryCursor {
+    pub snapshot: i64,
+    pub after: i64,
+}
+
+pub struct HistoryPage<T> {
+    pub items: Vec<T>,
+    pub cursor: HistoryCursor,
+    pub next: Option<HistoryCursor>,
+}
+
+pub const HISTORY_PAGE_SIZE: usize = 30;
+
+fn page_cursor(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    cursor: Option<HistoryCursor>,
+) -> Result<HistoryCursor> {
+    let cursor = match cursor {
+        Some(c) => c,
+        None => HistoryCursor {
+            snapshot: conn.query_row(
+                &format!("SELECT COALESCE(MAX(rowid),0) FROM {table}"),
+                [],
+                |r| r.get(0),
+            )?,
+            after: 0,
+        },
+    };
+    if cursor.snapshot < 0
+        || cursor.after < 0
+        || cursor.after > cursor.snapshot
+        || (cursor.after != 0
+            && !conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE rowid=?1 AND routine_id=?2)"),
+                params![cursor.after, id],
+                |r| r.get::<_, bool>(0),
+            )?)
+    {
+        return Err(Error::InvalidInput(
+            "Curseur d’historique invalide ; rouvrez l’historique.".into(),
+        ));
+    }
+    Ok(cursor)
+}
+
+pub fn history_page(
+    conn: &Connection,
+    id: &str,
+    cursor: Option<HistoryCursor>,
+) -> Result<HistoryPage<Occurrence>> {
+    let cursor = page_cursor(conn, "scheduler_occurrences", id, cursor)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS},rowid FROM scheduler_occurrences
+        WHERE routine_id=?1 AND rowid<=?2 AND (?3=0 OR (scheduled_at_utc,occurrence_id)<
+        (SELECT scheduled_at_utc,occurrence_id FROM scheduler_occurrences WHERE rowid=?3))
+        ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT ?4"
+    ))?;
+    let mut rows = stmt
+        .query_map(
+            params![id, cursor.snapshot, cursor.after, HISTORY_PAGE_SIZE + 1],
+            |r| Ok((from_row(r)?, r.get::<_, i64>(8)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let more = rows.len() > HISTORY_PAGE_SIZE;
+    rows.truncate(HISTORY_PAGE_SIZE);
+    let next = if more {
+        rows.last().map(|(_, after)| HistoryCursor {
+            after: *after,
+            ..cursor
+        })
+    } else {
+        None
+    };
+    Ok(HistoryPage {
+        items: rows.into_iter().map(|(item, _)| item).collect(),
+        cursor,
+        next,
+    })
+}
+
+pub fn missed_ranges_page(
+    conn: &Connection,
+    id: &str,
+    cursor: Option<HistoryCursor>,
+) -> Result<HistoryPage<MissedRange>> {
+    let cursor = page_cursor(conn, "scheduler_missed_ranges", id, cursor)?;
+    let mut stmt = conn.prepare("SELECT routine_id,schedule_version,from_inclusive,until_exclusive,trigger,time_zone,rowid
+        FROM scheduler_missed_ranges WHERE routine_id=?1 AND rowid<=?2 AND (?3=0 OR
+        (from_inclusive,schedule_version)<(SELECT from_inclusive,schedule_version FROM scheduler_missed_ranges WHERE rowid=?3))
+        ORDER BY from_inclusive DESC,schedule_version DESC LIMIT ?4")?;
+    let mut rows = stmt
+        .query_map(
+            params![id, cursor.snapshot, cursor.after, HISTORY_PAGE_SIZE + 1],
+            |r| {
+                Ok((
+                    MissedRange {
+                        routine_id: r.get(0)?,
+                        schedule_version: r.get(1)?,
+                        from_inclusive: r.get(2)?,
+                        until_exclusive: r.get(3)?,
+                        trigger: routine::json(r, 4)?,
+                        time_zone: r.get(5)?,
+                    },
+                    r.get::<_, i64>(6)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let more = rows.len() > HISTORY_PAGE_SIZE;
+    rows.truncate(HISTORY_PAGE_SIZE);
+    let next = if more {
+        rows.last().map(|(_, after)| HistoryCursor {
+            after: *after,
+            ..cursor
+        })
+    } else {
+        None
+    };
+    Ok(HistoryPage {
+        items: rows.into_iter().map(|(item, _)| item).collect(),
+        cursor,
+        next,
+    })
 }
 
 pub fn list(conn: &Connection, routine_id: &str) -> Result<Vec<Occurrence>> {

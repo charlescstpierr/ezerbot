@@ -1190,7 +1190,16 @@ fn routine_without_skill_runs_inline_prompt() {
             summary: "Report ready".into()
         })
     );
-    assert_eq!(f.history(&r)["occurrences"][0]["status"]["status"], "done");
+    let history = f.history(&r);
+    assert_eq!(history["occurrences"][0]["status"]["status"], "done");
+    assert_eq!(
+        history["occurrences"][0]["conversation_id"],
+        r.conversation_id
+    );
+    assert_eq!(
+        history["occurrences"][0]["message_id"],
+        format!("reply-{}", f.run(&r).run_id)
+    );
     let seen = f.server.seen.lock().unwrap();
     assert!(seen
         .bodies
@@ -1633,6 +1642,232 @@ fn failing_tool_rolls_back_partial_effects_inside_engine_transaction() {
             .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn history_pages_are_bounded_stable_and_persist_across_restart() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Paged report");
+    let db = f.db();
+    for n in 0..67 {
+        // Equal timestamps force the ID tie-breaker; insertion order differs.
+        db.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,manual_nonce) VALUES (?1,?2,1,?3,'missed',?1)",params![format!("page-{n:03}"),r.routine_id,n/3]).unwrap();
+        db.execute(
+            "INSERT INTO scheduler_missed_ranges VALUES (?1,1,?2,?3,?4,'UTC')",
+            params![
+                r.routine_id,
+                n * 100,
+                n * 100 + 50,
+                json!({"kind":"every","interval_ms":60000,"phase_ms":null}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    let first = f.history(&r);
+    assert_eq!(first["occurrences"].as_array().unwrap().len(), 30);
+    assert_eq!(first["missed_ranges"].as_array().unwrap().len(), 30);
+    let mut ids = Vec::new();
+    let mut ranges = Vec::new();
+    let mut page = first.clone();
+    // Both newer and backdated rows must stay outside this traversal.
+    for (id, at) in [("newer", 1000), ("backdated", 0)] {
+        db.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,manual_nonce) VALUES (?1,?2,1,?3,'missed',?1)",params![id,r.routine_id,at]).unwrap();
+    }
+    db.execute(
+        "INSERT INTO scheduler_missed_ranges VALUES (?1,2,0,50,?2,'UTC')",
+        params![
+            r.routine_id,
+            json!({"kind":"every","interval_ms":60000,"phase_ms":null}).to_string()
+        ],
+    )
+    .unwrap();
+    f.reopen();
+    loop {
+        ids.extend(
+            page["occurrences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["occurrence_id"].as_str().unwrap().to_owned()),
+        );
+        ranges.extend(
+            page["missed_ranges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["from_inclusive"].as_i64().unwrap()),
+        );
+        if page["next_cursor"].is_null() {
+            break;
+        }
+        page=f.post("/api/routines/history",json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"cursor":page["next_cursor"],"ranges_cursor":page["next_ranges_cursor"]}));
+        assert!(page["occurrences"].as_array().unwrap().len() <= 30);
+    }
+    assert_eq!(ids.len(), 67);
+    let mut expected = (0..67)
+        .rev()
+        .map(|n| format!("page-{n:03}"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected);
+    expected.sort();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids, expected);
+    assert_eq!(ranges, (0..67).rev().map(|n| n * 100).collect::<Vec<_>>());
+    assert_eq!(f.history(&r)["occurrences"][0]["occurrence_id"], "newer");
+    let other = f.create("Other");
+    for cursor in [json!("invalid"), json!("-1.0"), json!("999999.999999")] {
+        assert!(f
+            .app
+            .api(
+                "POST",
+                "/api/routines/history",
+                json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"cursor":cursor})
+                    .to_string()
+                    .as_bytes()
+            )
+            .is_err());
+    }
+    assert!(f.app.api("POST","/api/routines/history",json!({"bot_id":other.bot_id,"routine_id":other.routine_id,"cursor":first["next_cursor"]}).to_string().as_bytes()).is_err());
+}
+
+#[test]
+fn concurrent_panel_resume_and_launch_coalesce_and_aliases_survive_restart() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Concurrent report");
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id}),
+    );
+    for endpoint in ["/api/routines/resume", "/api/routines/run-now"] {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads = (0..2)
+            .map(|n| {
+                let path = f.path.clone();
+                let provider = f.provider.clone();
+                let id = r.routine_id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut app = App::open_with(&path, provider).unwrap();
+                    barrier.wait();
+                    let payload = if endpoint.ends_with("run-now") {
+                        json!({"bot_id":"grokbot","routine_id":id,"nonce":format!("client-{n}")})
+                    } else {
+                        json!({"bot_id":"grokbot","routine_id":id})
+                    };
+                    app.api("POST", endpoint, payload.to_string().as_bytes())
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let replies = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(replies[0], replies[1]);
+    }
+    let first = f.post(
+        "/api/routines/run-now",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"nonce":"client-0"}),
+    )["occurrence"]["occurrence_id"]
+        .clone();
+    let mut ctx = f.app.feature_context();
+    ctx.now_ms = r.modified_at as u64;
+    features::routines::tick(&ctx);
+    assert_eq!(f.count(), 1);
+    f.reopen();
+    // Even a new client intent just after synchronous completion is coalesced.
+    let cooldown = f.post(
+        "/api/routines/run-now",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"nonce":"third-client"}),
+    );
+    assert_eq!(cooldown["occurrence"]["occurrence_id"], first);
+    // Replay after cooldown (force old timestamp) still returns the old identity.
+    f.db()
+        .execute(
+            "UPDATE scheduler_occurrences SET scheduled_at_utc=1 WHERE occurrence_id=?1",
+            [first.as_str().unwrap()],
+        )
+        .unwrap();
+    let alias = f.post(
+        "/api/routines/run-now",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"nonce":"client-1"}),
+    );
+    assert_eq!(alias["occurrence"]["occurrence_id"], first);
+    let h = f.history(&r);
+    assert_eq!(h["occurrences"][0]["conversation_id"], r.conversation_id);
+    assert_eq!(h["occurrences"][0]["run_id"], f.run(&r).run_id);
+    assert_eq!(
+        h["occurrences"][0]["message_id"],
+        format!("reply-{}", f.run(&r).run_id)
+    );
+    // Failure outputs are linked as well as successes.
+    assert_eq!(h["occurrences"][0]["status"]["status"], "failed");
+    assert_eq!(f.count(), 1);
+}
+
+#[test]
+fn concurrent_resumes_preserve_one_schedule_anchor_and_one_due_run() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Resume once");
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id}),
+    );
+    let reviewed = routine::get(&f.db(), &r.routine_id).unwrap().unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let threads=(0..2).map(|_| {
+        let path=f.path.clone(); let provider=f.provider.clone(); let barrier=barrier.clone(); let reviewed=reviewed.clone();
+        std::thread::spawn(move || {
+            let mut app=App::open_with(&path,provider).unwrap(); barrier.wait();
+            app.api("POST","/api/routines/resume",json!({"bot_id":reviewed.bot_id,"routine_id":reviewed.routine_id,"modified_at":reviewed.modified_at,"schedule_version":reviewed.schedule_version}).to_string().as_bytes()).unwrap()
+        })
+    }).collect::<Vec<_>>();
+    let results = threads
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results[0], results[1]);
+    let resumed = routine::get(&f.db(), &r.routine_id).unwrap().unwrap();
+    f.tick_due(&resumed);
+    f.tick_due(&resumed);
+    f.reopen();
+    f.tick_due(&resumed);
+    assert_eq!(f.count(), 1);
+    assert_eq!(f.history(&r)["occurrences"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn panel_confirmation_rejects_a_changed_review_and_history_denies_wrong_bot() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Reviewed report");
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id}),
+    );
+    let err=f.app.api("POST","/api/routines/resume",json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version}).to_string().as_bytes()).unwrap_err();
+    assert_eq!(err.status, 409);
+    assert!(err.message.contains("Relisez"));
+    assert!(
+        !routine::get(&f.db(), &r.routine_id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(f.count(), 0);
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/routines/history",
+                json!({"bot_id":"missing","routine_id":r.routine_id})
+                    .to_string()
+                    .as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        404
     );
 }
 

@@ -138,9 +138,20 @@
       schedulePoll();
       return true;
     },
-    openConversation(id) {
+    openConversation(id, messageId) {
       if (busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
       selectConversation(id, true);
+      if (messageId) {
+        let attempts = 0;
+        const reveal = () => {
+          const target = [...ui.messages.querySelectorAll("[data-message-id]")].find((el) => el.dataset.messageId === messageId);
+          if (target) { target.scrollIntoView({ block: "center" }); target.classList.add("routine-run-target"); setTimeout(() => target.classList.remove("routine-run-target"), 2500); }
+          else if (++attempts < 20) setTimeout(reveal, 50);
+        };
+        // selectConversation schedules an initial jump to the latest message.
+        // Reveal the selected run only after that frame and React's layout.
+        requestAnimationFrame(() => requestAnimationFrame(reveal));
+      }
       return true;
     },
     draft: () => ui.input?.value || "",
@@ -224,19 +235,29 @@
       headers: { "Content-Type": "application/json", "X-Grokbot-Request": "local" },
       body: JSON.stringify(body),
     };
-    let response;
-    try { response = await fetch(path, options); }
-    catch (error) {
-      showConnectionError(error);
-      throw new Error("La connexion au moteur local est interrompue.");
-    }
-    let data;
-    try { data = await response.json(); } catch { throw new Error("Le moteur local a renvoyé une réponse illisible."); }
-    if (!response.ok) throw new Error(data.error || "L’action n’a pas pu être terminée.");
-    return data;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      let response;
+      try { response = await fetch(path, { ...options, signal: controller.signal }); }
+      catch (error) {
+        showConnectionError(error);
+        throw new Error("La connexion au moteur local est interrompue.");
+      }
+      let data;
+      try { data = await response.json(); }
+      catch (error) { showConnectionError(error); throw new Error("Le moteur local a renvoyé une réponse illisible."); }
+      if (!response.ok) throw new Error(data.error || "L’action n’a pas pu être terminée.");
+      return data;
+    } finally { clearTimeout(timeout); }
   }
 
-  async function refresh() {
+  let refreshWork;
+  function refresh() {
+    if (!refreshWork) refreshWork = loadState().finally(() => { refreshWork = null; });
+    return refreshWork;
+  }
+  async function loadState() {
     const previous = currentConversation();
     const groupWasActive = previous?.kind === "group" && Boolean(streamingMessage(previous));
     const previousTail = previous?.messages.at(-1)?.id;
@@ -265,11 +286,13 @@
     const live = state.conversations.some((conversation) => streamingMessage(conversation));
     const waiting = provider().signin === "pending" || provider().titling || (provider().connected && !provider().models_ready);
     const panelWaiting = [...panels.values()].some((panel) => panelCall(panel, panel.wantsPolling) === true);
-    if (!live && !waiting && !panelWaiting) return;
+    // A failed refresh must never disarm recovery. An idle heartbeat also
+    // notices a wrapper restart or a run started by another window.
+
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
-      try { await refresh(); } catch { /* showConnectionError already told the user. */ }
-    }, live ? 200 : 800);
+      try { await refresh(); } catch { schedulePoll(); }
+    }, !connected ? 1500 : live ? 200 : waiting || panelWaiting ? 800 : 5000);
   }
 
   function showConnectionError(error) {
@@ -278,6 +301,7 @@
     ui.bannerText.textContent = "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
     updateComposer();
+    schedulePoll();
     if (error) console.warn("Ezerbot local connection:", error.message);
   }
 

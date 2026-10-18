@@ -3,7 +3,7 @@ import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { Check, Clock, RefreshCw, Square, TriangleAlert } from "lucide-react";
+import { Check, Clock, FileText, RefreshCw, Square, TriangleAlert } from "lucide-react";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
@@ -128,6 +128,13 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
           {message.attachments.map((attachment, index) => {
             const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
             if (!id) return null;
+            if (attachment.kind === "document") return <div key={`${id}-${index}`} className="gb-document-chip">
+              <FileText aria-hidden="true" />
+              <div><strong title={attachment.name}>{attachment.name}</strong>
+                <span>{(attachment.byte_length / 1024).toFixed(1)} Ko · {attachment.page_label}</span>
+                {attachment.note && <span className="gb-document-note">{attachment.note}</span>}
+              </div>
+            </div>;
             const description = attachment.caption || attachment.name || "Image jointe";
             const url = `/api/attachments/${encodeURIComponent(id)}`;
             return <img key={`${id}-${index}`} className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" />;

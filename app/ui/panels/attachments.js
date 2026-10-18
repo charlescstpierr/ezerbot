@@ -7,7 +7,12 @@
   // png/jpeg/gif/webp/bmp, 150s deadline and controller-wide SKIPPED backoff.
   // The wrapper owns the five-pure-human projection and the caption cache.
   const MAX_BYTES = 20 * 1024 * 1024;
-  const MAX_IMAGES = 10; // Matches the wrapper's per-message limit.
+  const documentExtensions = new Set(["pdf", "docx", "xlsx", "csv", "pptx", "txt", "md", "rtf"]);
+  const documentMimes = { "application/pdf": "pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx", "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx", "text/csv": "csv", "text/plain": "txt", "text/markdown": "md", "application/rtf": "rtf", "text/rtf": "rtf" };
+  const documentExtension = (file) => documentExtensions.has(file.name?.split(".").pop().toLowerCase());
+  const documentFile = (file) => documentExtension(file) || Boolean(documentMimes[file.type]);
+  const sizeText = (bytes) => bytes < 1024 ? `${bytes} o` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} Ko` : `${(bytes / 1024 / 1024).toFixed(1)} Mio`;
+  const MAX_FILES = 10; // Matches the wrapper's per-message limit.
   const DEADLINE = 150_000;
   const types = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]);
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
@@ -53,7 +58,8 @@
   }
   function captionText(item) {
     if (item.upload === "pending") return "Import en cours…";
-    if (item.upload === "failed") return "Import impossible";
+    if (item.upload === "failed") return item.error || "Import impossible";
+    if (item.document) return item.metadata?.note || "Texte extrait localement";
     return { waiting: "Description en attente…", pending: "Description en cours…", ready: "Description prête", skipped: "Description ignorée", paused: cooldown > Date.now() ? "Description en pause" : "Description à préparer", failed: "Description indisponible" }[item.caption];
   }
   function render() {
@@ -65,14 +71,15 @@
     const group = bucket();
     const chips = group.items.map((item) => {
       if (!views.has(item)) views.set(item, createChip(group, item));
-      const { chip, status, retry } = views.get(item);
+      const { chip, status, retry, metadata } = views.get(item);
+      metadata.textContent = [sizeText(item.file.size), item.metadata?.page_label || ""].filter(Boolean).join(" · ");
       chip.dataset.status = item.upload === "ready" ? item.caption : item.upload;
       const label = captionText(item);
       if (status.textContent !== label) status.textContent = label;
       status.title = item.error || "";
       retry.hidden = !(item.upload === "failed" || ["failed", "skipped", "paused"].includes(item.caption));
       retry.disabled = !retry.hidden && item.upload === "ready" && remaining > 0;
-      retry.title = retry.disabled ? explanation : "Réessayer la préparation de cette image";
+      retry.title = retry.disabled ? explanation : item.document ? "Réessayer l’import du document" : "Réessayer la préparation de cette image";
       if (retry.disabled) retry.setAttribute("aria-describedby", pause.id);
       else retry.removeAttribute("aria-describedby");
       waiting ||= retry.disabled;
@@ -94,9 +101,9 @@
   }
   function createChip(group, item) {
     const chip = node("li", "attachment-chip");
-    const image = node("img", "attachment-preview");
-    image.src = item.preview;
-    image.alt = `Aperçu de ${item.file.name || "l’image collée"}`;
+    const image = item.document ? node("span", "attachment-document-icon", "▤") : node("img", "attachment-preview");
+    if (item.document) image.setAttribute("aria-hidden", "true");
+    else { image.src = item.preview; image.alt = `Aperçu de ${item.file.name || "l’image collée"}`; }
     const copy = node("div", "attachment-copy");
     const name = node("strong", "", item.file.name || "Image collée");
     name.title = item.file.name || "Image collée";
@@ -108,13 +115,14 @@
       if (item.upload === "failed") upload(group, item);
       else schedule(group, item, true);
     });
-    copy.append(name, status, retry);
+    const metadata = node("span", "attachment-metadata");
+    copy.append(name, metadata, status, retry);
     const close = node("button", "attachment-remove", "×");
     close.type = "button";
     close.setAttribute("aria-label", `Retirer ${item.file.name || "l’image"}`);
     close.addEventListener("click", () => remove(group, item));
     chip.append(image, copy, close);
-    return { chip, status, retry };
+    return { chip, status, retry, metadata };
   }
 
   // The API requires an existing conversation (wrapper review r1/r2). Create it
@@ -157,14 +165,19 @@
     // Office/iWork copies include a PNG rendition of the intended text. Browser
     // "Copy Image" also carries its URL, and RTFD may carry an object mark.
     const text = event?.clipboardData?.getData("text/plain").replace(/\uFFFC/g, "").trim();
-    if (text && !/^(?:[a-z][a-z0-9+.-]*:\/\/|data:|blob:)\S*$/i.test(text)) return false;
-    const candidates = files.filter((file) => mime(file));
-    if (!candidates.length) { panels.notify("Joignez une image PNG, JPEG, GIF, WebP ou BMP."); return false; }
+    if (text && !files.some(documentFile) && !/^(?:[a-z][a-z0-9+.-]*:\/\/|data:|blob:)\S*$/i.test(text)) return false;
+    const candidates = files.filter((file) => documentFile(file) || mime(file));
+    if (candidates.length !== files.length) panels.notify("Format non accepté. Joignez une image ou un document PDF, DOCX, XLSX, CSV, PPTX, TXT, MD ou RTF.");
+    if (!candidates.length) return false;
     const group = bucket(ctx);
-    for (const file of candidates) {
-      if (!file.size || file.size > MAX_BYTES) { panels.notify("Les images doivent être non vides et ne pas dépasser 20 Mio."); continue; }
-      if (group.items.length >= MAX_IMAGES) { panels.notify("Un message peut contenir dix images au maximum."); break; }
-      const item = { file, preview: URL.createObjectURL(file), upload: "pending", caption: "waiting", revision: 0 };
+    for (let file of candidates) {
+      // Some clipboard providers omit the extension; preserve the supplied name
+      // and add the known MIME suffix so the local reader can validate bytes.
+      if (!documentExtension(file) && documentMimes[file.type]) file = new File([file], `${file.name || "Document collé"}.${documentMimes[file.type]}`, { type: file.type });
+      if (!file.size || file.size > MAX_BYTES) { panels.notify(`${file.name} : le fichier doit être non vide et ne pas dépasser 20 Mio.`); continue; }
+      if (group.items.length >= MAX_FILES) { panels.notify("Un message peut contenir dix fichiers au maximum."); break; }
+      const document = documentFile(file);
+      const item = { file, document, preview: document ? "" : URL.createObjectURL(file), upload: "pending", caption: "waiting", revision: 0 };
       group.items.push(item);
       upload(group, item);
     }
@@ -180,27 +193,42 @@
     const timeout = setTimeout(() => controller.abort(), DEADLINE);
     changed();
     try {
-      const response = await fetch("/api/attachments", {
-        method: "POST", headers: { "Content-Type": mime(item.file), "X-Grokbot-Request": "local" },
-        body: item.file, signal: controller.signal,
+      let body = item.file;
+      if (item.document) {
+        const bytes = new Uint8Array(await item.file.arrayBuffer());
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        body = JSON.stringify({ name: item.file.name, data: btoa(binary) });
+      }
+      const response = await fetch(item.document ? "/api/documents" : "/api/attachments", {
+        method: "POST", headers: { "Content-Type": item.document ? "application/json" : mime(item.file), "X-Grokbot-Request": "local" },
+        body, signal: controller.signal,
       });
       const attachment = await response.json();
-      if (!response.ok) throw new Error(attachment.error || "L’import de l’image a échoué.");
-      if (!/^attachment_[0-9a-f]{64}$/.test(attachment.id)) throw new Error("Réponse d’import illisible.");
+      if (!response.ok) throw new Error(attachment.error || "L’import du fichier a échoué.");
+      if (!/^(?:attachment|document)_[0-9a-f]{64}$/.test(attachment.id)) throw new Error("Réponse d’import illisible.");
       if (!present(group, item)) return;
       if (group.items.some((other) => other !== item && other.id === attachment.id)) {
         remove(group, item);
-        panels.notify("Cette image est déjà jointe.");
+        panels.notify("Ce fichier est déjà joint.");
         return;
       }
       item.id = attachment.id;
+      if (item.document) item.metadata = attachment;
       // Keep submission blocked until the new conversation is selectable.
       await ensureConversation(group);
       if (!present(group, item)) return;
       item.upload = "ready";
-      schedule(group, item);
+      if (item.document) item.caption = "ready";
+      else schedule(group, item);
     } catch (error) {
-      if (present(group, item)) { item.upload = "failed"; item.error = error.message; }
+      if (present(group, item)) {
+        item.upload = "failed";
+        item.error = controller.signal.aborted ? "Délai d’import dépassé. Réessayez le fichier."
+          : error instanceof TypeError ? "L’import a été interrompu. Vérifiez la connexion locale, puis réessayez."
+          : error instanceof SyntaxError || error instanceof DOMException ? "Le fichier ou la réponse locale est illisible. Réessayez l’import."
+          : error.message || "L’import du fichier a échoué.";
+      }
     } finally {
       clearTimeout(timeout);
       if (item.controller === controller) item.controller = null;
@@ -290,7 +318,7 @@
     const group = bucket();
     const current = signature({ ...context, draft: panels.draft() });
     for (const item of group.items) {
-      if (item.upload !== "ready") continue;
+      if (item.document || item.upload !== "ready") continue;
       if (item.signature !== current) schedule(group, item);
     }
     render();
@@ -304,10 +332,10 @@
         picker = node("input", "attachment-picker");
         picker.type = "file";
         picker.multiple = true;
-        picker.accept = [...types, ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].join(",");
+        picker.accept = [...types, ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ...Array.from(documentExtensions, (ext) => `.${ext}`)].join(",");
         picker.tabIndex = -1;
-        picker.setAttribute("aria-label", "Choisir des images");
-        const choose = node("button", "attachment-choose", "+ Joindre une image");
+        picker.setAttribute("aria-label", "Choisir des images ou des documents");
+        const choose = node("button", "attachment-choose", "+ Joindre un fichier");
         choose.type = "button";
         choose.addEventListener("click", () => picker.click());
         picker.addEventListener("change", () => { onFiles(Array.from(picker.files), null, context); picker.value = ""; });
@@ -318,7 +346,7 @@
         pause.id = "attachment-pause";
         pause.hidden = true;
         list = node("ul", "attachment-list");
-        list.setAttribute("aria-label", "Images à envoyer");
+        list.setAttribute("aria-label", "Pièces jointes à envoyer");
         tray.append(choose, picker, pause, list);
         container.append(tray);
         const form = document.getElementById("composer-form");
@@ -330,7 +358,7 @@
           if (bucket().items.some((item) => item.upload !== "ready")) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            panels.notify("Attendez l’import des images, ou retirez celles en échec, avant d’envoyer.");
+            panels.notify("Attendez l’import des fichiers, ou retirez ceux en échec, avant d’envoyer.");
           }
         }, true);
         window.addEventListener("beforeunload", () => { for (const group of new Set(buckets.values())) group.items.forEach(discard); });

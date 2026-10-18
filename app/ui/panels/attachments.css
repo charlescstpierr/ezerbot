@@ -1,4 +1,9 @@
 .attachments-panel { margin: 0 0 8px; min-width: 0; }
+/* Keep the empty-thread introduction out of the document tray's way. The bot
+   picker remains available; the compact window must not crop the hero heading. */
+.main-panel:has(.attachment-document-icon) .welcome { padding: 8px 0; }
+.main-panel:has(.attachment-document-icon) .welcome :is(.mascot-stage, .welcome-eyebrow, .welcome-description, .suggestion-grid) { display: none; }
+@media (max-height: 650px) { .main-panel:has(.attachment-document-icon) .welcome h2 { display: none; } }
 .attachment-choose { padding: 5px 8px; border-radius: 6px; color: var(--muted); font-size: 12px; }
 .attachment-choose:hover { background: var(--soft); color: var(--text); }
 .attachment-picker { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -8,7 +13,9 @@
 .attachment-preview { width: 48px; height: 48px; flex: 0 0 auto; border-radius: 5px; object-fit: cover; }
 .attachment-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .attachment-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
-.attachment-status { color: var(--muted); font-size: 11px; }
+.attachment-status { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.attachment-metadata { color: var(--muted); font-size: 11px; }
+.attachment-document-icon { display: grid; place-items: center; width: 40px; height: 48px; flex: 0 0 auto; color: var(--muted); font-size: 30px; }
 .attachment-chip[data-status="ready"] .attachment-status { color: var(--ok); }
 .attachment-chip[data-status="failed"] .attachment-status { color: var(--danger-text); }
 .attachment-retry { align-self: flex-start; padding: 2px 0; border: 0; color: var(--accent-ink); font-size: 11px; text-decoration: underline; }

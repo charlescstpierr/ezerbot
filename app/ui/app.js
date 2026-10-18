@@ -31,7 +31,7 @@
   let pollTimer;
   let pickerKind = null;
   const usageUrl = "https://chatgpt.com/settings/usage";
-  const effortNames = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+  const effortNames = { none: "Aucun", minimal: "Minimal", low: "Léger", medium: "Équilibré", high: "Élevé", xhigh: "Très élevé", max: "Maximum", ultra: "Ultra" };
   const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 

@@ -339,7 +339,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             {
                 return Err(ApiError::new(
                     400,
-                    "Ajoutez du texte (16 Ko au plus) ou une image.",
+                    "Ajoutez du texte (16 Ko au plus) ou un fichier.",
                 ));
             }
             let prepared = if previous.is_some() {
@@ -1196,6 +1196,7 @@ impl RunServices for Services<'_> {
             .join("\n\n");
         let (mut history, _) = history(self.connection, run, &input)?;
         hydrate_history_images(&ctx, &run.conversation_id, &model, &mut history)?;
+        input.text.push_str(&super::attachments::document_text(&ctx, &run.conversation_id, &input.entry_id).map_err(engine_error)?);
         history.push(input);
         Ok(ModelRequest {
             model,
@@ -1368,6 +1369,7 @@ fn hydrate_history_images(
     history: &mut [HistoryItem],
 ) -> grokbot_engine::contracts::Result<()> {
     for item in history.iter_mut().filter(|i| i.role == Role::User) {
+        item.text.push_str(&super::attachments::document_text(ctx, conversation, &item.entry_id).map_err(engine_error)?);
         let linked =
             super::attachments::images_for_message(ctx, conversation, &item.entry_id, model, false)
                 .map_err(engine_error)?;
@@ -2382,6 +2384,7 @@ pub fn request_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
         request.current_message.images = images;
     }
     let (mut history, reset) = history(&app.connection, &run, &current)?;
+    request.current_message.text.push_str(&super::attachments::document_text(&ctx, conversation_id, &current.entry_id)?);
     hydrate_history_images(&ctx, conversation_id, &model, &mut history)?;
     Ok(assembler::assemble(
         &request,

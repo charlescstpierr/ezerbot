@@ -39,6 +39,9 @@ pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 pub fn body_limit(path: &str) -> usize {
     match path {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
+        // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
+        // retain the same 20 MiB limit as images.
+        "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
         _ => BODY_LIMIT,
     }

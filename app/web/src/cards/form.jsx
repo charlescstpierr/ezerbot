@@ -36,7 +36,7 @@ export function useHumanInput(message, onAction) {
   return { request, receipt, status, pending, busy, error: status && status !== "pending" ? "" : activity?.error || error, act };
 }
 
-export function HumanInputCard({ message, title, input, children, statusText }) {
+export function HumanInputCard({ message, title, input, children, statusText, badge, showDelivery = true }) {
   const { request, receipt, status, busy, error, act } = input;
   const labels = { pending: "En attente de vous", resolved: "Réponse enregistrée", denied: "Refusée", expired: "Expirée", cancelled: "Annulée" };
   const wake = receipt?.wake;
@@ -50,17 +50,17 @@ export function HumanInputCard({ message, title, input, children, statusText }) 
   const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
     ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
   return (
-    <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} aria-busy={Boolean(busy)}>
-      <header className="gb-meta"><strong>{title}</strong></header>
+    <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
+      <header className="gb-meta"><strong>{title}</strong>{badge}</header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
         <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {statusText || statusLabel}</p>
         {children}
-        <div className="mt-3 text-sm" role="status" aria-live="polite">
+        {showDelivery && <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}
           {!busy && wake?.status === "pending" && "Le bot reprend…"}
           {!busy && delivered && ({ denied: "Refus pris en compte", cancelled: "Annulation prise en compte", expired: "Expiration prise en compte" }[status] || "Repris")}
           {!busy && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
-        </div>
+        </div>}
       </>}
       {error && <p className="mt-2 text-sm text-muted-foreground" role="alert">{error}</p>}
       {(!available || error) && <button type="button" className="gb-retry mt-2" disabled={busy} onClick={() => act("forms.refresh")}>Actualiser l’état</button>}

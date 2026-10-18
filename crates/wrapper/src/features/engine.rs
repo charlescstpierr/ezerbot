@@ -2517,11 +2517,18 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             |r| r.get(0),
         )
         .unwrap_or(run.bot_id);
+    let mut display_call = event.payload;
+    if display_call["name"] == "propose_skill" {
+        // This call has its own approval card with lazy historical content.
+        // Keep canonical arguments in engine events, never duplicate them into
+        // every conversation/state projection of a hidden technical tool row.
+        display_call.as_object_mut()?.remove("arguments");
+    }
     Some(card(
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"call":event.payload,"outcome":result.as_ref().map(|e|&e.payload["outcome"]),
+        json!({"run_id":run_id,"call":display_call,"outcome":result.as_ref().map(|e|&e.payload["outcome"]),
             "authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),

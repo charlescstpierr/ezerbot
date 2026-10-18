@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { skillDiff } from "./skill-proposal.js";
+import { skillDiff, skillDiffStats } from "./skill-proposal.js";
 
 const skill = { display_name: "Résumé", description: "Trois puces", body: "Lire.\nRésumer.", files: [{ path: "exemple.md", content: "Ancien" }] };
 test("skill diff includes metadata, body and companion-file changes", () => {
@@ -13,6 +13,7 @@ test("skill diff includes metadata, body and companion-file changes", () => {
   assert.ok(diff.some((line) => line.kind === "removed" && line.text === "Ancien"));
   assert.ok(diff.some((line) => line.kind === "added" && line.text === "Nouveau"));
   assert.deepEqual(skillDiff(skill, skill), []);
+  assert.deepEqual(skillDiffStats([{ kind: "added" }, { kind: "context" }, { kind: "removed" }, { kind: "added" }]), { added: 2, removed: 1 });
 });
 test("skill diff handles very long repeated content with bounded space", () => {
   const before = { ...skill, body: "Ligne\n".repeat(40000) };

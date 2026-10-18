@@ -68,6 +68,9 @@ fn skill_proposal_waits_for_click_survives_restart_and_keeps_file_history() {
     assert_eq!(history[1].content.files[0].content, "Exemple révisé.");
     let summaries = f.app.api("GET", "/api/skills?bot_id=grokbot", b"").unwrap();
     assert_eq!(summaries["skills"][0]["version"], 2);
+    assert_eq!(summaries["skills"][0]["file_count"], 1);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["skills"]["by_bot"]["grokbot"][0]["file_count"], 1);
     for forbidden in ["body", "content", "files"] {
         assert!(summaries["skills"][0].get(forbidden).is_none());
     }
@@ -112,24 +115,58 @@ fn another_bot_keeps_skill_ownership_when_the_principal_reviews_it() {
 
 #[test]
 fn model_revision_keeps_imported_version_and_its_original_provenance() {
-    let mut f = Fixture::new();
-    let imported = f.post("/api/skills/import", json!({"bot_id":"grokbot", "files":[{"path":"resume.md","content":"---\nname: Résumé\ndescription: Version importée\n---\nTexte importé."}]}));
-    let id = imported["report"][0]["status"]["skill_id"].clone();
-    let first = skills(&f).remove(0);
-    let mut args = draft();
-    args["skill_id"] = id;
-    args["expected_version"] = json!(1);
-    let request = f.suspended_request("run", "skill", "propose_skill", args);
-    assert_eq!(
-        display(&f, &request)["before"]["content"]["body"],
-        "Texte importé."
-    );
-    f.decide(&request, "save", json!("allow_once"));
-    f.drive("run", &ScriptedGateway::default());
-    let history = library::history(&f.conn, &first.skill_id).unwrap();
-    assert_eq!(history[0], first);
-    assert_eq!(history[1].content.origin, library::Origin::Model);
-    assert_eq!(history[1].content.files.len(), 1);
+    for legacy_raw_copy in [false, true] {
+        let mut f = Fixture::new();
+        let imported = f.post("/api/skills/import", json!({"bot_id":"grokbot", "files":[{"path":"resume.md","content":"---\nname: Résumé\ndescription: Version importée\n---\nTexte importé."}]}));
+        let id = imported["report"][0]["status"]["skill_id"].clone();
+        let first = skills(&f).remove(0);
+        let ToolOutcome::Done { output } = f
+            .app
+            .invoke_tool("grokbot", "read_skill", json!({"skill_id":id}))
+            .unwrap()
+        else {
+            panic!("read_skill failed")
+        };
+        assert_eq!(output["body"], "Texte importé.");
+        assert_eq!(output["display_name"], "Résumé");
+        assert_eq!(output["description"], "Version importée");
+        let source = if legacy_raw_copy {
+            first.content.body.as_str()
+        } else {
+            output["body"].as_str().unwrap()
+        };
+        let mut args = draft();
+        args["skill_id"] = id.clone();
+        args["expected_version"] = json!(1);
+        args["name"] = json!("Résumé");
+        args["body"] = json!(format!("{source}\nTroisième ligne."));
+        let request = f.suspended_request("run", "skill", "propose_skill", args);
+        let shown = display(&f, &request);
+        assert_eq!(shown["before"]["content"]["body"], "Texte importé.");
+        assert_eq!(
+            shown["proposal"]["body"],
+            "Texte importé.\nTroisième ligne."
+        );
+        f.decide(&request, "save", json!("allow_once"));
+        f.drive("run", &ScriptedGateway::default());
+        let history = library::history(&f.conn, &first.skill_id).unwrap();
+        assert_eq!(history[0], first);
+        assert_eq!(history[1].content.origin, library::Origin::Model);
+        assert_eq!(history[1].content.files.len(), 1);
+        let versions = f.post(
+            "/api/skills/versions",
+            json!({"bot_id":"grokbot","skill_id":id}),
+        );
+        let body = versions["versions"][1]["content"]["editable_body"]
+            .as_str()
+            .unwrap();
+        assert_eq!(body, "Texte importé.\nTroisième ligne.");
+        assert!(!body.contains("origin:") && !body.contains("upload-") && !body.contains("name:"));
+        let reimport = f.post("/api/skills/import", json!({"bot_id":"grokbot", "files":[{"path":"resume.md","content":"---\nname: Résumé\n---\nSource corrigée."}]}));
+        assert_eq!(reimport["report"][0]["status"]["skill_id"], id);
+        assert_eq!(skills(&f).len(), 1);
+        assert_eq!(skills(&f)[0].content.files, history[1].content.files);
+    }
 }
 
 #[test]
@@ -150,6 +187,97 @@ fn ignored_expired_or_cancelled_proposal_never_writes_a_skill() {
         assert_eq!(f.count("skills_library"), 0);
         assert_eq!(f.count("skills_versions"), 0);
     }
+}
+
+#[test]
+fn settled_card_bodies_are_loaded_on_demand_with_conversation_binding() {
+    let mut f = Fixture::new();
+    let body = "ARCHIVE_UNIQUE_NON_POLLEE\n".repeat(8000);
+    let mut args = draft();
+    args["body"] = json!(body);
+    let request = f.suspended_request("run", "skill", "propose_skill", args);
+    assert!(display(&f, &request)["proposal"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("ARCHIVE_UNIQUE"));
+    f.decide(&request, "save", json!("allow_once"));
+    f.drive("run", &ScriptedGateway::default());
+    f.app = App::open(&f.directory.join("app.sqlite")).unwrap();
+    let state = f.app.api("GET", "/api/state", b"").unwrap().to_string();
+    assert!(!state.contains("ARCHIVE_UNIQUE"));
+    assert!(state.len() < 20_000, "state length {}", state.len());
+    assert_eq!(display(&f, &request)["content_available"], true);
+    let opened = f.post(
+        "/api/forms/skill-content",
+        json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id}),
+    );
+    assert_eq!(opened["request"]["arguments"]["proposal"]["body"], body);
+    let other = f.post("/api/conversations", json!({}))["conversation"]["id"].clone();
+    let query = json!({"entry_id":request.entry_id,"conversation_id":other});
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/forms/skill-content",
+                query.to_string().as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        403
+    );
+}
+
+#[test]
+fn duplicate_names_are_refused_before_review_and_rechecked_at_save() {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/skills",
+        json!({"bot_id":"grokbot","name":"Résumé fidèle","body":"Déjà présente"}),
+    );
+    f.drive(
+        "run",
+        &ScriptedGateway::call("skill", "propose_skill", draft()),
+    );
+    assert_eq!(f.count("forms_requests"), 0);
+    assert_eq!(skills(&f).len(), 1);
+    let mut f = Fixture::new();
+    let request = f.suspended_request("run", "skill", "propose_skill", draft());
+    f.post(
+        "/api/skills",
+        json!({"bot_id":"grokbot","name":"Résumé fidèle","body":"Créée pendant la revue"}),
+    );
+    f.decide(&request, "save", json!("allow_once"));
+    f.drive("run", &ScriptedGateway::default());
+    assert_eq!(skills(&f).len(), 1);
+    assert_eq!(skills(&f)[0].version, 1);
+    assert!(display(&f, &request)["save_error"]
+        .as_str()
+        .unwrap()
+        .contains("déjà ce nom"));
+}
+
+#[test]
+fn manual_edits_and_reimports_share_the_body_plus_annexes_budget() {
+    let mut f = Fixture::new();
+    let mut args = draft();
+    args["files"][0]["content"] = json!("a".repeat(200_000));
+    let request = f.suspended_request("run", "skill", "propose_skill", args);
+    f.decide(&request, "save", json!("allow_once"));
+    f.drive("run", &ScriptedGateway::default());
+    let skill = skills(&f).remove(0);
+    let change = json!({"bot_id":"grokbot","skill_id":skill.skill_id,"expected_version":1,"body":"b".repeat(200_000)});
+    let error = f
+        .app
+        .api("POST", "/api/skills/update", change.to_string().as_bytes())
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(error.message.contains("annexes"));
+    let report = f.post("/api/skills/import", json!({"bot_id":"grokbot","files":[{"path":"resume.md","content":format!("---\nname: Résumé fidèle\n---\n{}", "b".repeat(200_000))}]}));
+    assert_eq!(
+        report["report"][0]["status"]["reason"],
+        "combined-too-large"
+    );
+    assert_eq!(skills(&f), vec![skill]);
 }
 
 #[test]

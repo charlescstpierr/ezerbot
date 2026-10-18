@@ -364,7 +364,14 @@ fn upload_editor_hides_metadata_and_sparse_edits_synchronize_the_stored_document
     );
     assert_eq!(unchanged["skill"], described["skill"]);
     let output = tool_output(&app, "read_skill", json!({"skill_id":id}));
-    assert_eq!(output["body"], described["skill"]["content"]["body"]);
+    assert_eq!(
+        output["body"],
+        versions["versions"][2]["content"]["editable_body"]
+    );
+    assert_eq!(
+        output["description"],
+        described["skill"]["content"]["description"]
+    );
 }
 
 #[test]
@@ -477,7 +484,7 @@ fn a_markdown_block_opening_the_body_is_not_read_as_the_hidden_header() {
         assert_eq!(versions["versions"][0], original);
         assert_eq!(versions["versions"].as_array().unwrap().len(), 3);
         let output = tool_output(&app, "read_skill", json!({"name":"Fiche produit"}));
-        assert_eq!(output["body"], second["skill"]["content"]["body"]);
+        assert_eq!(output["body"], versions["versions"][2]["content"]["editable_body"]);
     }
 }
 

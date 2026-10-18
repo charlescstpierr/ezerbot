@@ -6,11 +6,18 @@ import { editorOptions, readText, writeText } from "./editor.js";
 import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from "./attachment-presentation.js";
 import { mentionMenu, readMentions } from "./mentions.js";
 import { pendingReply } from "./thread-order.js";
+import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
+import { createApprovalFollow } from "./approval-follow.js";
 
 const roots = new WeakMap();
 
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {
+  teachPrompt: TEACH_PROMPT,
+  isTeachMessage,
+  searchableMessageText,
+  exportMessage,
+  createApprovalFollow,
   formatAttachmentSize,
   documentBudgetMessage,
   createDocumentIcon: () => createDocumentIcon(document),

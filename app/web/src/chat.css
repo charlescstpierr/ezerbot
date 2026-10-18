@@ -16,9 +16,22 @@
 
 .gb-skill-proposal { min-width: 0; overflow-wrap: anywhere; }
 .gb-skill-text { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); color: var(--text); font: 12px/1.6 var(--font-mono); tab-size: 2; }
-.gb-skill-proposal summary { cursor: pointer; }
-.gb-skill-diff-added { background: color-mix(in srgb, var(--accent-ink) 15%, transparent); }
-.gb-skill-diff-removed { background: color-mix(in srgb, var(--warning-text) 18%, transparent); text-decoration: line-through; }
+.gb-skill-proposal summary { cursor: pointer; padding-left: 1.1em; text-indent: -1.1em; }
+.gb-skill-diff-line { display: block; padding-left: 2ch; text-indent: -2ch; min-height: 1.6em; }
+.gb-skill-diff-added { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.gb-skill-diff-removed { color: var(--danger-text); background: color-mix(in srgb, var(--danger-text) 12%, transparent); }
+.gb-skill-diff-counts { margin: 8px 0; font-size: 11px; }
+.gb-skill-diff-counts > span:first-child { color: var(--ok); }
+.gb-skill-diff-counts > span:last-child { color: var(--danger-text); }
+.gb-skill-badge { margin-left: auto; flex-shrink: 0; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; background: var(--soft); color: var(--muted); font-size: 10px; font-weight: 500; line-height: 1.5; }
+.gb-skill-badge-saved { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); background: color-mix(in srgb, var(--ok) 10%, var(--pane)); }
+.gb-skill-badge-error { color: var(--danger-text); }
+.gb-skill-saved-preview { font-size: 12px; }
+.gb-skill-error { color: var(--danger-text); }
+.gb-card-slot [data-card-kind="approval"] { scroll-margin-top: 12px; }
+.gb-teach-marker { display: flex; flex-direction: column; align-items: flex-end; color: var(--muted); }
+.gb-teach-marker .gb-meta { align-items: center; font-size: 11px; margin-bottom: 0; }
+.gb-teach-marker .lucide { width: 14px; height: 14px; }
 
 /* Streamdown is styled with shadcn colour names; they resolve to the app tokens. */
 @theme inline {

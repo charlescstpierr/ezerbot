@@ -7,6 +7,14 @@ export function skillText(content) {
     ...(content.files || []).flatMap((file) => ["", `Fichier : ${file.path}`, file.content])].join("\n");
 }
 
+export function skillDiffStats(lines) {
+  return lines.reduce((counts, line) => {
+    if (line.kind === "added") counts.added++;
+    if (line.kind === "removed") counts.removed++;
+    return counts;
+  }, { added: 0, removed: 0 });
+}
+
 export function skillDiff(before, after) {
   const a = skillText(before).split("\n"), b = skillText(after).split("\n");
   let prefix = 0, suffix = 0;

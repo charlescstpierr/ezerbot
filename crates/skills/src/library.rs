@@ -42,6 +42,22 @@ pub struct SkillContent {
     pub files: Vec<SkillFile>,
 }
 
+/// User-authored UTF-16 units, excluding host-managed upload annotations.
+/// All high-level write paths use the same body + companion-files budget.
+pub fn content_characters(content: &SkillContent) -> usize {
+    let body = if matches!(&content.origin, Origin::Upload { .. }) {
+        crate::import::editable_body(&content.body)
+    } else {
+        content.body.clone()
+    };
+    content
+        .files
+        .iter()
+        .fold(body.encode_utf16().count(), |size, file| {
+            size.saturating_add(file.content.encode_utf16().count())
+        })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
     pub skill_id: String,

@@ -741,6 +741,7 @@ pub fn routes(
             "POST",
             "/api/forms/submit"
                 | "/api/forms/cancel"
+                | "/api/forms/skill-content"
                 | "/api/approvals/resolve"
                 | "/api/approvals/rules/revoke"
                 | "/api/secrets/delete"
@@ -755,6 +756,22 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
     let ctx = app.feature_context();
     if path == "/api/approvals/reviewer" {
         return reviewer::settings(&ctx, method, body);
+    }
+    if path == "/api/forms/skill-content" {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Preview {
+            entry_id: String,
+            conversation_id: String,
+        }
+        let input: Preview = parse(body)?;
+        let request = for_entry(ctx.connection, &input.entry_id, &input.conversation_id)?;
+        if !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill") {
+            return Err(ApiError::new(404, "Proposition de skill introuvable."));
+        }
+        return Ok(
+            json!({"request":redact_value(&vault(&ctx)?, &request_value(&ctx, &request, true)?)?}),
+        );
     }
     if path == "/api/approvals/rules/revoke" {
         let input: RevokeRule = parse(body)?;
@@ -983,7 +1000,11 @@ fn secret_metadata(ctx: &Context<'_>) -> Result<Value, ApiError> {
 }
 // Build metadata without reopening the vault; callers redact their whole public
 // projection once, rather than reading/validating the file once per request.
-fn request_value(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<Value, ApiError> {
+fn request_value(
+    ctx: &Context<'_>,
+    request: &HumanInputRequest,
+    full_content: bool,
+) -> Result<Value, ApiError> {
     let submission: Option<String> = ctx
         .connection
         .query_row(
@@ -998,13 +1019,27 @@ fn request_value(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<Value
         None => Value::Null,
     };
     if matches!(request.kind, InputKind::Approval { .. }) {
+        let compact = !full_content
+            && request.status != RequestStatus::Pending
+            && matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill");
+        // Do not deserialize/transport historical bodies on every state poll.
+        // The authenticated preview route loads a settled card only on expansion.
+        let sql = if compact {
+            "SELECT json_remove(json_set(display_json,
+                '$.content_available',json('true'),
+                '$.proposal.file_count',coalesce(json_array_length(json_extract(display_json,'$.proposal.files')),0),
+                '$.before.content.file_count',coalesce(json_array_length(json_extract(display_json,'$.before.content.files')),0),
+                '$.before.content.name',substr(json_extract(display_json,'$.before.content.name'),1,128),
+                '$.before.content.display_name',substr(json_extract(display_json,'$.before.content.display_name'),1,128),
+                '$.before.content.description',substr(json_extract(display_json,'$.before.content.description'),1,512)),
+                '$.proposal.body','$.proposal.files','$.before.content.body','$.before.content.files','$.before.content.origin')
+             FROM wrapper_forms_calls WHERE request_id=?1"
+        } else {
+            "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1"
+        };
         let display: Option<String> = ctx
             .connection
-            .query_row(
-                "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1",
-                [&request.id],
-                |row| row.get(0),
-            )
+            .query_row(sql, [&request.id], |row| row.get(0))
             .optional()?;
         value["review"] = json!(grokbot_forms::reviewer::get(ctx.connection, &request.id)?);
         value["arguments"] = display
@@ -1029,7 +1064,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let mut requests = Vec::new();
         for id in ids {
             if let Some(request) = requests::get(ctx.connection, &id)? {
-                requests.push(request_value(ctx, &request)?);
+                requests.push(request_value(ctx, &request, false)?);
             }
         }
         let vault = vault(ctx)?;
@@ -1052,7 +1087,10 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return None;
     }
     let payload = (|| -> Result<Value, ApiError> {
-        Ok(redact_value(&vault(ctx)?, &request_value(ctx, &request)?)?)
+        Ok(redact_value(
+            &vault(ctx)?,
+            &request_value(ctx, &request, false)?,
+        )?)
     })()
     .unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}));
     let created_at = ctx.connection.query_row("SELECT created_at FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,request.route.target_conversation_id,request.entry_id],|r| r.get(0)).unwrap_or(0);

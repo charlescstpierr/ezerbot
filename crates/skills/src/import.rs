@@ -201,12 +201,15 @@ fn import_files(
                                         && skill.content.display_name
                                             == imported.content.display_name))
                                     && !planned.contains(&skill.content.name)
-                                    && field(
+                                    && (field(
                                         frontmatter(&skill.content.body).map_or("", |(h, _)| h),
                                         "name",
                                     )
                                     .trim_matches(js_space)
                                         == front
+                                        || (matches!(skill.content.origin, Origin::Model)
+                                            && skill.content.display_name
+                                                == imported.content.display_name))
                             })
                         });
                         // Only final names claim reuse; suffixes and failed/refused
@@ -221,6 +224,15 @@ fn import_files(
                             if let Some(existing) = existing {
                                 // Pre-fix uploads retain their lookup key and stable ID.
                                 content.name = existing.content.name.clone();
+                                content.files = existing.content.files.clone();
+                            }
+                            if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
+                                return ImportItem {
+                                    file_name: file.path.clone(),
+                                    status: ImportStatus::Skipped {
+                                        reason: "combined-too-large".into(),
+                                    },
+                                };
                             }
                             match write(existing, &content) {
                                 Ok(skill) => {

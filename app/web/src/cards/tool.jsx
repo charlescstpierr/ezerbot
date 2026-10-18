@@ -71,8 +71,8 @@ function openConnectors() {
 export function Card({ message }) {
   const view = useEngine();
   const { run_id: runId, call, outcome, connector, authorized_by, requesting_bot, approval_status } = message.payload || {};
-  // These internal tools are represented by the single task-status card.
-  if (["begin_task", "complete_task"].includes(call?.name)) return null;
+  // These calls already have a dedicated, user-facing decision/status card.
+  if (["begin_task", "complete_task", "propose_skill"].includes(call?.name)) return null;
   if (!call?.call_id || typeof call.name !== "string") {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Appel d’outil indisponible.</article>;
   }

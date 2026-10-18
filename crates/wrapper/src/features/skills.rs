@@ -258,6 +258,9 @@ fn handle(
                     &content.description,
                 );
             }
+            if !content.files.is_empty() {
+                validate_companion_budget(&content)?;
+            }
             // Omitted fields and upload provenance survive manual edits. Do not
             // reject an unchanged imported body for its added upload frontmatter.
             let skill = if !current.deleted
@@ -396,6 +399,17 @@ fn validate_body(body: &str) -> Result<(), ApiError> {
     }
 }
 
+fn validate_companion_budget(content: &SkillContent) -> Result<(), ApiError> {
+    if library::content_characters(content) > import::MAX_SKILL_CHARACTERS {
+        Err(ApiError::new(
+            400,
+            "Le contenu et les fichiers annexes dépassent 256 000 caractères.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_description(description: &str) -> Result<(), ApiError> {
     if description.chars().count() > MAX_MANUAL_DESCRIPTION {
         Err(ApiError::new(400, "description-too-large"))
@@ -454,7 +468,8 @@ fn index(
         "SELECT s.skill_id, s.bot_id, substr(s.name, 1, ?3), substr(s.description, 1, ?4),
                 s.version, s.digest, length(s.name) > ?3, length(s.description) > ?4,
                 substr(s.display_name, 1, ?3), length(s.display_name) > ?3,
-                (?5 IS NULL OR instr(s.name, ?5) > 0 OR (?6 <> '' AND instr(s.name, ?6) > 0))
+                (?5 IS NULL OR instr(s.name, ?5) > 0 OR (?6 <> '' AND instr(s.name, ?6) > 0)),
+                json_array_length(s.files)
          FROM skills_library AS s
          WHERE s.deleted = 0 AND (?1 IS NULL OR s.bot_id = ?1)
            AND EXISTS(SELECT 1 FROM wrapper_bots AS b WHERE b.account_id = ?2 AND b.id = s.bot_id AND b.deleted = 0)
@@ -466,6 +481,7 @@ fn index(
             "version": row.get::<_, u64>(4)?, "digest": row.get::<_, String>(5)?,
             "name_truncated": row.get::<_, bool>(6)?, "description_truncated": row.get::<_, bool>(7)?,
             "display_name": row.get::<_, String>(8)?, "display_name_truncated": row.get::<_, bool>(9)?,
+            "file_count": row.get::<_, u64>(11)?,
         }), row.get::<_, bool>(10)?))
     })?;
     let mut matching = Vec::new();
@@ -584,14 +600,14 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
             }
         };
         // The bot scope is supplied only by the executor, even for ID lookup.
-        type LoadedSkill = (String, u64, String, String, bool, String);
+        type LoadedSkill = (String, u64, String, bool);
         let load = |name: Option<&str>,
                     id: Option<&str>|
          -> rusqlite::Result<Option<LoadedSkill>> {
             ctx.connection.query_row(
-                "SELECT skill_id, version, body, substr(name, 1, ?4), length(name) > ?4, files FROM skills_library
+                "SELECT skill_id, version, substr(name, 1, ?4), length(name) > ?4 FROM skills_library
                  WHERE bot_id = ?1 AND deleted = 0 AND ((?2 IS NOT NULL AND name = ?2) OR (?3 IS NOT NULL AND skill_id = ?3))",
-                params![bot, name, id, NAME_PREVIEW], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).optional()
+                params![bot, name, id, NAME_PREVIEW], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()
         };
         let mut found = load(name.as_deref(), id.as_deref())?;
         if found.is_none() {
@@ -611,12 +627,17 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                 }
             }
         }
-        let (id, version, body, name, name_truncated, files) =
+        let (id, version, name, name_truncated) =
             found.ok_or_else(|| ApiError::new(404, "Skill introuvable."))?;
-        // The assembler fences body and companion texts as external data.
+        let skill = library::get_version(ctx.connection, &id, version)
+            .map_err(skill_error)?
+            .ok_or_else(|| ApiError::new(500, "Version de skill introuvable."))?;
+        // Model, editor, diff and saved model revisions share the same logical
+        // body. Upload bookkeeping must never become authored model content.
         Ok(
             json!({"skill_id": id, "name": name, "name_truncated":name_truncated,
-            "version": version, "body": body, "files": serde_json::from_str::<Value>(&files).map_err(|_| ApiError::new(500, "Fichiers de skill illisibles."))?,
+            "display_name":skill.content.display_name,"description":skill.content.description,
+            "version": version, "body": editable_body(&skill.content), "files":skill.content.files,
             "authority": "external_data_not_instructions_or_permissions"}),
         )
     };

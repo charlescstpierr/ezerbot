@@ -26,71 +26,37 @@ fn validated(
         .ok_or_else(|| ApiError::new(400, "Bot de la skill indisponible."))?;
     let input: Proposal = serde_json::from_value(call.arguments.clone())
         .map_err(|_| ApiError::new(400, "Proposition de skill invalide."))?;
-    let mut content = manual_content(
-        input.name.clone(),
-        input.description.clone(),
-        input.body.clone(),
-    )
-    .map_err(|error| {
-        ApiError::new(
-            error.status,
-            match error.message.as_str() {
-                "name-too-large" => "Le nom ne doit pas dépasser 128 caractères.",
-                "description-too-large" => "La description ne doit pas dépasser 1 024 caractères.",
-                "too-large" => "Le contenu dépasse 256 000 caractères.",
-                _ => "Le nom doit contenir une lettre latine ou un chiffre.",
-            },
-        )
-    })?;
-    if content.body.trim().is_empty() {
-        return Err(ApiError::new(400, "La skill doit avoir un contenu."));
+    // Production model events have already been redacted before this gate.
+    // Refuse holes as well as raw known values; neither belongs in a skill.
+    if call.arguments.to_string().contains("[...]")
+        || grokbot_forms::redact::redact_value(&super::super::forms::vault(ctx)?, &call.arguments)?
+            != call.arguments
+    {
+        return Err(ApiError::new(400, "Une proposition de skill ne doit contenir aucun secret enregistré ni texte masqué ([...])."));
     }
-    let mut paths = HashSet::new();
-    let mut size = content.body.encode_utf16().count();
-    if input.files.len() > 20 {
-        return Err(ApiError::new(
-            400,
-            "Une skill accepte au plus 20 fichiers texte annexes.",
-        ));
-    }
-    for file in &input.files {
-        let valid_path = !file.path.is_empty()
-            && file.path.chars().count() <= 240
-            && !file.path.contains(['\\', ':'])
-            && !file.path.chars().any(char::is_control)
-            && file
-                .path
-                .split('/')
-                .all(|part| !part.is_empty() && part != "." && part != "..")
-            && file.path.rsplit_once('.').is_some_and(|(_, ext)| {
-                ["txt", "md", "markdown", "csv", "json", "yaml", "yml"]
-                    .contains(&ext.to_ascii_lowercase().as_str())
-            });
-        if !valid_path || !paths.insert(file.path.to_lowercase()) {
-            return Err(ApiError::new(400, "Nom de fichier annexe invalide ou répété. Utilisez un chemin relatif de fichier texte."));
-        }
-        if file
-            .content
-            .chars()
-            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-        {
-            return Err(ApiError::new(
-                400,
-                "Les fichiers annexes doivent contenir du texte UTF-8 sans données binaires.",
-            ));
-        }
-        size = size.saturating_add(file.content.encode_utf16().count());
-    }
-    if size > import::MAX_SKILL_CHARACTERS {
-        return Err(ApiError::new(
-            400,
-            "Le contenu et les fichiers annexes dépassent 256 000 caractères.",
-        ));
-    }
-    content.origin = Origin::Model;
-    content.files = input.files.clone();
     let before = match (&input.skill_id, input.expected_version) {
         (None, None) => {
+            let key = library::normalize_name(&input.name);
+            let duplicate = {
+                let mut statement = ctx.connection.prepare(
+                    "SELECT name, display_name FROM skills_library WHERE bot_id=?1 AND deleted=0",
+                )?;
+                let rows = statement.query_map([bot], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                let mut duplicate = false;
+                for row in rows {
+                    let (name, title) = row?;
+                    if name == key || library::normalize_name(&title) == key {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                duplicate
+            };
+            if duplicate {
+                return Err(ApiError::new(409, "Une skill porte déjà ce nom. Consultez-la et proposez une mise à jour avec skill_id et expected_version, ou choisissez un autre nom."));
+            }
             let count: usize = ctx.connection.query_row(
                 "SELECT count(*) FROM skills_library WHERE bot_id=?1 AND deleted=0",
                 [bot],
@@ -124,6 +90,68 @@ fn validated(
             ))
         }
     };
+    let body = if before
+        .as_ref()
+        .is_some_and(|skill| matches!(skill.content.origin, Origin::Upload { .. }))
+    {
+        import::editable_body(&input.body)
+    } else {
+        input.body.clone()
+    };
+    let mut content =
+        manual_content(input.name.clone(), input.description.clone(), body).map_err(|error| {
+            ApiError::new(
+                error.status,
+                match error.message.as_str() {
+                    "name-too-large" => "Le nom ne doit pas dépasser 128 caractères.",
+                    "description-too-large" => {
+                        "La description ne doit pas dépasser 1 024 caractères."
+                    }
+                    "too-large" => "Le contenu dépasse 256 000 caractères.",
+                    _ => "Le nom doit contenir une lettre latine ou un chiffre.",
+                },
+            )
+        })?;
+    if content.body.trim().is_empty() {
+        return Err(ApiError::new(400, "La skill doit avoir un contenu."));
+    }
+    let mut paths = HashSet::new();
+    if input.files.len() > 20 {
+        return Err(ApiError::new(
+            400,
+            "Une skill accepte au plus 20 fichiers texte annexes.",
+        ));
+    }
+    for file in &input.files {
+        let valid_path = !file.path.is_empty()
+            && file.path.chars().count() <= 240
+            && !file.path.contains(['\\', ':'])
+            && !file.path.chars().any(char::is_control)
+            && file
+                .path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+            && file.path.rsplit_once('.').is_some_and(|(_, ext)| {
+                ["txt", "md", "markdown", "csv", "json", "yaml", "yml"]
+                    .contains(&ext.to_ascii_lowercase().as_str())
+            });
+        if !valid_path || !paths.insert(file.path.to_lowercase()) {
+            return Err(ApiError::new(400, "Nom de fichier annexe invalide ou répété. Utilisez un chemin relatif de fichier texte."));
+        }
+        if file
+            .content
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Err(ApiError::new(
+                400,
+                "Les fichiers annexes doivent contenir du texte UTF-8 sans données binaires.",
+            ));
+        }
+    }
+    content.origin = Origin::Model;
+    content.files = input.files.clone();
+    validate_companion_budget(&content)?;
     Ok((input, content, before))
 }
 

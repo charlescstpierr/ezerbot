@@ -256,6 +256,47 @@ fn model_skill_draft_uses_real_approval_then_resumes_after_restart() {
 }
 
 #[test]
+fn real_model_redaction_cannot_save_masked_skill_holes_or_duplicate_hidden_arguments() {
+    let mut f = Fixture::new();
+    let secret = "cle-factice-QA-skill-9182";
+    forms::vault(&f.app.feature_context())
+        .unwrap()
+        .set("API_KEY", "Test", secret)
+        .unwrap();
+    f.script(vec![
+        call(
+            "masked-skill",
+            "propose_skill",
+            json!({"name":"Mauvaise skill","description":"Test", "body":format!("Clé : {secret}")}),
+        ),
+        complete(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({"conversation_id":f.conversation,"message_id":"masked","body":"Rédige une skill"}),
+    );
+    f.finish("masked");
+    assert!(requests::list_for_run(&f.db(), &f.run("masked").run_id)
+        .unwrap()
+        .is_empty());
+    assert!(grokbot_skills::library::list(&f.db(), "grokbot")
+        .unwrap()
+        .is_empty());
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(!state.to_string().contains(secret));
+    let messages = state["conversations"][0]["messages"].as_array().unwrap();
+    let tool = messages
+        .iter()
+        .find(|message| message["kind"] == "tool")
+        .unwrap();
+    assert!(tool["payload"]["call"].get("arguments").is_none());
+    assert!(tool["payload"]["outcome"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("masqué"));
+}
+
+#[test]
 fn receipt_becomes_delivered_only_after_first_resumed_event() {
     let mut f = Fixture::new();
     let request = f.form();

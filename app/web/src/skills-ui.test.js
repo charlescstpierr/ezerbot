@@ -22,9 +22,9 @@ class Element {
 const descendants = (element) => [element, ...element.children.flatMap(descendants)];
 const byClass = (element, name) => descendants(element).find((child) => child.className === name);
 
-function panel() {
+function panel(fileCount = 1) {
   const root = new Element("div");
-  const skill = { skill_id: "skill_internal_123", version: 1, name: "resume", display_name: "Résumé express", description: "En trois puces." };
+  const skill = { skill_id: "skill_internal_123", version: 1, name: "resume", display_name: "Résumé express", description: "En trois puces.", file_count: fileCount };
   const content = { ...skill, body: "Texte original.", editable_body: "Texte original.", files: [{ path: "exemple.md", content: "Texte annexe <script>non exécuté</script>" }] };
   let registration;
   const requests = [];
@@ -44,11 +44,16 @@ function panel() {
 test("skill list keeps the human title and version but not the internal id", () => {
   const { root, skill } = panel();
   const row = byClass(root, "skills-row");
-  assert.equal(row.children[0].textContent, "Résumé expressEn trois puces.Version 1");
+  assert.equal(row.children[0].textContent, "Résumé expressEn trois puces.Version 1 · 1 annexe");
   assert.ok(!row.textContent.includes(skill.skill_id));
   // Keep the durable id for edit routing, not for display.
   assert.equal(row.children[1].dataset.skillId, skill.skill_id);
-  assert.equal(byClass(root, "skills-version-preview").textContent, "");
+  assert.equal(byClass(root, "skills-history-content").textContent, "");
+});
+
+test("skill list shows a bounded companion-file count", () => {
+  const { root } = panel(2);
+  assert.ok(byClass(root, "skills-row").textContent.includes("Version 1 · 2 annexes"));
 });
 
 test("skill editor hides the id while still loading its exact version history", async () => {
@@ -71,5 +76,9 @@ test("skill editor hides the id while still loading its exact version history", 
   const history = byClass(dialog, "skills-history");
   history.children[1].value = "1";
   history.children[1].listeners.change();
-  assert.ok(history.children[2].textContent.includes("Fichier : exemple.md"));
+  const oldFiles = byClass(history, "skills-companion-files");
+  assert.equal(oldFiles.children[1].tagName, "details");
+  assert.equal(oldFiles.children[1].children[0].textContent, "exemple.md");
+  assert.equal(oldFiles.children[1].children[1].textContent, "Texte annexe <script>non exécuté</script>");
+  assert.ok(!byClass(history.children[2], "skills-version-preview").textContent.includes("exemple.md"));
 });

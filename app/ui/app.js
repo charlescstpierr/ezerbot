@@ -40,6 +40,7 @@
   const botCleanups = [];
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
+  const approvalFollow = window.GrokbotChat.createApprovalFollow();
   // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onCardAction(message, action, detail, context); only true claims an action.
@@ -348,6 +349,7 @@
   }
 
   function selectConversation(id, focus = false) {
+    approvalFollow.cancel();
     saveDraft();
     selectedId = id;
     writePreference("grokbot.selected", id || "");
@@ -384,7 +386,7 @@
     const items = state.conversations
       .filter((item) => item.kind !== "task" && item.kind !== "routine")
       .filter((item) => !favoriteOnly || item.favorite)
-      .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => message.body.toLocaleLowerCase("fr").includes(query)))
+      .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => window.GrokbotChat.searchableMessageText(message).toLocaleLowerCase("fr").includes(query)))
       .sort((a, b) => timestamp(b.updated_at) - timestamp(a.updated_at));
     if (!items.length) {
       const text = query ? "Aucune conversation trouvée." : favoriteOnly ? "Ajoutez une conversation aux favoris pour la retrouver ici." : "Vos conversations apparaîtront ici.";
@@ -611,7 +613,10 @@
     // React commits asynchronously: a frame callback alone can run before the
     // admitted turns/cards exist, making the next poll wrongly think we scrolled up.
     const follow = conversation?.kind === "group" && (followGroup || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
-    const onLayout = follow ? () => { if (currentConversation()?.id === conversation.id) ui.scroll.scrollTop = ui.scroll.scrollHeight; } : undefined;
+    const onLayout = () => {
+      if (currentConversation()?.id !== conversation?.id) return;
+      if (!scrollToPendingApproval() && follow) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+    };
     const hasMessages = Boolean(conversation?.messages.length);
     const name = state.account.name || "Espace personnel";
     $("account-name").textContent = name;
@@ -790,8 +795,17 @@
     } catch (error) { notify(error.message); }
   }
 
+  function scrollToPendingApproval() {
+    const conversation = currentConversation();
+    const id = approvalFollow.observe(conversation?.id, conversation?.messages || []);
+    if (!id) return false;
+    const card = [...ui.messages.querySelectorAll('[data-card-kind="approval"]')].find((node) => node.dataset.messageId === id);
+    if (card) card.scrollIntoView({ block: "start" });
+    return true; // React may not have committed the card yet; onLayout retries.
+  }
+
   function scrollToLatest() {
-    requestAnimationFrame(() => { ui.scroll.scrollTop = ui.scroll.scrollHeight; });
+    requestAnimationFrame(() => { if (!scrollToPendingApproval()) ui.scroll.scrollTop = ui.scroll.scrollHeight; });
   }
 
   function newConversation() {
@@ -816,11 +830,12 @@
     const conversation = currentConversation();
     if (!conversation) return;
     closeMenu();
+    approvalFollow.arm(conversation.id, conversation.messages, ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     busy = true; submissionActivity = "send"; updateComposer();
     const messageId = crypto.randomUUID();
     // Use the ordinary durable send/context path. No separate summarizer, no
     // direct skill mutation, and no consumption of the user's unsent draft/files.
-    const body = "Apprends ceci comme skill : à partir de cette conversation, rédige une procédure réutilisable et fidèle à ce que nous avons établi. N’invente pas d’étapes et n’inclus aucun secret. Consulte tes skills pour éviter les doublons, puis utilise propose_skill pour proposer une nouvelle skill ou une nouvelle version. Présente le nom, la description, le contenu et les éventuels fichiers texte annexes dans la carte Enregistrer / Ignorer. Rien ne doit être enregistré sans mon clic.";
+    const body = window.GrokbotChat.teachPrompt;
     try {
       const response = await api("/api/send", { conversation_id: conversation.id, message_id: messageId, body });
       upsertConversation(response.conversation); render(true); scrollToLatest(); schedulePoll();
@@ -840,6 +855,7 @@
     const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
     let conversation = currentConversation();
+    approvalFollow.arm(conversation?.id ?? null, conversation?.messages || [], ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     busy = true;
     submissionActivity = "send";
     updateComposer();
@@ -866,6 +882,7 @@
         conversation = created.conversation;
         selectedId = conversation.id;
         writePreference("grokbot.selected", selectedId);
+        approvalFollow.bind(conversation.id);
       }
       messageId = crypto.randomUUID();
       pendingSends.set(messageId, { extras, consumed: false });
@@ -976,7 +993,8 @@
   function exportConversation() {
     const conversation = currentConversation();
     if (!conversation) return;
-    const blob = new Blob([JSON.stringify(conversation, null, 2)], { type: "application/json" });
+    const exported = { ...conversation, messages: conversation.messages.map(window.GrokbotChat.exportMessage) };
+    const blob = new Blob([JSON.stringify(exported, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = element("a");
     anchor.href = url;
@@ -1028,6 +1046,14 @@
   });
   $("composer-form").addEventListener("drop", (event) => {
     if (!event.defaultPrevented) composerFiles(event.dataTransfer?.files, event);
+  });
+  // Cancel only for explicit reading/navigation gestures, not for scroll events
+  // caused by streaming, layout changes or our own scrollToLatest callbacks.
+  for (const event of ["wheel", "touchmove"]) ui.scroll.addEventListener(event, () => approvalFollow.cancel(), { passive: true });
+  ui.scroll.addEventListener("pointerdown", (event) => { if (event.target === ui.scroll) approvalFollow.cancel(); });
+  ui.scroll.addEventListener("keydown", (event) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+        && !event.target.closest('input, textarea, select, button, summary, [contenteditable="true"]')) approvalFollow.cancel();
   });
   $("composer-form").addEventListener("submit", sendMessage);
   $("learn-skill-button").addEventListener("click", () => void learnConversation());

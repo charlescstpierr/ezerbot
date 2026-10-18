@@ -11,7 +11,7 @@ function composer(kind = "task") {
   const ctx = { active: true, streaming: true, conversation: { id: "thread", kind, messages: [] } };
   const removed = [], discarded = [], mascots = [];
   const input = { value: "", setReadOnly(value) { this.readOnly = value; }, setPlaceholder(value) { this.placeholder = value; }, setInvalid(value) { this.invalid = value; } };
-  const nodes = { "new-chat": {}, "composer-hint": {} };
+  const nodes = { "new-chat": {}, "composer-hint": {}, "learn-skill-button": {} };
   const use = { setAttribute() {} };
   const ui = { input, send: { dataset: {}, setAttribute() {}, querySelector: () => use }, hint: { dataset: {} }, menuButton: {} };
   const panel = { composer: { discard() { discarded.push(ctx.conversation.id); } } };

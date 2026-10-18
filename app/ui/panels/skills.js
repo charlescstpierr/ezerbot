@@ -27,7 +27,7 @@
     el.addEventListener("click", action);
     return el;
   };
-  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
+  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "combined-too-large": "Le contenu et les annexes conservées dépassent ensemble 256 000 caractères",  "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
   function session(botId) {
     if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "" });
     return sessions.get(botId);
@@ -133,7 +133,7 @@
     progress.setAttribute("role", "status");
     const reportRows = node("ol", "skills-report-rows");
     report.append(reportTitle, reportRows);
-    section.append(node("p", "skills-note", "Textes UTF-8 : txt, md, markdown, csv, json, yaml, yml. 256 000 caractères par texte · 250 skills par bot."), actions, list, progress, report);
+    section.append(node("p", "skills-note", "Textes UTF-8 : txt, md, markdown, csv, json, yaml, yml. 256 000 caractères par skill, annexes comprises · 250 skills par bot."), actions, list, progress, report);
     const fileInput = node("input", "skills-file-input");
     fileInput.type = "file"; fileInput.multiple = true;
     fileInput.accept = EXTENSIONS.map((extension) => `.${extension}`).join(",");
@@ -186,7 +186,7 @@
     const history = node("details", "skills-history");
     const select = node("select", "text-input"); select.name = "skill-version";
     select.setAttribute("aria-label", "Version à consulter");
-    const preview = node("pre", "skills-version-preview");
+    const preview = node("div", "skills-history-content");
     history.append(node("summary", "", "Historique des versions (lecture seule)"), select, preview);
     const confirmation = node("div", "skills-confirmation"); confirmation.hidden = true;
     confirmation.append(node("p", "skills-note", "Supprimer cette skill ? Elle ne sera plus proposée au bot. Les versions déjà épinglées restent conservées."), button("Confirmer la suppression", () => void remove(), "danger-button"), button("Garder la skill", () => { confirmation.hidden = true; }));
@@ -204,9 +204,24 @@
     dialog.addEventListener("close", () => {
       if (alive && !dialog.open) { token++; focusPending = true; render(); }
     });
+    function fileDetails(file) {
+      const detail = node("details");
+      detail.append(node("summary", "", file.path), node("pre", "skills-version-preview", file.content));
+      return detail;
+    }
     function showVersion() {
       const version = versions.find((item) => String(item.version) === select.value);
-      preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${displayName(version.content)}\n${version.content.description}\n\n${version.content.editable_body ?? version.content.body}${(version.content.files || []).map((file) => `\n\nFichier : ${file.path}\n${file.content}`).join("")}` : "";
+      preview.replaceChildren();
+      if (!version) return;
+      const content = version.content;
+      preview.append(node("h4", "", `${version.deleted ? "Supprimée · " : ""}${displayName(content)}`),
+        node("p", "skills-note", content.description), node("pre", "skills-version-preview", content.editable_body ?? content.body));
+      if (content.files?.length) {
+        const files = node("section", "skills-companion-files");
+        files.setAttribute("aria-label", `Fichiers annexes de la version ${version.version}`);
+        files.append(node("h3", "", `Fichiers annexes · ${content.files.length}`), ...content.files.map(fileDetails));
+        preview.append(files);
+      }
     }
     select.addEventListener("change", showVersion);
     function populate(skill, allVersions) {
@@ -219,11 +234,7 @@
       baseline = { name: name.value, description: description.value, body: body.value };
       const files = skill?.content.files || [];
       companionFiles.hidden = !files.length;
-      companionFiles.replaceChildren(node("h3", "", `Fichiers annexes · ${files.length}`), node("p", "skills-note", "Textes conservés avec cette version. Demandez au bot une nouvelle proposition pour les modifier."), ...files.map((file) => {
-        const detail = node("details");
-        detail.append(node("summary", "", file.path), node("pre", "skills-version-preview", file.content));
-        return detail;
-      }));
+      companionFiles.replaceChildren(node("h3", "", `Fichiers annexes · ${files.length}`), node("p", "skills-note", "Textes conservés avec cette version. Demandez au bot une nouvelle proposition pour les modifier."), ...files.map(fileDetails));
       versionLabel.textContent = skill ? `Version ${skill.version}` : "Votre bot retrouve cette skill par son nom.";
       history.hidden = !skill; history.open = false;
       removeButton.hidden = !skill; confirmation.hidden = true;
@@ -321,7 +332,7 @@
         for (const skill of skills) {
           const row = node("li", "skills-row"), copy = node("div");
           const lookupKey = titleCounts.get(displayName(skill)) > 1 ? ` · ${skill.name}${skill.name_truncated ? "…" : ""}` : "";
-          copy.append(node("strong", "", displayName(skill) + (skill.display_name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version}${lookupKey}`));
+          copy.append(node("strong", "", displayName(skill) + (skill.display_name_truncated ? "…" : "")), node("small", "", (skill.description || "Sans description") + (skill.description_truncated ? "…" : "")), node("small", "", `Version ${skill.version}${skill.file_count ? ` · ${skill.file_count} ${skill.file_count === 1 ? "annexe" : "annexes"}` : ""}${lookupKey}`));
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;

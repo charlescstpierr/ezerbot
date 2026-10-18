@@ -25,7 +25,7 @@
     const phase = pending ? "pending" : running ? "running" : tool.payload.outcome.status === "failed" ? "failed" : tool.payload.outcome.output.status;
     return { message, phase, token: `${context.conversation.id}:${message.id}:${phase}:${message.payload?.outcome?.reason || ""}` };
   }
-  function focusAttention(context, resized = false) {
+  function focusAttention(context, resized = false, immediate = false) {
     const wanted = attention(context);
     if (!wanted || typeof window.requestAnimationFrame !== "function") return;
     if (resized ? resizeAnchor !== wanted.token : attentionSeen.has(wanted.token)) return;
@@ -51,7 +51,8 @@
         else target.scrollIntoView({ block: "start" });
       }
     };
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => settle(30)));
+    if (immediate) settle(0);
+    else window.requestAnimationFrame(() => window.requestAnimationFrame(() => settle(30)));
   }
   const scroll = document.getElementById?.("chat-scroll");
   let userScroll = null, inputSequence = 0;
@@ -77,6 +78,19 @@
       // Layout clamping and our own scrolls are not a reader leaving the card.
       if (userScroll && width === scroll.clientWidth && height === scroll.clientHeight && userScroll.width === width && userScroll.height === height && Math.abs(scroll.scrollTop - userScroll.top) > 1) {
         resizeAnchor = null; resizePending = false; userScroll = null;
+        return;
+      }
+      // A late shell follow may scroll after our React/resize callback. Correct
+      // only the still-active running card, never an actual reader movement.
+      const wanted = !userScroll && resizeAnchor && attention(latestContext);
+      if (wanted?.phase === "running" && wanted.token === resizeAnchor) {
+        const target = [...document.querySelectorAll("[data-message-id]")].find(e => e.dataset.messageId === wanted.message.id);
+        const controls = [target?.querySelector(".gb-local-header"), target?.querySelector(".gb-local-stop")];
+        const view = scroll.getBoundingClientRect();
+        if (controls.every(Boolean) && controls.some(e => { const r = e.getBoundingClientRect(); return r.top < view.top || r.bottom > view.bottom; })) {
+          resizePending = true;
+          focusAttention(latestContext, true, true);
+        }
       }
     });
   }

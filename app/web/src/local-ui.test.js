@@ -192,6 +192,37 @@ test("a running local call after this turn's human approval waits for its commit
   scroll.clientHeight=521;resized();flush();assert.equal(moves,2);
 });
 
+test("late shell scrolling keeps the complete running header and stop visible at both layouts without overriding readers",()=>{
+  for(const height of [521,301]){
+    const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:height,scrollTop:0,
+      getBoundingClientRect(){return {top:72,bottom:72+this.clientHeight};}});
+    let resized,moves=0;const frames=[];
+    class ResizeObserver {constructor(callback){resized=callback;}observe(){}}
+    const {registration,panels,window,document}=setup({scroll,ResizeObserver});
+    window.requestAnimationFrame=fn=>frames.push(fn);document.querySelector=()=>null;
+    const header={getBoundingClientRect:()=>({top:192-scroll.scrollTop,bottom:214-scroll.scrollTop})};
+    const stop={getBoundingClientRect:()=>({top:372-scroll.scrollTop,bottom:403-scroll.scrollTop})};
+    const target={dataset:{messageId:"running-call",localState:"running"},getBoundingClientRect:()=>({height:240}),
+      querySelector:selector=>selector===".gb-local-header"?header:selector===".gb-local-stop"?stop:null,
+      scrollIntoView(){moves+=1;scroll.scrollTop=120;scroll.listeners.scroll();}};
+    document.querySelectorAll=()=>[target];
+    const context={conversation:{id:"chat",messages:[{role:"user"},
+      {kind:"approval",payload:{run_id:"run",kind:{tool:"run_shell"},status:{status:"resolved"}}},
+      {id:"running-call",kind:"tool",payload:{run_id:"run",run_status:"running",call:{name:"run_shell"}}}]}};
+    const flush=()=>{let count=0;while(frames.length){assert.ok(++count<40);frames.shift()();}};
+    registration.onState(panels.state,context);flush();assert.equal(moves,1);
+    // Actual layout geometry after a late shell/tail follow, not a new state.
+    scroll.scrollTop=380;scroll.listeners.scroll();assert.equal(moves,2);flush();
+    const view=scroll.getBoundingClientRect();
+    for(const element of [header,stop]){const box=element.getBoundingClientRect();assert.ok(box.top>=view.top&&box.bottom<=view.bottom);}
+    // A real reading gesture disarms the same local anchor before any correction.
+    scroll.listeners.keydown({type:"keydown",key:"PageDown"});scroll.scrollTop=480;scroll.listeners.scroll();flush();
+    assert.equal(scroll.scrollTop,480);assert.equal(moves,2);
+    scroll.clientHeight=height===521?301:521;resized();flush();assert.equal(moves,2);
+    scroll.scrollTop=500;scroll.listeners.scroll();flush();assert.equal(moves,2);
+  }
+});
+
 test("running attention never borrows an approval from another run, tool, turn or refused decision",()=>{
   for(const change of ["run","tool","turn","denied","expired","cancelled","missing-run"]){
 

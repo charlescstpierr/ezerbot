@@ -33,3 +33,4 @@
 .gb-local-diff-removed { color:var(--danger-text); }
 .gb-local-diff-hunk { color:var(--muted); font-style:italic; }
 .gb-local-card[data-local-state="running"] > .gb-local-command { max-height:120px; overflow:auto; }
+.gb-local-card[data-local-state="running"] > .gb-local-header { position:sticky; top:0; z-index:1; background:var(--pane); }

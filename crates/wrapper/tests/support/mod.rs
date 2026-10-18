@@ -56,6 +56,54 @@ impl ScriptedResponse {
         }
     }
 
+    /// Responses-shaped transport: repeated response objects/instructions and
+    /// one metadata-rich delta per four Unicode characters (roughly one token).
+    /// Deliberately not the tiny, one-delta convenience fixture.
+    pub fn openai_text(text: &str, instructions: &str) -> Self {
+        let item_id = format!("msg_{}", "a".repeat(48));
+        let mut response = json!({"id":format!("resp_{}","b".repeat(48)),"object":"response","status":"in_progress","created_at":1800000000,"instructions":instructions,"model":"gpt-test-mini","reasoning":{"effort":"low"},"text":{"format":{"type":"text"}},"tools":[],"usage":null,"metadata":{},"output":[]});
+        let mut events = vec![
+            json!({"type":"response.created","response":response}),
+            json!({"type":"response.in_progress","response":response}),
+        ];
+        let reasoning =
+            json!({"id":format!("rs_{}","c".repeat(48)),"type":"reasoning","summary":[]});
+        events.push(json!({"type":"response.output_item.added","output_index":0,"item":reasoning}));
+        events.push(json!({"type":"response.output_item.done","output_index":0,"item":reasoning}));
+        let mut message = json!({"id":item_id,"type":"message","role":"assistant","status":"in_progress","content":[]});
+        events.push(json!({"type":"response.output_item.added","output_index":1,"item":message}));
+        events.push(json!({"type":"response.content_part.added","item_id":item_id,"output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}));
+        for chunk in text.chars().collect::<Vec<_>>().chunks(4) {
+            events.push(json!({"type":"response.output_text.delta","item_id":item_id,"output_index":1,"content_index":0,"delta":chunk.iter().collect::<String>(),"logprobs":[],"obfuscation":"0123456789abcdef0123456789abcdef"}));
+        }
+        let part = json!({"type":"output_text","text":text,"annotations":[],"logprobs":[]});
+        events.push(json!({"type":"response.output_text.done","item_id":item_id,"output_index":1,"content_index":0,"text":text}));
+        events.push(json!({"type":"response.content_part.done","item_id":item_id,"output_index":1,"content_index":0,"part":part}));
+        message["content"] = json!([part]);
+        message["status"] = json!("completed");
+        events.push(json!({"type":"response.output_item.done","output_index":1,"item":message}));
+        response["output"] = json!([reasoning, message]);
+        response["status"] = json!("completed");
+        response["usage"] = json!({"input_tokens":500,"output_tokens":400,"input_tokens_details":{"cached_tokens":0}});
+        events.push(json!({"type":"response.completed","response":response}));
+        for (sequence, event) in events.iter_mut().enumerate() {
+            event["sequence_number"] = json!(sequence);
+        }
+        Self {
+            status: 200,
+            content_type: "text/event-stream".into(),
+            body: events
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect(),
+        }
+    }
+
     pub fn events(events: &[Value]) -> Self {
         Self {
             status: 200,

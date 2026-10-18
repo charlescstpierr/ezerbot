@@ -42,8 +42,11 @@
           finally { input.disabled = false; }
         });
       }
-      input.closest("label").querySelector("strong").textContent = bot.name;
-      input.setAttribute("aria-label", `Mémoire automatique — ${bot.name}`);
+      const paused = state?.memory_auto?.available === false;
+      const label = input.closest("label");
+      label.className = `setting-toggle memory-auto-toggle${paused ? " is-paused" : ""}`;
+      label.querySelector("strong").textContent = `${bot.name}${paused ? " (en pause)" : ""}`;
+      input.setAttribute("aria-label", `Mémoire automatique — ${bot.name}${paused ? " — en pause" : ""}`);
       if (!input.disabled) input.checked = state?.memory_auto?.settings?.find((s) => s.bot_id === bot.id)?.enabled !== false;
     }
   }
@@ -74,7 +77,14 @@
     onState(state) {
       renderAutomaticSettings(state);
       const revision = state?.memory_auto?.revision;
-      if (revision !== automaticRevision) { automaticRevision = revision; activeReload?.(); }
+      if (revision !== automaticRevision) {
+        automaticRevision = revision;
+        activeReload?.();
+        // The worker can commit between /api/state's conversation projection
+        // and its revision/pending reads. Re-read once for each new revision so
+        // a fast completion cannot stop polling with its last receipt missing.
+        if (revision > 0) Promise.resolve().then(() => panels.refresh()).catch(() => {});
+      }
     },
     wantsPolling() { return panels.state?.memory_auto?.pending === true; },
     async onCardAction(message, action, detail) {
@@ -86,7 +96,8 @@
         return true;
       } finally {
         // Even a stale action must reconcile the card with the durable fact.
-        try { await panels.refresh(); } finally { activeReload?.(); }
+        await panels.refresh().catch(() => {});
+        activeReload?.();
       }
     },
     botSection(bot, container) {
@@ -274,7 +285,9 @@
           const data = await panels.api(path, body);
           apply(data); // Record confirmed forgetting even if the dialog closed.
           closeEditor(); // Drop the corrected/forgotten text from the DOM.
-          await panels.refresh(); // Reproject receipts in the conversation too.
+          // The mutation was confirmed. A failed state read must not report it
+          // as failed or replace the server's original error on another action.
+          await panels.refresh().catch(() => {});
           if (alive) {
             render();
             try { facts = await readFacts(); }
@@ -306,7 +319,7 @@
             totals.kept += data.kept_private_count;
             for (const id of batch) { processed.add(id); selected.delete(id); }
             showTotals(); // Kept-private IDs are processed too (MW03).
-            await panels.refresh();
+            await panels.refresh().catch(() => {});
           }
           if (alive) status.textContent = "Partage terminé.";
         } catch (error) {

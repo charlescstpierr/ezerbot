@@ -254,6 +254,146 @@ fn deduplicates_updates_preserves_team_scope_and_undo_restores_previous() {
 }
 
 #[test]
+fn edited_automatic_update_restores_predecessor_without_deleting_or_duplicating_it() {
+    for declared in [false, true] {
+        let mut f = Fixture::new();
+        let c = f.conv("grokbot");
+        let original = "Je préfère le thé vert.";
+        if declared {
+            facts::remember(
+                &f.db(),
+                &facts::Fact {
+                    fact_id: String::new(),
+                    bot_id: "grokbot".into(),
+                    scope: Scope::Private,
+                    text: original.into(),
+                    provenance: facts::Provenance {
+                        source: Source::UserStated,
+                        conversation_id: None,
+                        entry_id: None,
+                    },
+                    learned_at: 1700000000000,
+                    status: FactStatus::Active,
+                    sensitive: false,
+                },
+            )
+            .unwrap();
+        } else {
+            f.script(json!([fact(original, None)]));
+            f.send(&c, "creation", original);
+            f.settle();
+        }
+        let old = f.facts("grokbot")[0].clone();
+        let changed = "Je préfère maintenant le café noir.";
+        f.script(json!([fact(changed, Some(&old.fact_id))]));
+        f.send(&c, "update", changed);
+        f.settle();
+        let update = f.cards(&c).last().unwrap().clone();
+        let edited = "Je préfère maintenant le café noir avec du lait.";
+        f.post(
+            "/api/memory/correct",
+            json!({"bot_id":"grokbot","fact_id":update["payload"]["fact_id"],"text":edited}),
+        );
+        let cards = f.cards(&c);
+        assert_eq!(
+            cards
+                .iter()
+                .filter(|c| c["payload"]["active"] == true)
+                .count(),
+            1
+        );
+        if !declared {
+            assert_eq!(cards[0]["payload"]["active"], false);
+            assert_eq!(cards[0]["payload"]["updated"], true);
+            assert!(f
+                .app
+                .api(
+                    "POST",
+                    "/api/memory/automatic/undo",
+                    json!({"card_id":cards[0]["id"]}).to_string().as_bytes()
+                )
+                .is_err());
+        }
+        f.post(
+            "/api/memory/automatic/undo",
+            json!({"card_id":update["id"]}),
+        );
+        let restored = f.facts("grokbot");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].text, original);
+        assert_eq!(restored[0].provenance, old.provenance);
+        assert_eq!(restored[0].learned_at, old.learned_at);
+        assert_ne!(
+            facts::get(&f.db(), &old.fact_id).unwrap().unwrap().status,
+            FactStatus::Forgotten
+        );
+        let cards = f.cards(&c);
+        assert_eq!(
+            cards
+                .iter()
+                .filter(|c| c["payload"]["active"] == true)
+                .count(),
+            usize::from(!declared)
+        );
+        assert_eq!(cards.last().unwrap()["payload"]["restored_active"], true);
+        f.send(&c, "repeat-edited", edited);
+        f.settle();
+        assert_eq!(f.calls().len(), if declared { 1 } else { 2 });
+        assert_eq!(f.facts("grokbot")[0].text, original);
+        f.reopen();
+        assert_eq!(f.facts("grokbot")[0].provenance, old.provenance);
+        let later=f.post("/api/memory/correct",json!({"bot_id":"grokbot","fact_id":restored[0].fact_id,"text":"Je préfère le thé vert avec du miel."}));
+        assert_eq!(
+            f.cards(&c).last().unwrap()["payload"]["restored_active"],
+            false
+        );
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"grokbot","fact_id":later["fact"]["fact_id"]}),
+        );
+        assert_eq!(
+            f.cards(&c).last().unwrap()["payload"]["restored_active"],
+            false
+        );
+    }
+}
+
+#[test]
+fn realistic_token_sse_envelope_retains_three_facts_and_transport_stays_bounded() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let texts = [
+        "Je préfère travailler ",
+        "Je suis organisatrice de projets ",
+        "Je travaille sur le projet Boréal ",
+    ]
+    .map(|prefix| {
+        format!(
+            "{prefix}{}.",
+            "avec des listes lisibles et des étapes faciles à suivre ".repeat(2)
+        )
+    });
+    let output =
+        json!({"facts":texts.iter().map(|text|fact(text,None)).collect::<Vec<_>>()}).to_string();
+    let reply =
+        ScriptedResponse::openai_text(&output, &"Consignes d’extraction bornée. ".repeat(60));
+    assert!(reply.body.len() > 30000);
+    assert!(reply.body.len() < 512 * 1024);
+    f.script_response(reply);
+    f.send(&c, "realistic", &texts.join(" "));
+    f.settle();
+    assert_eq!(f.facts("grokbot").len(), 3);
+    assert_eq!(f.cards(&c).len(), 3);
+    let mut oversized = response(json!([fact("Je préfère le thé vert.", None)]));
+    oversized.body = format!("{}{}", ": keepalive\n\n".repeat(50000), oversized.body);
+    f.script_response(oversized);
+    f.send(&c, "over-envelope", "Je préfère le thé vert.");
+    f.settle();
+    assert_eq!(f.facts("grokbot").len(), 3);
+    assert_eq!(f.cards(&c).len(), 3);
+}
+
+#[test]
 fn undo_new_fact_and_forget_block_identical_source_after_restart() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");
@@ -725,6 +865,10 @@ fn rich_group_mentions_are_removed_but_email_values_remain_excluded() {
     });
     f.settle();
     assert_eq!(f.calls().len(), 2);
+    assert!(f
+        .cards(&c)
+        .iter()
+        .all(|card| card["payload"]["memory_root_id"] == "everyone"));
     assert_eq!(f.facts("grokbot").len(), 1);
     assert_eq!(f.facts("other").len(), 1);
     for call in f.calls() {

@@ -993,9 +993,11 @@ impl Provider {
             .map_err(|_| Failure::other("Extraction indisponible."))?;
         let mut text = String::new();
         let mut completed = false;
-        // Bound even a misbehaving server's SSE envelope, not only JSON output.
+        // A real Responses stream repeats metadata/instructions and sends one
+        // envelope per token. Leave room for 900 such deltas while still bounding
+        // transport bytes independently of the 4096-byte useful-text limit.
         crate::gateway::stream_response(
-            BufReader::new(response.into_reader().take(24_000)),
+            BufReader::new(response.into_reader().take(512 * 1024)),
             &mut |event| {
                 match event {
                     ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {

@@ -10,6 +10,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
+import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage } from "./teach.js";
 
@@ -283,7 +284,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
   const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask]);
-  const ordered = useMemo(() => orderThread(messages), [messages]);
+  const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
   return (
@@ -301,6 +302,17 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
             </div>
           );
           if (delegated) return <DelegationInstruction key={message.id} message={message} createMascot={authorMascot} botName={authorName} />;
+          if (message.kind === "memory_overflow") {
+            const Receipt = cards.get("memory_auto");
+            return <div className="gb-card-slot" key={message.id}>
+              <details className="gb-memory-overflow">
+                <summary>Autres mémoires de ce tour ({message.memories.length})</summary>
+                <div className="gb-memory-overflow-content">{message.memories.map((receipt) => <div className="gb-memory-overflow-item" key={receipt.id}>
+                  <Receipt message={receipt} busy={busy} botName={bots.find((bot) => bot.id === receipt.payload?.bot_id)?.name || botName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(receipt, action, detail)} />
+                </div>)}</div>
+              </details>
+            </div>;
+          }
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"

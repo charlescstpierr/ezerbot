@@ -41,6 +41,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS memory_auto_cards (
         id TEXT PRIMARY KEY, run_id TEXT NOT NULL, fact_id TEXT NOT NULL,
         previous_id TEXT, source_hash TEXT NOT NULL, cancelled INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS memory_auto_cards_previous ON memory_auto_cards(previous_id,cancelled);
         CREATE TABLE IF NOT EXISTS memory_auto_blocks (
         bot_id TEXT NOT NULL, scope TEXT NOT NULL, digest TEXT NOT NULL,
         PRIMARY KEY(bot_id, scope, digest));")?;
@@ -262,7 +263,7 @@ pub fn routes(
             row.ok_or_else(|| ApiError::new(404, "Carte mémoire introuvable."))?;
         let fact = current_fact(&tx, &id)?;
         if !cancelled {
-            let later_card:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_auto_cards WHERE fact_id=?1 AND id!=?2 AND cancelled=0)",params![fact.fact_id,input.card_id],|r|r.get(0))?;
+            let later_card = has_newer_receipt(&tx, &id, &input.card_id)?;
             if fact.status != FactStatus::Active || later_card {
                 return Err(ApiError::new(
                     409,
@@ -271,9 +272,9 @@ pub fn routes(
             }
             block(&tx, &fact.bot_id, fact.scope, &source_hash)?;
             block(&tx, &fact.bot_id, fact.scope, &hash(&fact.text))?;
-            // Editing a receipt keeps Annuler: it forgets the edited head.
-            // Only an unchanged automatic update restores its predecessor.
-            if let Some(previous) = previous.filter(|_| fact.fact_id == id) {
+            // A creation receipt forgets its edited head. An update receipt
+            // always restores its predecessor, even after manual head edits.
+            if let Some(previous) = previous {
                 let old = facts::get(&tx, &previous)?
                     .ok_or_else(|| ApiError::new(409, "La version précédente est indisponible."))?;
                 if old.bot_id != fact.bot_id
@@ -738,6 +739,20 @@ fn current_fact(conn: &Connection, id: &str) -> Result<Fact, ApiError> {
     ))
 }
 
+fn has_newer_receipt(conn: &Connection, fact_id: &str, card_id: &str) -> Result<bool, ApiError> {
+    // A manual successor has no card of its own. Keep the earlier receipt
+    // inactive while ANY later, un-cancelled update still owns this lineage.
+    Ok(conn.query_row(
+        "WITH RECURSIVE lineage(id) AS (
+        SELECT ?1 UNION SELECT f.superseded_by FROM memory_facts f
+        JOIN lineage l ON f.fact_id=l.id WHERE f.status='superseded'
+    ) SELECT EXISTS(SELECT 1 FROM memory_auto_cards c WHERE c.id!=?2 AND c.cancelled=0
+        AND c.previous_id IN (SELECT id FROM lineage))",
+        params![fact_id, card_id],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     if kind != "memory_auto" {
         return None;
@@ -757,15 +772,19 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
     // Never retain a copy of text in a receipt; edits/forgetting are projected
     // from the current lineage on each state refresh.
     let fact = current_fact(ctx.connection, &fact_id).ok()?;
-    let updated = fact.fact_id != fact_id
-        && ctx
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM memory_auto_cards WHERE fact_id=?1 AND cancelled=0)",
-                [&fact.fact_id],
-                |r| r.get::<_, bool>(0),
-            )
-            .ok()?;
+    let updated = fact.status == FactStatus::Active
+        && has_newer_receipt(ctx.connection, &fact_id, id).ok()?;
+    let root: Option<String> = ctx
+        .connection
+        .query_row(
+            "SELECT root_id FROM wrapper_group_turns WHERE run_id=?1",
+            [&run_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()?;
+    let restored_active = cancelled && replaced && fact.status == FactStatus::Active
+        && ctx.connection.query_row("SELECT p.text FROM memory_auto_cards c JOIN memory_facts p ON p.fact_id=c.previous_id WHERE c.id=?1", [id], |r|r.get::<_,String>(0)).optional().ok()?.is_some_and(|text|text==fact.text);
     let active = !cancelled && !updated && fact.status == FactStatus::Active;
     Some(Message {
         id: id.into(),
@@ -778,7 +797,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         notice: None,
         proposals: vec![],
         kind: "memory_auto".into(),
-        payload: json!({"memory_run_id":run_id,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
+        payload: json!({"memory_run_id":run_id,"memory_root_id":root,"restored_active":restored_active,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
         attachments: vec![],
     })
 }

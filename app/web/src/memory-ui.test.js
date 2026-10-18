@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { memoryPresentation } from "./memory-presentation.js";
+import { memoryPresentation, collapseMemoryReceipts } from "./memory-presentation.js";
 
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.value = ""; }
@@ -24,7 +24,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 async function fixture() {
   const initial = { fact_id: "fact-one", bot_id: "bot", text: "Je préfère le thé vert.", scope: "private", learned_at: 1, provenance: { source: "automatic" } };
-  let current = initial, registration, refreshes = 0;
+  let current = initial, registration, refreshes = 0, refreshFailure = false;
   const requests = [], root = new Element("div");
   const state = { bots: [{ id: "bot", name: "Ezerbot" }], provider: { connected: true, models_ready: true }, memory_auto: { available: true, revision: 1 }, conversations: [{ messages: [{ kind: "memory_auto", payload: { ...initial, active: true } }] }] };
   const panels = {
@@ -40,6 +40,7 @@ async function fixture() {
     },
     async refresh() {
       refreshes++;
+      if (refreshFailure) throw new Error("Lecture de l’état indisponible.");
       state.conversations[0].messages[0].payload = { ...(current || initial), active: !!current, text: current?.text || "" };
       registration.onState(state);
     },
@@ -51,7 +52,8 @@ async function fixture() {
   registration.onState(state);
   const cleanup = registration.botSection(state.bots[0], root);
   await flush();
-  return { root, state, panels, registration, requests, cleanup, setCurrent: (fact) => { current = fact; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
+  refreshes = 0; // Initial revision reconciliation is not an action refresh.
+  return { root, state, panels, registration, requests, cleanup, failRefresh: () => { refreshFailure = true; }, setCurrent: (fact) => { current = fact; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
 }
 
 test("forgetting through the real panel refreshes the thread into an inactive, text-free receipt", async () => {
@@ -104,9 +106,54 @@ test("memory receipts distinguish corrections, restore undo and the owning group
   assert.equal(updated.quote, "« Je code en Rust. »");
   assert.equal(memoryPresentation({ active: true }).label, "Mémorisé :");
   assert.equal(memoryPresentation({ active: true }, "Ezerbot", true).label, "Mémorisé par Ezerbot :");
-  const undo = memoryPresentation({ active: false, cancelled: true, replaced: true, text: "Texte ancien" });
+  const undo = memoryPresentation({ active: false, cancelled: true, replaced: true, restored_active: true, text: "Texte ancien" });
   assert.match(undo.receipt, /l’ancien fait est rétabli/);
   assert.equal(undo.quote, "");
+  assert.equal(memoryPresentation({ active: false, cancelled: true, replaced: true, restored_active: false }).receipt, "Mise à jour annulée.");
+});
+
+test("a revision delivered with a stale conversation frame triggers one follow-up state read", async () => {
+  const f = await fixture();
+  try {
+    f.setCurrent({ ...f.card().payload, text: "Fait reçu à la fin du tour." });
+    f.state.memory_auto.revision++;
+    f.registration.onState(f.state);
+    await flush();
+    assert.equal(f.refreshes(), 1);
+    assert.equal(f.card().payload.text, "Fait reçu à la fin du tour.");
+    await flush(); assert.equal(f.refreshes(), 1); // No idle polling loop.
+  } finally { f.cleanup(); }
+});
+
+test("confirmed mutations remain confirmed when only the state refresh fails", async () => {
+  const f = await fixture();
+  try {
+    f.failRefresh();
+    button(f.root, "Oublier…").listeners.click(); button(f.root, "Confirmer l’oubli").listeners.click();
+    await flush();
+    assert.equal(f.root.textContent.includes("Action non confirmée"), false);
+    assert.ok(f.root.textContent.includes("Fait oublié."));
+    await assert.rejects(f.registration.onCardAction(f.card(), "undo"), /Ce fait a changé/);
+  } finally { f.cleanup(); }
+  const share = await fixture();
+  try {
+    share.failRefresh(); const check = byClass(share.root, "memory-fact-choice").children[0]; check.checked = true; check.listeners.change();
+    button(share.root, "Partager la sélection (1)").listeners.click(); await flush();
+    assert.ok(share.root.textContent.includes("Partage terminé."));
+    assert.ok(!share.root.textContent.includes("Partage interrompu"));
+  } finally { share.cleanup(); }
+});
+
+test("group turns keep three receipts visible and retain individual actions inside one disclosure", () => {
+  const receipts = Array.from({ length: 6 }, (_, index) => ({ id: `memory-${index}`, kind: "memory_auto", payload: { memory_root_id: "human-root", bot_id: `bot-${index % 3}` } }));
+  const next = { id: "next", role: "user", body: "Autre tour" };
+  const otherRoot = { id: "other", kind: "memory_auto", payload: { memory_root_id: "other-root" } };
+  const input = [...receipts, next, otherRoot], result = collapseMemoryReceipts(input, true);
+  assert.equal(result.filter((m) => m.kind === "memory_auto").length, 4);
+  const disclosure = result.find((m) => m.kind === "memory_overflow");
+  assert.deepEqual(disclosure.memories, receipts.slice(3));
+  assert.equal(result.at(-2), next); assert.equal(result.at(-1), otherRoot);
+  assert.equal(collapseMemoryReceipts(input, false), input);
 });
 
 test("settings expose unavailable small models without repeating one description per bot", async () => {
@@ -117,5 +164,8 @@ test("settings expose unavailable small models without repeating one description
     f.registration.settingsSection(settings);
     assert.match(byClass(settings, "memory-auto-availability").textContent, /aucun petit modèle/);
     assert.equal(walk(settings).filter((el) => el.tagName === "small").length, 0);
+    const row = byClass(settings, "memory-auto-toggle");
+    assert.match(row.className, /is-paused/); assert.match(row.textContent, /en pause/);
+    assert.equal(row.querySelector("input").checked, true);
   } finally { f.cleanup(); }
 });

@@ -604,7 +604,9 @@ fn prompt_cache_key(conversation: &str) -> String {
     use sha2::{Digest, Sha256};
     // Local conversation identity only: no account id, secret, timestamp or run id.
     // Child/task/routine conversations have distinct prompts and their own affinity.
-    format!("ezerbot-{:x}", Sha256::digest(conversation.as_bytes()))
+    // Responses limits keys to 64 characters. Keep 128 hash bits plus our prefix (40 total).
+    let digest = format!("{:x}", Sha256::digest(conversation.as_bytes()));
+    format!("ezerbot-{}", &digest[..32])
 }
 fn legacy_run_id(conversation: &str, message: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -2777,6 +2779,22 @@ mod projection_tests {
         let reply = run_reply(&f.app.connection, &f.run, "reply-question".into(), vec![]).unwrap();
         assert_eq!(reply.body, "");
         assert_eq!(reply.payload["parts"], json!([]));
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::prompt_cache_key;
+
+    #[test]
+    fn cache_key_is_bounded_and_hashes_the_entire_long_conversation_id() {
+        let conversation = format!("task:child:routine:{}", "long-id-".repeat(1024));
+        let key = prompt_cache_key(&conversation);
+        assert!(key.is_ascii() && key.len() <= 64);
+        assert!(key.starts_with("ezerbot-"));
+        assert_eq!(key, prompt_cache_key(&conversation));
+        assert_ne!(key, prompt_cache_key(&format!("{conversation}-other")));
+        assert!(prompt_cache_key("short-conversation").len() <= 64);
     }
 }
 

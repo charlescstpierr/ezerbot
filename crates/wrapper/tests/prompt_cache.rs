@@ -156,7 +156,7 @@ fn consecutive_turns_keep_serialized_prefix_and_usage_after_restart() {
         bytes(&second["instructions"])
     );
     let key = second["prompt_cache_key"].as_str().unwrap();
-    assert!(key.starts_with("ezerbot-") && key.len() == 72);
+    assert!(key.starts_with("ezerbot-") && key.len() <= 64);
     assert!(!key.contains("test-host") && !key.contains("fake-access"));
 
     let conn = Connection::open(f.dir.join("app.sqlite")).unwrap();
@@ -195,6 +195,35 @@ fn consecutive_turns_keep_serialized_prefix_and_usage_after_restart() {
     f.conversation = other;
     let other = f.send("other", "Bonjour ailleurs");
     assert_ne!(third["prompt_cache_key"], other["prompt_cache_key"]);
+}
+
+#[test]
+fn fake_provider_rejects_cache_keys_over_64_characters() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let server = FakeOpenAi::new(seen.clone());
+    for length in [65, 72, 1024] {
+        let result = ureq::post(&format!("{}/v1/responses", server.base))
+            .set("Content-Type", "application/json")
+            .send_string(&json!({"prompt_cache_key":"x".repeat(length)}).to_string());
+        let Err(ureq::Error::Status(400, response)) = result else {
+            panic!("provider accepted an oversized cache key of length {length}");
+        };
+        let error: Value = response.into_json().unwrap();
+        assert_eq!(error["error"]["code"], "string_above_max_length");
+        assert_eq!(error["error"]["param"], "prompt_cache_key");
+    }
+    // Boundary and auxiliary (omitted-key) requests remain accepted.
+    for body in [json!({"prompt_cache_key":"x".repeat(64)}), json!({})] {
+        assert_eq!(
+            ureq::post(&format!("{}/v1/responses", server.base))
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+                .unwrap()
+                .status(),
+            200
+        );
+    }
+    assert_eq!(seen.lock().unwrap().bodies.len(), 5);
 }
 
 #[test]

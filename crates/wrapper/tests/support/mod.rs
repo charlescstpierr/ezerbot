@@ -176,7 +176,18 @@ impl FakeOpenAi {
                         seen.bearer.push(bearer);
                         let request_body: Value = serde_json::from_str(&body).unwrap();
                         seen.bodies.push(request_body.clone());
-                        if let Some(reply) = seen.responses.pop_front() {
+                        if let Some(key) = request_body["prompt_cache_key"]
+                            .as_str()
+                            .filter(|key| key.chars().count() > 64)
+                        {
+                            // Mirror the Responses constraint before consuming scripted replies.
+                            let error = json!({"error": {
+                                "type":"invalid_request_error", "code":"string_above_max_length",
+                                "param":"prompt_cache_key",
+                                "message":format!("Invalid 'prompt_cache_key': string too long. Expected a string with maximum length 64, but got a string with length {} instead.", key.chars().count()),
+                            }});
+                            (400, "application/json".into(), error.to_string())
+                        } else if let Some(reply) = seen.responses.pop_front() {
                             (reply.status, reply.content_type, reply.body)
                         } else if request_body["instructions"]
                             .as_str()

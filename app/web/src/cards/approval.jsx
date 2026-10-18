@@ -3,6 +3,10 @@ import { useState } from "react";
 
 export const kind = "approval";
 
+function ActionArguments({ value }) {
+  return <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-xs" aria-label="Arguments de l’action">{JSON.stringify(value, null, 2)}</pre>;
+}
+
 export function Card({ message, busy, onAction }) {
   const input = useHumanInput(message, onAction);
   const { request, pending, act } = input;
@@ -17,22 +21,30 @@ export function Card({ message, busy, onAction }) {
   const automatic = !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
     || (review?.answer?.decision === "deny" && input.status === "denied"));
   if (automatic) return (
-    <article className="gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground" data-message-id={message.id} data-card-kind="approval">
-      <p className="text-sm" role="status"><strong>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
+    <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
+      <p className="text-sm" role="status"><strong className={input.status === "denied" ? "gb-status-alert" : undefined}>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
       <p className="mt-1 text-xs text-muted-foreground">Outil : <code>{action.tool}</code></p>
+      {request.arguments == null ? <p className="mt-2 text-xs text-muted-foreground">Aperçu de l’action indisponible.</p> : <div className="mt-2 space-y-2 text-xs text-muted-foreground">
+        <code className="block truncate" title={JSON.stringify(request.arguments)}>{JSON.stringify(request.arguments)}</code>
+        <details><summary>Voir l’action complète</summary><div className="mt-2"><ActionArguments value={request.arguments} /></div></details>
+      </div>}
       <button type="button" className="gb-retry mt-2" onClick={() => act("forms.rules")}>Modifier les règles pour les prochains appels</button>
     </article>
   );
+  const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
     <HumanInputCard message={message} title="Approbation demandée" input={input}>
       <div className="space-y-3">
-        {pending && review && <p className="text-xs text-muted-foreground" role="status">{review.pending
-          ? (review.started_at + 12000 > Date.now() ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
-          : review.answer.reason}</p>}
+        {pending && review && <p className="text-xs text-muted-foreground" role="status">
+          {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
+          <strong>Relecteur : </strong>{review.pending
+            ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
+            : review.answer.reason}
+        </p>}
         <p className="text-sm">Outil : <code>{action.tool}</code></p>
         {request.arguments == null
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
-          : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-xs" aria-label="Arguments de l’action">{JSON.stringify(request.arguments, null, 2)}</pre>}
+          : <ActionArguments value={request.arguments} />}
         <details className="text-xs text-muted-foreground"><summary>Empreinte et expiration</summary><p className="break-all">{action.args_digest}</p><p>{Number.isFinite(action.expires_at) ? new Date(action.expires_at).toLocaleString("fr-CA") : "Échéance indisponible"}</p></details>
         {pending && <fieldset className="space-y-3" disabled={disabled}>
           <div className="flex flex-wrap gap-2">

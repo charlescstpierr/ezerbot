@@ -30,6 +30,23 @@
   let rulesKey;
   let expiryTimer;
   let reviewDraft;
+  let reviewNotice;
+  let reviewStatus;
+  let reviewErrors = {};
+  let reviewBusy = false;
+  let reviewControls = [];
+  function setReviewNotice(text, error = false) {
+    reviewNotice = text ? { text, error } : undefined;
+    if (reviewStatus) {
+      reviewStatus.textContent = text || "";
+      reviewStatus.className = `reviewer-notice${error ? " reviewer-error" : ""}`;
+      reviewStatus.setAttribute("role", error ? "alert" : "status");
+    }
+  }
+  function setReviewBusy(busy) {
+    reviewBusy = busy;
+    for (const control of reviewControls) control.disabled = busy;
+  }
   function reviewEditor(state) {
     const saved = state.forms?.reviewer;
     if (!saved) return;
@@ -39,14 +56,23 @@
     form.className = "reviewer-settings";
     const title = document.createElement("h4");
     title.textContent = "Règles en langage naturel";
-    const note = document.createElement("p");
-    note.textContent = "Après les règles « Toujours », un modèle relit vos demandes. Au moindre doute ou en cas d’erreur, vous décidez. Aucun secret ne lui est transmis. Les commandes et données sensibles nécessitent votre confirmation.";
     const toggle = document.createElement("label");
+    toggle.className = "setting-toggle";
+    const copy = document.createElement("span");
+    const toggleTitle = document.createElement("strong");
+    toggleTitle.textContent = "Activer le relecteur d’approbations";
+    const note = document.createElement("small");
+    note.textContent = "Après les règles « Toujours », un modèle relit vos demandes. Au moindre doute ou en cas d’erreur, vous décidez. Aucun secret ne lui est transmis. Les commandes et données sensibles nécessitent votre confirmation.";
+    copy.append(toggleTitle, note);
     const enabled = document.createElement("input");
     enabled.type = "checkbox"; enabled.name = "reviewer-enabled"; enabled.checked = draft.enabled;
-    toggle.append(enabled, " Activer le relecteur d’approbations");
-    form.append(title, note, toggle);
+    enabled.setAttribute("role", "switch");
+    const track = document.createElement("span");
+    track.className = "toggle-track"; track.setAttribute("aria-hidden", "true");
+    toggle.append(copy, enabled, track);
+    form.append(title, toggle);
     const fields = {};
+    const errors = {};
     for (const [key, label, placeholder] of [
       ["allow", "Autoriser ou demander confirmation", "Autorise toujours la lecture dans ~/Documents/projets, mais demande-moi avant toute suppression."],
       ["block", "Refuser systématiquement", "Refuse toute suppression dans ~/Documents/archives."],
@@ -56,42 +82,71 @@
       const field = document.createElement("textarea");
       field.className = "text-input"; field.name = `reviewer-${key}`; field.rows = 3; field.value = draft[key];
       field.placeholder = placeholder; field.setAttribute("aria-label", label);
-      fields[key] = field; wrapper.append(field); form.append(wrapper);
+      const error = document.createElement("p");
+      error.id = `reviewer-${key}-error`; error.className = "reviewer-error";
+      error.setAttribute("role", "alert"); error.textContent = reviewErrors[key] || "";
+      field.setAttribute("aria-describedby", error.id);
+      field.setAttribute("aria-invalid", String(Boolean(reviewErrors[key])));
+      fields[key] = field; errors[key] = error;
+      wrapper.append(field); form.append(wrapper, error);
     }
     const limits = document.createElement("p");
     limits.textContent = "Une règle par ligne · 20 règles par liste · 1 000 caractères par règle. Les refus et demandes de confirmation priment. N’incluez aucun secret. Modifier ou désactiver ces règles agit sur les appels futurs, pas sur une action déjà autorisée. Cette revue utilise votre modèle et votre abonnement ChatGPT.";
-    const status = document.createElement("p"); status.setAttribute("role", "status");
+    reviewStatus = document.createElement("p");
+    setReviewNotice(reviewNotice?.text, reviewNotice?.error);
     const save = document.createElement("button"); save.type = "submit";
-    save.className = "secondary-button"; save.textContent = "Enregistrer les règles";
+    save.className = "primary-button"; save.textContent = "Enregistrer les règles";
     const capture = () => { reviewDraft = { enabled: enabled.checked,
       allow: fields.allow.value, block: fields.block.value, version: draft.version }; };
-    form.addEventListener("input", capture);
+    function clearFeedback() {
+      reviewErrors = {};
+      for (const key of Object.keys(fields)) {
+        fields[key].setAttribute("aria-invalid", "false"); errors[key].textContent = "";
+      }
+      setReviewNotice("");
+    }
+    form.addEventListener("input", () => { capture(); clearFeedback(); });
     form.addEventListener("submit", async (event) => {
-      event.preventDefault(); capture();
+      event.preventDefault();
+      if (reviewBusy) return;
+      capture(); clearFeedback();
       const entries = (text) => text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const config = { enabled: reviewDraft.enabled, allow: entries(reviewDraft.allow), block: entries(reviewDraft.block) };
-      if ([config.allow, config.block].some((list) => list.length > 20 || list.some((line) => [...line].length > 1000))) {
-        status.textContent = "Limite dépassée : 20 règles par liste, 1 000 caractères par règle."; return;
+      for (const key of Object.keys(fields)) {
+        if (config[key].length > 20 || config[key].some((line) => [...line].length > 1000)) {
+          reviewErrors[key] = "Limite dépassée : 20 règles par liste, 1 000 caractères par règle.";
+          fields[key].setAttribute("aria-invalid", "true"); errors[key].textContent = reviewErrors[key];
+        }
       }
-      save.disabled = true;
+      const invalid = Object.keys(reviewErrors)[0];
+      if (invalid) { fields[invalid].focus(); return; }
+      setReviewBusy(true);
       try {
         await panels.api("/api/approvals/reviewer", { config, version: reviewDraft.version });
         reviewDraft = undefined; rulesKey = undefined;
-        status.textContent = "Règles enregistrées.";
-        panels.notify("Règles enregistrées. Elles s’appliqueront aux prochaines demandes.");
+        setReviewNotice("Règles enregistrées. Elles s’appliqueront aux prochaines demandes.");
         try { await panels.refresh(); }
-        catch { status.textContent = "Règles enregistrées. L’actualisation de l’état reste à faire."; }
+        catch { setReviewNotice("Règles enregistrées. L’actualisation de l’état reste à faire."); }
       } catch {
-        status.textContent = "Enregistrement non confirmé. Vérifiez que vos règles ne contiennent aucun secret. Si elles ont changé dans une autre fenêtre, rechargez-les avant de réessayer.";
-      } finally { save.disabled = false; }
+        setReviewNotice("Enregistrement non confirmé. Vérifiez que vos règles ne contiennent aucun secret. Si elles ont changé dans une autre fenêtre, rechargez-les avant de réessayer.", true);
+      } finally { setReviewBusy(false); }
     });
     const reload = document.createElement("button"); reload.type = "button";
     reload.className = "secondary-button"; reload.textContent = "Recharger les règles enregistrées";
     reload.addEventListener("click", async () => {
-      try { await panels.refresh(); reviewDraft = undefined; rulesKey = undefined; renderRules(panels.state); }
-      catch { status.textContent = "Les règles ne peuvent pas être rechargées pour le moment."; }
+      if (reviewBusy) return;
+      setReviewBusy(true);
+      try {
+        await panels.refresh(); reviewDraft = undefined; reviewErrors = {}; rulesKey = undefined;
+        setReviewNotice("Règles rechargées."); renderRules(panels.state);
+      } catch { setReviewNotice("Les règles ne peuvent pas être rechargées pour le moment.", true); }
+      finally { setReviewBusy(false); }
     });
-    form.append(limits, save, reload, status); settings.append(form);
+    const actions = document.createElement("div"); actions.className = "reviewer-actions";
+    actions.append(save, reload);
+    reviewControls = [enabled, ...Object.values(fields), save, reload];
+    setReviewBusy(reviewBusy);
+    form.append(limits, reviewStatus, actions); settings.append(form);
   }
   const pendingApproval = (request) => request.status?.status === "pending"
     && request.kind?.kind === "approval" && Number.isFinite(request.kind.expires_at);
@@ -118,7 +173,6 @@
     const note = document.createElement("p");
     note.textContent = "Les règles servent aux revues futures. Les retirer n’annule pas une action déjà autorisée.";
     settings.append(note);
-    reviewEditor(state);
     if (!rules.length) {
       const empty = document.createElement("p");
       empty.textContent = state.forms?.error ? "Les règles sont momentanément indisponibles." : "Aucune règle « Toujours » enregistrée.";
@@ -151,6 +205,7 @@
       row.append(description, remove);
       settings.append(row);
     }
+    reviewEditor(state);
   }
 
   panels.register({

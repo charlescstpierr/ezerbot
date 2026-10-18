@@ -81,11 +81,38 @@ pub fn assemble_input_for_turn(
     budget: &ContextBudget,
     sending_entry_id: &str,
 ) -> Result<AssembledContext> {
-    let has_sending_images = history.iter().any(|item| {
-        item.entry_id == sending_entry_id
-            && item.role == Role::User
-            && item.images.iter().any(|image| image.url.is_some())
-    });
+    assemble_input_for_entries(
+        request,
+        blocks,
+        history,
+        summary,
+        last_reset_entry,
+        budget,
+        &[sending_entry_id],
+    )
+}
+
+/// A task may receive several user follow-ups during one run. Their images have
+/// the same lifetime/budget guarantees as the original sending entry; unrelated
+/// historical images remain caption-only. The host supplies this run's durable IDs.
+pub fn assemble_input_for_entries(
+    request: &ContextRequest,
+    blocks: &[ContextBlock],
+    history: &[HistoryItem],
+    summary: Option<&Summary>,
+    last_reset_entry: Option<&str>,
+    budget: &ContextBudget,
+    sending_entry_ids: &[&str],
+) -> Result<AssembledContext> {
+    let sending_images: HashSet<_> = history
+        .iter()
+        .filter(|item| {
+            sending_entry_ids.contains(&item.entry_id.as_str())
+                && item.role == Role::User
+                && item.images.iter().any(|image| image.url.is_some())
+        })
+        .map(|item| item.entry_id.as_str())
+        .collect();
     let limit = character_limit(budget)?;
     if !blocks
         .iter()
@@ -107,10 +134,9 @@ pub fn assemble_input_for_turn(
         *cap = (*cap).min(block.budget);
     }
     let (history, summary) = select_history(request, history, summary, last_reset_entry)?;
-    if has_sending_images
-        && request.current_message.entry_id != sending_entry_id
-        && !history.iter().any(|item| item.entry_id == sending_entry_id)
-    {
+    if sending_images.iter().any(|id| {
+        request.current_message.entry_id != *id && !history.iter().any(|item| item.entry_id == *id)
+    }) {
         return Err(invalid("summary/reset cannot truncate sending-turn images"));
     }
     let mut candidates = blocks.to_vec();
@@ -151,7 +177,8 @@ pub fn assemble_input_for_turn(
     let history: Vec<_> = history
         .iter()
         .map(|item| {
-            let sending = item.entry_id == sending_entry_id && item.role == Role::User;
+            let sending =
+                sending_entry_ids.contains(&item.entry_id.as_str()) && item.role == Role::User;
             prepare_entry(item, sending, false).map(|(item, _)| item)
         })
         .collect::<Result<_>>()?;
@@ -160,7 +187,7 @@ pub fn assemble_input_for_turn(
     // blocks/output bodies can evict it.
     let history_category = category(ContextSource::History);
     let sending_start = history.iter().position(|item| {
-        item.entry_id == sending_entry_id
+        sending_entry_ids.contains(&item.entry_id.as_str())
             && item.role == Role::User
             && item.images.iter().any(|image| image.url.is_some())
     });
@@ -1154,6 +1181,67 @@ mod context_tests {
             .unwrap()
             .contains("external_data"));
         assert!(original.current_message.images[0].url.is_some());
+    }
+
+    #[test]
+    fn followup_images_share_the_sending_turn_without_restoring_historical_bytes() {
+        let image = ImageInput {
+            attachment_id: "image".into(),
+            url: Some("data:image/png;base64,AAAA".into()),
+            caption: None,
+        };
+        let mut old = entry("old", "historical");
+        old.images.push(image.clone());
+        let mut initial = entry("initial", "initial task");
+        initial.images.push(image.clone());
+        let mut followup = entry("followup", "look at this too");
+        followup.images.push(image);
+        let mut called = entry("call", "");
+        called.role = Role::Assistant;
+        called.tool_items.push(call("c"));
+        let mut request = request();
+        request.current_message = entry("result", "");
+        request.current_message.role = Role::Tool;
+        request.current_message.tool_items.push(output("c", "done"));
+        let history = vec![old, initial, followup, called];
+        let assembled = assemble_input_for_entries(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &budget(50_000),
+            &["initial", "followup"],
+        )
+        .unwrap();
+        assert!(assembled.input[0].images[0].url.is_none());
+        assert!(assembled.input[1].images[0].url.is_some());
+        assert!(assembled.input[2].images[0].url.is_some());
+        let truncated = Summary {
+            truncation_last_entry_inclusive: "followup".into(),
+            resume_from_entry_inclusive: "call".into(),
+            ..summary()
+        };
+        assert!(assemble_input_for_entries(
+            &request,
+            &base(),
+            &history,
+            Some(&truncated),
+            None,
+            &budget(50_000),
+            &["initial", "followup"]
+        )
+        .is_err());
+        assert!(assemble_input_for_entries(
+            &request,
+            &base(),
+            &history,
+            None,
+            None,
+            &budget(IMAGE_BUDGET_CHARS),
+            &["initial", "followup"]
+        )
+        .is_err());
     }
 
     #[test]

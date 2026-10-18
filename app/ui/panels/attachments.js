@@ -386,6 +386,13 @@
       },
       onFiles,
       blocked: (ctx) => bucket(ctx).items.some((item) => item.upload !== "ready") || Boolean(documentBudgetError(bucket(ctx), ctx)),
+      discard(ctx) {
+        const group = buckets.get(key(ctx));
+        if (!group?.items.length) return;
+        group.items.forEach(discard);
+        group.items = [];
+        render();
+      },
       onSent({ messageId, extras }, ctx) {
         // onSent may be delivered by refresh while another conversation is open.
         const conversation = ctx.state.conversations.find((entry) => entry.messages.some((message) => message.id === messageId));

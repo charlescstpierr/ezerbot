@@ -120,15 +120,9 @@ function PendingCard({ message, busy, onRetry }) {
   );
 }
 
-function UserMessage({ message, busy, onCopy, onRetry }) {
-  return (
-    <article className="gb-message gb-user" data-message-id={message.id}>
-      <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
-      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
-        ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
-        : part.text)}</div>}
-      {message.attachments?.length > 0 && (
-        <div className="flex flex-wrap items-start justify-end gap-2" aria-label="Pièces jointes">
+function MessageAttachments({ message, align = "end" }) {
+  return message.attachments?.length > 0 && (
+        <div className={`flex flex-wrap items-start ${align === "start" ? "justify-start" : "justify-end"} gap-2`} aria-label="Pièces jointes">
           {message.attachments.map((attachment, index) => {
             const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
             if (!id) return null;
@@ -144,9 +138,34 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
             return <img key={`${id}-${index}`} className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" />;
           })}
         </div>
-      )}
+  );
+}
+
+function DelegationInstruction({ message, createMascot, botName }) {
+  return (
+    <article className="gb-message gb-assistant gb-delegation-instruction" data-message-id={message.id} aria-label={`Consigne de ${botName}`}>
+      <Mascot create={createMascot} />
+      <div className="gb-content">
+        <header className="gb-meta"><strong>Consigne de {botName}</strong><Timestamp value={message.created_at} /></header>
+        {message.body && <p className="gb-instruction-text">{message.body}</p>}
+        <MessageAttachments message={message} align="start" />
+      </div>
+    </article>
+  );
+}
+
+function UserMessage({ message, busy, onCopy, onRetry }) {
+  const followUp = message.payload?.source === "follow_up";
+  return (
+    <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
+      <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
+      {followUp && <span className="gb-followup-label">Suivi</span>}
+      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
+        ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
+        : part.text)}</div>}
+      <MessageAttachments message={message} />
       <footer className="gb-actions">
-        {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />Envoyé</span>}
+        {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />{followUp ? "Enregistré" : "Envoyé"}</span>}
         {["queued", "dispatching"].includes(message.state) && <span className="gb-status">Envoi en cours…</span>}
         {message.state === "refused" && <span className="gb-status gb-status-alert"><TriangleAlert />Envoi refusé</span>}
         <CopyIconButton text={message.body} label="Copier votre message" onCopy={onCopy} />
@@ -173,6 +192,7 @@ function ReplyProblem({ message, actions }) {
       {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
       {(message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
         ? <p className="gb-reply-advice">Envoyez un nouveau message pour demander une nouvelle réponse.</p>
+        : actions.isTask ? <p className="gb-reply-advice">Poursuivez dans la conversation principale.</p>
         : message.error_kind === "context_budget" ? null : message.error_kind === "signin"
         ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
         : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}
@@ -231,7 +251,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
-            {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
+            {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
         {group && message.state === "stopped" && <p className="gb-reply-advice">Envoyez un nouveau message pour reprendre.</p>}
@@ -249,12 +269,12 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, onLayout }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup]);
+  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask]);
   const ordered = useMemo(() => orderThread(messages), [messages]);
   const last = ordered[ordered.length - 1];
   useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
@@ -262,8 +282,9 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
         {ordered.map((message) => {
-          const author = bots.find((bot) => bot.id === message.payload?.bot_id);
-          const authorName = author?.name || botName;
+          const delegated = message.payload?.source === "delegation";
+          const author = bots.find((bot) => bot.id === (delegated ? message.payload.from_bot : message.payload?.bot_id));
+          const authorName = author?.name || (delegated ? "bot parent" : botName);
           const authorMascot = author && createBotMascot ? createBotMascot(author) : createMascot;
           if (message.kind === "turn-heading") return (
             <div className="gb-message gb-assistant gb-turn-heading" key={message.id}>
@@ -271,6 +292,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
               <header className="gb-meta"><strong>{authorName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>
             </div>
           );
+          if (delegated) return <DelegationInstruction key={message.id} message={message} createMascot={authorMascot} botName={authorName} />;
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"

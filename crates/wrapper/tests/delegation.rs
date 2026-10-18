@@ -2158,6 +2158,136 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
         .any(|m| m["kind"] == "delegation" && m["payload"]["status"]["status"] == "done"));
 }
 
+#[test]
+fn task_transcript_preserves_parent_provenance_followup_and_long_title_after_restart() {
+    let mut f = Fixture::new(false);
+    let root = f.root("transcript-provenance");
+    let mut a = args("child");
+    a["objective"] = json!("É".repeat(95));
+    f.tool(&root, "provenance-child", "delegate", a);
+    let edge = f.children(&root).remove(0);
+    f.post(
+        "/api/delegation/send",
+        task_input(&root, &edge, "human-followup"),
+    );
+    for restart in [false, true] {
+        if restart {
+            f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+        }
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let conversation = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == json!(edge.conversation_id))
+            .unwrap();
+        let title = conversation["title"].as_str().unwrap();
+        assert_eq!(title.chars().count(), 80);
+        assert!(title.ends_with('…'));
+        let messages = conversation["messages"].as_array().unwrap();
+        let instruction = messages.iter().find(|m| m["id"] == edge.id).unwrap();
+        assert_eq!(instruction["payload"]["source"], "delegation");
+        assert_eq!(instruction["payload"]["from_bot"], root.bot_id);
+        assert_eq!(instruction["payload"]["parent_bot"], root.bot_id);
+        assert_eq!(instruction["role"], "assistant");
+        assert_eq!(instruction["kind"], "delegation_brief");
+        let followup = messages
+            .iter()
+            .find(|m| m["id"] == "human-followup")
+            .unwrap();
+        assert_eq!(followup["payload"]["source"], "follow_up");
+        assert!(followup["payload"].get("from_bot").is_none());
+        assert_eq!(followup["role"], "user");
+    }
+}
+
+#[test]
+fn followup_image_bytes_survive_tool_continuations_and_terminal_retry_is_idempotent() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::sync::atomic::AtomicBool;
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "image-followup", args("child"));
+    let image=f.app.api("POST","/api/attachments",&STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=").unwrap()).unwrap()["id"].clone();
+    let gate = Arc::new(AtomicBool::new(false));
+    let at = f.server.seen.lock().unwrap().bodies.len() + 1;
+    f.server.seen.lock().unwrap().response_gate = Some((at, gate.clone()));
+    f.events(vec![
+        call("before-image", "complete_task", json!({"summary":"Old"})),
+        completed(),
+    ]);
+    f.events(vec![
+        call("image-continuation", "check_delegations", json!({})),
+        completed(),
+    ]);
+    f.events(vec![
+        call(
+            "after-image",
+            "complete_task",
+            json!({"summary":"Image traitée"}),
+        ),
+        completed(),
+    ]);
+    f.tick();
+    wait("image followup in flight", || {
+        f.server.seen.lock().unwrap().bodies.len() >= at
+    });
+    let input = json!({"parent_conversation_id":parent.conversation_id,"task_id":edge.id,"message_id":"image-note","body":"Suivi avec image sans légende","attachments":[image]});
+    f.post("/api/delegation/send", input.clone());
+    gate.store(true, Ordering::SeqCst);
+    wait("image followup completed", || {
+        matches!(
+            graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+            DelegationStatus::Done { .. }
+        )
+    });
+    let seen = f.server.seen.lock().unwrap();
+    let requests: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|b| {
+            b["input"]
+                .to_string()
+                .contains("Suivi avec image sans légende")
+        })
+        .collect();
+    assert_eq!(requests.len(), 2, "first request and tool continuation");
+    for body in requests {
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["content"]
+                .as_array()
+                .is_some_and(
+                    |content| content.iter().any(|item| item["type"] == "input_image"
+                        && item["image_url"]
+                            .as_str()
+                            .is_some_and(|url| url.starts_with("data:image/png;base64,")))
+                )));
+    }
+    drop(seen);
+    let before = store::events(&f.db(), edge.child_run_id.as_deref().unwrap(), 0)
+        .unwrap()
+        .len();
+    f.post("/api/delegation/send", input.clone());
+    assert_eq!(
+        store::events(&f.db(), edge.child_run_id.as_deref().unwrap(), 0)
+            .unwrap()
+            .len(),
+        before
+    );
+    let mut fresh = input;
+    fresh["message_id"] = json!("new-after-finish");
+    assert_eq!(
+        f.app
+            .api("POST", "/api/delegation/send", fresh.to_string().as_bytes())
+            .unwrap_err()
+            .status,
+        409
+    );
+}
+
 fn task_input(parent: &Run, edge: &Delegation, id: &str) -> Value {
     json!({"parent_conversation_id":parent.conversation_id,"task_id":edge.id,"message_id":id,"body":"Ajoute une conclusion française."})
 }

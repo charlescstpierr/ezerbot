@@ -102,12 +102,9 @@ fn task_action(
     } else {
         // Identity, state, nonce and attachment links share one writer boundary.
         // Never fork a second run in the task namespace, even while queued.
-        if !active {
-            return Err(ApiError::new(409, FINISHED_TASK));
-        }
         crate::validate_id(&input.message_id)?;
         let text = input.body.trim();
-        if (text.is_empty() && input.attachments.is_empty()) || text.len() > 16 * 1024 {
+        if text.len() > 16 * 1024 {
             return Err(ApiError::new(
                 400,
                 "Ajoutez du texte (16 Ko au plus) ou un fichier.",
@@ -143,6 +140,21 @@ fn task_action(
                     "Les pièces jointes de ce message ont changé.",
                 ));
             }
+        }
+        if previous.is_some() {
+            // A lost HTTP acknowledgement may be replayed after completion.
+            // This only returns the already-recorded message, never reopens work.
+            tx.commit()?;
+            return app.conversation_response(conversation);
+        }
+        if !active {
+            return Err(ApiError::new(409, FINISHED_TASK));
+        }
+        if text.is_empty() && input.attachments.is_empty() {
+            return Err(ApiError::new(
+                400,
+                "Ajoutez du texte (16 Ko au plus) ou un fichier.",
+            ));
         }
         if previous.is_none() || !input.attachments.is_empty() {
             super::attachments::link_attachments(
@@ -701,7 +713,15 @@ fn outcome(conn: &Connection, id: &str) -> Result<ToolOutcome> {
 }
 fn create_conversation(ctx: &Context<'_>, edge: &Delegation, objective: &str) -> Result<()> {
     let parent = store::required(ctx.connection, &edge.parent_run_id)?;
-    let title: String = objective.chars().take(80).collect();
+    let title: String = if objective.chars().count() > 80 {
+        objective
+            .chars()
+            .take(79)
+            .chain(std::iter::once('…'))
+            .collect()
+    } else {
+        objective.into()
+    };
     ctx.connection.execute("INSERT OR IGNORE INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) VALUES (?1,?2,?3,?4,'task',?5,?6,?6)", params![ACCOUNT,edge.conversation_id,title,edge.child_bot,parent.conversation_id,ctx.now_ms])?;
     super::conversations::append_entry(
         ctx.connection,
@@ -1622,7 +1642,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         return Some(Message {
             id: id.into(),
             kind: "message".into(),
-            payload: json!({}),
+            payload: json!({"source":"follow_up"}),
             attachments: super::attachments::for_message(ctx, ctx.conversation_id?, id),
             role: "user",
             body: grokbot_forms::redact::redact(&vault, &text).ok()?,
@@ -1658,10 +1678,10 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         let vault = super::forms::vault(ctx).ok()?;
         return Some(Message {
             id: id.into(),
-            kind: "message".into(),
-            payload: json!({}),
+            kind: "delegation_brief".into(),
+            payload: json!({"source":"delegation","from_bot":edge.parent_bot,"parent_bot":edge.parent_bot}),
             attachments,
-            role: "user",
+            role: "assistant",
             body: grokbot_forms::redact::redact(&vault, &text).ok()?,
             state: "echoed",
             created_at,

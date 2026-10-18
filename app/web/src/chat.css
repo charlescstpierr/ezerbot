@@ -73,6 +73,9 @@
 
 .gb-user { display: flex; flex-direction: column; align-items: flex-end; }
 .gb-user .gb-meta { display: none; }
+.gb-followup-label { margin-bottom: 5px; color: var(--muted); font-size: 11px; }
+.gb-delegation-instruction .gb-content { padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); }
+.gb-instruction-text { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; }
 .gb-bubble { max-width: min(560px, 86%); padding: 10px 15px; border-radius: 16px 16px 4px 16px; background: var(--soft); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .gb-assistant { display: flex; gap: 12px; align-items: flex-start; }

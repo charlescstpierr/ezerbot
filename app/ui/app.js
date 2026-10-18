@@ -311,13 +311,23 @@
   function updateComposer() {
     const pendingMessage = currentConversation()?.messages.find((message) => message.role === "user" && pendingStates.has(message.state));
     const pending = Boolean(pendingMessage);
-    const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const group = currentConversation()?.kind === "group";
     const task = currentConversation()?.kind === "task";
     const taskFinished = task && !window.GrokbotDelegation?.canFollowUp(currentConversation().id);
+    ui.input.setReadOnly(taskFinished);
+    ui.input.setPlaceholder(task ? "Écrire un suivi pour cette sous-tâche…" : "Qu’avez-vous en tête ?");
+    if (taskFinished) {
+      if (ui.input.value) setComposerText("");
+      removePreference(draftKey());
+      removePreference(`${draftKey()}.document`);
+      for (const panel of panels.values()) panelCall(panel, panel.composer?.discard);
+      if (document.activeElement?.closest?.(".composer-area")) document.querySelector(".gb-delegation-bar p")?.focus();
+    }
+    const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const hasAttachments = Boolean(sendExtras().attachments?.length);
     const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
-    const live = Boolean(streamingMessage()) && (!(group || task) || (!ui.input.value.trim() && !hasAttachments));
+    // The task banner is the single cancellation control. The composer only sends follow-ups.
+    const live = !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
     const noMembers = group && !currentConversation().member_ids?.length;
     ui.send.disabled = taskFinished || (live ? ((group || task) && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
     ui.send.dataset.mode = live ? "stop" : "send";
@@ -326,11 +336,11 @@
     ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
     ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong));
-    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : task ? "Suivi envoyé à cette sous-tâche uniquement · Entrée pour envoyer" : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
+    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
-      activity: submissionActivity, pending: pendingMessage?.state || null, drafting: Boolean(ui.input.value.trim()) });
+      activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && Boolean(ui.input.value.trim()) });
   }
 
   function selectConversation(id, focus = false) {
@@ -628,7 +638,7 @@
     ui.welcome.hidden = hasMessages;
     document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", onLayout, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -836,7 +846,7 @@
       }
       messageId = crypto.randomUUID();
       pendingSends.set(messageId, { extras, consumed: false });
-      conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
+      conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(true);

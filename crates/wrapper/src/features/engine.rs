@@ -1673,6 +1673,11 @@ impl RunGatewayCall<'_> {
             .filter(|e| e.kind == RunEventKind::InputReceived)
             .filter_map(|e| e.payload["input"]["entry_id"].as_str().map(str::to_owned))
             .collect();
+        // InputConsumed is a request checkpoint, not the end of a sending turn:
+        // keep this run's follow-up bytes through its tool continuations too.
+        let sending_entry_ids: Vec<&str> = std::iter::once(original.entry_id.as_str())
+            .chain(followups.iter().map(String::as_str))
+            .collect();
         for sending in request.input.iter_mut().filter(|entry| {
             entry.role == Role::User
                 && (entry.entry_id == original.entry_id || followups.contains(&entry.entry_id))
@@ -1728,7 +1733,7 @@ impl RunGatewayCall<'_> {
             }
         }
         let has_sending_bytes = request.input.iter().any(|entry| {
-            entry.entry_id == original.entry_id
+            sending_entry_ids.contains(&entry.entry_id.as_str())
                 && entry.images.iter().any(|image| image.url.is_some())
         });
         let reset_index = reset
@@ -1742,7 +1747,7 @@ impl RunGatewayCall<'_> {
             .input
             .iter()
             .position(|entry| {
-                entry.entry_id == original.entry_id
+                sending_entry_ids.contains(&entry.entry_id.as_str())
                     && entry.images.iter().any(|image| image.url.is_some())
             })
             .map_or(request.input.len(), |index| index + 1);
@@ -1943,14 +1948,14 @@ impl RunGatewayCall<'_> {
                     &serde_json::to_value(current)?,
                 )?)?,
             };
-            let assembled = assembler::assemble_input_for_turn(
+            let assembled = assembler::assemble_input_for_entries(
                 &context_request,
                 std::slice::from_ref(&block),
                 input,
                 summary.as_ref(),
                 reset.as_deref(),
                 &budget,
-                &original.entry_id,
+                &sending_entry_ids,
             )?;
             let mut outgoing = request.clone();
             outgoing.instructions = assembled

@@ -31,6 +31,10 @@
     .gb-delegation-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
     .gb-delegation-note { color: var(--muted); }
     .main-panel[data-delegation-task] #welcome { display: none; }
+    .main-panel[data-delegation-finished] .composer-area { display: none; }
+    @media (max-width: 900px) {
+      .gb-delegation-note { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    }
   `;
   document.head.append(style);
   const bar = document.createElement("section");
@@ -89,7 +93,7 @@
         if (taskId) await panels.api("/api/delegation/cancel", { parent_conversation_id: conversations.get(conversationId)?.parent_id, task_id: taskId });
         else await panels.api("/api/stop", { conversation_id: conversationId, message_id: runId });
         await panels.refresh();
-        panels.notify("Arrêt demandé.");
+        panels.notify(taskId ? "Sous-tâche annulée." : "Arrêt demandé.");
       } catch (error) { panels.notify(error.message || "L’arrêt n’a pas pu être confirmé."); }
       finally { stopping.delete(key); updateStops(); }
     });
@@ -143,6 +147,7 @@
       }
       taskView = conversation?.kind === "task";
       main?.toggleAttribute("data-delegation-task", taskView);
+      main?.toggleAttribute("data-delegation-finished", taskView && !active(edges.get(conversation?.id)));
       const count = state.delegation?.active_by_conversation?.[conversation?.id];
       const hasChildren = Number.isSafeInteger(count) && count > 0;
       bar.hidden = !taskView && !hasChildren;
@@ -185,6 +190,7 @@
           links.push([childRun?.status === "awaiting_children" ? "Annuler cette sous-tâche et ses sous-tâches" : "Annuler cette sous-tâche", conversation.id, edge.child_run_id || edge.id, edge.id]);
         }
       }
+      note.title = note.textContent;
       if (hasChildren) {
         const parent = runs.find((run) => run.conversation_id === conversation.id && run.status === "awaiting_children");
         if (parent?.run_id) links.push(["Arrêter la réponse et ses sous-tâches", conversation.id, parent.run_id]);

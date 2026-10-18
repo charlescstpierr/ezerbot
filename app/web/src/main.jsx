@@ -23,7 +23,8 @@ window.GrokbotChat = {
   // Returns a stand-in for the former <textarea>.
   mountInput(element, { placeholder, onInput, onSubmit, onFiles, getMentionCandidates = () => [], onAddMember = async () => false, createMentionAvatar, mentionSummary }) {
     const menu = mentionMenu(element, getMentionCandidates, onAddMember, createMentionAvatar, mentionSummary);
-    const options = editorOptions({ placeholder, onSubmit });
+    let currentPlaceholder = placeholder;
+    const options = editorOptions({ placeholder: () => currentPlaceholder, onSubmit });
     const editor = new Editor({
       element, ...options, onUpdate: ({ editor }) => { onInput(); menu.update(editor); },
       onSelectionUpdate: ({ editor }) => menu.update(editor),
@@ -41,7 +42,17 @@ window.GrokbotChat = {
       get mentions() { return readMentions(editor); },
       get document() { return editor.getJSON(); },
       set document(value) { menu.hide(); editor.commands.setContent(value, { emitUpdate: false }); },
-      focus() { editor.commands.focus("end"); },
+      focus() { if (editor.isEditable) editor.commands.focus("end"); },
+      setReadOnly(readOnly) {
+        if (readOnly) menu.hide();
+        if (editor.isEditable === readOnly) editor.setEditable(!readOnly, false);
+        editor.view.dom.setAttribute("aria-disabled", String(readOnly));
+      },
+      setPlaceholder(text) {
+        if (currentPlaceholder === text) return;
+        currentPlaceholder = text;
+        editor.view.dispatch(editor.state.tr);
+      },
       setInvalid(invalid) { editor.view.dom.setAttribute("aria-invalid", String(invalid)); },
     };
   },

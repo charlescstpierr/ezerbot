@@ -133,3 +133,14 @@ test("removing an in-flight document aborts its request and ignores a late compl
   assert.equal(p.registration.sendExtras(p.ctx).attachments.length, 0);
   assert.equal(p.requests.length, 1);
 });
+
+test("discarding a finished task's attachment draft aborts pending uploads and clears its tray", async () => {
+  let release;
+  const p = panel(() => new Promise((resolve) => { release = resolve; }));
+  p.add([new File(["texte"], "brouillon.txt")]); await flush();
+  p.registration.composer.discard(p.ctx);
+  assert.equal(p.requests[0].options.signal.aborted, true);
+  assert.equal(p.registration.sendExtras(p.ctx).attachments.length, 0);
+  release({}); await flush();
+  assert.equal(allByClass(p.root, "attachment-chip").length, 0);
+});

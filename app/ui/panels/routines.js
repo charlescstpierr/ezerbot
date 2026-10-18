@@ -670,6 +670,14 @@
   }
   panels.register({
     id: "routines",
+    async openLink({ id, agent }) {
+      if (busy) return false;
+      const routine = (panels.state.routines?.items || []).find((item) => item.routine.routine_id === id && item.routine.bot_id === agent)?.routine;
+      if (!routine) return false;
+      open(agent);
+      await edit(routine); // Read/editor only; never run, resume or confirm.
+      return true;
+    },
     settingsSection(container) {
       const section = node("section", "setting-section");
       section.append(node("h3", "", "Routines"), button("Gérer les routines par bot", () => open(liveBots()[0]?.id))); container.append(section);

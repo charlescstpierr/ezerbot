@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod deep_links;
 mod mcp;
 mod provider;
 
@@ -784,6 +785,8 @@ pub struct App {
     provider: Provider,
     #[cfg(debug_assertions)]
     debug_voice: features::voice::DebugVoice,
+    // Host-owned: survives a WebView reload, never persisted across app starts.
+    deep_link_seen: BTreeMap<String, u64>,
 }
 
 impl App {
@@ -883,6 +886,7 @@ impl App {
             provider,
             #[cfg(debug_assertions)]
             debug_voice: features::voice::DebugVoice::default(),
+            deep_link_seen: BTreeMap::new(),
         })
     }
 
@@ -1181,7 +1185,8 @@ impl App {
         if body.len() > body_limit(path) {
             return Err(too_large(path));
         }
-        features::routes(self, method, path, body)
+        deep_links::route(self, method, path, body)
+            .or_else(|| features::routes(self, method, path, body))
             .unwrap_or_else(|| Err(ApiError::new(404, "Cette adresse n'existe pas.")))
     }
 

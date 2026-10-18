@@ -24,6 +24,16 @@
   const mascot = window.GrokbotMascot;
   let toastTimer;
   let simulateLoss = false;
+  let deepLinksBootReady = false;
+  let linkDrafts = null;
+  let navigationGeneration = 0;
+  const deepLinks = window.GrokbotChat.createDeepLinkQueue({
+    resolve: async (url) => { await refresh(); return api("/api/deep-links/resolve", { url }); },
+    navigate: navigateLink, report: linkError,
+    generation: () => navigationGeneration,
+  });
+  // Installed before the first state request; Cocoa only flushes after ready.
+  window.EzerbotDeepLinks = { receive: (url) => deepLinks.receive(url) };
   let themeChoice = readPreference("grokbot.theme", "dark");
   let accentChoice = readPreference("grokbot.accent", "citron");
   const accents = ["citron", "orange", "ambre", "menthe", "cyan", "magenta", "vermillon", "violet", "blanc"];
@@ -169,6 +179,82 @@
     api, refresh, notify, createBotMascot, botSummary,
     composerChanged() { updateComposer(); schedulePoll(); },
   };
+
+  function previousLinkDrafts() {
+    if (linkDrafts === null) {
+      try {
+        const saved = JSON.parse(readPreference("ezerbot.link-previous-draft", "[]"));
+        linkDrafts = Array.isArray(saved) ? saved.filter((draft) => typeof draft?.text === "string").slice(-16) : [];
+      } catch { linkDrafts = []; }
+    }
+    return linkDrafts;
+  }
+
+  function saveLinkDrafts() {
+    if (previousLinkDrafts().length) writePreference("ezerbot.link-previous-draft", JSON.stringify(linkDrafts));
+    else removePreference("ezerbot.link-previous-draft");
+  }
+
+  function linkError(message) {
+    $("link-error-message").textContent = message;
+    if (!$("link-error-dialog").open) $("link-error-dialog").showModal();
+  }
+
+  function focusLinkTarget(target) {
+    if (!target) throw new Error("Cette section n’est pas disponible dans cette version d’Ezerbot.");
+    target.tabIndex = -1; target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true });
+    target.classList.add("deep-link-target");
+    setTimeout(() => target.classList.remove("deep-link-target"), 2500);
+  }
+
+  async function navigateLink(destination) {
+    // Never discard an unsaved editor or silently substitute another target.
+    if (document.querySelector("#bot-dialog[open], .skills-dialog[open], .routines-dialog[open]")) {
+      throw new Error("Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.");
+    }
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    const { kind, id, agent } = destination;
+    if (kind === "conversation") {
+      if (!state.conversations.some((item) => item.id === id)) throw new Error("Cette conversation est introuvable ou inaccessible sur ce Mac.");
+      selectConversation(id, true);
+    } else if (kind === "bot") {
+      const bot = botById(id);
+      if (!bot || bot.deleted) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
+      openBotDialog(bot);
+    } else if (kind === "settings") {
+      $("settings-dialog").showModal();
+      const target = ({ account: $("provider-section"), appearance: $("settings-appearance"), bots: $("settings-bots"), shortcuts: $("settings-shortcuts") })[id]
+        || $("settings-extensions").querySelector(`[data-panel="${id}"]`);
+      focusLinkTarget(target);
+    } else if (kind === "routine" || kind === "skill") {
+      const bot = botById(agent);
+      if (!bot || bot.deleted) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
+      if (kind === "skill") openBotDialog(bot);
+      const panel = panels.get(kind === "skill" ? "skills" : "routines");
+      if (!panel?.openLink || await panel.openLink({ id, agent }) === false) throw new Error("La cible de ce lien est introuvable ou inaccessible sur ce Mac.");
+    } else if (kind === "compose") {
+      if (agent && (!botById(agent) || botById(agent).deleted)) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
+      if (stagedOnEmptyThread() || sendExtras().attachments?.length) throw new Error("Retirez les pièces jointes en cours ou envoyez-les vous-même avant de rouvrir ce lien. Rien n’a été envoyé.");
+      const newDraftText = selectedId ? readPreference(draftKey(null), "") : ui.input.value;
+      if (previousLinkDrafts().length >= 16 && newDraftText) throw new Error("Reprenez d’abord un brouillon précédent avant d’ouvrir un autre lien contenant du texte.");
+      selectConversation(null);
+      if (ui.input.value) {
+        previousLinkDrafts().push({ text: ui.input.value, document: ui.input.document, bot: chosenBotId });
+        saveLinkDrafts();
+      }
+      chosenBotId = agent || liveBots()[0]?.id;
+      writePreference("grokbot.bot", chosenBotId);
+      setComposerText(destination.text); saveDraft(); render(); ui.input.focus();
+      notify("Texte placé dans le brouillon. Rien n’a été envoyé.");
+    }
+  }
+
+  async function copyLink(path, fields) {
+    closeMenu();
+    const query = Object.entries(fields).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join("&");
+    try { await copyText(`ezerbot://app/v1/${path}?${query}`); notify("Lien copié. Il n’accorde aucun droit d’accès."); }
+    catch { notify("Le lien n’a pas pu être copié."); }
+  }
 
   function readPreference(key, fallback) {
     try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -392,6 +478,8 @@
     ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
+    deepLinks.setReady(deepLinksBootReady && connected && !busy);
+    $("restore-link-draft").hidden = Boolean(selectedId) || previousLinkDrafts().length === 0;
     const learn = $("learn-skill-button");
     learn.hidden = ["task", "routine"].includes(currentConversation()?.kind);
     learn.disabled = busy || !connected || pending || noMembers || Boolean(streamingMessage())
@@ -401,6 +489,7 @@
   }
 
   function selectConversation(id, focus = false) {
+    navigationGeneration++;
     approvalFollow.cancel();
     saveDraft();
     selectedId = id;
@@ -540,12 +629,20 @@
       edit.type = "button";
       edit.setAttribute("aria-label", `Modifier ${bot.name}`);
       edit.addEventListener("click", () => openBotDialog(bot));
-      row.append(botAvatar(bot), copy, edit);
+      const menu = element("details", "bot-link-menu");
+      const summary = element("summary", "icon-button");
+      summary.setAttribute("aria-label", `Actions de ${bot.name}`); summary.append(icon("more"));
+      const actions = element("div", "popover");
+      const link = element("button", "", "Copier le lien"); link.type = "button";
+      link.addEventListener("click", () => { menu.open = false; void copyLink("agent", { id: bot.id }); });
+      actions.append(link); menu.append(summary, actions);
+      row.append(botAvatar(bot), copy, edit, menu);
       return row;
     }));
   }
 
   function openBotDialog(bot) {
+    navigationGeneration++;
     closeMenu();
     editingBotId = bot?.id || null;
     if (!bot && !draftBotId) draftBotId = crypto.randomUUID();
@@ -558,6 +655,7 @@
     selectBotColor(values.color);
     selectBotShape(values.shape);
     $("bot-delete-button").hidden = !bot || bot.is_default;
+    $("bot-copy-link").hidden = !bot;
     renderBotExtensions(bot);
     $("bot-dialog").showModal();
     $("bot-name").focus();
@@ -1186,6 +1284,19 @@
     const conversation = currentConversation();
     if (conversation) await updateConversation({ favorite: !conversation.favorite });
   });
+  $("copy-link-button").addEventListener("click", () => { const conversation = currentConversation(); if (conversation) void copyLink("thread", { id: conversation.id }); });
+  $("bot-copy-link").addEventListener("click", () => { if (editingBotId) void copyLink("agent", { id: editingBotId }); });
+  $("restore-link-draft").addEventListener("click", () => {
+    try {
+      const previous = previousLinkDrafts().pop();
+      if (!previous) return;
+      setComposerText(previous.text); if (previous.document) ui.input.document = previous.document;
+      if (botById(previous.bot) && !botById(previous.bot).deleted) {
+        chosenBotId = previous.bot; writePreference("grokbot.bot", chosenBotId);
+      }
+      saveLinkDrafts(); saveDraft(); render(); ui.input.focus();
+    } catch { notify("Le brouillon précédent ne peut pas être restauré."); }
+  });
   $("export-button").addEventListener("click", exportConversation);
   $("edit-bot-button").addEventListener("click", () => { const bot = currentBot(); if (bot) openBotDialog(bot); });
   $("workspace-label").addEventListener("click", () => { const bot = currentBot(); if (bot && !bot.deleted) openBotDialog(bot); });
@@ -1265,5 +1376,10 @@
     restoreDraftDocument();
     updateComposer();
     scrollToLatest();
-  }).catch(showConnectionError);
+  }).catch(showConnectionError).finally(() => {
+    // Failed boot stays unready; a successful later refresh releases the queue.
+    deepLinksBootReady = true;
+    deepLinks.setReady(connected && !busy);
+    window.webkit?.messageHandlers?.ezerbotDeepLinks?.postMessage({ command: "ready" }).catch(() => {});
+  });
 })();

@@ -80,6 +80,11 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Ezerbot</string>
   <key>CFBundleDisplayName</key><string>Ezerbot</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>local.ezerbot.navigation</string>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>CFBundleURLSchemes</key><array><string>ezerbot</string></array>
+  </dict></array>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>Grokbot</string>

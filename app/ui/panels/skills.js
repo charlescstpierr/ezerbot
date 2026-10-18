@@ -14,6 +14,7 @@
   const encoder = new TextEncoder();
   const sessions = new Map();
   const mounts = new Set();
+  const linkEditors = new Map();
   let nextId = 0;
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
@@ -370,7 +371,14 @@
       }
     }
     mounts.add(render); render();
-    return () => { alive = false; token++; mounts.delete(render); dialog.close(); dialog.remove(); };
+    linkEditors.set(bot.id, openEditor);
+    return () => { alive = false; token++; mounts.delete(render); linkEditors.delete(bot.id); dialog.close(); dialog.remove(); };
   }
-  panels.register({ id: "skills", botSection, onState: changed });
+  panels.register({ id: "skills", botSection, onState: changed,
+    openLink({ id, agent }) {
+      const open = linkEditors.get(agent);
+      if (!open || session(agent).running || session(agent).mutating) return false;
+      return open(id);
+    },
+  });
 })();

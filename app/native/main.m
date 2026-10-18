@@ -23,6 +23,10 @@
 @property(nonatomic, copy) NSString *visibleConversationID;
 @property(nonatomic) BOOL conversationVisible;
 @property(nonatomic, copy) NSString *pendingNotificationID;
+@property(nonatomic, strong) NSMutableArray<NSString *> *pendingDeepLinks;
+@property(nonatomic) BOOL deepLinksReady;
+@property(nonatomic) BOOL deepLinksFlushing;
+@property(nonatomic) NSUInteger deepLinksEpoch;
 @end
 
 @implementation GrokbotApplication
@@ -50,7 +54,50 @@
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    for (NSString *argument in NSProcessInfo.processInfo.arguments) {
+        if ([argument.lowercaseString hasPrefix:@"ezerbot://"]) [self receiveDeepLink:argument];
+    }
     [self startBackend:nil];
+}
+
+// Cocoa may call openURLs before applicationDidFinishLaunching. Keep the raw
+// URL until the local UI has installed its listener AND restored its workspace.
+- (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
+    (void)application;
+    for (NSURL *url in urls) [self receiveDeepLink:url.absoluteString];
+}
+
+- (void)receiveDeepLink:(NSString *)raw {
+    if (!self.pendingDeepLinks) self.pendingDeepLinks = [NSMutableArray array];
+    if ([self.pendingDeepLinks containsObject:raw]) return;
+    if (raw.length > 2048 || self.pendingDeepLinks.count >= 16) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Impossible d’ouvrir ce lien";
+        alert.informativeText = raw.length > 2048 ? @"Ce lien Ezerbot est trop long." : @"Trop de liens en attente. Rouvrez ce lien après le démarrage.";
+        [alert runModal]; return;
+    }
+    [self.pendingDeepLinks addObject:raw];
+    [self.window deminiaturize:nil]; [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self flushDeepLinks];
+}
+
+- (void)flushDeepLinks {
+    if (!self.deepLinksReady || self.deepLinksFlushing || !self.pendingDeepLinks.count || ![self isWorkspaceURL:self.webView.URL]) return;
+    NSString *raw = self.pendingDeepLinks.firstObject;
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@[raw] options:0 error:nil];
+    NSString *argument = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+    NSString *script = [NSString stringWithFormat:@"Boolean(window.EzerbotDeepLinks?.receive(%@[0]))", argument];
+    NSUInteger epoch = self.deepLinksEpoch;
+    self.deepLinksFlushing = YES;
+    [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        if (epoch != self.deepLinksEpoch) return;
+        self.deepLinksFlushing = NO;
+        if (!error && [result boolValue]) {
+            [self.pendingDeepLinks removeObjectAtIndex:0];
+            [self flushDeepLinks];
+        }
+    }];
 }
 
 - (void)createMenus {
@@ -93,6 +140,7 @@
 
 - (void)showStatus:(NSString *)title detail:(NSString *)detail failed:(BOOL)failed {
     [self.voice cancel];
+    self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
     self.webView.navigationDelegate = nil;
     self.webView.UIDelegate = nil;
     self.webView = nil;
@@ -266,6 +314,7 @@
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoice"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -306,6 +355,11 @@
     }];
 }
 
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    (void)webView; (void)navigation;
+    self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
+}
+
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     (void)webView; (void)navigation;
     [self sendNotificationFocus];
@@ -322,6 +376,20 @@
     }
     NSDictionary *body = message.body;
     NSString *command = body[@"command"];
+    if ([message.name isEqualToString:@"ezerbotDeepLinks"]) {
+        if ([command isEqual:@"ready"]) {
+            self.deepLinksReady = YES;
+            [self flushDeepLinks]; replyHandler(@YES, nil); return;
+        }
+#if !defined(EZERBOT_RELEASE)
+        // Direct debug entry point: exercise Cocoa forwarding without ever
+        // registering a test bundle or asking LaunchServices to open a URL.
+        if ([command isEqual:@"receive"] && [body[@"url"] isKindOfClass:NSString.class]) {
+            [self receiveDeepLink:body[@"url"]]; replyHandler(@YES, nil); return;
+        }
+#endif
+        replyHandler(nil, @"Commande de lien inconnue."); return;
+    }
     void (^reply)(NSDictionary *) = ^(NSDictionary *result) {
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
@@ -403,6 +471,10 @@
  decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     (void)webView;
     NSURL *url = action.request.URL;
+    if (action.navigationType == WKNavigationTypeLinkActivated && [url.scheme.lowercaseString isEqualToString:@"ezerbot"]) {
+        [self receiveDeepLink:url.absoluteString];
+        decisionHandler(WKNavigationActionPolicyCancel); return;
+    }
     if (action.shouldPerformDownload && ([self isWorkspaceURL:url] || [self isWorkspaceBlobURL:url])) {
         decisionHandler(WKNavigationActionPolicyDownload);
         return;
@@ -421,7 +493,8 @@
   forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
     (void)configuration;
     (void)features;
-    if ([self isWorkspaceURL:action.request.URL]) [webView loadRequest:action.request];
+    if (action.navigationType == WKNavigationTypeLinkActivated && [action.request.URL.scheme.lowercaseString isEqualToString:@"ezerbot"]) [self receiveDeepLink:action.request.URL.absoluteString];
+    else if ([self isWorkspaceURL:action.request.URL]) [webView loadRequest:action.request];
     else if (action.navigationType == WKNavigationTypeLinkActivated && [self isExternalWebURL:action.request.URL]) {
         [[NSWorkspace sharedWorkspace] openURL:action.request.URL];
     }

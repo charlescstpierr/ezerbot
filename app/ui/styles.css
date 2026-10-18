@@ -328,6 +328,13 @@ a.secondary-button { text-decoration: none; }
 .bot-row strong { display: block; font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-row small { display: block; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 .bot-row .secondary-button { flex: 0 0 auto; padding: 7px 11px; }
+.bot-link-menu { position: relative; flex: 0 0 auto; }
+.bot-link-menu summary { list-style: none; cursor: pointer; }
+.bot-link-menu summary::-webkit-details-marker { display: none; }
+.bot-link-menu .popover { top: 34px; right: 0; min-width: 165px; }
+.deep-link-target { outline: 2px solid var(--accent-ink); outline-offset: 4px; border-radius: 6px; }
+.draft-restore { color: var(--accent-ink); text-decoration: underline; font-size: 10px; }
+#bot-form > .dialog-footer { flex-wrap: wrap; }
 .bot-field { margin-top: 18px; }
 .form-label small { color: var(--subtle); margin-left: 6px; }
 textarea.text-input { display: block; resize: vertical; min-height: 58px; line-height: 1.55; }

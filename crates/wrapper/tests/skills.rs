@@ -40,11 +40,35 @@ fn request(app: &mut App, path: &str, body: Value) -> Result<Value, ApiError> {
     app.api("POST", path, body.to_string().as_bytes())
 }
 fn listing(app: &mut App, bot: &str) -> Vec<Value> {
-    app.api("GET", &format!("/api/skills?bot_id={bot}"), b"")
+    // GET is metadata only. Existing content assertions explicitly open each
+    // skill, as the editor does; summaries themselves are tested separately.
+    let summaries = app
+        .api("GET", &format!("/api/skills?bot_id={bot}"), b"")
         .unwrap()["skills"]
         .as_array()
         .unwrap()
-        .clone()
+        .clone();
+    summaries
+        .into_iter()
+        .map(|summary| {
+            let versions = post(
+                app,
+                "/api/skills/versions",
+                json!({"bot_id":bot,"skill_id":summary["skill_id"]}),
+            );
+            let mut skill = versions["versions"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone();
+            skill["content"]
+                .as_object_mut()
+                .unwrap()
+                .remove("editable_body");
+            skill
+        })
+        .collect()
 }
 fn create_bot(app: &mut App) {
     post(
@@ -218,6 +242,7 @@ fn restored_legacy_titles_are_searchable_and_readable() {
             description: String::new(),
             body: "Corps hérité".into(),
             origin: grokbot_skills::library::Origin::Manual,
+            files: Vec::new(),
         },
     )
     .unwrap();
@@ -698,6 +723,7 @@ fn user_frontmatter_stays_visible_editable_and_removable_for_manual_and_model_sk
                     description: String::new(),
                     body: body.into(),
                     origin: origin.clone(),
+                    files: Vec::new(),
                 }
             )
             .unwrap())
@@ -905,6 +931,7 @@ fn context_index_includes_human_titles_alongside_legacy_and_fallback_keys() {
             description: String::new(),
             body: "LEGACY_BODY_NOT_IN_INDEX".into(),
             origin: Origin::Manual,
+            files: Vec::new(),
         },
     )
     .unwrap();

@@ -36,7 +36,7 @@ export function useHumanInput(message, onAction) {
   return { request, receipt, status, pending, busy, error: status && status !== "pending" ? "" : activity?.error || error, act };
 }
 
-export function HumanInputCard({ message, title, input, children }) {
+export function HumanInputCard({ message, title, input, children, statusText }) {
   const { request, receipt, status, busy, error, act } = input;
   const labels = { pending: "En attente de vous", resolved: "Réponse enregistrée", denied: "Refusée", expired: "Expirée", cancelled: "Annulée" };
   const wake = receipt?.wake;
@@ -53,7 +53,7 @@ export function HumanInputCard({ message, title, input, children }) {
     <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong></header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {statusText || statusLabel}</p>
         {children}
         <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}

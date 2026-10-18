@@ -339,6 +339,10 @@
     ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
+    const learn = $("learn-skill-button");
+    learn.hidden = ["task", "routine"].includes(currentConversation()?.kind);
+    learn.disabled = busy || !connected || pending || noMembers || Boolean(streamingMessage())
+      || !currentConversation()?.messages.some((message) => message.role === "user" && ["accepted", "echoed"].includes(message.state));
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
       activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && Boolean(ui.input.value.trim()) });
   }
@@ -807,6 +811,25 @@
     return api("/api/send", { ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: loss });
   }
 
+  async function learnConversation() {
+    if ($("learn-skill-button").disabled) return;
+    const conversation = currentConversation();
+    if (!conversation) return;
+    closeMenu();
+    busy = true; submissionActivity = "send"; updateComposer();
+    const messageId = crypto.randomUUID();
+    // Use the ordinary durable send/context path. No separate summarizer, no
+    // direct skill mutation, and no consumption of the user's unsent draft/files.
+    const body = "Apprends ceci comme skill : à partir de cette conversation, rédige une procédure réutilisable et fidèle à ce que nous avons établi. N’invente pas d’étapes et n’inclus aucun secret. Consulte tes skills pour éviter les doublons, puis utilise propose_skill pour proposer une nouvelle skill ou une nouvelle version. Présente le nom, la description, le contenu et les éventuels fichiers texte annexes dans la carte Enregistrer / Ignorer. Rien ne doit être enregistré sans mon clic.";
+    try {
+      const response = await api("/api/send", { conversation_id: conversation.id, message_id: messageId, body });
+      upsertConversation(response.conversation); render(true); scrollToLatest(); schedulePoll();
+    } catch (error) {
+      try { await refresh(); } catch { showConnectionError(error); }
+      notify("Demande d’apprentissage non confirmée. Vérifiez le fil avant de réessayer.");
+    } finally { busy = false; submissionActivity = null; updateComposer(); schedulePoll(); }
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
@@ -1007,6 +1030,7 @@
     if (!event.defaultPrevented) composerFiles(event.dataTransfer?.files, event);
   });
   $("composer-form").addEventListener("submit", sendMessage);
+  $("learn-skill-button").addEventListener("click", () => void learnConversation());
   document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {
     setComposerText(button.dataset.prompt.replace(/\\n/g, "\n"));
     saveDraft();

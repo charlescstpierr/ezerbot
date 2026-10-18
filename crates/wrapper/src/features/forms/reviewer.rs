@@ -107,7 +107,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
     }
     let active: i64 = ctx.connection.query_row("SELECT count(*) FROM forms_requests WHERE status='pending' AND json_extract(review_json,'$.pending')=1 AND json_extract(review_json,'$.started_at')>?1", [clock(ctx).saturating_sub(12_000)], |r| r.get(0))?;
     let available = (4 - active).max(0);
-    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' AND substr(json_extract(kind_json,'$.tool'),1,10)!='mcp_start_' AND substr(json_extract(kind_json,'$.tool'),1,11)!='mcp_remove_' ORDER BY rowid LIMIT ?1")?;
+    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' AND json_extract(kind_json,'$.tool')<>'propose_skill' AND substr(json_extract(kind_json,'$.tool'),1,10)!='mcp_start_' AND substr(json_extract(kind_json,'$.tool'),1,11)!='mcp_remove_' ORDER BY rowid LIMIT ?1")?;
     let ids = statement
         .query_map([available], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -206,6 +206,9 @@ pub(super) fn complete(
     let Some(request) = requests::get(&tx, id)? else {
         return Ok(());
     };
+    if matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill") {
+        return Ok(());
+    }
     let Some(current) = reviewer::get(&tx, id)? else {
         return Ok(());
     };

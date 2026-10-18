@@ -1,5 +1,6 @@
 import { HumanInputCard, inputClass, useHumanInput } from "./form.jsx";
 import { useState } from "react";
+import { SkillProposal } from "./skill-proposal.jsx";
 
 export const kind = "approval";
 
@@ -20,6 +21,7 @@ export function Card({ message, busy, onAction }) {
   // PS01/PS02: the action is read-only. The preview may be redacted; entry_id,
   // not an echo of that preview, binds the server's canonical action digest.
   const decide = (decision) => act("forms.decide", { decision });
+  if (action.tool === "propose_skill") return <SkillProposal message={message} input={input} disabled={disabled} expired={expired} />;
   const review = request.review;
   const automatic = !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
     || (review?.answer?.decision === "deny" && input.status === "denied"));

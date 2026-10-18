@@ -14,6 +14,12 @@
 .gb-document-chip span { color: var(--muted); font-size: 11px; }
 .gb-document-chip .gb-document-note { max-width: 310px; color: var(--warning-text); }
 
+.gb-skill-proposal { min-width: 0; overflow-wrap: anywhere; }
+.gb-skill-text { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); color: var(--text); font: 12px/1.6 var(--font-mono); tab-size: 2; }
+.gb-skill-proposal summary { cursor: pointer; }
+.gb-skill-diff-added { background: color-mix(in srgb, var(--accent-ink) 15%, transparent); }
+.gb-skill-diff-removed { background: color-mix(in srgb, var(--warning-text) 18%, transparent); text-decoration: line-through; }
+
 /* Streamdown is styled with shadcn colour names; they resolve to the app tokens. */
 @theme inline {
   --color-background: var(--canvas);

@@ -109,7 +109,12 @@ impl Fixture {
             json!({"conversation_id":conversation,"message_id":message,"body":"Ask for input"}),
         );
         wait("suspended input and released run owner", || {
-            self.run(message).status == RunStatus::AwaitingHumanInput
+            self.run(message).status
+                == if name == "propose_skill" {
+                    RunStatus::AwaitingApproval
+                } else {
+                    RunStatus::AwaitingHumanInput
+                }
                 && self.provider.status()["titling"] == false
         });
         let request = requests::list_for_run(&self.db(), &self.run(message).run_id)
@@ -208,6 +213,46 @@ fn output(body: &Value, id: &str) -> Option<Value> {
         .iter()
         .find(|i| i["type"] == "function_call_output" && i["call_id"] == id)
         .map(|i| decode_data(i["output"].as_str().unwrap()).expect("typed tool output"))
+}
+
+#[test]
+fn model_skill_draft_uses_real_approval_then_resumes_after_restart() {
+    for decision in ["allow_once", "deny"] {
+        let mut f = Fixture::new();
+        let request = f.suspend(&f.conversation.clone(), "teach", "propose_skill", json!({
+            "name":"Compte rendu", "description":"Trois puces", "body":"Résume les décisions sans inventer.",
+            "files":[{"path":"modele.md", "content":"# Décisions\n- À compléter"}]
+        }));
+        assert!(grokbot_skills::library::list(&f.db(), "grokbot")
+            .unwrap()
+            .is_empty());
+        f.reopen();
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        assert_eq!(
+            state["forms"]["requests"][0]["arguments"]["proposal"]["name"],
+            "compte-rendu"
+        );
+        f.script(vec![
+            json!({"type":"response.output_text.delta","delta":"Décision prise en compte."}),
+            complete(),
+        ]);
+        f.post("/api/approvals/resolve", json!({"entry_id":request.entry_id,"submission_id":"click","conversation_id":request.route.target_conversation_id,"decision":decision}));
+        f.app.tick(f.app.feature_context().now_ms);
+        f.finish("teach");
+        let all = grokbot_skills::library::list(&f.db(), "grokbot").unwrap();
+        assert_eq!(all.len(), usize::from(decision == "allow_once"));
+        if decision == "allow_once" {
+            assert_eq!(all[0].content.files[0].path, "modele.md");
+            let bodies = &f.server.seen.lock().unwrap().bodies;
+            assert!(bodies
+                .iter()
+                .any(
+                    |body| output(body, "input-call").is_some_and(|value| value["status"]
+                        == "done"
+                        && value["output"]["saved"] == true)
+                ));
+        }
+    }
 }
 
 #[test]

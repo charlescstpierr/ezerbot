@@ -115,6 +115,7 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
                 },
                 description: field(header, "description"),
                 body,
+                files: Vec::new(),
                 origin: Origin::Upload {
                     extension: extension.into(),
                     name: file_name.into(),

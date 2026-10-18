@@ -30,6 +30,9 @@ use std::{
     },
 };
 
+#[path = "support/skill_proposals_cases.rs"]
+mod skill_proposals_cases;
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture {
     app: App,

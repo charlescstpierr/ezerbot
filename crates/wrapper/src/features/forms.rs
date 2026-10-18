@@ -333,7 +333,16 @@ fn create_request(
             return Err(ApiError::new(400, "Invalid secret request name"));
         }
     }
-    let display = redact_value(&vault, &display)?;
+    let sanitized_display = redact_value(&vault, &display)?;
+    if matches!(&kind, InputKind::Approval { tool, .. } if tool == "propose_skill")
+        && sanitized_display != display
+    {
+        return Err(ApiError::new(
+            400,
+            "Une proposition de skill ne doit contenir aucun secret enregistré.",
+        ));
+    }
+    let display = sanitized_display;
     let request = requests::create(
         ctx.connection,
         &HumanInputRequest {
@@ -360,7 +369,7 @@ fn create_request(
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
     // Defense in depth if a standing rule appears between gate check and request.
     if approval
-        && !matches!(&request.kind, InputKind::Approval {tool,..} if super::mcp::is_lifecycle(tool))
+        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool))
     {
         if let Some(receipt) =
             approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
@@ -409,6 +418,11 @@ pub fn request_tool_approval(
 ) -> Result<SuspendCause, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
     if existing_request(ctx, &id, &digest)?.is_none() {
+        let display = if call.name == "propose_skill" {
+            super::skills::proposal_display(ctx, call)?
+        } else {
+            call.arguments.clone()
+        };
         create_request(
             ctx,
             run,
@@ -417,9 +431,13 @@ pub fn request_tool_approval(
             InputKind::Approval {
                 tool: call.name.clone(),
                 args_digest: digest.clone(),
-                expires_at: clock(ctx).saturating_add(600_000),
+                expires_at: clock(ctx).saturating_add(if call.name == "propose_skill" {
+                    86_400_000
+                } else {
+                    600_000
+                }),
             },
-            call.arguments.clone(),
+            display,
         )?;
     }
     Ok(SuspendCause::HumanInput { id })
@@ -478,6 +496,16 @@ pub fn check_tool_approval(
     }
     if super::mcp::is_lifecycle(&call.name) {
         return Ok(ApprovalCheck::Ask);
+    }
+    // Skill revisions always require the user's explicit click, even if an
+    // older client or imported DB contains a standing permission for this tool.
+    if call.name == "propose_skill" {
+        return Ok(match super::skills::proposal_display(ctx, call) {
+            Ok(_) => ApprovalCheck::Ask,
+            Err(error) => ApprovalCheck::Denied {
+                reason: error.message,
+            },
+        });
     }
     // Standing rules are bot-scoped, not conversation-scoped. A successful
     // auto-admission must not create an otherwise unused "Approbations" chat.
@@ -546,6 +574,25 @@ pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result
         403,
         "Cette action MCP n’a pas été autorisée.",
     ))
+}
+
+pub(super) fn consumed_tool_approval(
+    ctx: &Context<'_>,
+    call: &ToolCall,
+) -> Result<String, ApiError> {
+    let run = active_run(ctx, call)?;
+    let (id, digest) = guarded_identity(ctx, &run, call)?;
+    let authorized: bool = ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM forms_requests r JOIN forms_approval_grants g ON g.request_id=r.id
+         WHERE r.id=?1 AND r.run_id=?2 AND r.status='resolved' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL)",
+        params![id, run.run_id, call.name, digest], |row| row.get(0))?;
+    if !authorized {
+        return Err(ApiError::new(
+            403,
+            "Enregistrez d’abord cette proposition dans sa carte d’approbation.",
+        ));
+    }
+    Ok(id)
 }
 
 fn parse_args<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ApiError> {
@@ -830,6 +877,17 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 )
             {
                 return Err(ApiError::new(400, "Le démarrage et la suppression d’un connecteur exigent une décision ponctuelle."));
+            }
+            if tool == "propose_skill"
+                && !matches!(
+                    input.decision,
+                    ApprovalDecision::AllowOnce | ApprovalDecision::Deny
+                )
+            {
+                return Err(ApiError::new(
+                    400,
+                    "Chaque version de skill exige Enregistrer ou Ignorer, sans règle automatique.",
+                ));
             }
             // Optional action echo may not rewrite the approved action, even on a retry.
             match (&input.tool, &input.arguments) {

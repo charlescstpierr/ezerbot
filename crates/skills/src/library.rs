@@ -21,6 +21,15 @@ pub enum Origin {
     Model,
 }
 
+/// UTF-8 companion text, stored in SQLite with the immutable skill revision.
+/// Paths are labels, never host filesystem destinations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillFile {
+    pub path: String,
+    pub content: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillContent {
     /// Normalized lookup key; never use this as the human-facing title.
@@ -29,6 +38,8 @@ pub struct SkillContent {
     pub description: String,
     pub body: String,
     pub origin: Origin,
+    #[serde(default)]
+    pub files: Vec<SkillFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +53,7 @@ pub struct Skill {
 }
 
 const COLUMNS: &str =
-    "skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name";
+    "skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name, files";
 // Resolve collisions inside the writing statement, under SQLite's writer lock.
 // A separate availability read would race another bot run's add/rename.
 const AVAILABLE_NAME: &str = "
@@ -70,8 +81,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )
         .optional()?;
     match version {
-        Some(2) => return Ok(()),
-        Some(1) => return migrate_display_names(conn),
+        Some(3) => return Ok(()),
+        Some(2) => return migrate_files(conn),
+        Some(1) => {
+            migrate_display_names(conn)?;
+            return migrate_files(conn);
+        }
         None | Some(0) => {}
         Some(version) => {
             return Err(Error::InvalidInput(format!(
@@ -122,7 +137,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         INSERT INTO component_versions(component, version) VALUES ('skills', 1)
             ON CONFLICT(component) DO UPDATE SET version = excluded.version;",
     )?;
-    migrate_display_names(conn)
+    migrate_display_names(conn)?;
+    migrate_files(conn)
 }
 
 fn migrate_display_names(conn: &Connection) -> Result<()> {
@@ -166,7 +182,7 @@ fn migrate_display_names(conn: &Connection) -> Result<()> {
         ] {
             conn.execute_batch(&format!(
                 "CREATE TRIGGER {trigger} AFTER {event} ON skills_library BEGIN
-                    INSERT INTO skills_versions ({COLUMNS})
+                    INSERT INTO skills_versions (skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name)
                     VALUES (NEW.skill_id, NEW.bot_id, NEW.name, NEW.description, NEW.body,
                         NEW.origin, NEW.version, NEW.digest, NEW.deleted, NEW.display_name);
                  END;"
@@ -184,6 +200,33 @@ fn migrate_display_names(conn: &Connection) -> Result<()> {
         conn.execute_batch("ROLLBACK TO skills_display_names; RELEASE skills_display_names;")?;
     }
     result
+}
+
+fn migrate_files(conn: &Connection) -> Result<()> {
+    conn.execute_batch("SAVEPOINT skills_files;")?;
+    let result = conn.execute_batch(&format!(
+        "ALTER TABLE skills_library ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
+         ALTER TABLE skills_versions ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
+         DROP TRIGGER skills_snapshot_added;
+         DROP TRIGGER skills_snapshot_updated;
+         CREATE TRIGGER skills_snapshot_added AFTER INSERT ON skills_library BEGIN
+             INSERT INTO skills_versions ({COLUMNS}) VALUES
+             (NEW.skill_id, NEW.bot_id, NEW.name, NEW.description, NEW.body, NEW.origin,
+              NEW.version, NEW.digest, NEW.deleted, NEW.display_name, NEW.files);
+         END;
+         CREATE TRIGGER skills_snapshot_updated AFTER UPDATE ON skills_library BEGIN
+             INSERT INTO skills_versions ({COLUMNS}) VALUES
+             (NEW.skill_id, NEW.bot_id, NEW.name, NEW.description, NEW.body, NEW.origin,
+              NEW.version, NEW.digest, NEW.deleted, NEW.display_name, NEW.files);
+         END;
+         UPDATE component_versions SET version=3 WHERE component='skills';"
+    ));
+    if result.is_ok() {
+        conn.execute_batch("RELEASE skills_files;")?;
+    } else {
+        conn.execute_batch("ROLLBACK TO skills_files; RELEASE skills_files;")?;
+    }
+    result.map_err(Into::into)
 }
 
 /// Lowercase lookup slug, transliterating Latin accents before collapsing punctuation.
@@ -254,9 +297,9 @@ pub fn add(conn: &Connection, bot_id: &str, content: &SkillContent) -> Result<Sk
     Ok(conn.query_row(
         &format!(
             "INSERT INTO skills_library
-                (skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name)
+                (skill_id, bot_id, name, description, body, origin, version, digest, deleted, display_name, files)
              VALUES (:skill_id, :bot_id, ({AVAILABLE_NAME}), :description, :body,
-                     :origin, 1, :digest, 0, :display_name) RETURNING {COLUMNS}"
+                     :origin, 1, :digest, 0, :display_name, :files) RETURNING {COLUMNS}"
         ),
         named_params! {
             ":skill_id": skill_id,
@@ -266,6 +309,7 @@ pub fn add(conn: &Connection, bot_id: &str, content: &SkillContent) -> Result<Sk
             ":description": content.description,
             ":body": content.body,
             ":origin": serde_json::to_string(&content.origin)?,
+            ":files": serde_json::to_string(&content.files)?,
             ":digest": format!("{:x}", Sha256::digest(content.body.as_bytes())),
         },
         read_skill,
@@ -353,7 +397,7 @@ fn revise(
         &format!(
             "UPDATE skills_library
              SET name = CASE WHEN :deleted THEN :name ELSE ({AVAILABLE_NAME}) END,
-                 display_name = :display_name, description = :description, body = :body, origin = :origin,
+                 display_name = :display_name, description = :description, body = :body, origin = :origin, files = :files,
                  version = :version, digest = :digest, deleted = :deleted
              WHERE skill_id = :skill_id AND version = :expected_version AND deleted = 0
              RETURNING {COLUMNS}"
@@ -365,6 +409,7 @@ fn revise(
             ":description": skill.content.description,
             ":body": skill.content.body,
             ":origin": serde_json::to_string(&skill.content.origin)?,
+            ":files": serde_json::to_string(&skill.content.files)?,
             ":version": skill.version,
             ":digest": skill.digest,
             ":deleted": skill.deleted,
@@ -401,6 +446,13 @@ fn read_skill(row: &Row<'_>) -> rusqlite::Result<Skill> {
             description: row.get(3)?,
             body: row.get(4)?,
             origin,
+            files: serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         },
         version: row.get(6)?,
         digest: row.get(7)?,
@@ -425,6 +477,7 @@ mod tests {
             description: "A useful skill".into(),
             body: body.into(),
             origin: Origin::Manual,
+            files: Vec::new(),
         }
     }
 
@@ -461,6 +514,45 @@ mod tests {
         assert_eq!(
             history(&conn, &first.skill_id).unwrap(),
             vec![first, updated]
+        );
+    }
+
+    #[test]
+    fn v2_migration_adds_files_without_revising_existing_snapshots() {
+        let conn = database();
+        let first = add(&conn, "bot", &content("Ancienne", "Texte original")).unwrap();
+        // Reconstruct the v2 shape, including its history-trigger names.
+        conn.execute_batch("DROP TRIGGER skills_snapshot_added;
+            DROP TRIGGER skills_snapshot_updated;
+            ALTER TABLE skills_library DROP COLUMN files;
+            ALTER TABLE skills_versions DROP COLUMN files;
+            CREATE TRIGGER skills_snapshot_added AFTER INSERT ON skills_library BEGIN SELECT 1; END;
+            CREATE TRIGGER skills_snapshot_updated AFTER UPDATE ON skills_library BEGIN SELECT 1; END;
+            UPDATE component_versions SET version=2 WHERE component='skills';").unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(
+            history(&conn, &first.skill_id).unwrap(),
+            vec![first.clone()]
+        );
+        let mut revised = first.content.clone();
+        revised.files.push(SkillFile {
+            path: "exemple.md".into(),
+            content: "Exemple révisé".into(),
+        });
+        let second = update(&conn, &first.skill_id, 1, &revised).unwrap();
+        assert_eq!(
+            history(&conn, &first.skill_id).unwrap(),
+            vec![first, second.clone()]
+        );
+        delete(&conn, &second.skill_id, 2).unwrap();
+        assert_eq!(
+            get_version(&conn, &second.skill_id, 3)
+                .unwrap()
+                .unwrap()
+                .content
+                .files,
+            revised.files
         );
     }
 

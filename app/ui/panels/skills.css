@@ -30,6 +30,10 @@
 .skills-error:empty { display: none; }
 .skills-version-preview { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--canvas); border: 1px solid var(--line); padding: 12px; font-size: 11px; line-height: 1.6; }
 .skills-history select { margin-top: 12px; }
+.skills-companion-files { margin-top: 20px; min-width: 0; }
+.skills-companion-files h3 { margin: 0 0 8px; font-size: 14px; }
+.skills-companion-files details { margin-top: 8px; }
+.skills-companion-files summary { font-size: 12px; line-height: 1.7; cursor: pointer; overflow-wrap: anywhere; }
 .skills-confirmation { padding: 12px; background: var(--soft); border-radius: 7px; }
 .skills-confirmation button { margin: 4px; }
 .skills-dialog .dialog-footer { flex-wrap: wrap; }

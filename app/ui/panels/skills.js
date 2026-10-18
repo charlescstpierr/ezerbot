@@ -177,6 +177,9 @@
     name.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); description.focus(); }
     });
+    const companionFiles = node("section", "skills-companion-files");
+    companionFiles.setAttribute("aria-label", "Fichiers texte annexes de la version courante");
+    fields.append(companionFiles);
     const versionLabel = node("p", "skills-note");
     const error = node("p", "skills-error"); error.setAttribute("role", "alert");
     const reload = button("Recharger la version courante (remplace vos saisies)", () => void openEditor(current?.skill_id));
@@ -203,7 +206,7 @@
     });
     function showVersion() {
       const version = versions.find((item) => String(item.version) === select.value);
-      preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${displayName(version.content)}\n${version.content.description}\n\n${version.content.editable_body ?? version.content.body}` : "";
+      preview.textContent = version ? `${version.deleted ? "Supprimée · " : ""}${displayName(version.content)}\n${version.content.description}\n\n${version.content.editable_body ?? version.content.body}${(version.content.files || []).map((file) => `\n\nFichier : ${file.path}\n${file.content}`).join("")}` : "";
     }
     select.addEventListener("change", showVersion);
     function populate(skill, allVersions) {
@@ -214,6 +217,13 @@
       // Textareas normalize CRLF. Compare with the displayed initial values so
       // editing a description never silently rewrites an untouched imported body.
       baseline = { name: name.value, description: description.value, body: body.value };
+      const files = skill?.content.files || [];
+      companionFiles.hidden = !files.length;
+      companionFiles.replaceChildren(node("h3", "", `Fichiers annexes · ${files.length}`), node("p", "skills-note", "Textes conservés avec cette version. Demandez au bot une nouvelle proposition pour les modifier."), ...files.map((file) => {
+        const detail = node("details");
+        detail.append(node("summary", "", file.path), node("pre", "skills-version-preview", file.content));
+        return detail;
+      }));
       versionLabel.textContent = skill ? `Version ${skill.version}` : "Votre bot retrouve cette skill par son nom.";
       history.hidden = !skill; history.open = false;
       removeButton.hidden = !skill; confirmation.hidden = true;

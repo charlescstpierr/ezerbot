@@ -25,7 +25,7 @@ const byClass = (element, name) => descendants(element).find((child) => child.cl
 function panel() {
   const root = new Element("div");
   const skill = { skill_id: "skill_internal_123", version: 1, name: "resume", display_name: "Résumé express", description: "En trois puces." };
-  const content = { ...skill, body: "Texte original.", editable_body: "Texte original." };
+  const content = { ...skill, body: "Texte original.", editable_body: "Texte original.", files: [{ path: "exemple.md", content: "Texte annexe <script>non exécuté</script>" }] };
   let registration;
   const requests = [];
   const panels = {
@@ -48,6 +48,7 @@ test("skill list keeps the human title and version but not the internal id", () 
   assert.ok(!row.textContent.includes(skill.skill_id));
   // Keep the durable id for edit routing, not for display.
   assert.equal(row.children[1].dataset.skillId, skill.skill_id);
+  assert.equal(byClass(root, "skills-version-preview").textContent, "");
 });
 
 test("skill editor hides the id while still loading its exact version history", async () => {
@@ -62,4 +63,13 @@ test("skill editor hides the id while still loading its exact version history", 
   assert.ok(!dialog.textContent.includes(skill.skill_id));
   assert.equal(fields.children.find((child) => child.tagName === "input").value, "Résumé express");
   assert.equal(byClass(dialog, "skills-history").children[1].children[0].textContent, "Version 1");
+  const files = byClass(dialog, "skills-companion-files");
+  assert.equal(files.hidden, false);
+  assert.ok(files.textContent.includes("exemple.md"));
+  assert.ok(files.textContent.includes("<script>non exécuté</script>"));
+  assert.equal(requests.length, 1); // Bodies/files are loaded only on opening.
+  const history = byClass(dialog, "skills-history");
+  history.children[1].value = "1";
+  history.children[1].listeners.change();
+  assert.ok(history.children[2].textContent.includes("Fichier : exemple.md"));
 });

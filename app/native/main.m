@@ -1,13 +1,14 @@
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <WebKit/WebKit.h>
+#import "notifications.h"
 #import <errno.h>
 #import <poll.h>
 #import <signal.h>
 #import <sys/stat.h>
 #import <unistd.h>
 
-@interface GrokbotApplication : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate>
+@interface GrokbotApplication : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandlerWithReply, UNUserNotificationCenterDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) NSTask *backendTask;
@@ -16,12 +17,20 @@
 @property(nonatomic, copy) NSString *supportPath;
 @property(nonatomic) NSUInteger startupGeneration;
 @property(nonatomic) BOOL terminating;
+@property(nonatomic, strong) EzerbotNotifier *notifier;
+@property(nonatomic, copy) NSString *visibleConversationID;
+@property(nonatomic) BOOL conversationVisible;
+@property(nonatomic, copy) NSString *pendingNotificationID;
 @end
 
 @implementation GrokbotApplication
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
+    self.notifier = [[EzerbotNotifier alloc] init];
+#if defined(EZERBOT_RELEASE)
+    [UNUserNotificationCenter currentNotificationCenter].delegate = self;
+#endif
     [self createMenus];
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1140, 780)
                                             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -251,6 +260,7 @@
     self.backendURL = url;
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -260,6 +270,111 @@
     self.webView = view;
     self.window.contentView = view;
     [view loadRequest:[NSURLRequest requestWithURL:url]];
+}
+
+- (void)sendNotificationFocus {
+    BOOL focused = NSApp.isActive && self.window.isKeyWindow;
+    [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.EzerbotNotifications?.focus(%@)", focused ? @"true" : @"false"] completionHandler:nil];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification { (void)notification; [self sendNotificationFocus]; }
+- (void)windowDidResignKey:(NSNotification *)notification { (void)notification; [self sendNotificationFocus]; }
+- (void)applicationDidBecomeActive:(NSNotification *)notification { (void)notification; [self sendNotificationFocus]; }
+- (void)applicationDidResignActive:(NSNotification *)notification { (void)notification; [self sendNotificationFocus]; }
+
+- (void)activateNotification:(NSString *)eventID {
+    self.pendingNotificationID = eventID;
+    [self.window deminiaturize:nil];
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self flushNotificationClick];
+}
+
+- (void)flushNotificationClick {
+    if (!self.pendingNotificationID || ![self isWorkspaceURL:self.webView.URL]) return;
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@[self.pendingNotificationID] options:0 error:nil];
+    NSString *argument = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+    NSString *script = [NSString stringWithFormat:@"Boolean(window.EzerbotNotifications && (window.EzerbotNotifications.activate(%@[0]), true))", argument];
+    NSString *expected = self.pendingNotificationID;
+    [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        if (!error && [result boolValue] && [self.pendingNotificationID isEqualToString:expected]) self.pendingNotificationID = nil;
+    }];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    (void)webView; (void)navigation;
+    [self sendNotificationFocus];
+    [self flushNotificationClick];
+}
+
+- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message
+                replyHandler:(void (^)(id, NSString *))replyHandler {
+    (void)controller;
+    if (message.webView != self.webView || !message.frameInfo.isMainFrame ||
+        ![self isWorkspaceURL:message.frameInfo.request.URL] || ![self isWorkspaceURL:self.webView.URL] ||
+        ![message.body isKindOfClass:NSDictionary.class] || self.terminating) {
+        replyHandler(nil, @"Origine de notification refusée."); return;
+    }
+    NSDictionary *body = message.body;
+    NSString *command = body[@"command"];
+    void (^reply)(NSDictionary *) = ^(NSDictionary *result) {
+        dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
+    };
+    if ([command isEqual:@"presence"]) {
+        self.visibleConversationID = [body[@"conversation_id"] isKindOfClass:NSString.class] ? body[@"conversation_id"] : nil;
+        self.conversationVisible = [body[@"visible"] isKindOfClass:NSNumber.class] && [body[@"visible"] boolValue];
+        reply(@{@"status":@"ok"}); return;
+    }
+    if ([command isEqual:@"status"]) { [self.notifier status:reply]; return; }
+    if ([command isEqual:@"authorize"]) { [self.notifier authorize:reply]; return; }
+#if !defined(EZERBOT_RELEASE)
+    if ([command isEqual:@"recordings"]) { reply(@{@"status":@"recording", @"events":self.notifier.recordings}); return; }
+    if ([command isEqual:@"activateRecorded"]) {
+        for (NSDictionary *record in self.notifier.recordings) {
+            if ([record[@"event"][@"id"] isEqual:body[@"id"]]) {
+                [self activateNotification:body[@"id"]]; reply(@{@"status":@"ok"}); return;
+            }
+        }
+        replyHandler(nil, @"Notification de test inconnue."); return;
+    }
+#endif
+    if (![command isEqual:@"deliver"] || ![body[@"event"] isKindOfClass:NSDictionary.class]) {
+        replyHandler(nil, @"Commande de notification inconnue."); return;
+    }
+    NSDictionary *event = body[@"event"];
+    for (NSString *key in @[@"id", @"kind", @"conversation_id", @"card_id", @"title"]) {
+        if (![event[key] isKindOfClass:NSString.class] || [event[key] length] == 0 || [event[key] length] > 512) {
+            replyHandler(nil, @"Notification invalide."); return;
+        }
+    }
+    NSDictionary *titles = @{@"reply":@[@"Réponse terminée"], @"approval":@[@"Autorisation demandée"],
+        @"form":@[@"Informations demandées"], @"secret":@[@"Secret demandé"],
+        @"routine":@[@"Routine terminée", @"Échec de la routine"], @"delegation":@[@"Sous-tâche terminée"]};
+    if (![titles[event[@"kind"]] containsObject:event[@"title"]]) { replyHandler(nil, @"Type de notification invalide."); return; }
+    if (NSApp.isActive && self.window.isKeyWindow && self.conversationVisible && [self.visibleConversationID isEqualToString:event[@"conversation_id"]]) {
+        reply(@{@"status":@"suppressed"}); return;
+    }
+    [self.notifier deliver:event reply:reply];
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    (void)center;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL visible = NSApp.isActive && self.window.isKeyWindow && self.conversationVisible &&
+            [self.visibleConversationID isEqualToString:notification.request.content.userInfo[@"conversation_id"]];
+        completionHandler(visible ? UNNotificationPresentationOptionNone : UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList);
+    });
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center didReceiveNotificationResponse:(UNNotificationResponse *)response
+        withCompletionHandler:(void (^)(void))completionHandler {
+    (void)center;
+    NSString *eventID = response.notification.request.content.userInfo[@"event_id"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([eventID isKindOfClass:NSString.class] && eventID.length <= 512) [self activateNotification:eventID];
+        completionHandler();
+    });
 }
 
 - (BOOL)isWorkspaceURL:(NSURL *)url {

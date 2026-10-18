@@ -45,12 +45,22 @@ cd "$project_dir"
 if [[ -d "$project_dir/app/web/node_modules" ]] && command -v npm >/dev/null; then
   npm --prefix "$project_dir/app/web" run build
 fi
-"$cargo_bin" build --release --locked -p grokbot-wrapper
+# Debug bundles are incapable of contacting the macOS notification service.
+# GROKBOT_NOTIFICATION_FAKE=recording selects the recording adapter at runtime.
+profile=release
+native_flags=(-DEZERBOT_RELEASE=1 -O2)
+if [[ "${EZERBOT_BUILD_DEBUG:-0}" == 1 ]]; then
+  profile=debug
+  native_flags=(-DEZERBOT_DEBUG=1 -O0 -g)
+  "$cargo_bin" build --locked -p grokbot-wrapper
+else
+  "$cargo_bin" build --release --locked -p grokbot-wrapper
+fi
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-clang -fobjc-arc -Wall -Wextra -Werror -O2 -mmacosx-version-min=12.3 \
-  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers \
+clang -fobjc-arc -Wall -Wextra -Werror "${native_flags[@]}" -mmacosx-version-min=12.3 \
+  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications \
   "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
-cp "$project_dir/target/release/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
+cp "$project_dir/target/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
 
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

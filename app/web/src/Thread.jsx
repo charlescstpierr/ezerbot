@@ -317,7 +317,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
             </div>;
           }
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
-          if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
+          if (Card) return <div className="gb-card-slot" key={message.id} data-notification-card={message.id} data-run-id={message.payload?.run_id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} />;

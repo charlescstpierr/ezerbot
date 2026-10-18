@@ -8,6 +8,7 @@
   let names = new Map();
   let conversations = new Map();
   let taskView = false;
+  let edges = new Map();
   let navigationKey = "";
   const stopping = new Set();
   let stopButtons = new Map();
@@ -17,6 +18,9 @@
     botName: (id) => names.get(id) || id || "Bot inconnu",
     hasConversation: (id) => conversations.has(id),
     version: () => version,
+    edge: (conversation) => edges.get(conversation),
+    taskId: (conversation) => edges.get(conversation)?.id,
+    canFollowUp: (conversation) => active(edges.get(conversation)),
   };
 
   const style = document.createElement("style");
@@ -26,7 +30,7 @@
     .gb-delegation-bar p { margin: 0; }
     .gb-delegation-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
     .gb-delegation-note { color: var(--muted); }
-    .main-panel[data-delegation-task] :is(.composer-area, #welcome) { display: none; }
+    .main-panel[data-delegation-task] #welcome { display: none; }
   `;
   document.head.append(style);
   const bar = document.createElement("section");
@@ -48,19 +52,6 @@
   scroll?.before(bar);
   const main = scroll?.closest(".main-panel");
 
-  // REA delegation-lifecycle-deep.md DL-S05/S06 keeps taskId and parent
-  // session separate on send. The local API has no task-steering endpoint:
-  // show a read-only task transcript, never fork a new chat in that namespace
-  // (also avoids the completed-task nesting defect from wrapper review r3).
-  document.getElementById("composer-form")?.addEventListener("submit", (event) => {
-    // Preserve the shell's Stop path for a streaming child, even though its
-    // composer is hidden; the visible navigation Stop also works while waiting.
-    if (!taskView || document.getElementById("send-button")?.dataset.mode === "stop") return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    panels.notify("Ce fil de tâche est en lecture seule ; écrivez dans la conversation principale.");
-  }, true);
-
   function open(id) {
     if (!panels.openConversation(id)) panels.notify("Ce fil est indisponible ou une autre action est en cours.");
     else if (taskView) heading.focus(); // The shell otherwise focuses the hidden editor.
@@ -79,7 +70,7 @@
       button.setAttribute("aria-busy", String(button.disabled));
     }
   }
-  function stopButton(label, conversationId, runId) {
+  function stopButton(label, conversationId, runId, taskId) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "gb-retry";
@@ -95,7 +86,8 @@
       if (focused) focusView();
       try {
         // Both IDs are trusted host metadata; never infer a run from its title.
-        await panels.api("/api/stop", { conversation_id: conversationId, message_id: runId });
+        if (taskId) await panels.api("/api/delegation/cancel", { parent_conversation_id: conversations.get(conversationId)?.parent_id, task_id: taskId });
+        else await panels.api("/api/stop", { conversation_id: conversationId, message_id: runId });
         await panels.refresh();
         panels.notify("Arrêt demandé.");
       } catch (error) { panels.notify(error.message || "L’arrêt n’a pas pu être confirmé."); }
@@ -143,6 +135,12 @@
     onState(state, { conversation }) {
       names = new Map((state.bots || []).map((bot) => [bot.id, `${bot.name}${bot.deleted ? " (supprimé)" : ""}`]));
       conversations = new Map((state.conversations || []).map((item) => [item.id, item]));
+      edges = new Map((state.delegation?.delegations || []).map((edge) => [edge.conversation_id, edge]));
+      for (const parent of conversations.values()) {
+        for (const message of parent.messages || []) {
+          if (message.kind === "delegation" && !edges.has(message.payload?.conversation_id)) edges.set(message.payload?.conversation_id, message.payload);
+        }
+      }
       taskView = conversation?.kind === "task";
       main?.toggleAttribute("data-delegation-task", taskView);
       const count = state.delegation?.active_by_conversation?.[conversation?.id];
@@ -167,13 +165,11 @@
           || conversations.get(conversation.parent_id)?.messages
             ?.find((message) => message.kind === "delegation" && message.payload?.conversation_id === conversation.id)?.payload;
         const status = edge?.status?.status;
-        // A queued edge has a reserved ID, but no engine run until admission.
         const childRun = runs.find((run) => run.run_id === edge?.child_run_id);
-        const queuedWithoutRun = status === "queued" && !childRun;
         heading.textContent = `Fil de tâche · ${names.get(conversation.bot_id) || conversation.bot_id || "Bot inconnu"} · ${Object.hasOwn(labels, status) ? labels[status] : "État indisponible"}`;
-        note.textContent = "Lecture seule. Répondez aux demandes d’approbation dans la conversation du bot principal.";
+        note.textContent = active(edge) ? "Suivis remis à cette sous-tâche au prochain appel au modèle. Approbations dans le fil du bot principal." : "Cette tâche est terminée ; poursuivez dans la conversation principale.";
         const root = rootOf(conversation);
-        if (conversation.parent_id !== root?.id || queuedWithoutRun) links.push(["Retour au fil parent", conversation.parent_id]);
+        if (conversation.parent_id !== root?.id) links.push(["Retour au fil parent", conversation.parent_id]);
         if (root) links.push(["Conversation principale", root.id]);
         else note.textContent += " La conversation d’origine est indisponible.";
         // A non-default bot or a routine can be the root. Human requests have
@@ -185,10 +181,8 @@
           const principal = principalOf(conversation, state);
           if (principal && principal.id !== root?.id) links.push(["Conversation du bot principal", principal.id]);
         }
-        if (active(edge) && childRun) {
-          links.push([childRun.status === "awaiting_children" ? "Arrêter la sous-tâche et ses sous-tâches" : "Arrêter la sous-tâche", conversation.id, childRun.run_id]);
-        } else if (queuedWithoutRun) {
-          note.textContent += " En file d’attente : pour l’annuler, arrêtez la réponse du fil parent (toutes ses sous-tâches seront annulées).";
+        if (active(edge)) {
+          links.push([childRun?.status === "awaiting_children" ? "Annuler cette sous-tâche et ses sous-tâches" : "Annuler cette sous-tâche", conversation.id, edge.child_run_id || edge.id, edge.id]);
         }
       }
       if (hasChildren) {
@@ -210,8 +204,8 @@
         const focused = nav.contains(document.activeElement);
         nav.replaceChildren();
         stopButtons = new Map();
-        for (const [label, id, runId] of JSON.parse(nextKey)) {
-          if (runId) stopButton(label, id, runId);
+        for (const [label, id, runId, taskId] of JSON.parse(nextKey)) {
+          if (runId) stopButton(label, id, runId, taskId);
           else link(label, id);
         }
         if (focused) focusView();

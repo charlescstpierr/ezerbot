@@ -14,7 +14,7 @@ const labels = {
 
 export function Card({ message, busy = false, onAction }) {
   useSyncExternalStore(subscribe, () => view()?.version() ?? 0, () => 0);
-  const edge = message.payload || {};
+  const edge = view()?.edge(message.payload?.conversation_id) || message.payload || {};
   const status = edge.status?.status;
   const known = Object.hasOwn(labels, status);
   const child = view()?.botName(edge.child_bot) || edge.child_bot || "Bot inconnu";
@@ -24,7 +24,8 @@ export function Card({ message, busy = false, onAction }) {
   return (
     <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={kind} data-delegation-status={known ? status : "unknown"}>
       <header className="gb-meta"><strong>Sous-tâche · {child}</strong></header>
-      <p className="my-2 text-sm">{known ? labels[status] : "État indisponible"}</p>
+      {typeof edge.objective === "string" && edge.objective && <p className="mt-2 text-sm whitespace-pre-wrap break-words">{edge.objective}</p>}
+      <p className="my-2 text-sm" role="status" aria-live="polite">{known ? labels[status] : "État indisponible"}</p>
       {status === "queued" && <p className="mb-2 text-xs text-muted-foreground">La sous-tâche attend une place disponible.</p>}
       {typeof result === "string" && result && <details className="mb-3 text-sm">
         <summary>{status === "done" ? "Résultat de la sous-tâche" : "Motif"}</summary>

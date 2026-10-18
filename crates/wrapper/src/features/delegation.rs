@@ -33,12 +33,166 @@ use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashSet};
 
 pub fn routes(
-    _: &mut crate::App,
-    _: &str,
-    _: &str,
-    _: &[u8],
+    app: &mut crate::App,
+    method: &str,
+    path: &str,
+    body: &[u8],
 ) -> Option<std::result::Result<crate::ApiResponse, ApiError>> {
-    None
+    if method != "POST" || !matches!(path, "/api/delegation/send" | "/api/delegation/cancel") {
+        return None;
+    }
+    Some(task_action(app, path, body).map(crate::ApiResponse::Json))
+}
+
+const FINISHED_TASK: &str =
+    "Cette tâche est terminée ; poursuivez dans la conversation principale.";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskAction {
+    parent_conversation_id: String,
+    task_id: String,
+    #[serde(default)]
+    message_id: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    attachments: Vec<String>,
+}
+
+fn task_action(
+    app: &mut crate::App,
+    path: &str,
+    body: &[u8],
+) -> std::result::Result<Value, ApiError> {
+    let input: TaskAction = crate::parse(body)?;
+    crate::validate_conversation_id(&input.parent_conversation_id)?;
+    crate::validate_id(&input.task_id)?;
+    app.require_conversation(&input.parent_conversation_id)?;
+    let tx = write_transaction(&app.connection)?;
+    let edge = graph::get(&tx, &input.task_id)?
+        .ok_or_else(|| ApiError::new(404, "Sous-tâche introuvable."))?;
+    let parent = store::required(&tx, &edge.parent_run_id)?;
+    if parent.conversation_id != input.parent_conversation_id {
+        return Err(ApiError::new(
+            404,
+            "Sous-tâche introuvable dans cette conversation.",
+        ));
+    }
+    let conversation = edge
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| ApiError::new(404, "Fil de tâche introuvable."))?;
+    app.require_conversation(conversation)?;
+    let ctx = Context {
+        connection: &tx,
+        ..app.feature_context()
+    };
+    let active = matches!(
+        edge.status,
+        DelegationStatus::Queued | DelegationStatus::Running
+    );
+    if path.ends_with("/cancel") {
+        if active {
+            let mut cancelled = graph::set_status(&tx, &edge.id, &DelegationStatus::Cancelled)?;
+            cancelled.push(edge.clone());
+            cancel_runs(&ctx, cancelled)?;
+            promote(&ctx)?;
+        }
+    } else {
+        // Identity, state, nonce and attachment links share one writer boundary.
+        // Never fork a second run in the task namespace, even while queued.
+        if !active {
+            return Err(ApiError::new(409, FINISHED_TASK));
+        }
+        crate::validate_id(&input.message_id)?;
+        let text = input.body.trim();
+        if (text.is_empty() && input.attachments.is_empty()) || text.len() > 16 * 1024 {
+            return Err(ApiError::new(
+                400,
+                "Ajoutez du texte (16 Ko au plus) ou un fichier.",
+            ));
+        }
+        let vault = super::forms::vault(&ctx)?;
+        let text = grokbot_forms::redact::redact(&vault, text)?;
+        let previous: Option<(String, String)> = tx
+            .query_row(
+                "SELECT task_id,body FROM wrapper_delegation_inputs WHERE message_id=?1",
+                [&input.message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if previous
+            .as_ref()
+            .is_some_and(|(task, body)| task != &edge.id || body != &text)
+        {
+            return Err(ApiError::new(
+                409,
+                "Ce message existe déjà avec un autre contenu.",
+            ));
+        }
+        if previous.is_some() && !input.attachments.is_empty() {
+            let existing: Vec<_> =
+                super::attachments::for_message(&ctx, conversation, &input.message_id)
+                    .iter()
+                    .filter_map(|a| a["id"].as_str().map(str::to_owned))
+                    .collect();
+            if existing != input.attachments {
+                return Err(ApiError::new(
+                    409,
+                    "Les pièces jointes de ce message ont changé.",
+                ));
+            }
+        }
+        if previous.is_none() || !input.attachments.is_empty() {
+            super::attachments::link_attachments(
+                &ctx,
+                conversation,
+                &input.message_id,
+                &input.attachments,
+            )?;
+        }
+        if previous.is_none() {
+            tx.execute("INSERT INTO wrapper_delegation_inputs(task_id,message_id,body,created_at) VALUES (?1,?2,?3,?4)",
+                params![edge.id,input.message_id,text,ctx.now_ms])?;
+            super::conversations::append_entry(
+                &tx,
+                conversation,
+                "delegation_followup",
+                &input.message_id,
+                ctx.now_ms,
+            )?;
+            // Queued children have no run yet. reserve_run replays this same inbox.
+            if let Some(run) = edge
+                .child_run_id
+                .as_deref()
+                .map(|id| store::get(&tx, id))
+                .transpose()?
+                .flatten()
+            {
+                append_followup(&tx, &run.run_id, &input.message_id, &text)?;
+            }
+        }
+    }
+    tx.commit()?;
+    app.conversation_response(conversation)
+}
+
+fn append_followup(conn: &Connection, run: &str, id: &str, text: &str) -> Result<()> {
+    let exists = store::events(conn, run, 0)?
+        .iter()
+        .any(|e| e.kind == RunEventKind::InputReceived && e.payload["input"]["entry_id"] == id);
+    if !exists {
+        store::append_event(
+            conn,
+            run,
+            RunEventKind::InputReceived,
+            &json!({"input":HistoryItem {
+                entry_id:id.into(), role:Role::User, text:text.into(), images:vec![], tool_items:vec![]
+            }}),
+        )?;
+    }
+    Ok(())
 }
 pub fn link_attachments(
     _: &Context<'_>,
@@ -52,7 +206,8 @@ const CONTEXT_BUDGET: usize = 32_000;
 const RESULT_CHARACTERS: usize = 8_000;
 const RECENT_RESULTS: usize = 5;
 const RECENT_STATE: usize = 50;
-const DELEGATION_FAILURE: &str = "Invalid or unavailable delegation context; no child was created.";
+const DELEGATION_FAILURE: &str =
+    "Le contexte de délégation est invalide ou indisponible ; aucune sous-tâche n’a été créée.";
 
 pub fn migrate(conn: &Connection) -> std::result::Result<(), ApiError> {
     graph::migrate(conn)?;
@@ -64,7 +219,13 @@ pub fn migrate(conn: &Connection) -> std::result::Result<(), ApiError> {
     CREATE INDEX IF NOT EXISTS wrapper_delegation_status
         ON delegation_graph(json_extract(status,'$.status'));
     CREATE INDEX IF NOT EXISTS wrapper_delegation_calls_parent
-        ON wrapper_delegation_calls(parent_run_id);",
+        ON wrapper_delegation_calls(parent_run_id);
+    CREATE TABLE IF NOT EXISTS wrapper_delegation_inputs (
+        task_id TEXT NOT NULL, message_id TEXT NOT NULL, body TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY(task_id,message_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS wrapper_delegation_input_nonce
+        ON wrapper_delegation_inputs(message_id);",
     )?;
     Ok(())
 }
@@ -82,7 +243,7 @@ pub fn tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "delegate".into(),
-            description: "Delegate a task to another bot and wait. Select only parent-readable context IDs/texts; no parent history is inherited. The child must call complete_task with its result. A refusal means do the work inline.".into(),
+            description: "Delegate a task to another bot and wait. Call list_delegation_context to discover exact bot IDs and selectable message IDs. Select only parent-readable context IDs/texts; selected entries automatically include their images, captions and documents. No other parent history is inherited. The child must call complete_task with its result. A refusal means do the work inline.".into(),
             schema: json!({"type":"object","additionalProperties":false,"properties":{
                 "child_bot":{"type":"string"},"objective":{"type":"string"},
                 "selected_context":{"type":"object","additionalProperties":false,"properties":{
@@ -92,12 +253,98 @@ pub fn tools() -> Vec<ToolSpec> {
             requires_approval: false,
         },
         ToolSpec {
+            name: "list_delegation_context".into(),
+            description: "List available recipient bots and this conversation's readable message IDs and attachment names before delegating. Pass the selected entry_ids to delegate to include their images, captions and documents automatically. Page older messages with next_offset. No other conversation history or bot instructions are exposed.".into(),
+            schema: json!({"type":"object","additionalProperties":false,"properties":{"offset":{"type":"integer","minimum":0,"maximum":1000000}}}),
+            requires_approval: false,
+        },
+        ToolSpec {
             name: "check_delegations".into(),
             description: "Read this run's child task statuses and completed summaries.".into(),
             schema: json!({"type":"object","additionalProperties":false,"properties":{}}),
             requires_approval: false,
         },
     ]
+}
+
+fn delegation_catalog(ctx: &Context<'_>, parent: &Run, args: &Value) -> Result<ToolOutcome> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Page {
+        #[serde(default)]
+        offset: usize,
+    }
+    let page: Page = serde_json::from_value(args.clone())?;
+    if page.offset > 1_000_000 {
+        return Err(invalid("invalid context offset"));
+    }
+    let mut ancestors = graph::ancestor_bots(ctx.connection, &parent.run_id)?;
+    ancestors.push(parent.bot_id.clone());
+    let mut stmt = ctx.connection.prepare(
+        "SELECT id,name FROM wrapper_bots WHERE account_id=?1 AND deleted=0 ORDER BY name,id",
+    )?;
+    let bots = stmt
+        .query_map([ACCOUNT], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(id, _)| !ancestors.contains(id))
+        .map(|(id, name)| json!({"id":id,"name":name}))
+        .collect::<Vec<_>>();
+    let mut stmt = ctx.connection.prepare("SELECT message_id,kind FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2
+        AND kind IN ('submission','delegation_input','delegation_followup')
+        AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')),-1)
+        ORDER BY ordinal DESC LIMIT 21 OFFSET ?3")?;
+    let rows = stmt
+        .query_map(params![ACCOUNT, parent.conversation_id, page.offset], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let next = (rows.len() > 20).then_some(page.offset + 20);
+    let mut entries = Vec::new();
+    for (id, kind) in rows.into_iter().take(20) {
+        let (text, sources) = if kind == "delegation_input" {
+            let edge =
+                graph::get(ctx.connection, &id)?.ok_or_else(|| invalid("missing task input"))?;
+            let objective: String = ctx.connection.query_row(
+                "SELECT objective FROM wrapper_delegation_calls WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )?;
+            (objective, selected_sources(ctx.connection, &edge)?)
+        } else {
+            let text = if kind == "submission" {
+                ctx.connection.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,parent.conversation_id,id],|r|r.get(0)).optional()?
+            } else {
+                ctx.connection
+                    .query_row(
+                        "SELECT body FROM wrapper_delegation_inputs WHERE message_id=?1",
+                        [&id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+            };
+            let Some(text) = text else { continue };
+            (text, vec![(parent.conversation_id.clone(), id.clone())])
+        };
+        let mut files = Vec::new();
+        for (conversation, message) in sources {
+            files.extend(super::attachments::selection_metadata(
+                ctx.connection,
+                &conversation,
+                &message,
+            )?);
+        }
+        entries.push(json!({"entry_id":id,"excerpt":bounded(&text,160),"attachments":files}));
+    }
+    let vault = super::forms::vault(ctx).map_err(|_| invalid("vault unavailable"))?;
+    Ok(ToolOutcome::Done {
+        output: redact_value(
+            &vault,
+            &json!({"bots":bots,"entries":entries,"next_offset":next}),
+        )?,
+    })
 }
 
 fn invalid(message: &str) -> grokbot_engine::contracts::Error {
@@ -127,11 +374,17 @@ fn active_run(ctx: &Context<'_>) -> Result<Run> {
 }
 
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
-    if !matches!(call.name.as_str(), "delegate" | "check_delegations") {
+    if !matches!(
+        call.name.as_str(),
+        "delegate" | "check_delegations" | "list_delegation_context"
+    ) {
         return None;
     }
     let result = (|| -> Result<ToolOutcome> {
         let parent = active_run(ctx)?;
+        if call.name == "list_delegation_context" {
+            return delegation_catalog(ctx, &parent, &call.arguments);
+        }
         if call.name == "check_delegations" {
             if call.arguments != json!({}) {
                 return Err(invalid("check_delegations takes no arguments"));
@@ -382,6 +635,8 @@ fn delegate(ctx: &Context<'_>, call: &ToolCall, parent: &Run) -> Result<ToolOutc
         status: DelegationStatus::Queued,
     };
     graph::resolve_selected_context(&Resolver(ctx.connection), &edge, CONTEXT_BUDGET)?;
+    super::attachments::validate_selected_material(ctx, &selected_sources(ctx.connection, &edge)?)
+        .map_err(|_| invalid("selected attachments exceed the child input budget"))?;
     let decision = admission::admit(ctx.connection, &edge, &AdmissionLimits::default())?;
     let refusal = match decision {
         Admission::Refused { reason } => Some(reason),
@@ -448,6 +703,16 @@ fn create_conversation(ctx: &Context<'_>, edge: &Delegation, objective: &str) ->
     let parent = store::required(ctx.connection, &edge.parent_run_id)?;
     let title: String = objective.chars().take(80).collect();
     ctx.connection.execute("INSERT OR IGNORE INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) VALUES (?1,?2,?3,?4,'task',?5,?6,?6)", params![ACCOUNT,edge.conversation_id,title,edge.child_bot,parent.conversation_id,ctx.now_ms])?;
+    super::conversations::append_entry(
+        ctx.connection,
+        edge.conversation_id
+            .as_deref()
+            .ok_or_else(|| invalid("missing child conversation"))?,
+        "delegation_input",
+        &edge.id,
+        ctx.now_ms,
+    )
+    .map_err(|_| invalid("cannot append child input"))?;
     Ok(())
 }
 fn reserve_run(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
@@ -498,6 +763,14 @@ fn reserve_run(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
     if hosted != 0 {
         super::conversations::append_entry(
             ctx.connection,
+            edge.conversation_id.as_deref().unwrap(),
+            "delegation_input",
+            &edge.id,
+            ctx.now_ms,
+        )
+        .map_err(|_| invalid("cannot append child input"))?;
+        super::conversations::append_entry(
+            ctx.connection,
             edge.conversation_id
                 .as_ref()
                 .ok_or_else(|| invalid("missing child conversation"))?,
@@ -509,7 +782,62 @@ fn reserve_run(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
         )
         .map_err(|_| invalid("cannot append child reply"))?;
     }
+    let mut stmt = ctx.connection.prepare(
+        "SELECT message_id,body FROM wrapper_delegation_inputs WHERE task_id=?1 ORDER BY rowid",
+    )?;
+    let inputs = stmt
+        .query_map([&edge.id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, text) in inputs {
+        append_followup(
+            ctx.connection,
+            edge.child_run_id.as_deref().unwrap(),
+            &id,
+            &text,
+        )?;
+    }
     Ok(())
+}
+
+// The selection remains live: reset/deletion revokes access on every request.
+// Only explicitly selected, parent-readable entries may contribute files.
+pub(super) fn selected_sources(
+    conn: &Connection,
+    edge: &Delegation,
+) -> Result<Vec<(String, String)>> {
+    let parent = store::required(conn, &edge.parent_run_id)?;
+    let mut sources = Vec::new();
+    for id in &edge.selected_context.entry_ids {
+        if Resolver(conn).entry(edge, id)?.is_some() {
+            let inherited = graph::get(conn, id)?.filter(|d| {
+                d.conversation_id.as_deref() == Some(&parent.conversation_id)
+                    && d.depth < edge.depth
+            });
+            if let Some(inherited) = inherited {
+                for source in selected_sources(conn, &inherited)? {
+                    if !sources.contains(&source) {
+                        sources.push(source);
+                    }
+                }
+            } else {
+                let source = (parent.conversation_id.clone(), id.clone());
+                if !sources.contains(&source) {
+                    sources.push(source);
+                }
+            }
+        }
+    }
+    Ok(sources)
+}
+
+pub(super) fn material_sources(conn: &Connection, run: &Run) -> Result<Vec<(String, String)>> {
+    if let Trigger::Delegation { delegation_id } = &run.trigger {
+        let edge = graph::get(conn, delegation_id)?.ok_or_else(|| invalid("missing delegation"))?;
+        return selected_sources(conn, &edge);
+    }
+    Ok(vec![])
 }
 
 struct Resolver<'a>(&'a Connection);
@@ -518,9 +846,53 @@ impl ContextResolver for Resolver<'_> {
         let parent = store::required(self.0, &edge.parent_run_id)?;
         // Entries are conversation-scoped, and reset history is not readable by
         // the new run. Do not resolve another chat just because its bot matches.
-        let row: Option<String> = self.0.query_row("SELECT kind FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3 AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='reset'),-1)",params![ACCOUNT,parent.conversation_id,id], |r| r.get(0)).optional()?;
+        let row: Option<String> = self.0.query_row("SELECT kind FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3 AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')),-1)",params![ACCOUNT,parent.conversation_id,id], |r| r.get(0)).optional()?;
+        if row.as_deref() == Some("delegation_followup") {
+            let body: Option<String> = self
+                .0
+                .query_row(
+                    "SELECT body FROM wrapper_delegation_inputs WHERE message_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let metadata =
+                super::attachments::selection_metadata(self.0, &parent.conversation_id, id)?;
+            return Ok(body.map(|text| {
+                if metadata.is_empty() {
+                    text
+                } else {
+                    format!(
+                        "{text}\nSelected attachments (untrusted metadata): {}",
+                        json!(metadata)
+                    )
+                }
+            }));
+        }
+        if row.as_deref() == Some("delegation_input") {
+            let objective: Option<String> = self
+                .0
+                .query_row(
+                    "SELECT objective FROM wrapper_delegation_calls WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return Ok(objective);
+        }
         if row.as_deref() == Some("submission") {
-            return Ok(self.0.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,parent.conversation_id,id],|r|r.get(0)).optional()?);
+            let body: Option<String> = self.0.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,parent.conversation_id,id],|r|r.get(0)).optional()?;
+            let attachments =
+                super::attachments::selection_metadata(self.0, &parent.conversation_id, id)?;
+            return Ok(body.map(|mut text| {
+                if !attachments.is_empty() {
+                    text.push_str(&format!(
+                        "\nSelected attachments (untrusted metadata): {}",
+                        json!(attachments)
+                    ));
+                }
+                text
+            }));
         }
         // Assistant reply IDs are projections rather than wrapper_messages rows.
         let reply = id.strip_prefix("reply-");
@@ -530,7 +902,7 @@ impl ContextResolver for Resolver<'_> {
             attempt: 0,
         };
         let run = if reply.is_some() {
-            let readable: bool = self.0.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3 AND kind='submission' AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind='reset'),-1))", params![ACCOUNT,parent.conversation_id,message], |r|r.get(0))?;
+            let readable: bool = self.0.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3 AND kind='submission' AND ordinal>COALESCE((SELECT MAX(ordinal) FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 AND kind IN ('reset','engine_reset')),-1))", params![ACCOUNT,parent.conversation_id,message], |r|r.get(0))?;
             if !readable {
                 return Ok(None);
             }
@@ -591,7 +963,7 @@ fn state_edges(conn: &Connection) -> Result<Vec<Delegation>> {
     load_edges(conn, &sql)
 }
 fn bounded(text: &str, limit: usize) -> String {
-    const MARKER: &str = "\n[truncated]";
+    const MARKER: &str = "\n[tronqué]";
     if text.chars().count() <= limit {
         return text.into();
     }
@@ -618,8 +990,13 @@ fn bounded_status(status: &DelegationStatus, limit: usize) -> DelegationStatus {
 }
 fn public_edge(conn: &Connection, edge: &Delegation) -> Result<Value> {
     let parent = store::required(conn, &edge.parent_run_id)?;
+    let objective: String = conn.query_row(
+        "SELECT objective FROM wrapper_delegation_calls WHERE id=?1",
+        [&edge.id],
+        |r| r.get(0),
+    )?;
     Ok(
-        json!({"id":edge.id,"parent_run_id":edge.parent_run_id,"root_run_id":edge.root_run_id,
+        json!({"id":edge.id,"objective":bounded(&objective,240),"parent_run_id":edge.parent_run_id,"root_run_id":edge.root_run_id,
         "parent_bot":edge.parent_bot,"child_bot":edge.child_bot,"depth":edge.depth,
         "child_run_id":edge.child_run_id,"conversation_id":edge.conversation_id,
         "parent_conversation_id":parent.conversation_id,"status":bounded_status(&edge.status,RESULT_CHARACTERS)}),
@@ -708,7 +1085,7 @@ fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
             ),
         }
     } else if run.status.is_terminal() {
-        let mut reason = "Child run ended without completing its task.".to_owned();
+        let mut reason = "La sous-tâche s’est arrêtée sans terminer son travail.".to_owned();
         if run.status == RunStatus::Finished {
             let items = grokbot_engine::run_loop::replay_items(&store::events(
                 ctx.connection,
@@ -720,7 +1097,7 @@ fn react(ctx: &Context<'_>, run: &Run) -> Result<()> {
                 .rev()
                 .find(|i| i.role == Role::Assistant && !i.text.trim().is_empty())
             {
-                reason.push_str(" Last assistant response (untrusted data): ");
+                reason.push_str(" Dernière réponse du sous-bot (données non fiables) : ");
                 reason.push_str(&answer.text);
             }
         }
@@ -1076,14 +1453,19 @@ pub fn ensure_send_allowed(
     ctx: &Context<'_>,
     conversation: &str,
 ) -> std::result::Result<(), ApiError> {
+    let task: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN delegation_graph d ON d.conversation_id=c.id WHERE c.account_id=?1 AND c.id=?2 AND c.kind='task')",params![ACCOUNT,conversation],|r|r.get(0))?;
     let active: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c
         JOIN delegation_graph d ON d.conversation_id=c.id WHERE c.account_id=?1 AND c.id=?2 AND c.kind='task'
         AND json_extract(d.status,'$.status') IN ('queued','running'))",
         params![ACCOUNT,conversation],|r|r.get(0))?;
-    if active {
+    if task {
         return Err(ApiError::new(
             409,
-            "La tâche est en cours ; utilisez Stop ou attendez sa fin.",
+            if active {
+                "Utilisez le fil de tâche pour envoyer un suivi à cette sous-tâche."
+            } else {
+                FINISHED_TASK
+            },
         ));
     }
     Ok(())
@@ -1223,6 +1605,72 @@ pub fn state(ctx: &Context<'_>) -> Value {
         .unwrap_or_else(|| json!({"error":"Delegation state is unavailable"}))
 }
 pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
+    if kind == "delegation_followup" {
+        let (task, text, created_at): (String, String, u64) = ctx
+            .connection
+            .query_row(
+                "SELECT task_id,body,created_at FROM wrapper_delegation_inputs WHERE message_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()?;
+        let edge = graph::get(ctx.connection, &task).ok()??;
+        if ctx.conversation_id != edge.conversation_id.as_deref() {
+            return None;
+        }
+        let vault = super::forms::vault(ctx).ok()?;
+        return Some(Message {
+            id: id.into(),
+            kind: "message".into(),
+            payload: json!({}),
+            attachments: super::attachments::for_message(ctx, ctx.conversation_id?, id),
+            role: "user",
+            body: grokbot_forms::redact::redact(&vault, &text).ok()?,
+            state: "echoed",
+            created_at,
+            error: None,
+            error_kind: None,
+            notice: None,
+            proposals: vec![],
+        });
+    }
+    if kind == "delegation_input" {
+        let edge = graph::get(ctx.connection, id).ok()??;
+        if ctx.conversation_id != edge.conversation_id.as_deref() {
+            return None;
+        }
+        let (text, created_at): (String, u64) = ctx
+            .connection
+            .query_row(
+                "SELECT objective,created_at FROM wrapper_delegation_calls WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()?;
+        let mut attachments = Vec::new();
+        for (conversation, message) in selected_sources(ctx.connection, &edge).ok()? {
+            for file in super::attachments::for_message(ctx, &conversation, &message) {
+                if !attachments.iter().any(|a: &Value| a["id"] == file["id"]) {
+                    attachments.push(file);
+                }
+            }
+        }
+        let vault = super::forms::vault(ctx).ok()?;
+        return Some(Message {
+            id: id.into(),
+            kind: "message".into(),
+            payload: json!({}),
+            attachments,
+            role: "user",
+            body: grokbot_forms::redact::redact(&vault, &text).ok()?,
+            state: "echoed",
+            created_at,
+            error: None,
+            error_kind: None,
+            notice: None,
+            proposals: vec![],
+        });
+    }
     if kind != "delegation" {
         return None;
     }

@@ -66,10 +66,16 @@ const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bure
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
 const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
 fn context_budget_failed(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {
-    if run.status != RunStatus::Failed { return Ok(false); }
-    Ok(store::events(conn, &run.run_id, 0)?.iter().any(|event|
-        event.kind == RunEventKind::TurnEnded && event.payload["failed"] == true &&
-        event.payload["reason"].as_str().is_some_and(|reason| reason.starts_with("context budget cannot retain"))))
+    if run.status != RunStatus::Failed {
+        return Ok(false);
+    }
+    Ok(store::events(conn, &run.run_id, 0)?.iter().any(|event| {
+        event.kind == RunEventKind::TurnEnded
+            && event.payload["failed"] == true
+            && event.payload["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("context budget cannot retain"))
+    }))
 }
 const DEMO_REPLY: &str = "Bien reçu. Ton message est conservé dans cette conversation. Le mode local simule les réponses ; aucun service d'intelligence artificielle n'est connecté.";
 const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule les réponses.\n\n```mermaid\nflowchart LR\n  A[Votre message] --> B{Ezerbot}\n  B -->|texte| C[Réponse]\n  B -->|schéma| D[Diagramme]\n  C & D --> E[(Historique local)]\n```\n\nPassez la souris sur le diagramme pour le copier, le télécharger ou l'agrandir.";
@@ -566,7 +572,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     return Err(ApiError::new(400, CONTEXT_TOO_LARGE));
                 }
                 let original = run_input(&app.connection, &old.run_id)?;
-                super::attachments::validate_message_documents(&app.feature_context(), &input.conversation_id, &original.entry_id)?;
+                super::attachments::validate_message_documents(
+                    &app.feature_context(),
+                    &input.conversation_id,
+                    &original.entry_id,
+                )?;
                 let Trigger::UserMessage { attempt, .. } = old.trigger else {
                     unreachable!()
                 };
@@ -1299,7 +1309,10 @@ impl RunServices for Services<'_> {
             .join("\n\n");
         let (mut history, _) = history(self.connection, run, &input)?;
         hydrate_history_images(&ctx, &run.conversation_id, &model, &mut history)?;
-        input.text.push_str(&super::attachments::document_text(&ctx, &run.conversation_id, &input.entry_id).map_err(engine_error)?);
+        input.text.push_str(
+            &super::attachments::document_text(&ctx, &run.conversation_id, &input.entry_id)
+                .map_err(engine_error)?,
+        );
         if source_message != input.entry_id {
             // A group's sending image is attached to its distinct turn input;
             // the shared human entry must not repeat that caption a second time.
@@ -1482,7 +1495,10 @@ fn hydrate_history_images(
     history: &mut [HistoryItem],
 ) -> grokbot_engine::contracts::Result<()> {
     for item in history.iter_mut().filter(|i| i.role == Role::User) {
-        item.text.push_str(&super::attachments::document_text(ctx, conversation, &item.entry_id).map_err(engine_error)?);
+        item.text.push_str(
+            &super::attachments::document_text(ctx, conversation, &item.entry_id)
+                .map_err(engine_error)?,
+        );
         let linked =
             super::attachments::images_for_message(ctx, conversation, &item.entry_id, model, false)
                 .map_err(engine_error)?;
@@ -1650,22 +1666,55 @@ impl RunGatewayCall<'_> {
         };
         let source_message =
             super::multibot::source_message(self.connection, &run.run_id, &original.entry_id)?;
-        let linked = super::attachments::images_for_message_cached(
-            &ctx,
-            &run.conversation_id,
-            &source_message,
-            &request.model,
-            !self.no_vision.load(Ordering::SeqCst) && !self.captions_only.load(Ordering::SeqCst),
-            &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
-        )
-        .map_err(engine_error)?;
-        if let Some(sending) = request
-            .input
-            .iter_mut()
-            .find(|entry| entry.entry_id == original.entry_id && entry.role == Role::User)
-        {
-            if !linked.is_empty() {
-                sending.images = linked;
+        let sending_bytes =
+            !self.no_vision.load(Ordering::SeqCst) && !self.captions_only.load(Ordering::SeqCst);
+        let followups: HashSet<String> = store::events(self.connection, &run.run_id, 0)?
+            .iter()
+            .filter(|e| e.kind == RunEventKind::InputReceived)
+            .filter_map(|e| e.payload["input"]["entry_id"].as_str().map(str::to_owned))
+            .collect();
+        for sending in request.input.iter_mut().filter(|entry| {
+            entry.role == Role::User
+                && (entry.entry_id == original.entry_id || followups.contains(&entry.entry_id))
+        }) {
+            if sending.entry_id == original.entry_id
+                && matches!(run.trigger, Trigger::Delegation { .. })
+            {
+                let sources = super::delegation::material_sources(self.connection, &run)?;
+                let (images, documents) = super::attachments::selected_material(
+                    &ctx,
+                    &sources,
+                    &request.model,
+                    sending_bytes,
+                    &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+                )
+                .map_err(engine_error)?;
+                sending.images = images;
+                sending.text.push_str(&documents);
+            } else {
+                let message = if sending.entry_id == original.entry_id {
+                    &source_message
+                } else {
+                    &sending.entry_id
+                };
+                let linked = super::attachments::images_for_message_cached(
+                    &ctx,
+                    &run.conversation_id,
+                    message,
+                    &request.model,
+                    sending_bytes,
+                    &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+                )
+                .map_err(engine_error)?;
+                if !linked.is_empty() {
+                    sending.images = linked;
+                }
+                if followups.contains(&sending.entry_id) {
+                    sending.text.push_str(
+                        &super::attachments::document_text(&ctx, &run.conversation_id, message)
+                            .map_err(engine_error)?,
+                    );
+                }
             }
         }
         if self.no_vision.load(Ordering::SeqCst) {
@@ -2544,7 +2593,14 @@ pub fn request_preview(app: &App, conversation_id: &str) -> Result<Vec<ContextBl
         request.current_message.images = images;
     }
     let (mut history, reset) = history(&app.connection, &run, &current)?;
-    request.current_message.text.push_str(&super::attachments::document_text(&ctx, conversation_id, &current.entry_id)?);
+    request
+        .current_message
+        .text
+        .push_str(&super::attachments::document_text(
+            &ctx,
+            conversation_id,
+            &current.entry_id,
+        )?);
     hydrate_history_images(&ctx, conversation_id, &model, &mut history)?;
     Ok(assembler::assemble(
         &request,

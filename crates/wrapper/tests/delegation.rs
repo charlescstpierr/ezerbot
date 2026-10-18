@@ -289,7 +289,7 @@ fn failed_last_delegate_waits_for_its_admitted_sibling() {
             .unwrap()
             .to_string();
         assert!(body.contains("Verified child summary"));
-        assert!(body.contains("Invalid or unavailable delegation context; no child was created."));
+        assert!(body.contains("Le contexte de délégation est invalide ou indisponible ; aucune sous-tâche n’a été créée."));
         assert!(matches!(
             graph::get(&f.db(), &children[0].id)
                 .unwrap()
@@ -601,7 +601,7 @@ fn active_task_send_is_rejected_without_a_second_run() {
     assert_eq!(error.status, 409);
     assert_eq!(
         error.message,
-        "La tâche est en cours ; utilisez Stop ou attendez sa fin."
+        "Utilisez le fil de tâche pour envoyer un suivi à cette sous-tâche."
     );
     assert_eq!(
         store::runs_for_conversation(&f.db(), task).unwrap().len(),
@@ -920,7 +920,7 @@ fn newest_long_results_and_all_wakees_fit_the_rendered_context_budget() {
             "missing result {n}"
         );
     }
-    assert!(body.contains("truncated"));
+    assert!(body.contains("tronqué"));
     let result = blocks
         .iter()
         .find(|b| b.source == ContextSource::DelegatedContext)
@@ -1399,7 +1399,7 @@ fn failed_child_reports_failure_to_parent() {
     let seen = f.server.seen.lock().unwrap();
     let body = seen.bodies.last().unwrap().to_string();
     assert!(body.contains("failed"));
-    assert!(body.contains("Child run ended without completing its task"));
+    assert!(body.contains("La sous-tâche s’est arrêtée sans terminer son travail"));
 }
 
 #[test]
@@ -1821,4 +1821,609 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
     assert!(
         matches!(f.tool(&root,"check","check_delegations",json!({})),ToolOutcome::Done{output} if output["delegations"][0]["status"]["result"]=="stable result")
     );
+}
+
+#[test]
+fn selected_images_captions_and_documents_reach_child_after_restart_only() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let image = f.app.api("POST","/api/attachments",&STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=").unwrap()).unwrap()["id"].as_str().unwrap().to_owned();
+    let doc = f.post("/api/documents",json!({"name":"preuve.txt","data":STANDARD.encode("DOCUMENT_SELECTIONNE_éè — contenu local") }))["id"].as_str().unwrap().to_owned();
+    // Persist the caption through the existing preparation path.
+    f.events(vec![json!({"type":"response.output_text.delta","delta":"LEGENDE_SELECTIONNEE : un carré clair."}),completed()]);
+    let caption = json!({"conversation_id":c,"attachment_id":image,"draft":"Pièces à vérifier"});
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("selected caption", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Pièces reçues."}),
+        completed(),
+    ]);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"selected-files","body":"","attachments":[image,doc]}));
+    f.wait_parent(&c, "selected-files", RunStatus::Finished);
+    f.send(&c, "private-entry", "TEXTE_NON_SELECTIONNE");
+    f.wait_parent(&c, "private-entry", RunStatus::Finished);
+    let mut a = args("child");
+    a["selected_context"]["entry_ids"] = json!(["selected-files"]);
+    let (_, edge) = f.begin(&c, "delegate-files", a);
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    f.child_done(&edge);
+    let seen = f.server.seen.lock().unwrap();
+    let outgoing = seen.bodies.last().unwrap().to_string();
+    assert!(outgoing.contains("data:image/png;base64,"));
+    assert!(outgoing.contains("LEGENDE_SELECTIONNEE"));
+    assert!(outgoing.contains("DOCUMENT_SELECTIONNE"));
+    assert!(!outgoing.contains("TEXTE_NON_SELECTIONNE"));
+    assert!(!seen.bodies.last().unwrap()["instructions"]
+        .to_string()
+        .contains("data:image"));
+    drop(seen);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let thread = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == json!(edge.conversation_id))
+        .unwrap();
+    let objective = thread["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == edge.id)
+        .unwrap();
+    assert_eq!(objective["attachments"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn followup_during_final_text_gets_another_model_call() {
+    use std::sync::atomic::AtomicBool;
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "text-followup", args("child"));
+    let gate = Arc::new(AtomicBool::new(false));
+    let at = f.server.seen.lock().unwrap().bodies.len() + 1;
+    f.server.seen.lock().unwrap().response_gate = Some((at, gate.clone()));
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Ancienne réponse"}),
+        completed(),
+    ]);
+    f.events(vec![
+        call(
+            "new-end",
+            "complete_task",
+            json!({"summary":"Nouvelle réponse"}),
+        ),
+        completed(),
+    ]);
+    f.tick();
+    wait("child text request", || {
+        f.server.seen.lock().unwrap().bodies.len() >= at
+    });
+    f.post(
+        "/api/delegation/send",
+        task_input(&parent, &edge, "text-note"),
+    );
+    gate.store(true, Ordering::SeqCst);
+    wait(
+        "follow-up after text",
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result == "Nouvelle réponse"),
+    );
+    let body = f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(body.contains("Ancienne réponse") && body.contains("Ajoute une conclusion française."));
+}
+
+#[test]
+fn individual_cancel_wins_over_late_running_completion() {
+    use std::sync::atomic::AtomicBool;
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "cancel-live", args("child"));
+    let gate = Arc::new(AtomicBool::new(false));
+    let at = f.server.seen.lock().unwrap().bodies.len() + 1;
+    f.server.seen.lock().unwrap().response_gate = Some((at, gate.clone()));
+    f.events(vec![
+        call("too-late", "complete_task", json!({"summary":"Late"})),
+        completed(),
+    ]);
+    f.tick();
+    wait("cancel in flight", || {
+        f.server.seen.lock().unwrap().bodies.len() >= at
+    });
+    f.post(
+        "/api/delegation/cancel",
+        json!({"parent_conversation_id":parent.conversation_id,"task_id":edge.id}),
+    );
+    gate.store(true, Ordering::SeqCst);
+    wait("cancel releases owner", || {
+        !f.provider.status()["titling"].as_bool().unwrap()
+    });
+    assert_eq!(
+        graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+        DelegationStatus::Cancelled
+    );
+    assert_eq!(
+        store::required(&f.db(), edge.child_run_id.as_deref().unwrap())
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(
+        store::required(&f.db(), &parent.run_id).unwrap().status,
+        RunStatus::AwaitingChildren
+    );
+}
+
+#[test]
+fn selected_files_are_revoked_on_reset_and_missing_bytes_fail_honestly() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    for reset in [true, false] {
+        let mut f = Fixture::new(true);
+        let c = f.conversation();
+        let file = f.app.api("POST","/api/attachments",&STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=").unwrap()).unwrap();
+        f.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Image reçue"}),
+            completed(),
+        ]);
+        f.post("/api/send",json!({"conversation_id":c,"message_id":"revoke-source","body":"Image sélectionnée","attachments":[file["id"]]}));
+        f.wait_parent(&c, "revoke-source", RunStatus::Finished);
+        let mut a = args("child");
+        a["selected_context"]["entry_ids"] = json!(["revoke-source"]);
+        let (_, edge) = f.begin(&c, "revoke-child", a);
+        if reset {
+            features::conversations::append_entry(&f.db(), &c, "reset", "reset-selection", 123)
+                .unwrap();
+            f.child_done(&edge);
+            let body = f
+                .server
+                .seen
+                .lock()
+                .unwrap()
+                .bodies
+                .last()
+                .unwrap()
+                .to_string();
+            assert!(!body.contains("data:image/"));
+            assert!(body.contains("revoked/unavailable"));
+        } else {
+            let directory = PathBuf::from(format!("{}.attachments", f.path.display()));
+            std::fs::remove_file(directory.join(file["sha256"].as_str().unwrap())).unwrap();
+            let before = f.server.seen.lock().unwrap().bodies.len();
+            f.tick();
+            wait("missing selected blob fails", || {
+                matches!(
+                    graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+                    DelegationStatus::Failed { .. }
+                )
+            });
+            assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+        }
+    }
+}
+
+#[test]
+fn followup_does_not_bypass_pending_human_gate() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "human-gate-followup", args("child"));
+    f.events(vec![call("pending-form","request_form",json!({"fields":[{"name":"answer","label":"Autorisation","field_type":{"kind":"text"},"required":true}]})),completed()]);
+    f.tick();
+    wait("child awaits human", || {
+        store::required(&f.db(), edge.child_run_id.as_deref().unwrap())
+            .unwrap()
+            .status
+            == RunStatus::AwaitingHumanInput
+    });
+    let count = f.server.seen.lock().unwrap().bodies.len();
+    f.post(
+        "/api/delegation/send",
+        task_input(&parent, &edge, "human-pending-note"),
+    );
+    f.tick();
+    assert_eq!(
+        store::required(&f.db(), edge.child_run_id.as_deref().unwrap())
+            .unwrap()
+            .status,
+        RunStatus::AwaitingHumanInput
+    );
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), count);
+    assert_eq!(store::pending_wakes(&f.db()).unwrap().len(), 0);
+}
+
+#[test]
+fn model_can_discover_real_recipient_and_selected_message_ids_without_private_history() {
+    let mut f = Fixture::new(true);
+    let hidden = f.conversation();
+    f.send(&hidden, "hidden-catalogue", "NE_PAS_EXPOSER_AUTRE_FIL");
+    f.wait_parent(&hidden, "hidden-catalogue", RunStatus::Finished);
+    let c = f.conversation();
+    f.events(vec![
+        call("discover", "list_delegation_context", json!({})),
+        completed(),
+    ]);
+    let mut a = args("child");
+    a["selected_context"]["entry_ids"] = json!(["catalogue-entry"]);
+    f.events(vec![
+        call("delegate-discovered", "delegate", a),
+        completed(),
+    ]);
+    f.send(&c, "catalogue-entry", "Sélection à confier au sous-bot");
+    f.wait_parent(&c, "catalogue-entry", RunStatus::AwaitingChildren);
+    let run = f.run(&c, "catalogue-entry");
+    let events = store::events(&f.db(), &run.run_id, 0).unwrap();
+    let output = &events
+        .iter()
+        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == "discover")
+        .unwrap()
+        .payload["outcome"]["output"];
+    assert!(output["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["id"] == "child"));
+    assert!(!output["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["id"] == "grokbot"));
+    assert_eq!(output["entries"][0]["entry_id"], "catalogue-entry");
+    assert!(!output.to_string().contains("NE_PAS_EXPOSER_AUTRE_FIL"));
+    assert!(
+        f.server.seen.lock().unwrap().bodies.last().unwrap()["input"]
+            .to_string()
+            .contains("catalogue-entry")
+    );
+}
+
+#[test]
+fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
+    let mut f = Fixture::new(true);
+    let c = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["grokbot","other"],"title":"Groupe et sous-tâche"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.events(vec![
+        call("from-group", "delegate", args("child")),
+        completed(),
+    ]);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
+    f.tick();
+    wait("group delegates", || {
+        f.db()
+            .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 1
+    });
+    let edge_id: String = f
+        .db()
+        .query_row("SELECT id FROM delegation_graph", [], |r| r.get(0))
+        .unwrap();
+    let edge = graph::get(&f.db(), &edge_id).unwrap().unwrap();
+    let parent = store::required(&f.db(), &edge.parent_run_id).unwrap();
+    f.post(
+        "/api/delegation/send",
+        task_input(&parent, &edge, "group-child-note"),
+    );
+    f.child_done(&edge);
+    assert!(f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("Ajoute une conclusion française."));
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Résultat reçu dans le groupe."}),
+        completed(),
+    ]);
+    wait("group parent resumes", || {
+        f.tick();
+        store::required(&f.db(), &parent.run_id).unwrap().status == RunStatus::Finished
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let group = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == c)
+        .unwrap();
+    assert_eq!(group["kind"], "group");
+    assert_eq!(group["member_ids"].as_array().unwrap().len(), 2);
+    assert!(!group["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == "group-child-note"));
+    assert!(group["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["kind"] == "delegation" && m["payload"]["status"]["status"] == "done"));
+}
+
+fn task_input(parent: &Run, edge: &Delegation, id: &str) -> Value {
+    json!({"parent_conversation_id":parent.conversation_id,"task_id":edge.id,"message_id":id,"body":"Ajoute une conclusion française."})
+}
+
+#[test]
+fn queued_followup_persists_and_individual_cancel_preserves_siblings() {
+    let mut f = Fixture::new(false);
+    let root = f.root("queued-followup");
+    for id in ["one", "two", "three", "four", "five"] {
+        f.tool(&root, id, "delegate", args("child"));
+    }
+    let edges = f.children(&root);
+    let queued = edges
+        .iter()
+        .find(|d| d.status == DelegationStatus::Queued)
+        .unwrap()
+        .clone();
+    let input = task_input(&root, &queued, "queued-note");
+    f.post("/api/delegation/send", input.clone());
+    f.post("/api/delegation/send", input.clone());
+    assert_eq!(
+        f.db()
+            .query_row("SELECT COUNT(*) FROM wrapper_delegation_inputs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert!(store::get(&f.db(), queued.child_run_id.as_deref().unwrap())
+        .unwrap()
+        .is_none());
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == json!(queued.conversation_id))
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == "queued-note"));
+    let victim = edges
+        .iter()
+        .find(|d| d.status == DelegationStatus::Running)
+        .unwrap();
+    f.post(
+        "/api/delegation/cancel",
+        json!({"parent_conversation_id":root.conversation_id,"task_id":victim.id}),
+    );
+    assert_eq!(
+        graph::get(&f.db(), &victim.id).unwrap().unwrap().status,
+        DelegationStatus::Cancelled
+    );
+    assert!(!store::required(&f.db(), &root.run_id)
+        .unwrap()
+        .status
+        .is_terminal());
+    for sibling in edges.iter().filter(|d| d.id != victim.id) {
+        assert!(matches!(
+            graph::get(&f.db(), &sibling.id).unwrap().unwrap().status,
+            DelegationStatus::Running | DelegationStatus::Queued
+        ));
+    }
+    // Promotion transfers the persisted follow-up exactly once to the reserved run.
+    let promoted = edges
+        .iter()
+        .filter(|d| d.status == DelegationStatus::Queued)
+        .find(|d| graph::get(&f.db(), &d.id).unwrap().unwrap().status == DelegationStatus::Running)
+        .unwrap();
+    f.post(
+        "/api/delegation/send",
+        task_input(&root, promoted, "promoted-note"),
+    );
+    let events = store::events(&f.db(), promoted.child_run_id.as_deref().unwrap(), 0).unwrap();
+    assert!(events.iter().any(|e| e.kind == RunEventKind::InputReceived));
+    let still_queued = edges
+        .iter()
+        .find(|d| graph::get(&f.db(), &d.id).unwrap().unwrap().status == DelegationStatus::Queued)
+        .unwrap();
+    f.post(
+        "/api/delegation/cancel",
+        json!({"parent_conversation_id":root.conversation_id,"task_id":still_queued.id}),
+    );
+    assert!(
+        store::get(&f.db(), still_queued.child_run_id.as_deref().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        graph::get(&f.db(), &still_queued.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        DelegationStatus::Cancelled
+    );
+}
+
+#[test]
+fn followup_identity_denial_terminal_and_invalid_files_are_atomic() {
+    let mut f = Fixture::new(false);
+    let root = f.root("followup-denial");
+    f.tool(&root, "child", "delegate", args("child"));
+    let edge = f.children(&root).remove(0);
+    let other = f.conversation();
+    let mut input = task_input(&root, &edge, "denied-note");
+    input["parent_conversation_id"] = json!(other);
+    assert_eq!(
+        f.app
+            .api("POST", "/api/delegation/send", input.to_string().as_bytes())
+            .unwrap_err()
+            .status,
+        404
+    );
+    let mut input = task_input(&root, &edge, "bad-file");
+    input["attachments"] = json!(["nonexistent"]);
+    assert_eq!(
+        f.app
+            .api("POST", "/api/delegation/send", input.to_string().as_bytes())
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(
+        f.db()
+            .query_row("SELECT COUNT(*) FROM wrapper_delegation_inputs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    f.post(
+        "/api/delegation/send",
+        task_input(&root, &edge, "immutable"),
+    );
+    let mut changed_files = task_input(&root, &edge, "immutable");
+    changed_files["attachments"] = json!(["nonexistent"]);
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/delegation/send",
+                changed_files.to_string().as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        409
+    );
+    f.tool(&root, "second-recipient", "delegate", args("other"));
+    let sibling = f
+        .children(&root)
+        .into_iter()
+        .find(|d| d.id != edge.id)
+        .unwrap();
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/delegation/send",
+                task_input(&root, &sibling, "immutable")
+                    .to_string()
+                    .as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        409
+    );
+    let mut changed = task_input(&root, &edge, "immutable");
+    changed["body"] = json!("Différent");
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/delegation/send",
+                changed.to_string().as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        409
+    );
+    f.post(
+        "/api/delegation/cancel",
+        json!({"parent_conversation_id":root.conversation_id,"task_id":edge.id}),
+    );
+    for (path, input) in [
+        ("/api/delegation/send", task_input(&root, &edge, "finished")),
+        (
+            "/api/send",
+            json!({"conversation_id":edge.conversation_id,"message_id":"finished","body":"Encore"}),
+        ),
+    ] {
+        let error = f
+            .app
+            .api("POST", path, input.to_string().as_bytes())
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(
+            error.message,
+            "Cette tâche est terminée ; poursuivez dans la conversation principale."
+        );
+    }
+    assert_eq!(
+        store::runs_for_conversation(&f.db(), edge.conversation_id.as_deref().unwrap())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
+    use std::sync::atomic::AtomicBool;
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "running-note", args("child"));
+    let gate = Arc::new(AtomicBool::new(false));
+    let at = f.server.seen.lock().unwrap().bodies.len() + 1;
+    f.server.seen.lock().unwrap().response_gate = Some((at, gate.clone()));
+    f.events(vec![
+        call(
+            "stale-completion",
+            "complete_task",
+            json!({"summary":"Old answer"}),
+        ),
+        completed(),
+    ]);
+    f.events(vec![
+        call(
+            "fresh-completion",
+            "complete_task",
+            json!({"summary":"Conclusion française ajoutée."}),
+        ),
+        completed(),
+    ]);
+    f.tick();
+    wait("child request in flight", || {
+        f.server.seen.lock().unwrap().bodies.len() >= at
+    });
+    let input = task_input(&parent, &edge, "live-note");
+    f.post("/api/delegation/send", input.clone());
+    f.post("/api/delegation/send", input);
+    gate.store(true, Ordering::SeqCst);
+    wait(
+        "updated task completion",
+        || matches!(graph::get(&f.db(),&edge.id).unwrap().unwrap().status,DelegationStatus::Done{ref result} if result.contains("française")),
+    );
+    assert!(f
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .last()
+        .unwrap()
+        .to_string()
+        .contains("Ajoute une conclusion française."));
+    let events = store::events(&f.db(), edge.child_run_id.as_deref().unwrap(), 0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == RunEventKind::InputReceived)
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|e| e.kind == RunEventKind::ToolResult
+        && e.payload["call_id"] == "stale-completion"
+        && e.payload["outcome"]["status"] == "failed"));
 }

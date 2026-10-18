@@ -149,7 +149,21 @@ fn finish(
     run_id: &str,
     end: TurnEnd,
 ) -> Result<RunProgress> {
-    finish_response(conn, services, run_id, end, None)
+    finish_response(conn, services, run_id, end, None)?;
+    ended(&store::required(conn, run_id)?)
+}
+
+fn pending_input(conn: &Connection, run_id: &str) -> Result<bool> {
+    let events = store::events(conn, run_id, 0)?;
+    let consumed = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == RunEventKind::InputConsumed)
+        .and_then(|e| e.payload["through_seq"].as_u64())
+        .unwrap_or(0);
+    Ok(events
+        .iter()
+        .any(|e| e.kind == RunEventKind::InputReceived && e.seq > consumed))
 }
 
 fn finish_response(
@@ -158,9 +172,20 @@ fn finish_response(
     run_id: &str,
     end: TurnEnd,
     response: Option<u32>,
-) -> Result<RunProgress> {
+) -> Result<()> {
     commit(conn, services, run_id, |conn, _| {
         let mut run = store::required(conn, run_id)?;
+        if !run.status.is_terminal() && end == TurnEnd::Finished && pending_input(conn, run_id)? {
+            // A follow-up accepted during streaming wins over stale final text.
+            // Preserve the completed response for replay, then request again.
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ResponseCompleted,
+                &json!({"response":response}),
+            )?;
+            return Ok(()); // drive continues from the still-running durable state
+        }
         if !run.status.is_terminal() {
             settle_pending(
                 conn,
@@ -181,7 +206,7 @@ fn finish_response(
                 &json!({"turn_end": end, "response": response}),
             )?;
         }
-        ended(&run)
+        Ok(())
     })
 }
 
@@ -331,7 +356,12 @@ pub fn cancel(
 pub fn replay_items(events: &[RunEvent]) -> Result<Vec<HistoryItem>> {
     let completed: HashSet<_> = events
         .iter()
-        .filter(|event| matches!(event.kind, RunEventKind::ToolCall | RunEventKind::TurnEnded))
+        .filter(|event| {
+            matches!(
+                event.kind,
+                RunEventKind::ToolCall | RunEventKind::TurnEnded | RunEventKind::ResponseCompleted
+            )
+        })
         .filter_map(|event| event.payload["response"].as_u64())
         .collect();
     let outputs: HashSet<_> = events
@@ -372,6 +402,10 @@ pub fn replay_items(events: &[RunEvent]) -> Result<Vec<HistoryItem>> {
                 }
                 item.text = text.into();
                 previous_response = response;
+            }
+            RunEventKind::InputReceived => {
+                previous_response = None;
+                item = serde_json::from_value(event.payload["input"].clone())?;
             }
             RunEventKind::ToolCall => {
                 previous_response = None;
@@ -590,6 +624,12 @@ fn execute(
             ToolOutcome::Failed {
                 reason: format!("unknown tool {}", call.name),
             }
+        } else if call.name == "complete_task" && pending_input(conn, run_id)? {
+            ToolOutcome::Failed {
+                reason:
+                    "Un suivi utilisateur vient d’arriver. Lisez-le avant de terminer la tâche."
+                        .into(),
+            }
         } else if matches!(call.name.as_str(), "begin_task" | "complete_task") {
             builtin(conn, &mut run, call)?
         } else {
@@ -746,6 +786,14 @@ fn drive(
             let mut usage = store::budget_usage(conn, run_id, now_ms())?;
             usage.model_calls += 1;
             store::save_budget_usage(conn, run_id, &usage)?;
+            if events.iter().any(|e| e.kind == RunEventKind::InputReceived) {
+                store::append_event(
+                    conn,
+                    run_id,
+                    RunEventKind::InputConsumed,
+                    &json!({"through_seq":events.last().map_or(0, |e| e.seq)}),
+                )?;
+            }
             Ok(usage.model_calls)
         })?;
         let mut calls: Vec<ToolCall> = vec![];

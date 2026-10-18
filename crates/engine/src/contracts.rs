@@ -240,6 +240,12 @@ pub struct ResumeReceipt {
 pub enum RunEventKind {
     Started,
     TextDelta,
+    /// A durable follow-up to the same task, never a new run.
+    InputReceived,
+    /// Highest event sequence included in an outgoing model request.
+    InputConsumed,
+    /// A completed response superseded by a follow-up, without ending the task.
+    ResponseCompleted,
     ToolCall,
     ToolResult,
     Suspended,

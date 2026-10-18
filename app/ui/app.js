@@ -313,18 +313,20 @@
     const pending = Boolean(pendingMessage);
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const group = currentConversation()?.kind === "group";
+    const task = currentConversation()?.kind === "task";
+    const taskFinished = task && !window.GrokbotDelegation?.canFollowUp(currentConversation().id);
     const hasAttachments = Boolean(sendExtras().attachments?.length);
     const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
-    const live = Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
+    const live = Boolean(streamingMessage()) && (!(group || task) || (!ui.input.value.trim() && !hasAttachments));
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = live ? (group && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked;
+    ui.send.disabled = taskFinished || (live ? ((group || task) && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
     ui.send.dataset.mode = live ? "stop" : "send";
     ui.send.title = live ? group ? "Arrêter les tours" : "Arrêter la réponse" : "Envoyer le message";
     ui.send.setAttribute("aria-label", live ? ui.send.title : busy ? "Envoi en cours" : "Envoyer le message");
     ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
     ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong));
-    ui.hint.textContent = noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
+    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : task ? "Suivi envoyé à cette sous-tâche uniquement · Entrée pour envoyer" : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
@@ -784,6 +786,17 @@
     selectConversation(null, true);
   }
 
+  function sendRequest(conversation, messageId, body, extras, loss = false) {
+    if (conversation.kind === "task") {
+      return api("/api/delegation/send", {
+        parent_conversation_id: conversation.parent_id,
+        task_id: window.GrokbotDelegation?.taskId(conversation.id),
+        message_id: messageId, body, attachments: extras.attachments || [],
+      });
+    }
+    return api("/api/send", { ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: loss });
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
@@ -828,9 +841,7 @@
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(true);
       scrollToLatest();
-      const response = await api("/api/send", {
-        ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: simulateLoss,
-      });
+      const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
       simulateLoss = false;
       $("simulate-loss").checked = false;
       upsertConversation(response.conversation);
@@ -888,10 +899,8 @@
     let delivered = false;
     render();
     try {
-      const response = await api("/api/send", {
-        ...(pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {})),
-        conversation_id: conversation.id, message_id: message.id, body: message.body,
-      });
+      const response = await sendRequest(conversation, message.id, message.body,
+        pendingSends.get(message.id)?.extras || (message.attachments?.length ? { attachments: message.attachments.map((item) => typeof item === "string" ? item : item.id || item.attachment_id) } : {}));
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((item) => item.id === message.id && ["accepted", "echoed"].includes(item.state));
       render();

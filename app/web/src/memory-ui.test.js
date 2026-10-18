@@ -112,6 +112,15 @@ test("memory receipts distinguish corrections, restore undo and the owning group
   assert.equal(memoryPresentation({ active: false, cancelled: true, replaced: true, restored_active: false }).receipt, "Mise à jour annulée.");
 });
 
+test("inactive group receipts retain bot attribution, including cancelled updates", () => {
+  assert.equal(memoryPresentation({ cancelled: true }, "Éclaireur", true).receipt, "Mémorisation annulée (Éclaireur).");
+  assert.equal(memoryPresentation({ cancelled: true, replaced: true, restored_active: true }, "Rédacteur", true).receipt, "Mise à jour annulée — l’ancien fait est rétabli (Rédacteur).");
+  assert.equal(memoryPresentation({ updated: true }, "Ezerbot", true).receipt, "Ce fait a été mis à jour (Ezerbot).");
+  const shared = memoryPresentation({ scope_changed: true, active: false, text: "Ancien texte privé" });
+  assert.equal(shared.receipt, "Ce fait a changé de portée. Consultez la mémoire du bot.");
+  assert.equal(shared.quote, "");
+});
+
 test("a revision delivered with a stale conversation frame triggers one follow-up state read", async () => {
   const f = await fixture();
   try {
@@ -152,6 +161,11 @@ test("group turns keep three receipts visible and retain individual actions insi
   assert.equal(result.filter((m) => m.kind === "memory_auto").length, 4);
   const disclosure = result.find((m) => m.kind === "memory_overflow");
   assert.deepEqual(disclosure.memories, receipts.slice(3));
+  assert.deepEqual(disclosure.groups.map((group) => group.bot_id), ["bot-0", "bot-1", "bot-2"]);
+  assert.equal(disclosure.groups[1].memories[0], receipts[4]);
+  // Nonadjacent receipts of one bot still share one heading and original IDs.
+  const interleaved = collapseMemoryReceipts([...receipts, { ...receipts[3], id: "last" }], true).find((m) => m.kind === "memory_overflow");
+  assert.deepEqual(interleaved.groups[0].memories.map((m) => m.id), ["memory-3", "last"]);
   assert.equal(result.at(-2), next); assert.equal(result.at(-1), otherRoot);
   assert.equal(collapseMemoryReceipts(input, false), input);
 });

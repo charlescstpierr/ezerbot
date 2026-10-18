@@ -617,7 +617,7 @@
     const conversation = currentConversation();
     // React commits asynchronously: a frame callback alone can run before the
     // admitted turns/cards exist, making the next poll wrongly think we scrolled up.
-    const follow = conversation?.kind === "group" && (followGroup || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
+    const follow = (conversation?.kind === "group" || conversation?.messages.some((message) => message.kind === "memory_auto")) && (followGroup || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
     const onLayout = () => {
       if (currentConversation()?.id !== conversation?.id) return;
       if (!scrollToPendingApproval() && follow) ui.scroll.scrollTop = ui.scroll.scrollHeight;

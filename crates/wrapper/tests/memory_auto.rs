@@ -254,6 +254,70 @@ fn deduplicates_updates_preserves_team_scope_and_undo_restores_previous() {
 }
 
 #[test]
+fn undo_cannot_publish_a_private_predecessor_after_the_update_is_shared() {
+    for edited in [false, true] {
+        let mut f = Fixture::new();
+        f.bot();
+        let c = f.conv("grokbot");
+        let original = "Je préfère le thé vert.";
+        f.script(json!([fact(original, None)]));
+        f.send(&c, "one", original);
+        f.settle();
+        let old = f.facts("grokbot")[0].clone();
+        let changed = "Je préfère maintenant le café.";
+        f.script(json!([fact(changed, Some(&old.fact_id))]));
+        f.send(&c, "two", changed);
+        f.settle();
+        let card = f.cards(&c).pop().unwrap();
+        if edited {
+            f.post("/api/memory/correct", json!({"bot_id":"grokbot","fact_id":card["payload"]["fact_id"],"text":"Je préfère le café avec du lait."}));
+        }
+        let head = f.facts("grokbot")[0].clone();
+        f.post(
+            "/api/memory/promote",
+            json!({"bot_id":"grokbot","fact_ids":[head.fact_id]}),
+        );
+        let blocks: i64 = f
+            .db()
+            .query_row("SELECT COUNT(*) FROM memory_auto_blocks", [], |r| r.get(0))
+            .unwrap();
+        let error = f
+            .app
+            .api(
+                "POST",
+                "/api/memory/automatic/undo",
+                json!({"card_id":card["id"]}).to_string().as_bytes(),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("changé de portée"));
+        assert_eq!(
+            f.db()
+                .query_row("SELECT COUNT(*) FROM memory_auto_blocks", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            blocks
+        );
+        assert_eq!(
+            facts::get(&f.db(), &old.fact_id).unwrap().unwrap().scope,
+            Scope::Private
+        );
+        let visible = f.facts("other");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, head.text);
+        assert_eq!(visible[0].scope, Scope::Team);
+        assert!(!visible.iter().any(|v| v.text == original));
+        f.reopen();
+        let projected = f.cards(&c).pop().unwrap();
+        assert_eq!(projected["payload"]["scope_changed"], true);
+        assert_eq!(projected["payload"]["active"], false);
+        assert_eq!(projected["payload"]["can_undo"], false);
+        assert_eq!(projected["payload"]["text"], "");
+        assert_eq!(projected["payload"]["cancelled"], false);
+    }
+}
+
+#[test]
 fn edited_automatic_update_restores_predecessor_without_deleting_or_duplicating_it() {
     for declared in [false, true] {
         let mut f = Fixture::new();

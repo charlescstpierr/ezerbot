@@ -285,6 +285,12 @@ pub fn routes(
                         "Ce fait a changé. Consultez la mémoire du bot.",
                     ));
                 }
+                if fact.scope != old.scope {
+                    return Err(ApiError::new(
+                        409,
+                        "Ce fait a changé de portée. Consultez la mémoire du bot.",
+                    ));
+                }
                 let restored = facts::correct(
                     &tx,
                     &fact.bot_id,
@@ -295,6 +301,8 @@ pub fn routes(
                 )?;
                 // This is restoration, not a newly learned correction: keep the
                 // original learning date/source while retaining the lineage.
+                // Unlike corrections, a restoration's learned_at can predate
+                // its head: it is not a timestamp of the mutation itself.
                 tx.execute(
                     "UPDATE memory_facts SET learned_at=?2 WHERE fact_id=?1",
                     params![restored.fact_id, old.learned_at],
@@ -783,9 +791,22 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         )
         .optional()
         .ok()?;
-    let restored_active = cancelled && replaced && fact.status == FactStatus::Active
-        && ctx.connection.query_row("SELECT p.text FROM memory_auto_cards c JOIN memory_facts p ON p.fact_id=c.previous_id WHERE c.id=?1", [id], |r|r.get::<_,String>(0)).optional().ok()?.is_some_and(|text|text==fact.text);
-    let active = !cancelled && !updated && fact.status == FactStatus::Active;
+    let previous = ctx.connection.query_row("SELECT p.text,p.scope FROM memory_auto_cards c JOIN memory_facts p ON p.fact_id=c.previous_id WHERE c.id=?1", [id], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional().ok()?;
+    let same_scope = previous.as_ref().is_some_and(|(_, scope)| {
+        scope
+            == if fact.scope == Scope::Team {
+                "team"
+            } else {
+                "private"
+            }
+    });
+    let scope_changed = !cancelled && replaced && fact.status == FactStatus::Active && !same_scope;
+    let restored_active = cancelled
+        && replaced
+        && fact.status == FactStatus::Active
+        && same_scope
+        && previous.is_some_and(|(text, _)| text == fact.text);
+    let active = !cancelled && !updated && !scope_changed && fact.status == FactStatus::Active;
     Some(Message {
         id: id.into(),
         role: "assistant",
@@ -797,7 +818,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
         notice: None,
         proposals: vec![],
         kind: "memory_auto".into(),
-        payload: json!({"memory_run_id":run_id,"memory_root_id":root,"restored_active":restored_active,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
+        payload: json!({"memory_run_id":run_id,"memory_root_id":root,"restored_active":restored_active,"scope_changed":scope_changed,"fact_id":fact.fact_id,"bot_id":fact.bot_id,"text":if active {fact.text.as_str()} else {""},"active":active,"cancelled":cancelled,"updated":updated,"can_undo":active,"replaced":replaced}),
         attachments: vec![],
     })
 }

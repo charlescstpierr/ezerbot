@@ -11,6 +11,8 @@
 .gb-memory-overflow summary { padding: 8px 0; color: var(--text); font-size: 11px; cursor: pointer; }
 .gb-memory-overflow summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; border-radius: 4px; }
 .gb-memory-overflow-content { display: grid; gap: 10px; padding-top: 10px; }
+.gb-memory-overflow-bot { display: grid; gap: 10px; min-width: 0; }
+.gb-memory-overflow-bot h4 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; overflow-wrap: anywhere; }
 .gb-memory-overflow-item > .gb-memory-card { padding-inline: 16px; }
 .gb-memory-error { margin: 8px 0; font-size: 11px; line-height: 1.6; color: var(--warning-text, var(--text)); }
 .gb-memory-card label { font-size: 11px; }

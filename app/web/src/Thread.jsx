@@ -307,9 +307,12 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
             return <div className="gb-card-slot" key={message.id}>
               <details className="gb-memory-overflow">
                 <summary>Autres mémoires de ce tour ({message.memories.length})</summary>
-                <div className="gb-memory-overflow-content">{message.memories.map((receipt) => <div className="gb-memory-overflow-item" key={receipt.id}>
-                  <Receipt message={receipt} busy={busy} botName={bots.find((bot) => bot.id === receipt.payload?.bot_id)?.name || botName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(receipt, action, detail)} />
-                </div>)}</div>
+                <div className="gb-memory-overflow-content">{message.groups.map((group) => <section className="gb-memory-overflow-bot" key={group.bot_id || "unknown"}>
+                  <h4>{bots.find((bot) => bot.id === group.bot_id)?.name || botName}</h4>
+                  {group.memories.map((receipt) => <div className="gb-memory-overflow-item" key={receipt.id}>
+                    <Receipt message={receipt} busy={busy} botName={bots.find((bot) => bot.id === group.bot_id)?.name || botName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(receipt, action, detail)} />
+                  </div>)}
+                </section>)}</div>
               </details>
             </div>;
           }

@@ -5,8 +5,9 @@ export function memoryPresentation(fact, botName = "Ezerbot", isGroup = false) {
   const groupLabel = fact.replaced ? `Mis à jour par ${botName} :` : `Mémorisé par ${botName} :`;
   const receipt = fact.cancelled
     ? fact.replaced ? fact.restored_active ? "Mise à jour annulée — l’ancien fait est rétabli." : "Mise à jour annulée." : "Mémorisation annulée."
+    : fact.scope_changed ? "Ce fait a changé de portée. Consultez la mémoire du bot."
     : fact.updated ? "Ce fait a été mis à jour." : "Ce fait a été oublié.";
-  return { label: isGroup ? groupLabel : label, quote: fact.active ? `« ${fact.text} »` : "", receipt };
+  return { label: isGroup ? groupLabel : label, quote: fact.active ? `« ${fact.text} »` : "", receipt: isGroup ? receipt.replace(/\.$/u, ` (${botName}).`) : receipt };
 }
 
 // Group addressing may produce up to 18 private receipts for one human turn.
@@ -24,7 +25,14 @@ export function collapseMemoryReceipts(messages, isGroup) {
     if (receipts.length <= 3) continue;
     const extra = receipts.slice(3);
     for (const receipt of extra) hidden.add(receipt);
-    disclosures.set(receipts.at(-1), { id: `memory-overflow:${root}`, kind: "memory_overflow", memories: extra });
+    const byBot = new Map();
+    for (const receipt of extra) {
+      const bot = receipt.payload?.bot_id;
+      if (!byBot.has(bot)) byBot.set(bot, []);
+      byBot.get(bot).push(receipt);
+    }
+    const groups = [...byBot].map(([bot_id, memories]) => ({ bot_id, memories }));
+    disclosures.set(receipts.at(-1), { id: `memory-overflow:${root}`, kind: "memory_overflow", memories: extra, groups });
   }
   return messages.flatMap((message) => disclosures.has(message) ? [disclosures.get(message)] : hidden.has(message) ? [] : [message]);
 }

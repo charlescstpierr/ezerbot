@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod documents;
+pub mod generation;
 pub mod precaption;
 pub mod staging;
 

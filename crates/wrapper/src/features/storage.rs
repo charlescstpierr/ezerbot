@@ -78,6 +78,7 @@ fn valid_digest(s: &str) -> bool {
 fn digest_id(id: &str) -> Option<&str> {
     id.strip_prefix("attachment_")
         .or_else(|| id.strip_prefix("document_"))
+        .or_else(|| id.strip_prefix("generated_"))
         .filter(|s| valid_digest(s))
 }
 fn directory(base: &Path) -> Result<PathBuf, ApiError> {
@@ -124,6 +125,7 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
             table.as_str(),
             "attachments_staged"
                 | "attachments_documents"
+                | "attachments_generated"
                 | "attachments_caption_cache"
                 | "attachments_caption_uses"
                 | "wrapper_attachment_retry"
@@ -166,7 +168,16 @@ fn roots(conn: &Connection) -> Result<HashSet<String>, ApiError> {
         object.remove("id");
         collect_digests(record.to_string().as_bytes(), &mut roots);
     }
+    let mut statement = conn.prepare("SELECT bytes FROM attachments_generated")?;
+    for bytes in statement.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
+        collect_digests(&bytes?, &mut roots);
+    }
     Ok(roots)
+}
+
+fn generated_extension(kind: &str) -> Option<&str> {
+    kind.strip_prefix("generated:")
+        .filter(|ext| ["pdf", "docx", "pptx", "md", "csv", "xlsx", "svg"].contains(ext))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -277,6 +288,38 @@ fn inventory(
             });
         }
     }
+    let mut statement = conn.prepare("SELECT id, length(bytes)+length(CAST(record AS BLOB))+length(CAST(preview AS BLOB)), created_at FROM attachments_generated")?;
+    for row in statement.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, u64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })? {
+        let (id, mut bytes, created) = row?;
+        let file = super::generated::get(conn, &id)?;
+        let cache = super::generated::cache_path(base, &file)?;
+        match fs::symlink_metadata(cache) {
+            Ok(m) if m.is_file() && !m.file_type().is_symlink() => bytes += m.len(),
+            Ok(_) => {
+                return Err(ApiError::new(
+                    409,
+                    "Le cache d’un document généré n’est pas un fichier local régulier.",
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(e)),
+        }
+        usage.documents += bytes;
+        usage.document_count += 1;
+        if before.is_none_or(|cutoff| created < cutoff) {
+            candidates.push(Candidate {
+                id,
+                kind: format!("generated:{}", file.format),
+                bytes,
+            });
+        }
+    }
     (usage.memory, usage.fact_count, usage.forget_marker_count) = conn.query_row("SELECT COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(provenance AS BLOB))),0), COALESCE(SUM(text!=''),0), COALESCE(SUM(status='forgotten'),0) FROM memory_facts", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
     Ok((usage, candidates))
@@ -313,6 +356,13 @@ fn orphan_candidates(
 }
 
 fn candidate_exists(conn: &Connection, base: &Path, item: &Candidate) -> Result<bool, ApiError> {
+    if generated_extension(&item.kind).is_some() {
+        return Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments_generated WHERE id=?1)",
+            [&item.id],
+            |r| r.get(0),
+        )?);
+    }
     if item.kind == "document" {
         return Ok(conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM attachments_documents WHERE id=?1)",
@@ -510,6 +560,8 @@ fn queue(conn: &Connection, items: &[Candidate], reason: &str) -> Result<Vec<i64
                 [&item.id],
             )?;
             conn.execute("DELETE FROM attachments_staged WHERE id=?1", [&item.id])?;
+        } else if generated_extension(&item.kind).is_some() {
+            conn.execute("DELETE FROM attachments_generated WHERE id=?1", [&item.id])?;
         } else if item.kind == "document" {
             conn.execute("DELETE FROM attachments_documents WHERE id=?1", [&item.id])?;
             conn.execute("DELETE FROM wrapper_storage_staged WHERE id=?1", [&item.id])?;
@@ -556,18 +608,21 @@ fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
         .filter(|s| valid_digest(s))
         .ok_or_else(|| ApiError::new(409, "Journal de nettoyage invalide."))?;
         let restaged: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attachments_staged WHERE sha256=?1)",
+            "SELECT EXISTS(SELECT 1 FROM attachments_staged WHERE sha256=?1) OR EXISTS(SELECT 1 FROM attachments_generated WHERE id='generated_' || ?1)",
             [sha],
             |r| r.get(0),
         )?;
         let state = if roots.contains(sha) || restaged {
             "retained"
         } else {
-            let path = directory.join(if kind == "temporary" {
-                id.as_str()
+            let filename = if let Some(ext) = generated_extension(&kind) {
+                format!("{sha}.{ext}")
+            } else if kind == "temporary" {
+                id.clone()
             } else {
-                sha
-            });
+                sha.to_owned()
+            };
+            let path = directory.join(filename);
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
                     fs::remove_file(&path).map_err(io)?;

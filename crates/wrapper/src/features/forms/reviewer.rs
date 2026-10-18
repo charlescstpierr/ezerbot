@@ -152,7 +152,9 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         let action = json!({"tool":tool,"arguments":serde_json::from_str::<Value>(&display).unwrap_or(Value::Null)});
         let payload = json!({"rules":config,"action":action});
         let safe = redact_value(&vault(ctx)?, &payload)?;
-        let fallback = if super::super::local::is_tool(tool) || super::super::screen::is_tool(tool)
+        let fallback = if super::super::local::is_tool(tool)
+            || super::super::screen::is_tool(tool)
+            || super::super::generated::is_external(tool)
         {
             Some("Les actions sur votre Mac demandent votre décision.")
         } else if safe != payload || has_opaque_data(&action) || action["arguments"].is_null() {
@@ -224,7 +226,7 @@ pub(super) fn complete(
     let config = rules::load_auto_review_config(&tx)?;
     record.pending = false;
     let lifecycle = matches!(&request.kind, InputKind::Approval {tool,..} if super::super::mcp::is_lifecycle(tool));
-    let local_tool = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_tool(tool));
+    let local_tool = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_tool(tool) || super::super::screen::is_tool(tool) || super::super::generated::is_external(tool));
     let local_read = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_read(tool));
     let standing = if !lifecycle
         && !local_read

@@ -421,7 +421,9 @@ pub fn request_tool_approval(
 ) -> Result<SuspendCause, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
     if existing_request(ctx, &id, &digest)?.is_none() {
-        let mut display = if call.name == "propose_skill" {
+        let mut display = if super::generated::is_external(&call.name) {
+            super::generated::approval_display(ctx, call)?
+        } else if call.name == "propose_skill" {
             super::skills::proposal_display(ctx, call)?
         } else {
             call.arguments.clone()

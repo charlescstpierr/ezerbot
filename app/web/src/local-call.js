@@ -1,4 +1,4 @@
-export const localToolNames = { run_shell: "Terminal sur votre Mac", read_file: "Lecture de fichier", list_directory: "Contenu du dossier", write_file: "Écriture de fichier" };
+export const localToolNames = { run_shell: "Terminal sur votre Mac", read_file: "Lecture de fichier", list_directory: "Contenu du dossier", write_file: "Écriture de fichier", document_action: "Document sur votre Mac" };
 export const localToolLabel = (name) => localToolNames[name] || name;
 if (typeof window !== "undefined") window.GrokbotLocalUi = { toolLabel: localToolLabel };
 

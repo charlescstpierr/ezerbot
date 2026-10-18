@@ -87,6 +87,7 @@ pub mod conversations;
 pub mod delegation;
 pub mod engine;
 pub mod forms;
+pub mod generated;
 pub mod local;
 pub mod mcp;
 pub mod memory;
@@ -136,6 +137,7 @@ registry!(
     routines_background,
     delegation,
     attachments,
+    generated,
     mcp,
     storage,
     notifications,

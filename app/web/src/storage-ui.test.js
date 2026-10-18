@@ -116,7 +116,15 @@ test("memory explains retained forget markers and zero counts use the singular",
   const data = empty(); data.usage.memory = 387; data.usage.forget_marker_count = 3;
   const p = mount({ initial: data }); await flush();
   const details = p.root.querySelector(".storage-usage").querySelectorAll("small").map((el) => el.textContent);
-  assert.deepEqual(details, ["0 fichier", "0 extraction", "0 capture", "0 fait · 3 marqueurs d’oubli"]);
+  assert.deepEqual(details, ["0 fichier", "0 document", "0 capture", "0 fait · 3 marqueurs d’oubli"]);
+});
+
+test("document usage includes generated originals, previews and opening caches", async () => {
+  const data=empty();data.usage.document_count=7;data.usage.documents=18200;
+  const p=mount({initial:data});await flush();
+  assert.match(p.root.textContent,/7 documents/);
+  assert.match(p.root.textContent,/fichiers générés, aperçus et copies locales d’ouverture/);
+  assert.doesNotMatch(p.root.textContent,/sans copie du fichier d’origine/);
 });
 
 test("a second-window cleanup is described as already cleaned, not retained", async () => {

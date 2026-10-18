@@ -920,7 +920,10 @@ pub(crate) fn queue_approved_action(
             return host_action_response(&conversation, &id, &call);
         }
     }
-    let conversation = super::mcp::approval_conversation(ctx)?;
+    let conversation = match ctx.conversation_id {
+        Some(id) => super::forms::principal_conversation(ctx, id)?,
+        None => super::mcp::approval_conversation(ctx)?,
+    };
     let run = Run {
         run_id: format!("mcp-host-{}", random_id(ctx.connection)?),
         bot_id: DEFAULT_BOT.id.into(),
@@ -1510,7 +1513,9 @@ impl RunServices for Services<'_> {
         self.call_tool(conn, run, call)
     }
     fn is_journaled_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
-        super::local::is_tool(&call.name) || super::screen::is_tool(&call.name)
+        super::local::is_tool(&call.name)
+            || super::screen::is_tool(&call.name)
+            || super::generated::is_external(&call.name)
     }
     fn external_unavailable_reason(
         &self,
@@ -1518,23 +1523,27 @@ impl RunServices for Services<'_> {
         call: &grokbot_engine::contracts::ToolCall,
     ) -> Option<String> {
         let ctx = self.ctx(self.connection, run);
-        (if super::screen::is_tool(&call.name) {
+        let result = if super::screen::is_tool(&call.name) {
             super::screen::validate(&ctx, call)
+        } else if super::generated::is_external(&call.name) {
+            super::generated::validate(&ctx, call)
         } else {
             super::local::validate(&ctx, call)
-        })
-        .err()
-        .map(|e| e.message)
+        };
+        result.err().map(|e| e.message)
     }
     fn call_journaled_external_tool(
         &mut self,
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> ToolOutcome {
+        let ctx = self.ctx(self.connection, run);
         let outcome = if super::screen::is_tool(&call.name) {
-            super::screen::execute(&self.ctx(self.connection, run), call, self.cancel.clone())
+            super::screen::execute(&ctx, call, self.cancel.clone())
+        } else if super::generated::is_external(&call.name) {
+            super::generated::execute(&ctx, call, self.cancel.clone())
         } else {
-            super::local::execute(&self.ctx(self.connection, run), call, self.cancel.clone())
+            super::local::execute(&ctx, call, self.cancel.clone())
         };
         // No private vault values may leak through command/file output.
         match vault(self.path)
@@ -1562,6 +1571,13 @@ impl RunServices for Services<'_> {
         }
         if super::local::is_tool(&call.name) {
             if let Err(error) = super::local::validate(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
+        if super::generated::is_external(&call.name) {
+            if let Err(error) = super::generated::validate(&self.ctx(conn, run), call) {
                 return Ok(ApprovalCheck::Denied {
                     reason: error.message,
                 });

@@ -18,3 +18,5 @@ base64 = "0.22"
 # Bounded, in-memory Office ZIP/XML reading; no archive paths are extracted.
 zip = { version = "6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.38"
+# NFC keeps decomposed French accents readable in the PDF's WinAnsi font.
+unicode-normalization = "0.1"

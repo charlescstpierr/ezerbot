@@ -7,7 +7,7 @@
   let latestContext, resizeAnchor, runningAnchor, resizePending = false;
   const dropAnchor = () => { resizeAnchor = null; runningAnchor = null; resizePending = false; };
   const expireRunning = () => { if (runningAnchor && Date.now() >= runningAnchor.until) dropAnchor(); };
-  const localNames = new Set(["run_shell", "read_file", "list_directory", "write_file"]);
+  const localNames = new Set(["run_shell", "read_file", "list_directory", "write_file", "document_action"]);
   function attention(context) {
     if (!context?.conversation) return;
     const messages = context.conversation.messages || [];

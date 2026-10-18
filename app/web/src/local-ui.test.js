@@ -146,6 +146,15 @@ test("tall pending approvals expose their action fieldset instead of clipping bu
   while(frames.length)frames.shift()();assert.equal(actionBlock,"end");assert.equal(cardMoves,0);
 });
 
+test("generated-file actions reveal the decision controls at 820×560 without a new user message",()=>{
+  const scroll=Object.assign(new Element("section"),{clientHeight:301});
+  const {registration,panels,window,document}=setup({scroll});const frames=[];let actionMoves=0;
+  window.requestAnimationFrame=fn=>frames.push(fn);document.querySelector=()=>null;
+  document.querySelectorAll=()=>[{dataset:{messageId:"document-approval"},getBoundingClientRect:()=>({height:450}),querySelector:()=>({scrollIntoView(options){assert.equal(options.block,"end");actionMoves+=1;}})}];
+  registration.onState(panels.state,{conversation:{id:"chat",messages:[{role:"user"},{id:"document-approval",kind:"approval",payload:{kind:{tool:"document_action"},status:{status:"pending"}}}]}});
+  while(frames.length)frames.shift()();assert.equal(actionMoves,1);
+});
+
 for (const tool of ["mcp_start_fixture", "routines_background_configure"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
   const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:521,scrollTop:0});
   let resized,cardMoves=0,actions=0;const frames=[];

@@ -1848,7 +1848,17 @@ fn selected_images_captions_and_documents_reach_child_after_restart_only() {
     let mut a = args("child");
     a["selected_context"]["entry_ids"] = json!(["selected-files"]);
     let (_, edge) = f.begin(&c, "delegate-files", a);
+    // Housekeeping sees the parent's selected material even when the child is
+    // still queued and has not copied anything into its own model snapshot.
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
+    f.db()
+        .execute("UPDATE attachments_staged SET staged_at=0", [])
+        .unwrap();
+    f.db()
+        .execute("UPDATE wrapper_storage_staged SET staged_at=0", [])
+        .unwrap();
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
     f.child_done(&edge);
     let seen = f.server.seen.lock().unwrap();
     let outgoing = seen.bodies.last().unwrap().to_string();
@@ -2234,6 +2244,8 @@ fn followup_image_bytes_survive_tool_continuations_and_terminal_retry_is_idempot
     });
     let input = json!({"parent_conversation_id":parent.conversation_id,"task_id":edge.id,"message_id":"image-note","body":"Suivi avec image sans légende","attachments":[image]});
     f.post("/api/delegation/send", input.clone());
+    // A direct child follow-up is not a parent submission, but is just as live.
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
     gate.store(true, Ordering::SeqCst);
     wait("image followup completed", || {
         matches!(

@@ -36,8 +36,33 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 pub const ATTACHMENT_BODY_LIMIT: usize = 20 * 1024 * 1024;
 pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
-/// Only the exact upload routes receive a larger budget; other routes stay bounded JSON.
+pub(crate) fn attachment_upload_query(query: &str) -> Result<(String, Option<String>), ApiError> {
+    let query = query
+        .strip_prefix("draft_id=")
+        .ok_or_else(|| ApiError::new(400, "Brouillon invalide."))?;
+    let (draft, token) = query
+        .split_once("&upload_id=")
+        .map_or((query, None), |(d, t)| (d, Some(t)));
+    let draft = draft.replace("%3A", ":").replace("%3a", ":");
+    validate_conversation_id(&draft)?;
+    if let Some(token) = token {
+        validate_id(token)?;
+    }
+    Ok((draft, token.map(str::to_owned)))
+}
+
+fn attachment_upload_path(path: &str) -> bool {
+    path == "/api/attachments"
+        || path
+            .strip_prefix("/api/attachments?")
+            .is_some_and(|query| attachment_upload_query(query).is_ok())
+}
+
+/// Only upload routes (including their validated draft query) get a larger budget.
 pub fn body_limit(path: &str) -> usize {
+    if attachment_upload_path(path) {
+        return ATTACHMENT_BODY_LIMIT;
+    }
     match path {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
         // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
@@ -793,6 +818,10 @@ impl App {
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
         features::engine::startup(&connection)?;
+        if let Err(error) = features::storage::startup(&connection, path, now() as i64) {
+            // Keep the app usable; the Stockage panel exposes the actionable error.
+            eprintln!("Nettoyage automatique interrompu : {error}");
+        }
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,
@@ -1369,7 +1398,8 @@ pub fn validate_headers_for_path(
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'+' | b'.'))
         });
-        if !mime.eq_ignore_ascii_case("application/json") && !(path == "/api/attachments" && image)
+        if !mime.eq_ignore_ascii_case("application/json")
+            && !(attachment_upload_path(path) && image)
         {
             return Err(reject());
         }

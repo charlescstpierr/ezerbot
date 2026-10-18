@@ -93,6 +93,7 @@ pub mod memory_auto;
 pub mod multibot;
 pub mod routines;
 pub mod skills;
+pub mod storage;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
 struct Feature {
@@ -129,7 +130,8 @@ registry!(
     routines,
     delegation,
     attachments,
-    mcp
+    mcp,
+    storage
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

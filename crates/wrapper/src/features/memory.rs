@@ -455,6 +455,43 @@ fn owned_fact(conn: &Connection, bot: &str, id: &str) -> Result<Fact, ApiError> 
         .ok_or_else(|| ApiError::new(404, "Fait introuvable pour ce bot."))
 }
 
+/// Storage UI may purge retained private facts of deleted owners, including
+/// superseded versions whose successor is shared. Never erase a team fact.
+/// The caller owns the IMMEDIATE transaction and the deletion audit.
+pub(super) fn purge_deleted_private(conn: &Connection, id: &str) -> Result<usize, ApiError> {
+    let fact = facts::get(conn, id)?
+        .filter(|f| f.scope == Scope::Private && !f.text.is_empty())
+        .ok_or_else(|| ApiError::new(404, "Fait privé introuvable."))?;
+    let live: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_bots WHERE account_id=?1 AND id=?2 AND deleted=0)",
+        params![ACCOUNT, fact.bot_id],
+        |r| r.get(0),
+    )?;
+    if live {
+        return Err(ApiError::new(
+            409,
+            "Ce bot existe encore. Utilisez son panneau Mémoire.",
+        ));
+    }
+    let mut statement = conn.prepare("WITH RECURSIVE lineage(id) AS (
+        SELECT fact_id FROM memory_facts WHERE fact_id=?1 AND scope='private'
+        UNION SELECT f.fact_id FROM memory_facts f JOIN lineage l ON f.superseded_by=l.id WHERE f.bot_id=?2 AND f.scope='private') SELECT id FROM lineage")?;
+    let ids = statement
+        .query_map(params![id, fact.bot_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut snapshots = Vec::new();
+    for id in &ids {
+        if let Some(fact) = facts::get(conn, id)? {
+            snapshots.push(fact);
+        }
+    }
+    redact_traces(conn, &snapshots, None)?;
+    for id in &ids {
+        conn.execute("UPDATE memory_facts SET text='',status='forgotten',superseded_by=NULL WHERE fact_id=?1 AND scope='private'", [id])?;
+    }
+    Ok(ids.len())
+}
+
 pub(super) fn forget(
     conn: &Connection,
     bot: &str,

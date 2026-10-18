@@ -124,7 +124,9 @@ pub fn link(conn: &Connection, conversation: &str, message: &str, ids: &[String]
     }
     Ok(())
 }
-pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
+/// Extract outside the caller's writer lock. The resulting immutable record can
+/// then be saved atomically together with durable draft ownership.
+pub fn prepare(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
     if bytes.is_empty() {
         return Err(invalid("Le document est vide."));
     }
@@ -202,10 +204,20 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
         text,
     };
     document.note = display_note(&document);
+    Ok(document)
+}
+
+pub fn save(conn: &Connection, document: &Document) -> Result<()> {
     conn.execute(
         "INSERT INTO attachments_documents VALUES (?1, ?2) ON CONFLICT DO NOTHING",
-        params![document.id, serde_json::to_string(&document)?],
+        params![document.id, serde_json::to_string(document)?],
     )?;
+    Ok(())
+}
+
+pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
+    let document = prepare(conn, name, bytes)?;
+    save(conn, &document)?;
     Ok(document)
 }
 fn estimated(text: String) -> (String, usize, String, usize, bool) {

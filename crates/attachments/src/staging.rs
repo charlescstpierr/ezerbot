@@ -1,8 +1,8 @@
 //! Content-addressed image staging. Bytes live in `<base>.attachments/<sha256>`,
 //! never in the submission journal. Only magic-byte detection is performed, not
 //! image decoding. The wrapper owns transactions and component schema versions.
-//! Crash-left temporary files are swept after one hour. Unreferenced staged
-//! blobs (including those left by rolled-back messages) await a later GC slice.
+//! The host owns orphan/temporary cleanup, including its durable deletion log.
+//! `sweep_temporaries` remains available to standalone callers.
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -223,13 +223,12 @@ pub fn stage(conn: &Connection, base_path: &Path, bytes: &[u8], now_ms: i64) -> 
         ));
     }
     let image_type = sniff(bytes)?;
-    let _ = sweep_temporaries(base_path);
     let sha256 = digest(bytes);
     let id = format!("attachment_{sha256}");
     write_blob(&blob_path(base_path, &sha256)?, bytes)?;
     conn.execute(
         "INSERT INTO attachments_staged(id, sha256, image_type, byte_length, staged_at)
-         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(sha256) DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(sha256) DO UPDATE SET staged_at=excluded.staged_at",
         params![
             id,
             sha256,
@@ -469,13 +468,14 @@ mod tests {
         let f = Fixture::new();
         let first = stage(&f.conn, &f.base, PNG, 123).unwrap();
         let again = stage(&f.conn, &f.base, PNG, 999).unwrap();
-        assert_eq!(first, again);
+        assert_eq!(first.id, again.id);
+        assert_eq!(again.staged_at, 999);
         let path = blob_path(&f.base, &first.sha256).unwrap();
         assert_eq!(path.file_name().unwrap(), first.sha256.as_str());
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let reopened = Connection::open(&f.base).unwrap();
         migrate(&reopened).unwrap();
-        assert_eq!(get(&reopened, &first.id).unwrap(), Some(first.clone()));
+        assert_eq!(get(&reopened, &first.id).unwrap(), Some(again));
         assert_eq!(read(&reopened, &f.base, &first.id).unwrap(), PNG);
         assert!(get(&reopened, "../../missing").unwrap().is_none());
         assert!(read(&reopened, &f.base, "../../missing").is_err());

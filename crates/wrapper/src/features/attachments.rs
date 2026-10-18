@@ -167,6 +167,7 @@ pub fn routes(
     path: &str,
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
     match (method, path) {
         ("POST", "/api/documents") => Some((|| {
             #[derive(Deserialize)]
@@ -174,23 +175,50 @@ pub fn routes(
             struct Upload {
                 name: String,
                 data: String,
+                draft_id: Option<String>,
+                upload_id: Option<String>,
             }
             let input: Upload = parse(body)?;
             let bytes = STANDARD
                 .decode(&input.data)
                 .map_err(|_| ApiError::new(400, "Le contenu du document est invalide."))?;
-            // Parsing is outside the writer transaction; there is no network,
-            // user command, external path, macro or formula execution.
-            let document = documents::stage(&app.connection, &input.name, &bytes).map_err(|error| match error {
+            // Parsing is outside the writer lock. Persist the immutable
+            // extraction and its draft reference together afterwards.
+            let document = documents::prepare(&app.connection, &input.name, &bytes).map_err(|error| match error {
                 grokbot_engine::contracts::Error::Io(error) if error.kind() == std::io::ErrorKind::TimedOut => ApiError::new(408, "Le lecteur local a dépassé le délai de 20 secondes. Réessayez l’import."),
                 grokbot_engine::contracts::Error::InvalidInput(message) => ApiError::new(400, message),
                 _ => ApiError::new(500, "Le document n’a pas pu être enregistré localement. Réessayez l’import."),
             })?;
+            let tx = write_transaction(&app.connection)?;
+            documents::save(&tx, &document).map_err(|_| {
+                ApiError::new(
+                    500,
+                    "Le document n’a pas pu être enregistré localement. Réessayez l’import.",
+                )
+            })?;
+            super::storage::staged_document(&tx, &document.id)?;
+            if let Some(draft) = &input.draft_id {
+                super::storage::retain_upload(
+                    &tx,
+                    draft,
+                    &document.id,
+                    input.upload_id.as_deref(),
+                )?;
+            }
+            tx.commit()?;
             Ok(ApiResponse::Json(document_dto(&document)))
         })()),
         ("POST", "/api/attachments") => Some((|| {
+            let draft = if query.is_empty() {
+                None
+            } else {
+                Some(crate::attachment_upload_query(query)?)
+            };
             let tx = write_transaction(&app.connection)?;
             let attachment = staging::stage(&tx, &app.db_path, body, now() as i64)?;
+            if let Some((draft, token)) = draft {
+                super::storage::retain_upload(&tx, &draft, &attachment.id, token.as_deref())?;
+            }
             tx.commit()?;
             Ok(ApiResponse::Json(dto(&attachment)))
         })()),
@@ -211,7 +239,7 @@ pub fn routes(
     }
 }
 
-fn dto(attachment: &staging::Attachment) -> Value {
+pub(super) fn dto(attachment: &staging::Attachment) -> Value {
     json!({
         "id": attachment.id, "sha256": attachment.sha256,
         "mime_type": attachment.image_type.mime_type(), "byte_length": attachment.byte_length,
@@ -951,6 +979,14 @@ pub fn link_attachments(
             "INSERT INTO wrapper_attachment_order VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
             params![conversation, message, id, ordinal],
         )?;
+        ctx.connection.execute(
+            "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
+            params![conversation, id],
+        )?;
+        ctx.connection.execute(
+            "UPDATE wrapper_storage_uploads SET cancelled=1 WHERE draft_id=?1 AND attachment_id=?2",
+            params![conversation, id],
+        )?;
     }
     Ok(())
 }
@@ -1110,7 +1146,7 @@ pub(super) fn validate_message_documents(
         &documents::for_message(ctx.connection, conversation, message)?,
     )
 }
-fn document_dto(document: &documents::Document) -> Value {
+pub(super) fn document_dto(document: &documents::Document) -> Value {
     // Extracted content is for model input, not the polling state or composer.
     let mut dto = serde_json::to_value(document).expect("document DTO");
     dto.as_object_mut().expect("object").remove("text");

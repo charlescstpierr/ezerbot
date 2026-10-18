@@ -154,7 +154,12 @@ fn named_document_reaches_user_input_only_and_restart_regenerate_reuses_extracti
         .clone();
     assert_eq!(message["attachments"], json!([doc]));
     assert_eq!(message["body"], "Lis le budget.");
+    f.db()
+        .execute("UPDATE wrapper_storage_staged SET staged_at=0", [])
+        .unwrap();
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
     f.post(
         "/api/regenerate",
         json!({"conversation_id":conversation, "message_id":"doc"}),
@@ -192,6 +197,9 @@ fn named_document_reaches_user_input_only_and_restart_regenerate_reuses_extracti
     assert!(!f.requests().pop().unwrap()["input"]
         .to_string()
         .contains("EXTRACTION FIGÉE"));
+    // Reset hides history from the model; it must never make an attachment
+    // disposable while that history is still readable by the user.
+    assert_eq!(f.post("/api/storage/preview", json!({}))["count"], 0);
 }
 #[test]
 fn bad_uploads_references_and_changed_send_are_refused_before_model_or_journal() {

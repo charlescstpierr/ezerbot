@@ -7,6 +7,20 @@ fn db() -> Connection {
     migrate(&conn).unwrap();
     conn
 }
+#[test]
+fn preparation_does_not_write_and_saving_joins_the_callers_transaction() {
+    let conn = db();
+    let document = prepare(&conn, "brouillon.txt", b"Contenu local").unwrap();
+    assert!(get(&conn, &document.id).unwrap().is_none());
+    let tx = conn.unchecked_transaction().unwrap();
+    save(&tx, &document).unwrap();
+    assert!(get(&tx, &document.id).unwrap().is_some());
+    tx.rollback().unwrap();
+    assert!(get(&conn, &document.id).unwrap().is_none());
+    save(&conn, &document).unwrap();
+    assert_eq!(get(&conn, &document.id).unwrap().unwrap(), document);
+}
+
 fn office(parts: &[(&str, &str)]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()

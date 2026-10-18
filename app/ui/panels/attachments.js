@@ -18,6 +18,19 @@
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
   const buckets = new Map();
   const views = new WeakMap();
+  let restored = false;
+  function release(group, items) {
+    if (!group.conversation || !items.length) return;
+    const removed = items.filter((item) => !item.uploadToken && item.id).map((item) => item.id);
+    const cancelled_uploads = items.map((item) => item.uploadToken).filter(Boolean);
+    // Keep a removal durable even when the user leaves during an upload. The
+    // server cancellation token wins over a late upload completion.
+    fetch("/api/storage/drafts", { method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json", "X-Grokbot-Request": "local" },
+      body: JSON.stringify({ draft_id: group.conversation, attachments: [], removed, cancelled_uploads }) })
+      .then((response) => { if (!response.ok) throw new Error("Retrait interrompu"); })
+      .catch(() => panels.notify("Le brouillon reste conservé sur disque. Réessayez de retirer le fichier."));
+  }
   let context, tray, list, picker, pause, limitNotice, cooldown = 0, cooldownTimer;
   function backoff(until) {
     cooldown = Math.max(cooldown, until);
@@ -54,6 +67,7 @@
   function remove(group, item) {
     discard(item);
     group.items = group.items.filter((entry) => entry !== item);
+    release(group, [item]);
     changed();
   }
   function captionText(item) {
@@ -191,7 +205,7 @@
       const document = documentFile(file);
       const error = !file.size ? `${file.name} est vide. Choisissez un fichier non vide.`
         : file.size > MAX_BYTES ? `${file.name} dépasse la limite de ${sizeText(MAX_BYTES)} (${sizeText(file.size)}).` : null;
-      const item = { file, document, refused: Boolean(error), retryable: !error, error, preview: document || error ? "" : URL.createObjectURL(file), upload: error ? "failed" : "pending", caption: "waiting", revision: 0 };
+      const item = { file, document, uploadToken: crypto.randomUUID(), refused: Boolean(error), retryable: !error, error, preview: document || error ? "" : URL.createObjectURL(file), upload: error ? "failed" : "pending", caption: "waiting", revision: 0 };
       group.items.push(item);
       if (error) panels.notify(error);
       else upload(group, item);
@@ -209,14 +223,15 @@
     const timeout = setTimeout(() => controller.abort(), DEADLINE);
     changed();
     try {
+      await ensureConversation(group);
       let body = item.file;
       if (item.document) {
         const bytes = new Uint8Array(await item.file.arrayBuffer());
         let binary = "";
         for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        body = JSON.stringify({ name: item.file.name, data: btoa(binary) });
+        body = JSON.stringify({ name: item.file.name, data: btoa(binary), draft_id: group.conversation, upload_id: item.uploadToken });
       }
-      const response = await fetch(item.document ? "/api/documents" : "/api/attachments", {
+      const response = await fetch(item.document ? "/api/documents" : `/api/attachments?draft_id=${encodeURIComponent(group.conversation)}&upload_id=${item.uploadToken}`, {
         method: "POST", headers: { "Content-Type": item.document ? "application/json" : mime(item.file), "X-Grokbot-Request": "local" },
         body, signal: controller.signal,
       });
@@ -224,7 +239,7 @@
       const attachment = await response.json();
       if (!response.ok) throw new Error(attachment.error || "L’import du fichier a échoué.");
       if (!/^(?:attachment|document)_[0-9a-f]{64}$/.test(attachment.id)) throw new Error("Réponse d’import illisible.");
-      if (!present(group, item)) return;
+      if (!present(group, item)) { release(group, [{ ...item, id: attachment.id }]); return; }
       if (group.items.some((other) => other !== item && other.id === attachment.id)) {
         remove(group, item);
         panels.notify("Ce fichier est déjà joint.");
@@ -389,6 +404,7 @@
       discard(ctx) {
         const group = buckets.get(key(ctx));
         if (!group?.items.length) return;
+        release(group, group.items);
         group.items.forEach(discard);
         group.items = [];
         render();
@@ -408,6 +424,21 @@
       },
     },
     onState(state, ctx) {
+      if (!restored && state.storage?.drafts) {
+        restored = true;
+        for (const [conversation, files] of Object.entries(state.storage.drafts)) {
+          const thread = state.conversations.find((entry) => entry.id === conversation);
+          if (!thread) continue;
+          const group = bucket({ conversation: thread, bot: { id: thread.bot_id } });
+          for (const file of files) {
+            if (group.items.some((item) => item.id === file.id)) continue;
+            const document = file.kind === "document";
+            group.items.push({ id: file.id, document, metadata: document ? file : null,
+              file: { name: file.name || "Image jointe", size: file.byte_length },
+              preview: file.url || "", upload: "ready", caption: document ? "ready" : "waiting", revision: 0 });
+          }
+        }
+      }
       backoff(Number(state.attachments?.retry_after) || 0);
       sync(ctx);
       const group = bucket();

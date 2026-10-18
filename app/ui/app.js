@@ -44,7 +44,7 @@
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
-  // composer: mount(container, context), onFiles(files, event, context), onSent({messageId, extras}, context).
+  // composer: mount(container, context), onFiles(files, event, context), blocked(context), onSent({messageId, extras}, context).
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
   const panelContext = () => ({ state, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
@@ -299,7 +299,8 @@
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const live = Boolean(streamingMessage());
     const hasAttachments = Boolean(sendExtras().attachments?.length);
-    ui.send.disabled = live ? false : busy || !connected || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong;
+    const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
+    ui.send.disabled = live ? false : busy || !connected || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked;
     ui.send.dataset.mode = live ? "stop" : "send";
     ui.send.title = live ? "Arrêter la réponse" : "Envoyer le message";
     ui.send.setAttribute("aria-label", live ? "Arrêter la réponse" : busy ? "Envoi en cours" : "Envoyer le message");

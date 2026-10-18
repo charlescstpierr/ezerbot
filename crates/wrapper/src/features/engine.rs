@@ -62,6 +62,13 @@ struct Empty {}
 empty_hooks!(tools, call_tool, link_attachments);
 const BASE_INSTRUCTIONS: &str = "Tu es un assistant dans une application de bureau. Réponds dans la langue de l'utilisateur. Tu peux utiliser le Markdown, des blocs de code avec le nom du langage, des diagrammes dans des blocs ```mermaid et des formules LaTeX entre $...$ ou $$...$$.";
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
+const CONTEXT_TOO_LARGE: &str = "Le texte et les pièces jointes dépassent ce que le modèle peut lire en un message. Raccourcissez le texte ou joignez moins de documents dans un nouveau message.";
+fn context_budget_failed(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<bool> {
+    if run.status != RunStatus::Failed { return Ok(false); }
+    Ok(store::events(conn, &run.run_id, 0)?.iter().any(|event|
+        event.kind == RunEventKind::TurnEnded && event.payload["failed"] == true &&
+        event.payload["reason"].as_str().is_some_and(|reason| reason.starts_with("context budget cannot retain"))))
+}
 const DEMO_REPLY: &str = "Bien reçu. Ton message est conservé dans cette conversation. Le mode local simule les réponses ; aucun service d'intelligence artificielle n'est connecté.";
 const DEMO_DIAGRAM: &str = "Voici un diagramme d'exemple. Le mode local simule les réponses.\n\n```mermaid\nflowchart LR\n  A[Votre message] --> B{Ezerbot}\n  B -->|texte| C[Réponse]\n  B -->|schéma| D[Diagramme]\n  C & D --> E[(Historique local)]\n```\n\nPassez la souris sur le diagramme pour le copier, le télécharger ou l'agrandir.";
 const DEMO_CODE: &str = "Voici un exemple de code. Le mode local simule les réponses.\n\n```rust\nfn saluer(nom: &str) -> String {\n    format!(\"Bonjour, {nom} !\")\n}\n\nfn main() {\n    println!(\"{}\", saluer(\"Ezerbot\"));\n}\n```\n\nLe bouton en haut du bloc copie le code.";
@@ -125,7 +132,7 @@ fn database(path: &Path) -> rusqlite::Result<Connection> {
 fn vault(path: &Path) -> grokbot_engine::contracts::Result<Vault> {
     Vault::open(&path.with_extension("secrets.json"))
 }
-fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<ContextBudget> {
+pub(super) fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<ContextBudget> {
     let tokens = conn.query_row(
         "SELECT estimated_tokens FROM wrapper_engine_config WHERE account_id=?1",
         [ACCOUNT],
@@ -526,6 +533,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 if !old.status.is_terminal() && old.status != RunStatus::Interrupted {
                     return Err(ApiError::new(409, "Cette réponse est déjà en cours."));
                 }
+                if context_budget_failed(&app.connection, &old)? {
+                    return Err(ApiError::new(400, CONTEXT_TOO_LARGE));
+                }
+                let original = run_input(&app.connection, &old.run_id)?;
+                super::attachments::validate_message_documents(&app.feature_context(), &input.conversation_id, &original.entry_id)?;
                 let Trigger::UserMessage { attempt, .. } = old.trigger else {
                     unreachable!()
                 };
@@ -2077,11 +2089,15 @@ fn run_reply(
 ) -> Result<Message, ApiError> {
     let parts = projected_parts(conn, run)?;
     let body = parts.iter().map(|part| part.body.as_str()).collect();
-    let metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
+    let mut metadata: (Option<String>, Option<String>, Option<String>) = conn.query_row(
         "SELECT error,error_kind,notice FROM wrapper_engine_runs WHERE run_id=?1",
         [&run.run_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    if context_budget_failed(conn, run)? {
+        metadata.0 = Some(CONTEXT_TOO_LARGE.into());
+        metadata.1 = Some("context_budget".into());
+    }
     let (state, error) = match run.status {
         RunStatus::Queued | RunStatus::Running => ("streaming", None),
         RunStatus::Interrupted => ("failed", Some(INTERRUPTED.into())),

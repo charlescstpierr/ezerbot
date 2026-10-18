@@ -3,11 +3,15 @@ import { Editor } from "@tiptap/core";
 import "./chat.css";
 import { Thread } from "./Thread.jsx";
 import { editorOptions, readText, writeText } from "./editor.js";
+import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from "./attachment-presentation.js";
 
 const roots = new WeakMap();
 
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {
+  formatAttachmentSize,
+  documentBudgetMessage,
+  createDocumentIcon: () => createDocumentIcon(document),
   renderThread(container, props) {
     if (!roots.has(container)) roots.set(container, createRoot(container));
     roots.get(container).render(<Thread {...props} />);

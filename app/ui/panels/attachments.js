@@ -11,14 +11,14 @@
   const documentMimes = { "application/pdf": "pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx", "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx", "text/csv": "csv", "text/plain": "txt", "text/markdown": "md", "application/rtf": "rtf", "text/rtf": "rtf" };
   const documentExtension = (file) => documentExtensions.has(file.name?.split(".").pop().toLowerCase());
   const documentFile = (file) => documentExtension(file) || Boolean(documentMimes[file.type]);
-  const sizeText = (bytes) => bytes < 1024 ? `${bytes} o` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} Ko` : `${(bytes / 1024 / 1024).toFixed(1)} Mio`;
+  const sizeText = (bytes) => window.GrokbotChat.formatAttachmentSize(bytes);
   const MAX_FILES = 10; // Matches the wrapper's per-message limit.
   const DEADLINE = 150_000;
   const types = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]);
   const extensions = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
   const buckets = new Map();
   const views = new WeakMap();
-  let context, tray, list, picker, pause, cooldown = 0, cooldownTimer;
+  let context, tray, list, picker, pause, limitNotice, cooldown = 0, cooldownTimer;
   function backoff(until) {
     cooldown = Math.max(cooldown, until);
   }
@@ -62,6 +62,15 @@
     if (item.document) return item.metadata?.note || "Texte extrait localement";
     return { waiting: "Description en attente…", pending: "Description en cours…", ready: "Description prête", skipped: "Description ignorée", paused: cooldown > Date.now() ? "Description en pause" : "Description à préparer", failed: "Description indisponible" }[item.caption];
   }
+  function documentBudgetError(group, ctx = context) {
+    const limits = ctx?.state?.attachments || {};
+    const textLimit = limits.document_character_limit ?? 200_000;
+    const payloadLimit = limits.document_payload_limit ?? 300_000;
+    const documents = group.items.filter((item) => item.document && item.metadata);
+    const text = documents.reduce((total, item) => total + (item.metadata.text_characters || 0), 0);
+    const payload = documents.reduce((total, item) => total + (item.metadata.context_characters || 0), 0) - Math.max(0, documents.length - 1);
+    return text > textLimit || payload > payloadLimit ? window.GrokbotChat.documentBudgetMessage(Math.min(textLimit, payloadLimit)) : "";
+  }
   function render() {
     if (!list || !context) return;
     clearTimeout(cooldownTimer);
@@ -69,15 +78,19 @@
     const explanation = remaining > 0 ? `Prédescriptions en pause · reprise dans ${remainingWait(remaining)}` : "";
     let waiting = false;
     const group = bucket();
+    const budgetError = documentBudgetError(group);
+    limitNotice.hidden = !budgetError;
+    if (limitNotice.textContent !== budgetError) limitNotice.textContent = budgetError;
     const chips = group.items.map((item) => {
       if (!views.has(item)) views.set(item, createChip(group, item));
       const { chip, status, retry, metadata } = views.get(item);
       metadata.textContent = [sizeText(item.file.size), item.metadata?.page_label || ""].filter(Boolean).join(" · ");
       chip.dataset.status = item.upload === "ready" ? item.caption : item.upload;
+      chip.dataset.warning = String(Boolean(item.metadata?.truncated || item.metadata?.encoding_note));
       const label = captionText(item);
       if (status.textContent !== label) status.textContent = label;
       status.title = item.error || "";
-      retry.hidden = !(item.upload === "failed" || ["failed", "skipped", "paused"].includes(item.caption));
+      retry.hidden = !((item.upload === "failed" && item.retryable !== false) || (item.upload === "ready" && ["failed", "skipped", "paused"].includes(item.caption)));
       retry.disabled = !retry.hidden && item.upload === "ready" && remaining > 0;
       retry.title = retry.disabled ? explanation : item.document ? "Réessayer l’import du document" : "Réessayer la préparation de cette image";
       if (retry.disabled) retry.setAttribute("aria-describedby", pause.id);
@@ -101,8 +114,8 @@
   }
   function createChip(group, item) {
     const chip = node("li", "attachment-chip");
-    const image = item.document ? node("span", "attachment-document-icon", "▤") : node("img", "attachment-preview");
-    if (item.document) image.setAttribute("aria-hidden", "true");
+    const image = item.document || item.refused ? node("span", "attachment-document-icon") : node("img", "attachment-preview");
+    if (item.document || item.refused) { image.setAttribute("aria-hidden", "true"); image.append(window.GrokbotChat.createDocumentIcon()); }
     else { image.src = item.preview; image.alt = `Aperçu de ${item.file.name || "l’image collée"}`; }
     const copy = node("div", "attachment-copy");
     const name = node("strong", "", item.file.name || "Image collée");
@@ -174,12 +187,14 @@
       // Some clipboard providers omit the extension; preserve the supplied name
       // and add the known MIME suffix so the local reader can validate bytes.
       if (!documentExtension(file) && documentMimes[file.type]) file = new File([file], `${file.name || "Document collé"}.${documentMimes[file.type]}`, { type: file.type });
-      if (!file.size || file.size > MAX_BYTES) { panels.notify(`${file.name} : le fichier doit être non vide et ne pas dépasser 20 Mio.`); continue; }
       if (group.items.length >= MAX_FILES) { panels.notify("Un message peut contenir dix fichiers au maximum."); break; }
       const document = documentFile(file);
-      const item = { file, document, preview: document ? "" : URL.createObjectURL(file), upload: "pending", caption: "waiting", revision: 0 };
+      const error = !file.size ? `${file.name} est vide. Choisissez un fichier non vide.`
+        : file.size > MAX_BYTES ? `${file.name} dépasse la limite de ${sizeText(MAX_BYTES)} (${sizeText(file.size)}).` : null;
+      const item = { file, document, refused: Boolean(error), retryable: !error, error, preview: document || error ? "" : URL.createObjectURL(file), upload: error ? "failed" : "pending", caption: "waiting", revision: 0 };
       group.items.push(item);
-      upload(group, item);
+      if (error) panels.notify(error);
+      else upload(group, item);
     }
     changed();
     return true;
@@ -187,6 +202,7 @@
 
   async function upload(group, item) {
     item.upload = "pending";
+    item.retryable = true;
     item.error = null;
     const controller = new AbortController();
     item.controller = controller;
@@ -204,6 +220,7 @@
         method: "POST", headers: { "Content-Type": item.document ? "application/json" : mime(item.file), "X-Grokbot-Request": "local" },
         body, signal: controller.signal,
       });
+      item.retryable = response.ok || response.status >= 500 || [408, 429].includes(response.status);
       const attachment = await response.json();
       if (!response.ok) throw new Error(attachment.error || "L’import du fichier a échoué.");
       if (!/^(?:attachment|document)_[0-9a-f]{64}$/.test(attachment.id)) throw new Error("Réponse d’import illisible.");
@@ -345,9 +362,12 @@
         pause = node("p", "attachment-pause");
         pause.id = "attachment-pause";
         pause.hidden = true;
+        limitNotice = node("p", "attachment-limit");
+        limitNotice.setAttribute("role", "alert");
+        limitNotice.hidden = true;
         list = node("ul", "attachment-list");
         list.setAttribute("aria-label", "Pièces jointes à envoyer");
-        tray.append(choose, picker, pause, list);
+        tray.append(choose, picker, pause, limitNotice, list);
         container.append(tray);
         const form = document.getElementById("composer-form");
         form.addEventListener("input", () => sync());
@@ -355,15 +375,17 @@
         new MutationObserver(() => sync()).observe(document.getElementById("composer-input"), { childList: true, characterData: true, subtree: true });
         form.addEventListener("submit", (event) => {
           if (document.getElementById("send-button").dataset.mode === "stop") return;
-          if (bucket().items.some((item) => item.upload !== "ready")) {
+          const budgetError = documentBudgetError(bucket());
+          if (budgetError || bucket().items.some((item) => item.upload !== "ready")) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            panels.notify("Attendez l’import des fichiers, ou retirez ceux en échec, avant d’envoyer.");
+            panels.notify(budgetError || "Attendez l’import des fichiers, ou retirez ceux en échec, avant d’envoyer.");
           }
         }, true);
         window.addEventListener("beforeunload", () => { for (const group of new Set(buckets.values())) group.items.forEach(discard); });
       },
       onFiles,
+      blocked: (ctx) => bucket(ctx).items.some((item) => item.upload !== "ready") || Boolean(documentBudgetError(bucket(ctx), ctx)),
       onSent({ messageId, extras }, ctx) {
         // onSent may be delivered by refresh while another conversation is open.
         const conversation = ctx.state.conversations.find((entry) => entry.messages.some((message) => message.id === messageId));

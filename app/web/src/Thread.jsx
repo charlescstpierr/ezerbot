@@ -3,7 +3,8 @@ import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { Check, Clock, FileText, RefreshCw, Square, TriangleAlert } from "lucide-react";
+import { Check, Clock, RefreshCw, Square, TriangleAlert } from "lucide-react";
+import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
@@ -124,14 +125,14 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
       {message.body && <div className="gb-bubble">{message.body}</div>}
       {message.attachments?.length > 0 && (
-        <div className="flex flex-wrap justify-end gap-2" aria-label="Pièces jointes">
+        <div className="flex flex-wrap items-start justify-end gap-2" aria-label="Pièces jointes">
           {message.attachments.map((attachment, index) => {
             const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
             if (!id) return null;
             if (attachment.kind === "document") return <div key={`${id}-${index}`} className="gb-document-chip">
-              <FileText aria-hidden="true" />
+              <svg width="22" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{documentIconPaths.map((d) => <path key={d} d={d} />)}</svg>
               <div><strong title={attachment.name}>{attachment.name}</strong>
-                <span>{(attachment.byte_length / 1024).toFixed(1)} Ko · {attachment.page_label}</span>
+                <span>{formatAttachmentSize(attachment.byte_length)} · {attachment.page_label}</span>
                 {attachment.note && <span className="gb-document-note">{attachment.note}</span>}
               </div>
             </div>;
@@ -167,7 +168,7 @@ function ReplyProblem({ message, actions }) {
       </div>
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
       {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
-      {message.error_kind === "signin"
+      {message.error_kind === "context_budget" ? null : message.error_kind === "signin"
         ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
         : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}
     </div>

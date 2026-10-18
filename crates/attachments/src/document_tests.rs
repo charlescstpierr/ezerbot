@@ -68,7 +68,10 @@ fn plain_formats_utf16_and_unicode_truncation() {
     let doc = stage(&conn, "long.md", "é".repeat(MAX_TEXT + 10).as_bytes()).unwrap();
     assert_eq!(doc.text.chars().count(), MAX_TEXT);
     assert!(doc.truncated);
-    assert!(doc.note.unwrap().contains("Texte tronqué"));
+    let note = doc.note.unwrap();
+    assert!(note.contains("Texte tronqué"));
+    assert!(note.contains("25 pages sur 26 transmises"));
+    assert!(note.contains("100\u{202f}000 premiers caractères"));
 }
 #[test]
 fn office_docx_spreadsheet_shared_multiline_and_slide_caps() {
@@ -165,6 +168,22 @@ $.NSFileHandle.fileHandleWithStandardOutput.writeData(doc.dataRepresentationWith
         .unwrap_err()
         .to_string()
         .contains("Ce PDF est chiffré"));
+    let owner = builtin("/usr/bin/osascript", &["-l", "JavaScript", "-e", r#"ObjC.import('Foundation'); ObjC.import('PDFKit');
+const data=$.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+const doc=$.PDFDocument.alloc.initWithData(data); const options=$.NSMutableDictionary.alloc.init;
+options.setObjectForKey($('test-owner'),$.PDFDocumentOwnerPasswordOption);
+$.NSFileHandle.fileHandleWithStandardOutput.writeData(doc.dataRepresentationWithOptions(options));"#], &pdf()).unwrap();
+    let probe = builtin("/usr/bin/osascript", &["-l", "JavaScript", "-e", r#"ObjC.import('Foundation');ObjC.import('PDFKit');
+const doc=$.PDFDocument.alloc.initWithData($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile);
+const result=JSON.stringify({encrypted:!!doc.isEncrypted,locked:!!doc.isLocked});
+$.NSFileHandle.fileHandleWithStandardOutput.writeData($(result).dataUsingEncoding($.NSUTF8StringEncoding));"#], &owner).unwrap();
+    let probe: serde_json::Value = serde_json::from_slice(&probe).unwrap();
+    assert_eq!(probe["encrypted"], true);
+    assert_eq!(probe["locked"], false);
+    assert!(stage(&conn, "restrictions.pdf", &owner)
+        .unwrap()
+        .text
+        .contains("Bonjour PDF local"));
 }
 
 #[test]
@@ -199,7 +218,7 @@ fn invalid_encrypted_oversized_and_bombs_are_french_errors() {
             office(&[("word/document.xml", &"a".repeat(16 * 1024 * 1024 + 1))]),
             "décompression",
         ),
-        ("trop.txt", vec![b'a'; MAX_BYTES + 1], "20 Mio"),
+        ("trop.txt", vec![b'a'; MAX_BYTES + 1], "20 Mo"),
         ("programme.exe", b"text".to_vec(), "Format non accepté"),
         ("../notes.txt", b"text".to_vec(), "nom"),
     ] {
@@ -314,6 +333,48 @@ fn corrupt_zip_checksum_is_a_french_error_and_empty_shared_strings_are_valid() {
         .unwrap_err()
         .to_string()
         .contains("Aucun texte"));
+}
+
+#[test]
+fn local_reader_timeout_is_transient_and_reaps_its_child() {
+    let started = Instant::now();
+    let error =
+        builtin_with_timeout("/bin/sleep", &["2"], b"", Duration::from_millis(25)).unwrap_err();
+    assert!(matches!(error, Error::Io(ref error) if error.kind() == std::io::ErrorKind::TimedOut));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn legacy_csv_encodings_are_explicit_and_old_notes_refresh_without_reparsing() {
+    let conn = db();
+    let csv = stage(&conn, "export-excel.csv", b"caf\xe9;cr\xe8me\nprix;10\x80").unwrap();
+    assert_eq!(csv.text, "café;crème\nprix;10€");
+    assert_eq!(csv.note.as_deref(), Some("Encodage Windows-1252 supposé."));
+    assert!(stage(&conn, "binaire.txt", b"caf\xe9\0binaire").is_err());
+    let mut long = stage(&conn, "ancien.md", "x".repeat(MAX_TEXT + 1).as_bytes()).unwrap();
+    long.note = Some("Ancienne note : 100000 caractères".into());
+    long.text = "Extraction figée, ne pas relire le fichier".into();
+    let mut record = serde_json::to_value(&long).unwrap();
+    record.as_object_mut().unwrap().remove("encoding_note");
+    conn.execute(
+        "UPDATE attachments_documents SET record=?1 WHERE id=?2",
+        params![record.to_string(), long.id],
+    )
+    .unwrap();
+    let loaded = get(&conn, &long.id).unwrap().unwrap();
+    assert_eq!(loaded.text, long.text);
+    assert!(loaded
+        .note
+        .unwrap()
+        .contains("100\u{202f}000 premiers caractères"));
+    assert!(conn
+        .query_row(
+            "SELECT record FROM attachments_documents WHERE id=?1",
+            [&long.id],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap()
+        .contains("Ancienne note"));
 }
 
 #[test]

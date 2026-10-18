@@ -7,12 +7,12 @@
 @source "../node_modules/@streamdown/math/dist/*.js";
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-.gb-document-chip { display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); max-width: 100%; text-align: left; }
+.gb-document-chip { display: flex; align-items: flex-start; align-self: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); max-width: 100%; text-align: left; }
 .gb-document-chip > svg { width: 22px; height: 26px; flex: 0 0 auto; color: var(--muted); }
 .gb-document-chip > div { display: flex; flex-direction: column; min-width: 0; gap: 4px; }
 .gb-document-chip strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
 .gb-document-chip span { color: var(--muted); font-size: 11px; }
-.gb-document-chip .gb-document-note { max-width: 310px; }
+.gb-document-chip .gb-document-note { max-width: 310px; color: var(--warning-text); }
 
 /* Streamdown is styled with shadcn colour names; they resolve to the app tokens. */
 @theme inline {

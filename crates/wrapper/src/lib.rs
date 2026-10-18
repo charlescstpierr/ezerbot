@@ -49,6 +49,9 @@ pub fn body_limit(path: &str) -> usize {
 
 /// Shared size error for direct API calls, declared lengths and chunked bodies.
 pub fn too_large(path: &str) -> ApiError {
+    if path == "/api/documents" {
+        return ApiError::new(413, "Le document dépasse la limite de 20 Mo.");
+    }
     let limit = body_limit(path);
     let (amount, unit) = if limit >= 1024 * 1024 {
         (limit / (1024 * 1024), "Mio")

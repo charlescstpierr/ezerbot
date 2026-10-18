@@ -30,11 +30,59 @@ pub struct Document {
     pub page_kind: String,
     pub pages_read: usize,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_note: Option<String>,
     pub note: Option<String>,
     pub text: String,
 }
 fn invalid(message: &str) -> Error {
     Error::InvalidInput(message.into())
+}
+pub fn format_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut text = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            text.push('\u{202f}');
+        }
+        text.push(digit);
+    }
+    text
+}
+fn display_note(document: &Document) -> Option<String> {
+    let mut notes = document.encoding_note.iter().cloned().collect::<Vec<_>>();
+    if document.truncated {
+        let read = format_count(document.pages_read);
+        let count = format_count(document.page_count);
+        let characters = format_count(MAX_TEXT);
+        let detail = if document.page_kind == "pages estimées" {
+            format!("environ {read} pages sur {count} transmises. Lecture limitée aux {characters} premiers caractères")
+        } else {
+            let unit = if document.pages_read == 1 {
+                match document.page_kind.as_str() {
+                    "pages" => "page",
+                    "feuilles" => "feuille",
+                    "diapositives" => "diapositive",
+                    other => other,
+                }
+            } else {
+                &document.page_kind
+            };
+            let plural = if document.pages_read == 1 { "" } else { "s" };
+            format!("{read} {unit} parcourue{plural} sur {count}. Lecture limitée à {MAX_PAGES} {} et {characters} caractères", document.page_kind)
+        };
+        notes.push(format!(
+            "Texte tronqué : {detail}. La suite du document n’a pas été transmise."
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join(" "))
+}
+fn stored_document(record: &str) -> Result<Document> {
+    let mut document: Document = serde_json::from_str(record)
+        .map_err(|_| invalid("L’extraction enregistrée est illisible."))?;
+    // Refresh presentation for older records without re-parsing their source.
+    document.note = display_note(&document);
+    Ok(document)
 }
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -56,23 +104,12 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Document>> {
             |r| r.get(0),
         )
         .optional()?;
-    record
-        .map(|s| {
-            serde_json::from_str(&s).map_err(|_| {
-                invalid("L’extraction enregistrée est illisible. Importez le fichier à nouveau.")
-            })
-        })
-        .transpose()
+    record.map(|s| stored_document(&s)).transpose()
 }
 pub fn for_message(conn: &Connection, conversation: &str, message: &str) -> Result<Vec<Document>> {
     let mut query = conn.prepare("SELECT d.record FROM attachments_document_links l JOIN attachments_documents d ON d.id=l.document_id WHERE conversation_id=?1 AND message_id=?2 ORDER BY ordinal")?;
     let rows = query.query_map(params![conversation, message], |r| r.get::<_, String>(0))?;
-    rows.map(|s| {
-        serde_json::from_str(&s?).map_err(|_| {
-            invalid("L’extraction enregistrée est illisible. Importez le fichier à nouveau.")
-        })
-    })
-    .collect()
+    rows.map(|s| stored_document(&s?)).collect()
 }
 pub fn link(conn: &Connection, conversation: &str, message: &str, ids: &[String]) -> Result<()> {
     for id in ids {
@@ -92,7 +129,7 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
         return Err(invalid("Le document est vide."));
     }
     if bytes.len() > MAX_BYTES {
-        return Err(invalid("Le document dépasse la limite de 20 Mio."));
+        return Err(invalid("Le document dépasse la limite de 20 Mo."));
     }
     if name.is_empty()
         || name.len() > 512
@@ -117,6 +154,7 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
     if bytes.starts_with(b"\xd0\xcf\x11\xe0") {
         return Err(invalid("Document Office chiffré ou ancien format non accepté. Exportez une copie non protégée en DOCX, XLSX ou PPTX."));
     }
+    let mut encoding_note = None;
     let (mut text, page_count, page_kind, pages_read, mut truncated) = match format.as_str() {
         "pdf" => pdf(bytes)?,
         "docx" | "xlsx" | "pptx" => office(bytes, &format)?,
@@ -131,7 +169,11 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
             )?;
             estimated(String::from_utf8(output).map_err(|_| invalid("Texte RTF illisible."))?)
         }
-        _ => estimated(decode_text(bytes)?),
+        _ => {
+            let (text, encoding) = decode_text(bytes)?;
+            encoding_note = encoding;
+            estimated(text)
+        }
     };
     let char_cap = if page_kind == "pages estimées" {
         MAX_TEXT.min(MAX_PAGES * 4000)
@@ -146,8 +188,7 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
     if text.trim().is_empty() {
         return Err(invalid("Aucun texte lisible dans ce document. Pour un PDF numérisé, exportez une version avec reconnaissance de texte (OCR)."));
     }
-    let note = truncated.then(|| format!("Texte tronqué : lecture limitée à {MAX_PAGES} pages, diapositives ou feuilles et {MAX_TEXT} caractères. La suite du document n’a pas été transmise."));
-    let document = Document {
+    let mut document = Document {
         id,
         name: name.into(),
         format,
@@ -156,9 +197,11 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
         page_kind,
         pages_read,
         truncated,
-        note,
+        encoding_note,
+        note: None,
         text,
     };
+    document.note = display_note(&document);
     conn.execute(
         "INSERT INTO attachments_documents VALUES (?1, ?2) ON CONFLICT DO NOTHING",
         params![document.id, serde_json::to_string(&document)?],
@@ -175,7 +218,8 @@ fn estimated(text: String) -> (String, usize, String, usize, bool) {
         pages > MAX_PAGES,
     )
 }
-fn decode_text(bytes: &[u8]) -> Result<String> {
+fn decode_text(bytes: &[u8]) -> Result<(String, Option<String>)> {
+    let mut encoding_note = None;
     let text = if bytes.starts_with(b"\xff\xfe") || bytes.starts_with(b"\xfe\xff") {
         if !bytes.len().is_multiple_of(2) {
             return Err(invalid(
@@ -196,11 +240,35 @@ fn decode_text(bytes: &[u8]) -> Result<String> {
             })
             .collect();
         String::from_utf16(&words).map_err(|_| invalid("Encodage UTF-16 invalide."))?
+    } else if let Ok(text) = std::str::from_utf8(bytes) {
+        text.trim_start_matches('\u{feff}').into()
     } else {
-        std::str::from_utf8(bytes)
-            .map_err(|_| invalid("Texte illisible. Enregistrez le fichier en UTF-8 ou UTF-16."))?
-            .trim_start_matches('\u{feff}')
-            .into()
+        // Excel's legacy CSV exports commonly use Windows-1252. Never guess
+        // around NUL/C0 binary data; keep the assumption visible to the user.
+        if bytes
+            .iter()
+            .any(|b| *b < 0x20 && !matches!(*b, b'\t' | b'\r' | b'\n' | 0x0c))
+        {
+            return Err(invalid(
+                "Ce fichier contient des données binaires, pas du texte.",
+            ));
+        }
+        const C1: [char; 32] = [
+            '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+            '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ',
+            '\u{9d}', 'ž', 'Ÿ',
+        ];
+        encoding_note = Some("Encodage Windows-1252 supposé.".into());
+        bytes
+            .iter()
+            .map(|b| {
+                if (0x80..=0x9f).contains(b) {
+                    C1[usize::from(*b - 0x80)]
+                } else {
+                    char::from(*b)
+                }
+            })
+            .collect()
     };
     if text
         .chars()
@@ -210,7 +278,7 @@ fn decode_text(bytes: &[u8]) -> Result<String> {
             "Ce fichier contient des données binaires, pas du texte.",
         ));
     }
-    Ok(text)
+    Ok((text, encoding_note))
 }
 
 // Collect just visible XML text, retaining paragraph/cell boundaries and cached
@@ -467,6 +535,14 @@ fn office(bytes: &[u8], format: &str) -> Result<(String, usize, String, usize, b
 /// Fixed macOS readers, no shell. Drain bounded output concurrently to avoid pipe
 /// deadlock, kill on timeout, and reap before returning. Never expose stderr.
 fn builtin(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    builtin_with_timeout(program, args, input, Duration::from_secs(20))
+}
+fn builtin_with_timeout(
+    program: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -482,7 +558,8 @@ fn builtin(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         stdout.take(MAX_XML + 1).read_to_end(&mut out).map(|_| out)
     });
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -494,6 +571,7 @@ fn builtin(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
             }
         }
         if Instant::now() >= deadline {
+            timed_out = true;
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -505,13 +583,22 @@ fn builtin(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
         .join()
         .map_err(|_| invalid("Lecture locale interrompue."))?
         .map_err(|_| invalid("La sortie du lecteur local est illisible."))?;
+    if timed_out {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Délai de lecture locale dépassé.",
+        )
+        .into());
+    }
     if out.len() as u64 > MAX_XML {
         return Err(invalid(
             "Le texte extrait dépasse la limite de sécurité de 16 Mio.",
         ));
     }
     if !status.is_some_and(|s| s.success()) {
-        return Err(invalid("Document invalide, chiffré ou délai de lecture dépassé. Exportez une copie non protégée."));
+        return Err(invalid(
+            "Document invalide ou illisible. Exportez une copie non protégée.",
+        ));
     }
     Ok(out)
 }
@@ -525,7 +612,7 @@ const bytes = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
 function extract() {
 const doc = $.PDFDocument.alloc.initWithData(bytes);
 if (!doc || doc.isNil()) return {error:'invalid'};
-if (doc.isEncrypted || doc.isLocked) return {error:'encrypted'};
+if (doc.isLocked) return {error:'encrypted'};
 const count = Number(doc.pageCount); let text = ''; let read = 0;
 for (let i=0; i<Math.min(count,50); i++) { const raw=doc.pageAtIndex(i).string; const s=raw ? ObjC.unwrap(raw) : ''; text += '\n[Page '+(i+1)+']\n'+(typeof s==='string' ? s : ''); read++; if (text.length>100000) break; }
 const chars = Array.from(text);

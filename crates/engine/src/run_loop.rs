@@ -622,7 +622,11 @@ fn execute(
             denied
         } else if spec.is_none() {
             ToolOutcome::Failed {
-                reason: format!("unknown tool {}", call.name),
+                reason: if call.name.starts_with("mcp_") {
+                    format!("Outil MCP inconnu ou connecteur désactivé : {}", call.name)
+                } else {
+                    format!("unknown tool {}", call.name)
+                },
             }
         } else if call.name == "complete_task" && pending_input(conn, run_id)? {
             ToolOutcome::Failed {

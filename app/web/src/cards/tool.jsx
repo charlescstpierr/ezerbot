@@ -60,7 +60,7 @@ function suspension(message, view) {
 
 export function Card({ message }) {
   const view = useEngine();
-  const { run_id: runId, call, outcome } = message.payload || {};
+  const { run_id: runId, call, outcome, connector } = message.payload || {};
   // These internal tools are represented by the single task-status card.
   if (["begin_task", "complete_task"].includes(call?.name)) return null;
   if (!call?.call_id || typeof call.name !== "string") {
@@ -68,7 +68,7 @@ export function Card({ message }) {
   }
   const run = view?.run(runId);
   const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);
-  let label = outcome?.status === "done" ? "Appel terminé" : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
+  let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
   let note;
   if (outcome?.status === "suspend") ({ label, note } = suspension(message, view));
   if (!outcome) {
@@ -78,7 +78,7 @@ export function Card({ message }) {
         : "Aucun résultat enregistré pour cet appel.";
   }
   return (
-    <Disclosure message={message} title={`Outil · ${call.name}`} label={label}>
+    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : `Outil · ${call.name}`} label={label}>
       <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>
       <h4>Arguments</h4>
       <Data value={call.arguments} />

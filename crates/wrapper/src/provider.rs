@@ -199,6 +199,7 @@ struct Inner {
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
     catalog: Mutex<Catalog>,
+    mcp: crate::mcp::Manager,
 }
 
 #[derive(Clone)]
@@ -439,8 +440,13 @@ impl Provider {
                 runs: Mutex::new(HashMap::new()),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
+                mcp: crate::mcp::Manager::default(),
             }),
         }
+    }
+
+    pub(crate) fn mcp(&self) -> &crate::mcp::Manager {
+        &self.inner.mcp
     }
 
     fn read(&self) -> Option<Credentials> {

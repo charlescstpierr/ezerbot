@@ -182,7 +182,10 @@
       const row = document.createElement("p");
       const description = document.createElement("span");
       const botName = state.bots?.find((bot) => bot.id === rule.route.requesting_bot_id)?.name || rule.route.requesting_bot_id;
-      description.textContent = `${botName} · ${rule.tool} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
+      const server = state.mcp?.servers?.find((s) => s.tools.some((t) => t.namespace === rule.tool) || [`mcp_start_${s.id}`, `mcp_remove_${s.id}`].includes(rule.tool));
+      const tool = server?.tools.find((t) => t.namespace === rule.tool)?.name || (rule.tool.startsWith("mcp_start_") ? "Démarrer / redémarrer" : "Supprimer le connecteur");
+      const toolName = server ? `${server.name} · ${tool}` : rule.tool;
+      description.textContent = `${botName} · ${toolName} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Retirer la règle";

@@ -108,7 +108,7 @@ pub fn tools() -> Vec<ToolSpec> {
 /// Route is trusted host state, never model-supplied IDs. Prefer the originating
 /// principal chat or its ancestor; routines/other bots fall back to the most recent
 /// principal chat. If none exists, create a visible principal approval conversation.
-fn principal_conversation(ctx: &Context<'_>, origin: &str) -> Result<String, ApiError> {
+pub(crate) fn principal_conversation(ctx: &Context<'_>, origin: &str) -> Result<String, ApiError> {
     let mut candidate = Some(origin.to_owned());
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = candidate {
@@ -463,6 +463,39 @@ pub fn check_tool_approval(
             None => ApprovalCheck::Ask,
         },
     )
+}
+
+/// Defense in depth for MCP's external effects. Only a grant consumed for this
+/// exact protected call, or the same bot/tool standing rule, admits execution.
+pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
+    let run = store::required(
+        ctx.connection,
+        ctx.run_id
+            .ok_or_else(|| ApiError::new(403, "Approbation MCP requise."))?,
+    )?;
+    let (id, digest) = guarded_identity(ctx, &run, call)?;
+    if let Some(request) = existing_request(ctx, &id, &digest)? {
+        let admitted: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_approval_grants WHERE request_id=?1 AND tool=?2 AND args_digest=?3 AND consumed_at IS NOT NULL)",params![id,call.name,digest],|r|r.get(0))?;
+        if admitted && matches!(request.status, RequestStatus::Resolved { .. }) {
+            return Ok(());
+        }
+    } else {
+        let route = ApprovalRoute {
+            requesting_bot_id: run.bot_id,
+            target_bot_id: DEFAULT_BOT.id.into(),
+            target_conversation_id: run.conversation_id,
+        };
+        if matches!(
+            rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?,
+            Some((true, _))
+        ) {
+            return Ok(());
+        }
+    }
+    Err(ApiError::new(
+        403,
+        "Cette action MCP n’a pas été autorisée.",
+    ))
 }
 
 fn parse_args<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ApiError> {
@@ -863,6 +896,11 @@ fn request_value(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<Value
             .transpose()
             .map_err(|_| ApiError::new(500, "Invalid approval display metadata"))?
             .unwrap_or(Value::Null);
+    }
+    if let InputKind::Approval { tool, .. } = &request.kind {
+        if let Some(display) = super::mcp::display(ctx, tool) {
+            value["connector"] = display;
+        }
     }
     Ok(value)
 }

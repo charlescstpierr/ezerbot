@@ -289,6 +289,7 @@ pub fn startup(conn: &Connection) -> Result<(), ApiError> {
         provider: &provider,
         connection: conn,
         cancel: Arc::new(AtomicBool::new(false)),
+        bot_id: None,
     };
     for run in store::runs_with_status(conn, RunStatus::Running)? {
         run_loop::with_run_events(conn, &mut services, &run.run_id, |conn, _| {
@@ -900,6 +901,51 @@ fn create_run(
     launch(ctx, &saved)?;
     Ok(saved)
 }
+/// Settings actions are durable host-authored calls, not model instructions.
+/// They use the exact same engine/forms gate, journal, wake and tool cards.
+pub(crate) fn queue_approved_action(
+    ctx: &super::Context<'_>,
+    name: &str,
+    arguments: Value,
+) -> Result<Value, ApiError> {
+    let conversation = super::forms::principal_conversation(ctx, "")?;
+    let run = Run {
+        run_id: format!("mcp-host-{}", random_id(ctx.connection)?),
+        bot_id: DEFAULT_BOT.id.into(),
+        conversation_id: conversation.clone(),
+        trigger: Trigger::UserMessage {
+            message_id: format!("mcp-settings/{}", random_id(ctx.connection)?),
+            attempt: 0,
+        },
+        kind: RunKind::Chat,
+        status: RunStatus::Queued,
+        task_status: None,
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: now() as i64,
+    };
+    let local = super::Context {
+        bot_id: Some(DEFAULT_BOT.id),
+        conversation_id: Some(&conversation),
+        ..*ctx
+    };
+    let mut services = Services::new(&local)?;
+    run_loop::with_run_events(ctx.connection, &mut services, &run.run_id, |conn, _| {
+        model::start(conn, &run)?;
+        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,"Gestion du connecteur MCP".into()))?])?;
+        model::set_running_at(conn, &run.run_id, now() as i64)?;
+        store::append_event(
+            conn,
+            &run.run_id,
+            RunEventKind::ToolCall,
+            &json!({"call_id":format!("{}-call",run.run_id),"name":name,"arguments":arguments,"response":0}),
+        )?;
+        Ok(())
+    })?;
+    launch(&local, &run)?;
+    Ok(json!({"conversation_id":conversation,"run_id":run.run_id}))
+}
+
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
@@ -1062,6 +1108,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         let _guard = guard;
         let mut services = Services::new(ctx)?;
         services.cancel = cancel;
+        services.bot_id = Some(run.bot_id.clone());
         let gateway = RunGateway {
             path: ctx.db_path,
             provider: ctx.provider,
@@ -1086,6 +1133,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 provider: &provider,
                 connection: &conn,
                 cancel: cancel.clone(),
+                bot_id: Some(store::required(&conn, &id)?.bot_id),
             };
             let gateway = RunGateway {
                 path: &path,
@@ -1206,6 +1254,7 @@ struct Services<'a> {
     provider: &'a Provider,
     connection: &'a Connection,
     cancel: Arc<AtomicBool>,
+    bot_id: Option<String>,
 }
 impl<'a> Services<'a> {
     fn new(ctx: &super::Context<'a>) -> grokbot_engine::contracts::Result<Self> {
@@ -1214,6 +1263,7 @@ impl<'a> Services<'a> {
             provider: ctx.provider,
             connection: ctx.connection,
             cancel: Arc::new(AtomicBool::new(false)),
+            bot_id: ctx.bot_id.map(str::to_owned),
         })
     }
     fn ctx<'b>(&'b self, conn: &'b Connection, run: &'b Run) -> super::Context<'b> {
@@ -1335,7 +1385,18 @@ impl RunServices for Services<'_> {
         })
     }
     fn tools(&self) -> Vec<ToolSpec> {
-        super::tools()
+        let mut tools = super::tools();
+        let ctx = super::Context {
+            connection: self.connection,
+            provider: self.provider,
+            db_path: self.path,
+            now_ms: now(),
+            bot_id: self.bot_id.as_deref(),
+            conversation_id: None,
+            run_id: None,
+        };
+        tools.extend(super::mcp::scoped_tools(&ctx));
+        tools
     }
     fn call_tool(
         &mut self,
@@ -1835,6 +1896,7 @@ impl RunGatewayCall<'_> {
                 provider: self.provider,
                 connection: self.connection,
                 cancel: Arc::new(AtomicBool::new(false)),
+                bot_id: Some(run.bot_id.clone()),
             };
             let reserved = run_loop::with_run_events(
                 self.connection,
@@ -2171,6 +2233,9 @@ impl ModelGateway for ProviderGateway<'_> {
         request: &ModelRequest,
         emit: &mut dyn FnMut(ModelEvent) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
+        if request.model == "mcp-local" {
+            return emit(ModelEvent::Completed);
+        }
         if request.model == "simulated" {
             return crate::gateway::SimulatedGateway.stream(request, emit);
         }
@@ -2412,7 +2477,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"call":event.payload,"outcome":outcome}),
+        json!({"run_id":run_id,"call":event.payload,"outcome":outcome,"connector":super::mcp::display(ctx,event.payload["name"].as_str().unwrap_or(""))}),
         run.started_at.max(0) as u64,
     ))
 }
@@ -2819,10 +2884,18 @@ impl ModelGateway for RunGateway<'_> {
                 provider: self.provider,
                 connection: &conn,
                 cancel: Arc::new(AtomicBool::new(false)),
+                bot_id: Some(run.bot_id.clone()),
             };
             let mut fresh = services.context(&run)?;
             fresh.input.extend(replay(&conn, &run)?);
-            fresh.tools = request.tools.clone();
+            fresh.tools = request
+                .tools
+                .iter()
+                .filter(|tool| {
+                    !tool.name.starts_with("mcp_start_") && !tool.name.starts_with("mcp_remove_")
+                })
+                .cloned()
+                .collect();
             if let Some((_, protocol)) = request.instructions.rsplit_once("\nUse begin_task") {
                 fresh
                     .instructions

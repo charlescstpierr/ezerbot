@@ -1,0 +1,27 @@
+.mcp-section { min-width: 0; }
+.mcp-list { display: grid; gap: 12px; margin: 12px 0; }
+.mcp-server { border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; font-size: 12px; }
+.mcp-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.mcp-heading strong { overflow-wrap: anywhere; }
+.mcp-status { color: var(--muted); font-size: 11px; }
+.mcp-status-connected { color: var(--text); }
+.mcp-server details, .mcp-add { margin: 10px 0; }
+.mcp-server summary, .mcp-add > summary { cursor: pointer; font-size: 12px; }
+.mcp-server pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.mcp-server p { overflow-wrap: anywhere; }
+.mcp-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.mcp-error { color: var(--text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.mcp-actions button, .mcp-env-row button { font-size: 11px; padding: 7px 9px; }
+.mcp-bots { border: 0; padding: 0; margin: 12px 0; display: flex; flex-wrap: wrap; gap: 10px; }
+.mcp-bots legend { color: var(--muted); margin-bottom: 6px; font-size: 11px; }
+.mcp-bots label { display: flex; align-items: center; gap: 6px; flex-direction: row-reverse; }
+.mcp-bots input { accent-color: var(--accent); }
+.mcp-form { display: grid; gap: 12px; padding-top: 12px; min-width: 0; }
+.mcp-form > label { display: grid; gap: 5px; font-size: 12px; }
+.mcp-form input:not([type=checkbox]), .mcp-form textarea { width: 100%; min-width: 0; box-sizing: border-box; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 9px; font: inherit; font-size: 12px; }
+.mcp-form input:focus, .mcp-form textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mcp-form > button { justify-self: start; }
+.mcp-environment { display: grid; gap: 8px; }
+.mcp-env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
+@media (max-width: 850px) { .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; } .mcp-env-row input:first-child { grid-column: 1 / -1; } }

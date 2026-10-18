@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod mcp;
 mod provider;
 
 /// Model gateway implementations are added independently of the HTTP host.

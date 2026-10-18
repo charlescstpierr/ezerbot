@@ -10,7 +10,7 @@ function ActionArguments({ value }) {
 export function Card({ message, busy, onAction }) {
   const input = useHumanInput(message, onAction);
   const { request, pending, act } = input;
-  const [scope, setScope] = useState("subject");
+  const [scope, setScope] = useState(message.payload?.connector ? "global" : "subject");
   const action = request.kind || {};
   const expired = Number.isFinite(action.expires_at) && action.expires_at <= Date.now();
   const disabled = busy || input.busy || !pending || expired;
@@ -41,7 +41,7 @@ export function Card({ message, busy, onAction }) {
             ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
             : review.answer.reason}
         </p>}
-        <p className="text-sm">Outil : <code>{action.tool}</code></p>
+        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />Outil : <code>{request.connector.tool}</code></p> : <p className="text-sm">Outil : <code>{action.tool}</code></p>}
         {request.arguments == null
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
           : <ActionArguments value={request.arguments} />}

@@ -139,7 +139,7 @@
     },
     draft: () => ui.input?.value || "",
     get state() { return state; },
-    api, refresh, notify,
+    api, refresh, notify, createBotMascot, botSummary,
     composerChanged() { updateComposer(); schedulePoll(); },
   };
 
@@ -165,7 +165,7 @@
   function currentBot() { const conversation = currentConversation(); return conversation ? botById(conversation.bot_id) : chosenBot(); }
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
-  function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => message.state === "streaming"); }
+  function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
   function effortName(effort) { return effortNames[effort] || (effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : "Par défaut"); }
 
   function icon(name, className = "icon") {
@@ -231,6 +231,9 @@
   }
 
   async function refresh() {
+    const previous = currentConversation();
+    const groupWasActive = previous?.kind === "group" && Boolean(streamingMessage(previous));
+    const previousTail = previous?.messages.at(-1)?.id;
     state = await api("/api/state");
     for (const conversation of state.conversations) observeSavedConversation(conversation);
     if (!preferencesLoaded) {
@@ -245,7 +248,8 @@
     writePreference("grokbot.selected", selectedId || "");
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     render();
-    if (pinned && streamingMessage()) scrollToLatest();
+    const current = currentConversation();
+    if (pinned && (streamingMessage() || (current?.kind === "group" && current.id === previous?.id && (groupWasActive || current.messages.at(-1)?.id !== previousTail)))) scrollToLatest();
     schedulePoll();
   }
 
@@ -308,17 +312,19 @@
     const pendingMessage = currentConversation()?.messages.find((message) => message.role === "user" && pendingStates.has(message.state));
     const pending = Boolean(pendingMessage);
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
-    const live = Boolean(streamingMessage()) && currentConversation()?.kind !== "group";
+    const group = currentConversation()?.kind === "group";
     const hasAttachments = Boolean(sendExtras().attachments?.length);
     const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
-    ui.send.disabled = live ? false : busy || !connected || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked;
+    const live = Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
+    const noMembers = group && !currentConversation().member_ids?.length;
+    ui.send.disabled = live ? (group && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked;
     ui.send.dataset.mode = live ? "stop" : "send";
-    ui.send.title = live ? "Arrêter la réponse" : "Envoyer le message";
-    ui.send.setAttribute("aria-label", live ? "Arrêter la réponse" : busy ? "Envoi en cours" : "Envoyer le message");
+    ui.send.title = live ? group ? "Arrêter les tours" : "Arrêter la réponse" : "Envoyer le message";
+    ui.send.setAttribute("aria-label", live ? ui.send.title : busy ? "Envoi en cours" : "Envoyer le message");
     ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
     ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong));
-    ui.hint.textContent = pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
+    ui.hint.textContent = noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
@@ -333,7 +339,7 @@
     restoreDraftDocument();
     closeMenu();
     closeSidebar();
-    render();
+    render(true);
     scrollToLatest();
     if (focus) ui.input.focus();
   }
@@ -380,9 +386,9 @@
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
       button.dataset.conversationId = conversation.id;
-      button.title = `${conversation.title} · ${botName(conversation.bot_id)}`;
+      button.title = `${conversation.title} · ${conversation.kind === "group" ? `Groupe : ${groupMembers(conversation).map((b) => b.name).join(", ")}` : botName(conversation.bot_id)}`;
       if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
-      button.append(botAvatar(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
+      button.append(conversation.kind === "group" ? groupAvatars(conversation) : botAvatar(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
       if (conversation.messages.some((message) => message.state === "unknown")) button.append(element("span", "pending-indicator"));
       if (conversation.favorite) button.append(icon("star", "icon favorite-indicator"));
       button.addEventListener("click", () => { if (!busy) selectConversation(conversation.id); });
@@ -398,6 +404,22 @@
     const figure = mascot?.create(false, bot?.shape);
     if (figure) avatar.append(figure);
     return avatar;
+  }
+
+  function botSummary(bot) {
+    if (bot.description) return bot.description;
+    const date = new Date(bot.created_at);
+    return Number.isNaN(date.getTime()) ? "Bot personnel" : `Créé le ${date.toLocaleString("fr-CA", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  }
+  function groupMembers(conversation) { return (conversation.member_ids || []).map(botById).filter(Boolean); }
+  function groupAvatars(conversation) {
+    const stack = element("span", "group-avatar-stack");
+    stack.setAttribute("aria-hidden", "true");
+    const members = groupMembers(conversation);
+    for (const bot of members.slice(0, 3)) stack.append(botAvatar(bot));
+    if (members.length > 3) stack.append(element("span", "group-avatar-more", `+${members.length - 3}`));
+    if (!members.length) stack.append(botAvatar(null));
+    return stack;
   }
 
   function renderBots() {
@@ -436,7 +458,9 @@
     add.append(icon("plus"), element("span", "", "Nouveau bot"));
     add.addEventListener("click", () => openBotDialog(null));
     $("bot-chips").replaceChildren(...chips, add);
-    $("welcome-description").textContent = chosen?.description || defaultWelcome;
+    $("welcome-description").textContent = currentConversation()?.kind === "group"
+      ? "Un fil partagé pour croiser vos idées. Sans mention, le coordinateur répond."
+      : chosen?.description || defaultWelcome;
 
     $("bot-list").replaceChildren(...liveBots().map((bot) => {
       const row = element("div", "bot-row");
@@ -532,7 +556,7 @@
       upsertBot({ ...bot, deleted: true });
       $("bot-delete-dialog").close();
       $("bot-dialog").close();
-      render();
+      await refresh(); // Memberships and coordinators changed with the tombstone.
       notify(`${bot.name} a été supprimé.`);
     } catch (error) { notify(error.message); }
     finally { $("confirm-bot-delete").disabled = false; }
@@ -566,8 +590,12 @@
     },
   };
 
-  function render() {
+  function render(followGroup = false) {
     const conversation = currentConversation();
+    // React commits asynchronously: a frame callback alone can run before the
+    // admitted turns/cards exist, making the next poll wrongly think we scrolled up.
+    const follow = conversation?.kind === "group" && (followGroup || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
+    const onLayout = follow ? () => { if (currentConversation()?.id === conversation.id) ui.scroll.scrollTop = ui.scroll.scrollHeight; } : undefined;
     const hasMessages = Boolean(conversation?.messages.length);
     const name = state.account.name || "Espace personnel";
     $("account-name").textContent = name;
@@ -575,15 +603,21 @@
     ui.title.textContent = conversation?.title || "Nouvelle conversation";
     const bot = currentBot();
     const label = $("workspace-label");
-    label.textContent = conversation ? botName(conversation.bot_id) : bot?.name || "Espace personnel";
-    // Sans conversation, ou pour un bot supprimé, le nom reste un simple texte.
-    label.disabled = !conversation || !bot || bot.deleted;
+    label.textContent = conversation?.kind === "group" ? "Groupe" : conversation ? botName(conversation.bot_id) : bot?.name || "Espace personnel";
+    // Le groupe ne désigne pas la personnalité de son seul coordinateur.
+    label.disabled = !conversation || conversation.kind === "group" || !bot || bot.deleted;
     if (label.disabled) label.removeAttribute("title");
     else label.title = "Modifier la personnalité";
     if (bot) document.querySelector(".main-panel").dataset.botColor = bot.color;
     else delete document.querySelector(".main-panel").dataset.botColor;
     const hero = document.querySelector("[data-mascot=hero]");
     hero.setAttribute("aria-label", `Faire sourire ${bot?.name || "Ezerbot"}`);
+    hero.hidden = conversation?.kind === "group";
+    hero.parentElement.querySelector(".group-hero")?.remove();
+    if (hero.hidden) {
+      const stack = groupAvatars(conversation); stack.classList.add("group-hero");
+      hero.parentElement.append(stack);
+    }
     // La marque et la barre latérale gardent le galet : c'est l'identité de l'app.
     for (const node of document.querySelectorAll("[data-mascot=hero] .mascot, [data-mascot=composer] .mascot")) mascot.setShape(node, bot?.shape);
     thread.createMascot = threadMascot(bot?.shape || "galet");
@@ -592,7 +626,7 @@
     ui.welcome.hidden = hasMessages;
     document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", onLayout, ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -730,10 +764,12 @@
   async function generation(path, messageId) {
     const conversation = currentConversation();
     if (!conversation) return;
+    const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     try {
       const response = await api(path, { conversation_id: conversation.id, message_id: messageId });
       upsertConversation(response.conversation);
       render();
+      if (conversation.kind === "group" && currentConversation()?.id === conversation.id && pinned) scrollToLatest();
       schedulePoll();
     } catch (error) { notify(error.message); }
   }
@@ -751,7 +787,7 @@
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
-    if (live && currentConversation()?.kind !== "group") { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
+    if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const submittedDraft = ui.input.value;
     const submittedDocument = ui.input.document;
@@ -790,7 +826,7 @@
       conversation.messages.push({ ...extras, id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
-      render();
+      render(true);
       scrollToLatest();
       const response = await api("/api/send", {
         ...extras, conversation_id: conversation.id, message_id: messageId, body, simulate_loss: simulateLoss,
@@ -799,7 +835,7 @@
       $("simulate-loss").checked = false;
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((message) => message.id === messageId && ["accepted", "echoed"].includes(message.state));
-      render();
+      render(true);
       scrollToLatest();
       schedulePoll();
     } catch (error) {
@@ -922,6 +958,8 @@
   ui.input = window.GrokbotChat.mountInput($("composer-input"), {
     placeholder: "Qu’avez-vous en tête ?",
     onInput: () => { saveDraft(); updateComposer(); },
+    createMentionAvatar: (bot) => createBotMascot(bot)(),
+    mentionSummary: botSummary,
     getMentionCandidates: () => {
       const conversation = currentConversation();
       const ids = conversation?.member_ids || [chosenBot()?.id];
@@ -940,7 +978,7 @@
         upsertConversation(response.conversation); render(); return true;
       } catch (error) { notify(error.message); return false; }
     },
-    onSubmit: () => { if (!ui.send.disabled && (!streamingMessage() || currentConversation()?.kind === "group")) $("composer-form").requestSubmit(); },
+    onSubmit: () => { if (!ui.send.disabled && ui.send.dataset.mode !== "stop") $("composer-form").requestSubmit(); },
     onFiles: composerFiles,
   });
   $("composer-form").addEventListener("dragover", (event) => {

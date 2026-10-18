@@ -11,13 +11,34 @@ export const Mention = Node.create({
 
 export function readMentions(editor) {
   const mentions = [];
-  editor.state.doc.descendants((node) => {
-    if (node.type.name === "botMention") mentions.push({ id: node.attrs.id, label: node.attrs.label });
+  const text = editor.getText({ blockSeparator: "\n" });
+  const leading = text.length - text.trimStart().length;
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name === "botMention") {
+      const prefix = editor.state.doc.textBetween(0, position, "\n", (leaf) => leaf.type.name === "botMention" ? `@${leaf.attrs.label}` : leaf.type.name === "hardBreak" ? "\n" : "");
+      mentions.push({ id: node.attrs.id, label: node.attrs.label, offset: prefix.length - leading });
+    }
   });
   return mentions;
 }
 
-export function mentionMenu(element, getCandidates, addMember) {
+// Offsets are durable document metadata, never a name-based recipient lookup.
+// Legacy plain mentions stay plain rather than guessing which @name was atomic.
+export function splitMentionText(body = "", mentions = []) {
+  const parts = [];
+  let from = 0;
+  for (const mention of mentions) {
+    const token = `@${mention.label}`;
+    if (!Number.isInteger(mention.offset) || mention.offset < from || body.slice(mention.offset, mention.offset + token.length) !== token) continue;
+    if (mention.offset > from) parts.push({ text: body.slice(from, mention.offset) });
+    parts.push({ text: token, mention });
+    from = mention.offset + token.length;
+  }
+  if (from < body.length) parts.push({ text: body.slice(from) });
+  return parts;
+}
+
+export function mentionMenu(element, getCandidates, addMember, createAvatar, summary) {
   const menu = document.createElement("div");
   menu.className = "gb-mention-menu";
   menu.setAttribute("role", "listbox");
@@ -51,16 +72,27 @@ export function mentionMenu(element, getCandidates, addMember) {
     choices = getCandidates().filter((c) => c.name.toLocaleLowerCase("fr").includes(query) || c.id.toLocaleLowerCase("fr").includes(query)).slice(0, 12);
     current = Math.min(current, Math.max(0, choices.length - 1));
     menu.replaceChildren();
+    let outside = false;
     choices.forEach((candidate, index) => {
+      if (candidate.outside && !outside) {
+        const separator = document.createElement("div"); separator.className = "gb-mention-separator"; separator.setAttribute("role", "presentation"); separator.textContent = "Ajouter au groupe"; menu.append(separator); outside = true;
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(current === index));
+      const everyone = candidate.id === "@everyone";
+      button.title = everyone ? "Tous les membres actifs à l’envoi" : `Bot : ${candidate.id}`;
+      button.setAttribute("aria-label", everyone ? "@everyone, tous les membres actifs" : `${candidate.outside ? "Ajouter et mentionner" : "Mentionner"} ${candidate.name} (${candidate.id})`);
+      const avatar = document.createElement("span"); avatar.className = "gb-mention-avatar"; avatar.setAttribute("aria-hidden", "true");
+      if (everyone) avatar.textContent = "@";
+      else { const figure = createAvatar?.(candidate); if (figure) avatar.append(figure); }
+      const copy = document.createElement("span"); copy.className = "gb-mention-copy";
       const name = document.createElement("strong");
-      name.textContent = candidate.outside ? `Ajouter ${candidate.name} et mentionner` : candidate.name;
-      const id = document.createElement("small");
-      id.textContent = candidate.id === "@everyone" ? "Tous les membres actifs à l’envoi" : candidate.id;
-      button.append(name, id);
+      name.textContent = everyone ? "@everyone" : candidate.outside ? `Ajouter ${candidate.name} et mentionner` : candidate.name;
+      const description = document.createElement("small");
+      description.textContent = everyone ? "Tous les membres actifs à l’envoi" : summary?.(candidate) || candidate.description || "Bot personnel";
+      copy.append(name, description); button.append(avatar, copy);
       button.onmousedown = (event) => event.preventDefault();
       button.onclick = () => choose(editor, candidate);
       menu.append(button);

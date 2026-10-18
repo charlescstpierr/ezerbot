@@ -1302,12 +1302,14 @@ fn bot_creation_is_idempotent_on_its_client_id() {
     let first = post(&mut app, "/api/bots", request.clone()).unwrap();
     let replay = post(&mut app, "/api/bots", request.clone()).unwrap();
     assert_eq!(first, replay);
+    assert!(first["bot"]["created_at"].as_u64().unwrap() > 0);
     assert_eq!(
         first["bot"],
         json!({
             "id": "bot-1", "name": "Juriste", "color": "violet", "shape": "galet",
             "description": "Relit vos contrats.", "instructions": "Cite toujours l'article.",
             "is_default": false, "template": null, "customized": false, "deleted": false,
+            "created_at": first["bot"]["created_at"],
         })
     );
     assert_eq!(bot_ids(&mut app), ["grokbot", "bot-1"]);
@@ -1873,6 +1875,7 @@ fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
     let default = super::Bot {
         id: "grokbot".into(),
         name: "Ezerbot".into(),
+        created_at: 0,
         color: "citron".into(),
         shape: "galet".into(),
         description: String::new(),

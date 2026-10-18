@@ -5,6 +5,7 @@ import { Thread } from "./Thread.jsx";
 import { editorOptions, readText, writeText } from "./editor.js";
 import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from "./attachment-presentation.js";
 import { mentionMenu, readMentions } from "./mentions.js";
+import { pendingReply } from "./thread-order.js";
 
 const roots = new WeakMap();
 
@@ -13,14 +14,15 @@ window.GrokbotChat = {
   formatAttachmentSize,
   documentBudgetMessage,
   createDocumentIcon: () => createDocumentIcon(document),
+  isPendingReply: pendingReply,
   renderThread(container, props) {
     if (!roots.has(container)) roots.set(container, createRoot(container));
     roots.get(container).render(<Thread {...props} />);
   },
 
   // Returns a stand-in for the former <textarea>.
-  mountInput(element, { placeholder, onInput, onSubmit, onFiles, getMentionCandidates = () => [], onAddMember = async () => false }) {
-    const menu = mentionMenu(element, getMentionCandidates, onAddMember);
+  mountInput(element, { placeholder, onInput, onSubmit, onFiles, getMentionCandidates = () => [], onAddMember = async () => false, createMentionAvatar, mentionSummary }) {
+    const menu = mentionMenu(element, getMentionCandidates, onAddMember, createMentionAvatar, mentionSummary);
     const options = editorOptions({ placeholder, onSubmit });
     const editor = new Editor({
       element, ...options, onUpdate: ({ editor }) => { onInput(); menu.update(editor); },

@@ -1,9 +1,26 @@
 const chatKinds = new Set([undefined, null, "message", "submission", "reply"]);
 
+// The model can finish before the durable scheduler admits a return or appends
+// its terminal notice. Poll until that group lifecycle settles as well.
+export function pendingReply(message, group = false) {
+  return message.state === "streaming" || (group && ["queued", "running"].includes(message.payload?.turn_status));
+}
+
 // The shell keeps a single reply for transport/retry. Render its text fragments
 // around the host's call anchors instead of moving all text ahead of the tools.
 // Leave unrelated/routed cards and user turns in their durable transcript order.
 export function orderThread(messages) {
+  // A group's placeholders are admitted before their calls arrive. Keep each
+  // run's cards and fragments together at that durable turn anchor, otherwise
+  // a later queued peer/return reply can overtake its author's tool-first turn.
+  const runs = new Set(messages.filter((m) => chatKinds.has(m.kind) && m.payload?.turn_id && m.payload?.run_id).map((m) => m.payload.run_id));
+  const owner = (m) => !chatKinds.has(m.kind) && (runs.has(m.payload?.run_id) ? m.payload.run_id : runs.has(m.payload?.parent_run_id) ? m.payload.parent_run_id : null);
+  const cards = new Map();
+  for (const message of messages) {
+    const run = owner(message);
+    if (run) cards.set(run, [...(cards.get(run) || []), message]);
+  }
+  messages = messages.flatMap((message) => owner(message) ? [] : [message, ...(message.payload?.turn_id ? cards.get(message.payload.run_id) || [] : [])]);
   const before = new Map();
   const after = new Map();
   const replies = new Set();

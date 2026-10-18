@@ -195,7 +195,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             if app.bot(&input.id)?.is_none() {
                 return Err(ApiError::new(404, "Bot introuvable."));
             }
-            app.connection.execute("UPDATE wrapper_bots SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
+            super::multibot::delete_bot(app, &input.id)?;
             Ok(json!({"ok": true}))
         }
         "/api/proposals/accept" => {
@@ -345,7 +345,10 @@ impl App {
         })?;
         for row in rows {
             let (ordinal, conversation_id, kind, id, created_at) = row?;
-            if hidden.contains(&conversation_id) {
+            if hidden.contains(&conversation_id)
+                || (kind == "group_notice"
+                    && !super::multibot::notice_visible(&self.connection, &id)?)
+            {
                 continue;
             }
             let Some(conversation) = conversations.get_mut(&conversation_id) else {

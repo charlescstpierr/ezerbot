@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -137,6 +137,11 @@ fn call(id: &str, bot: &str) -> Vec<Value> {
 fn migrate_single_add_remove_preserves_history_and_authors_after_restart() {
     let mut f = Fixture::new(false);
     f.bot("b");
+    // A display name cannot turn a membership event into a legacy limit card.
+    f.post(
+        "/api/bots/update",
+        json!({"id":"b","name":"Limite de chaîne atteinte"}),
+    );
     let c = f.group(&["grokbot"]);
     let old = f.send(&c, "ancien", json!([]))["conversation"].clone();
     assert_eq!(old["messages"][1]["id"], "reply-ancien");
@@ -151,7 +156,23 @@ fn migrate_single_add_remove_preserves_history_and_authors_after_restart() {
     f.restart();
     let grouped = f.conversation(&c);
     assert_eq!(grouped["kind"], "group");
-    assert_eq!(grouped["messages"], old["messages"]);
+    assert_eq!(
+        &grouped["messages"].as_array().unwrap()[..2],
+        old["messages"].as_array().unwrap()
+    );
+    assert_eq!(grouped["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(grouped["messages"][2]["kind"], "group_event");
+    assert_eq!(
+        f.db()
+            .query_row("SELECT COUNT(*) FROM wrapper_group_limits", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(grouped["messages"][2]["body"]
+        .as_str()
+        .unwrap()
+        .contains("a rejoint le fil"));
     assert_eq!(grouped["member_ids"], json!(["grokbot", "b"]));
     f.send(&c, "coordonner", json!([]));
     f.drain();
@@ -856,6 +877,21 @@ fn per_bot_and_total_chain_budgets_are_durable_and_visible() {
         if index == 3 {
             assert!(matches!(result, ToolOutcome::Failed { .. }));
         }
+        if index == 2 {
+            // Merely reserving a bot's third slot is not a refused delivery.
+            assert_eq!(
+                tx.query_row("SELECT COUNT(*) FROM wrapper_group_limits", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            tx.query_row("SELECT COUNT(*) FROM wrapper_group_notices", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
     let count: i64 = tx
         .query_row(
@@ -883,4 +919,511 @@ fn per_bot_and_total_chain_budgets_are_durable_and_visible() {
     let text = f.conversation(&c).to_string();
     assert!(text.contains("12 tours"));
     assert!(text.contains("3 tours par bot"));
+    let current = f.conversation(&c);
+    let terminal = current["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(terminal["kind"], "group_notice");
+    assert_eq!(terminal["payload"]["terminal"], true);
+    assert_eq!(
+        current["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["kind"] == "group_notice")
+            .count(),
+        1
+    );
+    assert!(db.query_row("SELECT (SELECT ordinal FROM wrapper_messages WHERE message_id=?1) > (SELECT MAX(m.ordinal) FROM wrapper_messages m JOIN wrapper_group_turns t ON t.id=m.message_id WHERE t.root_id='limite' AND m.kind='group_reply')",[terminal["id"].as_str().unwrap()],|r|r.get::<_,bool>(0)).unwrap());
+    // Upgrade a prototype database containing two early limit cards. Keep their
+    // IDs durably, but project only one corrected card after the final reply.
+    let content_ids = current["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["kind"] != "group_notice")
+        .map(|m| m["id"].clone())
+        .collect::<Vec<_>>();
+    db.execute("DELETE FROM wrapper_messages WHERE kind='group_notice'", [])
+        .unwrap();
+    db.execute("DELETE FROM wrapper_group_notices", []).unwrap();
+    db.execute("DELETE FROM wrapper_group_limits", []).unwrap();
+    db.execute("UPDATE wrapper_messages SET ordinal=ordinal*10+10000", [])
+        .unwrap();
+    for (id, body, ordinal) in [
+        (
+            "prototype-a",
+            "Limite de chaîne atteinte : 3 tours par bot.",
+            10025,
+        ),
+        (
+            "prototype-b",
+            "Limite de chaîne atteinte : 12 tours.",
+            10035,
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO wrapper_group_notices VALUES (?1,?2,'limite',?3)",
+            rusqlite::params![id, c, body],
+        )
+        .unwrap();
+        grokbot_wrapper::features::conversations::append_entry(&db, &c, "group_notice", id, 0)
+            .unwrap();
+        db.execute(
+            "UPDATE wrapper_messages SET ordinal=?2 WHERE message_id=?1",
+            rusqlite::params![id, ordinal],
+        )
+        .unwrap();
+    }
+    f.restart();
+    f.drain();
+    let migrated = f.conversation(&c);
+    let messages = migrated["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m["kind"] != "group_notice")
+            .map(|m| m["id"].clone())
+            .collect::<Vec<_>>(),
+        content_ids
+    );
+    assert_eq!(messages.last().unwrap()["id"], "prototype-a");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m["kind"] == "group_notice")
+            .count(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM wrapper_group_notices", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    f.restart();
+    f.drain();
+    assert_eq!(
+        f.conversation(&c)["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["id"],
+        "prototype-a"
+    );
+}
+
+#[test]
+fn connected_queued_turn_waits_for_delayed_catalogue_after_restart() {
+    restart_with_delayed_catalogue(false);
+}
+
+#[test]
+fn connected_already_created_run_waits_for_delayed_catalogue_after_restart() {
+    restart_with_delayed_catalogue(true);
+}
+
+fn restart_with_delayed_catalogue(already_created: bool) {
+    let mut f = Fixture::new(true);
+    f.bot("a");
+    f.bot("b");
+    let c = f.group(&["a", "b"]);
+    let response_gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().response_gate = Some((1, response_gate.clone()));
+    f.send(&c, "ancienne-requete", json!([mention("a")]));
+    wait("requête distante en vol", || {
+        f.server.seen.lock().unwrap().bodies.len() == 1
+    });
+    f.send(&c, "reprise-unique", json!([mention("b")]));
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT status FROM wrapper_group_turns WHERE root_id='reprise-unique'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "queued"
+    );
+    // A consistent crash image avoids keeping the old provider's worker alive
+    // on the restarted database (which would not happen after a real process kill).
+    let recovered = f.path.with_file_name("recovered.sqlite");
+    f.db()
+        .execute("VACUUM INTO ?1", [recovered.to_str().unwrap()])
+        .unwrap();
+    std::fs::copy(
+        f.path.with_extension("chatgpt-auth.json"),
+        recovered.with_extension("chatgpt-auth.json"),
+    )
+    .unwrap();
+    f.post(
+        "/api/stop",
+        json!({"conversation_id":c,"message_id":"groupe"}),
+    );
+    response_gate.store(true, Ordering::SeqCst);
+    if already_created {
+        let mut db = Connection::open(&recovered).unwrap();
+        let tx = db.transaction().unwrap();
+        tx.execute(
+            "UPDATE engine_runs SET status='interrupted' WHERE status='running'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE wrapper_group_turns SET status='failed' WHERE root_id='ancienne-requete'",
+            [],
+        )
+        .unwrap();
+        let (turn, prompt): (String, String) = tx
+            .query_row(
+                "SELECT id,prompt FROM wrapper_group_turns WHERE root_id='reprise-unique'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let run = model::Run {
+            run_id: format!("group-{turn}"),
+            bot_id: "b".into(),
+            conversation_id: c.clone(),
+            trigger: Trigger::UserMessage {
+                message_id: format!("{c}/{turn}"),
+                attempt: 0,
+            },
+            kind: RunKind::Chat,
+            status: RunStatus::Queued,
+            task_status: None,
+            turn_end: None,
+            budgets: RunBudgets::default(),
+            started_at: 0,
+        };
+        model::start(&tx, &run).unwrap();
+        let input = HistoryItem {
+            entry_id: turn.clone(),
+            role: Role::User,
+            text: prompt,
+            images: vec![],
+            tool_items: vec![],
+        };
+        tx.execute(
+            "INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,1,'')",
+            rusqlite::params![run.run_id, serde_json::to_string(&input).unwrap()],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE wrapper_group_turns SET status='running',run_id=?2,snapshot='[]' WHERE id=?1",
+            rusqlite::params![turn, run.run_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    let models_gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().models_gate = Some(models_gate.clone());
+    f.path = recovered;
+    f.provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    assert_eq!(f.provider.status()["models_ready"], false);
+    wait("catalogue retenu", || {
+        f.server.seen.lock().unwrap().model_requests == 2
+    });
+    for _ in 0..3 {
+        f.app.tick(0);
+    }
+    let pending = f.conversation(&c)["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["payload"]["root_id"] == "reprise-unique")
+        .unwrap()
+        .clone();
+    assert_eq!(pending["payload"]["turn_status"], "queued");
+    assert_ne!(pending["state"], "failed");
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), 1);
+    models_gate.store(true, Ordering::SeqCst);
+    f.drain();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT status FROM wrapper_group_turns WHERE root_id='reprise-unique'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "completed"
+    );
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.bodies
+            .iter()
+            .filter(|b| b.to_string().contains("reprise-unique"))
+            .count(),
+        1
+    );
+    assert_eq!(seen.bodies.len(), 2); // uncertain old request was never replayed
+}
+
+#[test]
+fn refused_limit_is_published_once_after_all_real_calls_and_replies() {
+    let mut f = Fixture::new(true);
+    f.bot("a");
+    f.bot("b");
+    f.post("/api/bots/update", json!({"id":"a","name":"Aurore"}));
+    f.post("/api/bots/update", json!({"id":"b","name":"Boréal"}));
+    let c = f.group(&["a", "b"]);
+    for (index, bot) in ["b", "a", "b", "b", "a", "a"].into_iter().enumerate() {
+        f.script(call(&format!("chaine-{index}"), bot));
+        f.script(text("Tour terminé."));
+    }
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().response_gate = Some((8, gate.clone()));
+    f.send(&c, "chaine", json!([mention("a")]));
+    wait("refus avec deux tours encore en attente", || {
+        f.app.tick(0);
+        f.server.seen.lock().unwrap().bodies.len() == 8
+    });
+    assert!(f
+        .db()
+        .query_row(
+            "SELECT COUNT(*)>0 FROM wrapper_group_limits WHERE root_id='chaine' AND published=0",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(f
+        .db()
+        .query_row(
+            "SELECT COUNT(*)>0 FROM wrapper_group_turns WHERE root_id='chaine' AND status='queued'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(!f.conversation(&c)["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["kind"] == "group_notice"));
+    gate.store(true, Ordering::SeqCst);
+    f.drain();
+    let current = f.conversation(&c);
+    let terminal = current["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(terminal["kind"], "group_notice");
+    assert!(terminal["body"]
+        .as_str()
+        .unwrap()
+        .contains("Aurore, Boréal"));
+    assert!(f.db().query_row("SELECT (SELECT ordinal FROM wrapper_messages WHERE message_id=?1) > (SELECT MAX(ordinal) FROM wrapper_messages WHERE conversation_id=?2 AND kind<>'group_notice')",rusqlite::params![terminal["id"].as_str().unwrap(),c],|r|r.get::<_,bool>(0)).unwrap());
+    f.restart();
+    f.drain();
+    assert_eq!(
+        f.conversation(&c)["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["kind"] == "group_notice")
+            .count(),
+        1
+    );
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), 12);
+}
+
+#[test]
+fn deleting_members_excludes_them_from_everyone_and_replaces_the_coordinator() {
+    let mut f = Fixture::new(false);
+    for bot in ["a", "b", "c"] {
+        f.bot(bot);
+    }
+    let c = f.group(&["a", "b", "c"]);
+    f.send(&c, "historique", json!([mention("a")]));
+    f.drain();
+    f.post("/api/bots/delete", json!({"id":"c"}));
+    f.post("/api/bots/delete", json!({"id":"c"}));
+    f.send(
+        &c,
+        "tous-vivants",
+        json!([{"id":"@everyone","label":"everyone"}]),
+    );
+    f.drain();
+    assert_eq!(f.db().query_row("SELECT COUNT(*) FROM wrapper_group_turns WHERE root_id='tous-vivants' AND bot_id='c'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    f.post("/api/bots/delete", json!({"id":"a"}));
+    f.restart();
+    assert_eq!(f.conversation(&c)["bot_id"], "b");
+    assert_eq!(f.conversation(&c)["member_ids"], json!(["b"]));
+    assert!(f.conversation(&c)["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["payload"]["bot_id"] == "a"));
+    f.send(&c, "repli", json!([]));
+    f.drain();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT bot_id FROM wrapper_group_turns WHERE root_id='repli'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "b"
+    );
+    f.post("/api/bots/delete", json!({"id":"b"}));
+    assert_eq!(f.conversation(&c)["member_ids"], json!([]));
+    assert_eq!(
+        f.bad(
+            "/api/send",
+            json!({"conversation_id":c,"message_id":"sans-membre","body":"Bonjour"})
+        ),
+        409
+    );
+    f.post(
+        "/api/conversations/members/add",
+        json!({"conversation_id":c,"bot_id":"grokbot","command_id":"remplacer"}),
+    );
+    assert_eq!(f.conversation(&c)["bot_id"], "grokbot");
+    f.send(&c, "reprise", json!([]));
+    f.drain();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT bot_id FROM wrapper_group_turns WHERE root_id='reprise'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "grokbot"
+    );
+}
+
+#[test]
+fn migration_retires_previously_deleted_group_coordinators() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    let c = f.group(&["a", "b"]);
+    f.db()
+        .execute("UPDATE wrapper_bots SET deleted=1 WHERE id='a'", [])
+        .unwrap();
+    f.restart();
+    assert_eq!(f.conversation(&c)["member_ids"], json!(["b"]));
+    assert_eq!(f.conversation(&c)["bot_id"], "b");
+    f.send(
+        &c,
+        "migration",
+        json!([{"id":"@everyone","label":"everyone"}]),
+    );
+    f.drain();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE root_id='migration' AND bot_id='a'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn mention_offsets_are_validated_and_survive_reload_without_name_matching() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    let c = f.group(&["a", "b"]);
+    let body = "😀 @Même nom tapé, puis @Même nom choisi";
+    let offset = body[..body.rfind("@Même nom").unwrap()]
+        .encode_utf16()
+        .count();
+    let mention = json!({"id":"b","label":"Même nom","offset":offset});
+    let input = json!({"conversation_id":c,"message_id":"puce","body":body,"mentions":[mention]});
+    f.post("/api/send", input.clone());
+    f.drain();
+    f.restart();
+    f.post("/api/send", input);
+    f.drain();
+    let current = f.conversation(&c);
+    assert_eq!(current["messages"][0]["body"], body);
+    assert_eq!(
+        current["messages"][0]["payload"]["mentions"][0]["offset"],
+        offset
+    );
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE root_id='puce'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    for mentions in [
+        json!([{"id":"a","label":"Même nom","offset":1}]),
+        json!([mention.clone(), mention]),
+    ] {
+        assert_eq!(f.bad("/api/send",json!({"conversation_id":c,"message_id":"position-invalide","body":body,"mentions":mentions})),400);
+    }
+}
+
+#[test]
+fn first_completed_group_turn_generates_one_title_from_shared_visible_context() {
+    let mut f = Fixture::new(true);
+    f.bot("a");
+    f.bot("b");
+    let c = f.post("/api/conversations", json!({"bot_ids":["a","b"]}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.script(text("Bonjour au groupe."));
+    f.script(text("Conversation de groupe"));
+    f.send(&c, "titre", json!([mention("a")]));
+    wait("titre du groupe", || {
+        f.app.tick(0);
+        f.conversation(&c)["title"] == "Conversation de groupe"
+    });
+    f.drain();
+    f.send(&c, "suite", json!([mention("b")]));
+    f.drain();
+    wait("fin de titrage", || f.provider.status()["titling"] == false);
+    let seen = f.server.seen.lock().unwrap();
+    let titles = seen
+        .bodies
+        .iter()
+        .filter(|b| {
+            b["instructions"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("titre")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(titles.len(), 1);
+    assert!(titles[0].to_string().contains("Bonjour au groupe"));
+    assert!(!titles[0].to_string().contains("secret-prive"));
+}
+
+#[test]
+fn a_failed_initial_group_turn_does_not_prevent_the_first_completed_title() {
+    let mut f = Fixture::new(true);
+    f.bot("a");
+    f.bot("b");
+    let c = f.post("/api/conversations", json!({"bot_ids":["a","b"]}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::json(
+            500,
+            json!({"error":{"message":"Indisponible"}}),
+        ));
+    f.send(&c, "echec-initial", json!([mention("a")]));
+    f.drain();
+    f.script(text("La discussion peut reprendre."));
+    f.script(text("Un nouveau départ"));
+    f.send(&c, "premier-succes", json!([mention("b")]));
+    wait("premier titre après échec", || {
+        f.app.tick(0);
+        f.conversation(&c)["title"] == "Un nouveau départ"
+    });
+    f.drain();
+    wait("fin du titrage", || f.provider.status()["titling"] == false);
 }

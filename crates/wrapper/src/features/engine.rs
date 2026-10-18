@@ -365,6 +365,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 &input.conversation_id,
                 &input.message_id,
                 &input.mentions,
+                text,
                 app.provider.connected(),
             )?;
             super::conversations::append_entry(
@@ -763,7 +764,7 @@ impl App {
         Ok(())
     }
 }
-fn resolve_model(
+pub(crate) fn resolve_model(
     conn: &Connection,
     provider: &Provider,
 ) -> grokbot_engine::contracts::Result<Option<ResolvedModel>> {
@@ -1016,6 +1017,9 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         )?;
         if model.is_empty() {
             let Some((model, effort, tier)) = resolve_model(ctx.connection, ctx.provider)? else {
+                if super::multibot::managed(ctx.connection, &run.run_id) {
+                    return Ok(());
+                }
                 ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='other' WHERE run_id=?1",params![run.run_id,"Les modèles de votre compte ChatGPT ne sont pas encore chargés. Relancez la réponse dans un instant."])?;
                 let mut services = Services::new(ctx)?;
                 fail_host(ctx.connection, &mut services, &run.run_id)?;
@@ -2409,7 +2413,7 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
             .map(|contract| format!("{BASE_INSTRUCTIONS}\n\n{contract}"))
             .unwrap_or_else(|| BASE_INSTRUCTIONS.into()),
     )];
-    if let Ok(Some(bot))=ctx.connection.query_row("SELECT id,name,color,description,instructions,template,customized,deleted,shape FROM wrapper_bots WHERE account_id=?1 AND id=?2",params![ACCOUNT,request.bot_id],bot_from_row).optional(){
+    if let Ok(Some(bot))=ctx.connection.query_row("SELECT id,name,color,description,instructions,template,customized,deleted,shape,created_at FROM wrapper_bots WHERE account_id=?1 AND id=?2",params![ACCOUNT,request.bot_id],bot_from_row).optional(){
         let mut identity=format!("Tu t'appelles {}.",bot.name);
         if !bot.description.is_empty(){identity.push_str(&format!("\n\nTon rôle, tel que les autres le voient : {}",bot.description));}
         blocks.push(block(ContextSource::BotIdentity,super::priority::IDENTITY,identity));
@@ -2559,8 +2563,15 @@ fn retitle(
     path: &Path,
 ) -> grokbot_engine::contracts::Result<()> {
     let run = store::required(conn, id)?;
-    if super::multibot::managed(conn, id) {
-        return Ok(());
+    let group = super::multibot::managed(conn, id);
+    if group {
+        // One title from the first completed group turn, not twelve competing
+        // title requests. Existing direct conversations keep their own policy.
+        let first: Option<String> = conn.query_row("SELECT t.run_id FROM wrapper_group_turns t JOIN engine_runs r ON r.run_id=t.run_id WHERE t.account_id=?1 AND t.conversation_id=?2 AND r.status='finished' ORDER BY t.ordinal LIMIT 1",params![ACCOUNT,run.conversation_id],|r|r.get(0)).optional()?;
+        let new_group: bool = conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM wrapper_messages m WHERE m.account_id=?1 AND m.conversation_id=?2 AND m.kind='submission' AND NOT EXISTS(SELECT 1 FROM wrapper_group_inputs i WHERE i.account_id=m.account_id AND i.conversation_id=m.conversation_id AND i.message_id=m.message_id AND i.group_mode=1))",params![ACCOUNT,run.conversation_id],|r|r.get(0))?;
+        if first.as_deref() != Some(id) || !new_group {
+            return Ok(());
+        }
     }
     if run.status != RunStatus::Finished || cancel.load(Ordering::SeqCst) {
         return Ok(());
@@ -2569,9 +2580,13 @@ fn retitle(
         return Ok(());
     };
     let current = run_input(conn, id)?;
-    let (history, _) = history(conn, &run, &current)?;
+    let history = if group {
+        super::multibot::snapshot(conn, id)?.unwrap_or_default()
+    } else {
+        history(conn, &run, &current)?.0
+    };
     let turns = history.iter().filter(|i| i.role == Role::User).count() + 1;
-    if !matches!(turns, 1 | 3) {
+    if !group && !matches!(turns, 1 | 3) {
         return Ok(());
     }
     let automatic:bool=conn.query_row("SELECT title_customized=0 AND deleted=0 FROM wrapper_conversations WHERE account_id=?1 AND id=?2",params![ACCOUNT,run.conversation_id],|r|r.get(0))?;

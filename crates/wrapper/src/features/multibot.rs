@@ -10,14 +10,14 @@ use grokbot_engine::{
 
 empty_hooks!(state, context, on_run_event, link_attachments);
 
-const CHAIN_LIMIT_NOTICE: &str = "Limite de chaîne atteinte : 12 tours pour ce message humain. Envoyez un nouveau message pour poursuivre.";
-const BOT_LIMIT_NOTICE: &str = "Limite de chaîne atteinte : 3 tours par bot pour ce message humain. Envoyez un nouveau message pour poursuivre.";
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Mention {
     pub id: String,
     pub label: String,
+    /// UTF-16 offset in the trimmed human body, matching the WebView document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
@@ -43,16 +43,40 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     CREATE TABLE IF NOT EXISTS wrapper_group_notices (
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, root_id TEXT NOT NULL,
         body TEXT NOT NULL, UNIQUE(conversation_id,root_id,body));
+    CREATE TABLE IF NOT EXISTS wrapper_group_limits (
+        account_id TEXT NOT NULL, conversation_id TEXT NOT NULL, root_id TEXT NOT NULL,
+        notice_id TEXT, published INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(account_id,conversation_id,root_id));
+    -- Fold the prototype's early notices without deleting their historical IDs.
+    INSERT OR IGNORE INTO wrapper_group_limits(account_id,conversation_id,root_id,notice_id)
+        SELECT c.account_id,n.conversation_id,n.root_id,MIN(n.id) FROM wrapper_group_notices n
+        JOIN wrapper_conversations c ON c.id=n.conversation_id
+        JOIN wrapper_messages m ON m.account_id=c.account_id AND m.conversation_id=c.id AND m.message_id=n.id AND m.kind='group_notice'
+        WHERE n.body LIKE 'Limite de chaîne atteinte%' GROUP BY c.account_id,n.conversation_id,n.root_id;
     CREATE INDEX IF NOT EXISTS wrapper_group_queue ON wrapper_group_turns(status,priority,ordinal);
     CREATE INDEX IF NOT EXISTS wrapper_group_chain ON wrapper_group_turns(account_id,conversation_id,root_id,bot_id);
     INSERT OR IGNORE INTO wrapper_members(account_id,conversation_id,bot_id,position)
         SELECT c.account_id,c.id,c.bot_id,0 FROM wrapper_conversations c
         WHERE NOT EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id);")?;
+    // The capability migration dispatcher already owns the transaction.
+    let mut s = conn.prepare("SELECT m.conversation_id,m.bot_id FROM wrapper_members m JOIN wrapper_bots b ON b.account_id=m.account_id AND b.id=m.bot_id JOIN wrapper_conversations c ON c.account_id=m.account_id AND c.id=m.conversation_id WHERE m.account_id=?1 AND m.active=1 AND b.deleted=1 AND c.kind='group'")?;
+    let retired = s
+        .query_map([ACCOUNT], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(s);
+    for (conversation, bot) in retired {
+        conn.execute("UPDATE wrapper_members SET active=0 WHERE account_id=?1 AND conversation_id=?2 AND bot_id=?3",params![ACCOUNT,conversation,bot])?;
+        conn.execute("UPDATE wrapper_group_turns SET status='cancelled' WHERE account_id=?1 AND conversation_id=?2 AND bot_id=?3 AND status IN ('queued','running')",params![ACCOUNT,conversation,bot])?;
+        member_event(conn, &conversation, &bot, "a quitté le fil (bot supprimé)")?;
+        replace_coordinator(conn, &conversation, &bot)?;
+    }
     Ok(())
 }
 
 pub fn members(conn: &Connection, conversation: &str) -> Result<Vec<String>, ApiError> {
-    let mut s = conn.prepare("SELECT bot_id FROM wrapper_members WHERE account_id=?1 AND conversation_id=?2 AND active=1 ORDER BY position,bot_id")?;
+    let mut s = conn.prepare("SELECT m.bot_id FROM wrapper_members m JOIN wrapper_bots b ON b.account_id=m.account_id AND b.id=m.bot_id WHERE m.account_id=?1 AND m.conversation_id=?2 AND m.active=1 AND b.deleted=0 ORDER BY m.position,m.bot_id")?;
     let mut rows = s
         .query_map(params![ACCOUNT, conversation], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<String>>>()?;
@@ -63,7 +87,7 @@ pub fn members(conn: &Connection, conversation: &str) -> Result<Vec<String>, Api
         if uninitialized {
             if let Some(bot) = conn
                 .query_row(
-                    "SELECT bot_id FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
+                    "SELECT c.bot_id FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id WHERE c.account_id=?1 AND c.id=?2 AND b.deleted=0",
                     params![ACCOUNT, conversation],
                     |r| r.get(0),
                 )
@@ -165,7 +189,21 @@ fn member_command(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiEr
                         ));
                     }
                     tx.execute("INSERT INTO wrapper_members(account_id,conversation_id,bot_id,position) VALUES (?1,?2,?3,(SELECT COALESCE(MAX(position),0)+1 FROM wrapper_members WHERE account_id=?1 AND conversation_id=?2)) ON CONFLICT(account_id,conversation_id,bot_id) DO UPDATE SET active=1,position=excluded.position",params![ACCOUNT,input.conversation_id,input.bot_id])?;
-                    tx.execute("UPDATE wrapper_conversations SET kind='group' WHERE account_id=?1 AND id=?2",params![ACCOUNT,input.conversation_id])?;
+                    tx.execute("UPDATE wrapper_conversations SET kind='group',bot_id=CASE WHEN ?3 THEN ?4 ELSE bot_id END WHERE account_id=?1 AND id=?2",params![ACCOUNT,input.conversation_id,active.is_empty(),input.bot_id])?;
+                    member_event(
+                        &tx,
+                        &input.conversation_id,
+                        &input.bot_id,
+                        "a rejoint le fil",
+                    )?;
+                    if active.is_empty() {
+                        member_event(
+                            &tx,
+                            &input.conversation_id,
+                            &input.bot_id,
+                            "coordonne maintenant",
+                        )?;
+                    }
                 }
             }
             "/api/conversations/members/remove" => {
@@ -183,7 +221,13 @@ fn member_command(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiEr
                         &input.conversation_id,
                         Some(&input.bot_id),
                     )?;
-                    tx.execute("UPDATE wrapper_conversations SET bot_id=?3 WHERE account_id=?1 AND id=?2 AND bot_id=?4",params![ACCOUNT,input.conversation_id,active.iter().find(|id|*id!=&input.bot_id).unwrap(),input.bot_id])?;
+                    member_event(
+                        &tx,
+                        &input.conversation_id,
+                        &input.bot_id,
+                        "a quitté le fil",
+                    )?;
+                    replace_coordinator(&tx, &input.conversation_id, &input.bot_id)?;
                 }
             }
             _ => {
@@ -193,10 +237,12 @@ fn member_command(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiEr
                         "Le coordinateur doit être membre du fil.",
                     ));
                 }
-                tx.execute(
-                    "UPDATE wrapper_conversations SET bot_id=?3 WHERE account_id=?1 AND id=?2",
+                if tx.execute(
+                    "UPDATE wrapper_conversations SET bot_id=?3 WHERE account_id=?1 AND id=?2 AND bot_id<>?3",
                     params![ACCOUNT, input.conversation_id, input.bot_id],
-                )?;
+                )? > 0 {
+                    member_event(&tx, &input.conversation_id, &input.bot_id, "coordonne maintenant")?;
+                }
             }
         }
         tx.execute(
@@ -232,8 +278,28 @@ pub fn capture(
     conversation: &str,
     message: &str,
     mentions: &[Mention],
+    body: &str,
     live: bool,
 ) -> Result<(), ApiError> {
+    let utf16 = body.encode_utf16().collect::<Vec<_>>();
+    let mut end = 0;
+    for mention in mentions {
+        if let Some(offset) = mention.offset {
+            let token = format!("@{}", mention.label)
+                .encode_utf16()
+                .collect::<Vec<_>>();
+            let next = offset
+                .checked_add(token.len())
+                .ok_or_else(|| ApiError::new(400, "Position de mention invalide."))?;
+            if offset < end || utf16.get(offset..next) != Some(token.as_slice()) {
+                return Err(ApiError::new(
+                    400,
+                    "La position d’une mention ne correspond pas au message.",
+                ));
+            }
+            end = next;
+        }
+    }
     if mentions.len() > 32 || mentions.iter().any(|m| m.label.len() > 240) {
         return Err(ApiError::new(400, "Trop de mentions ou libellé trop long."));
     }
@@ -271,6 +337,12 @@ pub fn capture(
                 targets.push(id);
             }
         }
+    }
+    if active.is_empty() && is_group(conn, conversation) {
+        return Err(ApiError::new(
+            409,
+            "Ce groupe n’a plus de membre actif. Ajoutez un bot pour poursuivre.",
+        ));
     }
     if targets.is_empty() {
         targets.push(conn.query_row(
@@ -359,26 +431,15 @@ fn admit(
         return Err(ApiError::new(409, "Ce bot n’est plus membre actif du fil."));
     }
     let (total,per_bot):(i64,i64)=conn.query_row("SELECT COUNT(*),COALESCE(SUM(bot_id=?4),0) FROM wrapper_group_turns WHERE account_id=?1 AND conversation_id=?2 AND root_id=?3",params![ACCOUNT,conversation,root,bot],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    let limit = if total >= 12 {
-        Some(CHAIN_LIMIT_NOTICE)
-    } else if per_bot >= 3 {
-        Some(BOT_LIMIT_NOTICE)
-    } else {
-        None
-    };
-    if let Some(body) = limit {
-        notice(conn, conversation, root, body)?;
+    if total >= 12 || per_bot >= 3 {
+        // A refused delivery, not a reservation of the last slot. Publish only
+        // once this root has drained, after its final tool and reply entries.
+        conn.execute("INSERT OR IGNORE INTO wrapper_group_limits(account_id,conversation_id,root_id) VALUES (?1,?2,?3)",params![ACCOUNT,conversation,root])?;
         return Ok(None);
     }
     let id = format!("tour-{}", random(conn)?);
     conn.execute("INSERT INTO wrapper_group_turns(account_id,conversation_id,id,root_id,parent_id,bot_id,cause_id,prompt,priority,status,return_to) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',?10)",params![ACCOUNT,conversation,id,root,parent,bot,cause,prompt,priority,return_to])?;
     super::conversations::append_entry(conn, conversation, "group_reply", &id, now())?;
-    if total + 1 == 12 {
-        notice(conn, conversation, root, CHAIN_LIMIT_NOTICE)?;
-    }
-    if per_bot + 1 == 3 {
-        notice(conn, conversation, root, BOT_LIMIT_NOTICE)?;
-    }
     Ok(Some(id))
 }
 
@@ -642,6 +703,11 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
             )?;
             continue;
         }
+        // The catalogue loads asynchronously after startup. A turn which has
+        // never contacted the provider remains durable and queued until ready.
+        if live && super::engine::resolve_model(conn, ctx.provider)?.is_none() {
+            continue;
+        }
         let local = super::Context {
             connection: conn,
             provider: ctx.provider,
@@ -727,6 +793,121 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
             .map_err(|_| ApiError::new(500, "Contexte invalide."))?;
         super::engine::start_group_run(&local, &id, &prompt, &snapshot)?;
     }
+    publish_limits(conn)?;
+    Ok(())
+}
+
+// One terminal card per root, including legacy early notices. The transaction
+// rechecks idleness so a concurrent delivery cannot slip behind the final card.
+fn publish_limits(conn: &Connection) -> Result<(), ApiError> {
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_group_limits WHERE account_id=?1 AND published=0)",
+        [ACCOUNT],
+        |r| r.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
+    let tx = super::write_transaction(conn)?;
+    let mut s = tx.prepare("SELECT conversation_id,root_id,notice_id FROM wrapper_group_limits l WHERE account_id=?1 AND published=0 AND NOT EXISTS(SELECT 1 FROM wrapper_group_turns t WHERE t.account_id=l.account_id AND t.conversation_id=l.conversation_id AND t.root_id=l.root_id AND t.status IN ('queued','running'))")?;
+    let roots = s
+        .query_map([ACCOUNT], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(s);
+    for (conversation, root, prior) in roots {
+        let total: i64 = tx.query_row("SELECT COUNT(*) FROM wrapper_group_turns WHERE account_id=?1 AND conversation_id=?2 AND root_id=?3", params![ACCOUNT,conversation,root],|r|r.get(0))?;
+        let mut s = tx.prepare("SELECT b.name FROM wrapper_group_turns t JOIN wrapper_bots b ON b.account_id=t.account_id AND b.id=t.bot_id WHERE t.account_id=?1 AND t.conversation_id=?2 AND t.root_id=?3 GROUP BY t.bot_id HAVING COUNT(*)>=3 ORDER BY MIN(t.ordinal)")?;
+        let names = s
+            .query_map(params![ACCOUNT, conversation, root], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut body = if total >= 12 {
+            "La limite de 12 tours pour ce message humain est atteinte. ".to_owned()
+        } else {
+            String::new()
+        };
+        if !names.is_empty() {
+            body.push_str(&format!(
+                "Limite de 3 tours par bot atteinte pour {}. ",
+                names.join(", ")
+            ));
+        }
+        body.push_str("Cette chaîne est terminée. Envoyez un nouveau message pour poursuivre.");
+        let id = prior.unwrap_or(format!("limite-{}", random(&tx)?));
+        tx.execute("INSERT INTO wrapper_group_notices(id,conversation_id,root_id,body) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![id,conversation,root,body])?;
+        super::conversations::append_entry(&tx, &conversation, "group_notice", &id, now())?;
+        // A prototype notice may already have an earlier ordinal. Keep its ID,
+        // but move that system entry only; no human/reply content is rewritten.
+        tx.execute("UPDATE wrapper_messages SET ordinal=(SELECT COALESCE(MAX(ordinal),0)+1 FROM wrapper_messages) WHERE account_id=?1 AND conversation_id=?2 AND kind='group_notice' AND message_id=?3",params![ACCOUNT,conversation,id])?;
+        tx.execute("UPDATE wrapper_group_limits SET notice_id=?4,published=1 WHERE account_id=?1 AND conversation_id=?2 AND root_id=?3",params![ACCOUNT,conversation,root,id])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn notice_visible(conn: &Connection, id: &str) -> Result<bool, ApiError> {
+    Ok(conn.query_row("SELECT CASE WHEN n.body LIKE 'Limite de chaîne atteinte%' OR n.id=l.notice_id THEN COALESCE(l.published=1 AND l.notice_id=n.id,0) ELSE 1 END FROM wrapper_group_notices n LEFT JOIN wrapper_group_limits l ON l.account_id=?1 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id WHERE n.id=?2",params![ACCOUNT,id],|r|r.get(0)).optional()?.unwrap_or(true))
+}
+
+fn member_event(
+    conn: &Connection,
+    conversation: &str,
+    bot: &str,
+    action: &str,
+) -> Result<(), ApiError> {
+    let name: String = conn.query_row(
+        "SELECT name FROM wrapper_bots WHERE account_id=?1 AND id=?2",
+        params![ACCOUNT, bot],
+        |r| r.get(0),
+    )?;
+    let id = format!("membre-{}", random(conn)?);
+    conn.execute(
+        "INSERT INTO wrapper_group_notices VALUES (?1,?2,?1,?3)",
+        params![id, conversation, format!("{name} {action}.")],
+    )?;
+    super::conversations::append_entry(conn, conversation, "group_event", &id, now())
+}
+fn replace_coordinator(
+    conn: &Connection,
+    conversation: &str,
+    removed: &str,
+) -> Result<(), ApiError> {
+    if let Some(next) = members(conn, conversation)?.first() {
+        if conn.execute("UPDATE wrapper_conversations SET bot_id=?3 WHERE account_id=?1 AND id=?2 AND bot_id=?4",params![ACCOUNT,conversation,next,removed])? > 0 {
+            member_event(conn,conversation,next,"coordonne maintenant")?;
+        }
+    }
+    Ok(())
+}
+
+/// Global deletion retires group memberships atomically, not historical authors.
+/// An empty group remains readable and can receive a new member from its dialog.
+pub fn delete_bot(app: &mut App, bot: &str) -> Result<(), ApiError> {
+    let tx = super::write_transaction(&app.connection)?;
+    let mut s = tx.prepare("SELECT m.conversation_id FROM wrapper_members m JOIN wrapper_conversations c ON c.account_id=m.account_id AND c.id=m.conversation_id WHERE m.account_id=?1 AND m.bot_id=?2 AND m.active=1 AND c.kind='group'")?;
+    let groups = s
+        .query_map(params![ACCOUNT, bot], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(s);
+    tx.execute(
+        "UPDATE wrapper_bots SET deleted=1,updated_at=?3 WHERE account_id=?1 AND id=?2",
+        params![ACCOUNT, bot, now()],
+    )?;
+    for conversation in &groups {
+        tx.execute("UPDATE wrapper_members SET active=0 WHERE account_id=?1 AND conversation_id=?2 AND bot_id=?3",params![ACCOUNT,conversation,bot])?;
+        cancel(&app.feature_context(), &tx, conversation, Some(bot))?;
+        member_event(&tx, conversation, bot, "a quitté le fil (bot supprimé)")?;
+        replace_coordinator(&tx, conversation, bot)?;
+    }
+    tx.commit()?;
+    tick(&app.feature_context());
     Ok(())
 }
 
@@ -741,22 +922,22 @@ pub fn cancel(
 }
 
 fn entry_time(ctx: &super::Context<'_>, id: &str) -> u64 {
-    ctx.connection.query_row("SELECT created_at FROM wrapper_messages WHERE account_id=?1 AND message_id=?2 AND kind IN ('group_reply','group_notice')",params![ACCOUNT,id],|r|r.get(0)).unwrap_or(ctx.now_ms)
+    ctx.connection.query_row("SELECT created_at FROM wrapper_messages WHERE account_id=?1 AND message_id=?2 AND kind IN ('group_reply','group_notice','group_event')",params![ACCOUNT,id],|r|r.get(0)).unwrap_or(ctx.now_ms)
 }
 pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> {
-    if kind == "group_notice" {
-        let body = ctx
+    if matches!(kind, "group_notice" | "group_event") {
+        let (body, root, terminal) = ctx
             .connection
             .query_row(
-                "SELECT body FROM wrapper_group_notices WHERE id=?1",
-                [id],
-                |r| r.get(0),
+                "SELECT n.body,n.root_id,EXISTS(SELECT 1 FROM wrapper_group_limits l WHERE l.account_id=?2 AND l.conversation_id=n.conversation_id AND l.root_id=n.root_id AND l.notice_id=n.id AND l.published=1) FROM wrapper_group_notices n WHERE n.id=?1 AND (?3 IS NULL OR n.conversation_id=?3)",
+                params![id,ACCOUNT,ctx.conversation_id],
+                |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?)),
             )
             .ok()?;
         return Some(Message {
             id: id.into(),
-            kind: "group_notice".into(),
-            payload: json!({}),
+            kind: kind.into(),
+            payload: json!({"root_id":root,"terminal":terminal}),
             attachments: vec![],
             role: "assistant",
             body,
@@ -775,6 +956,18 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
     if ctx.conversation_id.is_some_and(|c| c != conversation) {
         return None;
     }
+    let never_started = run.as_ref().is_none_or(|id| {
+        store::budget_usage(ctx.connection, id, ctx.now_ms as i64)
+            .is_ok_and(|usage| usage.model_calls == 0)
+    });
+    let waiting = status == "queued"
+        || (status == "running"
+            && run.as_ref().is_some_and(|id| {
+                store::get(ctx.connection, id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|r| r.status == RunStatus::Queued)
+            }));
     let mut message = run
         .and_then(|run| super::engine::group_reply(ctx, &run).ok())
         .unwrap_or(Message {
@@ -799,21 +992,25 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         });
     if status == "cancelled" {
         message.state = "stopped";
+        message.payload["never_started"] = json!(never_started);
     }
     message.payload["bot_id"] = json!(bot);
     message.payload["turn_id"] = json!(id);
     message.payload["root_id"] = json!(root);
     message.payload["parent_turn_id"] = json!(parent);
-    message.payload["turn_status"] = json!(status);
-    if status == "queued" {
+    message.payload["turn_status"] = json!(if waiting { "queued" } else { &status });
+    if waiting {
         message.notice = Some("Tour en file d’attente".into());
+        let live: bool = ctx.connection.query_row("SELECT live FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,root],|r|r.get(0)).unwrap_or(false);
+        if live && !ctx.provider.connected() {
+            message.payload["wait_reason"] = json!("signin");
+        } else if live && ctx.provider.models().is_empty() {
+            message.payload["wait_reason"] = json!("models");
+        }
     }
     if let Some(parent) = parent {
         let author: String = ctx.connection.query_row("SELECT b.name FROM wrapper_group_turns t JOIN wrapper_bots b ON b.account_id=t.account_id AND b.id=t.bot_id WHERE t.id=?1", [&parent], |r|r.get(0)).unwrap_or_else(|_|"un membre".into());
-        message.notice = Some(format!(
-            "Échange avec {author} · demande {}",
-            root.chars().take(8).collect::<String>()
-        ));
+        message.notice = Some(format!("En réponse à {author}"));
     }
     Some(message)
 }

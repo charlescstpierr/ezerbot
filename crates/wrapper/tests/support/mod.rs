@@ -29,6 +29,10 @@ pub struct Seen {
     pub responses: VecDeque<ScriptedResponse>,
     /// Optional provider telemetry for default chat replies (titles remain independent).
     pub usage: Option<Value>,
+    /// Hold a catalogue or a numbered response without locking observations.
+    pub models_gate: Option<Arc<AtomicBool>>,
+    pub model_requests: usize,
+    pub response_gate: Option<(usize, Arc<AtomicBool>)>,
 }
 
 pub struct ScriptedResponse {
@@ -162,6 +166,7 @@ impl FakeOpenAi {
                         (200, "application/json".into(), String::new())
                     }
                     "/v1/models" => {
+                        seen.model_requests += 1;
                         seen.bearer.push(bearer);
                         let models = json!({"models": [
                             {"slug": "gpt-test", "display_name": "GPT Test", "description": "Modèle de test", "visibility": "list",
@@ -227,7 +232,21 @@ impl FakeOpenAi {
                     }
                     _ => (404, "text/plain".into(), String::new()),
                 };
+                let gate = match request.url() {
+                    "/v1/models" => seen.models_gate.clone(),
+                    "/v1/responses" => seen
+                        .response_gate
+                        .as_ref()
+                        .filter(|(at, _)| *at == seen.bodies.len())
+                        .map(|(_, gate)| gate.clone()),
+                    _ => None,
+                };
                 drop(seen);
+                if let Some(gate) = gate {
+                    while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
                 let _ = request.respond(
                     tiny_http::Response::from_string(payload)

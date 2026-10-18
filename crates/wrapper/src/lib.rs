@@ -375,6 +375,7 @@ impl BotChanges {
 pub struct Bot {
     pub id: String,
     pub name: String,
+    pub created_at: u64,
     pub color: String,
     pub shape: String,
     /// Publique : présentée dans l'interface et donnée au modèle comme contrainte de rôle.
@@ -504,7 +505,7 @@ pub(crate) fn record_proposal(
             }
             let bot = connection
                 .query_row(
-                    "SELECT id, name, color, description, instructions, template, customized, deleted, shape FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
+                    "SELECT id, name, color, description, instructions, template, customized, deleted, shape, created_at FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
                     params![ACCOUNT, arguments.bot_id],
                     bot_from_row,
                 )
@@ -1129,7 +1130,7 @@ impl App {
         Ok(self
             .connection
             .query_row(
-                "SELECT id, name, color, description, instructions, template, customized, deleted, shape FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
+                "SELECT id, name, color, description, instructions, template, customized, deleted, shape, created_at FROM wrapper_bots WHERE account_id = ?1 AND id = ?2",
                 params![ACCOUNT, id],
                 bot_from_row,
             )
@@ -1138,7 +1139,7 @@ impl App {
 
     fn bots(&self) -> Result<Vec<Bot>, ApiError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, color, description, instructions, template, customized, deleted, shape FROM wrapper_bots WHERE account_id = ?1 ORDER BY id = ?2 DESC, created_at, id",
+            "SELECT id, name, color, description, instructions, template, customized, deleted, shape, created_at FROM wrapper_bots WHERE account_id = ?1 ORDER BY id = ?2 DESC, created_at, id",
         )?;
         let bots = statement
             .query_map(params![ACCOUNT, DEFAULT_BOT.id], bot_from_row)?
@@ -1204,6 +1205,7 @@ fn bot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         customized: row.get(6)?,
         deleted: row.get(7)?,
         shape: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 

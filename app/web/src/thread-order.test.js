@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { orderThread } from "./thread-order.js";
+import { orderThread, pendingReply } from "./thread-order.js";
 
 const user = { id: "question", role: "user", body: "Question" };
 const tool = { id: "run:3", kind: "tool", payload: { run_id: "run" } };
@@ -10,6 +10,15 @@ const reply = (state, parts, extra = {}) => ({
   payload: { run_id: "run", parts }, ...extra,
 });
 const preCall = { body: "Avant.", before: tool.id };
+
+test("group polling waits for durable finalization even after the model has finished", () => {
+  for (const turn_status of ["queued", "running", "completed", "failed", "cancelled"]) {
+    const message = { state: "echoed", payload: { turn_status } };
+    assert.equal(pendingReply(message, true), ["queued", "running"].includes(turn_status));
+    assert.equal(pendingReply(message, false), false);
+  }
+  assert.equal(pendingReply({ state: "streaming" }), true);
+});
 
 test("group card-first and delivery-only turns retain their own structured author", () => {
   for (const parts of [[], [{ body: "L’avis de Boréal." }]]) {
@@ -198,4 +207,24 @@ test("task/delegation/form cards stay before the tail without moving another tur
   assert.deepEqual(result.slice(3, 7), cards);
   assert.equal(result.at(-2).state, "failed");
   assert.equal(result.at(-1), other);
+});
+
+test("group tools and headings remain at their admitted turn, ahead of later peer/return replies", () => {
+  const group = { ...reply("echoed", [{ body: "Résultat du pair." }]), payload: { run_id: "run", turn_id: "pair", root_id: "root", bot_id: "a", parts: [{ body: "Résultat du pair." }] } };
+  const later = { ...reply("echoed", [{ body: "Retour." }]), id: "return", payload: { run_id: "return-run", turn_id: "return-turn", root_id: "root", bot_id: "a", parts: [{ body: "Retour." }] } };
+  const limit = { id: "limit", kind: "group_notice", payload: { root_id: "root", terminal: true } };
+  const result = orderThread([user, group, later, tool, limit]);
+  assert.deepEqual(result.map((m) => m.id), [user.id, "reply-question:heading", tool.id, group.id, later.id, limit.id]);
+  assert.equal(result[1].payload.turn_id, "pair");
+  assert.equal(result.at(-1), limit);
+});
+
+test("group multi-call fragments keep their call order without stealing unrelated cards", () => {
+  const second = { ...tool, id: "second-call" };
+  const unrelated = { id: "outside", kind: "secret", payload: { run_id: "outside-run" } };
+  const group = reply("failed", [preCall, { body: "Puis.", before: second.id }]);
+  group.payload.turn_id = "group-turn";
+  const next = { id: "next", role: "user", body: "Message suivant" };
+  const result = orderThread([user, group, next, unrelated, tool, second]);
+  assert.deepEqual(result.map((m) => m.body ?? m.id), ["Question", "Avant.", tool.id, "Puis.", second.id, "", next.body, unrelated.id]);
 });

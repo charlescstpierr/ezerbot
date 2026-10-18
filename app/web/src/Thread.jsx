@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
@@ -10,6 +10,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
+import { splitMentionText } from "./mentions.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -123,7 +124,9 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
   return (
     <article className="gb-message gb-user" data-message-id={message.id}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
-      {message.body && <div className="gb-bubble">{message.body}</div>}
+      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
+        ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
+        : part.text)}</div>}
       {message.attachments?.length > 0 && (
         <div className="flex flex-wrap items-start justify-end gap-2" aria-label="Pièces jointes">
           {message.attachments.map((attachment, index) => {
@@ -169,7 +172,7 @@ function ReplyProblem({ message, actions }) {
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
       {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
       {(message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
-        ? <span className="gb-notice">Envoyez un nouveau message pour demander une nouvelle réponse.</span>
+        ? <p className="gb-reply-advice">Envoyez un nouveau message pour demander une nouvelle réponse.</p>
         : message.error_kind === "context_budget" ? null : message.error_kind === "signin"
         ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
         : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}
@@ -177,9 +180,15 @@ function ReplyProblem({ message, actions }) {
   );
 }
 
+function TurnLabel({ message }) {
+  return message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>;
+}
+
 function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
+  const queued = message.payload?.turn_status === "queued";
+  const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const copyText = "copyText" in message ? message.copyText : message.body;
   useEffect(() => {
     const root = content.current;
@@ -206,25 +215,26 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   }, [message.body, appearance.key]);
   if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
-    <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming}>
+    <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming && !queued}>
       {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
       <div className="gb-content" ref={content}>
-        {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} />{message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>}</header>}
+        {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>}
         {message.body
           ? (
             <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
               {message.body}
             </Streamdown>
           )
-          : streaming && <Dots />}
+          : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : message.payload?.wait_reason === "signin" ? "En attente de connexion" : "En attente"}</span> : streaming && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
-        {message.notice && <p className="gb-notice">{message.notice}</p>}
+        {message.notice && (!queued || message.payload?.parent_turn_id) && <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
-            {message.state === "stopped" && <><span className="gb-status"><Square />Réponse arrêtée</span>{!message.payload?.turn_id && !actions.isGroup && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
+            {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
+        {group && message.state === "stopped" && <p className="gb-reply-advice">Envoyez un nouveau message pour reprendre.</p>}
       </div>
     </article>
   );
@@ -239,7 +249,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, onLayout }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;
@@ -247,6 +257,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
   const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup]);
   const ordered = useMemo(() => orderThread(messages), [messages]);
   const last = ordered[ordered.length - 1];
+  useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
@@ -257,7 +268,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
           if (message.kind === "turn-heading") return (
             <div className="gb-message gb-assistant gb-turn-heading" key={message.id}>
               <Mascot create={authorMascot} />
-              <header className="gb-meta"><strong>{authorName}</strong><Timestamp value={message.created_at} /></header>
+              <header className="gb-meta"><strong>{authorName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>
             </div>
           );
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);

@@ -4,7 +4,9 @@
   if (!panels) return;
   let settings, key, errorNode, errorMessage = "", folderDraft = "";
   const attentionSeen = new Set();
-  let latestContext, resizeAnchor, resizePending = false;
+  let latestContext, resizeAnchor, runningAnchor, resizePending = false;
+  const dropAnchor = () => { resizeAnchor = null; runningAnchor = null; resizePending = false; };
+  const expireRunning = () => { if (runningAnchor && Date.now() >= runningAnchor.until) dropAnchor(); };
   const localNames = new Set(["run_shell", "read_file", "list_directory", "write_file"]);
   function attention(context) {
     if (!context?.conversation) return;
@@ -26,6 +28,7 @@
     return { message, phase, token: `${context.conversation.id}:${message.id}:${phase}:${message.payload?.outcome?.reason || ""}` };
   }
   function focusAttention(context, resized = false, immediate = false) {
+    expireRunning();
     const wanted = attention(context);
     if (!wanted || typeof window.requestAnimationFrame !== "function") return;
     if (resized ? resizeAnchor !== wanted.token : attentionSeen.has(wanted.token)) return;
@@ -41,6 +44,7 @@
       }
       attentionSeen.add(token);
       if (attentionSeen.size > 500) attentionSeen.delete(attentionSeen.values().next().value);
+      runningAnchor = phase === "running" ? { token, target, until: runningAnchor?.token === token ? runningAnchor.until : Date.now() + 1000 } : null;
       resizeAnchor = token;
       resizePending = false;
       userScroll = null;
@@ -55,10 +59,11 @@
     else window.requestAnimationFrame(() => window.requestAnimationFrame(() => settle(30)));
   }
   const scroll = document.getElementById?.("chat-scroll");
-  let userScroll = null, inputSequence = 0;
+  let userScroll = null, inputSequence = 0, pointerHeld = false;
   if (scroll && typeof window.ResizeObserver === "function") {
     let width = scroll.clientWidth, height = scroll.clientHeight;
     new window.ResizeObserver(() => {
+      expireRunning();
       if (width === scroll.clientWidth && height === scroll.clientHeight) return;
       width = scroll.clientWidth; height = scroll.clientHeight;
       if (resizeAnchor && attention(latestContext)?.token === resizeAnchor) {
@@ -69,22 +74,34 @@
     const intent = event => {
       if (event.type === "pointermove" && !event.buttons) return;
       if (event.type === "keydown" && (!new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]).has(event.key) || event.target?.closest?.("input,textarea,select,[contenteditable=true]"))) return;
+      if (event.type === "keydown") { dropAnchor(); userScroll = null; ++inputSequence; return; }
+      if (event.type === "pointerdown") pointerHeld = true;
       const sequence = ++inputSequence;
       userScroll = { top: scroll.scrollTop, width: scroll.clientWidth, height: scroll.clientHeight };
+      if (!pointerHeld) window.requestAnimationFrame(() => window.requestAnimationFrame(() => { if (inputSequence === sequence) userScroll = null; }));
+    };
+    for (const type of ["wheel", "touchmove", "pointerdown", "pointermove"]) scroll.addEventListener(type, intent, { passive: true });
+    // A removed approval button leaves focus on BODY; keyboard scrolling still
+    // targets the last clicked scroller. Observe the real document event path.
+    document.addEventListener("keydown", intent, true);
+    const releasePointer = () => {
+      pointerHeld = false;
+      const sequence = ++inputSequence;
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => { if (inputSequence === sequence) userScroll = null; }));
     };
-    for (const type of ["wheel", "touchmove", "pointerdown", "pointermove", "keydown"]) scroll.addEventListener(type, intent, { passive: true });
+    for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, releasePointer, true);
     scroll.addEventListener("scroll", () => {
       // Layout clamping and our own scrolls are not a reader leaving the card.
       if (userScroll && width === scroll.clientWidth && height === scroll.clientHeight && userScroll.width === width && userScroll.height === height && Math.abs(scroll.scrollTop - userScroll.top) > 1) {
-        resizeAnchor = null; resizePending = false; userScroll = null;
+        dropAnchor(); userScroll = null;
         return;
       }
-      // A late shell follow may scroll after our React/resize callback. Correct
-      // only the still-active running card, never an actual reader movement.
-      const wanted = !userScroll && resizeAnchor && attention(latestContext);
-      if (wanted?.phase === "running" && wanted.token === resizeAnchor) {
-        const target = [...document.querySelectorAll("[data-message-id]")].find(e => e.dataset.messageId === wanted.message.id);
+      // Only the brief post-approval window can repair a late shell follow.
+      // Cached running metadata keeps ordinary scroll events O(1).
+      expireRunning();
+      const active = !userScroll && runningAnchor;
+      if (active && active.token === resizeAnchor) {
+        const target = active.target;
         const controls = [target?.querySelector(".gb-local-header"), target?.querySelector(".gb-local-stop")];
         const view = scroll.getBoundingClientRect();
         if (controls.every(Boolean) && controls.some(e => { const r = e.getBoundingClientRect(); return r.top < view.top || r.bottom > view.bottom; })) {
@@ -162,7 +179,7 @@
   document.getElementById?.("settings-dialog")?.addEventListener("close", () => focusAttention(latestContext, resizePending));
   panels.register({
     id: "local", settingsSection(container) { settings = container; render(panels.state); },
-    onState(state, context) { render(state); latestContext = context; if (resizeAnchor && attention(context)?.token !== resizeAnchor) { resizeAnchor = null; resizePending = false; } focusAttention(context); },
+    onState(state, context) { render(state); latestContext = context; if (resizeAnchor && attention(context)?.token !== resizeAnchor) { dropAnchor(); } focusAttention(context); },
     async onCardAction(message, action, detail, context) {
       if (action !== "local.stop" || message.kind !== "tool") return false;
       await panels.api("/api/stop", { conversation_id: context.conversation.id, message_id: message.payload.run_id });

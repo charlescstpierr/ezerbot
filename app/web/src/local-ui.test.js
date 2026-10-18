@@ -13,14 +13,15 @@ class Element {
   addEventListener(name,fn) {this.listeners[name]=fn;}
 }
 const all = e => [e,...e.children.flatMap(all)];
-function setup({scroll,ResizeObserver,dialog}={}) {
+function setup({scroll,ResizeObserver,dialog,clock=Date}={}) {
   let registration;
   const requests=[], notifications=[];
   const state={bots:[{id:"bot",name:"Mon bot"}],local:{bots:[],folders:["/tmp/<dossier>"]}};
   const panels={state,register(p){registration=p;},async api(path,body){requests.push({path,body});},async refresh(){},notify(message){notifications.push(message);}};
   const window={GrokbotPanels:panels,GrokbotChat:{revealPendingApproval},ResizeObserver};
-  const document={getElementById:id=>id==="chat-scroll"?scroll:id==="settings-dialog"?dialog:undefined,createElement:tag=>new Element(tag),createTextNode:text=>Object.assign(new Element("#text"),{textContent:text})};
-  runInNewContext(readFileSync(new URL("../../ui/panels/local.js",import.meta.url),"utf8"),{window,document});
+  const document=Object.assign(new Element("document"),{body:new Element("body"),getElementById:id=>id==="chat-scroll"?scroll:id==="settings-dialog"?dialog:undefined,createElement:tag=>new Element(tag),createTextNode:text=>Object.assign(new Element("#text"),{textContent:text})});
+  document.activeElement=document.body;
+  runInNewContext(readFileSync(new URL("../../ui/panels/local.js",import.meta.url),"utf8"),{window,document,Date:clock});
   const root=new Element("div");registration.settingsSection(root);
   return {root,requests,registration,panels,notifications,window,document};
 }
@@ -131,7 +132,7 @@ test("resize attention waits for settings to close and respects keyboard scrolli
   registration.onState(panels.state,context);flush();assert.equal(moves,1);
   modal=true;scroll.clientHeight=301;resized();flush();assert.equal(moves,1);
   modal=false;dialog.listeners.close();flush();assert.equal(moves,2);
-  scroll.listeners.keydown({type:"keydown",key:"PageDown"});scroll.scrollTop=100;scroll.listeners.scroll();flush();
+  document.listeners.keydown({type:"keydown",key:"PageDown",target:document.body});scroll.scrollTop=100;scroll.listeners.scroll();flush();
   scroll.clientHeight=521;resized();flush();assert.equal(moves,2);
 });
 
@@ -188,7 +189,7 @@ test("a running local call after this turn's human approval waits for its commit
   target.dataset.localState="running";flush();assert.equal(moves,1);
   registration.onState(panels.state,context);flush();assert.equal(moves,1);
   scroll.clientHeight=301;resized();flush();assert.equal(moves,2);
-  scroll.listeners.keydown({type:"keydown",key:"PageUp"});scroll.scrollTop=80;scroll.listeners.scroll();flush();
+  document.listeners.keydown({type:"keydown",key:"PageUp",target:document.body});scroll.scrollTop=80;scroll.listeners.scroll();flush();
   scroll.clientHeight=521;resized();flush();assert.equal(moves,2);
 });
 
@@ -216,7 +217,7 @@ test("late shell scrolling keeps the complete running header and stop visible at
     const view=scroll.getBoundingClientRect();
     for(const element of [header,stop]){const box=element.getBoundingClientRect();assert.ok(box.top>=view.top&&box.bottom<=view.bottom);}
     // A real reading gesture disarms the same local anchor before any correction.
-    scroll.listeners.keydown({type:"keydown",key:"PageDown"});scroll.scrollTop=480;scroll.listeners.scroll();flush();
+    document.listeners.keydown({type:"keydown",key:"PageDown",target:document.body});scroll.scrollTop=480;scroll.listeners.scroll();flush();
     assert.equal(scroll.scrollTop,480);assert.equal(moves,2);
     scroll.clientHeight=height===521?301:521;resized();flush();assert.equal(moves,2);
     scroll.scrollTop=500;scroll.listeners.scroll();flush();assert.equal(moves,2);
@@ -234,6 +235,51 @@ test("running attention never borrows an approval from another run, tool, turn o
     const messages=[{role:"user"},approval,...(change==="turn"?[{role:"user"}]:[]),tool];
     registration.onState(panels.state,{conversation:{id:"chat",messages}});assert.equal(frames.length,0,change);
   }
+});
+
+function runningLayout() {
+  let time=0,moves=0,reads=0,resized;const frames=[];
+  class Clock extends Date { static now(){return time;} }
+  class ResizeObserver {constructor(fn){resized=fn;}observe(){}}
+  const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:301,scrollTop:0,getBoundingClientRect(){return {top:72,bottom:373};}});
+  const f=setup({scroll,ResizeObserver,clock:Clock});
+  f.window.requestAnimationFrame=fn=>frames.push(fn);f.document.querySelector=()=>null;
+  const target={dataset:{messageId:"running",localState:"running"},getBoundingClientRect:()=>({height:240}),
+    querySelector:selector=>({getBoundingClientRect:()=>({top:2072-scroll.scrollTop+(selector===".gb-local-stop"?180:0),bottom:2072-scroll.scrollTop+(selector===".gb-local-stop"?211:22)})}),
+    scrollIntoView(){moves++;scroll.scrollTop=2000;}};
+  f.document.querySelectorAll=()=>[target];
+  const messages=[...Array.from({length:50},(_,i)=>({id:`old-${i}`,role:i%2?"assistant":"user"})),{role:"user"},
+    {kind:"approval",payload:{run_id:"run",kind:{tool:"run_shell"},status:{status:"resolved"}}},
+    {id:"running",kind:"tool",payload:{run_id:"run",run_status:"running",call:{name:"run_shell"}}}];
+  const context={conversation:{id:"long-chat",get messages(){reads++;return messages;}}};
+  const flush=()=>{let count=0;while(frames.length){assert.ok(++count<40);frames.shift()();}};
+  f.registration.onState(f.panels.state,context);flush();
+  return {...f,scroll,flush,context,resized,moves:()=>moves,reads:()=>reads,resetReads:()=>{reads=0;},time:value=>{time=value;}};
+}
+
+test("body-focused PageUp and Home release running anchoring without making the chat focusable",()=>{
+  for(const key of ["PageUp","Home"]){
+    const f=runningLayout();assert.equal(f.document.activeElement,f.document.body);assert.equal(f.scroll.tabIndex,undefined);
+    assert.equal(f.moves(),1);assert.equal(typeof f.document.listeners.keydown,"function");
+    f.document.listeners.keydown({type:"keydown",key,target:f.document.body});f.flush();
+    f.scroll.scrollTop=key==="Home"?0:1200;f.scroll.listeners.scroll();f.flush();
+    assert.equal(f.moves(),1);assert.equal(f.scroll.scrollTop,key==="Home"?0:1200);
+    f.registration.onState(f.panels.state,f.context);f.flush();assert.equal(f.moves(),1);
+  }
+});
+
+test("scrollbar pointer intent remains armed beyond two frames until pointer release",()=>{
+  const f=runningLayout();f.scroll.listeners.pointerdown({type:"pointerdown",target:f.scroll});f.flush();
+  f.scroll.scrollTop=1000;f.scroll.listeners.scroll();f.flush();assert.equal(f.moves(),1);assert.equal(f.scroll.scrollTop,1000);
+  f.document.listeners.pointerup({type:"pointerup"});f.flush();f.resized();assert.equal(f.moves(),1);
+});
+
+test("late-shell correction expires after one second and cached scroll checks do not scan the transcript",()=>{
+  const f=runningLayout();f.resetReads();
+  for(let i=0;i<5;i++)f.scroll.listeners.scroll();assert.equal(f.reads(),0);
+  f.time(500);f.scroll.scrollTop=2500;f.scroll.listeners.scroll();f.flush();assert.equal(f.moves(),2);
+  f.resetReads();f.time(1100);f.scroll.scrollTop=2500;f.scroll.listeners.scroll();f.flush();assert.equal(f.moves(),2);assert.equal(f.reads(),0);
+  f.scroll.clientHeight=521;f.resized();f.flush();assert.equal(f.moves(),2);
 });
 
 test("granted paths remain text and cancellation uses the existing run stop route",async()=>{

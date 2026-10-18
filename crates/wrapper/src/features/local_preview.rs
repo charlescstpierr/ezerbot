@@ -282,7 +282,7 @@ pub fn approval_preview(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<Val
     if super::super::forms::read_is_denied(ctx, &read_call)? {
         return Err(ApiError::new(
             403,
-            "La lecture nécessaire au diff est interdite par une règle permanente.",
+            "La lecture nécessaire à la comparaison est interdite par une règle permanente.",
         ));
     }
     let path = absolute(&a.path)?.canonicalize().map_err(super::io_error)?;
@@ -300,13 +300,13 @@ pub fn approval_preview(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<Val
         let text = String::from_utf8(bytes).map_err(|_| {
             ApiError::new(
                 400,
-                "Impossible de préparer le diff : le fichier actuel n’est pas un texte UTF-8.",
+                "Impossible de préparer la comparaison : le fichier actuel n’est pas un texte UTF-8.",
             )
         })?;
         if granted(ctx, &read_call)?.is_none() {
             return Err(ApiError::new(
                 403,
-                "Le dossier accordé a changé pendant la préparation du diff.",
+                "Le dossier accordé a changé pendant la préparation de la comparaison.",
             ));
         }
         (
@@ -333,9 +333,9 @@ pub fn approval_preview(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<Val
                 |r| r.get(0),
             )
             .optional()?;
-        let text=cached.ok_or_else(||ApiError::new(403,"Pour préparer un diff sans lecture implicite, lisez d’abord ce fichier ou accordez son dossier dans Paramètres › Terminal et fichiers."))?;
+        let text=cached.ok_or_else(||ApiError::new(403,"Pour préparer une comparaison sans lecture implicite, lisez d’abord ce fichier ou accordez son dossier dans Paramètres › Terminal et fichiers."))?;
         if format!("{:x}", Sha256::digest(text.as_bytes())) != expected.to_lowercase() {
-            return Err(ApiError::new(403,"Le contenu de la lecture précédente est caviardé : accordez le dossier pour préparer un diff fidèle."));
+            return Err(ApiError::new(403,"Le contenu de la lecture précédente est caviardé : accordez le dossier pour préparer une comparaison fidèle."));
         }
         (text, "lecture_approuvee", Value::Null)
     };

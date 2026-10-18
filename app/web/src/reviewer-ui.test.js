@@ -227,7 +227,7 @@ for (const mcpFirst of [false, true]) {
     assert.match(ruleRows(f.root)[rules.indexOf(mcp)].textContent, /Atelier MCP · echo · Toujours refuser · Arguments identiques/);
     const details = f.root.children.filter((node) => node.tagName === "details");
     assert.equal(details.length, 1);
-    assert.match(details[0].textContent, /run_shell/);
+    assert.equal(find(details[0], (node) => node.tagName === "code").textContent, "run_shell");
     for (const [i, rule] of rules.entries()) {
       assert.ok(form(f.root));
       assert.ok(field(f.root, "enabled"));

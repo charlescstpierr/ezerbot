@@ -805,7 +805,7 @@ fn legacy_read_denials_win_inside_and_outside_granted_folders() {
             assert!(f.outcome("preview-denied")["reason"]
                 .as_str()
                 .unwrap()
-                .contains("lecture nécessaire au diff est interdite"));
+                .contains("lecture nécessaire à la comparaison est interdite"));
             assert!(
                 requests::list_for_run(&f.db(), &f.run("preview-denied").run_id)
                     .unwrap()

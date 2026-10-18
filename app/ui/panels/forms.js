@@ -288,7 +288,7 @@
       if (!server && localLabel !== rule.tool) {
         const details = document.createElement("details");
         const summary = document.createElement("summary"); summary.textContent = "Détails techniques";
-        const code = document.createElement("code"); code.textContent = `${rule.tool} · ${rule.args_digest}`;
+        const code = document.createElement("code"); code.textContent = rule.args_digest ? `${rule.tool} · ${rule.args_digest}` : rule.tool;
         details.append(summary, code); settings.append(details);
       }
     }

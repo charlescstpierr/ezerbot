@@ -15,7 +15,8 @@
 .gb-local-fingerprint { overflow-wrap:anywhere; font-size:11px; color:var(--muted); }
 .gb-local-global-warning,.gb-local-sensitive-warning { border-left:3px solid var(--warning-line); padding:8px 10px; background:var(--warning-bg); color:var(--warning-text); }
 .local-settings .local-data-warning { color:var(--warning-text); font-size:11px; line-height:1.45; margin:6px 0 12px; padding:8px 10px; border:1px solid var(--warning-line); border-radius:7px; background:var(--warning-bg); }
-[data-panel=forms] > details { font-size:11px; }
+[data-panel=forms] > details { font-size:11px; margin-bottom:12px; }
+[data-panel=forms] > details > code { display:block; overflow-wrap:anywhere; }
 .gb-local-diff-summary { font-weight:600; }
 [data-card-kind=approval] fieldset { scroll-margin-bottom:4px; }
 .local-settings > .local-folder-error { color:var(--danger-text); font-size:11px; margin:6px 0 0; padding-bottom:6px; scroll-margin-block:8px; overflow-wrap:anywhere; }
@@ -33,4 +34,4 @@
 .gb-local-diff-removed { color:var(--danger-text); }
 .gb-local-diff-hunk { color:var(--muted); font-style:italic; }
 .gb-local-card[data-local-state="running"] > .gb-local-command { max-height:120px; overflow:auto; }
-.gb-local-card[data-local-state="running"] > .gb-local-header { position:sticky; top:0; z-index:1; background:var(--pane); }
+.gb-local-card[data-local-state="running"] > .gb-local-header { position:sticky; top:0; z-index:1; background:var(--pane); padding-bottom:6px; border-bottom:1px solid var(--line); }

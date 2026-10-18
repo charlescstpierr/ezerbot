@@ -235,7 +235,7 @@
     toolbar.append(button("Nouvelle routine", () => edit(null), "primary-button"), button("Actualiser", reload));
     status = node("p", "routines-note"); status.setAttribute("role", "status");
     content = node("div", "routines-content"); notices = node("div", "routines-live-notices");
-    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
+    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé dans Paramètres. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
       revision++; current = null; content.replaceChildren();

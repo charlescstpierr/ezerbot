@@ -196,7 +196,7 @@
     [self stopBackend];
     NSUInteger generation = ++self.startupGeneration;
     self.backendURL = nil;
-    [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local…" failed:NO];
+    [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local… Une routine en cours se termine avant l’ouverture." failed:NO];
     NSFileManager *files = [NSFileManager defaultManager];
     NSError *error = nil;
     NSURL *applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
@@ -265,11 +265,11 @@
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableData *line = [NSMutableData data];
         NSString *problem = nil;
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:180];
         BOOL complete = NO;
         while (!complete && line.length <= 8192) {
             int remaining = (int)MAX(0, [deadline timeIntervalSinceNow] * 1000);
-            if (remaining == 0) { problem = @"Le moteur ne répond pas après 15 secondes."; break; }
+            if (remaining == 0) { problem = @"Le moteur reste occupé après trois minutes. Réessayez après la fin de la routine."; break; }
             struct pollfd ready = {.fd = reader.fileDescriptor, .events = POLLIN};
             int result = poll(&ready, 1, remaining);
             if (result < 0 && errno == EINTR) continue;
@@ -602,8 +602,32 @@
 
 @end
 
-int main(void) {
+int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 3 && strcmp(argv[1], "--notify-background") == 0) {
+            // Same signed app identity and privacy-safe notifier as the WebView;
+            // no window, backend, permission prompt or personal workspace access.
+            NSData *data = [[NSString stringWithUTF8String:argv[2]] dataUsingEncoding:NSUTF8StringEncoding];
+            NSDictionary *event = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (![event isKindOfClass:NSDictionary.class] || ![event[@"id"] isKindOfClass:NSString.class]
+                || ![event[@"conversation_id"] isKindOfClass:NSString.class]
+                || ![@[@"Routine terminée", @"Échec de la routine", @"Autorisation demandée", @"Informations demandées", @"Secret demandé", @"Sous-tâche terminée", @"Réponse terminée"] containsObject:event[@"title"]]) return 1;
+            EzerbotNotifier *notifier = [[EzerbotNotifier alloc] init];
+            __block BOOL finished = NO;
+            __block int code = 1;
+            [notifier deliver:event reply:^(NSDictionary *result) {
+                NSString *status = result[@"status"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    code = [@[@"delivered", @"denied", @"undetermined", @"recording", @"disabled"] containsObject:status] ? 0 : 1;
+                    finished = YES;
+                });
+            }];
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+            while (!finished && deadline.timeIntervalSinceNow > 0) {
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+            }
+            return finished ? code : 1;
+        }
         // The workspace and database created by the owned engine remain user-private.
         umask(0077);
         NSApplication *application = [NSApplication sharedApplication];

@@ -26,17 +26,20 @@ const TICK_INTERVAL: Duration = Duration::from_millis(500);
 struct Options {
     port: u16,
     db: PathBuf,
+    routine_wake: bool,
 }
 
 fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut port = 0;
+    let mut routine_wake = false;
     let mut db = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Library/Application Support/Grokbot Local/workspace.sqlite");
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--routine-wake" | "--headless-routines" => routine_wake = true,
             "--port" => {
                 port = args
                     .next()
@@ -48,13 +51,17 @@ fn options() -> Result<Option<Options>, String> {
                 db = args.next().ok_or("--db attend un chemin SQLite.")?.into();
             }
             "--help" | "-h" => {
-                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
+                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--headless-routines]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
                 return Ok(None);
             }
             _ => return Err(format!("Argument inconnu : {arg}")),
         }
     }
-    Ok(Some(Options { port, db }))
+    Ok(Some(Options {
+        port,
+        db,
+        routine_wake,
+    }))
 }
 
 fn error(status: u16, message: &str) -> ApiError {
@@ -154,11 +161,37 @@ fn audio_range(value: &str, length: usize) -> Option<(usize, usize)> {
 }
 
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use grokbot_wrapper::features::routines_background::{self, Owner};
+    // Acquire BEFORE App::open: its crash recovery must not interrupt a peer.
+    let _owner = if options.routine_wake {
+        let Some(owner) = Owner::try_acquire(&options.db)? else {
+            return Ok(());
+        };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+        if !routines_background::due(&options.db, now)? {
+            return Ok(());
+        }
+        owner
+    } else {
+        Owner::foreground(&options.db)?
+    };
     grokbot_forms::vault::enable_os_vault(signature::stable_identity());
     let mut app = App::open_with(&options.db, provider(&options.db))?;
     // First-start migration runs before serving the page. Keychain denial falls
     // back to the owner-only file and is projected in Paramètres, never logged.
     grokbot_wrapper::features::forms::vault(&app.feature_context())?;
+    if options.routine_wake {
+        let code = match routines_background::run(&mut app) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("Ezerbot Local : {error}");
+                1
+            }
+        };
+        // Keep the OS owner lock until ALL threads die, also on a deadline or
+        // transport failure. A foreground opener cannot race late worker writes.
+        std::process::exit(code);
+    }
     let server = Server::http(("127.0.0.1", options.port))?;
     let port = server
         .server_addr()

@@ -94,6 +94,7 @@ pub mod memory_auto;
 pub mod multibot;
 pub mod notifications;
 pub mod routines;
+pub mod routines_background;
 pub mod skills;
 pub mod storage;
 pub mod voice;
@@ -131,6 +132,7 @@ registry!(
     memory_auto,
     forms,
     routines,
+    routines_background,
     delegation,
     attachments,
     mcp,

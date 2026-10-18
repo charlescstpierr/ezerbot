@@ -317,6 +317,60 @@ pub fn routes(
     })())
 }
 
+/// Reuse the exact settings, source identities, claims and throttles used by
+/// the WebView. A headless run never prompts for OS permission.
+pub(crate) fn background(app: &mut App) -> Result<(), ApiError> {
+    let response = routes(
+        app,
+        "POST",
+        "/api/notifications/poll",
+        br#"{"focused":false,"visible":false,"conversation_id":null}"#,
+    )
+    .expect("notification route")?;
+    let ApiResponse::Json(value) = response else {
+        return Ok(());
+    };
+    for event in value["deliveries"].as_array().into_iter().flatten() {
+        #[cfg(debug_assertions)]
+        {
+            use std::io::Write;
+            // Agent installation already validated this throwaway environment.
+            // No debug build can execute the native delivery helper.
+            let root = super::routines_background::test_root()?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join("notifications-recording.jsonl"))
+                .map_err(|_| {
+                    ApiError::new(500, "Impossible d’enregistrer la notification de test.")
+                })?;
+            writeln!(file, "{event}")
+                .map_err(|_| ApiError::new(500, "Notification de test non enregistrée."))?;
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let helper = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("Ezerbot")))
+                .ok_or_else(|| {
+                    ApiError::new(500, "Service de notifications Ezerbot introuvable.")
+                })?;
+            let status = std::process::Command::new(helper)
+                .arg("--notify-background")
+                .arg(event.to_string())
+                .status()
+                .map_err(|_| ApiError::new(500, "Le service de notifications n’a pas démarré."))?;
+            if !status.success() {
+                return Err(ApiError::new(
+                    500,
+                    "L’alerte macOS n’a pas pu être envoyée. L’événement reste dans Notifications.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

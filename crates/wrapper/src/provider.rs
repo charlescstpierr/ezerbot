@@ -1179,6 +1179,9 @@ impl Provider {
         runs.insert(id.into(), cancel.clone());
         Some(cancel)
     }
+    pub(crate) fn has_run_workers(&self) -> bool {
+        !lock(&self.inner.runs).is_empty()
+    }
     pub(crate) fn release_run(&self, id: &str) {
         lock(&self.inner.runs).remove(id);
     }

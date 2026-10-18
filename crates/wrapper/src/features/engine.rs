@@ -934,7 +934,7 @@ pub(crate) fn queue_approved_action(
     let mut services = Services::new(&local)?;
     run_loop::with_run_events(ctx.connection, &mut services, &run.run_id, |conn, _| {
         model::start(conn, &run)?;
-        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,"Gestion du connecteur MCP".into()))?])?;
+        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,if name == super::routines_background::ACTION { "Routines quand Ezerbot est fermé".into() } else { "Gestion du connecteur MCP".into() }))?])?;
         model::set_running_at(conn, &run.run_id, now() as i64)?;
         store::append_event(
             conn,
@@ -955,6 +955,12 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
+    tick_selected(ctx, false);
+}
+pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
+    tick_selected(ctx, true);
+}
+fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
     // run() commits Resumed and the matching receipt together. Merely scanning
     // pending wakes must NEVER mark them Delivered (SR01/SR02).
     for status in [
@@ -967,6 +973,12 @@ pub fn tick(ctx: &super::Context<'_>) {
     ] {
         if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
             for run in runs {
+                if routines_only {
+                    let belongs: bool = ctx.connection.query_row("WITH RECURSIVE ancestors(id,parent_id,kind) AS (SELECT id,parent_id,kind FROM wrapper_conversations WHERE account_id=?1 AND id=?2 UNION SELECT c.id,c.parent_id,c.kind FROM wrapper_conversations c JOIN ancestors a ON a.parent_id=c.id WHERE c.account_id=?1) SELECT EXISTS(SELECT 1 FROM ancestors WHERE kind='routine')", params![ACCOUNT,run.conversation_id], |r| r.get(0)).unwrap_or(false);
+                    if !belongs {
+                        continue;
+                    }
+                }
                 if status == RunStatus::Interrupted
                     && super::multibot::is_group(ctx.connection, &run.conversation_id)
                 {
@@ -1409,6 +1421,9 @@ impl RunServices for Services<'_> {
             run_id: self.host_mcp.then_some("mcp-host-"),
         };
         tools.extend(super::mcp::scoped_tools(&ctx));
+        if self.host_mcp {
+            tools.extend(super::routines_background::host_tools());
+        }
         tools
     }
     fn tools_for_run(&self, run: &Run) -> Vec<ToolSpec> {
@@ -1453,7 +1468,7 @@ impl RunServices for Services<'_> {
         Ok(serde_json::from_value(value)?)
     }
     fn is_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
-        call.name.starts_with("mcp_")
+        call.name.starts_with("mcp_") || call.name == super::routines_background::ACTION
     }
     fn call_external_tool(
         &mut self,

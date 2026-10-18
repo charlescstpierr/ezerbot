@@ -16,6 +16,7 @@ export function Card({ message, busy, onAction }) {
   const [scope, setScope] = useState(message.payload?.connector ? "global" : "subject");
   const action = request.kind || {};
   const lifecycle = request.connector && typeof action.tool === "string" && (action.tool.startsWith("mcp_start_") || action.tool.startsWith("mcp_remove_"));
+  const background = action.tool === "routines_background_configure";
   const preview = request.arguments;
   const previewAvailable = preview != null && (!lifecycle || (typeof preview.commande === "string" && Array.isArray(preview.arguments) && Array.isArray(preview.variables_privées)));
   const argumentPreview = <ActionArguments value={preview} />;
@@ -42,19 +43,19 @@ export function Card({ message, busy, onAction }) {
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
     <HumanInputCard message={message} title="Approbation demandée" input={input}>
-      <div className="space-y-3" data-follow-actions={localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
+      <div className="space-y-3" data-follow-actions={background || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
           <strong>Relecteur : </strong>{review.pending
             ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
             : review.answer.reason}
         </p>}
-        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
+        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
         {!previewAvailable
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
-          : lifecycle ? <>
+          : background ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à exécuter les routines dues quand l’app est fermée ? Un agent macOS sera installé pour votre session uniquement. Les résultats et les alertes suivront vos réglages habituels." : "Retirer l’agent macOS de cette session ? Les routines ne s’exécuteront plus quand Ezerbot est fermé. Vos routines, résultats et historiques seront conservés."}</p> : lifecycle ? <>
             <dl className="grid gap-3 text-sm" aria-label="Configuration du connecteur">
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">Commande</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>

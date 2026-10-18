@@ -120,7 +120,7 @@ export function Card({ message, onAction, busy }) {
         : "Aucun résultat enregistré pour cet appel.";
   }
   return (
-    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : `Outil · ${call.name}`} label={label}>
+    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : call.name === "routines_background_configure" ? "Routines en arrière-plan" : `Outil · ${call.name}`} label={label}>
       <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>
       {authorized_by?.kind === "rule" && <p className="gb-engine-note">Autorisé automatiquement par la règle « Toujours » ({requesting_bot || "Bot demandeur"} · {connector ? `${connector.server} · ${connector.tool}` : call.name}).</p>}
       <h4>Arguments</h4>

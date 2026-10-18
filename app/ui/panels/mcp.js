@@ -10,6 +10,7 @@
   async function act(path, body, b) {
     b.disabled = true;
     feedback.textContent = "";
+    feedback.className = "mcp-error";
     try {
       const result = await panels.api(path, body);
       await panels.refresh();
@@ -40,7 +41,10 @@
     for (const server of servers) {
       const card = node("article", null, "mcp-server");
       const heading = node("div", null, "mcp-heading");
-      heading.append(node("strong", server.name), node("span", ({connected:"Connecté",disconnected:"Déconnecté",crashed:"Serveur arrêté",error:"Erreur de connexion"})[server.status] || "État inconnu", `mcp-status mcp-status-${server.status}`));
+      const status = node("span", null, `mcp-status mcp-status-${server.status}`);
+      const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
+      status.append(dot, document.createTextNode(({connected:"Connecté",busy:"Occupé",starting:"Démarrage en cours",disconnected:"Déconnecté",crashed:"Serveur arrêté",error:"En erreur"})[server.status] || "État inconnu"));
+      heading.append(node("strong", server.name), status);
       card.append(heading);
       const config = node("details"); config.append(node("summary", "Configuration locale"));
       config.append(node("pre", [server.command, ...server.arguments].join("\n")));
@@ -54,13 +58,13 @@
         check.addEventListener("change", () => act("/api/mcp/select", {id:server.id,bot_id:bot.id,enabled:check.checked}, check));
         choices.append(label(bot.name,check));
       }
-      card.append(choices, node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
-      const tools = node("details"); tools.append(node("summary", `Outils (${server.tools.length})`));
+      card.append(choices);
+      const tools = node("details"); tools.append(node("summary", `Outils (${server.tools.length})${["connected","busy"].includes(server.status) ? "" : " · dernier catalogue connu"}`));
       if (!server.tools.length) tools.append(node("p", "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
       for (const tool of server.tools) { const item = node("p"); item.append(node("strong",tool.name),node("span",` — ${tool.description || "Sans description"}`)); tools.append(item); }
       card.append(tools);
       const actions = node("div", null, "mcp-actions");
-      const restart = button(server.status === "connected" ? "Redémarrer…" : "Démarrer…", () => act("/api/mcp/restart",{id:server.id},restart));
+      const restart = button(["connected","busy","starting"].includes(server.status) ? "Redémarrer…" : "Démarrer…", () => act("/api/mcp/restart",{id:server.id},restart));
       const remove = button("Supprimer…", () => act("/api/mcp/remove",{id:server.id},remove));
       actions.append(restart,remove); card.append(actions); list.append(card);
     }
@@ -69,7 +73,7 @@
     id: "mcp",
     settingsSection(container) {
       section = container; section.className = "setting-section mcp-section";
-      section.append(node("h3", "Connecteurs"),node("p", "Ajoutez un serveur MCP local (stdio). Démarrage et appels exigent votre accord dans la conversation d’Ezerbot. « Toujours » peut autoriser un outil de ce serveur pour un bot."));
+      section.append(node("h3", "Connecteurs"),node("p", "Ajoutez un serveur MCP local (stdio). Démarrage et appels exigent votre accord. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
       list = node("div", null, "mcp-list"); section.append(list);
       const details = node("details", null, "mcp-add"); details.append(node("summary", "Ajouter un serveur MCP"));
       const form = node("form", null, "mcp-form");
@@ -89,7 +93,7 @@
       form.append(submit); details.append(form); section.append(details);
       feedback = node("p",null,"mcp-error"); feedback.setAttribute("role","status"); section.append(feedback);
       form.addEventListener("submit",async event => {
-        event.preventDefault(); submit.disabled=true; feedback.textContent="";
+        event.preventDefault(); submit.disabled=true; feedback.textContent=""; feedback.className="mcp-error";
         const environment = Object.create(null);
         let invalid = false;
         for (const row of env.children) {
@@ -99,10 +103,11 @@
         }
         if (invalid) { feedback.textContent="Chaque variable privée doit avoir un nom unique et non vide."; submit.disabled=false; return; }
         try {
-          await panels.api("/api/mcp/add",{name:name.value,command:command.value,arguments:args.value ? args.value.split(/\r?\n/) : [],environment});
+          await panels.api("/api/mcp/add",{name:name.value,command:command.value,arguments:args.value.replace(/(\r?\n)+$/, "") ? args.value.replace(/(\r?\n)+$/, "").split(/\r?\n/) : [],environment});
           form.reset(); env.replaceChildren(); details.open=false;
           await panels.refresh();
-          panels.notify("Connecteur enregistré. Activez-le pour un bot, puis démarrez-le.");
+          feedback.className="mcp-note";
+          feedback.textContent="Connecteur enregistré. Activez-le pour un bot, puis démarrez-le.";
         } catch (e) { feedback.textContent=e.message || "Le connecteur n’a pas pu être enregistré."; }
         finally { for (const k of Object.keys(environment)) delete environment[k]; for (const v of env.querySelectorAll('input[type="password"]')) v.value=""; submit.disabled=false; }
       });

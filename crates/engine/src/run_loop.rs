@@ -8,14 +8,15 @@
 //! `goal-permissions-secrets.md` PS05–PS06). No routine-specific gate is added here.
 use self::with_run_events as commit;
 use crate::contracts::{
-    ApprovalCheck, Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest, Result, Role,
-    RunEvent, RunEventKind, RunKind, SuspendCause, TaskStatus, ToolCall, ToolItem, ToolOutcome,
-    ToolSpec, TurnEnd,
+    ApprovalCheck, AuthorizedBy, Error, HistoryItem, ModelEvent, ModelGateway, ModelRequest,
+    Result, Role, RunEvent, RunEventKind, RunKind, SuspendCause, TaskStatus, ToolCall, ToolItem,
+    ToolOutcome, ToolSpec, TurnEnd,
 };
 use crate::model::{self, invalid, Run, RunStatus};
 use crate::store;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,12 +32,27 @@ pub trait RunServices {
     /// replayed after commit. Transaction retries may invoke this again after
     /// rollback: use SQLite, not process-local flags, for capability effects.
     fn call_tool(&mut self, conn: &Connection, run: &Run, call: &ToolCall) -> Result<ToolOutcome>;
+    /// Slow external effects use a durable admission transaction followed by I/O
+    /// WITHOUT a SQLite writer. An admitted call is never replayed after a crash:
+    /// an unconfirmed effect is reported as uncertain instead. Internal tools
+    /// retain the atomic call_tool contract above.
+    fn is_external_tool(&self, _call: &ToolCall) -> bool {
+        false
+    }
+    fn call_external_tool(
+        &mut self,
+        _conn: &Connection,
+        _run: &Run,
+        _call: &ToolCall,
+    ) -> Result<ToolOutcome> {
+        Err(invalid("external tool adapter unavailable"))
+    }
     /// After validating object arguments, first find the existing request keyed
     /// by (run_id, call_id, canonical tool/argument digest): Pending -> Ask without
     /// a new request; Denied/Expired/Cancelled -> Denied, never ask again. Otherwise
     /// consult bot-scoped standing rules/auto-review or the resolved single-use grant.
     /// Consume AllowOnce via approvals::consume_allow_once here, inside the caller's
-    /// same with_tx as call_tool and its result event. Persist Authorized { by } in
+    /// same with_tx as internal call_tool, or the durable external admission. Persist Authorized { by } in
     /// that result event for durable authorization provenance after rule revocation.
     /// auto_review only resolves an already-created request. Denied never executes.
     fn check_approval(
@@ -313,11 +329,21 @@ fn pending_calls(events: &[RunEvent]) -> Result<Vec<ToolCall>> {
 
 fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
     for call in pending_calls(&store::events(conn, run_id, 0)?)? {
+        let admitted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",
+            rusqlite::params![run_id, call.call_id],
+            |r| r.get(0),
+        )?;
+        let reason = if admitted {
+            "Appel externe interrompu ; son effet peut déjà avoir eu lieu.".to_owned()
+        } else {
+            format!("not executed: {reason}")
+        };
         store::append_event(
             conn,
             run_id,
             RunEventKind::ToolResult,
-            &json!({"call_id": call.call_id, "outcome": ToolOutcome::Failed { reason: format!("not executed: {reason}") }}),
+            &json!({"call_id": call.call_id, "outcome": ToolOutcome::Failed { reason }}),
         )?;
     }
     Ok(())
@@ -564,6 +590,162 @@ fn builtin(conn: &Connection, run: &mut Run, call: &ToolCall) -> Result<ToolOutc
     })
 }
 
+fn external_digest(call: &ToolCall) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(call)?)))
+}
+
+/// Exact durable admission proof for a call. External adapters read it after
+/// commit; it stores no duplicate arguments, just digest and provenance.
+pub fn external_authorization(
+    conn: &Connection,
+    run_id: &str,
+    call: &ToolCall,
+) -> Result<Option<AuthorizedBy>> {
+    let raw: Option<Option<String>> = conn.query_row(
+        "SELECT authorized_by FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2 AND digest=?3",
+        rusqlite::params![run_id,call.call_id,external_digest(call)?], |r|r.get(0)).optional()?;
+    raw.flatten()
+        .map(|s| serde_json::from_str(&s).map_err(Error::from))
+        .transpose()
+}
+
+fn execute_external(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    run_id: &str,
+    call: &ToolCall,
+    protected: Option<bool>,
+) -> Result<Option<RunProgress>> {
+    enum Start {
+        Complete(Option<RunProgress>),
+        Admitted(Box<Run>, Option<AuthorizedBy>),
+    }
+    let start = commit(conn, services, run_id, |conn, services| {
+        let mut run = store::required(conn, run_id)?;
+        if run.status != RunStatus::Running || services.is_cancelled(run_id) {
+            return Err(invalid("run stopped before external admission"));
+        }
+        if store::events(conn, run_id, 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call.call_id)
+        {
+            return Ok(Start::Complete(None));
+        }
+        let prior: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",
+            rusqlite::params![run_id, call.call_id],
+            |r| r.get(0),
+        )?;
+        if prior {
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &json!({"call_id":call.call_id,"authorized_by":external_authorization(conn,run_id,call)?,"outcome":ToolOutcome::Failed {reason:"L’appel externe a été interrompu après son autorisation. Son effet est incertain ; vérifiez-le avant de le relancer.".into()}}),
+            )?;
+            return Ok(Start::Complete(None));
+        }
+        let Some(protected) = protected else {
+            let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+            usage.tool_calls += 1;
+            store::save_budget_usage(conn, run_id, &usage)?;
+            let reason = if call.name.starts_with("mcp_") {
+                "Outil MCP inconnu ou connecteur désactivé.".into()
+            } else {
+                format!("unknown tool {}", call.name)
+            };
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+            )?;
+            return Ok(Start::Complete(None));
+        };
+        let by = if protected {
+            match services.check_approval(conn, &run, call)? {
+                ApprovalCheck::Ask => {
+                    let cause = services.request_approval(conn, &run, call)?;
+                    if !matches!(cause, SuspendCause::HumanInput { .. }) {
+                        return Err(invalid("an approval must wait for human input"));
+                    }
+                    suspend(conn, &mut run, call, &cause, true)?;
+                    return Ok(Start::Complete(Some(RunProgress::Suspended(cause))));
+                }
+                ApprovalCheck::Denied { reason } => {
+                    let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+                    usage.tool_calls += 1;
+                    store::save_budget_usage(conn, run_id, &usage)?;
+                    store::append_event(
+                        conn,
+                        run_id,
+                        RunEventKind::ToolResult,
+                        &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason}}),
+                    )?;
+                    return Ok(Start::Complete(None));
+                }
+                ApprovalCheck::Authorized { by } => Some(by),
+            }
+        } else {
+            None
+        };
+        if services.is_cancelled(run_id)
+            || store::budget_usage(conn, run_id, now_ms())?.elapsed_ms >= run.budgets.duration_ms
+        {
+            return Err(invalid("run stopped during external admission"));
+        }
+        let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+        usage.tool_calls += 1;
+        store::save_budget_usage(conn, run_id, &usage)?;
+        conn.execute(
+            "INSERT INTO engine_tool_admissions VALUES (?1,?2,?3,?4)",
+            rusqlite::params![
+                run_id,
+                call.call_id,
+                external_digest(call)?,
+                by.as_ref().map(serde_json::to_string).transpose()?
+            ],
+        )?;
+        Ok(Start::Admitted(Box::new(run), by))
+    })?;
+    let Start::Admitted(run, by) = start else {
+        let Start::Complete(progress) = start else {
+            unreachable!()
+        };
+        return Ok(progress);
+    };
+    if let Some(progress) = checkpoint(conn, services, run_id)? {
+        return Ok(Some(progress));
+    }
+    debug_assert!(conn.is_autocommit());
+    let outcome = services.call_external_tool(conn, &run, call)?;
+    if matches!(outcome, ToolOutcome::Suspend { .. }) {
+        return Err(invalid("external effects must return a final outcome"));
+    }
+    if let Some(progress) = checkpoint(conn, services, run_id)? {
+        return Ok(Some(progress));
+    }
+    commit(conn, services, run_id, |conn, services| {
+        if store::required(conn, run_id)?.status != RunStatus::Running
+            || services.is_cancelled(run_id)
+        {
+            return Ok(None);
+        }
+        if !store::events(conn, run_id, 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call.call_id)
+        {
+            store::append_event(
+                conn,
+                run_id,
+                RunEventKind::ToolResult,
+                &json!({"call_id":call.call_id,"outcome":outcome,"authorized_by":by}),
+            )?;
+        }
+        Ok(None)
+    })
+}
+
 fn execute(
     conn: &Connection,
     services: &mut dyn RunServices,
@@ -571,6 +753,20 @@ fn execute(
     call: &ToolCall,
 ) -> Result<Option<RunProgress>> {
     let specs = tool_specs(services);
+    if call.arguments.is_object() && services.is_external_tool(call) {
+        // Recovery may have no live connector/spec. Consult the admission before
+        // declaring the tool unknown: a previously issued effect is uncertain.
+        return execute_external(
+            conn,
+            services,
+            run_id,
+            call,
+            specs
+                .iter()
+                .find(|s| s.name == call.name)
+                .map(|s| s.requires_approval),
+        );
+    }
     commit(conn, services, run_id, |conn, services| {
         let mut run = store::required(conn, run_id)?;
         if run.status != RunStatus::Running || services.is_cancelled(run_id) {
@@ -616,14 +812,18 @@ fn execute(
         store::save_budget_usage(conn, run_id, &usage)?;
         let outcome = if !valid_arguments {
             ToolOutcome::Failed {
-                reason: "invalid arguments".into(),
+                reason: if call.name.starts_with("mcp_") {
+                    "Arguments MCP invalides : un objet JSON est requis.".into()
+                } else {
+                    "invalid arguments".into()
+                },
             }
         } else if let Some(denied) = approval {
             denied
         } else if spec.is_none() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {
-                    format!("Outil MCP inconnu ou connecteur désactivé : {}", call.name)
+                    "Outil MCP inconnu ou connecteur désactivé.".into()
                 } else {
                     format!("unknown tool {}", call.name)
                 },
@@ -997,6 +1197,7 @@ mod tests {
         cancel_in_tool: bool,
         cancel_in_context: bool,
         error_in_tool: bool,
+        external: bool,
         hooks: Vec<RunEvent>,
         fail_final_hook: bool,
         fail_hook_once: Option<RunEventKind>,
@@ -1040,6 +1241,19 @@ mod tests {
                     output: json!({"ok":true}),
                 },
             })
+        }
+        fn is_external_tool(&self, _: &ToolCall) -> bool {
+            self.external
+        }
+        fn call_external_tool(
+            &mut self,
+            conn: &Connection,
+            run: &Run,
+            call: &ToolCall,
+        ) -> Result<ToolOutcome> {
+            assert!(conn.is_autocommit());
+            assert!(external_authorization(conn, &run.run_id, call)?.is_some());
+            self.call_tool(conn, run, call)
         }
         fn check_approval(
             &mut self,
@@ -1105,6 +1319,92 @@ mod tests {
         fn resolution(&mut self, _: &Connection, _: &Run, _: &str) -> Result<Option<Value>> {
             Ok(self.resolved.clone())
         }
+    }
+    fn external_fixture() -> Result<(Connection, ToolCall)> {
+        let conn = database(false, RunBudgets::default())?;
+        let call = ToolCall {
+            call_id: "outside".into(),
+            name: "external".into(),
+            arguments: json!({}),
+        };
+        with_tx(&conn, |conn| -> Result<()> {
+            model::set_running_at(conn, "run", now_ms())?;
+            store::append_event(conn, "run", RunEventKind::ToolCall, &json!(call))?;
+            Ok(())
+        })?;
+        Ok((conn, call))
+    }
+    #[test]
+    fn external_admission_releases_sqlite_and_result_retry_never_repeats_the_effect() -> Result<()>
+    {
+        let (conn, call) = external_fixture()?;
+        let mut services = Services {
+            external: true,
+            allowed: true,
+            specs: vec![spec("external", true)],
+            fail_hook_once: Some(RunEventKind::ToolResult),
+            ..Default::default()
+        };
+        execute(&conn, &mut services, "run", &call)?;
+        execute(&conn, &mut services, "run", &call)?;
+        assert_eq!(services.calls, vec!["outside"]);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM grants_used", [], |r| r
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert!(matches!(
+            external_authorization(&conn, "run", &call)?,
+            Some(AuthorizedBy::AllowOnce { .. })
+        ));
+        let mut changed = call.clone();
+        changed.arguments = json!({"other":true});
+        assert!(external_authorization(&conn, "run", &changed)?.is_none());
+        Ok(())
+    }
+    #[test]
+    fn an_unconfirmed_external_effect_is_not_reexecuted_after_interruption() -> Result<()> {
+        let (conn, call) = external_fixture()?;
+        let mut services = Services {
+            external: true,
+            allowed: true,
+            error_in_tool: true,
+            specs: vec![spec("external", true)],
+            ..Default::default()
+        };
+        assert!(execute(&conn, &mut services, "run", &call).is_err());
+        services.error_in_tool = false;
+        services.specs.clear(); // After process restart, MCP has no live client.
+        execute(&conn, &mut services, "run", &call)?;
+        assert_eq!(services.calls.len(), 1);
+        assert!(store::events(&conn, "run", 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult
+                && e.payload["outcome"]["reason"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("incertain"))));
+        Ok(())
+    }
+    #[test]
+    fn cancelling_an_admitted_effect_does_not_claim_it_was_never_executed() -> Result<()> {
+        let (conn, call) = external_fixture()?;
+        let mut services = Services {
+            external: true,
+            allowed: true,
+            cancel_in_tool: true,
+            specs: vec![spec("external", true)],
+            ..Default::default()
+        };
+        execute(&conn, &mut services, "run", &call)?;
+        assert_eq!(services.calls.len(), 1);
+        assert_eq!(store::required(&conn, "run")?.status, RunStatus::Cancelled);
+        assert!(store::events(&conn, "run", 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult
+                && e.payload["outcome"]["reason"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("effet peut"))));
+        Ok(())
     }
     fn spec(name: &str, requires_approval: bool) -> ToolSpec {
         ToolSpec {

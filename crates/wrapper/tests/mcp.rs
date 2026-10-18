@@ -79,18 +79,24 @@ impl Fixture {
         c
     }
     fn request(&self, run: &str) -> requests::HumanInputRequest {
+        wait("approval card", || {
+            !requests::list_for_run(&self.db(), run).unwrap().is_empty()
+        });
         requests::list_for_run(&self.db(), run).unwrap().remove(0)
     }
     fn decide(&mut self, run: &str, decision: Value) {
         let r = self.request(run);
         self.post("/api/approvals/resolve",json!({"entry_id":r.entry_id,"conversation_id":r.route.target_conversation_id,"submission_id":format!("decision-{run}"),"decision":decision}));
         self.app.tick(0);
+        self.finish(run);
     }
     fn start(&mut self, id: &str) -> String {
-        self.post("/api/mcp/restart", json!({"id":id}))["run_id"]
+        let run = self.post("/api/mcp/restart", json!({"id":id}))["run_id"]
             .as_str()
             .unwrap()
-            .to_owned()
+            .to_owned();
+        self.request(&run);
+        run
     }
     fn connect(&mut self, id: &str) {
         self.post(
@@ -137,6 +143,16 @@ impl Fixture {
             .expect("tool result");
         serde_json::from_value(event.payload["outcome"].clone()).unwrap()
     }
+    fn tool_card(&mut self, call: &str) -> Value {
+        self.state()["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["messages"].as_array().unwrap())
+            .find(|m| m["kind"] == "tool" && m["payload"]["call"]["call_id"] == call)
+            .expect("public tool card")["payload"]
+            .clone()
+    }
     fn finish(&self, run: &str) {
         wait("tool response", || {
             store::required(&self.db(), run)
@@ -151,6 +167,294 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
+}
+
+#[test]
+fn slow_calls_initialization_and_catalogue_refresh_leave_reads_writes_and_stop_responsive() {
+    use std::time::{Duration, Instant};
+    for mode in ["normal", "slow-start", "slow-list"] {
+        let mut f = Fixture::new();
+        let id = f.add(mode);
+        let (run, message) = if mode == "slow-start" {
+            (f.start(&id), None)
+        } else {
+            f.connect(&id);
+            let tool = f.tool("echo");
+            let text = if mode == "normal" {
+                "slow-two-seconds"
+            } else {
+                "Bonjour"
+            };
+            let run = f.send(&tool, json!({"text":text}), "slow-ui");
+            f.script(vec![json!({"type":"response.completed"})]);
+            (run.run_id, Some("slow-ui"))
+        };
+        let request = f.request(&run);
+        f.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id,"submission_id":"slow-admit","decision":"allow_once"}));
+        let before = Instant::now();
+        f.app.tick(0);
+        assert!(before.elapsed() < Duration::from_millis(200), "tick {mode}");
+        if mode == "slow-list" {
+            f.finish(&run);
+            f.app.tick(0);
+        }
+        wait("busy MCP", || {
+            if mode == "slow-list" {
+                f.app.tick(0);
+            }
+            matches!(
+                f.state()["mcp"]["servers"][0]["status"].as_str(),
+                Some("busy" | "starting")
+            )
+        });
+        for _ in 0..3 {
+            let before = Instant::now();
+            f.app.api_response("GET", "/api/state", b"").unwrap();
+            assert!(
+                before.elapsed() < Duration::from_millis(200),
+                "GET /api/state {mode}"
+            );
+        }
+        let before = Instant::now();
+        let other = f.post("/api/conversations", json!({"title":"Pendant MCP"}))["conversation"]
+            ["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            before.elapsed() < Duration::from_millis(200),
+            "new conversation {mode}"
+        );
+        f.script(vec![json!({"type":"response.completed"})]);
+        let before = Instant::now();
+        f.post(
+            "/api/send",
+            json!({"conversation_id":other,"message_id":"during-mcp","body":"Bonjour pendant MCP"}),
+        );
+        assert!(before.elapsed() < Duration::from_millis(200), "send {mode}");
+        if mode == "normal" {
+            let before = Instant::now();
+            f.post(
+                "/api/stop",
+                json!({"conversation_id":f.conversation,"message_id":message.unwrap()}),
+            );
+            assert!(before.elapsed() < Duration::from_millis(200), "stop");
+            assert_eq!(
+                store::required(&f.db(), &run).unwrap().status,
+                RunStatus::Cancelled
+            );
+        }
+        f.finish(&run);
+        if mode == "slow-list" {
+            wait("catalogue idle", || {
+                f.state()["mcp"]["servers"][0]["status"] == "connected"
+            });
+        }
+    }
+}
+
+#[test]
+fn short_settings_do_not_corrupt_other_connectors_or_json_scalar_types() {
+    let mut f = Fixture::new();
+    let id = f.add("normal");
+    f.connect(&id);
+    f.post("/api/mcp/add",json!({"name":"Réglages inactifs","command":"python3","arguments":["script1.py"],"environment":{"DEBUG":"1","PORT":"3000","VERBOSE":"false"}}));
+    let addition = f.tool("addition");
+    let run = f.send(&addition, json!({"a":1000,"b":2000}), "numeric-short");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="3000")
+    );
+    let name = format!("MCP_{id}_ENV").to_uppercase();
+    features::forms::vault(&f.app.feature_context()).unwrap().set(&name,grokbot_forms::vault::MCP_ENV_PURPOSE,&json!({"variables":{"DEBUG":"1","PORT":"3000","VERBOSE":"false","TEST_TOKEN":"jeton-prive-test-489","NUMERIC_TOKEN":"30000000"}}).to_string()).unwrap();
+    let restart = f.start(&id);
+    f.decide(&restart, json!("allow_once"));
+    let echo = f.tool("echo");
+    let run = f.send(&echo, json!({"text":"typed"}), "typed-short");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Done{output} if output["isError"]==false && output["structuredContent"]["port"]==3000 && output["structuredContent"]["flag"]==false)
+    );
+    let run = f.send(&echo, json!({"text":"env:VERBOSE"}), "own-short");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="[masqué]" && output["isError"]==false)
+    );
+    let run = f.send(&echo, json!({"text":"number-secret"}), "private-number");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Failed{reason} if reason.contains("numérique privée"))
+    );
+    assert!(!f.state().to_string().contains("30000000"));
+}
+
+#[test]
+fn rpc_argument_errors_keep_the_connection_usable_for_the_next_valid_call() {
+    let mut f = Fixture::new();
+    let id = f.add("normal");
+    f.connect(&id);
+    let echo = f.tool("echo");
+    let run = f.send(&echo, json!({"text":5}), "bad-args");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Failed{reason} if reason.contains("arguments invalides"))
+    );
+    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "connected");
+    assert!(f.state()["mcp"]["servers"][0]["error"].is_null());
+    let next = f.send(&echo, json!({"text":"Encore connecté"}), "valid-after-rpc");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&next.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&next.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="Encore connecté")
+    );
+}
+
+#[test]
+fn rpc_catalogue_errors_keep_the_last_catalogue_and_retry_without_restarting() {
+    let mut f = Fixture::new();
+    let id = f.add("rpc-list");
+    f.connect(&id);
+    let echo = f.tool("echo");
+    let run = f.send(&echo, json!({"text":"Bonjour"}), "list-rpc-error");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    wait("metadata RPC deferred", || {
+        f.app.tick(0);
+        f.state()["mcp"]["error"].is_string()
+    });
+    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "connected");
+    let next = f.send(
+        &echo,
+        json!({"text":"Toujours vivant"}),
+        "call-during-list-error",
+    );
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&next.run_id, json!("allow_once"));
+    assert!(
+        matches!(f.outcome(&next.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="Toujours vivant")
+    );
+    wait("metadata RPC recovered", || {
+        f.app.tick(0);
+        let s = f.state();
+        s["mcp"]["error"].is_null()
+            && s["mcp"]["servers"][0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["description"] == "Catalogue actualisé.")
+    });
+}
+
+#[test]
+fn settings_actions_have_a_stable_dedicated_route_and_only_one_time_decisions() {
+    let mut f = Fixture::new();
+    let id = f.add("normal");
+    f.db()
+        .execute(
+            "INSERT INTO forms_approval_rules VALUES ('grokbot','grokbot',?1,?2,?3,'\"global\"',1)",
+            rusqlite::params![f.conversation, format!("mcp_start_{id}"), "0".repeat(64)],
+        )
+        .unwrap();
+    let run = f.start(&id);
+    let first = f.request(&run);
+    let dedicated = first.route.target_conversation_id.clone();
+    assert_ne!(dedicated, f.conversation);
+    let state = f.state();
+    let card = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap();
+    assert_eq!(card["connector"]["tool"], "Démarrer le connecteur");
+    assert_eq!(card["connector"]["origin"], "settings");
+    let body = json!({"entry_id":first.entry_id,"conversation_id":dedicated,"submission_id":"invalid-always","decision":{"always_allow":{"scope":"global"}}});
+    assert_eq!(
+        f.app
+            .api(
+                "POST",
+                "/api/approvals/resolve",
+                body.to_string().as_bytes()
+            )
+            .unwrap_err()
+            .status,
+        400
+    );
+    f.decide(&run, json!("deny"));
+    assert_eq!(
+        f.tool_card(&format!("{run}-call"))["approval_status"],
+        "denied"
+    );
+    f.post(
+        "/api/conversations",
+        json!({"title":"Discussion sans rapport"}),
+    );
+    f.post(
+        "/api/conversations/update",
+        json!({"id":dedicated,"title":"Mes validations"}),
+    );
+    let second = f.start(&id);
+    assert_eq!(f.request(&second).route.target_conversation_id, dedicated);
+    f.decide(&second, json!("allow_once"));
+    let restart = f.start(&id);
+    let state = f.state();
+    assert_eq!(
+        state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["run_id"] == restart)
+            .unwrap()["connector"]["tool"],
+        "Redémarrer le connecteur"
+    );
+    f.decide(&restart, json!("deny"));
+    f.post("/api/conversations/delete", json!({"id":dedicated}));
+    let next = f.start(&id);
+    assert_ne!(f.request(&next).route.target_conversation_id, dedicated);
+    f.decide(&next, json!("deny"));
+}
+
+#[test]
+fn model_guessed_management_names_never_create_an_approval_and_unknown_tools_keep_the_server_label()
+{
+    let mut f = Fixture::new();
+    let id = f.add("normal");
+    f.connect(&id);
+    let server = f.state()["mcp"]["servers"][0].clone();
+    let run=f.send(&format!("mcp_remove_{id}"),json!({"serveur":server["name"],"commande":server["command"],"arguments":server["arguments"],"variables_privées":server["environment_names"],"action":"Supprimer le connecteur"}),"guessed-management");
+    assert!(requests::list_for_run(&f.db(), &run.run_id)
+        .unwrap()
+        .is_empty());
+    assert!(
+        matches!(f.outcome(&run.run_id),ToolOutcome::Failed{reason} if reason.contains("inconnu"))
+    );
+    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "connected");
+    let echo = f.tool("echo");
+    let invalid = f.send(&echo, json!("incomplets"), "non-object-mcp");
+    assert!(requests::list_for_run(&f.db(), &invalid.run_id)
+        .unwrap()
+        .is_empty());
+    assert!(
+        matches!(f.outcome(&invalid.run_id),ToolOutcome::Failed{reason} if reason.contains("Arguments MCP invalides"))
+    );
+    let unknown = f.send(
+        &format!("mcp_{id}_ffffffffffffffff"),
+        json!({}),
+        "unknown-known-server",
+    );
+    assert!(requests::list_for_run(&f.db(), &unknown.run_id)
+        .unwrap()
+        .is_empty());
+    let card = f.tool_card("unknown-known-server");
+    assert_eq!(
+        card["connector"],
+        json!({"server":"Atelier local","tool":"outil inconnu"})
+    );
 }
 
 #[test]
@@ -312,6 +616,10 @@ fn catalogue_notification_retries_after_a_failed_sql_write_without_losing_the_se
     f.script(vec![json!({"type":"response.completed"})]);
     f.decide(&run.run_id, json!("allow_once"));
     f.finish(&run.run_id);
+    wait("deferred catalogue", || {
+        f.app.tick(0);
+        f.state()["mcp"]["error"].is_string()
+    });
     let deferred = f.state();
     assert_eq!(deferred["mcp"]["servers"].as_array().unwrap().len(), 1);
     assert!(deferred["mcp"]["error"]
@@ -321,6 +629,16 @@ fn catalogue_notification_retries_after_a_failed_sql_write_without_losing_the_se
     f.db()
         .execute_batch("DROP TRIGGER fail_mcp_catalogue;")
         .unwrap();
+    wait("retried catalogue", || {
+        f.app.tick(0);
+        let s = f.state();
+        s["mcp"]["error"].is_null()
+            && s["mcp"]["servers"][0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["description"] == "Catalogue actualisé.")
+    });
     let refreshed = f.state();
     assert!(refreshed["mcp"]["error"].is_null());
     assert!(refreshed["mcp"]["servers"][0]["tools"]
@@ -438,6 +756,14 @@ fn notifications_refresh_catalogue_and_unknown_tool_fails_in_french() {
     f.script(vec![json!({"type":"response.completed"})]);
     f.decide(&run.run_id, json!("allow_once"));
     f.finish(&run.run_id);
+    wait("catalogue notification", || {
+        f.app.tick(0);
+        f.state()["mcp"]["servers"][0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["description"] == "Catalogue actualisé.")
+    });
     assert!(f.state()["mcp"]["servers"][0]["tools"]
         .as_array()
         .unwrap()
@@ -462,12 +788,13 @@ fn server_crash_during_tool_and_disconnected_call_do_not_auto_restart() {
     assert!(
         matches!(f.outcome(&crash.run_id),ToolOutcome::Failed {reason} if reason.contains("déconnecté"))
     );
+    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "crashed");
     let absent = f.send(&tool, json!({"text":"Bonjour"}), "disconnected-call");
-    f.script(vec![json!({"type":"response.completed"})]);
-    f.decide(&absent.run_id, json!("allow_once"));
-    f.finish(&absent.run_id);
+    assert!(requests::list_for_run(&f.db(), &absent.run_id)
+        .unwrap()
+        .is_empty());
     assert!(
-        matches!(f.outcome(&absent.run_id),ToolOutcome::Failed {reason} if reason.contains("déconnecté"))
+        matches!(f.outcome(&absent.run_id),ToolOutcome::Failed{reason} if reason.contains("inconnu"))
     );
     let restart = f.start(&id);
     f.decide(&restart, json!("allow_once"));
@@ -513,6 +840,13 @@ fn launch_denial_persistence_restart_and_remove_use_the_gate() {
         f.state()["mcp"]["servers"][0]["enabled_bots"],
         json!(["grokbot"])
     );
+    let ctx = f.app.feature_context();
+    assert!(!features::mcp::scoped_tools(&features::Context {
+        bot_id: Some("grokbot"),
+        ..ctx
+    })
+    .iter()
+    .any(|t| t.name.starts_with(&format!("mcp_{id}_"))));
     let restart = f.start(&id);
     f.decide(&restart, json!("allow_once"));
     assert_eq!(f.state()["mcp"]["servers"][0]["status"], "connected");
@@ -593,6 +927,8 @@ fn model_tools_are_bot_scoped_approved_namespaced_and_secret_safe() {
     assert!(
         matches!(f.outcome(&second.run_id),ToolOutcome::Done {output} if output["content"][0]["text"]=="Bonjour")
     );
+    assert_eq!(f.tool_card("next")["authorized_by"]["kind"], "rule");
+    assert_eq!(f.tool_card("next")["requesting_bot"], "Ezerbot");
     // A different tool still asks: Always is server + tool, not whole server.
     let addition = f.tool("addition");
     let denied = f.send(&addition, json!({"a":1,"b":2}), "addition-denied");
@@ -635,7 +971,7 @@ fn crash_and_launch_errors_are_french_and_restartable() {
     assert!(
         matches!(f.outcome(&run),ToolOutcome::Failed {reason} if reason.contains("déconnecté"))
     );
-    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "error");
+    assert_eq!(f.state()["mcp"]["servers"][0]["status"], "crashed");
     let restart = f.start(&id);
     assert_eq!(
         store::required(&f.db(), &restart).unwrap().status,

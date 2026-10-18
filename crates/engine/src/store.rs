@@ -56,6 +56,11 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             run_id TEXT NOT NULL REFERENCES engine_runs(run_id), seq INTEGER NOT NULL CHECK(seq > 0),
             kind TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(run_id, seq)
         );
+        CREATE TABLE IF NOT EXISTS engine_tool_admissions (
+            run_id TEXT NOT NULL REFERENCES engine_runs(run_id), call_id TEXT NOT NULL,
+            digest TEXT NOT NULL, authorized_by TEXT,
+            PRIMARY KEY(run_id, call_id)
+        );
         CREATE TABLE IF NOT EXISTS engine_run_wakes (
             wake_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
             cause TEXT NOT NULL, reference TEXT NOT NULL, state TEXT NOT NULL,

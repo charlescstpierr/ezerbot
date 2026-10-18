@@ -3,14 +3,24 @@
 .mcp-server { border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; font-size: 12px; }
 .mcp-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .mcp-heading strong { overflow-wrap: anywhere; }
-.mcp-status { color: var(--muted); font-size: 11px; }
-.mcp-status-connected { color: var(--text); }
+.mcp-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.mcp-status .status-dot { flex: 0 0 auto; background: var(--subtle); }
+.mcp-status-connected, .mcp-status-busy { color: var(--text); }
+.mcp-status-starting { color: var(--warning-text); }
+.mcp-status-starting .status-dot { background: var(--warning-text); }
+.mcp-status-error, .mcp-status-crashed { color: var(--danger-text); }
+.mcp-status-connected .status-dot, .mcp-status-busy .status-dot { background: var(--ok); }
+.mcp-status-error .status-dot, .mcp-status-crashed .status-dot { background: var(--danger-text); }
 .mcp-server details, .mcp-add { margin: 10px 0; }
 .mcp-server summary, .mcp-add > summary { cursor: pointer; font-size: 12px; }
+.mcp-server summary:focus-visible, .mcp-add > summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; border-radius: 3px; }
+.mcp-add > summary { display: inline-flex; list-style: none; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 10px 15px; font-size: 11px; font-weight: 500; }
+.mcp-add > summary::-webkit-details-marker { display: none; }
+.mcp-add > summary:hover { background: var(--soft); }
 .mcp-server pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
 .mcp-server p { overflow-wrap: anywhere; }
 .mcp-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.mcp-error { color: var(--text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.mcp-section .mcp-error { color: var(--danger-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .mcp-actions button, .mcp-env-row button { font-size: 11px; padding: 7px 9px; }
 .mcp-bots { border: 0; padding: 0; margin: 12px 0; display: flex; flex-wrap: wrap; gap: 10px; }
@@ -24,4 +34,4 @@
 .mcp-form > button { justify-self: start; }
 .mcp-environment { display: grid; gap: 8px; }
 .mcp-env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
-@media (max-width: 850px) { .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; } .mcp-env-row input:first-child { grid-column: 1 / -1; } }
+@media (max-width: 850px) { .mcp-environment { gap: 14px; } .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; padding-bottom: 10px; border-bottom: 1px solid var(--line); } .mcp-env-row input:first-child { grid-column: 1 / -1; } }

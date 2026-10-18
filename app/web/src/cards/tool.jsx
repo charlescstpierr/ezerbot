@@ -58,9 +58,19 @@ function suspension(message, view) {
   return { label: "État de l’appel indisponible" };
 }
 
+function openConnectors() {
+  const dialog = document.getElementById("settings-dialog");
+  if (!dialog?.open) document.getElementById("settings-button")?.click();
+  requestAnimationFrame(() => {
+    const section = document.querySelector(".mcp-section");
+    section?.scrollIntoView({ block: "start" });
+    section?.querySelector("button, summary")?.focus({ preventScroll: true });
+  });
+}
+
 export function Card({ message }) {
   const view = useEngine();
-  const { run_id: runId, call, outcome, connector } = message.payload || {};
+  const { run_id: runId, call, outcome, connector, authorized_by, requesting_bot, approval_status } = message.payload || {};
   // These internal tools are represented by the single task-status card.
   if (["begin_task", "complete_task"].includes(call?.name)) return null;
   if (!call?.call_id || typeof call.name !== "string") {
@@ -69,6 +79,9 @@ export function Card({ message }) {
   const run = view?.run(runId);
   const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);
   let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
+  const decisionLabels = { denied: "Refusé", cancelled: "Annulé", expired: "Approbation expirée" };
+  const refused = outcome?.status === "failed" && Object.hasOwn(decisionLabels, approval_status);
+  if (refused) label = decisionLabels[approval_status];
   let note;
   if (outcome?.status === "suspend") ({ label, note } = suspension(message, view));
   if (!outcome) {
@@ -80,6 +93,7 @@ export function Card({ message }) {
   return (
     <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : `Outil · ${call.name}`} label={label}>
       <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>
+      {authorized_by?.kind === "rule" && <p className="gb-engine-note">Autorisé automatiquement par la règle « Toujours » ({requesting_bot || "Bot demandeur"} · {connector ? `${connector.server} · ${connector.tool}` : call.name}).</p>}
       <h4>Arguments</h4>
       <Data value={call.arguments} />
       {outcome?.status === "done" && <><h4>Résultat</h4>{connector && Array.isArray(outcome.output?.content)
@@ -88,7 +102,7 @@ export function Card({ message }) {
           : <p className="gb-engine-note">Le résultat ne contient pas de texte. Consultez les données techniques ci-dessous.</p>}
           <details><summary>Données techniques du résultat</summary><Data value={outcome.output} /></details></>
         : <Data value={outcome.output} />}</>}
-      {outcome?.status === "failed" && <><h4>Raison de l’échec</h4><Data value={outcome.reason} /></>}
+      {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector && !refused && <button type="button" className="gb-retry" onClick={openConnectors}>Ouvrir les connecteurs</button>}</>}
       {note && <p className="gb-engine-note">{note}</p>}
     </Disclosure>
   );

@@ -6,16 +6,41 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 
+pub(crate) const DISCONNECTED: &str =
+    "Le serveur MCP s’est arrêté ou déconnecté. Redémarrez le connecteur.";
 const FRAME_LIMIT: usize = 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
-type Result<T> = std::result::Result<T, String>;
+#[derive(Debug)]
+pub(crate) enum Error {
+    Transport(String),
+    Rpc { code: i64, message: String },
+}
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Self::Transport(s)
+    }
+}
+impl From<&str> for Error {
+    fn from(s: &str) -> Self {
+        Self::Transport(s.into())
+    }
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(s) => f.write_str(s),
+            Self::Rpc { code, message } => write!(f, "{message} ({code})"),
+        }
+    }
+}
+type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) struct Client {
     child: Child,
@@ -111,9 +136,10 @@ impl Client {
             .input
             .as_mut()
             .ok_or("Le serveur MCP est déconnecté.")?;
-        input
-            .try_send(bytes)
-            .map_err(|_| "Le serveur MCP est déconnecté ou ne lit plus les requêtes.".into())
+        input.try_send(bytes).map_err(|error| match error {
+            mpsc::TrySendError::Disconnected(_) => DISCONNECTED.into(),
+            mpsc::TrySendError::Full(_) => "Le serveur MCP ne lit plus les requêtes.".into(),
+        })
     }
     fn notification(&mut self, frame: &Value) -> Result<()> {
         if frame["jsonrpc"] != "2.0" || !frame["method"].is_string() {
@@ -131,21 +157,13 @@ impl Client {
         }
         Ok(())
     }
-    pub(crate) fn mark_catalog_dirty(&mut self) {
-        self.catalog_dirty = true;
-    }
     pub(crate) fn catalog_changed(&mut self) -> Result<bool> {
         // Only idle connections call this; no response is consumed out of turn.
         for _ in 0..32 {
             match self.frames.try_recv() {
                 Ok(frame) => self.notification(&frame?)?,
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(_) => {
-                    return Err(
-                        "Le serveur MCP s’est arrêté ou déconnecté. Redémarrez le connecteur."
-                            .into(),
-                    )
-                }
+                Err(_) => return Err(DISCONNECTED.into()),
             }
         }
         Ok(self.catalog_dirty)
@@ -177,12 +195,7 @@ impl Client {
                     );
                     return Err("Le serveur MCP n’a pas répondu dans le délai prévu (10 secondes). Redémarrez le connecteur.".into());
                 }
-                Err(_) => {
-                    return Err(
-                        "Le serveur MCP s’est arrêté ou déconnecté. Redémarrez le connecteur."
-                            .into(),
-                    )
-                }
+                Err(_) => return Err(DISCONNECTED.into()),
             };
             if frame["jsonrpc"] != "2.0" {
                 return Err("Réponse MCP incompatible avec JSON-RPC 2.0.".into());
@@ -199,15 +212,22 @@ impl Client {
             if frame["id"] != id {
                 return Err("Le serveur MCP a renvoyé un identifiant de réponse inattendu.".into());
             }
-            if frame.get("error").is_some() {
-                let code = frame["error"]["code"].as_i64().unwrap_or(-32603);
-                if method == "tools/call" && matches!(code, -32601 | -32602) {
-                    return Err(
-                        "Le serveur MCP a refusé l’outil : outil inconnu ou arguments invalides."
-                            .into(),
-                    );
+            if let Some(error) = frame.get("error") {
+                let code = error["code"]
+                    .as_i64()
+                    .ok_or("Erreur JSON-RPC MCP invalide.")?;
+                if !error["message"].is_string() || frame.get("result").is_some() {
+                    return Err("Erreur JSON-RPC MCP invalide.".into());
                 }
-                return Err(format!("Le serveur MCP a refusé la requête ({code})."));
+                let message = if method == "tools/call" && matches!(code, -32601 | -32602) {
+                    "Le serveur MCP a refusé l’outil : outil inconnu ou arguments invalides."
+                } else {
+                    "Le serveur MCP a refusé la requête."
+                };
+                return Err(Error::Rpc {
+                    code,
+                    message: message.into(),
+                });
             }
             return frame
                 .get("result")
@@ -277,9 +297,7 @@ impl Client {
     pub(crate) fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
-}
-impl Drop for Client {
-    fn drop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         // MCP stdio shutdown: close stdin, allow EOF cleanup, then reap/terminate.
         self.input.take();
         let deadline = Instant::now() + Duration::from_millis(300);
@@ -292,8 +310,36 @@ impl Drop for Client {
         let _ = self.child.wait();
     }
 }
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+pub(crate) struct Connection {
+    pub(crate) client: Mutex<Client>,
+    pub(crate) environment: HashMap<String, String>,
+    pub(crate) identity: u64,
+    pub(crate) dirty: AtomicBool,
+    pub(crate) ready: AtomicBool,
+}
+impl Connection {
+    pub(crate) fn new(client: Client) -> Arc<Self> {
+        Arc::new(Self {
+            identity: client.identity(),
+            environment: client.private_environment().clone(),
+            client: Mutex::new(client),
+            dirty: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+        })
+    }
+}
 #[derive(Default)]
-pub(crate) struct Manager(pub(crate) Mutex<HashMap<String, Client>>);
+pub(crate) struct Manager(
+    pub(crate) Mutex<HashMap<String, Arc<Connection>>>,
+    pub(crate) AtomicBool,
+    pub(crate) AtomicBool,
+    pub(crate) AtomicU64,
+);
 
 #[cfg(test)]
 mod tests {
@@ -326,6 +372,7 @@ mod tests {
         assert!(client
             .request("tools/call", json!({"name":"unknown","arguments":{}}))
             .unwrap_err()
+            .to_string()
             .contains("refusé"));
         client.input.take();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -393,6 +440,7 @@ mod tests {
                 Duration::from_millis(100)
             )
             .unwrap_err()
+            .to_string()
             .contains("délai"));
         assert!(before.elapsed() < Duration::from_secs(2));
     }
@@ -415,7 +463,7 @@ mod tests {
                     },
                 )
                 .unwrap_err();
-            assert!(error.contains(expected), "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 }

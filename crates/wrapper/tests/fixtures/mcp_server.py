@@ -9,6 +9,7 @@ import threading
 mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 initialized = False
 changed = False
+failed_list_once = False
 if mode == "no-read":
     time.sleep(20)
 for line in sys.stdin:
@@ -28,8 +29,17 @@ for line in sys.stdin:
         continue
     response = {"jsonrpc": "2.0", "id": request["id"]}
     if method == "initialize":
+        if mode == "slow-start":
+            time.sleep(2)
         result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {"listChanged": True}}, "serverInfo": {"name": "Atelier local", "version": "1"}}
     elif method == "tools/list" and initialized:
+        if mode == "rpc-list" and changed and not failed_list_once:
+            failed_list_once = True
+            response["error"] = {"code": -32001, "message": "Catalogue provisoirement indisponible"}
+            print(json.dumps(response), flush=True)
+            continue
+        if mode == "slow-list" and changed:
+            time.sleep(2)
         result = {"tools": [
             {"name": "echo", "description": "Catalogue actualisé." if changed else "Répéter un texte sans effet externe.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
             {"name": "addition", "description": "Additionner deux nombres.", "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}}
@@ -42,6 +52,12 @@ for line in sys.stdin:
         args = request["params"]["arguments"]
         if name == "echo":
             text = args.get("text", "")
+            if not isinstance(text, str):
+                response["error"] = {"code": -32602, "message": "Texte requis"}
+                print(json.dumps(response), flush=True)
+                continue
+            if text == "slow-two-seconds":
+                time.sleep(2)
             if text == "crash":
                 sys.exit(9)
             if text == "crash-after":
@@ -57,13 +73,17 @@ for line in sys.stdin:
                 text = os.environ.get(text[4:], "absent")
             if text == "secret":
                 text = "private-value-56789" if mode == "foreign" else os.environ.get("TEST_TOKEN", "absent")
-            result = {"content": [None] if mode == "invalid-content" else [{"type": "text", "text": text}], "isError": False}
+            result = {"content": [None] if mode == "invalid-content" else [{"type": "text", "text": text}], "isError": text == "erreur"}
+            if text == "typed":
+                result["structuredContent"] = {"port": 3000, "flag": False}
+            if text == "number-secret":
+                result["structuredContent"] = {"value": int(os.environ["NUMERIC_TOKEN"])}
         elif name == "addition":
             result = {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}]}
         else:
             response["error"] = {"code": -32602, "message": "Outil inconnu"}
             result = None
-        if mode == "notifications":
+        if mode in ("notifications", "slow-list", "rpc-list"):
             changed = True
             print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "Appel terminé"}}), flush=True)

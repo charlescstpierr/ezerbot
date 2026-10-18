@@ -162,7 +162,7 @@ impl Vault {
                             environment
                                 .values()
                                 .filter_map(|v| v.as_str())
-                                .filter(|v| v.len() >= MIN_SECRET_VALUE_CHARACTERS)
+                                .filter(|v| v.encode_utf16().count() >= MIN_SECRET_VALUE_CHARACTERS)
                                 .map(str::to_owned),
                         );
                     }

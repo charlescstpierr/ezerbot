@@ -2,18 +2,79 @@
 //! bot selection and grants; NM04 establishes JSON lines, NM07 EOF cleanup.
 //! Command launch/removal are host-generated tool calls through forms.rs too.
 use super::{write_transaction, Context};
-use crate::{mcp::Client, parse, ApiError, ApiResponse, App};
+mod execution;
+use crate::{mcp::Client, parse, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::contracts::{RunEventKind, ToolCall, ToolOutcome, ToolSpec};
 use grokbot_forms::redact::redact_value;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::atomic::Ordering,
+};
 
 // No global MCP tools or custom transcript entries: Services supplies bot-scoped
 // specs, and the engine/forms modules own the tool and approval cards.
-empty_hooks!(context, entry, link_attachments, tools, tick);
+empty_hooks!(context, entry, link_attachments, tools);
+fn wall_clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+pub fn tick(ctx: &Context<'_>) {
+    let manager = ctx.provider.mcp();
+    if manager
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+    {
+        manager.2.store(false, Ordering::Release);
+        manager.3.store(0, Ordering::Release);
+        return;
+    }
+    let now = wall_clock();
+    if manager.3.load(Ordering::Acquire) > now || manager.1.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    manager.3.store(now.saturating_add(200), Ordering::Release);
+    let provider = ctx.provider.clone();
+    let path = ctx.db_path.to_path_buf();
+    std::thread::spawn(move || {
+        struct Reset(crate::Provider);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                self.0.mcp().1.store(false, Ordering::Release);
+            }
+        }
+        let _reset = Reset(provider.clone());
+        let result = (|| -> Result<(), ApiError> {
+            let conn = Connection::open(&path)?;
+            conn.busy_timeout(std::time::Duration::from_secs(3))?;
+            let ctx = Context {
+                connection: &conn,
+                provider: &provider,
+                db_path: &path,
+                now_ms: 0,
+                bot_id: None,
+                conversation_id: None,
+                run_id: None,
+            };
+            refresh_catalogues(&ctx)
+        })();
+        if result.is_err() {
+            provider
+                .mcp()
+                .3
+                .store(wall_clock().saturating_add(1000), Ordering::Release);
+        }
+        provider.mcp().2.store(result.is_err(), Ordering::Release);
+    });
+}
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_mcp_servers (
@@ -23,10 +84,33 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_mcp_bots (
         server_id TEXT NOT NULL REFERENCES wrapper_mcp_servers(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL, PRIMARY KEY(server_id,bot_id));
-        CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);",
+        CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS wrapper_mcp_approval_chat (account_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL);",
     )?;
     Ok(())
 }
+/// Settings actions have one stable, host-owned destination, never the most
+/// recently edited user discussion. A deleted destination is recreated atomically.
+pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiError> {
+    let tx = write_transaction(ctx.connection)?;
+    let existing: Option<String> = tx.query_row(
+        "SELECT c.id FROM wrapper_mcp_approval_chat m JOIN wrapper_conversations c ON c.account_id=m.account_id AND c.id=m.conversation_id WHERE m.account_id=?1 AND c.bot_id=?2 AND c.kind='chat' AND c.deleted=0",
+        params![ACCOUNT, DEFAULT_BOT.id], |r| r.get(0),
+    ).optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let id: String = tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
+    tx.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,created_at,updated_at) VALUES (?1,?2,'Approbations',?3,?4,?4)",params![ACCOUNT,id,DEFAULT_BOT.id,ctx.now_ms])?;
+    tx.execute("INSERT INTO wrapper_mcp_approval_chat VALUES (?1,?2) ON CONFLICT(account_id) DO UPDATE SET conversation_id=excluded.conversation_id", params![ACCOUNT,id])?;
+    tx.commit()?;
+    Ok(id)
+}
+
+pub(crate) fn is_lifecycle(name: &str) -> bool {
+    name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Add {
@@ -106,6 +190,9 @@ fn environment(ctx: &Context<'_>, server: &Server) -> Result<HashMap<String, Str
     serde_json::from_value(value["variables"].clone())
         .map_err(|_| invalid("Les variables privées du connecteur sont illisibles."))
 }
+fn strong_secret(value: &str) -> bool {
+    value.encode_utf16().count() >= grokbot_forms::vault::MIN_SECRET_VALUE_CHARACTERS
+}
 fn private_values(ctx: &Context<'_>) -> Result<HashMap<String, String>, ApiError> {
     let vault = super::forms::vault(ctx)?;
     let mut values = HashMap::new();
@@ -127,6 +214,7 @@ fn private_values(ctx: &Context<'_>) -> Result<HashMap<String, String>, ApiError
         values.extend(
             environment
                 .into_iter()
+                .filter(|(_, value)| strong_secret(value))
                 .map(|(key, value)| (format!("{}:{key}", secret.name), value)),
         );
     }
@@ -153,27 +241,33 @@ fn sanitize(value: &Value, env: &HashMap<String, String>) -> Result<Value, ApiEr
         output
     }
     let mut patterns = BTreeSet::new();
-    for value in env.values().filter(|v| !v.is_empty()) {
+    let short: Vec<_> = env
+        .values()
+        .filter(|v| !v.is_empty() && !strong_secret(v))
+        .map(String::as_str)
+        .collect();
+    for value in env.values().filter(|v| strong_secret(v)) {
         patterns.insert(value.clone());
         let encoded = json!(value).to_string();
         patterns.insert(encoded[1..encoded.len() - 1].to_owned());
     }
     let mut values: Vec<_> = patterns.iter().map(String::as_str).collect();
     values.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    fn walk(value: &Value, values: &[&str]) -> Result<Value, ApiError> {
+    fn walk(value: &Value, values: &[&str], short: &[&str]) -> Result<Value, ApiError> {
         Ok(match value {
+            Value::String(s) if short.contains(&s.as_str()) => json!("[masqué]"),
             Value::String(s) => json!(text(s, values)),
             Value::Array(items) => Value::Array(
                 items
                     .iter()
-                    .map(|v| walk(v, values))
+                    .map(|v| walk(v, values, short))
                     .collect::<Result<_, _>>()?,
             ),
             Value::Object(items) => {
                 let mut output = serde_json::Map::new();
                 for (key, value) in items {
                     if output
-                        .insert(text(key, values), walk(value, values)?)
+                        .insert(text(key, values), walk(value, values, short)?)
                         .is_some()
                     {
                         return Err(invalid(
@@ -183,17 +277,13 @@ fn sanitize(value: &Value, env: &HashMap<String, String>) -> Result<Value, ApiEr
                 }
                 Value::Object(output)
             }
-            _ => {
-                let raw = value.to_string();
-                if text(&raw, values) != raw {
-                    json!("[masqué]")
-                } else {
-                    value.clone()
-                }
-            }
+            Value::Number(n) if values.contains(&n.to_string().as_str()) => return Err(invalid(
+                "Le résultat MCP contient une donnée numérique privée ; il n’a pas été conservé.",
+            )),
+            _ => value.clone(),
         })
     }
-    walk(value, &values)
+    walk(value, &values, &short)
 }
 fn safe_catalogue(
     ctx: &Context<'_>,
@@ -235,7 +325,10 @@ fn enabled(conn: &Connection, server: &str, bot: &str) -> bool {
 pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
     let mut result = Vec::new();
     for server in servers(ctx.connection).unwrap_or_default() {
-        for action in ["start", "remove"] {
+        for action in ["start", "remove"]
+            .into_iter()
+            .filter(|_| ctx.run_id.is_some_and(|id| id.starts_with("mcp-host-")))
+        {
             result.push(ToolSpec {
                 name: format!("mcp_{action}_{}", server.id),
                 description: format!(
@@ -254,6 +347,24 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
         if !ctx
             .bot_id
             .is_some_and(|bot| enabled(ctx.connection, &server.id, bot))
+        {
+            continue;
+        }
+        let handle = ctx
+            .provider
+            .mcp()
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&server.id)
+            .cloned();
+        let Some(handle) = handle.filter(|c| c.ready.load(Ordering::Acquire)) else {
+            continue;
+        };
+        if handle
+            .client
+            .try_lock()
+            .is_ok_and(|mut client| !client.alive())
         {
             continue;
         }
@@ -305,114 +416,136 @@ pub fn display(ctx: &Context<'_>, name: &str) -> Option<Value> {
         for action in ["start", "remove"] {
             if name == format!("mcp_{action}_{}", server.id) {
                 return Some(
-                    json!({"server":server.name,"tool":if action=="start" {"Démarrer / redémarrer"} else {"Supprimer le connecteur"}}),
+                    json!({"server":server.name,"tool":if action=="start" {"Démarrer le connecteur"} else {"Supprimer le connecteur"}}),
                 );
             }
         }
         if let Some(tool) = server.tools.iter().find(|t| namespace(&server, t) == name) {
             return Some(json!({"server":server.name,"tool":tool["name"]}));
         }
+        if name.starts_with(&format!("mcp_{}_", server.id)) {
+            return Some(json!({"server":server.name,"tool":"outil inconnu"}));
+        }
     }
     None
 }
-/// Catalogue refresh follows the engine's lock order: SQLite writer, then
-/// process registry. Never try to acquire a writer while holding the registry;
-/// a simultaneous approved call may already own SQLite and need that registry.
-fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
-    let pending: Vec<_> = {
-        let mut live = ctx
-            .provider
-            .mcp()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        live.iter_mut()
-            .filter_map(|(id, client)| match client.catalog_changed() {
-                Ok(true) => Some((id.clone(), client.identity(), None)),
-                Ok(false) => None,
-                Err(error) => Some((id.clone(), client.identity(), Some(error))),
+pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> Option<Value> {
+    let label = display(ctx, name)?;
+    if is_lifecycle(name) {
+        let title = arguments["action"]
+            .as_str()
+            .filter(|s| {
+                matches!(
+                    *s,
+                    "Démarrer le connecteur"
+                        | "Redémarrer le connecteur"
+                        | "Supprimer le connecteur"
+                )
             })
-            .collect()
-    };
-    for (id, identity, error) in pending {
-        let tx = write_transaction(ctx.connection)?;
-        let local = Context {
-            connection: &tx,
-            ..*ctx
-        };
-        let mut live = ctx
-            .provider
-            .mcp()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // A queued notification/error belongs to one process, not merely its
-        // persisted server ID. A concurrent restart must not lose its NEW child.
-        if !live
-            .get(&id)
-            .is_some_and(|client| client.identity() == identity)
-        {
+            .unwrap_or_else(|| label["tool"].as_str().unwrap_or("Gérer le connecteur"));
+        return Some(
+            json!({"server":label["server"],"tool":title,"origin":"settings","action":if name.starts_with("mcp_start_") {"start"} else {"remove"}}),
+        );
+    }
+    Some(label)
+}
+/// Background only: no stdio under a SQLite writer or the process registry.
+/// A busy client is skipped; immutable connection identities defeat stale EOFs.
+fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
+    let handles = ctx
+        .provider
+        .mcp()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let private = active_private(ctx);
+    for (id, handle) in handles {
+        if !handle.ready.load(Ordering::Acquire) {
             continue;
         }
-        let active_private: HashMap<String, String> = live
-            .iter()
-            .flat_map(|(server, client)| {
-                client
-                    .private_environment()
-                    .iter()
-                    .map(move |(key, value)| (format!("active:{server}:{key}"), value.clone()))
-            })
-            .collect();
-        // The approved connection includes metadata discovery, never tool execution.
-        let refreshed = match error {
-            Some(error) => Err(ApiError::new(503, error)),
-            None => live
-                .get_mut(&id)
-                .unwrap()
-                .list_tools()
-                .map_err(|e| ApiError::new(503, e))
-                .and_then(|tools| safe_catalogue(&local, tools, &active_private)),
+        let Ok(mut client) = handle.client.try_lock() else {
+            continue;
         };
-        match refreshed {
-            Ok(tools) => {
-                if let Err(error) = tx.execute(
-                    "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
-                    params![id, json!(tools).to_string()],
-                ) {
-                    live.get_mut(&id).unwrap().mark_catalog_dirty();
-                    return Err(error.into());
-                }
+        let refreshed = match client.catalog_changed() {
+            Ok(false) if !handle.dirty.swap(false, Ordering::AcqRel) => continue,
+            Ok(_) => {
+                let tools = match client.list_tools() {
+                    Ok(tools) => Ok(tools),
+                    Err(e @ crate::mcp::Error::Rpc { .. }) => {
+                        handle.dirty.store(true, Ordering::Release);
+                        return Err(ApiError::new(503, e.to_string()));
+                    }
+                    Err(e) => Err(ApiError::new(503, e.to_string())),
+                };
+                tools.and_then(|t| {
+                    let mut p = private.clone();
+                    p.extend(handle.environment.clone());
+                    safe_catalogue(ctx, t, &p)
+                })
             }
-            Err(error) => {
-                live.remove(&id);
-                tx.execute(
-                    "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                    params![id, error.message],
-                )?;
-            }
-        }
-        drop(live);
-        if let Err(error) = tx.commit() {
-            if let Some(client) = ctx
+            Err(e) => Err(ApiError::new(503, e.to_string())),
+        };
+        drop(client);
+        let saved = (|| -> Result<(), ApiError> {
+            let tx = write_transaction(ctx.connection)?;
+            let mut registry = ctx
                 .provider
                 .mcp()
                 .0
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_mut(&id)
+                .unwrap_or_else(|e| e.into_inner());
+            if !registry
+                .get(&id)
+                .is_some_and(|c| c.identity == handle.identity)
             {
-                if client.identity() == identity {
-                    client.mark_catalog_dirty();
+                return Ok(());
+            }
+            match &refreshed {
+                Ok(tools) => {
+                    tx.execute(
+                        "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
+                        params![id, json!(tools).to_string()],
+                    )?;
+                }
+                Err(e) => {
+                    tx.execute(
+                        "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
+                        params![id, e.message],
+                    )?;
                 }
             }
-            return Err(error.into());
+            tx.commit()?;
+            if refreshed.is_err() {
+                registry.remove(&id);
+            }
+            Ok(())
+        })();
+        if saved.is_err() {
+            handle.dirty.store(true, Ordering::Release);
         }
+        saved?;
     }
     Ok(())
 }
+fn active_private(ctx: &Context<'_>) -> HashMap<String, String> {
+    ctx.provider
+        .mcp()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .flat_map(|(id, c)| {
+            c.environment
+                .iter()
+                .filter(|(_, value)| strong_secret(value))
+                .map(move |(key, value)| (format!("active:{id}:{key}"), value.clone()))
+        })
+        .collect()
+}
 
 pub fn state(ctx: &Context<'_>) -> Value {
-    let refresh_error = refresh_catalogues(ctx).err();
+    let refresh_error = ctx.provider.mcp().2.load(Ordering::Acquire);
     let load = || -> Result<Value, ApiError> {
         let mut live = ctx
             .provider
@@ -423,13 +556,18 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let mut result = Vec::new();
         for server in servers(ctx.connection)? {
             let status = match live.get_mut(&server.id) {
-                Some(client) => {
-                    if client.alive() {
-                        "connected"
-                    } else {
-                        "crashed"
+                Some(handle) if !handle.ready.load(Ordering::Acquire) => "starting",
+                Some(handle) => match handle.client.try_lock() {
+                    Ok(mut client) => {
+                        if client.alive() {
+                            "connected"
+                        } else {
+                            "crashed"
+                        }
                     }
-                }
+                    Err(_) => "busy",
+                },
+                None if server.error.as_deref() == Some(crate::mcp::DISCONNECTED) => "crashed",
                 None if server.error.is_some() => "error",
                 None => "disconnected",
             };
@@ -443,7 +581,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
         }
         Ok(
-            json!({"servers":result,"error":refresh_error.as_ref().map(|_|"L’actualisation des outils est différée. Le dernier état connu reste affiché.")}),
+            json!({"servers":result,"error":refresh_error.then_some("L’actualisation des outils est différée. Le dernier état connu reste affiché.")}),
         )
     };
     load().unwrap_or_else(|_| json!({"error":"Les connecteurs MCP sont indisponibles."}))
@@ -464,8 +602,8 @@ pub fn routes(
     }
     Some(route(app, path, body).map(ApiResponse::Json))
 }
-fn lifecycle_arguments(server: &Server, action: &str) -> Value {
-    json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {"Démarrer / redémarrer un processus local"} else {"Arrêter le processus et supprimer ce connecteur et ses variables privées"}})
+fn lifecycle_arguments(server: &Server, action: &str, restarting: bool) -> Value {
+    json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}})
 }
 
 fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
@@ -503,9 +641,13 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 return Err(invalid("Variable invalide : utilisez un nom de type CLE_API et une valeur sans caractère nul (2 Ko maximum)."));
             }
             if !value.is_empty()
-                && (name.contains(value)
-                    || command.contains(value)
-                    || add.arguments.iter().any(|a| a.contains(value)))
+                && (if strong_secret(value) {
+                    name.contains(value)
+                        || command.contains(value)
+                        || add.arguments.iter().any(|a| a.contains(value))
+                } else {
+                    name == value || command == value || add.arguments.iter().any(|a| a == value)
+                })
             {
                 return Err(invalid("Gardez les valeurs privées uniquement dans les variables d’environnement, pas dans le nom, la commande ou les arguments."));
             }
@@ -575,7 +717,14 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     } else {
         "remove"
     };
-    let args = lifecycle_arguments(&server, action);
+    let restarting = ctx
+        .provider
+        .mcp()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&server.id);
+    let args = lifecycle_arguments(&server, action, restarting);
     super::engine::queue_approved_action(&ctx, &format!("mcp_{action}_{}", server.id), args)
 }
 
@@ -600,145 +749,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
         // Engine has just consumed the grant or matched a standing permission.
         // Verify that admission again without consuming the single-use grant.
         super::forms::verify_tool_admitted(ctx, call)?;
-        let mut live = ctx
-            .provider
-            .mcp()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for server in servers(ctx.connection)? {
-            if call.name == format!("mcp_start_{}", server.id) {
-                if call.arguments != lifecycle_arguments(&server, "start") {
-                    return Err(invalid(
-                        "La commande MCP ne correspond pas à la configuration à approuver.",
-                    ));
-                }
-                live.remove(&server.id);
-                let env = environment(ctx, &server)?;
-                let mut redaction = env.clone();
-                for (id, client) in live.iter() {
-                    redaction.extend(
-                        client
-                            .private_environment()
-                            .iter()
-                            .map(|(key, value)| (format!("active:{id}:{key}"), value.clone())),
-                    );
-                }
-                let started = Client::spawn(&server.command, &server.arguments, &env)
-                    .and_then(|mut c| c.initialize().map(|tools| (c, tools)));
-                match started {
-                    Ok((client, tools)) => {
-                        let tools = match safe_catalogue(ctx, tools, &redaction) {
-                            Ok(tools) => json!(tools),
-                            Err(error) => {
-                                ctx.connection.execute(
-                                    "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                                    params![server.id, error.message],
-                                )?;
-                                return Err(error);
-                            }
-                        };
-                        ctx.connection.execute(
-                            "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
-                            params![server.id, tools.to_string()],
-                        )?;
-                        live.insert(server.id, client);
-                        return Ok(json!({"message":"Connecteur MCP connecté.","outils":tools}));
-                    }
-                    Err(error) => {
-                        ctx.connection.execute(
-                            "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                            params![server.id, error],
-                        )?;
-                        return Err(ApiError::new(503, error));
-                    }
-                }
-            }
-            if call.name == format!("mcp_remove_{}", server.id) {
-                if call.arguments != lifecycle_arguments(&server, "remove") {
-                    return Err(invalid(
-                        "La suppression MCP ne correspond pas à la configuration à approuver.",
-                    ));
-                }
-                live.remove(&server.id);
-                ctx.connection.execute(
-                    "DELETE FROM wrapper_mcp_bots WHERE server_id=?1",
-                    [&server.id],
-                )?;
-                ctx.connection
-                    .execute("DELETE FROM wrapper_mcp_servers WHERE id=?1", [&server.id])?;
-                // Remove stale Always permissions; an ID is never reused.
-                ctx.connection.execute(
-                    "DELETE FROM forms_approval_rules WHERE tool GLOB ?1 OR tool IN (?2,?3)",
-                    params![
-                        format!("mcp_{}_*", server.id),
-                        format!("mcp_start_{}", server.id),
-                        format!("mcp_remove_{}", server.id)
-                    ],
-                )?;
-                super::forms::vault(ctx)?.remove(&secret_name(&server.id))?;
-                return Ok(json!({"message":"Connecteur MCP supprimé et déconnecté."}));
-            }
-            if let Some(tool) = server
-                .tools
-                .iter()
-                .find(|t| namespace(&server, t) == call.name)
-            {
-                if !ctx
-                    .bot_id
-                    .is_some_and(|bot| enabled(ctx.connection, &server.id, bot))
-                {
-                    return Err(invalid("Ce connecteur MCP est désactivé pour ce bot."));
-                }
-                let mut private = private_values(ctx)?;
-                private.extend(environment(ctx, &server)?);
-                for (id, client) in live.iter() {
-                    private.extend(
-                        client
-                            .private_environment()
-                            .iter()
-                            .map(|(key, value)| (format!("active:{id}:{key}"), value.clone())),
-                    );
-                }
-                let client = live.get_mut(&server.id).ok_or_else(||invalid("Le serveur MCP est déconnecté. Démarrez le connecteur dans les paramètres."))?;
-                let output = client.request(
-                    "tools/call",
-                    json!({"name":tool["name"],"arguments":call.arguments}),
-                );
-                match output {
-                    Ok(output) => {
-                        let valid = output["content"].as_array().is_some_and(|parts| {
-                            parts.iter().all(|part| {
-                                part.is_object()
-                                    && part["type"].is_string()
-                                    && (part["type"] != "text" || part["text"].is_string())
-                            })
-                        });
-                        if !valid {
-                            let error="Le résultat de l’outil MCP est invalide. Le connecteur a été déconnecté.";
-                            live.remove(&server.id);
-                            ctx.connection.execute(
-                                "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                                params![server.id, error],
-                            )?;
-                            return Err(ApiError::new(503, error));
-                        }
-                        return sanitize(&output, &private);
-                    }
-                    Err(error) => {
-                        live.remove(&server.id);
-                        ctx.connection.execute(
-                            "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                            params![server.id, error],
-                        )?;
-                        return Err(ApiError::new(503, error));
-                    }
-                }
-            }
-        }
-        Err(invalid(
-            "Cet outil MCP est inconnu ou son connecteur a été supprimé.",
-        ))
+        execution::execute(ctx, call)
     })();
     Some(match result {
         Ok(output) => ToolOutcome::Done { output },

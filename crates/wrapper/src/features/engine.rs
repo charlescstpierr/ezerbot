@@ -290,6 +290,7 @@ pub fn startup(conn: &Connection) -> Result<(), ApiError> {
         connection: conn,
         cancel: Arc::new(AtomicBool::new(false)),
         bot_id: None,
+        host_mcp: false,
     };
     for run in store::runs_with_status(conn, RunStatus::Running)? {
         run_loop::with_run_events(conn, &mut services, &run.run_id, |conn, _| {
@@ -908,7 +909,7 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
-    let conversation = super::forms::principal_conversation(ctx, "")?;
+    let conversation = super::mcp::approval_conversation(ctx)?;
     let run = Run {
         run_id: format!("mcp-host-{}", random_id(ctx.connection)?),
         bot_id: DEFAULT_BOT.id.into(),
@@ -927,6 +928,7 @@ pub(crate) fn queue_approved_action(
     let local = super::Context {
         bot_id: Some(DEFAULT_BOT.id),
         conversation_id: Some(&conversation),
+        run_id: Some(&run.run_id),
         ..*ctx
     };
     let mut services = Services::new(&local)?;
@@ -1104,7 +1106,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     if live {
         ctx.provider.title_started();
     }
-    if !live {
+    if !live && !run.run_id.starts_with("mcp-host-") {
         let _guard = guard;
         let mut services = Services::new(ctx)?;
         services.cancel = cancel;
@@ -1134,6 +1136,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 connection: &conn,
                 cancel: cancel.clone(),
                 bot_id: Some(store::required(&conn, &id)?.bot_id),
+                host_mcp: id.starts_with("mcp-host-"),
             };
             let gateway = RunGateway {
                 path: &path,
@@ -1145,7 +1148,9 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 captions_only: AtomicBool::new(images_degraded),
             };
             drive_owned(&conn, &gateway, &mut services, &id)?;
-            retitle(&conn, &provider, &id, &cancel, &path)?;
+            if live {
+                retitle(&conn, &provider, &id, &cancel, &path)?;
+            }
             Ok(())
         })();
         // A failed DB open retains the durable queued/interrupted record for tick.
@@ -1222,11 +1227,17 @@ fn fail_host(
             if event.kind == RunEventKind::ToolCall {
                 if let Some(call) = event.payload["call_id"].as_str() {
                     if !settled.contains(call) {
+                        let admitted:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",params![id,call],|r|r.get(0))?;
+                        let reason = if admitted {
+                            "Résultat d’appel externe non confirmé ; son effet est incertain."
+                        } else {
+                            "local service unavailable"
+                        };
                         store::append_event(
                             conn,
                             id,
                             RunEventKind::ToolResult,
-                            &json!({"call_id":call,"outcome":{"status":"failed","reason":"local service unavailable"}}),
+                            &json!({"call_id":call,"outcome":{"status":"failed","reason":reason}}),
                         )?;
                     }
                 }
@@ -1255,6 +1266,7 @@ struct Services<'a> {
     connection: &'a Connection,
     cancel: Arc<AtomicBool>,
     bot_id: Option<String>,
+    host_mcp: bool,
 }
 impl<'a> Services<'a> {
     fn new(ctx: &super::Context<'a>) -> grokbot_engine::contracts::Result<Self> {
@@ -1264,6 +1276,7 @@ impl<'a> Services<'a> {
             connection: ctx.connection,
             cancel: Arc::new(AtomicBool::new(false)),
             bot_id: ctx.bot_id.map(str::to_owned),
+            host_mcp: ctx.run_id.is_some_and(|id| id.starts_with("mcp-host-")),
         })
     }
     fn ctx<'b>(&'b self, conn: &'b Connection, run: &'b Run) -> super::Context<'b> {
@@ -1393,7 +1406,7 @@ impl RunServices for Services<'_> {
             now_ms: now(),
             bot_id: self.bot_id.as_deref(),
             conversation_id: None,
-            run_id: None,
+            run_id: self.host_mcp.then_some("mcp-host-"),
         };
         tools.extend(super::mcp::scoped_tools(&ctx));
         tools
@@ -1429,6 +1442,17 @@ impl RunServices for Services<'_> {
         };
         let value = redact::redact_value(&vault(self.path)?, &serde_json::to_value(outcome)?)?;
         Ok(serde_json::from_value(value)?)
+    }
+    fn is_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
+        call.name.starts_with("mcp_")
+    }
+    fn call_external_tool(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+        self.call_tool(conn, run, call)
     }
     fn check_approval(
         &mut self,
@@ -1897,6 +1921,7 @@ impl RunGatewayCall<'_> {
                 connection: self.connection,
                 cancel: Arc::new(AtomicBool::new(false)),
                 bot_id: Some(run.bot_id.clone()),
+                host_mcp: false,
             };
             let reserved = run_loop::with_run_events(
                 self.connection,
@@ -2468,16 +2493,38 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         ));
     }
     let call_id = event.payload["call_id"].as_str()?;
-    let outcome = store::events(ctx.connection, run_id, seq)
+    let result = store::events(ctx.connection, run_id, seq)
         .ok()?
         .into_iter()
-        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call_id)
-        .map(|e| e.payload["outcome"].clone());
+        .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call_id);
+    let call = serde_json::from_value::<grokbot_engine::contracts::ToolCall>(event.payload.clone())
+        .ok()?;
+    let admission = result
+        .as_ref()
+        .and_then(|e| e.payload.get("authorized_by"))
+        .cloned()
+        .or_else(|| {
+            run_loop::external_authorization(ctx.connection, run_id, &call)
+                .ok()
+                .flatten()
+                .map(|by| json!(by))
+        });
+    let requester: String = ctx
+        .connection
+        .query_row(
+            "SELECT name FROM wrapper_bots WHERE account_id=?1 AND id=?2",
+            params![ACCOUNT, run.bot_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(run.bot_id);
     Some(card(
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"call":event.payload,"outcome":outcome,"connector":super::mcp::display(ctx,event.payload["name"].as_str().unwrap_or(""))}),
+        json!({"run_id":run_id,"call":event.payload,"outcome":result.as_ref().map(|e|&e.payload["outcome"]),
+            "authorized_by":admission,"requesting_bot":requester,
+            "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
+            "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
         run.started_at.max(0) as u64,
     ))
 }
@@ -2885,6 +2932,7 @@ impl ModelGateway for RunGateway<'_> {
                 connection: &conn,
                 cancel: Arc::new(AtomicBool::new(false)),
                 bot_id: Some(run.bot_id.clone()),
+                host_mcp: false,
             };
             let mut fresh = services.context(&run)?;
             fresh.input.extend(replay(&conn, &run)?);

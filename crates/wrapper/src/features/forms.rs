@@ -353,7 +353,9 @@ fn create_request(
     )?;
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
     // Defense in depth if a standing rule appears between gate check and request.
-    if approval {
+    if approval
+        && !matches!(&request.kind, InputKind::Approval {tool,..} if super::mcp::is_lifecycle(tool))
+    {
         if let Some(receipt) =
             approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
         {
@@ -372,10 +374,23 @@ fn guarded_identity(
     if active_run(ctx, call)? != *run {
         return Err(ApiError::new(409, "Approval does not match the active run"));
     }
+    approval_identity(&run.run_id, call)
+}
+fn approval_identity(run_id: &str, call: &ToolCall) -> Result<(String, String), ApiError> {
     let digest = approvals::args_digest(&call.name, &call.arguments)?;
-    let bytes = serde_json::to_vec(&(&run.run_id, &call.call_id, &digest))
+    let bytes = serde_json::to_vec(&(run_id, &call.call_id, &digest))
         .map_err(|_| ApiError::new(400, "Invalid approval binding"))?;
     Ok((format!("approval:{:x}", Sha256::digest(bytes)), digest))
+}
+pub(crate) fn tool_approval_status(
+    ctx: &Context<'_>,
+    run_id: &str,
+    call: &ToolCall,
+) -> Option<Value> {
+    let (id, _) = approval_identity(run_id, call).ok()?;
+    requests::get(ctx.connection, &id)
+        .ok()?
+        .map(|r| json!(r.status)["status"].clone())
 }
 
 /// RunServices::request_approval adapter. The caller propagates errors and owns
@@ -437,7 +452,7 @@ pub fn check_tool_approval(
                     Err(error) => Err(error.into()),
                 }
             }
-            _ => Ok(ApprovalCheck::Denied {
+            RequestStatus::Denied => Ok(ApprovalCheck::Denied {
                 reason: grokbot_forms::reviewer::get(ctx.connection, &id)?
                     .filter(|review| {
                         !review.pending
@@ -445,11 +460,18 @@ pub fn check_tool_approval(
                                 == grokbot_forms::reviewer::ReviewDecision::Deny
                     })
                     .map(|review| review.answer.reason)
-                    .unwrap_or_else(|| {
-                        "La demande a été refusée, a expiré ou a été annulée.".into()
-                    }),
+                    .unwrap_or_else(|| "L’action a été refusée.".into()),
+            }),
+            RequestStatus::Cancelled { .. } => Ok(ApprovalCheck::Denied {
+                reason: "L’action a été annulée.".into(),
+            }),
+            RequestStatus::Expired { .. } => Ok(ApprovalCheck::Denied {
+                reason: "Le délai d’approbation est écoulé.".into(),
             }),
         };
+    }
+    if super::mcp::is_lifecycle(&call.name) {
+        return Ok(ApprovalCheck::Ask);
     }
     // Standing rules are bot-scoped, not conversation-scoped. A successful
     // auto-admission must not create an otherwise unused "Approbations" chat.
@@ -479,13 +501,29 @@ pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result
         ctx.run_id
             .ok_or_else(|| ApiError::new(403, "Approbation MCP requise."))?,
     )?;
+    if ctx.connection.is_autocommit() {
+        let live: bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND bot_id=?3 AND deleted=0)",params![ACCOUNT,run.conversation_id,run.bot_id],|r|r.get(0))?;
+        if live
+            && run.status == RunStatus::Running
+            && ctx.bot_id == Some(run.bot_id.as_str())
+            && ctx.conversation_id == Some(run.conversation_id.as_str())
+            && grokbot_engine::run_loop::external_authorization(ctx.connection, &run.run_id, call)?
+                .is_some()
+        {
+            return Ok(());
+        }
+        return Err(ApiError::new(
+            403,
+            "Cette action MCP n’a pas été autorisée.",
+        ));
+    }
     let (id, digest) = guarded_identity(ctx, &run, call)?;
     if let Some(request) = existing_request(ctx, &id, &digest)? {
         let admitted: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_approval_grants WHERE request_id=?1 AND tool=?2 AND args_digest=?3 AND consumed_at IS NOT NULL)",params![id,call.name,digest],|r|r.get(0))?;
         if admitted && matches!(request.status, RequestStatus::Resolved { .. }) {
             return Ok(());
         }
-    } else {
+    } else if !super::mcp::is_lifecycle(&call.name) {
         let route = ApprovalRoute {
             requesting_bot_id: run.bot_id,
             target_bot_id: DEFAULT_BOT.id.into(),
@@ -779,6 +817,14 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             else {
                 return Err(ApiError::new(400, "Request is not an approval"));
             };
+            if super::mcp::is_lifecycle(tool)
+                && matches!(
+                    input.decision,
+                    ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
+                )
+            {
+                return Err(ApiError::new(400, "Le démarrage et la suppression d’un connecteur exigent une décision ponctuelle."));
+            }
             // Optional action echo may not rewrite the approved action, even on a retry.
             match (&input.tool, &input.arguments) {
                 (None, None) => {}
@@ -904,7 +950,7 @@ fn request_value(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<Value
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        if let Some(display) = super::mcp::display(ctx, tool) {
+        if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
         }
     }

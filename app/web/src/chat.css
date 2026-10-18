@@ -55,7 +55,7 @@
 .gb-meta { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 7px; }
 .gb-meta strong { font-weight: 600; }
 .gb-meta time { color: var(--subtle); font-size: 11px; }
-.gb-token-usage { margin: 8px 0 0; color: var(--subtle); font-size: 11px; line-height: 1.5; }
+.gb-token-usage { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .gb-actions { display: flex; align-items: center; gap: 6px; min-height: 26px; margin-top: 6px; color: var(--subtle); font-size: 11px; }
 .gb-status { display: inline-flex; align-items: center; gap: 4px; }
 .gb-status-alert { color: var(--danger-text); }

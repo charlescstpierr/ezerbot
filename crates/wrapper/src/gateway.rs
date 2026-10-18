@@ -282,6 +282,9 @@ impl Events {
                 return Ok(true);
             }
             "response.incomplete" => {
+                if let Some(usage) = token_usage(&event["response"]["usage"]) {
+                    emit(ModelEvent::Usage { usage })?;
+                }
                 emit(ModelEvent::Incomplete {
                     reason: event["response"]["incomplete_details"]["reason"]
                         .as_str()

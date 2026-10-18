@@ -212,7 +212,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {message.notice && <p className="gb-notice">{message.notice}</p>}
         {!streaming && usage && <p className="gb-token-usage" title={`Entrée : ${tokens.format(usage.input_tokens)} · Sortie : ${tokens.format(usage.output_tokens)} · Ensemble des appels de cette réponse`}>
-          Tokens : {tokens.format(usage.input_tokens + usage.output_tokens)} · dont {tokens.format(usage.cached_input_tokens)} en cache
+          Tokens : {tokens.format(usage.input_tokens + usage.output_tokens)}{usage.cached_input_tokens > 0 && <> · dont {tokens.format(usage.cached_input_tokens)} en cache</>}
         </p>}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">

@@ -404,7 +404,7 @@ pub enum ModelEvent {
         item_id: String,
         encrypted_content: String,
     },
-    /// Optional usage from a completed provider response, emitted before Completed.
+    /// Optional provider usage, emitted before Completed or Incomplete.
     Usage {
         usage: TokenUsage,
     },

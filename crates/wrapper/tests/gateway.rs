@@ -655,6 +655,31 @@ fn stream_failure_maps_to_failed_event() {
 }
 
 #[test]
+fn incomplete_reports_usage_before_its_terminal_event() {
+    use grokbot_engine::contracts::TokenUsage;
+    let fixture = Fixture::new();
+    fixture.events(&[json!({"type":"response.incomplete","response":{
+        "usage":{"input_tokens":12340,"output_tokens":100,"input_tokens_details":{"cached_tokens":11008}},
+        "incomplete_details":{"reason":"max_output_tokens"}
+    }})]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens: 12340,
+                    output_tokens: 100,
+                    cached_input_tokens: 11008
+                }
+            },
+            ModelEvent::Incomplete {
+                reason: "max_output_tokens".into()
+            },
+        ]
+    );
+}
+
+#[test]
 fn incomplete_is_not_completed_and_eof_is_not_success() {
     let fixture = Fixture::new();
     fixture.events(&[json!({"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}}})]);

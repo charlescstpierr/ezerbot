@@ -31,8 +31,26 @@ test("usage appears once on the last fragment, including tool-only replies", () 
     const fragments = orderThread([user, message, tool]).filter((m) => m.key);
     assert.equal(fragments.filter((m) => m.payload.usage).length, 1);
     assert.equal(fragments.at(-1).payload.usage, usage);
+    assert.equal(fragments.at(-1).copyText, message.body);
+    if (parts.length) assert.ok(fragments.at(-1).body);
   }
 });
+
+for (const routine of [false, true]) {
+  test(`${routine ? "routine" : "delegated"} task status after text does not detach usage or copy`, () => {
+    const task = { id: "task-end", kind: "task", payload: { run_id: "run", routine } };
+    const message = reply("echoed", [{ body: "Résultat de la tâche.", before: task.id }]);
+    const usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens: 11008 };
+    message.payload.usage = usage;
+    const result = orderThread([message, task]);
+    assert.equal(result.length, 2);
+    assert.equal(result[0].body, message.body);
+    assert.equal(result[0].copyText, message.body);
+    assert.equal(result[0].payload.usage, usage);
+    assert.equal(result[1], task);
+    assert.equal(result.filter((m) => m.key && !m.body).length, 0);
+  });
+}
 
 test("notice after a call is a tail fragment too", () => {
   const result = orderThread([user, reply("echoed", [preCall], { notice: "Attention" }), tool]);

@@ -17,7 +17,6 @@
       if (result.conversation_id) {
         document.getElementById("settings-dialog").close();
         panels.openConversation(result.conversation_id);
-        panels.notify("Confirmez l’action dans la carte d’approbation.");
       }
     } catch (e) {
       feedback.textContent = e.message || "L’action du connecteur a échoué.";

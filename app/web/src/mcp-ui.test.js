@@ -17,21 +17,33 @@ class Node {
   querySelectorAll(selector) { return this.all().filter(n => selector === "input" ? n.tag === "input" : selector === 'input[type="password"]' && n.tag === "input" && n.type === "password"); }
   reset() { for (const n of this.all()) n.value = ""; }
 }
-async function mount(servers = []) {
-  const root = new Node("section"), calls = [], notifications = [];
+async function mount(servers = [], actionResult = {}) {
+  const root = new Node("section"), calls = [], notifications = [], opened = [];
+  const dialog = { open: true, close() { this.open = false; } };
   let panel;
   const panels = {
     state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers } },
     register(value) { panel = value; },
-    async api(path, body) { calls.push({ path, body }); return {}; },
+    async api(path, body) { calls.push({ path, body }); return actionResult; },
     async refresh() {}, notify(text) { notifications.push(text); },
+    openConversation(id) { opened.push(id); return true; },
   };
-  const document = { createElement: tag => new Node(tag), createTextNode: text => { const n = new Node("#text"); n.textContent = text; return n; } };
+  const document = { getElementById: id => id === "settings-dialog" ? dialog : undefined, createElement: tag => new Node(tag), createTextNode: text => { const n = new Node("#text"); n.textContent = text; return n; } };
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document });
   vm.runInContext(await readFile(new URL("../../ui/panels/mcp.js", import.meta.url), "utf8"), context);
   panel.settingsSection(root);
-  return { root, calls, notifications };
+  return { root, calls, notifications, opened, dialog };
 }
+
+test("MCP management opens its approval without a toast over the decision buttons", async () => {
+  const { root, calls, notifications, opened, dialog } = await mount([{id:"local",name:"Atelier",status:"disconnected",command:"python3",arguments:[],environment_names:[],enabled_bots:[],tools:[]}], {conversation_id:"approbations"});
+  await root.all().find(n => n.tag === "button" && n.textContent === "Démarrer…").events.click();
+  assert.equal(calls[0].path, "/api/mcp/restart");
+  assert.equal(calls[0].body.id, "local");
+  assert.equal(dialog.open, false);
+  assert.deepEqual(opened, ["approbations"]);
+  assert.equal(notifications.length, 0);
+});
 
 test("MCP form ignores trailing blank argument lines, keeps interior spaces, and confirms inside settings", async () => {
   const { root, calls, notifications } = await mount();

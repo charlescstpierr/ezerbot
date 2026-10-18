@@ -245,6 +245,7 @@ pub fn summarize_with_options(
         tools: Vec::new(),
         effort: None,
         service_tier: None,
+        prompt_cache_key: None,
     };
     let mut text = String::new();
     let mut characters = 0usize;
@@ -263,7 +264,7 @@ pub fn summarize_with_options(
             }
             // This independent text-only summary call has no function calls to
             // replay. Never turn opaque provider state into summary evidence.
-            ModelEvent::Reasoning { .. } => {}
+            ModelEvent::Reasoning { .. } | ModelEvent::Usage { .. } => {}
             ModelEvent::Completed => completed = true,
             _ => {
                 return Err(invalid(

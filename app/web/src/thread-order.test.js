@@ -23,6 +23,17 @@ for (const state of ["streaming", "failed", "stopped"]) {
   });
 }
 
+test("usage appears once on the last fragment, including tool-only replies", () => {
+  const usage = { input_tokens: 12340, output_tokens: 100, cached_input_tokens: 11008 };
+  for (const parts of [[], [preCall], [preCall, { body: "Après." }]]) {
+    const message = reply("echoed", parts);
+    message.payload.usage = usage;
+    const fragments = orderThread([user, message, tool]).filter((m) => m.key);
+    assert.equal(fragments.filter((m) => m.payload.usage).length, 1);
+    assert.equal(fragments.at(-1).payload.usage, usage);
+  }
+});
+
 test("notice after a call is a tail fragment too", () => {
   const result = orderThread([user, reply("echoed", [preCall], { notice: "Attention" }), tool]);
   assert.equal(result[1].notice, undefined);

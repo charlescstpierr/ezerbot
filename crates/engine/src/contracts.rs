@@ -374,6 +374,17 @@ pub struct ModelRequest {
     pub tools: Vec<ToolSpec>,
     pub effort: Option<String>,
     pub service_tier: Option<String>,
+    /// Non-secret, stable conversation affinity; auxiliary requests may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+}
+
+/// Provider-reported counts, not context estimates. Cached input is a subset of input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +403,10 @@ pub enum ModelEvent {
     Reasoning {
         item_id: String,
         encrypted_content: String,
+    },
+    /// Optional usage from a completed provider response, emitted before Completed.
+    Usage {
+        usage: TokenUsage,
     },
     Completed,
     Incomplete {
@@ -615,6 +630,7 @@ mod contracts_tests {
             }],
             effort: None,
             service_tier: None,
+            prompt_cache_key: Some("conversation-test".into()),
         });
     }
 

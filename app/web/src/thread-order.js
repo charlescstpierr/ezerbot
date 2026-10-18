@@ -21,7 +21,7 @@ export function orderThread(messages) {
     // notices, Stop/Retry controls and live typing even when there is no text.
     const visible = parts.filter((part) => part.body?.trim());
     // A turn's status belongs after its last call, not on pre-call text.
-    if ((message.notice || ["streaming", "failed", "stopped"].includes(message.state))
+    if ((message.notice || message.payload?.usage || ["streaming", "failed", "stopped"].includes(message.state))
       && (!visible.length || indices.has(visible.at(-1).before))) visible.push({ body: "" });
     visible.forEach((part, partIndex) => {
       const last = partIndex === visible.length - 1;
@@ -33,6 +33,7 @@ export function orderThread(messages) {
         key: `${message.id}#${partIndex}`,
         continuation: partIndex > 0,
         copyText: last ? message.body : null,
+        payload: { ...message.payload, usage: last ? message.payload.usage : undefined },
         body: part.body,
         state: last ? message.state : "echoed",
         notice: last ? message.notice : undefined,

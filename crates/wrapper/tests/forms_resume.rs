@@ -467,6 +467,7 @@ impl RunServices for GateServices<'_> {
             tools: vec![],
             effort: None,
             service_tier: None,
+            prompt_cache_key: None,
         })
     }
     fn tools(&self) -> Vec<ToolSpec> {

@@ -27,6 +27,8 @@ pub struct Seen {
     pub revoked: bool,
     /// FIFO replies for /v1/responses. An empty queue uses the original chat fixture.
     pub responses: VecDeque<ScriptedResponse>,
+    /// Optional provider telemetry for default chat replies (titles remain independent).
+    pub usage: Option<Value>,
 }
 
 pub struct ScriptedResponse {
@@ -198,7 +200,7 @@ impl FakeOpenAi {
                                 json!({"type": "response.created"}),
                                 json!({"type": "response.output_text.delta", "delta": "Bon"}),
                                 json!({"type": "response.output_text.delta", "delta": "jour **vous**"}),
-                                json!({"type": "response.completed"}),
+                                json!({"type": "response.completed", "response": {"usage": seen.usage}}),
                             ];
                             let stream = events
                                 .iter()

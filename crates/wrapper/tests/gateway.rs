@@ -158,6 +158,7 @@ fn request() -> ModelRequest {
         }],
         effort: Some("high".into()),
         service_tier: Some("priority".into()),
+        prompt_cache_key: Some("test-conversation".into()),
     }
 }
 
@@ -173,6 +174,79 @@ fn tool_call(call_id: &str, name: &str, arguments: Value) -> ModelEvent {
         name: name.into(),
         arguments,
     }
+}
+
+#[test]
+fn completed_usage_is_optional_validated_and_precedes_completion() {
+    use grokbot_engine::contracts::TokenUsage;
+    let fixture = Fixture::new();
+    for (usage, expected) in [
+        (
+            json!({"input_tokens":12340,"output_tokens":100,"input_tokens_details":{"cached_tokens":11008}}),
+            Some((12340, 100, 11008)),
+        ),
+        (
+            json!({"input_tokens":12,"output_tokens":3}),
+            Some((12, 3, 0)),
+        ),
+        (
+            json!({"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":0}}),
+            Some((0, 0, 0)),
+        ),
+        (Value::Null, None),
+        (
+            json!({"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":-1}}),
+            None,
+        ),
+        (
+            json!({"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":13}}),
+            None,
+        ),
+        (json!({"input_tokens":"12","output_tokens":3}), None),
+    ] {
+        fixture.events(&[json!({"type":"response.completed","response":{"usage":usage}})]);
+        let events = fixture.collect(&request());
+        let mut expected_events = vec![];
+        if let Some((input_tokens, output_tokens, cached_input_tokens)) = expected {
+            expected_events.push(ModelEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                },
+            });
+        }
+        expected_events.push(ModelEvent::Completed);
+        assert_eq!(events, expected_events);
+    }
+    assert!(fixture
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .bodies
+        .iter()
+        .all(|b| b["prompt_cache_key"] == "test-conversation" && b["store"] == false));
+}
+
+#[test]
+fn tools_have_canonical_wire_order_independent_of_registry_order() {
+    let fixture = Fixture::new();
+    let mut request = request();
+    let mut other = request.tools[0].clone();
+    other.name = "alpha".into();
+    request.tools.push(other);
+    fixture.events(&[json!({"type":"response.completed"})]);
+    fixture.collect(&request);
+    request.tools.reverse();
+    fixture.events(&[json!({"type":"response.completed"})]);
+    fixture.collect(&request);
+    let seen = fixture.server.seen.lock().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&seen.bodies[0]["tools"]).unwrap(),
+        serde_json::to_vec(&seen.bodies[1]["tools"]).unwrap()
+    );
+    assert_eq!(seen.bodies[0]["tools"][0]["name"], "alpha");
 }
 
 #[test]

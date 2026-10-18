@@ -143,7 +143,7 @@ impl Drop for Fixture {
 fn ready(text: &str) -> ScriptedResponse {
     ScriptedResponse::events(&[
         json!({"type": "response.output_text.delta", "delta": text}),
-        json!({"type": "response.completed", "response": {"status": "completed", "output": [{
+        json!({"type": "response.completed", "response": {"status": "completed", "usage": {"input_tokens":12340,"output_tokens":100,"input_tokens_details":{"cached_tokens":11008}}, "output": [{
             "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}],
         }]}}),
     ])

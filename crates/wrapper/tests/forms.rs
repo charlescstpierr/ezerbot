@@ -232,6 +232,7 @@ impl RunServices for Services<'_> {
             tools: Vec::new(),
             effort: None,
             service_tier: None,
+            prompt_cache_key: None,
         })
     }
     fn tools(&self) -> Vec<ToolSpec> {

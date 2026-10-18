@@ -7,8 +7,8 @@
 //! On SQLITE_BUSY or a uniqueness race, callers must roll back and retry the
 //! whole transaction, never reuse a stale WAL snapshot (see model::start).
 use crate::contracts::{
-    Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, Trigger, TurnEnd, WakeCause,
-    WakeStatus,
+    Result, RunEvent, RunEventKind, SuspendCause, TaskStatus, TokenUsage, Trigger, TurnEnd,
+    WakeCause, WakeStatus,
 };
 use crate::model::{invalid, BudgetUsage, Run, RunStatus};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -71,12 +71,68 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if version != 1 {
+    if !(1..=2).contains(&version) {
         return Err(invalid(format!(
             "unsupported engine schema version {version}"
         )));
     }
+    if version < 2 {
+        // DDL and version marker commit together, including upgrades of existing workspaces.
+        conn.execute_batch("SAVEPOINT engine_usage_migration;
+            CREATE TABLE engine_response_usage (
+                run_id TEXT NOT NULL REFERENCES engine_runs(run_id),
+                response INTEGER NOT NULL CHECK(response > 0),
+                input_tokens INTEGER NOT NULL CHECK(input_tokens >= 0),
+                output_tokens INTEGER NOT NULL CHECK(output_tokens >= 0),
+                cached_input_tokens INTEGER NOT NULL CHECK(cached_input_tokens >= 0 AND cached_input_tokens <= input_tokens),
+                PRIMARY KEY(run_id, response)
+            );
+            UPDATE component_versions SET version=2 WHERE component='engine';
+            RELEASE engine_usage_migration;")?;
+    }
     Ok(())
+}
+
+/// One row per provider response, so duplicate telemetry cannot double-count a run.
+pub fn save_token_usage(
+    conn: &Connection,
+    run_id: &str,
+    response: u32,
+    usage: &TokenUsage,
+) -> Result<()> {
+    require_transaction(conn)?;
+    conn.execute(
+        "INSERT INTO engine_response_usage (run_id,response,input_tokens,output_tokens,cached_input_tokens)
+        VALUES (?1,?2,?3,?4,?5)
+        ON CONFLICT(run_id,response) DO UPDATE SET input_tokens=excluded.input_tokens,
+        output_tokens=excluded.output_tokens,cached_input_tokens=excluded.cached_input_tokens",
+        params![
+            run_id,
+            response,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_input_tokens
+        ],
+    )?;
+    Ok(())
+}
+
+/// Unknown for legacy/simulated runs or providers which omit usage (not a fabricated zero).
+pub fn token_usage(conn: &Connection, run_id: &str) -> Result<Option<TokenUsage>> {
+    Ok(conn
+        .query_row(
+            "SELECT SUM(input_tokens),SUM(output_tokens),SUM(cached_input_tokens)
+        FROM engine_response_usage WHERE run_id=?1 HAVING COUNT(*)>0",
+            [run_id],
+            |row| {
+                Ok(TokenUsage {
+                    input_tokens: row.get(0)?,
+                    output_tokens: row.get(1)?,
+                    cached_input_tokens: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 fn tag(value: &impl Serialize) -> Result<String> {
@@ -858,9 +914,49 @@ mod tests {
                 [],
                 |row| row.get::<_, i64>(0)
             )?,
-            1
+            2
         );
         assert!(model::start(&conn, &sample()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn usage_migrates_v1_preserves_runs_and_deduplicates_responses() -> Result<()> {
+        let conn = database()?;
+        conn.execute_batch("DROP TABLE engine_response_usage; UPDATE component_versions SET version=1 WHERE component='engine';")?;
+        migrate(&conn)?;
+        migrate(&conn)?;
+        assert_eq!(events(&conn, "run", 0)?.len(), 1);
+        assert_eq!(token_usage(&conn, "run")?, None);
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 80,
+        };
+        assert!(save_token_usage(&conn, "run", 1, &usage).is_err());
+        with_tx(&conn, |conn| {
+            save_token_usage(conn, "run", 1, &usage)?;
+            save_token_usage(conn, "run", 1, &usage)?;
+            save_token_usage(conn, "run", 2, &usage)
+        })?;
+        assert_eq!(
+            token_usage(&conn, "run")?,
+            Some(TokenUsage {
+                input_tokens: 200,
+                output_tokens: 20,
+                cached_input_tokens: 160
+            })
+        );
+        assert!(with_tx(&conn, |conn| save_token_usage(
+            conn,
+            "run",
+            3,
+            &TokenUsage {
+                cached_input_tokens: 101,
+                ..usage
+            }
+        ))
+        .is_err());
         Ok(())
     }
 

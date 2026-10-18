@@ -780,6 +780,10 @@ fn drive(
                     .map(|_| ())
                 })
                 .inspect_err(|_| persistence_error = true),
+                ModelEvent::Usage { usage } => commit(conn, services, run_id, |conn, _| {
+                    store::save_token_usage(conn, run_id, response, &usage)
+                })
+                .inspect_err(|_| persistence_error = true),
                 ModelEvent::Reasoning {
                     item_id,
                     encrypted_content,
@@ -958,6 +962,7 @@ mod tests {
                 tools: vec![],
                 effort: None,
                 service_tier: None,
+                prompt_cache_key: None,
             })
         }
         fn tools(&self) -> Vec<ToolSpec> {
@@ -1103,6 +1108,51 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+
+    #[test]
+    fn provider_usage_aggregates_tool_rounds_without_entering_replayed_history() -> Result<()> {
+        use crate::contracts::TokenUsage;
+        let conn = database(false, RunBudgets::default())?;
+        let usage = ModelEvent::Usage {
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cached_input_tokens: 80,
+            },
+        };
+        let gateway = Scripted::new(vec![
+            response(vec![
+                call("lookup", "read_skill", json!({})),
+                usage.clone(),
+                usage.clone(),
+            ]),
+            response(vec![
+                ModelEvent::TextDelta {
+                    text: "Done".into(),
+                },
+                usage,
+            ]),
+        ]);
+        let mut services = Services {
+            specs: vec![spec("read_skill", false)],
+            ..Services::default()
+        };
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(
+            store::token_usage(&conn, "run")?,
+            Some(TokenUsage {
+                input_tokens: 200,
+                output_tokens: 20,
+                cached_input_tokens: 160
+            })
+        );
+        assert_eq!(count(&conn, "engine_response_usage"), 2);
+        let replay = replay_items(&store::events(&conn, "run", 0)?)?;
+        assert!(!serde_json::to_string(&replay)?.contains("cached_input_tokens"));
+        run(&conn, &gateway, &mut services, "run")?;
+        assert_eq!(count(&conn, "engine_response_usage"), 2);
+        Ok(())
     }
 
     #[test]

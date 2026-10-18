@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 
 use grokbot_engine::contracts::{
-    Error, ModelEvent, ModelGateway, ModelRequest, Result, Role, ToolItem,
+    Error, ModelEvent, ModelGateway, ModelRequest, Result, Role, TokenUsage, ToolItem,
 };
 use serde_json::{json, Value};
 
@@ -98,11 +98,16 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
         "input": input, "store": false, "stream": true,
         "include": ["reasoning.encrypted_content"],
     });
+    if let Some(key) = &request.prompt_cache_key {
+        body["prompt_cache_key"] = json!(key);
+    }
     if !request.tools.is_empty() {
+        // Canonical order, even if a future registry obtains specs from a map.
+        let mut tools = request.tools.iter().collect::<Vec<_>>();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
         body["tools"] = Value::Array(
-            request
-                .tools
-                .iter()
+            tools
+                .into_iter()
                 .map(|tool| {
                     let mut function = json!({
                         "type": "function", "name": tool.name, "parameters": tool.schema,
@@ -127,6 +132,20 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
         body["service_tier"] = json!(tier);
     }
     Ok(body)
+}
+
+fn token_usage(value: &Value) -> Option<TokenUsage> {
+    // Bad/missing telemetry must not fail an otherwise valid reply or fabricate counts.
+    let count = |v: &Value| v.as_u64().filter(|n| *n <= i64::MAX as u64);
+    let input_tokens = count(&value["input_tokens"])?;
+    let output_tokens = count(&value["output_tokens"])?;
+    let cached = &value["input_tokens_details"]["cached_tokens"];
+    let cached_input_tokens = if cached.is_null() { 0 } else { count(cached)? };
+    (cached_input_tokens <= input_tokens).then_some(TokenUsage {
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+    })
 }
 
 #[derive(Default)]
@@ -255,6 +274,9 @@ impl Events {
                         "OpenAI a terminé la réponse avec un appel d’outil incomplet.",
                     ))?;
                 } else {
+                    if let Some(usage) = token_usage(&event["response"]["usage"]) {
+                        emit(ModelEvent::Usage { usage })?;
+                    }
                     emit(ModelEvent::Completed)?;
                 }
                 return Ok(true);
@@ -279,7 +301,7 @@ impl Events {
                 emit(failed(failure.message))?;
                 return Ok(true);
             }
-            _ => {} // Reasoning, usage and non-function items are not executable tool calls.
+            _ => {} // Non-function items are not executable tool calls.
         }
         Ok(false)
     }

@@ -600,6 +600,12 @@ fn user_trigger(conversation: &str, message: &str, attempt: u32) -> Trigger {
         attempt,
     }
 }
+fn prompt_cache_key(conversation: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // Local conversation identity only: no account id, secret, timestamp or run id.
+    // Child/task/routine conversations have distinct prompts and their own affinity.
+    format!("ezerbot-{:x}", Sha256::digest(conversation.as_bytes()))
+}
 fn legacy_run_id(conversation: &str, message: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
@@ -1196,6 +1202,7 @@ impl RunServices for Services<'_> {
             tools: vec![],
             effort,
             service_tier,
+            prompt_cache_key: Some(prompt_cache_key(&run.conversation_id)),
         })
     }
     fn tools(&self) -> Vec<ToolSpec> {
@@ -2090,7 +2097,7 @@ fn run_reply(
         notice: metadata.2,
         proposals,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"parts":parts}),
+        payload: json!({"run_id":run.run_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?}),
         attachments: vec![],
     })
 }
@@ -2439,11 +2446,11 @@ fn retitle(
         )?;
         let mut title = String::new();
         let mut completed = false;
-        ProviderGateway{provider,cancel,metadata:None}.stream(&ModelRequest{model,instructions:"Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.".into(),input:vec![item("title",Role::User,text)],tools:vec![],effort:None,service_tier:None},&mut |event|{
+        ProviderGateway{provider,cancel,metadata:None}.stream(&ModelRequest{model,instructions:"Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.".into(),input:vec![item("title",Role::User,text)],tools:vec![],effort:None,service_tier:None,prompt_cache_key:None},&mut |event|{
             match event {
                 ModelEvent::TextDelta{text}=>title.push_str(&text),
                 ModelEvent::Completed=>completed=true,
-                ModelEvent::Reasoning{..}=>{},
+                ModelEvent::Reasoning{..}|ModelEvent::Usage{..}=>{},
                 _=>return Err(Error::InvalidInput("title generation incomplete".into())),
             }
             Ok(())

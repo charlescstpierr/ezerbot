@@ -1872,6 +1872,47 @@ fn panel_confirmation_rejects_a_changed_review_and_history_denies_wrong_bot() {
 }
 
 #[test]
+fn idle_ping_is_small_stable_and_detects_local_and_background_writes() {
+    let mut f = Fixture::new(false);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let first = f.app.api("GET", "/api/ping", b"").unwrap();
+    assert_eq!(first["revision"], state["state_revision"]);
+    assert_eq!(first.as_object().unwrap().len(), 1);
+    assert!(first.to_string().len() < 150);
+    assert_eq!(first, f.app.api("GET", "/api/ping", b"").unwrap());
+    f.create("A local write changes the revision");
+    let local = f.app.api("GET", "/api/ping", b"").unwrap();
+    assert_ne!(local, first);
+    f.db()
+        .execute(
+            "UPDATE wrapper_bots SET description=description || ' suite' WHERE id='grokbot'",
+            [],
+        )
+        .unwrap();
+    let background = f.app.api("GET", "/api/ping", b"").unwrap();
+    assert_ne!(background, local);
+    assert_eq!(background, f.app.api("GET", "/api/ping", b"").unwrap());
+    assert_eq!(
+        background["revision"],
+        f.app.api("GET", "/api/state", b"").unwrap()["state_revision"]
+    );
+}
+
+#[test]
+fn a_scheduler_diagnostic_is_not_coalesced_with_a_manual_launch() {
+    let mut f = Fixture::new(false);
+    let r = f.create("Manual launch after a diagnostic");
+    f.db().execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,reason) VALUES ('quarantine-row',?1,1,?2,?3,'failed','invalid schedule')", params![r.routine_id, now(),format!("scheduler-error:{}",now())]).unwrap();
+    let result = f.post(
+        "/api/routines/run-now",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"nonce":"fresh-manual"}),
+    );
+    assert_ne!(result["occurrence"]["occurrence_id"], "quarantine-row");
+    assert_eq!(result["occurrence"]["manual_nonce"], "fresh-manual");
+    assert_eq!(result["occurrence"]["status"]["status"], "pending");
+}
+
+#[test]
 fn past_once_resume_is_refused_and_creation_time_is_server_owned() {
     let mut f = Fixture::new(false);
     let r = f.create("Report");

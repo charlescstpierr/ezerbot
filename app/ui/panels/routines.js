@@ -135,7 +135,7 @@
   let dialog, botSelect, content, status, toolbar, view = "list", current = null;
   let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
-  let historyView = null, historyFailure = false, uncertainResume = null;
+  let historyView = null, uncertainResume = null, notices, hostOnline = true;
   // Retain the intent across a page reload, without storing prompts or outputs.
   let savedLaunches = [];
   try { savedLaunches = JSON.parse(sessionStorage.getItem("ezerbot.routine-launches") || "[]"); } catch { /* Optional browser storage. */ }
@@ -151,21 +151,64 @@
   function kick() { if (wantsPolling()) void panels.refresh().catch(() => {}); }
   const idBody = (r) => ({ bot_id: r.bot_id, routine_id: r.routine_id });
   const active = (token) => dialog.open && token === revision;
-  function message(text, error = false, retry) {
-    status.replaceChildren(document.createTextNode(text)); status.classList.toggle("routines-error", error);
-    if (retry) status.append(document.createTextNode(" "), button("Réessayer", retry));
+  function message(text, error = false, retry, retryLabel = "Réessayer") {
+    delete status.dataset.launchResult;
+    status.replaceChildren(node("span", "", text)); status.classList.toggle("routines-error", error);
+    if (retry) status.append(button(retryLabel, retry));
     status.setAttribute("role", error ? "alert" : "status");
-    // Confirmation actions sit below a long review. Bring failures and their
-    // retry action into view without clearing the user's form or history.
-    if (error && status.dataset.message !== text) status.scrollIntoView?.({ block: "nearest" });
+    // Only a long editor needs to reveal its error. History errors must never
+    // move the reader away from the page or control they were using.
+    if (error && view !== "history" && status.dataset.message !== text) status.scrollIntoView?.({ block: "center" });
     status.dataset.message = text;
   }
-  function frenchError(error) {
+  function historyPosition() {
+    const position = { scrollTop: dialog.scrollTop };
+    if (view !== "history" || dialog.scrollTop < 120 || !dialog.getBoundingClientRect) return position;
+    const bounds = dialog.getBoundingClientRect();
+    const row = [...content.querySelectorAll("[data-history-focus]")].find((el) => (el.tagName === "ARTICLE" || el.tagName === "P") && el.getBoundingClientRect().bottom > bounds.top && el.getBoundingClientRect().top < bounds.bottom);
+    if (row) { position.key = row.dataset.historyFocus; position.offset = row.getBoundingClientRect().top - bounds.top; }
+    return position;
+  }
+  function restoreHistoryPosition(position) {
+    const row = position.key && [...content.querySelectorAll("[data-history-focus]")].find((el) => el.dataset.historyFocus === position.key);
+    if (row) dialog.scrollTop += row.getBoundingClientRect().top - dialog.getBoundingClientRect().top - position.offset;
+    else dialog.scrollTop = position.scrollTop;
+  }
+  function renderNotices() {
+    if (!notices || !dialog?.open) return;
+    const next = JSON.stringify([hostOnline, view === "history" && historyView?.newer, view === "history" && historyView?.failures.poll && !historyView.failures.initial && !historyView.failures.occurrences && !historyView.failures.ranges]);
+    if (notices.dataset.signature === next) return;
+    notices.dataset.signature = next;
+    const position = historyPosition();
+    notices.replaceChildren();
+    if (!hostOnline) {
+      const warning = node("div", "routines-warning routines-history-notice");
+      warning.setAttribute("role", "alert");
+      warning.append(node("span", "", "Moteur local injoignable — reconnexion automatique en cours. Vos données affichées sont conservées."), button("Réessayer", () => { void panels.refresh().catch(() => {}); }));
+      notices.append(warning);
+    }
+    if (view === "history" && historyView?.newer) {
+      const news = node("div", "routines-warning routines-history-notice");
+      news.append(node("span", "", "De nouvelles occurrences sont disponibles. Votre lecture reste dans le même ordre."), button("Voir les plus récentes", () => showHistory(current)));
+      notices.append(news);
+    }
+    if (view === "history" && historyView?.failures.poll && !historyView.failures.initial && !historyView.failures.occurrences && !historyView.failures.ranges) {
+      const warning = node("div", "routines-warning routines-history-notice"); warning.setAttribute("role", "alert");
+      warning.append(node("span", "", `Mise à jour de l’historique indisponible : ${historyView.failures.poll} Les pages affichées sont conservées.`), button("Réessayer", () => retryLoadedPages(current)));
+      notices.append(warning);
+    }
+    restoreHistoryPosition(position);
+  }
+  function frenchError(error, diagnostic = false) {
     const text = error?.message || "";
     const known = { "Routine run cancelled": "L’exécution a été arrêtée.", "Routine run failed": "L’exécution a échoué. Consultez son résultat pour le détail.", "Routine turn ended without complete_task": "Le bot a répondu sans confirmer la fin de la tâche.", "Routine paused or edited": "La routine a été mise en pause ou modifiée avant le départ.", "Occurrence no longer runnable": "Cette occurrence ne peut plus être lancée : la routine a changé." };
     if (known[text]) return known[text];
+    if (/schedule never fires|no future slot|schedule exhausted/i.test(text)) return "L’horaire n’a plus de créneau futur. Choisissez un nouvel horaire.";
+    if (/unknown routine/i.test(text)) return "La routine est introuvable ou a été supprimée.";
+    if (/time.?zone|time zone|zoneinfo|failed to find.*zone/i.test(text)) return "Le fuseau horaire de la routine est invalide. Ouvrez-la pour le corriger.";
+    if (/invalid schedule|invalid cron|interval.*invalid/i.test(text)) return "L’horaire de la routine est invalide. Ouvrez-la pour le corriger.";
     if (/changé|Conflit|créneau|introuvable|indisponible|connexion|illisible|Curseur|horaire|Réessayez/i.test(text)) return text;
-    return "Le moteur local n’a pas pu terminer cette action. Vos données sont conservées.";
+    return diagnostic ? "Diagnostic technique non traduit. Vérifiez l’horaire et le contenu de cette routine avant de la relancer." : "Le moteur local n’a pas pu terminer cette action. Vos données sont conservées.";
   }
   function lock() {
     botSelect.disabled = busy || view !== "list";
@@ -191,8 +234,8 @@
     toolbar = node("div", "routines-actions");
     toolbar.append(button("Nouvelle routine", () => edit(null), "primary-button"), button("Actualiser", reload));
     status = node("p", "routines-note"); status.setAttribute("role", "status");
-    content = node("div", "routines-content");
-    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, status, content);
+    content = node("div", "routines-content"); notices = node("div", "routines-live-notices");
+    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
       revision++; current = null; content.replaceChildren();
@@ -220,7 +263,7 @@
       entry.classList.add("routines-covered");
       return snapshot;
     });
-    message(""); dialog.showModal(); renderList();
+    message(""); dialog.showModal(); hostOnline = panels.connected !== false; renderNotices(); renderList();
     void reload();
   }
   async function reload() {
@@ -253,7 +296,7 @@
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
       if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
-      if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error })}`));
+      if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error }, true)}`));
       const actions = node("div", "routines-actions");
       actions.append(button("Modifier", () => edit(r)), button(r.enabled ? "Mettre en pause" : "Reprendre…", () => r.enabled ? mutate("/api/routines/pause", idBody(r), "Routine mise en pause.") : reviewResume(r)), button("Historique", () => showHistory(r)), button("Ouvrir le fil", () => openThread(r.conversation_id)));
       const job = launches.get(r.routine_id), running = item.running || histories.get(r.routine_id)?.running;
@@ -274,11 +317,11 @@
     if (!full) throw new Error("Cette routine a été supprimée. Actualisez la liste.");
     return full;
   }
-  function back() { if (busy) return; uncertainResume = null; revision++; view = "list"; current = null; signature = ""; message(""); renderList(); }
+  function back() { if (busy) return; uncertainResume = null; revision++; view = "list"; current = null; signature = ""; message(""); renderNotices(); renderList(); }
   async function edit(r, resume = false) {
     if (busy) return;
     const token = ++revision; view = "edit"; current = r; toolbar.hidden = true; content.replaceChildren(); botSelect.disabled = true;
-    content.append(button("Retour à la liste", back)); message(r ? "Chargement du contenu complet…" : "");
+    content.append(button("Retour à la liste", back)); message(r ? "Chargement du contenu complet…" : ""); renderNotices();
     try {
       const full = r ? await fetchRoutine(r) : null;
       let pinned = null;
@@ -391,26 +434,35 @@
   async function mutate(path, payload, success, reviewed) {
     if (busy) return;
     const token = revision; uncertainResume = null; busy = true; lock(); message("Enregistrement…");
+    let sent = false;
     try {
       if (reviewed) {
         const latest = await fetchRoutine(reviewed);
         if (latest.modified_at !== reviewed.modified_at || latest.schedule_version !== reviewed.schedule_version) throw new Error("La routine a changé depuis votre lecture. Revenez à la liste et relisez-la avant de l’activer.");
       }
+      sent = true;
       await panels.api(path, payload);
       if (active(token)) { view = "list"; current = null; signature = ""; message(success); }
       try { await panels.refresh(); } catch { if (active(token)) message(`${success} Liste à actualiser.`, true); }
     } catch (error) {
       if (active(token)) {
         const conflict = /Stale routine edit|changé depuis votre lecture|Routine changed|409/i.test(error.message);
-        const uncertain = /connexion.*interrompue|réponse illisible/i.test(error.message);
+        const disconnected = /connexion.*interrompue|réponse illisible/i.test(error.message);
+        const uncertain = sent && disconnected;
         const reason = /schedule never fires|Schedule has no future slot/i.test(error.message) ? "L’horaire n’a plus de créneau futur. Choisissez un instant futur." : error.message;
         if (uncertain && reviewed) uncertainResume = reviewed.routine_id;
-        const advice = conflict ? "Revenez à la liste, actualisez puis rouvrez l’éditeur." : uncertain ? "L’état sera vérifié automatiquement à la reconnexion." : /indisponible/i.test(reason) ? "Réessayez dans un instant." : "Vérifiez la saisie avant de réessayer.";
-        message(`${conflict ? "Conflit d’édition" : uncertain ? "Action non confirmée" : "Action refusée par le moteur"} : ${frenchError({ message: reason })} Vos saisies sont conservées. ${advice}`, true, () => conflict && reviewed ? reviewResume(reviewed) : mutate(path, payload, success, reviewed));
+        const advice = conflict ? "Revenez à la liste, actualisez puis rouvrez l’éditeur." : uncertain ? reviewed ? "L’état sera vérifié automatiquement à la reconnexion." : "Vérifiez l’état après reconnexion avant de réessayer." : /indisponible/i.test(reason) ? "Réessayez dans un instant." : "Vérifiez la saisie avant de réessayer.";
+        if (reviewed && disconnected && !sent) {
+          message(`Activation non envoyée : ${frenchError(error)}`, true, () => mutate(path, payload, success, reviewed));
+        } else if (conflict && reviewed) {
+          message("Conflit d’activation : la routine a changé depuis votre lecture. Relisez la nouvelle version avant de l’activer.", true, () => reviewResume(reviewed), "Relire la routine");
+        } else {
+          message(`${conflict ? "Conflit d’édition" : uncertain ? "Action non confirmée" : "Action refusée par le moteur"} : ${frenchError({ message: reason })}${reviewed ? "" : " Vos saisies sont conservées."} ${advice}`, true, () => mutate(path, payload, success, reviewed));
+        }
       }
     } finally {
       busy = false;
-      if (active(token)) { if (view === "list") { signature = ""; renderList(); } else lock(); }
+      if (active(token)) { renderNotices(); if (view === "list") { signature = ""; renderList(); } else lock(); }
     }
   }
   async function readHistory(r, cursor, rangesCursor) {
@@ -431,61 +483,142 @@
     for (const range of h.missed_ranges) historyView.ranges.set(`${range.schedule_version}.${range.from_inclusive}`, range);
     if (remember) historyView.pages.set(`${h.cursor}/${h.ranges_cursor}`, [h.cursor, h.ranges_cursor]);
   }
+  function emptyHistory() {
+    return { occurrences: new Map(), ranges: new Map(), pages: new Map(), next: null, nextRanges: null, newer: false, rangesOpen: false, failures: { initial: null, poll: null, occurrences: null, ranges: null }, loading: "", focusTarget: null };
+  }
+  function installHistory(h) {
+    const rangesOpen = historyView?.rangesOpen || false;
+    historyView = emptyHistory(); historyView.rangesOpen = rangesOpen;
+    mergePage(h); historyView.next = h.next_cursor; historyView.nextRanges = h.next_ranges_cursor;
+  }
   async function showHistory(r, more = "") {
-    if (busy || (more && historyLoading)) return;
-    const token = ++revision; view = "history"; current = r; toolbar.hidden = true; botSelect.disabled = true; historySignature = "";
+    if (busy || (more && historyView?.loading)) return;
+    const token = ++revision; view = "history"; current = r; toolbar.hidden = true; botSelect.disabled = true;
     if (!more) {
-      historyView = { occurrences: new Map(), ranges: new Map(), pages: new Map(), next: null, nextRanges: null, newer: false, rangesOpen: false };
-      content.replaceChildren(button("Retour à la liste", back));
+      historyView = emptyHistory(); historySignature = "";
+      content.replaceChildren(button("Retour à la liste", back)); message("Chargement de l’historique…");
+    } else {
+      if (content.contains(document.activeElement)) historyView.focusTarget = document.activeElement.dataset.historyFocus;
+      historyView.loading = more;
+      // Do not replace the DOM while waiting: the loading state belongs to the
+      // control at the reader's position, not to a status above sixty cards.
+      for (const control of content.querySelectorAll("button")) {
+        if (control.dataset.loadMore || control.dataset.historyFocus?.startsWith("retry-")) {
+          control.disabled = true;
+          if (control.dataset.loadMore === more || control.dataset.historyFocus === `retry-${more}`) control.textContent = "Chargement…";
+        }
+      }
     }
-    historyLoading = token; message("Chargement de l’historique…");
+    historyLoading = token; renderNotices();
     const cursor = more ? (more === "occurrences" ? historyView.next : [...historyView.pages.values()][0][0]) : null;
     const rangesCursor = more ? (more === "ranges" ? historyView.nextRanges : [...historyView.pages.values()][0][1]) : null;
     try {
       const h = await readHistory(r, cursor, rangesCursor); settleLaunch(r);
       if (active(token)) {
+        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${range.schedule_version}.${range.from_inclusive}`));
         mergePage(h);
         if (!more || more === "occurrences") historyView.next = h.next_cursor;
         if (!more || more === "ranges") historyView.nextRanges = h.next_ranges_cursor;
-        historyFailure = false; message(""); renderHistory(r);
+        historyView.failures[more || "initial"] = null;
+        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${newItems[0].schedule_version}.${newItems[0].from_inclusive}`;
+        if (!more) message("");
       }
-    } catch (error) { if (active(token)) { historyFailure = true; message(`Historique indisponible : ${frenchError(error)}`, true, () => showHistory(r, more)); } }
+    } catch (error) {
+      if (active(token)) {
+        historyView.failures[more || "initial"] = frenchError(error);
+        if (!more) message(`Historique indisponible : ${frenchError(error)}`, true, () => retryLoadedPages(r));
+      }
+    } finally {
+      if (historyLoading === token) historyLoading = false;
+      if (active(token)) { historyView.loading = ""; historySignature = ""; renderHistory(r); kick(); }
+    }
+  }
+  // Revalidation never starts a new traversal: preserve membership, cursor,
+  // explicit page errors and position. Only a reader at the top of one page
+  // can safely adopt fresh arrivals automatically.
+  async function refreshLoadedPages(r, token) {
+    const h = await readHistory(r); settleLaunch(r);
+    if (!active(token)) return;
+    const newer = h.occurrences.some((o) => !historyView.occurrences.has(o.occurrence_id));
+    if (!historyView.pages.size || (newer && historyView.pages.size === 1 && dialog.scrollTop < 120 && !historyView.failures.occurrences && !historyView.failures.ranges)) {
+      installHistory(h); message("");
+    } else {
+      if (newer) historyView.newer = true;
+      for (const [cursor, rangesCursor] of [...historyView.pages.values()]) {
+        const page = await readHistory(r, cursor, rangesCursor);
+        if (!active(token)) return;
+        mergePage(page, false);
+      }
+      historyView.failures.poll = null;
+      if (historyView.failures.initial) { historyView.failures.initial = null; message(""); }
+    }
+    renderHistory(r);
+  }
+  async function retryLoadedPages(r) {
+    if (busy || historyView?.loading || !r) return;
+    const token = ++revision; historyLoading = token;
+    try { await refreshLoadedPages(r, token); }
+    catch (error) { if (active(token)) { historyView.failures.poll = frenchError(error); renderHistory(r); } }
     finally { if (historyLoading === token) historyLoading = false; if (active(token)) kick(); }
   }
+  function pageControls(parent, r, kind) {
+    if (!(kind === "occurrences" ? historyView.next : historyView.nextRanges)) return;
+    const controls = node("div", "routines-pagination");
+    const load = button(kind === "occurrences" ? "Charger plus" : "Charger plus de plages", () => showHistory(r, kind), "secondary-button routines-load-more");
+    load.dataset.loadMore = kind; load.dataset.historyFocus = `load-${kind}`; controls.append(load);
+    if (historyView.failures[kind]) {
+      const error = node("div", "routines-error routines-page-error"); error.setAttribute("role", "alert");
+      const retry = button("Réessayer", () => showHistory(r, kind)); retry.dataset.historyFocus = `retry-${kind}`;
+      error.append(node("span", "", `Impossible de charger la suite : ${historyView.failures[kind]}`), retry); controls.append(error);
+    }
+    parent.append(controls);
+  }
   function renderHistory(r) {
+    renderNotices();
     const occurrences = [...historyView.occurrences.values()].sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || (a.occurrence_id < b.occurrence_id ? 1 : -1));
     const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version);
-    const next = JSON.stringify([r.routine_id, occurrences, visibleRanges, historyView.next, historyView.nextRanges, historyView.newer]);
+    const next = JSON.stringify([r.routine_id, occurrences, visibleRanges, historyView.next, historyView.nextRanges, historyView.failures]);
     if (historySignature === next) return;
     historySignature = next;
-    const scrollTop = dialog.scrollTop;
-    content.replaceChildren(button("Retour à la liste", back), button("Actualiser l’historique", () => showHistory(r)), node("h3", "", r.name));
-    if (historyView.newer) content.append(node("p", "routines-note", "De nouvelles occurrences sont disponibles. Votre lecture reste dans le même ordre."), button("Voir les plus récentes", () => showHistory(r)));
+    const position = historyPosition(), focused = document.activeElement;
+    const focusKey = focused?.disabled && historyView.focusTarget ? historyView.focusTarget : content.contains(focused) ? focused.dataset.historyFocus : (!focused || focused === document.body) ? historyView.focusTarget : null;
+    const focusText = content.contains(focused) ? focused.textContent : null;
+    content.replaceChildren(button("Retour à la liste", back), button("Actualiser l’historique", () => retryLoadedPages(r)), node("h3", "", r.name));
     const ranges = node("details", "routines-ranges");
     ranges.open = historyView.rangesOpen;
-    ranges.append(node("summary", "", `Plages d’occurrences manquées · ${visibleRanges.length} affichées`));
+    ranges.append(node("summary", "", `Plages d’occurrences manquées (${visibleRanges.length}${historyView.nextRanges ? "+" : ""})`));
     ranges.addEventListener("toggle", () => { if (ranges.isConnected) historyView.rangesOpen = ranges.open; });
     if (!visibleRanges.length) ranges.append(node("p", "routines-note", "Aucune plage manquée."));
-    for (const range of visibleRanges) ranges.append(node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`));
-    if (historyView.nextRanges) ranges.append(button("Charger plus de plages", () => showHistory(r, "ranges")));
-    content.append(ranges, node("h4", "", `${occurrences.length} occurrences affichées · plus récentes en premier`));
+    for (const range of visibleRanges) {
+      const row = node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`);
+      row.tabIndex = -1; row.dataset.historyFocus = `range-${range.schedule_version}.${range.from_inclusive}`; ranges.append(row);
+    }
+    pageControls(ranges, r, "ranges");
+    content.append(ranges, node("h4", "", `${occurrences.length} ${occurrences.length > 1 ? "occurrences chargées" : "occurrence chargée"}${historyView.next ? " · d’autres plus anciennes disponibles" : ""} · plus récentes en premier`));
     if (!occurrences.length) content.append(node("p", "routines-note", "Aucune occurrence."));
     for (const o of occurrences) {
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status; row.dataset.occurrenceId = o.occurrence_id;
+      row.tabIndex = -1; row.dataset.historyFocus = `occurrence-${o.occurrence_id}`;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
       row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
-      if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason })));
-      if (o.conversation_id) row.append(button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id)));
+      if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
+      if (o.conversation_id) {
+        const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));
+        result.dataset.historyFocus = `result-${o.occurrence_id}`; row.append(result);
+      }
       content.append(row);
     }
-    if (historyView.next) content.append(button("Charger plus", () => showHistory(r, "occurrences")));
-    dialog.scrollTop = scrollTop;
+    pageControls(content, r, "occurrences");
+    const focus = [...content.querySelectorAll("[data-history-focus]")].find((el) => el.dataset.historyFocus === focusKey) || [...content.querySelectorAll("button")].find((el) => focusText && el.textContent === focusText);
+    focus?.focus({ preventScroll: true }); historyView.focusTarget = null;
+    restoreHistoryPosition(position);
   }
   async function runNow(r) {
     if (busy) return;
     let job = launches.get(r.routine_id);
     if (job && Date.now() < job.until) return;
-    const token = revision; busy = true; signature = ""; renderList(); message("Vérification du dernier lancement…");
+    const token = revision; let confirmed = false;
+    busy = true; signature = ""; renderList(); message("Vérification du dernier lancement…");
     try {
       const h = await readHistory(r), own = job && h.occurrences.find((o) => o.manual_nonce === job.nonce || o.occurrence_id === job.occurrenceId);
       if (own && job.unknown) {
@@ -500,11 +633,16 @@
       job.unknown = true; saveLaunches();
       const reply = await panels.api("/api/routines/run-now", { ...idBody(r), nonce: job.nonce });
       job.occurrenceId = reply.occurrence.occurrence_id;
-      job.unknown = false; job.until = Date.now() + 3000;
+      confirmed = true; job.unknown = false; job.until = Date.now() + 3000;
       if (active(token)) message("Lancement demandé. Son résultat apparaîtra dans l’historique.");
       await readHistory(r);
       try { await panels.refresh(); } catch { /* The page-session nonce remains available for retry. */ }
-    } catch (error) { if (active(token)) message(`Lancement non confirmé : ${frenchError(error)} Le même identifiant sera réutilisé pour éviter un doublon.`, true, () => runNow(r)); }
+    } catch (error) {
+      if (active(token)) {
+        const text = confirmed ? `Lancement enregistré. Son historique est temporairement indisponible : ${frenchError(error)} Utilisez « Historique » ci-dessous pour réessayer.` : launches.get(r.routine_id)?.unknown ? `Lancement non confirmé : ${frenchError(error)} Le même identifiant sera réutilisé pour éviter un doublon. Utilisez « Vérifier / réessayer le lancement » ci-dessous.` : `Lancement non envoyé : ${frenchError(error)} Utilisez « Lancer maintenant » ci-dessous pour réessayer.`;
+        message(text, true); status.dataset.launchResult = "true";
+      }
+    }
     finally { busy = false; saveLaunches(); if (active(token)) { signature = ""; renderList(); kick(); } }
   }
   async function pollHistory() {
@@ -519,21 +657,13 @@
       for (const r of candidates.values()) {
         if (!active(token) || busy || reloading) break;
         try {
-          const h = await readHistory(r); settleLaunch(r);
+          if (view === "history" && current.routine_id === r.routine_id) await refreshLoadedPages(r, token);
+          else { await readHistory(r); settleLaunch(r); }
+        } catch (error) {
           if (active(token) && view === "history" && current.routine_id === r.routine_id) {
-            if (!historyView.pages.size) {
-              mergePage(h); historyView.next = h.next_cursor; historyView.nextRanges = h.next_ranges_cursor;
-            } else {
-              if (h.occurrences.some((o) => !historyView.occurrences.has(o.occurrence_id))) historyView.newer = true;
-              for (const [cursor, rangesCursor] of [...historyView.pages.values()]) {
-                const page = await readHistory(r, cursor, rangesCursor);
-                if (!active(token)) break;
-                mergePage(page, false);
-              }
-            }
-            if (active(token)) { if (historyFailure) message(""); historyFailure = false; renderHistory(r); }
-          }
-        } catch (error) { if (active(token) && view !== "edit") { historyFailure = true; message(`Historique temporairement indisponible : ${frenchError(error)}`, true, () => view === "history" ? showHistory(r) : reload()); } }
+            historyView.failures.poll = frenchError(error); renderHistory(r);
+          } else if (active(token) && view !== "edit" && status.dataset.launchResult !== "true") message(`Historique temporairement indisponible : ${frenchError(error)}`, true, reload);
+        }
       }
       if (active(token)) { signature = ""; renderList(); }
     } finally { if (historyLoading === token) historyLoading = false; }
@@ -550,15 +680,25 @@
       else section.append(node("p", "routines-note", "Enregistrez le bot avant de créer ses routines."));
       container.append(section);
     },
-    onState() {
+    onConnection(online) { hostOnline = online; renderNotices(); },
+    onState(_state, context) {
       if (!dialog?.open) return;
+      hostOnline = context?.connected ?? panels.connected ?? hostOnline;
       const bot = liveBots().find((b) => b.id === botId());
       if (!bot) { dialog.close(); panels.notify("Ce bot a été supprimé ; ses routines ne sont plus modifiables ici."); return; }
-      if (!busy && uncertainResume && view === "edit" && current?.routine_id === uncertainResume && items().some((i) => i.routine.routine_id === uncertainResume && i.routine.enabled)) {
-        uncertainResume = null; revision++; view = "list"; current = null; signature = "";
-        message("La routine est active. État récupéré automatiquement après reconnexion.");
+      if (!busy && uncertainResume && view === "edit" && current?.routine_id === uncertainResume) {
+        const observed = items().find((i) => i.routine.routine_id === uncertainResume);
+        if (observed) {
+          uncertainResume = null;
+          if (observed.routine.enabled) {
+            revision++; view = "list"; current = null; signature = "";
+            message("La routine est active. État récupéré automatiquement après reconnexion.");
+          } else {
+            message("L’activation n’a pas été enregistrée : la routine est toujours en pause. Relisez-la puis réessayez.", true, () => reviewResume(current), "Relire la routine");
+          }
+        }
       }
-      renderList(); void pollHistory();
+      renderNotices(); renderList(); void pollHistory();
     },
     wantsPolling,
   });

@@ -5,16 +5,27 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 class Element {
-  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.scrollTop = 0; this.open = true; this.isConnected = true; this.classList = { toggle() {}, add() {}, remove() {} }; }
+  constructor(tag, document) { this.ownerDocument = document; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.listeners = {}; this.scrollTop = 0; this.open = true; this.isConnected = true; this.classList = { toggle() {}, add() {}, remove() {} }; }
   append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
-  setAttribute() {}
-  addEventListener() {}
+  contains(value) { return !!value && (this === value || this.children.some(c => c instanceof Element && c.contains(value))); }
+  replaceChildren(...children) { if (this.contains(this.ownerDocument.activeElement)) this.ownerDocument.activeElement = this.ownerDocument.body; this.children = children; }
+  setAttribute(key, value) { this.attributes[key] = value; }
+  getAttribute(key) { return this.attributes[key]; }
+  addEventListener(name, action) { this.listeners[name] = action; }
+  click() { if (!this.disabled) return this.listeners.click?.(); }
+  focus() { if (!this.disabled) this.ownerDocument.activeElement = this; }
+  scrollIntoView() { this.scrollCalls = (this.scrollCalls || 0) + 1; }
   querySelectorAll(selector) {
-    const tags = selector.split(',').map(s => s.trim().toUpperCase());
-    return this.children.filter(c => c instanceof Element).flatMap(c => [...(tags.includes(c.tagName) ? [c] : []), ...c.querySelectorAll(selector)]);
+    const selectors = selector.split(',').map(s => s.trim());
+    const matches = el => selectors.some(s => {
+      if (s.startsWith('.')) return el.className?.split(' ').includes(s.slice(1));
+      const data = /^\[data-([a-z-]+)\]$/.exec(s);
+      if (data) return data[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase()) in el.dataset;
+      return el.tagName === s.toUpperCase();
+    });
+    return this.children.filter(c => c instanceof Element).flatMap(c => [...(matches(c) ? [c] : []), ...c.querySelectorAll(selector)]);
   }
-  set textContent(text) { this.children = [String(text)]; }
+  set textContent(text) { this.replaceChildren(String(text)); }
   get textContent() { return this.children.map(c => c?.textContent ?? String(c)).join(''); }
 }
 const routine = { routine_id: 'routine-test', bot_id: 'grokbot', conversation_id: 'thread-test', name: 'Bilan', enabled: false, trigger: { kind: 'every', interval_ms: 60000 }, time_zone: 'UTC' };
@@ -23,23 +34,140 @@ const page = (items, extra = {}) => ({ occurrences: items, missed_ranges: [], ru
 function harness(api) {
   let clock = 10000, sequence = 0;
   const storage = new Map();
-  const panels = { state: { bots: [{ id: 'grokbot', name: 'Ezerbot' }], routines: { items: [{ routine }] } }, api, refresh: async () => {}, notify() {}, register(panel) { this.panel = panel; } };
+  const panels = { connected: true, state: { bots: [{ id: 'grokbot', name: 'Ezerbot' }], routines: { items: [{ routine }] } }, api, refresh: async () => {}, notify() {}, register(panel) { this.panel = panel; } };
   const window = { GrokbotPanels: panels };
-  const context = vm.createContext({ window, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }), getElementById: () => null }, Intl, Date: class extends Date { static now() { return clock; } }, crypto: { randomUUID: () => `intent-${++sequence}` }, sessionStorage: { getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v) }, console, TextEncoder });
+  const document = { createElement: tag => new Element(tag, document), createTextNode: text => ({ textContent: text }), getElementById: () => null };
+  document.body = document.createElement('body'); document.activeElement = document.body;
+  const context = vm.createContext({ window, document, Intl, Date: class extends Date { static now() { return clock; } }, crypto: { randomUUID: () => `intent-${++sequence}` }, sessionStorage: { getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v) }, console, TextEncoder });
   // Expose lexical state only in this test VM; production has no test API.
   const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8').replace('  panels.register({', `
-  window.test = { runNow, showHistory, pollHistory, edit, mutate, back, settleLaunch, launches, histories,
+  window.test = { runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
     setup(r) { dialog = document.createElement('dialog'); botSelect = document.createElement('select'); botSelect.value = r.bot_id;
-      content = document.createElement('div'); status = document.createElement('p'); toolbar = document.createElement('div');
+      content = document.createElement('div'); status = document.createElement('p'); toolbar = document.createElement('div'); notices = document.createElement('div');
+      dialog.append(notices, status, content); document.body.append(dialog);
       view = 'list'; current = null; revision = 1; historyView = null; },
     prepareResume(r) { view = 'edit'; current = r; },
-    get status() { return status; }, get content() { return content; }, get history() { return historyView; }
+    get status() { return status; }, get content() { return content; }, get history() { return historyView; }, get dialog() { return dialog; }, get notices() { return notices; }
   };
   panels.register({`);
   vm.runInContext(source, context);
   window.test.setup(routine);
-  return { t: window.test, panels, advance: () => { clock += 4000; }, storage };
+  return { t: window.test, panels, document, advance: () => { clock += 4000; }, storage };
 }
+
+test('page and polling failures retain membership, cursor, position and an inline retry', async () => {
+  let failed = false;
+  const reads = [];
+  const h = harness(async url => {
+    reads.push(url);
+    if (failed) throw new Error('Le service est indisponible.');
+    if (url.includes('&cursor=10.2')) return page([occurrence('fifth'), occurrence('sixth')], { cursor: '10.2' });
+    if (url.includes('&cursor=10.1')) return page([occurrence('third'), occurrence('fourth')], { cursor: '10.1', next_cursor: '10.2' });
+    return page([occurrence('first'), occurrence('second')], { next_cursor: '10.1' });
+  });
+  await h.t.showHistory(routine); await h.t.showHistory(routine, 'occurrences');
+  h.t.dialog.scrollTop = 7410;
+  failed = true; await h.t.showHistory(routine, 'occurrences');
+  assert.equal(h.t.history.occurrences.size, 4);
+  assert.equal(h.t.dialog.scrollTop, 7410);
+  assert.match(h.t.content.textContent, /Impossible de charger la suite/);
+  h.advance(); await h.t.pollHistory();
+  assert.equal(h.t.dialog.scrollTop, 7410);
+  assert.match(h.t.content.textContent, /Impossible de charger la suite/);
+  assert.equal(h.t.status.scrollCalls || 0, 0);
+  assert.equal(h.t.notices.textContent, ''); // polling must not replace the explicit page error
+  failed = false; reads.length = 0; await h.t.retryLoadedPages(routine);
+  assert.equal(h.t.history.occurrences.size, 4);
+  assert.equal(h.t.history.pages.size, 2);
+  assert.equal(h.t.history.next, '10.2');
+  assert.equal(h.t.dialog.scrollTop, 7410);
+  assert.match(h.t.content.textContent, /Impossible de charger la suite/);
+  assert.ok(reads.some(url => url.includes('&cursor=10.1')));
+  const retry = h.t.content.querySelectorAll('button').find(b => b.dataset.historyFocus === 'retry-occurrences');
+  retry.focus(); await retry.click();
+  assert.equal(h.t.history.occurrences.size, 6);
+  assert.equal(h.t.dialog.scrollTop, 7410);
+  assert.equal(h.document.activeElement.dataset.historyFocus, 'occurrence-fifth');
+  assert.doesNotMatch(h.t.content.textContent, /Impossible de charger la suite/);
+});
+
+test('loading a page preempts polling, shows progress and restores keyboard focus', async () => {
+  let resolvePoll, resolveMore, holdPoll = false;
+  const h = harness(async url => {
+    if (url.includes('&cursor=10.1')) return new Promise(resolve => { resolveMore = resolve; });
+    if (holdPoll) return new Promise(resolve => { resolvePoll = resolve; });
+    return page([occurrence('first')], { next_cursor: '10.1' });
+  });
+  await h.t.showHistory(routine); h.t.dialog.scrollTop = 300;
+  holdPoll = true; h.advance(); const polling = h.t.pollHistory();
+  const load = h.t.content.querySelectorAll('button').find(b => b.dataset.loadMore === 'occurrences');
+  load.focus(); const loading = h.t.showHistory(routine, 'occurrences');
+  assert.equal(load.disabled, true); assert.equal(load.textContent, 'Chargement…');
+  await h.t.showHistory(routine, 'occurrences'); // dedicated double-click guard
+  resolveMore(page([occurrence('second')], { cursor: '10.1' })); await loading;
+  resolvePoll(page([occurrence('stale')])); await polling;
+  assert.deepEqual([...h.t.history.occurrences.keys()], ['first', 'second']);
+  assert.equal(h.document.activeElement.dataset.historyFocus, 'occurrence-second');
+  assert.equal(h.t.dialog.scrollTop, 300);
+});
+
+test('an offline notice is visible inside the modal, actionable and cleared on recovery', async () => {
+  const h = harness(async () => page([occurrence('first')]));
+  await h.t.showHistory(routine); h.t.dialog.scrollTop = 600;
+  h.panels.panel.onConnection(false);
+  assert.match(h.t.notices.textContent, /Moteur local injoignable/);
+  assert.equal(h.t.notices.children[0].getAttribute('role'), 'alert');
+  assert.match(h.t.notices.textContent, /Réessayer/);
+  assert.equal(h.t.dialog.scrollTop, 600);
+  h.panels.panel.onConnection(true);
+  assert.equal(h.t.notices.textContent, '');
+  assert.equal(h.t.history.occurrences.size, 1);
+  assert.equal(h.t.dialog.scrollTop, 600);
+});
+
+test('fresh arrivals update a single page at the top and stay announced during a longer reading', async () => {
+  let latest = 'first';
+  const h = harness(async url => url.includes('&cursor=') ? page([occurrence('first')]) : page([occurrence(latest)]));
+  await h.t.showHistory(routine); latest = 'second'; h.advance(); await h.t.pollHistory();
+  assert.deepEqual([...h.t.history.occurrences.keys()], ['second']);
+  assert.match(h.t.content.textContent, /1 occurrence chargée/);
+  assert.doesNotMatch(h.t.content.textContent, /1 occurrences/);
+  h.t.dialog.scrollTop = 500; latest = 'third'; h.advance(); await h.t.pollHistory();
+  assert.equal(h.t.history.newer, true);
+  assert.match(h.t.notices.textContent, /Voir les plus récentes/);
+});
+
+test('a missed-range retry keeps its cursor, expanded section and focus', async () => {
+  let fail = false;
+  const range = n => ({ schedule_version: 1, from_inclusive: n, until_exclusive: n + 1, trigger: routine.trigger, time_zone: 'UTC' });
+  const h = harness(async url => {
+    if (url.includes('&ranges_cursor=20.1')) {
+      if (fail) throw new Error('Le service est indisponible.');
+      return page([], { missed_ranges: [range(2)], cursor: '10.0', ranges_cursor: '20.1' });
+    }
+    return page([], { missed_ranges: [range(1)], ranges_cursor: '20.0', next_ranges_cursor: '20.1' });
+  });
+  await h.t.showHistory(routine); h.t.history.rangesOpen = true; h.t.dialog.scrollTop = 500;
+  fail = true; await h.t.showHistory(routine, 'ranges');
+  assert.equal(h.t.history.ranges.size, 1);
+  assert.equal(h.t.history.nextRanges, '20.1');
+  assert.match(h.t.content.textContent, /Impossible de charger la suite/);
+  fail = false;
+  const retry = h.t.content.querySelectorAll('button').find(b => b.dataset.historyFocus === 'retry-ranges');
+  retry.focus(); await retry.click();
+  assert.equal(h.t.history.ranges.size, 2);
+  assert.equal(h.t.history.rangesOpen, true);
+  assert.equal(h.t.dialog.scrollTop, 500);
+  assert.equal(h.document.activeElement.dataset.historyFocus, 'range-1.2');
+});
+
+test('diagnostics identify invalid schedules and zones without generic action wording', () => {
+  const h = harness(async () => page([]));
+  assert.match(h.t.frenchError({ message: 'invalid schedule: failed to find timezone X' }, true), /fuseau horaire.*invalide/);
+  assert.match(h.t.frenchError({ message: 'schedule never fires after its reference' }, true), /créneau futur/);
+  assert.match(h.t.frenchError({ message: 'unknown routine' }, true), /introuvable/);
+  assert.match(h.t.frenchError({ message: 'new diagnostic' }, true), /Diagnostic technique non traduit/);
+});
 
 test('concurrent clicks coalesce; an aliased run does not swallow the next intentional launch', async () => {
   let launches = 0, nonce, resolveRead;
@@ -103,12 +231,35 @@ test('a lost launch reply persists the intent and a retry confirms without runni
   });
   await h.t.runNow(routine);
   assert.equal(h.t.launches.get(routine.routine_id).unknown, true);
-  assert.match(h.t.status.textContent, /Réessayer/);
+  assert.match(h.t.status.textContent, /Vérifier \/ réessayer le lancement/);
+  assert.equal(h.t.status.querySelectorAll('button').length, 0);
   assert.match(h.storage.get('ezerbot.routine-launches'), /intent-1/);
   h.advance(); await h.t.runNow(routine);
   assert.equal(calls, 1);
   assert.equal(h.t.launches.get(routine.routine_id).unknown, false);
   assert.match(h.t.status.textContent, /confirmé dans l’historique/);
+});
+
+test('a launch preflight error points to the action that actually exists', async () => {
+  const h = harness(async () => { throw new Error('Le service est indisponible.'); });
+  await h.t.runNow(routine);
+  assert.match(h.t.status.textContent, /Lancement non envoyé.*Lancer maintenant/);
+  assert.doesNotMatch(h.t.status.textContent, /Vérifier \/ réessayer/);
+  assert.match(h.t.content.textContent, /Lancer maintenant/);
+});
+
+test('a confirmed launch with an unreadable history does not suggest a second launch', async () => {
+  let accepted = false;
+  const h = harness(async url => {
+    if (url === '/api/routines/run-now') { accepted = true; return { occurrence: occurrence('accepted') }; }
+    if (accepted) throw new Error('Le service est indisponible.');
+    return page([]);
+  });
+  await h.t.runNow(routine);
+  assert.match(h.t.status.textContent, /Lancement enregistré.*Historique/);
+  assert.doesNotMatch(h.t.status.textContent, /non envoyé|Vérifier \/ réessayer/);
+  h.advance(); await h.t.pollHistory();
+  assert.match(h.t.status.textContent, /Lancement enregistré.*Historique/);
 });
 
 test('activation errors keep a French retry action and release the panel lock', async () => {
@@ -135,6 +286,43 @@ test('a lost activation reply is reconciled from server state without manual ref
   h.panels.panel.onState();
   assert.match(h.t.status.textContent, /État récupéré automatiquement/);
   assert.match(h.t.content.textContent, /Mettre en pause/);
+});
+
+test('a preflight failure is not reported as an uncertain activation', async () => {
+  const reviewed = { ...routine, modified_at: 10, schedule_version: 1 };
+  const calls = [];
+  const h = harness(async url => { calls.push(url); throw new Error('La connexion au moteur local est interrompue.'); });
+  h.t.prepareResume(reviewed);
+  await h.t.mutate('/api/routines/resume', {}, 'Routine activée.', reviewed);
+  assert.deepEqual(calls, ['/api/routines?bot_id=grokbot']);
+  assert.match(h.t.status.textContent, /Activation non envoyée/);
+  assert.doesNotMatch(h.t.status.textContent, /sera vérifié|saisies/);
+  assert.match(h.t.status.textContent, /Réessayer/);
+});
+
+test('a submitted activation that did not persist is reconciled explicitly as still paused', async () => {
+  const reviewed = { ...routine, modified_at: 10, schedule_version: 1 };
+  const h = harness(async url => {
+    if (url.startsWith('/api/routines?')) return { routines: [reviewed] };
+    throw new Error('La connexion au moteur local est interrompue.');
+  });
+  h.t.prepareResume(reviewed);
+  await h.t.mutate('/api/routines/resume', {}, 'Routine activée.', reviewed);
+  assert.match(h.t.status.textContent, /Action non confirmée/);
+  h.panels.panel.onState();
+  assert.match(h.t.status.textContent, /n’a pas été enregistrée.*toujours en pause/);
+  assert.match(h.t.status.textContent, /Relire la routine/);
+  assert.doesNotMatch(h.t.status.textContent, /sera vérifié|saisies/);
+});
+
+test('activation conflicts offer one direct re-reading action without editor advice', async () => {
+  const reviewed = { ...routine, modified_at: 10, schedule_version: 1 };
+  const h = harness(async () => ({ routines: [{ ...reviewed, modified_at: 11 }] }));
+  h.t.prepareResume(reviewed);
+  await h.t.mutate('/api/routines/resume', {}, 'Routine activée.', reviewed);
+  assert.match(h.t.status.textContent, /Conflit d’activation/);
+  assert.match(h.t.status.textContent, /Relire la routine/);
+  assert.doesNotMatch(h.t.status.textContent, /saisies|Revenez|éditeur|Réessayer/);
 });
 
 test('confirmation read errors are French and actionable', async () => {

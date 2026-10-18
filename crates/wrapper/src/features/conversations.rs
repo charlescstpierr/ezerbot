@@ -23,7 +23,7 @@ pub fn routes(
 ) -> Option<Result<ApiResponse, ApiError>> {
     if !matches!(
         (method, path),
-        ("GET", "/api/state")
+        ("GET", "/api/state" | "/api/ping")
             | (
                 "POST",
                 "/api/preferences"
@@ -42,9 +42,25 @@ pub fn routes(
     Some(route(app, path, body).map(ApiResponse::Json))
 }
 
+// Detect writes from both this connection and background engine connections.
+// A process identity also invalidates the client's token after a wrapper restart.
+fn state_revision(connection: &rusqlite::Connection) -> Result<String, ApiError> {
+    let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
+    Ok(format!(
+        "{}.{}.{}",
+        std::process::id(),
+        external,
+        connection.total_changes()
+    ))
+}
+
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
+        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection)?})),
         "/api/state" => {
+            // Capture before reading: a concurrent write during serialization
+            // must cause another refresh, never be mistaken for observed data.
+            let revision = state_revision(&app.connection)?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;
@@ -56,7 +72,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 "preferences": { "theme": theme, "accent": accent, "fast": fast,
                     "model": resolved.as_ref().map(|(model, _, _)| model),
                     "effort": resolved.as_ref().and_then(|(_, effort, _)| effort.as_ref()), },
-                "provider": provider,
+                "provider": provider, "state_revision": revision,
             });
             // Each capability is merged under its own fixed key.
             for (key, value) in super::state(&app.feature_context())

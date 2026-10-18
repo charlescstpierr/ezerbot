@@ -43,12 +43,12 @@
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
   // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
   // botSection may return a cleanup function, called before remount and on dialog close.
-  // onState(state, context), onCardAction(message, action, detail, context); only true claims an action.
+  // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
   // wantsPolling(context) and sendExtras(context) are synchronous; sendExtras returns extra /api/send fields.
   // composer: mount(container, context), onFiles(files, event, context), blocked(context), onSent({messageId, extras}, context).
   // onSent runs once the server holds the message, including unknown/queued states, not on confirmation.
   // onFiles returns false to preserve normal paste/drop. Async uploads call composerChanged() when ready.
-  const panelContext = () => ({ state, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
+  const panelContext = () => ({ state, connected, conversation: currentConversation(), bot: currentBot(), draft: ui.input?.value || "" });
   function panelError(id, error) { console.warn(`Ezerbot panel ${id}:`, error); }
   function panelCall(panel, hook, ...args) {
     try {
@@ -140,12 +140,15 @@
     },
     openConversation(id, messageId) {
       if (busy || !state.conversations.some((conversation) => conversation.id === id)) return false;
-      selectConversation(id, true);
+      selectConversation(id, !messageId);
       if (messageId) {
         let attempts = 0;
         const reveal = () => {
           const target = [...ui.messages.querySelectorAll("[data-message-id]")].find((el) => el.dataset.messageId === messageId);
-          if (target) { target.scrollIntoView({ block: "center" }); target.classList.add("routine-run-target"); setTimeout(() => target.classList.remove("routine-run-target"), 2500); }
+          if (target) {
+            target.scrollIntoView({ block: "center" }); target.tabIndex = -1; target.focus({ preventScroll: true });
+            target.classList.add("routine-run-target"); setTimeout(() => target.classList.remove("routine-run-target"), 2500);
+          }
           else if (++attempts < 20) setTimeout(reveal, 50);
         };
         // selectConversation schedules an initial jump to the latest message.
@@ -156,6 +159,7 @@
     },
     draft: () => ui.input?.value || "",
     get state() { return state; },
+    get connected() { return connected; },
     api, refresh, notify, createBotMascot, botSummary,
     composerChanged() { updateComposer(); schedulePoll(); },
   };
@@ -271,6 +275,7 @@
     connected = true;
     connectionStatus = "online";
     ui.banner.hidden = true;
+    for (const panel of panels.values()) panelCall(panel, panel.onConnection, true);
     if (selectedId && !state.conversations.some((item) => item.id === selectedId)) selectedId = null;
     writePreference("grokbot.selected", selectedId || "");
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
@@ -291,7 +296,18 @@
 
     pollTimer = setTimeout(async () => {
       if (busy) { schedulePoll(); return; }
-      try { await refresh(); } catch { schedulePoll(); }
+      try {
+        if (live || waiting || !connected) await refresh();
+        else {
+          // Idle liveness must not serialize/repaint the entire workspace.
+          const ping = await api("/api/ping");
+          if (ping.revision !== state.state_revision) await refresh();
+          else {
+            for (const panel of panels.values()) if (panelCall(panel, panel.wantsPolling) === true) panelCall(panel, panel.onState, state);
+            schedulePoll();
+          }
+        }
+      } catch { schedulePoll(); }
     }, !connected ? 1500 : live ? 200 : waiting || panelWaiting ? 800 : 5000);
   }
 
@@ -301,6 +317,7 @@
     ui.bannerText.textContent = "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
     updateComposer();
+    for (const panel of panels.values()) panelCall(panel, panel.onConnection, false);
     schedulePoll();
     if (error) console.warn("Ezerbot local connection:", error.message);
   }

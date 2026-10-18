@@ -624,7 +624,7 @@ pub fn routes(
                 let existing: Option<String> = tx.query_row("SELECT occurrence_id FROM wrapper_routine_launches WHERE routine_id=?1 AND nonce=?2",params![input.routine_id,input.nonce],|r|r.get(0)).optional()?;
                 let existing = match existing {
                     Some(id) => Some(id),
-                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
+                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND manual_nonce NOT LIKE 'scheduler-error:%' AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
                 };
                 let occurrence = match existing {
                     Some(id) => occurrences::get(&tx, &id)?

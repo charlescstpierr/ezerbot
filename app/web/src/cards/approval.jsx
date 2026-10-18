@@ -49,7 +49,7 @@ export function Card({ message, busy, onAction }) {
             ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
             : review.answer.reason}
         </p>}
-        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">Action : {localToolLabel(action.tool)}</p>}
+        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
         {!previewAvailable

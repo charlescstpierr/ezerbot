@@ -7,6 +7,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
+import { localToolLabel } from "./local-call.js";
 
 // Exercise the shipping settings panel, including DOM replacement on refresh.
 class Element {
@@ -31,7 +32,7 @@ const form = (root) => byClass(root, "reviewer-settings");
 const submit = (root) => form(root).listeners.submit({ preventDefault() {} });
 const input = (root) => form(root).listeners.input();
 
-function settingsPanel() {
+function settingsPanel({ rules = [], mcp, localUi = { toolLabel: localToolLabel } } = {}) {
   const root = new Element("div");
   const settingsButton = new Element("button");
   let registration;
@@ -39,12 +40,20 @@ function settingsPanel() {
   const requests = [];
   const notifications = [];
   const panels = {
-    state: { forms: { rules: [], reviewer: remote }, bots: [] },
+    state: { forms: { rules, reviewer: remote }, bots: [], mcp },
     register(value) { registration = value; },
     notify(text) { notifications.push(text); },
     async api(path, body) {
       requests.push({ path, body });
       if (panels.failSave) throw new Error("never show remote exception text");
+      if (path === "/api/approvals/rules/revoke") {
+        panels.state.forms.rules = panels.state.forms.rules.filter((rule) => !(
+          rule.route.requesting_bot_id === body.requesting_bot_id
+          && rule.route.target_bot_id === body.target_bot_id
+          && rule.tool === body.tool && rule.args_digest === body.args_digest && rule.scope === body.scope
+        ));
+        return { rules: panels.state.forms.rules };
+      }
       remote = { config: body.config, version: String(Number(remote.version) + 1) };
       return remote;
     },
@@ -56,7 +65,7 @@ function settingsPanel() {
     },
   };
   runInNewContext(readFileSync(new URL("../../ui/panels/forms.js", import.meta.url), "utf8"), {
-    window: { GrokbotPanels: panels, clearTimeout() {}, setTimeout() {}, dispatchEvent() {} },
+    window: { GrokbotPanels: panels, GrokbotLocalUi: localUi, clearTimeout() {}, setTimeout() {}, dispatchEvent() {} },
     document: { createElement: (tag) => new Element(tag), getElementById: (id) => id === "settings-button" ? settingsButton : undefined }, Event: class {},
   });
   registration.settingsSection(root);
@@ -198,6 +207,60 @@ test("storage check blocks duplicate clicks, indicates progress and retains an a
   assert.equal(button(f.root, "Vérifier le stockage").disabled, false);
 });
 
+const standingRule = (tool, allow, scope = "global") => ({
+  route: { requesting_bot_id: "grokbot", target_bot_id: "grokbot" },
+  tool, allow, scope, args_digest: scope === "global" ? "" : "a".repeat(64),
+});
+const ruleRows = (root) => root.children.filter((row) => button(row, "Retirer la règle"));
+const connector = { servers: [{ id: "atelier", name: "Atelier MCP", tools: [{ namespace: "mcp_atelier_echo", name: "echo" }] }] };
+
+for (const mcpFirst of [false, true]) {
+  test(`mixed local/MCP standing rules all render and revoke without losing the reviewer (MCP first: ${mcpFirst})`, async () => {
+    const local = standingRule("run_shell", true);
+    const mcp = standingRule("mcp_atelier_echo", false, "subject");
+    const rules = mcpFirst ? [mcp, local] : [local, mcp];
+    // Execute the shipping panel with rules already present: the old code throws
+    // after its first row and never reaches the reviewer editor.
+    const f = settingsPanel({ rules, mcp: connector });
+    assert.equal(ruleRows(f.root).length, 2);
+    assert.match(ruleRows(f.root)[rules.indexOf(local)].textContent, /Terminal sur votre Mac · Toujours autoriser · Toutes les actions/);
+    assert.match(ruleRows(f.root)[rules.indexOf(mcp)].textContent, /Atelier MCP · echo · Toujours refuser · Arguments identiques/);
+    const details = f.root.children.filter((node) => node.tagName === "details");
+    assert.equal(details.length, 1);
+    assert.match(details[0].textContent, /run_shell/);
+    for (const [i, rule] of rules.entries()) {
+      assert.ok(form(f.root));
+      assert.ok(field(f.root, "enabled"));
+      assert.ok(button(f.root, "Enregistrer les règles"));
+      await button(ruleRows(f.root)[0], "Retirer la règle").listeners.click();
+      assert.deepEqual({ ...f.requests[i].body }, {
+        requesting_bot_id: "grokbot", target_bot_id: "grokbot", tool: rule.tool,
+        args_digest: rule.args_digest, scope: rule.scope,
+      });
+      assert.equal(f.requests[i].path, "/api/approvals/rules/revoke");
+      assert.equal(ruleRows(f.root).length, 1 - i);
+      assert.ok(form(f.root));
+    }
+    assert.match(f.root.textContent, /Aucune règle « Toujours »/);
+    field(f.root, "allow").value = "Demandez confirmation.";
+    input(f.root); await submit(f.root);
+    assert.equal(field(f.root, "allow").value, "Demandez confirmation.");
+    assert.match(byClass(f.root, "reviewer-notice").textContent, /^Règles enregistrées/);
+    assert.equal(f.notifications.length, 0);
+  });
+}
+
+test("multiple local rules, MCP lifecycle and unknown tools preserve every row and the reviewer with or without local UI", () => {
+  const rules = [standingRule("run_shell", true), standingRule("write_file", false), standingRule("mcp_start_atelier", true), standingRule("other_tool", false)];
+  for (const localUi of [{ toolLabel: localToolLabel }, null]) {
+    const f = settingsPanel({ rules, mcp: connector, localUi });
+    assert.equal(ruleRows(f.root).length, rules.length);
+    assert.ok(form(f.root));
+    assert.match(f.root.textContent, /Atelier MCP · Démarrer \/ redémarrer/);
+    assert.match(f.root.textContent, /other_tool · Toujours refuser/);
+  }
+});
+
 // Render the actual JSX through Vite's transform rather than inspecting source
 // strings. Middleware mode starts no listening server, and no dependency is added.
 const vite = await createServer({
@@ -256,6 +319,12 @@ test("local cards combine reviewer status, exact action and protected preview wi
   const command = card("pending", "ask", {command:"printf bonjour",cwd:"/tmp"}, false, "run_shell");
   assert.ok(command.includes("Relecteur : "));assert.ok(command.includes("printf bonjour"));
   assert.ok(!card("resolved", "allow", read, false, "read_file").includes("Approuvé automatiquement"));
+});
+
+test("generic approval retains its code identifier instead of a local-action label", () => {
+  const html = card("pending", "ask", {}, false, "test_generic_tool");
+  assert.match(html, /Outil : <code>test_generic_tool<\/code>/);
+  assert.ok(!html.includes("Action : test_generic_tool"));
 });
 
 test("human fallback is attributed to the reviewer; pending review has decorative progress without disabling decisions", () => {

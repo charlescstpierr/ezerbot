@@ -138,7 +138,7 @@ fn database(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 fn vault(path: &Path) -> grokbot_engine::contracts::Result<Vault> {
-    Vault::open(&path.with_extension("secrets.json"))
+    Vault::open_app(&path.with_extension("secrets.json"))
 }
 pub(super) fn budget(conn: &Connection) -> grokbot_engine::contracts::Result<ContextBudget> {
     let tokens = conn.query_row(

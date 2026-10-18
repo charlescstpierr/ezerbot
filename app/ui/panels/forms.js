@@ -162,11 +162,37 @@
   function renderRules(state) {
     if (!settings) return;
     const rules = state.forms?.rules || [];
-    const key = JSON.stringify([rules, state.forms?.reviewer, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
+    const key = JSON.stringify([rules, state.forms?.reviewer, state.forms?.storage, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
     if (key === rulesKey) return;
     rulesKey = key;
     settings.replaceChildren();
     settings.className = "setting-section";
+    const storageTitle = document.createElement("h3");
+    storageTitle.textContent = "Stockage des secrets";
+    const storage = document.createElement("p");
+    storage.textContent = state.forms?.storage?.label || "Stockage momentanément indisponible";
+    const storageNote = document.createElement("p");
+    storageNote.textContent = "Secrets des formulaires et variables privées des connecteurs MCP. Les identifiants ChatGPT sont gérés séparément.";
+    settings.append(storageTitle, storage, storageNote);
+    if (state.forms?.storage?.notice) {
+      const notice = document.createElement("p");
+      notice.className = "reviewer-notice reviewer-error";
+      notice.setAttribute("role", "alert");
+      notice.textContent = state.forms.storage.notice;
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "secondary-button";
+      retry.textContent = "Vérifier le stockage";
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        try { await panels.refresh(); }
+        catch { panels.notify("Le stockage ne peut pas être vérifié pour le moment."); }
+        finally { retry.disabled = false; }
+      });
+      const actions = document.createElement("p");
+      actions.append(retry);
+      settings.append(notice, actions);
+    }
     const heading = document.createElement("h3");
     heading.textContent = "Autorisations permanentes";
     settings.append(heading);

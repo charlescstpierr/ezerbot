@@ -1,4 +1,6 @@
 //! HTTP host extension contracts, exercised against the actual wrapper process.
+//! Never launch a release host here: its OS vault deliberately ignores test overrides.
+#![cfg(debug_assertions)]
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
@@ -25,10 +27,15 @@ impl Drop for Running {
 fn first_line_announces_loopback_and_http_enforces_origin_and_size() {
     let directory =
         std::env::temp_dir().join(format!("grokbot-wrapper-http-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
     let db = directory.join("app.sqlite");
     let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
         .args(["--port", "0", "--db"])
         .arg(&db)
+        .env("HOME", &directory)
+        .env("CFFIXED_USER_HOME", &directory)
+        .env_remove("GROKBOT_TEST_KEYCHAIN")
+        .env_remove("GROKBOT_FAKE_OPENAI")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -106,6 +113,9 @@ impl Host {
         let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
             .args(["--port", "0", "--db"])
             .arg(directory.join("app.sqlite"))
+            .env("HOME", &directory)
+            .env("CFFIXED_USER_HOME", &directory)
+            .env_remove("GROKBOT_TEST_KEYCHAIN")
             .env_remove("GROKBOT_FAKE_OPENAI")
             .stdout(Stdio::piped())
             .spawn()

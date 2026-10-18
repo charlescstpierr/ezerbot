@@ -1,8 +1,9 @@
-//! Local Q1 default: a separate, owner-only file, never a SQLite table.
+//! Owner-only legacy file and macOS Keychain, never a SQLite secrets table.
+//! The executable enables the OS backend; library fixtures remain explicitly file-backed.
 //! PS08 in `reports/goal-permissions-secrets.md` (A36/A45) establishes name/value
 //! validation and metadata-only DTOs. Its bot form trims inputs and uppercases
-//! names. This file-backed storage is a reconstruction choice, not the PS09
-//! encrypted Grok account vault. The wrapper supplies a path beside its database.
+//! names. The legacy file is a reconstruction choice; PS09 motivates OS-protected
+//! storage. The wrapper supplies the companion path used for migration and fallback.
 use grokbot_engine::contracts::{Error, Result, SecretRef};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,7 +30,7 @@ pub struct SecretMetadata {
 
 // Only this private disk representation serializes values. Neither Vault nor
 // any public DTO implements Serialize/Debug for secret-bearing state.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSecret {
     purpose: String,
@@ -54,6 +55,23 @@ fn invalid(message: &str) -> Error {
 /// Deliberately has no Serialize or Debug implementation.
 pub struct Vault {
     path: PathBuf,
+    #[cfg(target_os = "macos")]
+    keychain: Option<keychain::Target>,
+}
+#[cfg(target_os = "macos")]
+mod keychain;
+static OS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable the native backend in the app host, not in file-only library fixtures.
+pub fn enable_os_vault() {
+    OS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StorageStatus {
+    pub backend: &'static str,
+    pub label: &'static str,
+    pub notice: Option<&'static str>,
 }
 impl Vault {
     /// Open an explicit vault-file path (not a database path). Initialization is
@@ -68,7 +86,11 @@ impl Vault {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let vault = Self { path };
+        let vault = Self {
+            path,
+            #[cfg(target_os = "macos")]
+            keychain: None,
+        };
         let _file_guard = vault.lock_file(true)?;
         vault.cleanup_temporaries()?;
         let initialize = match checked_file(&vault.path, false) {
@@ -81,6 +103,31 @@ impl Vault {
         }
         vault.read()?;
         Ok(vault)
+    }
+    /// Application entry point. macOS release hosts prefer Keychain; development
+    /// uses only an explicit throwaway override, otherwise the file vault.
+    /// The empty legacy file remains a recovery container. ChatGPT credentials
+    /// are never opened by this code.
+    pub fn open_app(path: &Path) -> Result<Self> {
+        let vault = Self::open(path)?;
+        #[cfg(target_os = "macos")]
+        if OS_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(target) = keychain::Target::for_app() {
+                return vault.with_keychain(target);
+            }
+        }
+        Ok(vault)
+    }
+    pub fn storage_status(&self) -> StorageStatus {
+        #[cfg(target_os = "macos")]
+        if self.keychain.is_some() {
+            return keychain::status(&self.path);
+        }
+        StorageStatus {
+            backend: "file",
+            label: "Fichier local protégé (0600)",
+            notice: None,
+        }
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -107,6 +154,11 @@ impl Vault {
                 value: value.to_owned(),
             },
         );
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            keychain::set(self, target, &name, secrets.get(&name).unwrap())?;
+            return Ok(SecretRef { name });
+        }
         self.write(&secrets)?;
         Ok(SecretRef { name })
     }
@@ -114,12 +166,12 @@ impl Vault {
     pub fn get(&self, name: &str) -> Result<Option<String>> {
         let name = canonical_secret_name(name)?;
         let _guard = access();
-        let _file_guard = self.lock_file(false)?;
+        let _file_guard = self.lock_file(true)?;
         Ok(self.read()?.remove(&name).map(|secret| secret.value))
     }
     pub fn list(&self) -> Result<Vec<SecretMetadata>> {
         let _guard = access();
-        let _file_guard = self.lock_file(false)?;
+        let _file_guard = self.lock_file(true)?;
         Ok(self
             .read()?
             .into_iter()
@@ -134,6 +186,10 @@ impl Vault {
         let name = canonical_secret_name(name)?;
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            return keychain::remove(self, target, &name);
+        }
         let mut secrets = self.read()?;
         if secrets.remove(&name).is_some() {
             self.write(&secrets)?;
@@ -143,7 +199,7 @@ impl Vault {
     /// Restricted to redaction, not model context construction.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access();
-        let _file_guard = self.lock_file(false)?;
+        let _file_guard = self.lock_file(true)?;
         let mut values = Vec::new();
         for (name, secret) in self.read()? {
             // Connector envelopes preserve short/whitespace-sensitive values.
@@ -176,6 +232,13 @@ impl Vault {
     // Call only while holding VAULT_ACCESS and the companion-file lock. Parse
     // errors must not echo input: serde diagnostics can contain secret strings.
     fn read(&self) -> Result<Secrets> {
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            return keychain::snapshot(self, target);
+        }
+        self.read_file()
+    }
+    fn read_file(&self) -> Result<Secrets> {
         let file = checked_file(&self.path, false)?;
         let mut bytes = Vec::new();
         (&file).read_to_end(&mut bytes)?;

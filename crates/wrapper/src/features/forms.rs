@@ -67,7 +67,7 @@ pub fn vault(ctx: &Context<'_>) -> Result<Vault, ApiError> {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("grokbot");
-    Ok(Vault::open(
+    Ok(Vault::open_app(
         &directory.join(format!("{stem}.secrets.json")),
     )?)
 }
@@ -866,7 +866,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 let receipt = attach(&tx, &request, receipt)?;
                 if let InputKind::Secret { name, purpose } = &request.kind {
                     // Do SQL work first, so a wake failure cannot mutate the vault.
-                    // File + SQLite cannot be one transaction: a failed commit can
+                    // Vault + SQLite cannot be one transaction: a failed commit can
                     // leave a vault value, but never a falsely accepted resolution.
                     let value = input
                         .value
@@ -1070,7 +1070,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let vault = vault(ctx)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":vault.list()?,"rules":approvals::list_rules(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":vault.list()?,"storage":vault.storage_status(),"rules":approvals::list_rules(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))

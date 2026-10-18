@@ -127,7 +127,11 @@ fn provider(db: &std::path::Path) -> Provider {
 }
 
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    grokbot_forms::vault::enable_os_vault();
     let mut app = App::open_with(&options.db, provider(&options.db))?;
+    // First-start migration runs before serving the page. Keychain denial falls
+    // back to the owner-only file and is projected in Paramètres, never logged.
+    grokbot_wrapper::features::forms::vault(&app.feature_context())?;
     let server = Server::http(("127.0.0.1", options.port))?;
     let port = server
         .server_addr()

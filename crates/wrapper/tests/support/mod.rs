@@ -33,6 +33,8 @@ pub struct Seen {
     pub models_gate: Option<Arc<AtomicBool>>,
     pub model_requests: usize,
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
+    /// Test-only delay before sending Responses headers (without holding Seen).
+    pub response_delay: Option<Duration>,
 }
 
 pub struct ScriptedResponse {
@@ -143,6 +145,11 @@ impl FakeOpenAi {
                     .map(|header| header.value.to_string())
                     .unwrap_or_default();
                 let mut seen = observations.lock().unwrap();
+                let response_delay = if request.url() == "/v1/responses" {
+                    seen.response_delay
+                } else {
+                    None
+                };
                 let (status, content_type, payload) = match request.url() {
                     "/jwks" => (200, "application/json".to_owned(), JWKS.to_owned()),
                     "/token" => {
@@ -246,6 +253,9 @@ impl FakeOpenAi {
                     while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
                         std::thread::sleep(Duration::from_millis(5));
                     }
+                }
+                if let Some(delay) = response_delay {
+                    std::thread::sleep(delay);
                 }
                 let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
                 let _ = request.respond(

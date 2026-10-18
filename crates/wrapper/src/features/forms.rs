@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 empty_hooks!(context, link_attachments);
+mod reviewer;
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Needed before cutover too: the forms HTTP receipt already reads engine wakes.
@@ -423,14 +424,24 @@ pub fn check_tool_approval(
                     }),
                     Err(grokbot_engine::contracts::Error::InvalidInput(_)) => {
                         Ok(ApprovalCheck::Denied {
-                            reason: "Approval grant is unavailable or already consumed".into(),
+                            reason: "L’autorisation est indisponible ou a déjà été utilisée."
+                                .into(),
                         })
                     }
                     Err(error) => Err(error.into()),
                 }
             }
             _ => Ok(ApprovalCheck::Denied {
-                reason: "Approval was denied, expired or cancelled".into(),
+                reason: grokbot_forms::reviewer::get(ctx.connection, &id)?
+                    .filter(|review| {
+                        !review.pending
+                            && review.answer.decision
+                                == grokbot_forms::reviewer::ReviewDecision::Deny
+                    })
+                    .map(|review| review.answer.reason)
+                    .unwrap_or_else(|| {
+                        "La demande a été refusée, a expiré ou a été annulée.".into()
+                    }),
             }),
         };
     }
@@ -447,7 +458,7 @@ pub fn check_tool_approval(
                 by: AuthorizedBy::Rule { rule_id },
             },
             Some((false, _)) => ApprovalCheck::Denied {
-                reason: "Blocked by a standing permission".into(),
+                reason: "Une autorisation permanente refuse cette action.".into(),
             },
             None => ApprovalCheck::Ask,
         },
@@ -604,6 +615,7 @@ pub fn routes(
                 | "/api/approvals/rules/revoke"
                 | "/api/secrets/delete"
         ) | ("GET" | "DELETE", "/api/secrets")
+            | ("GET" | "POST", "/api/approvals/reviewer")
     ) {
         return None;
     }
@@ -611,6 +623,9 @@ pub fn routes(
 }
 fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     let ctx = app.feature_context();
+    if path == "/api/approvals/reviewer" {
+        return reviewer::settings(&ctx, method, body);
+    }
     if path == "/api/approvals/rules/revoke" {
         let input: RevokeRule = parse(body)?;
         if input.target_bot_id != DEFAULT_BOT.id {
@@ -842,6 +857,7 @@ fn request_value(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<Value
                 |row| row.get(0),
             )
             .optional()?;
+        value["review"] = json!(grokbot_forms::reviewer::get(ctx.connection, &request.id)?);
         value["arguments"] = display
             .map(|json| serde_json::from_str(&json))
             .transpose()
@@ -865,7 +881,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let vault = vault(ctx)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":vault.list()?,"rules":approvals::list_rules(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":vault.list()?,"rules":approvals::list_rules(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))
@@ -926,6 +942,7 @@ pub fn tick(ctx: &Context<'_>) {
     };
     // Roll back the entire expiry batch on error; the next host tick retries it.
     let _ = expire();
+    let _ = reviewer::tick(ctx);
 }
 
 /// Legacy registry hook cannot propagate failures (its signature is frozen in

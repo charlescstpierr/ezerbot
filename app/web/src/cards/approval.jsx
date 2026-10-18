@@ -13,9 +13,22 @@ export function Card({ message, busy, onAction }) {
   // PS01/PS02: the action is read-only. The preview may be redacted; entry_id,
   // not an echo of that preview, binds the server's canonical action digest.
   const decide = (decision) => act("forms.decide", { decision });
+  const review = request.review;
+  const automatic = !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
+    || (review?.answer?.decision === "deny" && input.status === "denied"));
+  if (automatic) return (
+    <article className="gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground" data-message-id={message.id} data-card-kind="approval">
+      <p className="text-sm" role="status"><strong>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
+      <p className="mt-1 text-xs text-muted-foreground">Outil : <code>{action.tool}</code></p>
+      <button type="button" className="gb-retry mt-2" onClick={() => act("forms.rules")}>Modifier les règles pour les prochains appels</button>
+    </article>
+  );
   return (
     <HumanInputCard message={message} title="Approbation demandée" input={input}>
       <div className="space-y-3">
+        {pending && review && <p className="text-xs text-muted-foreground" role="status">{review.pending
+          ? (review.started_at + 12000 > Date.now() ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
+          : review.answer.reason}</p>}
         <p className="text-sm">Outil : <code>{action.tool}</code></p>
         {request.arguments == null
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>

@@ -7,8 +7,8 @@
 //! persists. A matching Block wins (PS04). Revocation does not cancel grants or
 //! effects already admitted (PS03).
 //!
-//! PS06 does not recover the natural-language reviewer. AutoReviewConfig remains
-//! validated configuration for that future reviewer, never substring/glob rules.
+//! PS06 does not recover the natural-language reviewer. AutoReviewConfig is
+//! interpreted by a separate model call, never by substring/glob matching.
 //! Neither rule text nor identifiers may contain secret values. The caller owns
 //! transactions; standing lookup, grant consumption and tool effects must share
 //! the dispatch transaction, so revocation cannot race admission.
@@ -24,9 +24,10 @@ use sha2::{Digest, Sha256};
 
 pub const MAX_AUTO_REVIEW_ENTRIES: usize = 20;
 pub const MAX_AUTO_REVIEW_ENTRY_CHARS: usize = 1000;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoReviewConfig {
     pub enabled: bool,
     pub allow: Vec<String>,
@@ -51,8 +52,8 @@ impl AutoReviewConfig {
     }
 }
 
-/// Only the new settings table is owned here. approvals::migrate initializes the
-/// shared standing-rule registry; forms::migrate calls both in that order.
+/// Settings and the request's reviewer audit column are owned here.
+/// forms::migrate initializes requests and the standing-rule registry first.
 pub fn migrate(conn: &Connection) -> Result<()> {
     let version = component_version(conn, "forms_rules")?;
     if version > SCHEMA_VERSION {
@@ -64,6 +65,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             config TEXT NOT NULL
         );",
     )?;
+    let has_review: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('forms_requests') WHERE name='review_json')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_review {
+        conn.execute_batch("ALTER TABLE forms_requests ADD COLUMN review_json TEXT")?;
+    }
     set_component_version(conn, "forms_rules", SCHEMA_VERSION)
 }
 
@@ -560,16 +569,22 @@ mod tests {
         conn.pragma_update(None, "user_version", 17).unwrap();
         set_component_version(&conn, "other", 9).unwrap();
         migrate(&conn).unwrap();
-        assert_eq!(component_version(&conn, "forms_rules").unwrap(), 1);
+        assert_eq!(
+            component_version(&conn, "forms_rules").unwrap(),
+            SCHEMA_VERSION
+        );
         assert_eq!(component_version(&conn, "other").unwrap(), 9);
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
             17
         );
-        set_component_version(&conn, "forms_rules", 2).unwrap();
+        set_component_version(&conn, "forms_rules", SCHEMA_VERSION + 1).unwrap();
         assert!(migrate(&conn).is_err());
-        assert_eq!(component_version(&conn, "forms_rules").unwrap(), 2);
+        assert_eq!(
+            component_version(&conn, "forms_rules").unwrap(),
+            SCHEMA_VERSION + 1
+        );
     }
 
     #[test]

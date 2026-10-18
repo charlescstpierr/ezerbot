@@ -6,6 +6,7 @@
 pub mod approvals;
 pub mod redact;
 pub mod requests;
+pub mod reviewer;
 pub mod rules;
 pub mod vault;
 

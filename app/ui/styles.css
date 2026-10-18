@@ -321,6 +321,12 @@ a.secondary-button { text-decoration: none; }
 .bot-field { margin-top: 18px; }
 .form-label small { color: var(--subtle); margin-left: 6px; }
 textarea.text-input { display: block; resize: vertical; min-height: 58px; line-height: 1.55; }
+.reviewer-settings { display: grid; gap: 10px; margin: 14px 0 20px; }
+.reviewer-settings h4 { margin: 0; font-size: 12px; font-weight: 600; }
+.reviewer-settings p { margin: 0; font-size: 11px; line-height: 1.55; color: var(--muted); }
+.reviewer-settings label { display: block; font-size: 12px; line-height: 1.6; }
+.reviewer-settings textarea { margin-top: 5px; width: 100%; box-sizing: border-box; }
+.reviewer-settings .secondary-button { justify-self: start; max-width: 100%; white-space: normal; }
 .danger-link { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; padding: 10px 4px; color: var(--danger-text); font-size: 11px; }
 .danger-link .icon { width: 14px; height: 14px; }
 @media (min-height: 920px) and (min-width: 761px) {

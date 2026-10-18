@@ -932,6 +932,83 @@ impl Provider {
         self.responses_with_options(body, false, &mut Vec::new())
     }
 
+    /// Isolated, bounded policy call. No transcript, tools, cached conversation,
+    /// effort/Fast retry or provider error text enters the reviewer boundary.
+    pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
+        use grokbot_engine::contracts::ModelEvent;
+        let token = self.bearer(false)?;
+        let response = agent()
+            .post(&format!("{}/responses", self.inner.endpoints.api))
+            .timeout(Duration::from_secs(10))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "text/event-stream")
+            .send_json(body)
+            .map_err(|_| Failure::other("Revue indisponible."))?;
+        let mut text = String::new();
+        let mut completed = false;
+        let mut invalid = false;
+        // Bound both the total wire response and the collected answer.
+        let mut wire = String::new();
+        std::io::Read::read_to_string(
+            &mut std::io::Read::take(response.into_reader(), 32_769),
+            &mut wire,
+        )
+        .map_err(|_| Failure::other("Revue interrompue."))?;
+        if wire.len() >= 32_769 {
+            return Err(Failure::other("Revue trop longue."));
+        }
+        // The chat parser intentionally ignores non-text events; a policy reply
+        // must additionally reject refusals, unknown events and opaque items.
+        for line in wire.lines().filter_map(|line| line.strip_prefix("data:")) {
+            let event: Value = serde_json::from_str(line.trim())
+                .map_err(|_| Failure::other("Revue illisible."))?;
+            let kind = event["type"].as_str().unwrap_or_default();
+            if ![
+                "response.created",
+                "response.in_progress",
+                "response.output_item.added",
+                "response.output_item.done",
+                "response.content_part.added",
+                "response.content_part.done",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.completed",
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_part.done",
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_summary_text.done",
+            ]
+            .contains(&kind)
+                || (kind.starts_with("response.output_item.")
+                    && !["message", "reasoning"]
+                        .contains(&event["item"]["type"].as_str().unwrap_or_default()))
+                || (kind.starts_with("response.content_part.")
+                    && event["part"]["type"] != "output_text")
+                || event.to_string().contains("\"refusal\"")
+            {
+                return Err(Failure::other("Revue incertaine."));
+            }
+        }
+        crate::gateway::stream_response(std::io::Cursor::new(wire), &mut |event| {
+            match event {
+                ModelEvent::TextDelta { text: delta }
+                    if !completed && text.len() + delta.len() <= 4096 =>
+                {
+                    text.push_str(&delta)
+                }
+                ModelEvent::Completed if !completed => completed = true,
+                ModelEvent::Usage { .. } => {}
+                _ => invalid = true,
+            }
+            Ok(())
+        })
+        .map_err(|_| Failure::other("Revue illisible."))?;
+        if !completed || invalid {
+            return Err(Failure::other("Revue incomplète."));
+        }
+        Ok(text)
+    }
+
     /// Only the engine adapter opts into the legacy effort/Fast compatibility fallback.
     /// One authentication refresh is shared across all attempts of this logical request.
     fn responses_with_options(

@@ -266,6 +266,12 @@ fn request(ctx: &Context<'_>, call: &ToolCall) -> Result<HumanInputRequest, ApiE
     } else {
         let args: SecretArgs = parse_args(&call.arguments)?;
         let name = canonical_secret_name(&args.name)?;
+        if name.starts_with("MCP_") && name.ends_with("_ENV") {
+            return Err(ApiError::new(
+                400,
+                "Ce nom est réservé aux variables privées des connecteurs MCP.",
+            ));
+        }
         let purpose = args.purpose.trim().to_owned();
         if purpose.is_empty() || purpose.encode_utf16().count() > MAX_SECRET_PURPOSE_CHARACTERS {
             return Err(ApiError::new(

@@ -112,6 +112,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn connector_envelopes_also_mask_long_values_at_the_global_boundary() {
+        let test = TestVault::new();
+        test.vault
+            .set(
+                "MCP_SERVER_ENV",
+                crate::vault::MCP_ENV_PURPOSE,
+                &json!({"variables":{"TOKEN":"global-private-key-777","SHORT":"x"}}).to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            redact(&test.vault, "Préfixe global-private-key-777 suffixe").unwrap(),
+            "Préfixe [...] suffixe"
+        );
+        assert_eq!(
+            redact_value(&test.vault, &json!({"result":"global-private-key-777"})).unwrap(),
+            json!({"result":"[...]"})
+        );
+        // Short opaque flags cannot safely participate in global substring
+        // redaction; the connector host masks them in server-controlled data.
+        assert_eq!(redact(&test.vault, "texte x").unwrap(), "texte x");
+    }
+    #[test]
     fn redact_replaces_every_known_value() {
         let test = TestVault::new();
         let secrets = [

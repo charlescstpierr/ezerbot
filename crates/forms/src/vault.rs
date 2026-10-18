@@ -17,6 +17,8 @@ pub const MAX_SECRET_NAME_CHARACTERS: usize = 128;
 pub const MAX_SECRET_PURPOSE_CHARACTERS: usize = 500;
 pub const MIN_SECRET_VALUE_CHARACTERS: usize = 8;
 pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
+/// Opaque envelope used by the local connector host; never a public projection.
+pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretMetadata {
@@ -142,11 +144,33 @@ impl Vault {
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
         let _guard = access();
         let _file_guard = self.lock_file(false)?;
-        Ok(self
-            .read()?
-            .into_values()
-            .map(|secret| secret.value)
-            .collect())
+        let mut values = Vec::new();
+        for (name, secret) in self.read()? {
+            // Connector envelopes preserve short/whitespace-sensitive values.
+            // Long values also belong to the GLOBAL redaction boundary: another
+            // connector or the provider must not echo a different server's key.
+            // Keep the > MASK-length invariant of redact.rs. Short values are
+            // masked by the connector host before persistence, never added to
+            // global substring redaction (which would corrupt IDs and prose).
+            if name.starts_with("MCP_")
+                && name.ends_with("_ENV")
+                && secret.purpose == MCP_ENV_PURPOSE
+            {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                    if let Some(environment) = value["variables"].as_object() {
+                        values.extend(
+                            environment
+                                .values()
+                                .filter_map(|v| v.as_str())
+                                .filter(|v| v.len() >= MIN_SECRET_VALUE_CHARACTERS)
+                                .map(str::to_owned),
+                        );
+                    }
+                }
+            }
+            values.push(secret.value);
+        }
+        Ok(values)
     }
 
     // Call only while holding VAULT_ACCESS and the companion-file lock. Parse

@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import threading
 
 mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 initialized = False
@@ -33,6 +34,9 @@ for line in sys.stdin:
             {"name": "echo", "description": "Catalogue actualisé." if changed else "Répéter un texte sans effet externe.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
             {"name": "addition", "description": "Additionner deux nombres.", "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}}
         ]}
+        if mode == "change-during-list" and not changed:
+            changed = True
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
     elif method == "tools/call" and initialized:
         name = request["params"]["name"]
         args = request["params"]["arguments"]
@@ -40,11 +44,20 @@ for line in sys.stdin:
             text = args.get("text", "")
             if text == "crash":
                 sys.exit(9)
+            if text == "crash-after":
+                def late_exit():
+                    time.sleep(0.05)
+                    os._exit(9)
+                threading.Thread(target=late_exit, daemon=True).start()
             if text == "timeout":
                 time.sleep(20)
+            if text.startswith("slow-"):
+                time.sleep(0.15)
+            if text.startswith("env:"):
+                text = os.environ.get(text[4:], "absent")
             if text == "secret":
-                text = os.environ.get("TEST_TOKEN", "absent")
-            result = {"content": [{"type": "text", "text": text}], "isError": False}
+                text = "private-value-56789" if mode == "foreign" else os.environ.get("TEST_TOKEN", "absent")
+            result = {"content": [None] if mode == "invalid-content" else [{"type": "text", "text": text}], "isError": False}
         elif name == "addition":
             result = {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}]}
         else:

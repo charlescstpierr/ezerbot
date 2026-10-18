@@ -82,7 +82,12 @@ export function Card({ message }) {
       <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>
       <h4>Arguments</h4>
       <Data value={call.arguments} />
-      {outcome?.status === "done" && <><h4>Résultat</h4><Data value={outcome.output} /></>}
+      {outcome?.status === "done" && <><h4>Résultat</h4>{connector && Array.isArray(outcome.output?.content)
+        ? <>{outcome.output.content.some(part => part?.type === "text" && typeof part.text === "string")
+          ? outcome.output.content.filter(part => part?.type === "text" && typeof part.text === "string").map((part, index) => <Data key={index} value={part.text} />)
+          : <p className="gb-engine-note">Le résultat ne contient pas de texte. Consultez les données techniques ci-dessous.</p>}
+          <details><summary>Données techniques du résultat</summary><Data value={outcome.output} /></details></>
+        : <Data value={outcome.output} />}</>}
       {outcome?.status === "failed" && <><h4>Raison de l’échec</h4><Data value={outcome.reason} /></>}
       {note && <p className="gb-engine-note">{note}</p>}
     </Disclosure>

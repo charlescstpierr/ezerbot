@@ -18,7 +18,13 @@
         panels.openConversation(result.conversation_id);
         panels.notify("Confirmez l’action dans la carte d’approbation.");
       }
-    } catch (e) { feedback.textContent = e.message || "L’action du connecteur a échoué."; }
+    } catch (e) {
+      feedback.textContent = e.message || "L’action du connecteur a échoué.";
+      // Restore checkboxes from confirmed state after a refusal or lost reply.
+      key = undefined;
+      await panels.refresh().catch(() => {});
+      render(panels.state);
+    }
     finally { b.disabled = false; }
   }
   function render(state) {
@@ -48,7 +54,7 @@
         check.addEventListener("change", () => act("/api/mcp/select", {id:server.id,bot_id:bot.id,enabled:check.checked}, check));
         choices.append(label(bot.name,check));
       }
-      card.append(choices);
+      card.append(choices, node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
       const tools = node("details"); tools.append(node("summary", `Outils (${server.tools.length})`));
       if (!server.tools.length) tools.append(node("p", "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
       for (const tool of server.tools) { const item = node("p"); item.append(node("strong",tool.name),node("span",` — ${tool.description || "Sans description"}`)); tools.append(item); }
@@ -84,7 +90,7 @@
       feedback = node("p",null,"mcp-error"); feedback.setAttribute("role","status"); section.append(feedback);
       form.addEventListener("submit",async event => {
         event.preventDefault(); submit.disabled=true; feedback.textContent="";
-        const environment = {};
+        const environment = Object.create(null);
         let invalid = false;
         for (const row of env.children) {
           const [k,v] = row.querySelectorAll("input");

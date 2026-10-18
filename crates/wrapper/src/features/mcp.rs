@@ -9,8 +9,10 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+// No global MCP tools or custom transcript entries: Services supplies bot-scoped
+// specs, and the engine/forms modules own the tool and approval cards.
 empty_hooks!(context, entry, link_attachments, tools, tick);
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
@@ -21,7 +23,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_mcp_bots (
         server_id TEXT NOT NULL REFERENCES wrapper_mcp_servers(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL, PRIMARY KEY(server_id,bot_id));
-        CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);", 
+        CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);",
     )?;
     Ok(())
 }
@@ -104,10 +106,37 @@ fn environment(ctx: &Context<'_>, server: &Server) -> Result<HashMap<String, Str
     serde_json::from_value(value["variables"].clone())
         .map_err(|_| invalid("Les variables privées du connecteur sont illisibles."))
 }
+fn private_values(ctx: &Context<'_>) -> Result<HashMap<String, String>, ApiError> {
+    let vault = super::forms::vault(ctx)?;
+    let mut values = HashMap::new();
+    for secret in vault.list()? {
+        if secret.purpose != grokbot_forms::vault::MCP_ENV_PURPOSE
+            || !secret.name.starts_with("MCP_")
+            || !secret.name.ends_with("_ENV")
+        {
+            continue;
+        }
+        let raw = vault
+            .get(&secret.name)?
+            .ok_or_else(|| invalid("Une variable privée du coffre MCP a disparu."))?;
+        let value: Value = serde_json::from_str(&raw)
+            .map_err(|_| invalid("Une enveloppe privée du coffre MCP est illisible."))?;
+        let environment: HashMap<String, String> =
+            serde_json::from_value(value["variables"].clone())
+                .map_err(|_| invalid("Une enveloppe privée du coffre MCP est invalide."))?;
+        values.extend(
+            environment
+                .into_iter()
+                .map(|(key, value)| (format!("{}:{key}", secret.name), value)),
+        );
+    }
+    Ok(values)
+}
+
 // Values (including short/whitespace-sensitive environment values) are enclosed
 // in one vault secret. Sanitize server-controlled metadata/results before any
 // journal/database/UI/model boundary; stderr is never retained.
-fn sanitize(value: &Value, env: &HashMap<String, String>) -> Value {
+fn sanitize(value: &Value, env: &HashMap<String, String>) -> Result<Value, ApiError> {
     fn text(raw: &str, values: &[&str]) -> String {
         let mut output = String::new();
         let mut at = 0;
@@ -123,25 +152,46 @@ fn sanitize(value: &Value, env: &HashMap<String, String>) -> Value {
         }
         output
     }
-    let mut values: Vec<_> = env
-        .values()
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut patterns = BTreeSet::new();
+    for value in env.values().filter(|v| !v.is_empty()) {
+        patterns.insert(value.clone());
+        let encoded = json!(value).to_string();
+        patterns.insert(encoded[1..encoded.len() - 1].to_owned());
+    }
+    let mut values: Vec<_> = patterns.iter().map(String::as_str).collect();
     values.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    fn walk(value: &Value, values: &[&str]) -> Value {
-        match value {
+    fn walk(value: &Value, values: &[&str]) -> Result<Value, ApiError> {
+        Ok(match value {
             Value::String(s) => json!(text(s, values)),
-            Value::Array(items) => Value::Array(items.iter().map(|v| walk(v, values)).collect()),
-            Value::Object(items) => Value::Object(
+            Value::Array(items) => Value::Array(
                 items
                     .iter()
-                    .map(|(k, v)| (text(k, values), walk(v, values)))
-                    .collect(),
+                    .map(|v| walk(v, values))
+                    .collect::<Result<_, _>>()?,
             ),
-            Value::Number(n) if values.contains(&n.to_string().as_str()) => json!("[masqué]"),
-            _ => value.clone(),
-        }
+            Value::Object(items) => {
+                let mut output = serde_json::Map::new();
+                for (key, value) in items {
+                    if output
+                        .insert(text(key, values), walk(value, values)?)
+                        .is_some()
+                    {
+                        return Err(invalid(
+                            "Le masquage des variables privées rend le résultat MCP ambigu.",
+                        ));
+                    }
+                }
+                Value::Object(output)
+            }
+            _ => {
+                let raw = value.to_string();
+                if text(&raw, values) != raw {
+                    json!("[masqué]")
+                } else {
+                    value.clone()
+                }
+            }
+        })
     }
     walk(value, &values)
 }
@@ -151,7 +201,10 @@ fn safe_catalogue(
     env: &HashMap<String, String>,
 ) -> Result<Vec<Value>, ApiError> {
     let original = json!(tools);
-    let safe = sanitize(&original, env);
+    let mut private = private_values(ctx)?;
+    private.extend(env.iter().map(|(key, value)| (key.clone(), value.clone())));
+    let safe = sanitize(&original, &private)?;
+    let safe = redact_value(&super::forms::vault(ctx)?, &safe)?;
     if original
         .as_array()
         .unwrap()
@@ -161,7 +214,6 @@ fn safe_catalogue(
     {
         return Err(invalid("Le catalogue MCP contient une variable privée dans un nom ou un schéma. Corrigez le serveur pour pouvoir proposer ses outils sans divulgation."));
     }
-    let safe = redact_value(&super::forms::vault(ctx)?, &safe)?;
     Ok(safe.as_array().unwrap().clone())
 }
 
@@ -263,7 +315,104 @@ pub fn display(ctx: &Context<'_>, name: &str) -> Option<Value> {
     }
     None
 }
+/// Catalogue refresh follows the engine's lock order: SQLite writer, then
+/// process registry. Never try to acquire a writer while holding the registry;
+/// a simultaneous approved call may already own SQLite and need that registry.
+fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
+    let pending: Vec<_> = {
+        let mut live = ctx
+            .provider
+            .mcp()
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        live.iter_mut()
+            .filter_map(|(id, client)| match client.catalog_changed() {
+                Ok(true) => Some((id.clone(), client.identity(), None)),
+                Ok(false) => None,
+                Err(error) => Some((id.clone(), client.identity(), Some(error))),
+            })
+            .collect()
+    };
+    for (id, identity, error) in pending {
+        let tx = write_transaction(ctx.connection)?;
+        let local = Context {
+            connection: &tx,
+            ..*ctx
+        };
+        let mut live = ctx
+            .provider
+            .mcp()
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // A queued notification/error belongs to one process, not merely its
+        // persisted server ID. A concurrent restart must not lose its NEW child.
+        if !live
+            .get(&id)
+            .is_some_and(|client| client.identity() == identity)
+        {
+            continue;
+        }
+        let active_private: HashMap<String, String> = live
+            .iter()
+            .flat_map(|(server, client)| {
+                client
+                    .private_environment()
+                    .iter()
+                    .map(move |(key, value)| (format!("active:{server}:{key}"), value.clone()))
+            })
+            .collect();
+        // The approved connection includes metadata discovery, never tool execution.
+        let refreshed = match error {
+            Some(error) => Err(ApiError::new(503, error)),
+            None => live
+                .get_mut(&id)
+                .unwrap()
+                .list_tools()
+                .map_err(|e| ApiError::new(503, e))
+                .and_then(|tools| safe_catalogue(&local, tools, &active_private)),
+        };
+        match refreshed {
+            Ok(tools) => {
+                if let Err(error) = tx.execute(
+                    "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
+                    params![id, json!(tools).to_string()],
+                ) {
+                    live.get_mut(&id).unwrap().mark_catalog_dirty();
+                    return Err(error.into());
+                }
+            }
+            Err(error) => {
+                live.remove(&id);
+                tx.execute(
+                    "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
+                    params![id, error.message],
+                )?;
+            }
+        }
+        drop(live);
+        if let Err(error) = tx.commit() {
+            if let Some(client) = ctx
+                .provider
+                .mcp()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&id)
+            {
+                if client.identity() == identity {
+                    client.mark_catalog_dirty();
+                }
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 pub fn state(ctx: &Context<'_>) -> Value {
+    let refresh_error = refresh_catalogues(ctx).err();
     let load = || -> Result<Value, ApiError> {
         let mut live = ctx
             .provider
@@ -272,44 +421,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
-        for mut server in servers(ctx.connection)? {
-            // The approved connection includes metadata discovery. Server-pushed
-            // list_changed only refreshes its catalogue, never executes tools.
-            let refresh = match live.get_mut(&server.id) {
-                Some(client) => match client.catalog_changed() {
-                    Ok(true) => Some(
-                        client
-                            .list_tools()
-                            .map_err(|e| ApiError::new(503, e))
-                            .and_then(|tools| {
-                                safe_catalogue(ctx, tools, &environment(ctx, &server)?)
-                            }),
-                    ),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(ApiError::new(503, error))),
-                },
-                None => None,
-            };
-            if let Some(refresh) = refresh {
-                match refresh {
-                    Ok(tools) => {
-                        ctx.connection.execute(
-                            "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
-                            params![server.id, json!(tools).to_string()],
-                        )?;
-                        server.tools = tools;
-                        server.error = None;
-                    }
-                    Err(error) => {
-                        live.remove(&server.id);
-                        ctx.connection.execute(
-                            "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
-                            params![server.id, error.message],
-                        )?;
-                        server.error = Some(error.message);
-                    }
-                }
-            }
+        for server in servers(ctx.connection)? {
             let status = match live.get_mut(&server.id) {
                 Some(client) => {
                     if client.alive() {
@@ -330,7 +442,9 @@ pub fn state(ctx: &Context<'_>) -> Value {
             let tools: Vec<_> = server.tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"namespace":namespace(&server,t)})).collect();
             result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
         }
-        Ok(json!({"servers":result}))
+        Ok(
+            json!({"servers":result,"error":refresh_error.as_ref().map(|_|"L’actualisation des outils est différée. Le dernier état connu reste affiché.")}),
+        )
     };
     load().unwrap_or_else(|_| json!({"error":"Les connecteurs MCP sont indisponibles."}))
 }
@@ -383,15 +497,15 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 || !key.bytes().enumerate().all(|(i, c)| {
                     c.is_ascii_alphabetic() || c == b'_' || (i > 0 && c.is_ascii_digit())
                 })
-                || value.is_empty()
                 || value.len() > 2048
                 || value.contains('\0')
             {
-                return Err(invalid("Variable invalide : utilisez un nom de type CLE_API et une valeur non vide (2 Ko maximum)."));
+                return Err(invalid("Variable invalide : utilisez un nom de type CLE_API et une valeur sans caractère nul (2 Ko maximum)."));
             }
-            if name.contains(value)
-                || command.contains(value)
-                || add.arguments.iter().any(|a| a.contains(value))
+            if !value.is_empty()
+                && (name.contains(value)
+                    || command.contains(value)
+                    || add.arguments.iter().any(|a| a.contains(value)))
             {
                 return Err(invalid("Gardez les valeurs privées uniquement dans les variables d’environnement, pas dans le nom, la commande ou les arguments."));
             }
@@ -407,6 +521,12 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         if count >= 20 {
             return Err(invalid("La limite est de 20 connecteurs."));
         }
+        if servers(&tx)?
+            .iter()
+            .any(|s| s.name.to_lowercase() == name.to_lowercase())
+        {
+            return Err(ApiError::new(409,"Un connecteur porte déjà ce nom. Choisissez un nom distinct pour les approbations."));
+        }
         let id: String = tx.query_row("SELECT lower(hex(randomblob(8)))", [], |r| r.get(0))?;
         let names: Vec<_> = add.environment.keys().collect();
         tx.execute("INSERT INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json) VALUES (?1,?2,?3,?4,?5)",params![id,name,command,json!(add.arguments).to_string(),json!(names).to_string()])?;
@@ -420,7 +540,7 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         vault.set(
             &secret_name(&id),
-            "Variables privées d’un connecteur MCP",
+            grokbot_forms::vault::MCP_ENV_PURPOSE,
             &raw,
         )?;
         tx.commit()?;
@@ -495,11 +615,20 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                 }
                 live.remove(&server.id);
                 let env = environment(ctx, &server)?;
+                let mut redaction = env.clone();
+                for (id, client) in live.iter() {
+                    redaction.extend(
+                        client
+                            .private_environment()
+                            .iter()
+                            .map(|(key, value)| (format!("active:{id}:{key}"), value.clone())),
+                    );
+                }
                 let started = Client::spawn(&server.command, &server.arguments, &env)
                     .and_then(|mut c| c.initialize().map(|tools| (c, tools)));
                 match started {
                     Ok((client, tools)) => {
-                        let tools = match safe_catalogue(ctx, tools, &env) {
+                        let tools = match safe_catalogue(ctx, tools, &redaction) {
                             Ok(tools) => json!(tools),
                             Err(error) => {
                                 ctx.connection.execute(
@@ -540,8 +669,12 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                     .execute("DELETE FROM wrapper_mcp_servers WHERE id=?1", [&server.id])?;
                 // Remove stale Always permissions; an ID is never reused.
                 ctx.connection.execute(
-                    "DELETE FROM forms_approval_rules WHERE tool LIKE ?1",
-                    [format!("mcp_%{}%", server.id)],
+                    "DELETE FROM forms_approval_rules WHERE tool GLOB ?1 OR tool IN (?2,?3)",
+                    params![
+                        format!("mcp_{}_*", server.id),
+                        format!("mcp_start_{}", server.id),
+                        format!("mcp_remove_{}", server.id)
+                    ],
                 )?;
                 super::forms::vault(ctx)?.remove(&secret_name(&server.id))?;
                 return Ok(json!({"message":"Connecteur MCP supprimé et déconnecté."}));
@@ -557,18 +690,40 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                 {
                     return Err(invalid("Ce connecteur MCP est désactivé pour ce bot."));
                 }
+                let mut private = private_values(ctx)?;
+                private.extend(environment(ctx, &server)?);
+                for (id, client) in live.iter() {
+                    private.extend(
+                        client
+                            .private_environment()
+                            .iter()
+                            .map(|(key, value)| (format!("active:{id}:{key}"), value.clone())),
+                    );
+                }
                 let client = live.get_mut(&server.id).ok_or_else(||invalid("Le serveur MCP est déconnecté. Démarrez le connecteur dans les paramètres."))?;
-                let env = environment(ctx, &server)?;
                 let output = client.request(
                     "tools/call",
                     json!({"name":tool["name"],"arguments":call.arguments}),
                 );
                 match output {
                     Ok(output) => {
-                        if !output["content"].is_array() {
-                            return Err(invalid("Le résultat de l’outil MCP est invalide."));
+                        let valid = output["content"].as_array().is_some_and(|parts| {
+                            parts.iter().all(|part| {
+                                part.is_object()
+                                    && part["type"].is_string()
+                                    && (part["type"] != "text" || part["text"].is_string())
+                            })
+                        });
+                        if !valid {
+                            let error="Le résultat de l’outil MCP est invalide. Le connecteur a été déconnecté.";
+                            live.remove(&server.id);
+                            ctx.connection.execute(
+                                "UPDATE wrapper_mcp_servers SET error=?2 WHERE id=?1",
+                                params![server.id, error],
+                            )?;
+                            return Err(ApiError::new(503, error));
                         }
-                        return Ok(sanitize(&output, &env));
+                        return sanitize(&output, &private);
                     }
                     Err(error) => {
                         live.remove(&server.id);

@@ -5,20 +5,28 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
     process::{Child, Command, Stdio},
-    sync::{mpsc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
 const FRAME_LIMIT: usize = 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 type Result<T> = std::result::Result<T, String>;
 
 pub(crate) struct Client {
     child: Child,
+    identity: u64,
     input: Option<mpsc::SyncSender<Vec<u8>>>,
     frames: mpsc::Receiver<Result<Value>>,
     next: u64,
     catalog_dirty: bool,
+    // Retain the launched credential snapshot for redaction until EOF: a vault
+    // rotation must not reveal a value still held by the running child.
+    environment: HashMap<String, String>,
 }
 impl Client {
     pub(crate) fn spawn(
@@ -86,10 +94,12 @@ impl Client {
         });
         Ok(Self {
             child,
+            identity: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             input: Some(input),
             frames,
             next: 0,
             catalog_dirty: false,
+            environment: environment.clone(),
         })
     }
     fn send(&mut self, value: Value) -> Result<()> {
@@ -120,6 +130,9 @@ impl Client {
             }
         }
         Ok(())
+    }
+    pub(crate) fn mark_catalog_dirty(&mut self) {
+        self.catalog_dirty = true;
     }
     pub(crate) fn catalog_changed(&mut self) -> Result<bool> {
         // Only idle connections call this; no response is consumed out of turn.
@@ -214,6 +227,8 @@ impl Client {
         self.list_tools()
     }
     pub(crate) fn list_tools(&mut self) -> Result<Vec<Value>> {
+        // A notification arriving DURING discovery must schedule another pass.
+        self.catalog_dirty = false;
         let mut tools = Vec::new();
         let mut cursor = None;
         for _ in 0..16 {
@@ -231,6 +246,7 @@ impl Client {
                 if name.is_empty()
                     || name.len() > 256
                     || !tool["inputSchema"].is_object()
+                    || tool["inputSchema"]["type"] != "object"
                     || tools.iter().any(|t: &Value| t["name"] == name)
                 {
                     return Err(
@@ -247,11 +263,16 @@ impl Client {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
             if cursor.is_none() {
-                self.catalog_dirty = false;
                 return Ok(tools);
             }
         }
         Err("La pagination des outils MCP ne se termine pas.".into())
+    }
+    pub(crate) fn identity(&self) -> u64 {
+        self.identity
+    }
+    pub(crate) fn private_environment(&self) -> &HashMap<String, String> {
+        &self.environment
     }
     pub(crate) fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
@@ -306,7 +327,60 @@ mod tests {
             .request("tools/call", json!({"name":"unknown","arguments":{}}))
             .unwrap_err()
             .contains("refusé"));
+        client.input.take();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while client.alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !client.alive(),
+            "Le serveur doit quitter proprement sur EOF."
+        );
         drop(client);
+    }
+    #[test]
+    fn restarted_processes_have_distinct_connection_identities() {
+        let old = fake("normal");
+        let identity = old.identity();
+        drop(old);
+        let restarted = fake("normal");
+        assert_ne!(identity, restarted.identity());
+    }
+    #[test]
+    fn list_changed_during_discovery_is_not_lost() {
+        let mut client = fake("change-during-list");
+        client.initialize().unwrap();
+        assert!(client.catalog_changed().unwrap());
+        let tools = client.list_tools().unwrap();
+        assert_eq!(tools[0]["description"], "Catalogue actualisé.");
+        assert!(!client.catalog_changed().unwrap());
+    }
+    #[test]
+    fn process_environment_preserves_empty_values_spaces_and_prototype_like_names() {
+        let env = HashMap::from([
+            ("EMPTY".into(), "".into()),
+            ("SPACE".into(), "  avec espaces  ".into()),
+            ("__proto__".into(), "private-proto-4444".into()),
+        ]);
+        let mut client = Client::spawn(
+            "python3",
+            &[format!(
+                "{}/tests/fixtures/mcp_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            )],
+            &env,
+        )
+        .unwrap();
+        client.initialize().unwrap();
+        for (name, value) in env {
+            let result = client
+                .request(
+                    "tools/call",
+                    json!({"name":"echo","arguments":{"text":format!("env:{name}")}}),
+                )
+                .unwrap();
+            assert_eq!(result["content"][0]["text"], value);
+        }
     }
     #[test]
     fn child_that_never_reads_stdin_cannot_block_timeout() {
@@ -331,7 +405,15 @@ mod tests {
         ] {
             let mut client = fake(mode);
             let error = client
-                .request_with_timeout("initialize", json!({}), Duration::from_millis(100))
+                .request_with_timeout(
+                    "initialize",
+                    json!({}),
+                    if mode == "timeout" {
+                        Duration::from_millis(100)
+                    } else {
+                        TIMEOUT
+                    },
+                )
                 .unwrap_err();
             assert!(error.contains(expected), "{error}");
         }

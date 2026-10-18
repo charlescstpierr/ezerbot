@@ -43,7 +43,7 @@
     note.textContent = "Après les règles « Toujours », un modèle relit vos demandes. Au moindre doute ou en cas d’erreur, vous décidez. Aucun secret ne lui est transmis. Les commandes et données sensibles nécessitent votre confirmation.";
     const toggle = document.createElement("label");
     const enabled = document.createElement("input");
-    enabled.type = "checkbox"; enabled.checked = draft.enabled;
+    enabled.type = "checkbox"; enabled.name = "reviewer-enabled"; enabled.checked = draft.enabled;
     toggle.append(enabled, " Activer le relecteur d’approbations");
     form.append(title, note, toggle);
     const fields = {};
@@ -54,7 +54,7 @@
       const wrapper = document.createElement("label");
       wrapper.textContent = label;
       const field = document.createElement("textarea");
-      field.className = "text-input"; field.rows = 3; field.value = draft[key];
+      field.className = "text-input"; field.name = `reviewer-${key}`; field.rows = 3; field.value = draft[key];
       field.placeholder = placeholder; field.setAttribute("aria-label", label);
       fields[key] = field; wrapper.append(field); form.append(wrapper);
     }
@@ -121,7 +121,7 @@
     reviewEditor(state);
     if (!rules.length) {
       const empty = document.createElement("p");
-      empty.textContent = state.forms?.error ? "Les règles sont momentanément indisponibles." : "Aucune règle enregistrée.";
+      empty.textContent = state.forms?.error ? "Les règles sont momentanément indisponibles." : "Aucune règle « Toujours » enregistrée.";
       settings.append(empty);
     }
     for (const rule of rules) {

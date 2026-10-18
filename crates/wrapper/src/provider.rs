@@ -959,7 +959,11 @@ impl Provider {
         }
         // The chat parser intentionally ignores non-text events; a policy reply
         // must additionally reject refusals, unknown events and opaque items.
+        let mut terminal = false;
         for line in wire.lines().filter_map(|line| line.strip_prefix("data:")) {
+            if terminal {
+                return Err(Failure::other("Revue contradictoire."));
+            }
             let event: Value = serde_json::from_str(line.trim())
                 .map_err(|_| Failure::other("Revue illisible."))?;
             let kind = event["type"].as_str().unwrap_or_default();
@@ -984,10 +988,17 @@ impl Provider {
                         .contains(&event["item"]["type"].as_str().unwrap_or_default()))
                 || (kind.starts_with("response.content_part.")
                     && event["part"]["type"] != "output_text")
+                || (kind == "response.output_text.delta" && !event["delta"].is_string())
+                || (kind == "response.output_text.done" && !event["text"].is_string())
+                || (kind == "response.completed"
+                    && event["response"]
+                        .get("status")
+                        .is_some_and(|status| status != "completed"))
                 || event.to_string().contains("\"refusal\"")
             {
                 return Err(Failure::other("Revue incertaine."));
             }
+            terminal = kind == "response.completed";
         }
         crate::gateway::stream_response(std::io::Cursor::new(wire), &mut |event| {
             match event {

@@ -43,6 +43,8 @@ pub fn body_limit(path: &str) -> usize {
         // retain the same 20 MiB limit as images.
         "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
+        // 2 × 20 rules × 1,000 Unicode characters, including JSON escapes.
+        "/api/approvals/reviewer" => 256 * 1024,
         _ => BODY_LIMIT,
     }
 }

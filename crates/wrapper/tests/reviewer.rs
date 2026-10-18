@@ -248,6 +248,20 @@ fn malformed_refusal_incomplete_and_http_error_never_grant() {
     for response in [
         ScriptedResponse::json(500, json!({"error":{"message":"private error"}})),
         ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"{\"decision\":\"allow\",\"reason\":\"Oui\"}"}),
+            json!({"type":"response.output_text.delta","delta":42}),
+            json!({"type":"response.completed"}),
+        ]),
+        ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"{\"decision\":\"allow\",\"reason\":\"Oui\"}"}),
+            json!({"type":"response.completed","response":{"status":"incomplete"}}),
+        ]),
+        ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"{\"decision\":\"allow\",\"reason\":\"Oui\"}"}),
+            json!({"type":"response.completed"}),
+            json!({"type":"response.completed"}),
+        ]),
+        ScriptedResponse::events(&[
             json!({"type":"response.output_text.delta","delta":"{\"decision\":\"allow\"}"}),
             json!({"type":"response.completed"}),
         ]),
@@ -266,6 +280,7 @@ fn malformed_refusal_incomplete_and_http_error_never_grant() {
         f.tick_review(&id);
         assert_eq!(f.review(&id).answer.decision, reviewer::ReviewDecision::Ask);
         assert_eq!(f.status(&id), RequestStatus::Pending);
+        assert!(!f.review(&id).answer.reason.contains("private error"));
         assert!(store::pending_wakes(&f.db()).unwrap().is_empty());
     }
 }
@@ -284,6 +299,12 @@ fn disabled_and_sensitive_calls_never_reach_the_model() {
     for (id, args) in [
         ("vault", json!({"path":"secret-factice-993311"})),
         ("inline", json!({"token":"unknown-secret"})),
+        ("header", json!({"api-key":"unknown-secret"})),
+        (
+            "url",
+            json!({"url":"https://user:unknown-secret@example.invalid/?key=unknown-secret"}),
+        ),
+        ("content", json!({"content":"unknown-secret"})),
         (
             "command",
             json!({"command":"curl --password unknown-secret"}),
@@ -310,6 +331,23 @@ fn disabled_and_sensitive_calls_never_reach_the_model() {
     let version = f.app.api("GET", "/api/approvals/reviewer", b"").unwrap()["version"].clone();
     assert!(f.app.api("POST","/api/approvals/reviewer",json!({"version":version,"config":{"enabled":true,"allow":["secret-factice-993311"],"block":[]}}).to_string().as_bytes()).is_err());
 }
+#[test]
+fn all_twenty_unicode_rules_per_list_fit_the_api_budget() {
+    let mut f = Fixture::new();
+    let version = f.app.api("GET", "/api/approvals/reviewer", b"").unwrap()["version"].clone();
+    let config = AutoReviewConfig {
+        enabled: false,
+        allow: vec!["é🔒".repeat(500); 20],
+        block: vec!["é🔒".repeat(500); 20],
+    };
+    let body = json!({"config":config,"version":version}).to_string();
+    assert!(body.len() > 64 * 1024);
+    assert!(f
+        .app
+        .api("POST", "/api/approvals/reviewer", body.as_bytes())
+        .is_ok());
+}
+
 #[test]
 fn settings_reject_stale_writes_and_survive_restart() {
     let mut f = Fixture::new();

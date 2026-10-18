@@ -231,11 +231,13 @@ fn body_limit_by_route() {
     let host = Host::new();
     assert_eq!(body_limit("/api/attachments"), 20 * 1024 * 1024);
     assert_eq!(body_limit("/api/skills/import"), 16 * 1024 * 1024);
+    assert_eq!(body_limit("/api/approvals/reviewer"), 256 * 1024);
     for path in [
         "/api/send",
         "/api/attachments/one",
         "/api/skills/import/",
         "/api/attachments?x=1",
+        "/api/approvals/reviewer/",
     ] {
         assert_eq!(body_limit(path), 64 * 1024);
     }
@@ -243,6 +245,7 @@ fn body_limit_by_route() {
         ("/api/attachments", "20 Mio"),
         ("/api/skills/import", "16 Mio"),
         ("/api/send", "64 Ko"),
+        ("/api/approvals/reviewer", "256 Ko"),
     ] {
         let error = too_large(path);
         assert_eq!(error.status, 413);
@@ -255,6 +258,7 @@ fn body_limit_by_route() {
     for (path, mime) in [
         ("/api/attachments", "image/png"),
         ("/api/skills/import", "application/json"),
+        ("/api/approvals/reviewer", "application/json"),
     ] {
         assert!(accepted_by_host(host.post(path, mime, &body)), "{path}");
     }

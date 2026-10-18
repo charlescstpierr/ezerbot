@@ -588,6 +588,37 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_audit_column_upgrades_v1_without_losing_settings_or_requests() {
+        let conn = connection();
+        let config = AutoReviewConfig {
+            enabled: true,
+            allow: vec!["Autorise la lecture.".into()],
+            block: vec![],
+        };
+        save_auto_review_config(&conn, &config).unwrap();
+        decide(
+            &conn,
+            "before-upgrade",
+            &route(),
+            "read_file",
+            &json!({"path":"a"}),
+            ApprovalDecision::AllowOnce,
+        );
+        conn.execute_batch("ALTER TABLE forms_requests DROP COLUMN review_json")
+            .unwrap();
+        set_component_version(&conn, "forms_rules", 1).unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(load_auto_review_config(&conn).unwrap(), config);
+        assert!(requests::get(&conn, "before-upgrade").unwrap().is_some());
+        assert_eq!(crate::reviewer::get(&conn, "before-upgrade").unwrap(), None);
+        assert_eq!(
+            component_version(&conn, "forms_rules").unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
     fn rules_core_permission_and_auto_review_config_survive_reopen() {
         let mut bytes = [0; 8];
         getrandom::getrandom(&mut bytes).unwrap();

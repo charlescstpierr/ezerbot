@@ -63,22 +63,27 @@ pub(super) fn settings(ctx: &Context<'_>, method: &str, body: &[u8]) -> Result<V
 fn has_opaque_data(value: &Value) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
-            let key = key.to_ascii_lowercase();
+            let key = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                .to_ascii_lowercase();
             [
                 "secret",
                 "password",
                 "token",
                 "credential",
                 "authorization",
-                "api_key",
                 "apikey",
-                "private_key",
+                "privatekey",
+                "passphrase",
+                "cookie",
             ]
             .iter()
             .any(|part| key.contains(part))
                 || [
-                    "content", "body", "stdin", "env", "headers", "command", "value", "data",
-                    "input",
+                    "content", "body", "stdin", "env", "header", "headers", "command", "value",
+                    "data", "input", "auth",
                 ]
                 .contains(&key.as_str())
                 || has_opaque_data(value)
@@ -87,7 +92,9 @@ fn has_opaque_data(value: &Value) -> bool {
         // URLs may embed arbitrary credentials, and command strings may embed
         // inline passwords. With no safe structured interpretation, ask instead.
         Value::String(text) => {
-            text.contains("://") || text.contains("Bearer ") || text.contains("[...]")
+            text.contains("://")
+                || text.to_ascii_lowercase().contains("bearer ")
+                || text.contains("[...]")
         }
         _ => false,
     }

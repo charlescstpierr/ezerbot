@@ -429,8 +429,47 @@ pub fn display(ctx: &Context<'_>, name: &str) -> Option<Value> {
     }
     None
 }
+// Recovery is useful for a missing/dead transport, not an ordinary RPC refusal.
+// Use current connection state so repaired historical cards stop suggesting it.
+fn needs_recovery(ctx: &Context<'_>, name: &str) -> bool {
+    let id = name
+        .strip_prefix("mcp_start_")
+        .or_else(|| name.strip_prefix("mcp_remove_"))
+        .or_else(|| name.strip_prefix("mcp_")?.split_once('_').map(|(id, _)| id));
+    let Some(id) = id else {
+        return false;
+    };
+    let exists: bool = ctx
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM wrapper_mcp_servers WHERE id=?1)",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return false;
+    }
+    let handle = ctx
+        .provider
+        .mcp()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned();
+    let Some(handle) = handle else {
+        return true;
+    };
+    handle
+        .client
+        .try_lock()
+        .is_ok_and(|mut client| !client.alive())
+}
+
 pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> Option<Value> {
-    let label = display(ctx, name)?;
+    let mut label = display(ctx, name)?;
+    let recoverable = needs_recovery(ctx, name);
     if is_lifecycle(name) {
         let title = arguments["action"]
             .as_str()
@@ -444,9 +483,12 @@ pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> 
             })
             .unwrap_or_else(|| label["tool"].as_str().unwrap_or("Gérer le connecteur"));
         return Some(
-            json!({"server":label["server"],"tool":title,"origin":"settings","action":if name.starts_with("mcp_start_") {"start"} else {"remove"}}),
+            json!({"server":label["server"],"tool":title,"origin":"settings","action":if name.starts_with("mcp_start_") {"start"} else {"remove"},"recoverable":recoverable}),
         );
     }
+    label
+        .as_object_mut()?
+        .insert("recoverable".into(), json!(recoverable));
     Some(label)
 }
 /// Background only: no stdio under a SQLite writer or the process registry.
@@ -460,6 +502,7 @@ fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let private = active_private(ctx);
+    let mut deferred = None;
     for (id, handle) in handles {
         if !handle.ready.load(Ordering::Acquire) {
             continue;
@@ -474,7 +517,8 @@ fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
                     Ok(tools) => Ok(tools),
                     Err(e @ crate::mcp::Error::Rpc { .. }) => {
                         handle.dirty.store(true, Ordering::Release);
-                        return Err(ApiError::new(503, e.to_string()));
+                        deferred = Some(ApiError::new(503, e.to_string()));
+                        continue;
                     }
                     Err(e) => Err(ApiError::new(503, e.to_string())),
                 };
@@ -524,9 +568,11 @@ fn refresh_catalogues(ctx: &Context<'_>) -> Result<(), ApiError> {
         if saved.is_err() {
             handle.dirty.store(true, Ordering::Release);
         }
-        saved?;
+        if let Err(error) = saved {
+            deferred = Some(error);
+        }
     }
-    Ok(())
+    deferred.map_or(Ok(()), Err)
 }
 fn active_private(ctx: &Context<'_>) -> HashMap<String, String> {
     ctx.provider

@@ -153,6 +153,50 @@ impl Fixture {
             .expect("public tool card")["payload"]
             .clone()
     }
+    fn group_peer(&mut self, server: &str) -> String {
+        self.post(
+            "/api/bots",
+            json!({"id":"lecteur","name":"Lecteur","color":"cyan"}),
+        );
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server,"bot_id":"lecteur","enabled":true}),
+        );
+        self.post(
+            "/api/conversations",
+            json!({"bot_ids":["grokbot","lecteur"],"title":"MCP en groupe"}),
+        )["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn send_peer(&mut self, group: &str, name: &str, text: &str, id: &str) -> Run {
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":name,"arguments":json!({"text":text}).to_string()}}),json!({"type":"response.completed"})]);
+        self.post("/api/send", json!({"conversation_id":group,"message_id":id,"body":"@Lecteur Appelle le connecteur","mentions":[{"id":"lecteur","label":"Lecteur"}]}));
+        wait("peer run", || {
+            self.app.tick(0);
+            self.db().query_row("SELECT EXISTS(SELECT 1 FROM wrapper_group_turns WHERE root_id=?1 AND bot_id='lecteur' AND run_id IS NOT NULL)",[id],|r|r.get::<_,bool>(0)).unwrap()
+        });
+        let run: String = self
+            .db()
+            .query_row(
+                "SELECT run_id FROM wrapper_group_turns WHERE root_id=?1 AND bot_id='lecteur'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        wait("peer approval or result", || {
+            let status = store::required(&self.db(), &run).unwrap().status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        store::required(&self.db(), &run).unwrap()
+    }
+    fn drain_group(&mut self) {
+        wait("group turns complete", || {
+            self.app.tick(0);
+            self.db().query_row("SELECT COUNT(*)=0 FROM wrapper_group_turns WHERE status IN ('queued','running')",[],|r|r.get::<_,bool>(0)).unwrap()
+        });
+    }
     fn finish(&self, run: &str) {
         wait("tool response", || {
             store::required(&self.db(), run)
@@ -167,6 +211,108 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
+}
+
+#[test]
+fn a_non_coordinator_group_peer_can_use_once_and_standing_mcp_approvals() {
+    let mut f = Fixture::new();
+    let server = f.add("normal");
+    f.connect(&server);
+    let echo = f.tool("echo");
+    let group = f.group_peer(&server);
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT bot_id FROM wrapper_conversations WHERE id=?1",
+                [&group],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "grokbot"
+    );
+    for (id, decision) in [
+        ("group-once", json!("allow_once")),
+        ("group-always", json!({"always_allow":{"scope":"global"}})),
+    ] {
+        let run = f.send_peer(&group, &echo, id, id);
+        assert_eq!(run.bot_id, "lecteur");
+        assert_eq!(f.request(&run.run_id).route.requesting_bot_id, "lecteur");
+        f.script(vec![json!({"type":"response.completed"})]);
+        f.decide(&run.run_id, decision);
+        assert!(
+            matches!(f.outcome(&run.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]==id)
+        );
+        f.drain_group();
+    }
+    // Only this bot/server/tool standing rule authorizes the next group turn.
+    let next = f.send_peer(&group, &echo, "pair automatique", "group-automatic");
+    f.finish(&next.run_id);
+    f.drain_group();
+    assert!(requests::list_for_run(&f.db(), &next.run_id)
+        .unwrap()
+        .is_empty());
+    assert!(
+        matches!(f.outcome(&next.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="pair automatique")
+    );
+    assert_eq!(
+        f.tool_card("group-automatic")["authorized_by"]["kind"],
+        "rule"
+    );
+    assert_eq!(f.tool_card("group-automatic")["requesting_bot"], "Lecteur");
+}
+
+#[test]
+fn a_removed_group_peer_cannot_send_an_already_admitted_queued_mcp_call() {
+    let mut f = Fixture::new();
+    let gate = f.path.with_extension("release");
+    let server = f.post("/api/mcp/add",json!({"name":"Barrière locale","command":"python3","arguments":[format!("{}/tests/fixtures/mcp_server.py",env!("CARGO_MANIFEST_DIR"))],"environment":{"CALL_GATE":gate.to_str().unwrap()}}))["id"].as_str().unwrap().to_owned();
+    f.connect(&server);
+    let echo = f.tool("echo");
+    let group = f.group_peer(&server);
+    let blocker = f.send(&echo, json!({"text":"wait-for-release"}), "hold-client");
+    let approval = f.request(&blocker.run_id);
+    // The blocker cannot request its model continuation until the gate opens;
+    // do not enqueue that continuation ahead of the peer's initial tool call.
+    f.post("/api/approvals/resolve",json!({"entry_id":approval.entry_id,"conversation_id":approval.route.target_conversation_id,"submission_id":"hold","decision":"allow_once"}));
+    f.app.tick(0);
+    wait("client held", || {
+        f.state()["mcp"]["servers"][0]["status"] == "busy"
+    });
+    let peer = f.send_peer(&group, &echo, "must-not-run", "removed-peer");
+    let approval = f.request(&peer.run_id);
+    f.post("/api/approvals/resolve",json!({"entry_id":approval.entry_id,"conversation_id":approval.route.target_conversation_id,"submission_id":"queued-peer","decision":"allow_once"}));
+    f.app.tick(0);
+    wait("peer admitted before removal", || {
+        f.db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1)",
+                [&peer.run_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    // Persisted membership changes while the call waits for the busy client.
+    // Keep the run Running to exercise the adapter's independent membership guard.
+    f.db()
+        .execute(
+            "UPDATE wrapper_members SET active=0 WHERE conversation_id=?1 AND bot_id='lecteur'",
+            [&group],
+        )
+        .unwrap();
+    std::fs::write(&gate, b"release").unwrap();
+    f.finish(&blocker.run_id);
+    f.finish(&peer.run_id);
+    f.drain_group();
+    assert!(
+        matches!(f.outcome(&peer.run_id),ToolOutcome::Failed{reason} if reason.contains("n’a pas été autorisée"))
+    );
+    let probe = f.send(&echo, json!({"text":"call-count"}), "count-after-removal");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&probe.run_id, json!("allow_once"));
+    // The server saw only the blocker and this probe, never the removed peer.
+    assert!(
+        matches!(f.outcome(&probe.run_id),ToolOutcome::Done{output} if output["content"][0]["text"]=="2")
+    );
 }
 
 #[test]
@@ -306,6 +452,7 @@ fn rpc_argument_errors_keep_the_connection_usable_for_the_next_valid_call() {
     );
     assert_eq!(f.state()["mcp"]["servers"][0]["status"], "connected");
     assert!(f.state()["mcp"]["servers"][0]["error"].is_null());
+    assert_eq!(f.tool_card("bad-args")["connector"]["recoverable"], false);
     let next = f.send(&echo, json!({"text":"Encore connecté"}), "valid-after-rpc");
     f.script(vec![json!({"type":"response.completed"})]);
     f.decide(&next.run_id, json!("allow_once"));
@@ -453,7 +600,7 @@ fn model_guessed_management_names_never_create_an_approval_and_unknown_tools_kee
     let card = f.tool_card("unknown-known-server");
     assert_eq!(
         card["connector"],
-        json!({"server":"Atelier local","tool":"outil inconnu"})
+        json!({"server":"Atelier local","tool":"outil inconnu","recoverable":false})
     );
 }
 
@@ -972,6 +1119,10 @@ fn crash_and_launch_errors_are_french_and_restartable() {
         matches!(f.outcome(&run),ToolOutcome::Failed {reason} if reason.contains("déconnecté"))
     );
     assert_eq!(f.state()["mcp"]["servers"][0]["status"], "crashed");
+    assert_eq!(
+        f.tool_card(&format!("{run}-call"))["connector"]["recoverable"],
+        true
+    );
     let restart = f.start(&id);
     assert_eq!(
         store::required(&f.db(), &restart).unwrap().status,

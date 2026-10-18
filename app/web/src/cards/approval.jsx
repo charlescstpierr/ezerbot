@@ -49,9 +49,9 @@ export function Card({ message, busy, onAction }) {
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
           : lifecycle ? <>
             <dl className="grid gap-3 text-sm" aria-label="Configuration du connecteur">
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Commande</dt><dd className="mt-1 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : "Aucune variable privée."}</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Commande</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 ml-0 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : "Aucune variable privée."}</dd></div>
             </dl>
             {action.tool.startsWith("mcp_remove_") && <p className="text-sm">Le processus sera arrêté. La configuration, les règles permanentes et les variables privées de ce connecteur seront supprimées.</p>}
           </> : <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 text-xs" aria-label="Arguments de l’action">{JSON.stringify(preview, null, 2)}</pre>}

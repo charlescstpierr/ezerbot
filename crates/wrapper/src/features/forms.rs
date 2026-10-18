@@ -192,6 +192,12 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
     })
 }
 
+// A group's owner is only its coordinator. Both transactional approval and
+// post-admission execution must accept the same live, active participants.
+fn requesting_conversation_live(ctx: &Context<'_>, run: &Run) -> Result<bool, ApiError> {
+    Ok(ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=?3 WHERE c.account_id=?1 AND c.id=?2 AND c.deleted=0 AND b.deleted=0 AND (c.bot_id=?3 OR (c.kind='group' AND EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id AND m.bot_id=?3 AND m.active=1))))", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?)
+}
+
 fn active_run(ctx: &Context<'_>, call: &ToolCall) -> Result<Run, ApiError> {
     if ctx.connection.is_autocommit() {
         return Err(ApiError::new(
@@ -216,7 +222,7 @@ fn active_run(ctx: &Context<'_>, call: &ToolCall) -> Result<Run, ApiError> {
     {
         return Err(ApiError::new(400, "Invalid tool arguments"));
     }
-    let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=?3 WHERE c.account_id=?1 AND c.id=?2 AND c.deleted=0 AND b.deleted=0 AND (c.bot_id=?3 OR (c.kind='group' AND EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id AND m.bot_id=?3 AND m.active=1))))", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?;
+    let live = requesting_conversation_live(ctx, &run)?;
     if !live {
         return Err(ApiError::new(
             409,
@@ -502,7 +508,7 @@ pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result
             .ok_or_else(|| ApiError::new(403, "Approbation MCP requise."))?,
     )?;
     if ctx.connection.is_autocommit() {
-        let live: bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND bot_id=?3 AND deleted=0)",params![ACCOUNT,run.conversation_id,run.bot_id],|r|r.get(0))?;
+        let live = requesting_conversation_live(ctx, &run)?;
         if live
             && run.status == RunStatus::Running
             && ctx.bot_id == Some(run.bot_id.as_str())

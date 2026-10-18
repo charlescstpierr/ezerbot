@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic local stdio MCP fixture. No network or file effects."""
+"""Local stdio fixture. No network; optional release-file concurrency barrier."""
 import json
 import os
 import sys
@@ -10,6 +10,7 @@ mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 initialized = False
 changed = False
 failed_list_once = False
+call_count = 0
 if mode == "no-read":
     time.sleep(20)
 for line in sys.stdin:
@@ -48,6 +49,7 @@ for line in sys.stdin:
             changed = True
             print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
     elif method == "tools/call" and initialized:
+        call_count += 1
         name = request["params"]["name"]
         args = request["params"]["arguments"]
         if name == "echo":
@@ -56,6 +58,12 @@ for line in sys.stdin:
                 response["error"] = {"code": -32602, "message": "Texte requis"}
                 print(json.dumps(response), flush=True)
                 continue
+            if text == "wait-for-release":
+                deadline = time.monotonic() + 8
+                while not os.path.exists(os.environ["CALL_GATE"]) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            if text == "call-count":
+                text = str(call_count)
             if text == "slow-two-seconds":
                 time.sleep(2)
             if text == "crash":

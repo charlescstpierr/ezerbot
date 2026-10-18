@@ -88,7 +88,7 @@
         const v = input("env-value", "Valeur privée", "password"); v.setAttribute("aria-label","Valeur privée de la variable");
         row.append(k,v,button("Retirer",()=> {v.value="";row.remove();})); env.append(row);
       };
-      form.append(node("p","Variables d’environnement privées : conservées dans le coffre local, jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
+      form.append(node("p","Variables d’environnement privées : conservées dans le coffre local, jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal. Les valeurs de 8 caractères ou plus sont masquées dans tous les résultats, même si ce connecteur est inactif. Pour les valeurs plus courtes, seuls les champs texte identiques de ce serveur sont masqués ; les nombres et booléens restent inchangés.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
       const submit = node("button","Enregistrer le connecteur","primary-button"); submit.type = "submit";
       form.append(submit); details.append(form); section.append(details);
       feedback = node("p",null,"mcp-error"); feedback.setAttribute("role","status"); section.append(feedback);

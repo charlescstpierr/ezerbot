@@ -102,7 +102,7 @@ export function Card({ message }) {
           : <p className="gb-engine-note">Le résultat ne contient pas de texte. Consultez les données techniques ci-dessous.</p>}
           <details><summary>Données techniques du résultat</summary><Data value={outcome.output} /></details></>
         : <Data value={outcome.output} />}</>}
-      {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector && !refused && <button type="button" className="gb-retry" onClick={openConnectors}>Ouvrir les connecteurs</button>}</>}
+      {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector?.recoverable === true && !refused && <button type="button" className="gb-retry" onClick={openConnectors}>Ouvrir les connecteurs</button>}</>}
       {note && <p className="gb-engine-note">{note}</p>}
     </Disclosure>
   );

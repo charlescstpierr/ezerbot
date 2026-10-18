@@ -56,11 +56,14 @@ if [[ "${EZERBOT_BUILD_DEBUG:-0}" == 1 ]]; then
 else
   "$cargo_bin" build --release --locked -p grokbot-wrapper
 fi
+# Ask Cargo for the effective target directory (environment and .cargo/config).
+# Do not override CARGO_TARGET_DIR or silently copy an older project-local binary.
+target_dir="$("$cargo_bin" metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror "${native_flags[@]}" -mmacosx-version-min=12.3 \
   -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications \
   "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
-cp "$project_dir/target/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
+cp "$target_dir/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
 
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

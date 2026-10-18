@@ -3,23 +3,39 @@
 //! Stable source keys survive restart/replay. Claim BEFORE native delivery gives
 //! at-most-once attempts (a crash in that gap may lose a banner, never the inbox).
 use super::{write_transaction, Context};
-use crate::{ApiError, ApiResponse, App, Message, ACCOUNT};
+use crate::{ApiError, ApiResponse, App, ACCOUNT};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-empty_hooks!(tools, call_tool, context, on_run_event, link_attachments);
+empty_hooks!(
+    tools,
+    call_tool,
+    context,
+    on_run_event,
+    link_attachments,
+    tick,
+    entry
+);
 
 // No model text, tool arguments or secret names go to the OS notification centre.
+// SQLite CROSS JOIN fixes r→m loop order, so both reply branches use the full
+// message primary key even on a new database without ANALYZE statistics.
 const SOURCES: &str = "
 SELECT 'reply:'||r.run_id AS id, 'reply' AS kind, r.conversation_id AS conversation_id,
- CASE WHEN m.kind='submission' THEN 'reply-'||m.message_id ELSE 'reply-'||r.run_id END AS card_id,
- 'Réponse terminée' AS title
- FROM engine_runs r JOIN wrapper_messages m ON m.account_id='local-workspace'
- AND m.conversation_id=r.conversation_id AND
- ((m.kind='submission' AND r.trigger_ref=r.conversation_id||'/'||m.message_id)
- OR (m.kind='engine_reply' AND m.message_id=r.run_id))
+ 'reply-'||m.message_id AS card_id, 'Réponse terminée' AS title
+ FROM engine_runs r CROSS JOIN wrapper_messages m ON m.account_id=?1
+ AND m.conversation_id=r.conversation_id AND m.kind='submission'
+ AND m.message_id=substr(r.trigger_ref,length(r.conversation_id)+2)
  WHERE r.trigger_kind='user_message' AND r.status='finished'
+ AND substr(r.trigger_ref,1,length(r.conversation_id)+1)=r.conversation_id||'/'
+ AND NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id='reply:'||r.run_id)
+UNION ALL
+SELECT 'reply:'||r.run_id, 'reply', r.conversation_id, 'reply-'||r.run_id, 'Réponse terminée'
+ FROM engine_runs r CROSS JOIN wrapper_messages m ON m.account_id=?1
+ AND m.conversation_id=r.conversation_id AND m.message_id=r.run_id AND m.kind='engine_reply'
+ WHERE r.trigger_kind='user_message' AND r.status='finished'
+ AND NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id='reply:'||r.run_id)
 UNION ALL
 SELECT 'input:'||q.id, json_extract(q.kind_json,'$.kind'),
  json_extract(q.route_json,'$.target_conversation_id'), q.entry_id,
@@ -27,7 +43,7 @@ SELECT 'input:'||q.id, json_extract(q.kind_json,'$.kind'),
  WHEN 'secret' THEN 'Secret demandé' ELSE 'Informations demandées' END
  FROM forms_requests q WHERE q.status='pending'
 UNION ALL
-SELECT 'routine:'||o.occurrence_id, 'routine', s.conversation_id, 'routine:'||o.occurrence_id,
+SELECT 'routine:'||o.occurrence_id, 'routine', s.conversation_id, COALESCE('reply-'||o.run_id,''),
  CASE o.status WHEN 'done' THEN 'Routine terminée' ELSE 'Échec de la routine' END
  FROM scheduler_occurrences o JOIN scheduler_routines s ON s.routine_id=o.routine_id
  WHERE o.status IN ('done','failed')
@@ -112,6 +128,17 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             account_id TEXT NOT NULL, conversation_id TEXT NOT NULL, kind TEXT NOT NULL,
             title TEXT NOT NULL, attempted_at INTEGER NOT NULL,
             PRIMARY KEY(account_id,conversation_id,kind,title));")?;
+    // Repair the first implementation's notification-authored transcript rows.
+    // Only this dedicated kind is removed; genuine user/bot messages are untouched.
+    let migrated: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM component_versions WHERE component='wrapper.notifications' AND version>=2)", [], |r|r.get(0))?;
+    if !migrated {
+        conn.execute(
+            "DELETE FROM wrapper_messages WHERE account_id=?1 AND kind='notification_event'",
+            [ACCOUNT],
+        )?;
+        conn.execute("UPDATE wrapper_notifications SET card_id=COALESCE((SELECT 'reply-'||o.run_id FROM scheduler_occurrences o WHERE o.occurrence_id=substr(wrapper_notifications.id,9)),'') WHERE account_id=?1 AND kind='routine'", [ACCOUNT])?;
+        conn.execute("INSERT INTO component_versions(component,version) VALUES ('wrapper.notifications',2) ON CONFLICT(component) DO UPDATE SET version=2", [])?;
+    }
     let first = conn.execute(
         "INSERT OR IGNORE INTO wrapper_notification_settings VALUES (?1,?2)",
         params![ACCOUNT, json!(Settings::default()).to_string()],
@@ -128,31 +155,19 @@ fn project(conn: &Connection, now: u64, baseline: bool) -> Result<(), ApiError> 
             "INSERT OR IGNORE INTO wrapper_notifications
         SELECT ?1,src.id,src.kind,src.conversation_id,src.card_id,src.title,?2,?3,?4
         FROM ({SOURCES}) src JOIN wrapper_conversations c
-        ON c.account_id=?1 AND c.id=src.conversation_id AND c.deleted=0"
+        ON c.account_id=?1 AND c.id=src.conversation_id AND c.deleted=0
+        WHERE NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id=src.id)"
         ),
         params![ACCOUNT, now, !baseline, baseline],
     )?;
-    // A scheduler error before an engine run exists still has a precise, readable destination.
-    conn.execute("INSERT OR IGNORE INTO wrapper_messages(account_id,conversation_id,message_id,created_at,kind)
-        SELECT account_id,conversation_id,card_id,created_at,'notification_event'
-        FROM wrapper_notifications WHERE account_id=?1 AND kind='routine' AND unread=1", [ACCOUNT])?;
     // Deleting a conversation removes it from the inbox without resetting source deduplication.
     conn.execute("UPDATE wrapper_notifications SET unread=0,attempted=1 WHERE account_id=?1
         AND conversation_id IN (SELECT id FROM wrapper_conversations WHERE account_id=?1 AND deleted=1)", [ACCOUNT])?;
     // A fast auto-review or a resolved request is no longer waiting: never post a stale question.
     conn.execute("UPDATE wrapper_notifications SET attempted=1 WHERE account_id=?1 AND attempted=0
         AND kind IN ('approval','form','secret') AND NOT EXISTS
-        (SELECT 1 FROM forms_requests q WHERE 'input:'||q.id=wrapper_notifications.id AND q.status='pending')", [ACCOUNT])?;
+        (SELECT 1 FROM forms_requests q WHERE q.id=substr(wrapper_notifications.id,7) AND q.status='pending')", [ACCOUNT])?;
     Ok(())
-}
-
-pub fn tick(ctx: &Context<'_>) {
-    let _ = (|| -> Result<(), ApiError> {
-        let tx = write_transaction(ctx.connection)?;
-        project(&tx, ctx.now_ms, false)?;
-        tx.commit()?;
-        Ok(())
-    })(); // Durable sources remain unclaimed on failure; next poll retries.
 }
 
 fn snapshot(conn: &Connection) -> Result<Value, ApiError> {
@@ -272,12 +287,16 @@ pub fn routes(
                     let visible = input.focused
                         && input.visible
                         && input.conversation_id.as_deref() == Some(&conversation);
-                    tx.execute("UPDATE wrapper_notifications SET attempted=1,unread=CASE WHEN ?3 THEN 0 ELSE unread END WHERE account_id=?1 AND id=?2",params![ACCOUNT,id,visible])?;
+                    if visible || !prefs.permits(&kind) {
+                        tx.execute("UPDATE wrapper_notifications SET attempted=1,unread=CASE WHEN ?3 THEN 0 ELSE unread END WHERE account_id=?1 AND id=?2",params![ACCOUNT,id,visible])?;
+                        continue;
+                    }
                     let now = crate::now();
                     let last: Option<u64> = tx.query_row("SELECT attempted_at FROM wrapper_notification_throttle WHERE account_id=?1 AND conversation_id=?2 AND kind=?3 AND title=?4",params![ACCOUNT,conversation,kind,title],|r|r.get(0)).optional()?;
                     if should_deliver(&prefs, &kind, visible, last, now) {
-                        // REA's 5 s throttle, durable across reloads. A routine failure
-                        // has its own channel, so success cannot suppress its alert.
+                        // Claim only when delivery is due. A distinct throttled event
+                        // remains pending across polls/restarts, unless read or resolved.
+                        tx.execute("UPDATE wrapper_notifications SET attempted=1 WHERE account_id=?1 AND id=?2", params![ACCOUNT,id])?;
                         tx.execute("INSERT INTO wrapper_notification_throttle VALUES (?1,?2,?3,?4,?5) ON CONFLICT(account_id,conversation_id,kind,title) DO UPDATE SET attempted_at=excluded.attempted_at",params![ACCOUNT,conversation,kind,title,now])?;
                         deliveries.push(json!({"id":id,"kind":kind,"conversation_id":conversation,"card_id":card,"title":title}));
                     }
@@ -298,30 +317,45 @@ pub fn routes(
     })())
 }
 
-pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
-    if kind != "notification_event" {
-        return None;
-    }
-    let (title,created_at):(String,u64)=ctx.connection.query_row("SELECT title,created_at FROM wrapper_notifications WHERE account_id=?1 AND card_id=?2 AND conversation_id=?3",params![ACCOUNT,id,ctx.conversation_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().ok()??;
-    Some(Message {
-        id: id.into(),
-        kind: "message".into(),
-        payload: json!({}),
-        role: "assistant",
-        body: title,
-        state: "echoed",
-        created_at,
-        error: None,
-        error_kind: None,
-        notice: None,
-        proposals: vec![],
-        attachments: vec![],
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reply_projection_uses_both_full_message_primary_key_lookups() {
+        let directory = std::env::temp_dir().join(format!(
+            "notification-plan-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        {
+            let app = App::open(&directory.join("workspace.sqlite")).unwrap();
+            let ctx = app.feature_context();
+            let mut statement=ctx.connection.prepare(&format!("EXPLAIN QUERY PLAN SELECT * FROM ({SOURCES}) src WHERE NOT EXISTS (SELECT 1 FROM wrapper_notifications n WHERE n.account_id=?1 AND n.id=src.id)")).unwrap();
+            let plan = statement
+                .query_map([ACCOUNT], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let lookups: Vec<_> = plan
+                .iter()
+                .filter(|line| line.contains("SEARCH m USING"))
+                .collect();
+            assert_eq!(lookups.len(), 2, "{plan:#?}");
+            assert!(
+                lookups.iter().all(
+                    |line| line.contains("account_id=? AND conversation_id=? AND message_id=?")
+                ),
+                "{plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.contains("SCAN m")),
+                "{plan:#?}"
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn every_kind_switch_dnd_focus_and_throttle_are_independent() {
         let prefs = Settings {

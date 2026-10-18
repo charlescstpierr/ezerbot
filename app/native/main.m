@@ -343,7 +343,8 @@
     }
     NSDictionary *event = body[@"event"];
     for (NSString *key in @[@"id", @"kind", @"conversation_id", @"card_id", @"title"]) {
-        if (![event[key] isKindOfClass:NSString.class] || [event[key] length] == 0 || [event[key] length] > 512) {
+        if (![event[key] isKindOfClass:NSString.class] ||
+            ([event[key] length] == 0 && ![key isEqualToString:@"card_id"]) || [event[key] length] > 512) {
             replyHandler(nil, @"Notification invalide."); return;
         }
     }

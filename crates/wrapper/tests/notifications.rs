@@ -95,6 +95,19 @@ impl Fixture {
     fn request(&self, id: &str, kind: &str) {
         self.conn.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json) VALUES (?1,'source',?1,?2,?3)", params![id,json!({"kind":kind,"name":"NE_JAMAIS_NOTIFIER_CE_SECRET"}).to_string(),json!({"target_conversation_id":self.conversation}).to_string()]).unwrap();
     }
+    fn routine(&self, id: &str, status: &str, run: Option<&str>) {
+        self.conn.execute("INSERT OR IGNORE INTO scheduler_routines(routine_id,bot_id,conversation_id,name,body,trigger,time_zone,enabled,origin,untrusted,schedule_version,modified_at,last_served_at,materialized_after,active_since) VALUES ('routine','grokbot',?1,'Routine','{}','{}','UTC',0,'user',0,1,0,NULL,0,0)",[&self.conversation]).unwrap();
+        self.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,run_id,reason) VALUES (?1,'routine',1,1000,?1,?2,?3,'failure')",params![id,status,run]).unwrap();
+    }
+    fn message_count(&self) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_messages WHERE conversation_id=?1",
+                [&self.conversation],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
     fn restart(&mut self) {
         self.app = App::open(&self.dir.join("workspace.sqlite")).unwrap();
     }
@@ -127,6 +140,24 @@ fn finished_reply_focus_click_and_replay() {
     assert_eq!(f.get()["unread"], 0);
     f.restart();
     assert_eq!(f.get()["unread"], 0);
+}
+
+#[test]
+fn engine_reply_anchor_uses_the_same_durable_key_without_the_submission_join() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.reply("group-turn");
+    f.conn
+        .execute(
+            "DELETE FROM wrapper_messages WHERE message_id='message-group-turn'",
+            [],
+        )
+        .unwrap();
+    f.conn.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,kind,created_at) VALUES ('local-workspace',?1,'group-turn','engine_reply',1000)",[&f.conversation]).unwrap();
+    let result = f.poll(false, false);
+    assert_eq!(result["deliveries"][0]["id"], "reply:group-turn");
+    assert_eq!(result["deliveries"][0]["card_id"], "reply-group-turn");
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
 }
 
 #[test]
@@ -206,19 +237,17 @@ fn routine_finished_failed_and_delegated_card_destinations() {
     f.settings(json!({"enabled":true}));
     f.reply("parent");
     // Real component schemas; no engine/network work is needed to exercise terminal projection.
-    f.conn.execute("INSERT INTO scheduler_routines(routine_id,bot_id,conversation_id,name,body,trigger,time_zone,enabled,origin,untrusted,schedule_version,modified_at,last_served_at,materialized_after,active_since) VALUES ('routine','grokbot',?1,'Routine','{}','{}','UTC',0,'user',0,1,0,NULL,0,0)",[&f.conversation]).unwrap();
-    for (id, status) in [("done", "done"), ("failed", "failed")] {
-        f.conn.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,manual_nonce,status,run_id,reason) VALUES (?1,'routine',1,1000,?1,?2,?3,'failure')",params![id,status,if status=="done" {Some("parent")} else {None}]).unwrap();
-    }
+    f.routine("done", "done", Some("parent"));
+    f.routine("failed", "failed", None);
     f.conn.execute("INSERT INTO delegation_graph VALUES ('child','parent','parent','grokbot','other',1,NULL,NULL,'{}',?1)",[json!({"status":"done","result":"NE_JAMAIS_AFFICHER"}).to_string()]).unwrap();
     let result = f.poll(false, false);
     let items = result["deliveries"].as_array().unwrap();
     assert!(items.iter().any(|item| item["kind"] == "routine"
         && item["title"] == "Routine terminée"
-        && item["card_id"] == "routine:done"));
+        && item["card_id"] == "reply-parent"));
     assert!(items
         .iter()
-        .any(|item| item["title"] == "Échec de la routine" && item["card_id"] == "routine:failed"));
+        .any(|item| item["title"] == "Échec de la routine" && item["card_id"] == ""));
     assert!(items.iter().any(|item| item["kind"] == "delegation"
         && item["card_id"] == "child"
         && item["conversation_id"] == f.conversation));
@@ -231,7 +260,7 @@ fn routine_finished_failed_and_delegated_card_destinations() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(cards, 2);
+    assert_eq!(cards, 0);
     f.restart();
     assert_eq!(f.poll(false, false)["deliveries"], json!([]));
     let cards2: i64 = f
@@ -242,7 +271,7 @@ fn routine_finished_failed_and_delegated_card_destinations() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(cards2, 2);
+    assert_eq!(cards2, 0);
     // Upgrading an existing workspace establishes a baseline without inserting
     // historical routine summaries into its transcript.
     f.conn
@@ -314,7 +343,7 @@ fn migration_baseline_deleted_target_and_invalid_input() {
 }
 
 #[test]
-fn throttle_keeps_distinct_events_unread_without_a_banner_storm() {
+fn throttle_defers_distinct_events_and_retries_after_restart_without_duplicates() {
     let mut f = Fixture::new();
     f.settings(json!({"enabled":true}));
     f.reply("first");
@@ -326,8 +355,16 @@ fn throttle_keeps_distinct_events_unread_without_a_banner_storm() {
     let result = f.poll(false, false);
     assert_eq!(result["deliveries"], json!([]));
     assert_eq!(result["unread"], 2);
+    let pending: bool = f
+        .conn
+        .query_row(
+            "SELECT attempted=0 FROM wrapper_notifications WHERE id='reply:rapid'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(pending);
     f.restart();
-    f.reply("after-restart");
     assert_eq!(f.poll(false, false)["deliveries"], json!([]));
     f.conn
         .execute(
@@ -335,11 +372,12 @@ fn throttle_keeps_distinct_events_unread_without_a_banner_storm() {
             [],
         )
         .unwrap();
-    f.reply("later");
-    assert_eq!(
-        f.poll(false, false)["deliveries"].as_array().unwrap().len(),
-        1
-    );
+    let retried = f.poll(false, false);
+    assert_eq!(retried["deliveries"].as_array().unwrap().len(), 1);
+    assert_eq!(retried["deliveries"][0]["id"], "reply:rapid");
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    f.restart();
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
 }
 
 #[test]
@@ -391,6 +429,116 @@ fn simulated_reply_end_to_end_and_second_client_cannot_redeliver() {
         .unwrap()
         .iter()
         .any(|m| m["id"] == "reply-real-send"));
+}
+
+#[test]
+fn routines_never_write_transcript_even_when_notifications_are_disabled() {
+    for enabled in [false, true] {
+        let mut f = Fixture::new();
+        f.settings(json!({"enabled":enabled}));
+        f.reply("existing-run");
+        let before = f.message_count();
+        f.routine("done", "done", Some("existing-run"));
+        f.routine("failed-before-run", "failed", None);
+        f.poll(false, false);
+        f.restart();
+        f.poll(false, false);
+        assert_eq!(f.message_count(), before);
+        let open = f.post(
+            "/api/notifications/open",
+            json!({"id":"routine:failed-before-run"}),
+        );
+        assert_eq!(open["card_id"], "");
+        assert_eq!(open["conversation_id"], f.conversation);
+    }
+}
+
+#[test]
+fn upgrade_removes_only_old_notification_bubbles_and_repairs_clicks() {
+    let mut f = Fixture::new();
+    f.routine("pre-run", "failed", None);
+    f.get();
+    f.conn.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,created_at,kind) VALUES ('local-workspace',?1,'routine:pre-run',1000,'notification_event')",[&f.conversation]).unwrap();
+    f.conn.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,created_at,kind) VALUES ('local-workspace',?1,'genuine',1000,'message')",[&f.conversation]).unwrap();
+    f.conn.execute_batch("DELETE FROM component_versions WHERE component='wrapper.notifications'; UPDATE wrapper_notifications SET card_id='routine:pre-run' WHERE kind='routine'").unwrap();
+    f.restart();
+    assert_eq!(f.message_count(), 1);
+    assert_eq!(
+        f.conn
+            .query_row(
+                "SELECT kind FROM wrapper_messages WHERE message_id='genuine'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "message"
+    );
+    assert_eq!(
+        f.post("/api/notifications/open", json!({"id":"routine:pre-run"}))["card_id"],
+        ""
+    );
+    f.restart();
+    assert_eq!(f.message_count(), 1);
+}
+
+#[test]
+fn resolved_throttled_request_is_not_delivered_later() {
+    let mut f = Fixture::new();
+    f.settings(json!({"enabled":true}));
+    f.request("first", "approval");
+    assert_eq!(
+        f.poll(false, false)["deliveries"].as_array().unwrap().len(),
+        1
+    );
+    f.request("second", "approval");
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+    f.conn
+        .execute(
+            "UPDATE forms_requests SET status='denied' WHERE id='second'",
+            [],
+        )
+        .unwrap();
+    f.conn
+        .execute(
+            "UPDATE wrapper_notification_throttle SET attempted_at=0",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.poll(false, false)["deliveries"], json!([]));
+}
+
+#[test]
+fn thousand_turns_are_indexed_incremental_and_not_projected_on_host_ticks() {
+    let mut f = Fixture::new();
+    for n in 0..1000 {
+        f.reply(&format!("history-{n}"));
+    }
+    grokbot_wrapper::features::notifications::tick(&f.app.feature_context());
+    assert_eq!(
+        f.conn
+            .query_row("SELECT count(*) FROM wrapper_notifications", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let start = std::time::Instant::now();
+    let first = f.poll(false, false);
+    let elapsed = start.elapsed();
+    eprintln!("1000 tours, poll froid : {elapsed:?}");
+    assert_eq!(first["unread"], 1000);
+    // The exact indexed plan is also asserted in the module unit test. This
+    // generous ceiling catches the former >1s quadratic query without flaky 50ms CI.
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "poll: {elapsed:?}"
+    );
+    f.conn.execute_batch("CREATE TRIGGER never_reinsert BEFORE INSERT ON wrapper_notifications WHEN EXISTS(SELECT 1 FROM wrapper_notifications WHERE account_id=NEW.account_id AND id=NEW.id) BEGIN SELECT RAISE(ABORT,'historical source reinserted'); END").unwrap();
+    let warm = std::time::Instant::now();
+    f.poll(false, false);
+    eprintln!("1000 tours, poll chaud : {:?}", warm.elapsed());
+    // A new source is still admitted despite the incremental historical filter.
+    f.reply("new-source");
+    assert_eq!(f.poll(false, false)["unread"], 1001);
 }
 
 #[test]

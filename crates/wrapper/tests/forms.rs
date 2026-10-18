@@ -33,6 +33,8 @@ use std::{
 #[path = "support/skill_proposals_cases.rs"]
 mod skill_proposals_cases;
 
+// This SQL-only fake must not collide with the real filesystem tool/preview.
+const GUARDED_TOOL: &str = "test_protected_write";
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Fixture {
     app: App,
@@ -122,10 +124,13 @@ impl Fixture {
         self.request("form", "request_form", form_args())
     }
     fn approval_for(&self, run: &str, call_id: &str, args: Value) -> HumanInputRequest {
+        self.approval_call(run, &guarded_call(call_id, args))
+    }
+    fn approval_call(&self, run: &str, call: &ToolCall) -> HumanInputRequest {
         let run = store::required(&self.conn, run).unwrap();
         let tx = features::write_transaction(&self.conn).unwrap();
         let ctx = tool_context(&self.app, &tx, &run);
-        let cause = forms::request_tool_approval(&ctx, &run, &guarded_call(call_id, args)).unwrap();
+        let cause = forms::request_tool_approval(&ctx, &run, call).unwrap();
         let SuspendCause::HumanInput { id } = cause else {
             panic!("not human input")
         };
@@ -205,7 +210,7 @@ fn form_args() -> Value {
 fn guarded_call(id: &str, args: Value) -> ToolCall {
     ToolCall {
         call_id: id.into(),
-        name: "write_file".into(),
+        name: GUARDED_TOOL.into(),
         arguments: args,
     }
 }
@@ -241,7 +246,7 @@ impl RunServices for Services<'_> {
     fn tools(&self) -> Vec<ToolSpec> {
         let mut tools = features::tools();
         tools.push(ToolSpec {
-            name: "write_file".into(),
+            name: GUARDED_TOOL.into(),
             description: "Test guarded action".into(),
             schema: json!({"type":"object"}),
             requires_approval: true,
@@ -254,7 +259,7 @@ impl RunServices for Services<'_> {
         run: &Run,
         call: &ToolCall,
     ) -> EngineResult<ToolOutcome> {
-        if call.name == "write_file" {
+        if call.name == GUARDED_TOOL {
             conn.execute(
                 "INSERT INTO test_protected_effects(call_id,arguments) VALUES (?1,?2)",
                 params![call.call_id, call.arguments.to_string()],
@@ -528,7 +533,7 @@ fn approval_for_modified_args_is_refused() {
     let mut f = Fixture::new();
     let args = json!({"path":"safe","content":"hello"});
     let request = f.approval("approval", args.clone());
-    let modified = json!({"entry_id":request.entry_id,"submission_id":"allow","conversation_id":f.conversation,"decision":"allow_once","tool":"write_file","arguments":{"path":"unsafe","content":"hello"}});
+    let modified = json!({"entry_id":request.entry_id,"submission_id":"allow","conversation_id":f.conversation,"decision":"allow_once","tool":GUARDED_TOOL,"arguments":{"path":"unsafe","content":"hello"}});
     assert_eq!(
         f.app
             .api(
@@ -559,7 +564,7 @@ fn approval_for_modified_args_is_refused() {
 #[test]
 fn guarded_tool_allow_once_resumes_the_original_call_and_executes_once() {
     let mut f = Fixture::new();
-    let request = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
+    let request = f.suspended_request("run", "guarded", GUARDED_TOOL, json!({"path":"safe"}));
     assert!(request.id.starts_with("approval:"));
     assert_eq!(
         store::required(&f.conn, "run").unwrap().status,
@@ -590,7 +595,7 @@ fn guarded_tool_allow_once_resumes_the_original_call_and_executes_once() {
 fn denied_expired_and_cancelled_approvals_resume_without_effect_or_new_request() {
     for decision in ["deny", "expiry", "cancel"] {
         let mut f = Fixture::new();
-        let request = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
+        let request = f.suspended_request("run", "guarded", GUARDED_TOOL, json!({"path":"safe"}));
         match decision {
             "deny" => {
                 f.decide(&request, "deny", json!("deny"));
@@ -626,7 +631,7 @@ fn auto_review_before_real_gate_suspension_is_wakeable() {
     let mut f = Fixture::new();
     let first = f.approval("first", json!({"path":"one"}));
     f.decide(&first, "always", json!({"always_allow":{"scope":"global"}}));
-    let gateway = ScriptedGateway::call("guarded", "write_file", json!({"path":"two"}));
+    let gateway = ScriptedGateway::call("guarded", GUARDED_TOOL, json!({"path":"two"}));
     let progress = run_loop::run(
         &f.conn,
         &gateway,
@@ -659,7 +664,7 @@ fn hidden_worker_inputs_all_route_to_principal_and_wake_the_originating_run() {
         json!({"id":"child","name":"Child","color":"cyan","description":"","instructions":""}),
     );
     for kind in ["task", "routine"] {
-        for name in ["request_form", "request_secret", "write_file"] {
+        for name in ["request_form", "request_secret", GUARDED_TOOL] {
             let run = format!("{kind}-{name}");
             let conversation = format!("conversation-{run}");
             f.conn.execute("INSERT INTO wrapper_conversations(account_id,id,title,bot_id,kind,parent_id,created_at,updated_at) VALUES ('local-workspace',?1,'Worker','child',?2,?3,1,1)",params![conversation,kind,f.conversation]).unwrap();
@@ -673,7 +678,7 @@ fn hidden_worker_inputs_all_route_to_principal_and_wake_the_originating_run() {
             assert_eq!(request.route.target_bot_id, "grokbot");
             assert_eq!(request.route.target_conversation_id, f.conversation);
             assert_eq!(request.route.requesting_bot_id, "child");
-            if name == "write_file" {
+            if name == GUARDED_TOOL {
                 let forged = json!({"entry_id":request.entry_id,"submission_id":"deny","conversation_id":conversation,"decision":"deny"});
                 assert_eq!(
                     f.app
@@ -722,8 +727,16 @@ fn approval_card_shows_exact_action_with_secret_values_redacted_before_persisten
     let mut f = Fixture::new();
     let vault = forms::vault(&f.app.feature_context()).unwrap();
     vault.set("TOKEN", "purpose", "secret-token-value").unwrap();
-    let args = json!({"path":"/etc/hosts","content":"secret-token-value"});
-    let request = f.approval("preview", args.clone());
+    let path = f.directory.join("preview.txt");
+    let args = json!({"path":path,"content":"secret-token-value"});
+    let request = f.approval_call(
+        "run",
+        &ToolCall {
+            call_id: "preview".into(),
+            name: "write_file".into(),
+            arguments: args.clone(),
+        },
+    );
     assert_eq!(
         match &request.kind {
             grokbot_forms::requests::InputKind::Approval { args_digest, .. } => args_digest.clone(),
@@ -742,10 +755,14 @@ fn approval_card_shows_exact_action_with_secret_values_redacted_before_persisten
     assert!(!stored.contains("secret-token-value"));
     vault.remove("TOKEN").unwrap(); // old value must stay redacted after removal
     let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let display = &state["forms"]["requests"][0]["arguments"];
+    assert_eq!(display["path"], json!(path));
+    assert_eq!(display["content"], "[...]");
     assert_eq!(
-        state["forms"]["requests"][0]["arguments"],
-        json!({"path":"/etc/hosts","content":"[...]"})
+        display["apercu_local"]["extrait"],
+        "@@ -0,0 +1,1 @@\n+[...]\n"
     );
+    assert_eq!(display["apercu_local"]["lignes_ajoutees"], 1);
     let main = state["conversations"]
         .as_array()
         .unwrap()
@@ -754,7 +771,7 @@ fn approval_card_shows_exact_action_with_secret_values_redacted_before_persisten
         .unwrap();
     assert_eq!(
         main["messages"][0]["payload"]["arguments"]["path"],
-        "/etc/hosts"
+        json!(path)
     );
 }
 
@@ -774,7 +791,7 @@ fn always_permissions_survive_restart_and_can_be_revoked_without_cancelling_gran
     ));
     let admitted = f.approval("admitted", json!({"path":"three"}));
     assert!(matches!(admitted.status, RequestStatus::Resolved { .. }));
-    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"write_file","args_digest":"","scope":"global"}));
+    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":GUARDED_TOOL,"args_digest":"","scope":"global"}));
     assert_eq!(response, json!({"rules":[]}));
     assert!(matches!(
         f.check("admitted", json!({"path":"three"})),
@@ -799,8 +816,8 @@ fn never_subject_permission_can_be_retired_for_future_calls() {
         f.check("next", args.clone()),
         ApprovalCheck::Denied { .. }
     ));
-    let digest = approvals::args_digest("write_file", &args).unwrap();
-    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"write_file","args_digest":digest,"scope":"subject"}));
+    let digest = approvals::args_digest(GUARDED_TOOL, &args).unwrap();
+    let response = f.post("/api/approvals/rules/revoke",json!({"requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":GUARDED_TOOL,"args_digest":digest,"scope":"subject"}));
     assert_eq!(response, json!({"rules":[]}));
     assert_eq!(f.check("next", args.clone()), ApprovalCheck::Ask);
     assert_eq!(
@@ -864,7 +881,7 @@ fn cancellation_is_per_card_and_idempotent() {
 #[test]
 fn expiration_rolls_back_on_wake_failure_and_preserves_granted_history() {
     let mut f = Fixture::new();
-    let pending = f.suspended_request("run", "guarded", "write_file", json!({"path":"safe"}));
+    let pending = f.suspended_request("run", "guarded", GUARDED_TOOL, json!({"path":"safe"}));
     f.conn.execute_batch("CREATE TRIGGER fail_wake BEFORE INSERT ON engine_run_wakes BEGIN SELECT RAISE(ABORT,'wake failure'); END").unwrap();
     f.app.tick(u64::MAX);
     assert_eq!(
@@ -892,7 +909,7 @@ fn expiration_rolls_back_on_wake_failure_and_preserves_granted_history() {
             conn,
             &granted.id,
             "next",
-            "write_file",
+            GUARDED_TOOL,
             &json!({"path":"one"}),
             i64::MAX,
         )
@@ -1042,7 +1059,7 @@ fn reserved_submission_ids_and_model_resolution_tools_cannot_approve() {
         .invoke_tool(
             "grokbot",
             "request_approval",
-            json!({"tool":"write_file","arguments":{}})
+            json!({"tool":GUARDED_TOOL,"arguments":{}})
         )
         .is_err());
     assert!(features::tools()

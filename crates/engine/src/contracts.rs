@@ -144,7 +144,8 @@ pub struct ApprovalRoute {
 /// Denied never executes. Check the existing (run_id, call_id, canonical digest)
 /// decision first: pending -> Ask; denied/expired/cancelled -> Denied, not another
 /// request. Authorized applies only to this tool/argument digest. Consume AllowOnce
-/// inside the same caller transaction as the check, tool effect and result event.
+/// inside the same caller transaction as the check and internal effect/result,
+/// or the durable admission record for a non-replayable external effect.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ApprovalCheck {
@@ -156,6 +157,9 @@ pub enum ApprovalCheck {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthorizedBy {
+    FolderGrant {
+        path: String,
+    },
     AllowOnce {
         request_id: String,
     },

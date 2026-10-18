@@ -369,7 +369,7 @@ fn create_request(
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
     // Defense in depth if a standing rule appears between gate check and request.
     if approval
-        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool))
+        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool) || super::local::is_read(tool))
     {
         if let Some(receipt) =
             approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
@@ -418,11 +418,14 @@ pub fn request_tool_approval(
 ) -> Result<SuspendCause, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
     if existing_request(ctx, &id, &digest)?.is_none() {
-        let display = if call.name == "propose_skill" {
+        let mut display = if call.name == "propose_skill" {
             super::skills::proposal_display(ctx, call)?
         } else {
             call.arguments.clone()
         };
+        if let Some(preview) = super::local::approval_preview(ctx, call)? {
+            display["apercu_local"] = preview;
+        }
         create_request(
             ctx,
             run,
@@ -443,9 +446,24 @@ pub fn request_tool_approval(
     Ok(SuspendCause::HumanInput { id })
 }
 
+/// Read-only policy lookup for approval previews: a folder grant must not
+/// silently override a standing denial while obtaining the old file's bytes.
+pub(super) fn read_is_denied(ctx: &Context<'_>, call: &ToolCall) -> Result<bool, ApiError> {
+    let route = ApprovalRoute {
+        requesting_bot_id: ctx.bot_id.unwrap_or(DEFAULT_BOT.id).into(),
+        target_bot_id: DEFAULT_BOT.id.into(),
+        target_conversation_id: ctx.conversation_id.unwrap_or("").into(),
+    };
+    Ok(matches!(
+        rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?,
+        Some((false, _))
+    ))
+}
+
 /// RunServices::check_approval adapter. Existing per-call terminal decisions take
-/// precedence over standing rules. Admission/consumption, protected effect and
-/// ToolResult must commit in the SAME caller-owned IMMEDIATE transaction.
+/// precedence over standing rules. For internal tools, admission/consumption,
+/// effect and ToolResult share one IMMEDIATE transaction. External tools consume
+/// with a durable dispatch claim first, then perform outside SQLite without replay.
 pub fn check_tool_approval(
     ctx: &Context<'_>,
     run: &Run,
@@ -507,24 +525,37 @@ pub fn check_tool_approval(
             },
         });
     }
-    // Standing rules are bot-scoped, not conversation-scoped. A successful
-    // auto-admission must not create an otherwise unused "Approbations" chat.
+    // Standing rules are bot-scoped. A legacy read-denial still wins over a
+    // folder grant; read-allow rules never bypass the individual-card boundary.
     let route = ApprovalRoute {
         requesting_bot_id: run.bot_id.clone(),
         target_bot_id: DEFAULT_BOT.id.into(),
         target_conversation_id: run.conversation_id.clone(),
     };
-    Ok(
-        match rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)? {
-            Some((true, rule_id)) => ApprovalCheck::Authorized {
-                by: AuthorizedBy::Rule { rule_id },
-            },
-            Some((false, _)) => ApprovalCheck::Denied {
-                reason: "Une autorisation permanente refuse cette action.".into(),
+    let standing = rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?;
+    if matches!(standing, Some((false, _))) {
+        return Ok(ApprovalCheck::Denied {
+            reason: "Une autorisation permanente refuse cette action.".into(),
+        });
+    }
+    if super::local::is_read(&call.name) {
+        return Ok(match super::local::granted(ctx, call)? {
+            Some(path) => ApprovalCheck::Authorized {
+                by: AuthorizedBy::FolderGrant { path },
             },
             None => ApprovalCheck::Ask,
+        });
+    }
+    // A successful auto-admission must not create an unused approval chat.
+    Ok(match standing {
+        Some((true, rule_id)) => ApprovalCheck::Authorized {
+            by: AuthorizedBy::Rule { rule_id },
         },
-    )
+        Some((false, _)) => ApprovalCheck::Denied {
+            reason: "Une autorisation permanente refuse cette action.".into(),
+        },
+        None => ApprovalCheck::Ask,
+    })
 }
 
 /// Defense in depth for MCP's external effects. Only a grant consumed for this

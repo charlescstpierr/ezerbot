@@ -87,6 +87,7 @@ pub mod conversations;
 pub mod delegation;
 pub mod engine;
 pub mod forms;
+pub mod local;
 pub mod mcp;
 pub mod memory;
 pub mod memory_auto;
@@ -133,7 +134,8 @@ registry!(
     attachments,
     mcp,
     storage,
-    notifications
+    notifications,
+    local
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

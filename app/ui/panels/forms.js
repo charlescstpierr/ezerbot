@@ -261,7 +261,7 @@
       const botName = state.bots?.find((bot) => bot.id === rule.route.requesting_bot_id)?.name || rule.route.requesting_bot_id;
       const server = state.mcp?.servers?.find((s) => s.tools.some((t) => t.namespace === rule.tool) || [`mcp_start_${s.id}`, `mcp_remove_${s.id}`].includes(rule.tool));
       const tool = server?.tools.find((t) => t.namespace === rule.tool)?.name || (rule.tool.startsWith("mcp_start_") ? "Démarrer / redémarrer" : "Supprimer le connecteur");
-      const toolName = server ? `${server.name} · ${tool}` : rule.tool;
+      const toolName = server ? `${server.name} · ${tool}` : window.GrokbotLocalUi?.toolLabel(rule.tool) || rule.tool;
       description.textContent = `${botName} · ${toolName} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
       const remove = document.createElement("button");
       remove.type = "button";
@@ -284,6 +284,12 @@
       });
       row.append(description, remove);
       settings.append(row);
+      if (toolLabel !== rule.tool) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary"); summary.textContent = "Détails techniques";
+        const code = document.createElement("code"); code.textContent = `${rule.tool} · ${rule.args_digest}`;
+        details.append(summary, code); settings.append(details);
+      }
     }
     reviewEditor(state);
   }

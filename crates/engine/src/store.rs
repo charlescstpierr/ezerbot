@@ -67,6 +67,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL, after_seq INTEGER NOT NULL,
             UNIQUE(run_id, cause, reference)
         );
+        CREATE TABLE IF NOT EXISTS engine_external_tools (
+            run_id TEXT NOT NULL REFERENCES engine_runs(run_id), call_id TEXT NOT NULL,
+            authorized_by TEXT, outcome TEXT, PRIMARY KEY(run_id,call_id)
+        );
         CREATE INDEX IF NOT EXISTS engine_wakes_pending ON engine_run_wakes(state);
         INSERT INTO component_versions(component, version) VALUES ('engine', 1)
             ON CONFLICT(component) DO NOTHING;",

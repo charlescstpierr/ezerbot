@@ -1,4 +1,6 @@
 import { useState, useSyncExternalStore } from "react";
+import { localCallView, localStatusLabel, localFailureView, localLimits, localToolLabel } from "../local-call.js";
+import { LocalResult } from "../local-result.js";
 
 export const kind = "tool";
 
@@ -68,7 +70,33 @@ function openConnectors() {
   });
 }
 
-export function Card({ message }) {
+function LocalCard({ message, run, onAction, busy }) {
+  const { call, outcome, authorized_by: authority, approval_status: approvalStatus, run_status: storedStatus } = message.payload;
+  const output = outcome?.output;
+  const runStatus = run?.status && run.status !== "ended" ? run.status : storedStatus || run?.status;
+  const { args, preview, shellArguments } = localCallView(call);
+  const pending = !outcome && !["ended", "finished", "cancelled", "failed"].includes(runStatus);
+  if (!outcome && runStatus === "awaiting_approval") return <article className="gb-message gb-engine-card gb-local-card gb-local-waiting" data-message-id={message.id} data-card-kind="tool"><p>Accord requis dans la carte d’approbation.</p></article>;
+  const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approvalStatus, runStatus) : null;
+  const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
+  const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé"].includes(output?.status) ? "warning" : outcome ? "success" : "neutral");
+  return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || ""}>
+    <div className="gb-local-header"><strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
+    {authority?.kind === "rule" && <p>Autorisée automatiquement par une règle « Toujours » (Paramètres › Autorisations permanentes).</p>}
+    {authority?.kind === "folder_grant" && <p>Lecture autorisée dans un dossier accordé.</p>}
+    <pre className="gb-local-command">{typeof (call.name === "run_shell" ? args.command : args.path) === "string" ? preview : "Paramètres de l’action indisponibles ou invalides."}</pre>
+    {failure && <p className="gb-local-failure" data-tone={failure.tone} role={failure.tone === "warning" ? "alert" : "status"}>{failure.message}</p>}
+    {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
+    {pending && <button type="button" className="gb-retry" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
+    {output?.exit_code != null && <p>Code de sortie : {output.exit_code}</p>}
+    {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
+    {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}
+    {output?.output_incomplete && <p>Sortie incomplète : la collecte a été arrêtée pour ne pas bloquer l’annulation.</p>}
+    {outcome && <details><summary>{failure ? "Afficher les détails" : "Afficher la sortie"}</summary>{failure ? <Data value={call.arguments} /> : call.name === "run_shell" ? <><h4>Sortie standard</h4><Data value={output.stdout || "(vide)"} /><h4>Erreurs</h4><Data value={output.stderr || "(vide)"} /></> : <LocalResult name={call.name} output={output} arguments={args} />}</details>}
+  </article>;
+}
+
+export function Card({ message, onAction, busy }) {
   const view = useEngine();
   const { run_id: runId, call, outcome, connector, authorized_by, requesting_bot, approval_status } = message.payload || {};
   // These calls already have a dedicated, user-facing decision/status card.
@@ -77,6 +105,7 @@ export function Card({ message }) {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Appel d’outil indisponible.</article>;
   }
   const run = view?.run(runId);
+  if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);
   let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
   const decisionLabels = { denied: "Refusé", cancelled: "Annulé", expired: "Approbation expirée" };

@@ -223,13 +223,13 @@ test("secret cards warn about current fallback without claiming that a historica
     } finally { delete globalThis.window; }
   }
 });
-function card(status, decision, args = { path: "~/Documents/projets/notes.txt" }, pending = false) {
+function card(status, decision, args = { path: "~/Documents/projets/notes.txt" }, pending = false, tool = "test_read_resource") {
   globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
   try {
     return renderToStaticMarkup(React.createElement(Card, { message: {
       id: "approval-test", kind: "approval", payload: {
         entry_id: "approval-test", status: { status }, route: { requesting_bot_id: "grokbot" },
-        kind: { kind: "approval", tool: "read_file", expires_at: Date.now() + 60000 }, arguments: args,
+        kind: { kind: "approval", tool, expires_at: Date.now() + 60000 }, arguments: args,
         review: { pending, started_at: Date.now(), answer: { decision, reason: "Cette action correspond à votre règle." } },
       },
     } }));
@@ -247,6 +247,15 @@ test("automatic allow and deny both expose the redacted target plus an expandabl
     assert.equal(html.includes("gb-status-alert"), status === "denied");
   }
   assert.ok(card("resolved", "allow", null).includes("Aperçu de l’action indisponible."));
+});
+
+test("local cards combine reviewer status, exact action and protected preview without automatic framing", () => {
+  const read = { path: "/tmp/app/identifiants.json", apercu_local: { donnees_ezerbot: true, cible_reelle: "/tmp/app/identifiants.json" } };
+  const html = card("pending", "ask", read, false, "read_file");
+  for (const text of ["Relecteur : ", "Lecture : ", "identifiants, historique", "Autoriser une fois", "/tmp/app/identifiants.json"]) assert.ok(html.includes(text));
+  const command = card("pending", "ask", {command:"printf bonjour",cwd:"/tmp"}, false, "run_shell");
+  assert.ok(command.includes("Relecteur : "));assert.ok(command.includes("printf bonjour"));
+  assert.ok(!card("resolved", "allow", read, false, "read_file").includes("Approuvé automatiquement"));
 });
 
 test("human fallback is attributed to the reviewer; pending review has decorative progress without disabling decisions", () => {

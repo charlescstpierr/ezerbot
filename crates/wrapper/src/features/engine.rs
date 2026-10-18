@@ -1411,6 +1411,15 @@ impl RunServices for Services<'_> {
         tools.extend(super::mcp::scoped_tools(&ctx));
         tools
     }
+    fn tools_for_run(&self, run: &Run) -> Vec<ToolSpec> {
+        self.tools()
+            .into_iter()
+            .filter(|s| {
+                !super::local::is_tool(&s.name)
+                    || super::local::enabled(self.connection, &run.bot_id, &s.name)
+            })
+            .collect()
+    }
     fn call_tool(
         &mut self,
         conn: &Connection,
@@ -1454,13 +1463,59 @@ impl RunServices for Services<'_> {
     ) -> grokbot_engine::contracts::Result<ToolOutcome> {
         self.call_tool(conn, run, call)
     }
+    fn is_journaled_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
+        super::local::is_tool(&call.name)
+    }
+    fn external_unavailable_reason(
+        &self,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> Option<String> {
+        super::local::validate(&self.ctx(self.connection, run), call)
+            .err()
+            .map(|e| e.message)
+    }
+    fn call_journaled_external_tool(
+        &mut self,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+    ) -> ToolOutcome {
+        let outcome =
+            super::local::execute(&self.ctx(self.connection, run), call, self.cancel.clone());
+        // No private vault values may leak through command/file output.
+        match vault(self.path)
+            .and_then(|v| redact::redact_value(&v, &serde_json::to_value(outcome)?))
+            .and_then(|value| Ok(serde_json::from_value(value)?))
+        {
+            Ok(outcome) => outcome,
+            Err(_) => ToolOutcome::Failed {
+                reason: "Sortie locale indisponible.".into(),
+            },
+        }
+    }
     fn check_approval(
         &mut self,
         conn: &Connection,
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> grokbot_engine::contracts::Result<ApprovalCheck> {
-        super::forms::check_tool_approval(&self.ctx(conn, run), run, call).map_err(engine_error)
+        if super::local::is_tool(&call.name) {
+            if let Err(error) = super::local::validate(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
+        let decision = super::forms::check_tool_approval(&self.ctx(conn, run), run, call)
+            .map_err(engine_error)?;
+        if call.name == "write_file" && matches!(decision, ApprovalCheck::Ask) {
+            if let Err(error) = super::local::approval_preview(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
+        Ok(decision)
     }
     fn request_approval(
         &mut self,
@@ -2499,7 +2554,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == call_id);
     let call = serde_json::from_value::<grokbot_engine::contracts::ToolCall>(event.payload.clone())
         .ok()?;
-    let admission = result
+    let mut admission = result
         .as_ref()
         .and_then(|e| e.payload.get("authorized_by"))
         .cloned()
@@ -2516,19 +2571,43 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             params![ACCOUNT, run.bot_id],
             |r| r.get(0),
         )
-        .unwrap_or(run.bot_id);
+        .unwrap_or_else(|_| run.bot_id.clone());
+    let mut outcome = result.as_ref().map(|e| e.payload["outcome"].clone());
+    // A cancellation settles the engine call immediately, but the process owner
+    // may finish draining its bounded output a few milliseconds later.
+    if event.payload["name"]
+        .as_str()
+        .is_some_and(super::local::is_tool)
+    {
+        let stored: Option<(Option<String>,Option<String>)> = ctx
+            .connection
+            .query_row(
+                "SELECT outcome,authorized_by FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
+                params![run_id, call_id],
+                |r| Ok((r.get(0)?,r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some((stored, authority)) = stored {
+            if let Some(value) = stored.and_then(|s| serde_json::from_str(&s).ok()) {
+                outcome = Some(value);
+            }
+            if let Some(value) = authority.and_then(|s| serde_json::from_str(&s).ok()) {
+                admission = Some(value);
+            }
+        }
+    }
     let mut display_call = event.payload;
     if display_call["name"] == "propose_skill" {
-        // This call has its own approval card with lazy historical content.
-        // Keep canonical arguments in engine events, never duplicate them into
-        // every conversation/state projection of a hidden technical tool row.
+        // Keep canonical skill content in its lazy approval, not every state row.
         display_call.as_object_mut()?.remove("arguments");
     }
     Some(card(
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"call":display_call,"outcome":result.as_ref().map(|e|&e.payload["outcome"]),
+        json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome,
             "authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),

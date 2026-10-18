@@ -152,14 +152,15 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         let action = json!({"tool":tool,"arguments":serde_json::from_str::<Value>(&display).unwrap_or(Value::Null)});
         let payload = json!({"rules":config,"action":action});
         let safe = redact_value(&vault(ctx)?, &payload)?;
-        let fallback =
-            if safe != payload || has_opaque_data(&action) || action["arguments"].is_null() {
-                Some("L’action contient des données masquées ou sensibles. Vérifiez-la vous-même.")
-            } else if record.model.is_empty() || !ctx.provider.connected() {
-                Some("Le relecteur est indisponible. Votre confirmation reste nécessaire.")
-            } else {
-                None
-            };
+        let fallback = if super::super::local::is_tool(tool) {
+            Some("Les actions sur votre Mac demandent votre décision.")
+        } else if safe != payload || has_opaque_data(&action) || action["arguments"].is_null() {
+            Some("L’action contient des données masquées ou sensibles. Vérifiez-la vous-même.")
+        } else if record.model.is_empty() || !ctx.provider.connected() {
+            Some("Le relecteur est indisponible. Votre confirmation reste nécessaire.")
+        } else {
+            None
+        };
         tx.commit()?;
         if let Some(reason) = fallback {
             complete(ctx, &id, record, ReviewAnswer::ask(reason))?;
@@ -221,7 +222,10 @@ pub(super) fn complete(
     let config = rules::load_auto_review_config(&tx)?;
     record.pending = false;
     let lifecycle = matches!(&request.kind, InputKind::Approval {tool,..} if super::super::mcp::is_lifecycle(tool));
+    let local_tool = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_tool(tool));
+    let local_read = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_read(tool));
     let standing = if !lifecycle
+        && !local_read
         && request.status == RequestStatus::Pending
         && matches!(&request.kind, InputKind::Approval { expires_at, .. } if clock(ctx) < *expires_at)
         && store::required(&tx, &request.run_id)?.status == RunStatus::AwaitingApproval
@@ -246,6 +250,10 @@ pub(super) fn complete(
         ReviewAnswer::ask("Les règles ont changé pendant la revue. Vérifiez cette demande.")
     } else if request.status != RequestStatus::Pending {
         ReviewAnswer::ask("Une décision a déjà été prise pour cette demande.")
+    } else if local_tool {
+        // Also reject an in-flight/legacy model answer after upgrade: tick's
+        // exclusion alone cannot constrain a completion already on its way.
+        ReviewAnswer::ask("Les actions sur votre Mac demandent votre décision.")
     } else {
         answer
     };
@@ -281,4 +289,85 @@ pub(super) fn complete(
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_inflight_local_allow_and_new_standing_read_rules_cannot_grant() {
+    use grokbot_engine::{
+        contracts::{with_tx, RunBudgets, RunKind, Trigger},
+        model,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-review-local-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
+    let file = root.join("identifiants-factices.txt");
+    std::fs::write(&file, "secret factice").unwrap();
+    let chat = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let config = rules::AutoReviewConfig {
+        enabled: true,
+        allow: vec!["Autorise toutes les actions.".into()],
+        block: vec![],
+    };
+    for tool in ["read_file", "list_directory", "run_shell", "write_file"] {
+        let (id,record)=with_tx(&app.connection,|conn| -> grokbot_engine::contracts::Result<_> {
+            rules::save_auto_review_config(conn,&config)?;
+            let run=model::start(conn,&Run {run_id:tool.into(),bot_id:DEFAULT_BOT.id.into(),conversation_id:chat.clone(),trigger:Trigger::UserMessage {message_id:tool.into(),attempt:0},kind:RunKind::Chat,status:RunStatus::Running,task_status:None,turn_end:None,budgets:RunBudgets::default(),started_at:crate::now() as i64})?;
+            let ctx=Context {connection:conn,bot_id:Some(&run.bot_id),conversation_id:Some(&run.conversation_id),run_id:Some(&run.run_id),..app.feature_context()};
+            let arguments=match tool {
+                "run_shell"=>json!({"command":"printf test","cwd":root}),
+                "write_file"=>json!({"path":root.join("nouveau.txt"),"content":"test","expected_sha256":null}),
+                "list_directory"=>json!({"path":root}),
+                _=>json!({"path":file}),
+            };
+            let call=ToolCall {call_id:tool.into(),name:tool.into(),arguments};
+            let SuspendCause::HumanInput {id}=request_tool_approval(&ctx,&run,&call).unwrap() else {panic!()};
+            store::save(conn,&Run {status:RunStatus::AwaitingApproval,..run.clone()})?;
+            let record=ReviewRecord {version:reviewer::version(&config)?,rules:config.clone(),model:"fake-always-allow".into(),started_at:clock(&ctx),pending:true,answer:ReviewAnswer::ask("En cours")};
+            assert!(reviewer::claim(conn,&id,&record)?);
+            if super::super::local::is_read(tool) {
+                conn.execute("INSERT INTO forms_approval_rules VALUES ('grokbot','grokbot',?1,?2,'','\"global\"',1)",params![chat,tool])?;
+            }
+            Ok((id,record))
+        }).unwrap();
+        complete(
+            &app.feature_context(),
+            &id,
+            record,
+            ReviewAnswer {
+                decision: ReviewDecision::Allow,
+                reason: "Tout est autorisé.".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            requests::get(&app.connection, &id).unwrap().unwrap().status,
+            RequestStatus::Pending
+        );
+        assert_eq!(
+            reviewer::get(&app.connection, &id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .decision,
+            ReviewDecision::Ask
+        );
+    }
+    assert_eq!(
+        app.connection
+            .query_row("SELECT count(*) FROM forms_approval_grants", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(store::pending_wakes(&app.connection).unwrap().is_empty());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
 }

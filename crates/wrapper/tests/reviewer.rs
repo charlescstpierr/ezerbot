@@ -110,7 +110,8 @@ impl Fixture {
         };
         let call = ToolCall {
             call_id: format!("call-{id}"),
-            name: "read_file".into(),
+            // Generic SQL-only protected tool, not the actual local file API.
+            name: "test_read_resource".into(),
             arguments: args,
         };
         assert_eq!(
@@ -216,7 +217,7 @@ fn allow_deny_and_ask_are_bound_audited_and_persistent() {
             };
             let call = ToolCall {
                 call_id: format!("call-{decision}"),
-                name: "read_file".into(),
+                name: "test_read_resource".into(),
                 arguments: json!({"path":"~/Documents/projets/a.txt"}),
             };
             let check = forms::check_tool_approval(&ctx, &run, &call).unwrap();

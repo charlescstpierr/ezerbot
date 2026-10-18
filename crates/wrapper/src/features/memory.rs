@@ -485,6 +485,7 @@ pub(super) fn purge_deleted_private(conn: &Connection, id: &str) -> Result<usize
             snapshots.push(fact);
         }
     }
+    super::memory_auto::block_forgotten(conn, &snapshots)?;
     redact_traces(conn, &snapshots, None)?;
     for id in &ids {
         conn.execute("UPDATE memory_facts SET text='',status='forgotten',superseded_by=NULL WHERE fact_id=?1 AND scope='private'", [id])?;

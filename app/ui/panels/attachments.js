@@ -231,7 +231,7 @@
         for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
         body = JSON.stringify({ name: item.file.name, data: btoa(binary), draft_id: group.conversation, upload_id: item.uploadToken });
       }
-      const response = await fetch(item.document ? "/api/documents" : `/api/attachments?draft_id=${encodeURIComponent(group.conversation)}&upload_id=${item.uploadToken}`, {
+      const response = await fetch(item.document ? "/api/documents" : `/api/attachments?draft_id=${encodeURIComponent(group.conversation)}&upload_id=${item.uploadToken}&name=${encodeURIComponent(item.file.name || "Image collée")}`, {
         method: "POST", headers: { "Content-Type": item.document ? "application/json" : mime(item.file), "X-Grokbot-Request": "local" },
         body, signal: controller.signal,
       });

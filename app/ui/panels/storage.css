@@ -7,10 +7,14 @@
 .storage-section h4 { font-size: 12px; margin: 0 0 8px; }
 .storage-confirmation p, .storage-facts > p, .storage-notice { font-size: 11px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
 .storage-confirmation[hidden] { display: none; }
+.storage-confirmation h4:focus, .storage-facts > h4:focus { outline: none; }
+.storage-fact-confirmation { margin: 0 0 12px; }
+.storage-notice, .storage-section > .storage-notice { margin: 10px 0 0; }
+.storage-notice:empty { display: none; }
 .storage-facts { margin-top: 18px; }
 .storage-fact { display: flex; align-items: flex-start; gap: 10px; border-top: 1px solid var(--line); padding: 10px 0; }
 .storage-fact > div { flex: 1; min-width: 0; }
 .storage-fact strong { font-size: 11px; }
 .storage-fact p { margin: 5px 0 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .storage-fact button { flex: 0 0 auto; }
-.storage-error { color: var(--danger, #dc6464); }
+.setting-section > p.storage-error, .storage-notice.storage-error { color: var(--danger-text, var(--danger)); }

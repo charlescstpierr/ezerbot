@@ -36,19 +36,69 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 pub const ATTACHMENT_BODY_LIMIT: usize = 20 * 1024 * 1024;
 pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
-pub(crate) fn attachment_upload_query(query: &str) -> Result<(String, Option<String>), ApiError> {
-    let query = query
-        .strip_prefix("draft_id=")
+pub(crate) struct AttachmentUpload {
+    draft_id: String,
+    upload_id: Option<String>,
+    name: Option<String>,
+}
+
+fn decode_query(value: &str) -> Result<String, ApiError> {
+    let invalid = || ApiError::new(400, "Les paramètres d’import sont invalides.");
+    let mut bytes = Vec::new();
+    let mut input = value.bytes();
+    while let Some(byte) = input.next() {
+        bytes.push(match byte {
+            b'%' => {
+                let high = (input.next().ok_or_else(invalid)? as char)
+                    .to_digit(16)
+                    .ok_or_else(invalid)?;
+                let low = (input.next().ok_or_else(invalid)? as char)
+                    .to_digit(16)
+                    .ok_or_else(invalid)?;
+                (high * 16 + low) as u8
+            }
+            b'+' => b' ',
+            other => other,
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| invalid())
+}
+
+pub(crate) fn attachment_upload_query(query: &str) -> Result<AttachmentUpload, ApiError> {
+    let mut fields = BTreeMap::new();
+    for pair in query.split('&') {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| ApiError::new(400, "Paramètre d’import invalide."))?;
+        if !matches!(key, "draft_id" | "upload_id" | "name")
+            || fields.insert(key, decode_query(value)?).is_some()
+        {
+            return Err(ApiError::new(400, "Paramètre d’import inconnu ou répété."));
+        }
+    }
+    let draft_id = fields
+        .remove("draft_id")
         .ok_or_else(|| ApiError::new(400, "Brouillon invalide."))?;
-    let (draft, token) = query
-        .split_once("&upload_id=")
-        .map_or((query, None), |(d, t)| (d, Some(t)));
-    let draft = draft.replace("%3A", ":").replace("%3a", ":");
-    validate_conversation_id(&draft)?;
-    if let Some(token) = token {
+    validate_conversation_id(&draft_id)?;
+    let upload_id = fields.remove("upload_id");
+    if let Some(token) = &upload_id {
         validate_id(token)?;
     }
-    Ok((draft, token.map(str::to_owned)))
+    let name = fields.remove("name");
+    if let Some(name) = &name {
+        if name.is_empty()
+            || name.len() > 512
+            || name.contains(['/', '\\'])
+            || name.chars().any(char::is_control)
+        {
+            return Err(ApiError::new(400, "Le nom de l’image est invalide."));
+        }
+    }
+    Ok(AttachmentUpload {
+        draft_id,
+        upload_id,
+        name,
+    })
 }
 
 fn attachment_upload_path(path: &str) -> bool {

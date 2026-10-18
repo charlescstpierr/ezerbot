@@ -166,11 +166,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         "/api/conversations/delete" => {
             let input: DeleteConversation = parse(body)?;
             validate_conversation_id(&input.id)?;
-            let exists: bool = app.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2)", params![ACCOUNT, input.id], |r| r.get(0))?;
+            let tx = super::write_transaction(&app.connection)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2)", params![ACCOUNT, input.id], |r| r.get(0))?;
             if !exists {
                 return Err(ApiError::new(404, "Conversation introuvable."));
             }
-            app.connection.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
+            tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
+            super::storage::discard_conversation_draft(&tx, &input.id)?;
+            tx.commit()?;
             Ok(json!({"ok": true}))
         }
         "/api/bots" => {

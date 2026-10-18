@@ -24,19 +24,21 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 function panel(response) {
   const root = new Element("div");
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_ns, tag) => new Element(tag), getElementById: () => root };
-  const ctx = { conversation: { id: "chat", messages: [] }, bot: { id: "bot" }, state: { preferences: {}, provider: {}, attachments: { document_character_limit: 200000, document_payload_limit: 300000 } } };
+  const ctx = { conversation: { id: "chat", messages: [] }, bot: { id: "bot" }, state: { conversations: [{ id: "chat", bot_id: "bot", messages: [] }], preferences: {}, provider: {}, attachments: { document_character_limit: 200000, document_payload_limit: 300000 } } };
   let registration;
   const requests = [], notifications = [];
+  let uploadNonce = 0;
   const panels = { register(value) { registration = value; }, composerChanged() {}, draft: () => "", notify: (text) => notifications.push(text) };
   runInNewContext(readFileSync(new URL("../../ui/panels/attachments.js", import.meta.url), "utf8"), {
     window: { GrokbotPanels: panels, GrokbotChat: { formatAttachmentSize, documentBudgetMessage, createDocumentIcon: () => createDocumentIcon(document) }, addEventListener() {} },
     document, File, Uint8Array, btoa, AbortController, TypeError, SyntaxError, DOMException,
+    crypto: { randomUUID: () => `upload-${++uploadNonce}` },
     setTimeout: () => 1, clearTimeout() {}, MutationObserver: class { observe() {} },
     URL: { createObjectURL: () => "blob:test", revokeObjectURL() {} },
     fetch: async (url, options) => {
       requests.push({ url, options });
       const ordinal = requests.length;
-      const value = await response?.(ordinal) || {};
+      const value = await response?.(ordinal, url, options) || {};
       if (value.error instanceof Error) throw value.error;
       const status = value.status || 200;
       return { status, ok: status >= 200 && status < 300, json: async () => status >= 400 ? { error: value.message || "Ce PDF est chiffré." } : {
@@ -121,17 +123,54 @@ test("escaped-document volume also blocks a single text that would overflow its 
 
 test("removing an in-flight document aborts its request and ignores a late completion", async () => {
   let release;
-  const p = panel(() => new Promise((resolve) => { release = resolve; }));
+  const p = panel((n) => n === 1 ? new Promise((resolve) => { release = resolve; }) : {});
   p.add([new File(["texte"], "retiré.txt")]); await flush();
   assert.equal(p.requests.length, 1);
   assert.equal(p.blocked(), true);
   byClass(p.root, "attachment-remove").click();
   assert.equal(p.requests[0].options.signal.aborted, true);
   assert.equal(p.blocked(), false);
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.requests[1].url, "/api/storage/drafts");
+  assert.deepEqual(JSON.parse(p.requests[1].options.body).cancelled_uploads, ["upload-1"]);
+  assert.equal(p.requests[1].options.keepalive, true);
   release({}); await flush();
   assert.equal(allByClass(p.root, "attachment-chip").length, 0);
   assert.equal(p.registration.sendExtras(p.ctx).attachments.length, 0);
-  assert.equal(p.requests.length, 1);
+  // A late completion repeats the durable cancellation, never revives the chip.
+  assert.equal(p.requests.length, 3);
+  assert.equal(p.requests[2].url, "/api/storage/drafts");
+  assert.deepEqual(JSON.parse(p.requests[2].options.body).cancelled_uploads, ["upload-1"]);
+});
+
+test("uploads carry durable draft identity, a stable token and the original image name", async () => {
+  const id = `attachment_${"a".repeat(64)}`;
+  const p = panel(() => ({ metadata: { id } }));
+  p.add([new File(["image"], "schéma été.png", { type: "image/png" })]); await flush();
+  const query = new URL(p.requests[0].url, "http://localhost").searchParams;
+  assert.equal(query.get("draft_id"), "chat");
+  assert.equal(query.get("upload_id"), "upload-1");
+  assert.equal(query.get("name"), "schéma été.png");
+  assert.equal(p.registration.sendExtras(p.ctx).attachments[0], id);
+  const documents = panel(); documents.add([new File(["texte"], "notes.txt")]); await flush();
+  const body = JSON.parse(documents.requests[0].options.body);
+  assert.equal(body.draft_id, "chat"); assert.equal(body.upload_id, "upload-1"); assert.equal(body.name, "notes.txt");
+});
+
+test("state restores named image and document drafts once, without resurrecting a removed piece", async () => {
+  const p = panel();
+  const image = { id: `attachment_${"b".repeat(64)}`, name: "schéma conservé.png", url: "/api/attachments/image", byte_length: 42 };
+  const document = { id: `document_${"c".repeat(64)}`, kind: "document", name: "notes.txt", byte_length: 54, text_characters: 54, context_characters: 1000 };
+  p.ctx.state.storage = { drafts: { chat: [image, document] } };
+  p.registration.onState(p.ctx.state, p.ctx);
+  const chips = allByClass(p.root, "attachment-chip");
+  assert.equal(chips.length, 2); assert.match(chips[0].textContent, /schéma conservé.png/); assert.match(chips[1].textContent, /notes.txt/);
+  assert.deepEqual(Array.from(p.registration.sendExtras(p.ctx).attachments), [image.id, document.id]);
+  byClass(chips[0], "attachment-remove").click(); await flush();
+  const removal = JSON.parse(p.requests[0].options.body);
+  assert.deepEqual(removal.removed, [image.id]);
+  p.registration.onState(p.ctx.state, p.ctx);
+  assert.equal(allByClass(p.root, "attachment-chip").length, 1);
 });
 
 test("discarding a finished task's attachment draft aborts pending uploads and clears its tray", async () => {

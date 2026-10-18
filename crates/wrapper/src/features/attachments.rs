@@ -203,6 +203,7 @@ pub fn routes(
                     draft,
                     &document.id,
                     input.upload_id.as_deref(),
+                    Some(&document.name),
                 )?;
             }
             tx.commit()?;
@@ -215,9 +216,18 @@ pub fn routes(
                 Some(crate::attachment_upload_query(query)?)
             };
             let tx = write_transaction(&app.connection)?;
+            if let Some(draft) = &draft {
+                super::storage::require_draft(&tx, &draft.draft_id)?;
+            }
             let attachment = staging::stage(&tx, &app.db_path, body, now() as i64)?;
-            if let Some((draft, token)) = draft {
-                super::storage::retain_upload(&tx, &draft, &attachment.id, token.as_deref())?;
+            if let Some(draft) = draft {
+                super::storage::retain_upload(
+                    &tx,
+                    &draft.draft_id,
+                    &attachment.id,
+                    draft.upload_id.as_deref(),
+                    draft.name.as_deref(),
+                )?;
             }
             tx.commit()?;
             Ok(ApiResponse::Json(dto(&attachment)))

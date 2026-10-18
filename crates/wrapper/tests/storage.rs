@@ -27,10 +27,16 @@ impl Fixture {
         ));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.sqlite");
-        Self {
+        let fixture = Self {
             app: App::open(&path).unwrap(),
             path,
+        };
+        // Draft bindings must belong to a real, non-deleted conversation. Keep
+        // stable identities for these fixtures; missing/deleted cases use others.
+        for id in ["thread", "draft", "draft-thread", "task:child:parent"] {
+            fixture.db().execute("INSERT INTO wrapper_conversations(account_id,id,title,created_at,updated_at) VALUES ('local-workspace',?1,'Stockage',1,1)",[id]).unwrap();
         }
+        fixture
     }
     fn db(&self) -> Connection {
         let c = Connection::open(&self.path).unwrap();
@@ -682,6 +688,13 @@ fn private_purge_refuses_busy_runs_and_rolls_back_storage_errors() {
         .unwrap(),
         0
     );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM memory_auto_blocks", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "failed purge must roll back automatic-memory blocks too"
+    );
     db.execute_batch("DROP TRIGGER reject_purge").unwrap();
     f.post(
         "/api/storage/facts/delete",
@@ -692,6 +705,13 @@ fn private_purge_refuses_busy_runs_and_rolls_back_storage_errors() {
         .unwrap()
         .text
         .is_empty());
+    assert!(
+        db.query_row("SELECT COUNT(*) FROM memory_auto_blocks", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 0,
+        "storage purge must prevent automatic relearning"
+    );
 }
 
 #[test]
@@ -745,6 +765,287 @@ fn draft_uploads_and_housekeeping_keep_the_local_request_gate() {
     ] {
         assert!(validate_headers_for_path(1234, "POST", path, &headers).is_err());
     }
+}
+
+#[test]
+fn image_names_are_validated_per_draft_and_survive_restart_and_duplicates() {
+    let mut f = Fixture::new();
+    let upload=f.app.api("POST","/api/attachments?draft_id=thread&upload_id=first&name=sch%C3%A9ma%20d%27%C3%A9t%C3%A9%20%26%20copie.png",PNG).unwrap();
+    f.app
+        .api(
+            "POST",
+            "/api/attachments?draft_id=thread&upload_id=duplicate&name=autre.png",
+            PNG,
+        )
+        .unwrap();
+    f.app
+        .api(
+            "POST",
+            "/api/attachments?draft_id=draft&name=seconde.png",
+            PNG,
+        )
+        .unwrap();
+    f.restart();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["storage"]["drafts"]["thread"][0]["name"],
+        "schéma d’été & copie.png".replace('’', "'")
+    );
+    assert_eq!(
+        state["storage"]["drafts"]["draft"][0]["name"],
+        "seconde.png"
+    );
+    assert_eq!(state["storage"]["drafts"]["thread"][0]["id"], upload["id"]);
+    for name in [
+        "bad%0Aname.png",
+        "%FF",
+        "%2Foutside.png",
+        "bad%",
+        "",
+        &"a".repeat(513),
+    ] {
+        assert_eq!(
+            f.app
+                .api(
+                    "POST",
+                    &format!("/api/attachments?draft_id=thread&name={name}"),
+                    PNG
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+}
+
+#[test]
+fn legacy_draft_name_migration_is_idempotent_and_preserves_references() {
+    let mut f = Fixture::new();
+    let image = f.image(1);
+    f.db().execute_batch("DROP TABLE wrapper_storage_drafts; CREATE TABLE wrapper_storage_drafts(draft_id TEXT NOT NULL,attachment_id TEXT NOT NULL,PRIMARY KEY(draft_id,attachment_id));").unwrap();
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_storage_drafts VALUES ('thread',?1)",
+            [&image],
+        )
+        .unwrap();
+    f.restart();
+    f.restart();
+    assert_eq!(f.preview()["count"], 0);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["storage"]["drafts"]["thread"][0]["id"], image);
+    assert!(state["storage"]["drafts"]["thread"][0]
+        .get("name")
+        .is_none());
+}
+
+#[test]
+fn deleted_and_unknown_conversations_cannot_keep_inaccessible_drafts() {
+    let mut f = Fixture::new();
+    f.app
+        .api(
+            "POST",
+            "/api/attachments?draft_id=thread&upload_id=pending",
+            PNG,
+        )
+        .unwrap();
+    f.post("/api/documents",json!({"name":"retire.txt","data":STANDARD.encode("Brouillon supprimé"),"draft_id":"thread"}));
+    f.post("/api/conversations/delete", json!({"id":"thread"}));
+    assert_eq!(
+        f.db()
+            .query_row("SELECT COUNT(*) FROM wrapper_storage_drafts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(f
+        .db()
+        .query_row(
+            "SELECT cancelled FROM wrapper_storage_uploads WHERE token='pending'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    for id in ["thread", "inexistante"] {
+        assert_eq!(
+            f.app
+                .api(
+                    "POST",
+                    &format!("/api/attachments?draft_id={id}&upload_id=late"),
+                    PNG
+                )
+                .unwrap_err()
+                .status,
+            404
+        );
+    }
+    let plan = f.preview();
+    assert_eq!(plan["count"], 2);
+    f.clean(&plan);
+}
+
+#[test]
+fn deleting_a_conversation_and_its_draft_is_one_atomic_decision() {
+    let mut f = Fixture::new();
+    f.app
+        .api(
+            "POST",
+            "/api/attachments?draft_id=thread&upload_id=atomic",
+            PNG,
+        )
+        .unwrap();
+    f.db().execute_batch("CREATE TRIGGER reject_draft_delete BEFORE DELETE ON wrapper_storage_drafts BEGIN SELECT RAISE(ABORT,'forced failure'); END;").unwrap();
+    assert!(f
+        .app
+        .api("POST", "/api/conversations/delete", br#"{"id":"thread"}"#)
+        .is_err());
+    assert!(!f
+        .db()
+        .query_row(
+            "SELECT deleted FROM wrapper_conversations WHERE id='thread'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(!f
+        .db()
+        .query_row(
+            "SELECT cancelled FROM wrapper_storage_uploads WHERE token='atomic'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert_eq!(f.preview()["count"], 0);
+    f.db()
+        .execute_batch("DROP TRIGGER reject_draft_delete")
+        .unwrap();
+    f.post("/api/conversations/delete", json!({"id":"thread"}));
+    assert_eq!(f.preview()["count"], 1);
+}
+
+#[test]
+fn startup_prunes_legacy_drafts_without_removing_files_of_deleted_messages() {
+    let mut f = Fixture::new();
+    let missing = f.image(1);
+    let deleted = f.image(2);
+    let sent = f.image(3);
+    let db = f.db();
+    for (draft, id, token) in [
+        ("missing", &missing, "legacy-missing"),
+        ("thread", &deleted, "legacy-deleted"),
+    ] {
+        db.execute(
+            "INSERT INTO wrapper_storage_drafts(draft_id,attachment_id) VALUES (?1,?2)",
+            params![draft, id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO wrapper_storage_uploads VALUES (?1,?2,?3,0,0)",
+            params![token, draft, id],
+        )
+        .unwrap();
+    }
+    staging::link_attachments(&db, "thread", "old-message", std::slice::from_ref(&sent)).unwrap();
+    db.execute(
+        "UPDATE wrapper_conversations SET deleted=1 WHERE id='thread'",
+        [],
+    )
+    .unwrap();
+    db.execute("UPDATE attachments_staged SET staged_at=0", [])
+        .unwrap();
+    f.restart();
+    assert!(!f.blob(&missing).exists());
+    assert!(!f.blob(&deleted).exists());
+    assert!(f.blob(&sent).exists());
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM wrapper_storage_drafts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM wrapper_storage_uploads WHERE cancelled=1",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn another_window_already_cleaned_is_not_reported_as_retained() {
+    let mut f = Fixture::new();
+    f.image(1);
+    f.document("deja.txt");
+    let first = f.preview();
+    let second = f.preview();
+    f.clean(&second);
+    let result = f.clean(&first);
+    assert_eq!(result["deleted"], 0);
+    assert_eq!(result["retained"], 0);
+    assert_eq!(result["already_deleted"], 2);
+    let image = f.image(2);
+    f.document("autre.txt");
+    let first = f.preview();
+    f.post(
+        "/api/storage/drafts",
+        json!({"draft_id":"thread","attachments":[image]}),
+    );
+    let second = f.preview();
+    f.clean(&second);
+    let result = f.clean(&first);
+    assert_eq!(result["already_deleted"], 1);
+    assert_eq!(result["retained"], 1);
+    assert_eq!(result["deleted"], 0);
+}
+
+#[test]
+fn forget_markers_are_counted_separately_from_visible_facts() {
+    let mut f = Fixture::new();
+    let fact = f.fact("deleted-owner", Scope::Private, "Fait à supprimer");
+    f.post(
+        "/api/storage/facts/delete",
+        json!({"fact_id":fact.fact_id,"confirm":true}),
+    );
+    let usage = &f.info()["usage"];
+    assert_eq!(usage["fact_count"], 0);
+    assert_eq!(usage["forget_marker_count"], 1);
+    assert!(usage["memory"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn usage_and_startup_skip_history_scans_until_a_possible_orphan_needs_revalidation() {
+    let mut f = Fixture::new();
+    let image = f.image(1);
+    let db = f.db();
+    staging::link_attachments(&db, "thread", "sent", std::slice::from_ref(&image)).unwrap();
+    db.execute("UPDATE attachments_staged SET staged_at=0", [])
+        .unwrap();
+    let id = format!("document_{}", "d".repeat(64));
+    // This root would reject a full sweep. Usage needs only sizes; startup can
+    // rule out all eligible objects via their cheap message/draft links.
+    db.execute("INSERT INTO attachments_documents VALUES (?1,'[]')", [&id])
+        .unwrap();
+    db.execute(
+        "INSERT INTO attachments_document_links VALUES ('thread','sent',?1,0)",
+        [&id],
+    )
+    .unwrap();
+    f.info();
+    f.restart();
+    assert!(f.blob(&image).exists());
+    assert_eq!(f.preview()["count"], 0);
+    let orphan = f.image(2);
+    assert_eq!(
+        f.app
+            .api("POST", "/api/storage/preview", b"{}")
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert!(f.blob(&orphan).exists());
 }
 
 #[test]

@@ -34,7 +34,7 @@ empty_hooks!(
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_storage_drafts (
-        draft_id TEXT NOT NULL, attachment_id TEXT NOT NULL,
+        draft_id TEXT NOT NULL, attachment_id TEXT NOT NULL, name TEXT,
         PRIMARY KEY(draft_id, attachment_id));
         CREATE TABLE IF NOT EXISTS wrapper_storage_uploads (
         token TEXT PRIMARY KEY, draft_id TEXT NOT NULL, attachment_id TEXT,
@@ -48,6 +48,13 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         bytes INTEGER NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL,
         created_at INTEGER NOT NULL);",
     )?;
+    let has_name:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_storage_drafts') WHERE name='name')",[],|r|r.get(0))?;
+    if !has_name {
+        conn.execute(
+            "ALTER TABLE wrapper_storage_drafts ADD COLUMN name TEXT",
+            [],
+        )?;
+    }
     // Old documents have no staging timestamp: start a grace period, never
     // pretend their age is known. Restaging refreshes this timestamp.
     conn.execute(
@@ -176,6 +183,7 @@ struct Usage {
     image_count: usize,
     document_count: usize,
     fact_count: usize,
+    forget_marker_count: usize,
 }
 
 fn inventory(
@@ -183,7 +191,6 @@ fn inventory(
     base: &Path,
     before: Option<i64>,
 ) -> Result<(Usage, Vec<Candidate>), ApiError> {
-    let roots = roots(conn)?;
     let mut usage = Usage::default();
     let mut candidates = Vec::new();
     let directory = directory(base)?;
@@ -232,16 +239,7 @@ fn inventory(
                 .unwrap_or_default()
                 .as_millis()
                 .min(i64::MAX as u128) as i64;
-            let root = if temporary {
-                name.strip_prefix('.')
-                    .and_then(|s| s.strip_suffix(".tmp"))
-                    .expect("temporary digest")
-            } else {
-                &name
-            };
-            if !roots.contains(root)
-                && before.is_none_or(|cutoff| staged.unwrap_or(modified) < cutoff)
-            {
+            if before.is_none_or(|cutoff| staged.unwrap_or(modified) < cutoff) {
                 candidates.push(Candidate {
                     id,
                     kind: if temporary { "temporary" } else { "image" }.into(),
@@ -262,29 +260,131 @@ fn inventory(
         let (id, bytes, staged) = doc?;
         usage.documents += bytes;
         usage.document_count += 1;
-        if let Some(sha) = digest_id(&id) {
-            if !roots.contains(sha)
-                && before.is_none_or(|cutoff| staged.is_some_and(|at| at < cutoff))
-            {
-                candidates.push(Candidate {
-                    id,
-                    kind: "document".into(),
-                    bytes,
-                });
-            }
+        if digest_id(&id).is_some()
+            && before.is_none_or(|cutoff| staged.is_some_and(|at| at < cutoff))
+        {
+            candidates.push(Candidate {
+                id,
+                kind: "document".into(),
+                bytes,
+            });
         }
     }
-    (usage.memory, usage.fact_count) = conn.query_row("SELECT COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(provenance AS BLOB))),0), COALESCE(SUM(text!=''),0) FROM memory_facts", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    (usage.memory, usage.fact_count, usage.forget_marker_count) = conn.query_row("SELECT COALESCE(SUM(length(CAST(text AS BLOB)) + length(CAST(provenance AS BLOB))),0), COALESCE(SUM(text!=''),0), COALESCE(SUM(status='forgotten'),0) FROM memory_facts", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
     Ok((usage, candidates))
 }
 
-pub(super) fn retain_draft(conn: &Connection, draft: &str, id: &str) -> Result<(), ApiError> {
+fn orphan_candidates(
+    conn: &Connection,
+    mut candidates: Vec<Candidate>,
+) -> Result<Vec<Candidate>, ApiError> {
+    if candidates.is_empty() {
+        return Ok(candidates);
+    }
+    // Cheap relational roots avoid scanning run/skill history at startup when
+    // every old object is still sent or belongs to a live draft.
+    let mut statement=conn.prepare("SELECT attachment_id FROM wrapper_storage_drafts UNION SELECT attachment_id FROM attachments_message_links UNION SELECT document_id FROM attachments_document_links UNION SELECT attachment_id FROM wrapper_attachment_order")?;
+    let known = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    candidates.retain(|item| !known.contains(&item.id));
+    if !candidates.is_empty() {
+        let roots = roots(conn)?;
+        candidates.retain(|item| {
+            let sha = if item.kind == "temporary" {
+                item.id
+                    .strip_prefix('.')
+                    .and_then(|s| s.strip_suffix(".tmp"))
+            } else {
+                digest_id(&item.id)
+            };
+            !sha.is_some_and(|sha| roots.contains(sha))
+        });
+    }
+    Ok(candidates)
+}
+
+fn candidate_exists(conn: &Connection, base: &Path, item: &Candidate) -> Result<bool, ApiError> {
+    if item.kind == "document" {
+        return Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attachments_documents WHERE id=?1)",
+            [&item.id],
+            |r| r.get(0),
+        )?);
+    }
+    let digest = match item.kind.as_str() {
+        "image" => item.id.strip_prefix("attachment_"),
+        "temporary" => item
+            .id
+            .strip_prefix('.')
+            .and_then(|s| s.strip_suffix(".tmp")),
+        _ => None,
+    }
+    .filter(|sha| valid_digest(sha))
+    .ok_or_else(|| ApiError::new(409, "Aperçu de nettoyage invalide."))?;
+    let path = directory(base)?.join(if item.kind == "temporary" {
+        item.id.as_str()
+    } else {
+        digest
+    });
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io(error)),
+    }
+}
+
+pub(super) fn require_draft(conn: &Connection, draft: &str) -> Result<(), ApiError> {
     crate::validate_conversation_id(draft)?;
+    let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND deleted=0)",params![ACCOUNT,draft],|r|r.get(0))?;
+    if !exists {
+        return Err(ApiError::new(
+            404,
+            "Le brouillon appartient à une conversation absente ou supprimée.",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn discard_conversation_draft(conn: &Connection, draft: &str) -> Result<(), ApiError> {
     conn.execute(
-        "INSERT OR IGNORE INTO wrapper_storage_drafts VALUES (?1,?2)",
+        "UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?2 WHERE draft_id=?1",
+        params![draft, crate::now() as i64],
+    )?;
+    conn.execute(
+        "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1",
+        [draft],
+    )?;
+    Ok(())
+}
+
+fn prune_invalid_drafts(conn: &Connection) -> Result<(), ApiError> {
+    conn.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?2 WHERE cancelled=0 AND NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_uploads.draft_id AND c.deleted=0)",params![ACCOUNT,crate::now() as i64])?;
+    conn.execute("DELETE FROM wrapper_storage_drafts WHERE NOT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.account_id=?1 AND c.id=wrapper_storage_drafts.draft_id AND c.deleted=0)",[ACCOUNT])?;
+    Ok(())
+}
+
+pub(super) fn retain_draft(conn: &Connection, draft: &str, id: &str) -> Result<(), ApiError> {
+    require_draft(conn, draft)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO wrapper_storage_drafts(draft_id,attachment_id) VALUES (?1,?2)",
         params![draft, id],
     )?;
+    Ok(())
+}
+fn retain_named_draft(
+    conn: &Connection,
+    draft: &str,
+    id: &str,
+    name: Option<&str>,
+) -> Result<(), ApiError> {
+    retain_draft(conn, draft, id)?;
+    if let Some(name) = name {
+        // Preserve the first selection's label when duplicate bytes are imported
+        // under a different name; names belong to drafts, not global blob IDs.
+        conn.execute("UPDATE wrapper_storage_drafts SET name=COALESCE(name,?3) WHERE draft_id=?1 AND attachment_id=?2",params![draft,id,name])?;
+    }
     Ok(())
 }
 /// A cancellation can arrive before or after the upload publishes its bytes.
@@ -294,11 +394,12 @@ pub(super) fn retain_upload(
     draft: &str,
     id: &str,
     token: Option<&str>,
+    name: Option<&str>,
 ) -> Result<(), ApiError> {
+    require_draft(conn, draft)?;
     let Some(token) = token else {
-        return retain_draft(conn, draft, id);
+        return retain_named_draft(conn, draft, id, name);
     };
-    crate::validate_conversation_id(draft)?;
     crate::validate_id(token)?;
     conn.execute("INSERT OR IGNORE INTO wrapper_storage_uploads(token,draft_id,created_at) VALUES (?1,?2,?3)",params![token,draft,crate::now() as i64])?;
     let (owner, previous, cancelled): (String, Option<String>, bool) = conn.query_row(
@@ -317,13 +418,13 @@ pub(super) fn retain_upload(
         params![token, id],
     )?;
     if !cancelled {
-        retain_draft(conn, draft, id)?;
+        retain_named_draft(conn, draft, id, name)?;
     }
     Ok(())
 }
 fn cancel_upload(conn: &Connection, draft: &str, token: &str) -> Result<(), ApiError> {
     crate::validate_id(token)?;
-    conn.execute("INSERT INTO wrapper_storage_uploads(token,draft_id,cancelled,created_at) VALUES (?1,?2,1,?3) ON CONFLICT(token) DO UPDATE SET cancelled=1 WHERE draft_id=excluded.draft_id",params![token,draft,crate::now() as i64])?;
+    conn.execute("INSERT INTO wrapper_storage_uploads(token,draft_id,cancelled,created_at) VALUES (?1,?2,1,?3) ON CONFLICT(token) DO UPDATE SET cancelled=1,created_at=excluded.created_at WHERE draft_id=excluded.draft_id",params![token,draft,crate::now() as i64])?;
     conn.execute("DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=(SELECT attachment_id FROM wrapper_storage_uploads WHERE token=?2 AND draft_id=?1) AND NOT EXISTS(SELECT 1 FROM wrapper_storage_uploads u WHERE u.draft_id=?1 AND u.attachment_id=wrapper_storage_drafts.attachment_id AND u.cancelled=0)",params![draft,token])?;
     Ok(())
 }
@@ -333,17 +434,28 @@ pub(super) fn staged_document(conn: &Connection, id: &str) -> Result<(), ApiErro
 }
 
 fn drafts(conn: &Connection) -> Result<Value, ApiError> {
-    let mut statement = conn.prepare("SELECT draft_id, attachment_id FROM wrapper_storage_drafts ORDER BY draft_id, attachment_id")?;
-    let rows = statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut statement = conn.prepare("SELECT draft_id, attachment_id, name FROM wrapper_storage_drafts ORDER BY draft_id, attachment_id")?;
+    let rows = statement.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
     let mut output = serde_json::Map::new();
     for row in rows {
-        let (draft, id) = row?;
+        let (draft, id, name) = row?;
         let item = if id.starts_with("document_") {
             documents::get(conn, &id)?.map(|d| super::attachments::document_dto(&d))
         } else {
             staging::get(conn, &id)?.map(|a| super::attachments::dto(&a))
         };
-        if let Some(item) = item {
+        if let Some(mut item) = item {
+            if id.starts_with("attachment_") {
+                if let Some(name) = name {
+                    item["name"] = json!(name);
+                }
+            }
             output
                 .entry(draft)
                 .or_insert_with(|| json!([]))
@@ -407,8 +519,6 @@ fn queue(conn: &Connection, items: &[Candidate], reason: &str) -> Result<Vec<i64
 }
 fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
     let tx = write_transaction(conn)?;
-    let directory = directory(base)?;
-    let roots = roots(&tx)?;
     let rows = tx
         .prepare("SELECT seq,id,kind FROM wrapper_storage_deletions WHERE state='pending'")?
         .query_map([], |r| {
@@ -419,6 +529,12 @@ fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        tx.commit()?;
+        return Ok(0);
+    }
+    let directory = directory(base)?;
+    let roots = roots(&tx)?;
     let mut deleted = 0;
     for (seq, id, kind) in rows {
         let sha = if kind == "temporary" {
@@ -463,9 +579,13 @@ fn replay(conn: &Connection, base: &Path) -> Result<usize, ApiError> {
 }
 
 pub fn startup(conn: &Connection, base: &Path, now: i64) -> Result<(), ApiError> {
+    let tx = write_transaction(conn)?;
+    prune_invalid_drafts(&tx)?;
+    tx.commit()?;
     replay(conn, base)?;
     let tx = write_transaction(conn)?;
     let (_, candidates) = inventory(&tx, base, Some(now.saturating_sub(DAY)))?;
+    let candidates = orphan_candidates(&tx, candidates)?;
     tx.execute(
         "DELETE FROM wrapper_storage_uploads WHERE cancelled=1 AND created_at<?1",
         [now.saturating_sub(DAY)],
@@ -508,6 +628,7 @@ pub fn routes(
             "/api/storage/preview" => {
                 let tx = write_transaction(conn)?;
                 let (_, candidates) = inventory(&tx, &app.db_path, None)?;
+                let candidates = orphan_candidates(&tx, candidates)?;
                 let mut random = [0u8; 16];
                 getrandom::getrandom(&mut random)
                     .map_err(|_| ApiError::new(500, "Aperçu indisponible."))?;
@@ -547,6 +668,7 @@ pub fn routes(
                     })?)
                     .map_err(|_| ApiError::new(500, "Aperçu illisible."))?;
                 let (_, current) = inventory(&tx, &app.db_path, None)?;
+                let current = orphan_candidates(&tx, current)?;
                 let selected: Vec<_> = current
                     .into_iter()
                     .filter(|c| {
@@ -555,6 +677,16 @@ pub fn routes(
                             .any(|a| a.id == c.id && a.kind == c.kind && a.bytes == c.bytes)
                     })
                     .collect();
+                let mut already_deleted = 0usize;
+                for item in &approved {
+                    if !selected
+                        .iter()
+                        .any(|c| c.id == item.id && c.kind == item.kind)
+                        && !candidate_exists(&tx, &app.db_path, item)?
+                    {
+                        already_deleted += 1;
+                    }
+                }
                 let sequences = queue(&tx, &selected, "user_confirmed")?;
                 tx.execute(
                     "DELETE FROM wrapper_storage_previews WHERE token=?1",
@@ -575,7 +707,7 @@ pub fn routes(
                         bytes += item.bytes;
                     }
                 }
-                json!({"deleted":deleted,"bytes":bytes,"retained":approved.len()-deleted})
+                json!({"deleted":deleted,"bytes":bytes,"retained":approved.len()-deleted-already_deleted,"already_deleted":already_deleted})
             }
             "/api/storage/drafts" => {
                 #[derive(Deserialize)]
@@ -608,7 +740,7 @@ pub fn routes(
                     cancel_upload(&tx, &input.draft_id, token)?;
                 }
                 for id in &input.removed {
-                    tx.execute("UPDATE wrapper_storage_uploads SET cancelled=1 WHERE draft_id=?1 AND attachment_id=?2",params![input.draft_id,id])?;
+                    tx.execute("UPDATE wrapper_storage_uploads SET cancelled=1,created_at=?3 WHERE draft_id=?1 AND attachment_id=?2",params![input.draft_id,id,crate::now() as i64])?;
                     tx.execute(
                         "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1 AND attachment_id=?2",
                         params![input.draft_id, id],

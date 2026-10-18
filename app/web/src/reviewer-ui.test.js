@@ -33,6 +33,7 @@ const input = (root) => form(root).listeners.input();
 
 function settingsPanel() {
   const root = new Element("div");
+  const settingsButton = new Element("button");
   let registration;
   let remote = { config: { enabled: true, allow: ["Autorise la lecture."], block: [] }, version: "1" };
   const requests = [];
@@ -56,10 +57,10 @@ function settingsPanel() {
   };
   runInNewContext(readFileSync(new URL("../../ui/panels/forms.js", import.meta.url), "utf8"), {
     window: { GrokbotPanels: panels, clearTimeout() {}, setTimeout() {}, dispatchEvent() {} },
-    document: { createElement: (tag) => new Element(tag) }, Event: class {},
+    document: { createElement: (tag) => new Element(tag), getElementById: (id) => id === "settings-button" ? settingsButton : undefined }, Event: class {},
   });
   registration.settingsSection(root);
-  return { root, panels, registration, requests, notifications, setRemote(value) { remote = value; } };
+  return { root, settingsButton, panels, registration, requests, notifications, setRemote(value) { remote = value; } };
 }
 
 test("save confirmation survives the real refresh/rebuild inside the modal, without a hidden toast", async () => {
@@ -134,6 +135,69 @@ test("standing rules precede the separated reviewer, whose switch and grouped ac
   assert.equal(actions.children[1].className, "secondary-button");
 });
 
+const fallbackStorage = { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice: "Le trousseau est indisponible." };
+function updateStorage(f, storage) {
+  f.panels.state.forms.storage = storage;
+  f.registration.onState(f.panels.state);
+}
+
+test("storage warning is a dedicated alert in a separated block and marks Paramètres outside the modal", () => {
+  const f = settingsPanel(); updateStorage(f, fallbackStorage);
+  const block = byClass(f.root, "storage-settings");
+  const notice = byClass(block, "storage-notice");
+  assert.equal(notice.attributes.role, "alert");
+  assert.equal(notice.children[0].tagName, "strong");
+  assert.match(notice.textContent, /^Secrets non chiffrés pour le moment\./);
+  assert.ok(f.root.children.indexOf(block) < f.root.children.findIndex(e => e.textContent === "Autorisations permanentes"));
+  const marker = byClass(f.settingsButton, "storage-warning-marker");
+  assert.equal(marker.hidden, false);
+  assert.match(marker.attributes["aria-label"], /non chiffré/);
+  updateStorage(f, { backend: "keychain", label: "Trousseau macOS" });
+  assert.equal(marker.hidden, true);
+  assert.equal(byClass(f.root, "storage-notice"), undefined);
+});
+
+test("signature pending is neutral information, not a failure alert or an unlock invitation", () => {
+  const f = settingsPanel();
+  updateStorage(f, { backend: "file", label: "Fichier local protégé", notice: "Le trousseau attend une signature stable.", notice_kind: "info" });
+  const notice = byClass(f.root, "storage-notice");
+  assert.equal(notice.attributes.role, "status");
+  assert.ok(notice.className.includes("storage-info"));
+  assert.match(notice.textContent, /^Activation du trousseau en attente/);
+  assert.equal(button(f.root, "Vérifier le stockage"), undefined);
+  assert.equal(byClass(f.settingsButton, "storage-warning-marker").hidden, true);
+});
+
+test("storage check confirms refusal and recovery inside the modal, persisting through a real refresh", async () => {
+  const f = settingsPanel(); updateStorage(f, fallbackStorage);
+  await button(f.root, "Vérifier le stockage").listeners.click();
+  assert.match(byClass(f.root, "storage-feedback").textContent, /^Le trousseau est toujours inaccessible/);
+  f.panels.refresh = async () => updateStorage(f, { backend: "keychain", label: "Trousseau macOS" });
+  await button(f.root, "Vérifier le stockage").listeners.click();
+  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli.*transférés/);
+  assert.equal(byClass(f.root, "storage-feedback").attributes.role, "status");
+  assert.equal(button(f.root, "Vérifier le stockage"), undefined);
+  f.registration.onState(f.panels.state);
+  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli/);
+  assert.equal(f.notifications.length, 0); // A body toast is hidden behind the native modal.
+});
+
+test("storage check blocks duplicate clicks, indicates progress and retains an actionable error", async () => {
+  const f = settingsPanel(); updateStorage(f, fallbackStorage);
+  let reject;
+  let calls = 0;
+  f.panels.refresh = () => { calls++; return new Promise((_, failure) => { reject = failure; }); };
+  const pending = button(f.root, "Vérifier le stockage").listeners.click();
+  assert.equal(button(f.root, "Vérifier le stockage").disabled, true);
+  assert.match(byClass(f.root, "storage-feedback").textContent, /en cours/);
+  await button(f.root, "Vérifier le stockage").listeners.click();
+  assert.equal(calls, 1);
+  reject(new Error("private remote details")); await pending;
+  assert.match(byClass(f.root, "storage-feedback").textContent, /ne peut pas être vérifié/);
+  assert.ok(!f.root.textContent.includes("private remote"));
+  assert.equal(button(f.root, "Vérifier le stockage").disabled, false);
+});
+
 // Render the actual JSX through Vite's transform rather than inspecting source
 // strings. Middleware mode starts no listening server, and no dependency is added.
 const vite = await createServer({
@@ -143,6 +207,22 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
+const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
+
+test("secret cards warn about current fallback without claiming that a historical Keychain item moved", () => {
+  for (const backend of ["file_fallback", "keychain", "file"]) {
+    globalThis.window = { GrokbotForms: { view() {}, storage: () => ({ backend }) } };
+    try {
+      const html = renderToStaticMarkup(React.createElement(SecretCard, { message: {
+        id: "secret-test", kind: "secret", payload: { entry_id: "secret-test", status: { status: "resolved" }, route: { requesting_bot_id: "Ezerbot" }, kind: { kind: "secret", name: "CLE_API", purpose: "Test" } },
+      } }));
+      assert.equal(html.includes("gb-secret-storage-warning"), backend === "file_fallback");
+      if (backend === "file_fallback") assert.ok(html.includes("Les nouveaux secrets sont enregistrés dans un fichier de secours non chiffré"));
+      assert.ok(html.includes("selon Paramètres"));
+      assert.ok(!html.includes("envoyée au coffre local"));
+    } finally { delete globalThis.window; }
+  }
+});
 function card(status, decision, args = { path: "~/Documents/projets/notes.txt" }, pending = false) {
   globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
   try {

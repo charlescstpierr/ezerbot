@@ -57,14 +57,19 @@ pub struct Vault {
     path: PathBuf,
     #[cfg(target_os = "macos")]
     keychain: Option<keychain::Target>,
+    signature_notice: Option<&'static str>,
 }
 #[cfg(target_os = "macos")]
 mod keychain;
-static OS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// 0: explicit file-only library fixture; 1: host lacks a stable signer; 2: admitted.
+static OS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Enable the native backend in the app host, not in file-only library fixtures.
-pub fn enable_os_vault() {
-    OS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+pub fn enable_os_vault(stable_signature: bool) {
+    OS_MODE.store(
+        if stable_signature { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +77,7 @@ pub struct StorageStatus {
     pub backend: &'static str,
     pub label: &'static str,
     pub notice: Option<&'static str>,
+    pub notice_kind: Option<&'static str>,
 }
 impl Vault {
     /// Open an explicit vault-file path (not a database path). Initialization is
@@ -90,6 +96,7 @@ impl Vault {
             path,
             #[cfg(target_os = "macos")]
             keychain: None,
+            signature_notice: None,
         };
         let _file_guard = vault.lock_file(true)?;
         vault.cleanup_temporaries()?;
@@ -111,10 +118,16 @@ impl Vault {
     pub fn open_app(path: &Path) -> Result<Self> {
         let vault = Self::open(path)?;
         #[cfg(target_os = "macos")]
-        if OS_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Some(target) = keychain::Target::for_app() {
-                return vault.with_keychain(target);
+        let mut vault = vault;
+        #[cfg(target_os = "macos")]
+        match OS_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => vault.signature_notice = Some(keychain::signature_notice(&vault.path)),
+            2 => {
+                if let Some(target) = keychain::Target::for_app() {
+                    return vault.with_keychain(target);
+                }
             }
+            _ => (),
         }
         Ok(vault)
     }
@@ -125,8 +138,9 @@ impl Vault {
         }
         StorageStatus {
             backend: "file",
-            label: "Fichier local protégé (0600)",
-            notice: None,
+            label: "Fichier local protégé (lecture réservée à votre compte)",
+            notice: self.signature_notice,
+            notice_kind: self.signature_notice.map(|_| "info"),
         }
     }
     pub fn path(&self) -> &Path {

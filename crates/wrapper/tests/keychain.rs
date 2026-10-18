@@ -12,6 +12,9 @@ use std::{
 };
 
 const PASSWORD: &str = "ezerbot-throwaway-test-991";
+// Admission simulation only; no real signing or trust settings in tests.
+const CERTIFICATE_REQUIREMENT: &str =
+    "certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\"";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     home: PathBuf,
@@ -61,22 +64,42 @@ impl Fixture {
         Vault::open_test_keychain(&self.file(), &self.keychain).unwrap()
     }
     fn launch(&self, override_path: &Path) -> Host {
-        self.launch_with_override(Some(override_path))
+        self.launch_binary(
+            Path::new(env!("CARGO_BIN_EXE_grokbot-wrapper")),
+            Some(override_path),
+            Some(CERTIFICATE_REQUIREMENT),
+        )
     }
     fn launch_with_override(&self, override_path: Option<&Path>) -> Host {
+        self.launch_binary(
+            Path::new(env!("CARGO_BIN_EXE_grokbot-wrapper")),
+            override_path,
+            None,
+        )
+    }
+    fn launch_binary(
+        &self,
+        binary: &Path,
+        override_path: Option<&Path>,
+        requirement: Option<&str>,
+    ) -> Host {
         let log = fs::File::create(self.home.join("host.log")).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"));
+        let mut command = Command::new(binary);
         command
             .args(["--port", "0", "--db"])
             .arg(&self.db)
             .env("HOME", &self.home)
             .env("CFFIXED_USER_HOME", &self.home)
             .env_remove("GROKBOT_TEST_KEYCHAIN")
+            .env_remove("GROKBOT_TEST_SIGNATURE_REQUIREMENT")
             .env_remove("GROKBOT_FAKE_OPENAI")
             .stdout(log)
             .stderr(Stdio::null());
         if let Some(path) = override_path {
             command.env("GROKBOT_TEST_KEYCHAIN", path);
+        }
+        if let Some(requirement) = requirement {
+            command.env("GROKBOT_TEST_SIGNATURE_REQUIREMENT", requirement);
         }
         let mut child = command.spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -121,6 +144,26 @@ impl Host {
             .into_json()
             .unwrap()
     }
+    fn post(&self, path: &str, body: Value) -> Value {
+        ureq::post(&format!("{}{path}", self.url))
+            .set("Origin", &self.url)
+            .set("X-Grokbot-Request", "local")
+            .send_json(body)
+            .unwrap()
+            .into_json()
+            .unwrap()
+    }
+    fn wait_state(&self, predicate: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = self.state();
+            if predicate(&state) {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "state transition timed out");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
     fn delete(&self, name: &str) -> ureq::Response {
         ureq::post(&format!("{}/api/secrets/delete", self.url))
             .set("Origin", &self.url)
@@ -137,6 +180,58 @@ impl Drop for Host {
 }
 
 #[test]
+fn adhoc_reconstruction_preserves_the_complete_file_without_any_migration() {
+    let f = Fixture::new();
+    Vault::open(&f.file())
+        .unwrap()
+        .set("TOKEN", "Avant reconstruction", "valeur-factice-rebuild")
+        .unwrap();
+    let before = fs::read(f.file()).unwrap();
+    let rebuilt = f.home.join("wrapper-reconstruit");
+    fs::copy(env!("CARGO_BIN_EXE_grokbot-wrapper"), &rebuilt).unwrap();
+    for (binary, requirement) in [
+        (
+            Path::new(env!("CARGO_BIN_EXE_grokbot-wrapper")),
+            "cdhash H\"1111111111111111111111111111111111111111\"",
+        ),
+        (
+            rebuilt.as_path(),
+            "cdhash H\"2222222222222222222222222222222222222222\"",
+        ),
+    ] {
+        let host = f.launch_binary(binary, Some(&f.keychain), Some(requirement));
+        let state = host.state();
+        assert_eq!(state["forms"]["storage"]["backend"], "file");
+        assert_eq!(state["forms"]["storage"]["notice_kind"], "info");
+        assert!(state["forms"]["storage"]["notice"]
+            .as_str()
+            .unwrap()
+            .contains("signature stable"));
+        assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
+        assert_eq!(fs::read(f.file()).unwrap(), before);
+    }
+}
+
+#[test]
+fn unsigned_host_identifies_previous_items_without_changing_them() {
+    let f = Fixture::new();
+    f.vault()
+        .set("TOKEN", "Version précédente", "valeur-factice-previous")
+        .unwrap();
+    let host = f.launch_with_override(Some(&f.keychain));
+    let state = host.state();
+    assert_eq!(state["forms"]["storage"]["backend"], "file");
+    assert!(state["forms"]["storage"]["notice"]
+        .as_str()
+        .unwrap()
+        .contains("version précédente"));
+    assert_eq!(
+        f.vault().get("TOKEN").unwrap().as_deref(),
+        Some("valeur-factice-previous")
+    );
+}
+
+#[test]
 fn real_keychain_migration_persistence_rotation_and_deletion() {
     let f = Fixture::new();
     let file = Vault::open(&f.file()).unwrap();
@@ -149,6 +244,35 @@ fn real_keychain_migration_persistence_rotation_and_deletion() {
     assert_eq!(vault.storage_status().backend, "keychain");
     assert_eq!(vault.list().unwrap(), before);
     assert!(file.list().unwrap().is_empty());
+    // Metadata query only (-g/-w are deliberately absent): no password logging.
+    use sha2::Digest;
+    let service = format!(
+        "ca.ezerbot.secrets.v1.{:x}",
+        sha2::Sha256::digest(
+            fs::canonicalize(f.file())
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes()
+        )
+    );
+    let metadata = Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", &service, "-a", "FORM_TOKEN"])
+        .arg(&f.keychain)
+        .env("HOME", &f.home)
+        .env("CFFIXED_USER_HOME", &f.home)
+        .output()
+        .unwrap();
+    assert!(metadata.status.success());
+    let attributes = String::from_utf8(metadata.stdout).unwrap();
+    // security renders a non-ASCII label either literally or as hex + octal.
+    let label = "Ezerbot — FORM_TOKEN";
+    let label_hex: String = label
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(attributes.contains(label) || attributes.to_ascii_lowercase().contains(&label_hex));
+    assert!(attributes.contains("Secret Ezerbot"));
     assert_eq!(
         vault.get("MCP_TEST_ENV").unwrap().as_deref(),
         Some(env.as_str())
@@ -225,6 +349,90 @@ fn wrapper_first_start_projects_storage_and_restart_uses_keychain_without_plaint
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn mcp_after_locked_restart_explains_unavailable_keychain_instead_of_missing_variables() {
+    let f = Fixture::new();
+    let id = {
+        let host = f.launch_with_override(None);
+        host.post("/api/mcp/add", json!({"name":"Atelier jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-mcp-locked"}}))["id"].as_str().unwrap().to_owned()
+    };
+    {
+        let host = f.launch(&f.keychain);
+        assert_eq!(host.state()["forms"]["storage"]["backend"], "keychain");
+        assert!(Vault::open(&f.file()).unwrap().list().unwrap().is_empty());
+    }
+    f.security(&["lock-keychain"]);
+    let host = f.launch(&f.keychain); // No in-memory copy of the migrated value.
+    assert_eq!(host.state()["forms"]["storage"]["backend"], "file_fallback");
+    host.post("/api/mcp/restart", json!({"id":id}));
+    let tool = format!("mcp_start_{id}");
+    let state = host.wait_state(|state| {
+        state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"]["tool"] == tool && r["status"]["status"] == "pending")
+    });
+    let request = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"]["tool"] == tool)
+        .unwrap();
+    host.post("/api/approvals/resolve", json!({"entry_id":request["entry_id"],"conversation_id":request["route"]["target_conversation_id"],"submission_id":"test-unlock-message","decision":"allow_once"}));
+    let state = host.wait_state(|state| {
+        state
+            .to_string()
+            .contains("impossible de récupérer les variables privées de ce connecteur")
+    });
+    let public = state.to_string();
+    assert!(public.contains("Vérifier le stockage"));
+    assert!(!public.contains("absentes du coffre"));
+    assert!(!public.contains("valeur-factice-mcp-locked"));
+}
+
+#[test]
+fn denied_keychain_deletion_rolls_back_the_mcp_connector_removal() {
+    let f = Fixture::new();
+    let id = {
+        let host = f.launch_with_override(None);
+        host.post("/api/mcp/add", json!({"name":"Suppression jetable","command":"/usr/bin/false","arguments":[],"environment":{"API_TOKEN":"valeur-factice-delete"}}))["id"].as_str().unwrap().to_owned()
+    };
+    {
+        let host = f.launch(&f.keychain);
+        assert_eq!(host.state()["forms"]["storage"]["backend"], "keychain");
+    }
+    f.security(&["lock-keychain"]);
+    {
+        let host = f.launch(&f.keychain);
+        host.post("/api/mcp/remove", json!({"id":id}));
+        let tool = format!("mcp_remove_{id}");
+        let state = host.wait_state(|s| {
+            s["forms"]["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["kind"]["tool"] == tool && r["status"]["status"] == "pending")
+        });
+        let request = state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"]["tool"] == tool)
+            .unwrap();
+        host.post("/api/approvals/resolve", json!({"entry_id":request["entry_id"],"conversation_id":request["route"]["target_conversation_id"],"submission_id":"test-denied-delete","decision":"allow_once"}));
+        let state = host.wait_state(|s| s.to_string().contains("Suppression non confirmée"));
+        assert_eq!(state["mcp"]["servers"].as_array().unwrap().len(), 1);
+    }
+    f.security(&["unlock-keychain", "-p", PASSWORD]);
+    let host = f.launch(&f.keychain);
+    assert_eq!(host.state()["mcp"]["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        host.state()["forms"]["secrets"].as_array().unwrap().len(),
+        1
+    );
 }
 
 #[test]

@@ -460,6 +460,7 @@ name = "grokbot-wrapper"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "core-foundation",
  "getrandom",
  "grokbot-attachments",
  "grokbot-delegation",
@@ -474,6 +475,7 @@ dependencies = [
  "grokbot-submission-journal",
  "jsonwebtoken",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

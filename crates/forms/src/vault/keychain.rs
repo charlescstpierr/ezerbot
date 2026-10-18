@@ -4,7 +4,7 @@
 //! logs or OS error descriptions. All UI interaction is disabled (fail to file).
 use super::*;
 use security_framework::{
-    item::{ItemClass, ItemSearchOptions, Limit},
+    item::{update_item, ItemClass, ItemSearchOptions, ItemUpdateOptions, Limit},
     os::macos::keychain::{KeychainUserInteractionLock, SecKeychain},
 };
 use sha2::{Digest, Sha256};
@@ -85,13 +85,33 @@ fn states() -> MutexGuard<'static, BTreeMap<PathBuf, State>> {
 }
 pub(super) fn status(path: &Path) -> StorageStatus {
     if states().get(path).is_some_and(|s| s.failed) {
-        StorageStatus { backend: "file_fallback", label: "Fichier local de secours (0600)", notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Ezerbot continue avec le fichier local protégé (0600), non chiffré. Les secrets déjà transférés restent dans le trousseau et peuvent être indisponibles. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage pour reprendre le transfert.") }
+        StorageStatus { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Ezerbot continue avec un fichier local lisible seulement par votre compte macOS, mais non chiffré. Les secrets déjà transférés restent dans le trousseau et peuvent être indisponibles. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage pour reprendre le transfert.") }
     } else {
         StorageStatus {
             backend: "keychain",
             label: "Trousseau macOS",
             notice: None,
+            notice_kind: None,
         }
+    }
+}
+pub(super) fn signature_notice(path: &Path) -> &'static str {
+    // Attributes only, restricted to our exact service and selected keychain.
+    // In debug, Target::for_app never permits the user's default keychain.
+    let previous = Target::for_app()
+        .and_then(|target| target.connect(path).ok())
+        .is_some_and(|backend| {
+            backend
+                .query()
+                .load_attributes(true)
+                .limit(1)
+                .search()
+                .is_ok_and(|items| !items.is_empty())
+        });
+    if previous {
+        "Le trousseau sera activé quand l’application aura une signature stable. Aucune migration n’est effectuée : les secrets du fichier local protégé y sont conservés. Des secrets d’une version précédente sont aussi présents dans le trousseau ; ils ne sont pas modifiés. Utilisez l’ancienne version autorisée pour les récupérer."
+    } else {
+        "Le trousseau sera activé quand l’application aura une signature stable. Pour préserver les secrets après chaque reconstruction, aucune migration n’est effectuée : ils restent dans le fichier local protégé, lisible uniquement par votre compte et non chiffré."
     }
 }
 impl Vault {
@@ -185,6 +205,11 @@ impl Backend for Native {
                 .map_err(|_| unavailable())?,
             Err(_) => return Err(unavailable()),
         }
+        let mut metadata = ItemUpdateOptions::new();
+        metadata
+            .set_label(format!("Ezerbot — {name}"))
+            .set_description("Secret Ezerbot");
+        update_item(self.query().account(name), &metadata).map_err(|_| unavailable())?;
         let (readback, _) = self
             .keychain
             .find_generic_password(&self.service, name)

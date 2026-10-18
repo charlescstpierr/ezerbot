@@ -9,6 +9,8 @@ use grokbot_wrapper::{
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
+mod signature;
+
 const INDEX: &str = include_str!("../../../app/ui/index.html");
 const STYLES: &str = include_str!("../../../app/ui/styles.css");
 const SCRIPT: &str = include_str!("../../../app/ui/app.js");
@@ -127,7 +129,7 @@ fn provider(db: &std::path::Path) -> Provider {
 }
 
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    grokbot_forms::vault::enable_os_vault();
+    grokbot_forms::vault::enable_os_vault(signature::stable_identity());
     let mut app = App::open_with(&options.db, provider(&options.db))?;
     // First-start migration runs before serving the page. Keychain denial falls
     // back to the owner-only file and is projected in Paramètres, never logged.

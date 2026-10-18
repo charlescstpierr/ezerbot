@@ -132,6 +132,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .account-copy strong { display: block; font-size: 10px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-copy span { display: block; margin-top: 4px; font-size: 8px; color: var(--sidebar-muted); }
 .account-button > .icon { width: 15px; height: 15px; color: var(--sidebar-muted); }
+.storage-warning-marker { display: inline-grid; place-items: center; flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--warning-line); background: var(--warning-bg); color: var(--warning-text); font-size: 11px; font-weight: 700; }
 
 .main-panel { min-width: 0; display: flex; flex-direction: column; height: calc(100dvh - 16px); margin: 8px; position: relative; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .topbar { height: 63px; flex: 0 0 auto; padding: 0 27px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); position: relative; }
@@ -236,6 +237,15 @@ a.secondary-button { text-decoration: none; }
 .setting-section { padding: 21px 0; border-top: 1px solid var(--line); }
 .setting-section h3 { font-weight: 550; font-size: 12px; margin: 0 0 6px; }
 .setting-section > p { font-size: 11px; color: var(--muted); margin: 0 0 16px; line-height: 1.6; }
+.storage-settings { padding-bottom: 21px; margin-bottom: 21px; border-bottom: 1px solid var(--line); }
+.storage-settings > p { font-size: 11px; color: var(--muted); margin: 0 0 16px; line-height: 1.6; }
+.storage-settings > p.storage-backend { color: var(--text); font-weight: 550; }
+.storage-settings > p.storage-backend-fallback { color: var(--danger-text); }
+.storage-settings > p.storage-notice { padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger-text) 45%, var(--line)); border-radius: 7px; background: var(--soft); color: var(--text); margin-bottom: 10px; }
+.storage-notice > strong { display: block; color: var(--danger-text); margin-bottom: 5px; }
+.storage-settings > p.storage-info { border-color: var(--line); }
+.storage-info > strong { color: var(--text); }
+.storage-settings > p.storage-feedback { padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--text); }
 .theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .theme-options button { display: flex; flex-direction: column; align-items: center; gap: 10px; background: var(--soft); border: 1px solid transparent; border-radius: 8px; padding: 15px 5px; font-size: 11px; color: var(--muted); }
 .theme-options button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-ink); color: var(--accent-ink); }

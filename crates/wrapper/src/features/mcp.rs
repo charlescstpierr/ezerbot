@@ -181,10 +181,21 @@ fn invalid(message: &str) -> ApiError {
 fn secret_name(id: &str) -> String {
     format!("MCP_{id}_ENV").to_uppercase()
 }
+fn missing_private_value(vault: &grokbot_forms::vault::Vault, message: &str) -> ApiError {
+    if vault.storage_status().backend == "file_fallback" {
+        invalid("Le trousseau macOS est verrouillé ou inaccessible : impossible de récupérer les variables privées de ce connecteur. Déverrouillez-le, puis utilisez « Vérifier le stockage » dans Paramètres.")
+    } else {
+        invalid(message)
+    }
+}
 fn environment(ctx: &Context<'_>, server: &Server) -> Result<HashMap<String, String>, ApiError> {
-    let raw = super::forms::vault(ctx)?
-        .get(&secret_name(&server.id))?
-        .ok_or_else(|| invalid("Les variables privées du connecteur sont absentes du coffre."))?;
+    let vault = super::forms::vault(ctx)?;
+    let raw = vault.get(&secret_name(&server.id))?.ok_or_else(|| {
+        missing_private_value(
+            &vault,
+            "Les variables privées du connecteur sont absentes du coffre.",
+        )
+    })?;
     let value: Value = serde_json::from_str(&raw)
         .map_err(|_| invalid("Les variables privées du connecteur sont illisibles."))?;
     serde_json::from_value(value["variables"].clone())
@@ -203,9 +214,9 @@ fn private_values(ctx: &Context<'_>) -> Result<HashMap<String, String>, ApiError
         {
             continue;
         }
-        let raw = vault
-            .get(&secret.name)?
-            .ok_or_else(|| invalid("Une variable privée du coffre MCP a disparu."))?;
+        let raw = vault.get(&secret.name)?.ok_or_else(|| {
+            missing_private_value(&vault, "Une variable privée du coffre MCP a disparu.")
+        })?;
         let value: Value = serde_json::from_str(&raw)
             .map_err(|_| invalid("Une enveloppe privée du coffre MCP est illisible."))?;
         let environment: HashMap<String, String> =

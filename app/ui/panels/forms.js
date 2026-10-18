@@ -8,7 +8,31 @@
   const changed = () => window.dispatchEvent(new Event("grokbot:forms-change"));
   // Only non-sensitive delivery metadata lives here. Never cache values, arguments,
   // secrets or request bodies in storage, logs, notifications or the transcript.
-  window.GrokbotForms = { view: (id) => activity.get(id) };
+  let storageStatus;
+  let storageFeedback;
+  let storageCheckBusy = false;
+  let storageWarning;
+  window.GrokbotForms = { view: (id) => activity.get(id), storage: () => storageStatus };
+
+  function observeStorage(state) {
+    const next = state.forms?.storage;
+    if (JSON.stringify(next) !== JSON.stringify(storageStatus)) {
+      if (!storageCheckBusy) storageFeedback = undefined;
+      storageStatus = next;
+      changed();
+    }
+    const button = document.getElementById?.("settings-button");
+    if (!button) return;
+    if (!storageWarning) {
+      storageWarning = document.createElement("span");
+      storageWarning.className = "storage-warning-marker";
+      storageWarning.textContent = "!";
+      storageWarning.setAttribute("role", "img");
+      storageWarning.setAttribute("aria-label", "Attention : les nouveaux secrets sont enregistrés dans un fichier de secours non chiffré. Vérifiez le stockage dans Paramètres.");
+      button.append(storageWarning);
+    }
+    storageWarning.hidden = next?.backend !== "file_fallback";
+  }
 
   function observe(request) {
     if (!request?.entry_id) return;
@@ -162,37 +186,64 @@
   function renderRules(state) {
     if (!settings) return;
     const rules = state.forms?.rules || [];
-    const key = JSON.stringify([rules, state.forms?.reviewer, state.forms?.storage, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
+    const key = JSON.stringify([rules, state.forms?.reviewer, state.forms?.storage, storageFeedback, storageCheckBusy, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
     if (key === rulesKey) return;
     rulesKey = key;
     settings.replaceChildren();
     settings.className = "setting-section";
+    const storageBlock = document.createElement("div");
+    storageBlock.className = "storage-settings";
     const storageTitle = document.createElement("h3");
     storageTitle.textContent = "Stockage des secrets";
     const storage = document.createElement("p");
     storage.textContent = state.forms?.storage?.label || "Stockage momentanément indisponible";
+    storage.className = `storage-backend${state.forms?.storage?.backend === "file_fallback" ? " storage-backend-fallback" : ""}`;
     const storageNote = document.createElement("p");
     storageNote.textContent = "Secrets des formulaires et variables privées des connecteurs MCP. Les identifiants ChatGPT sont gérés séparément.";
-    settings.append(storageTitle, storage, storageNote);
+    storageBlock.append(storageTitle, storage, storageNote);
     if (state.forms?.storage?.notice) {
       const notice = document.createElement("p");
-      notice.className = "reviewer-notice reviewer-error";
-      notice.setAttribute("role", "alert");
-      notice.textContent = state.forms.storage.notice;
+      const information = state.forms.storage.notice_kind === "info";
+      notice.className = `storage-notice${information ? " storage-info" : ""}`;
+      notice.setAttribute("role", information ? "status" : "alert");
+      const title = document.createElement("strong");
+      title.textContent = information ? "Activation du trousseau en attente" : "Secrets non chiffrés pour le moment.";
+      const detail = document.createElement("span");
+      detail.textContent = state.forms.storage.notice;
+      notice.append(title, detail);
+      storageBlock.append(notice);
+      if (!information) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "secondary-button";
       retry.textContent = "Vérifier le stockage";
+      retry.disabled = storageCheckBusy;
       retry.addEventListener("click", async () => {
-        retry.disabled = true;
-        try { await panels.refresh(); }
-        catch { panels.notify("Le stockage ne peut pas être vérifié pour le moment."); }
-        finally { retry.disabled = false; }
+        if (storageCheckBusy) return;
+        storageCheckBusy = true;
+        storageFeedback = "Vérification du stockage en cours…";
+        renderRules(panels.state);
+        try {
+          await panels.refresh();
+          storageFeedback = panels.state.forms?.storage?.backend === "keychain"
+            ? "Trousseau macOS rétabli : les secrets du fichier de secours y ont été transférés."
+            : "Le trousseau est toujours inaccessible. Les nouveaux secrets restent dans le fichier de secours.";
+        } catch { storageFeedback = "Le stockage ne peut pas être vérifié pour le moment. Réessayez lorsque le moteur local est disponible."; }
+        finally { storageCheckBusy = false; renderRules(panels.state); }
       });
       const actions = document.createElement("p");
       actions.append(retry);
-      settings.append(notice, actions);
+      storageBlock.append(actions);
+      }
     }
+    if (storageFeedback) {
+      const feedback = document.createElement("p");
+      feedback.className = "storage-feedback";
+      feedback.setAttribute("role", "status");
+      feedback.textContent = storageFeedback;
+      storageBlock.append(feedback);
+    }
+    settings.append(storageBlock);
     const heading = document.createElement("h3");
     heading.textContent = "Autorisations permanentes";
     settings.append(heading);
@@ -241,6 +292,7 @@
     id: "forms",
     settingsSection(container) { settings = container; renderRules(panels.state); },
     onState(state) {
+      observeStorage(state);
       for (const request of state.forms?.requests || []) observe(request);
       // Older entries can fall outside the bounded state.forms history.
       for (const conversation of state.conversations || []) {

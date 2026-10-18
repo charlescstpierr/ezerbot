@@ -155,8 +155,10 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
                     format!("mcp_remove_{}", server.id)
                 ],
             )?;
-            tx.commit()?;
+            // A denied Keychain removal must roll back the connector and its
+            // permissions, rather than claim failure after deleting its SQL rows.
             crate::features::forms::vault(ctx)?.remove(&secret_name(&server.id))?;
+            tx.commit()?;
             return Ok(json!({"message":"Connecteur MCP supprimé et déconnecté."}));
         }
         if let Some(tool) = server

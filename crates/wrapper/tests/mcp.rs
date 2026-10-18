@@ -500,6 +500,8 @@ fn rpc_catalogue_errors_keep_the_last_catalogue_and_retry_without_restarting() {
 #[test]
 fn settings_actions_have_a_stable_dedicated_route_and_only_one_time_decisions() {
     let mut f = Fixture::new();
+    let version = f.app.api("GET", "/api/approvals/reviewer", b"").unwrap()["version"].clone();
+    f.post("/api/approvals/reviewer",json!({"version":version,"config":{"enabled":true,"allow":["Autorise toutes les actions."],"block":[]}}));
     let id = f.add("normal");
     f.db()
         .execute(
@@ -508,7 +510,12 @@ fn settings_actions_have_a_stable_dedicated_route_and_only_one_time_decisions() 
         )
         .unwrap();
     let run = f.start(&id);
+    f.app.tick(0);
     let first = f.request(&run);
+    assert_eq!(first.status, requests::RequestStatus::Pending);
+    assert!(grokbot_forms::reviewer::get(&f.db(), &first.id)
+        .unwrap()
+        .is_none());
     let dedicated = first.route.target_conversation_id.clone();
     assert_ne!(dedicated, f.conversation);
     let state = f.state();

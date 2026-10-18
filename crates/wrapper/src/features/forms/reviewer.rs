@@ -107,7 +107,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
     }
     let active: i64 = ctx.connection.query_row("SELECT count(*) FROM forms_requests WHERE status='pending' AND json_extract(review_json,'$.pending')=1 AND json_extract(review_json,'$.started_at')>?1", [clock(ctx).saturating_sub(12_000)], |r| r.get(0))?;
     let available = (4 - active).max(0);
-    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' ORDER BY rowid LIMIT ?1")?;
+    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' AND substr(json_extract(kind_json,'$.tool'),1,10)!='mcp_start_' AND substr(json_extract(kind_json,'$.tool'),1,11)!='mcp_remove_' ORDER BY rowid LIMIT ?1")?;
     let ids = statement
         .query_map([available], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -217,7 +217,9 @@ pub(super) fn complete(
     }
     let config = rules::load_auto_review_config(&tx)?;
     record.pending = false;
-    let standing = if request.status == RequestStatus::Pending
+    let lifecycle = matches!(&request.kind, InputKind::Approval {tool,..} if super::super::mcp::is_lifecycle(tool));
+    let standing = if !lifecycle
+        && request.status == RequestStatus::Pending
         && matches!(&request.kind, InputKind::Approval { expires_at, .. } if clock(ctx) < *expires_at)
         && store::required(&tx, &request.run_id)?.status == RunStatus::AwaitingApproval
     {
@@ -229,7 +231,11 @@ pub(super) fn complete(
     if let Some(receipt) = standing {
         attach(&tx, &request, receipt)?;
     }
-    record.answer = if standing_won {
+    record.answer = if lifecycle {
+        ReviewAnswer::ask(
+            "La gestion d’un connecteur MCP exige une décision ponctuelle dans la carte.",
+        )
+    } else if standing_won {
         ReviewAnswer::ask("Une règle « Toujours » a été appliquée avant la revue.")
     } else if crate::now().saturating_sub(record.started_at.max(0) as u64) > 12_000 {
         ReviewAnswer::ask("Le délai de revue est écoulé. Votre confirmation reste nécessaire.")

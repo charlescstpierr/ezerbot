@@ -181,7 +181,7 @@ fn allow_deny_and_ask_are_bound_audited_and_persistent() {
         assert_eq!(json!(f.review(&id).version), version);
         match decision {
             "allow" => assert!(matches!(f.status(&id), RequestStatus::Resolved { .. })),
-            "deny" => assert!(matches!(f.status(&id), RequestStatus::Denied { .. })),
+            "deny" => assert!(matches!(f.status(&id), RequestStatus::Denied)),
             _ => assert_eq!(f.status(&id), RequestStatus::Pending),
         }
         let conn = f.db();
@@ -405,7 +405,7 @@ fn edits_and_manual_decisions_win_over_inflight_allow() {
         if mode == "edit" {
             assert_eq!(f.status(&id), RequestStatus::Pending);
         } else {
-            assert!(matches!(f.status(&id), RequestStatus::Denied { .. }));
+            assert!(matches!(f.status(&id), RequestStatus::Denied));
         }
     }
 }

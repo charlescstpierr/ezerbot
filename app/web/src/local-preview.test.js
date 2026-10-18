@@ -12,7 +12,7 @@ const args = { path: "/tmp/existant.txt", content: "un\ndeux\nNOUVEAU\nquatre\n"
 } };
 test("replacement approval renders actual removed/added lines and exact counts", () => {
   const html=render(h(LocalApprovalPreview,{tool:"write_file",arguments:args}));
-  assert.match(html,/Diff : \+1 ligne ajoutée \/ −1 ligne supprimée · 4 lignes proposées/);
+  assert.match(html,/Modifications : \+1 ligne ajoutée \/ −1 ligne supprimée · 4 lignes proposées/);
   assert.ok(html.includes("-trois\n"));assert.ok(html.includes("+NOUVEAU\n"));
   assert.equal(localApprovalBlocked("write_file",args),false);
   const stale={...args,apercu_local:{...args.apercu_local,empreinte_actuelle_ok:false}};
@@ -35,10 +35,10 @@ test("read approval shows the real symlink target as escaped text",()=>{
   assert.match(protectedHtml,/identifiants, historique/);assert.match(protectedHtml,/Refusez sauf certitude/);
   assert.match(protectedHtml,/toujours une carte individuelle/);assert.ok(!protectedHtml.includes("Pour éviter ces cartes"));
 });
-test("write previews show a canonical parent destination and app-data warning",()=>{
+test("write previews show the canonical parent destination; the card owns the decision-adjacent warning",()=>{
   const html=render(h(LocalApprovalPreview,{tool:"write_file",arguments:{...args,path:"/tmp/lien/note.txt",apercu_local:{...args.apercu_local,cible_reelle:"/tmp/app/<note>.txt",donnees_ezerbot:true}}}));
   assert.match(html,/Destination réelle/);assert.ok(html.includes("/tmp/app/&lt;note&gt;.txt"));
-  assert.match(html,/identifiants, historique/);assert.match(html,/Refusez sauf certitude/);
+  assert.ok(!html.includes("gb-local-sensitive-warning"));
 });
 
 test("global shell and file permissions carry specific warnings",()=>{
@@ -67,6 +67,22 @@ test("failures distinguish refusal, missing files and unknown external effects",
   assert.equal(localLimits({timeout_ms:100,output_limit:1024}),"Délai : 0,1 s · Sortie cumulée : 1 Kio maximum");
   assert.equal(localLimits({}),"Délai : 30 s · Sortie cumulée : 128 Kio maximum");
 });
+test("manual denial is concise while standing-rule and reviewer provenance stay useful",()=>{
+  for(const reason of ["L’action a été refusée.","La demande a été refusée, a expiré ou a été annulée.","L’approbation a été refusée","Approval was denied"]){
+    assert.equal(localFailureView(reason,"denied").message,"L’action a été refusée et n’a pas été exécutée.");
+  }
+  assert.match(localFailureView("Une autorisation permanente refuse cette action.","denied").message,/règle « Toujours refuser »/);
+  assert.match(localFailureView("Cette ancienne règle refuse la lecture de cet historique.","denied").message,/Cette ancienne règle refuse la lecture/);
+});
+
+test("creation excerpts omit technical hunk headers, replacements keep styled context and French summaries",()=>{
+  const preview={...args.apercu_local,extrait:"@@ -0,0 +1,1 @@\n+nouveau\n"};
+  const creation=render(h(LocalApprovalPreview,{tool:"write_file",arguments:{...args,expected_sha256:null,apercu_local:preview}}));
+  assert.ok(!creation.includes("@@"));assert.match(creation,/Modifications :/);
+  const replacement=render(h(LocalApprovalPreview,{tool:"write_file",arguments:{...args,apercu_local:preview}}));
+  assert.match(replacement,/class="gb-local-diff-hunk"/);assert.ok(replacement.includes("@@ -0,0 +1,1 @@"));
+});
+
 test("all shell status labels are consistent French headings",()=>{
   for(const status of ["terminé","échec","annulé","délai dépassé"]) assert.match(localStatusLabel(status),/^[A-ZÉ]/);
   assert.equal(localStatusLabel("annulé"),"Annulée");assert.equal(localStatusLabel("délai dépassé"),"Délai dépassé");

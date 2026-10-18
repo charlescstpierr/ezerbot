@@ -1,7 +1,7 @@
 import { HumanInputCard, inputClass, useHumanInput } from "./form.jsx";
 import { useState } from "react";
 import { SkillProposal } from "./skill-proposal.jsx";
-import { LocalApprovalPreview, LocalApprovalWarning, localApprovalBlocked } from "../local-approval.js";
+import { LocalApprovalPreview, LocalApprovalWarning, SensitiveWarning, localApprovalBlocked } from "../local-approval.js";
 import { localLimits, localToolLabel, localToolNames } from "../local-call.js";
 
 export const kind = "approval";
@@ -63,6 +63,7 @@ export function Card({ message, busy, onAction }) {
             {action.tool.startsWith("mcp_remove_") && <p className="text-sm">Le processus sera arrêté. La configuration, les règles permanentes et les variables privées de ce connecteur seront supprimées.</p>}
           </> : localToolNames[action.tool] ? <details><summary className="text-xs">Détails techniques de l’action</summary><p className="text-xs">Identifiant de l’outil : <code>{action.tool}</code></p>{argumentPreview}</details> : argumentPreview}
         <details className="text-xs text-muted-foreground"><summary>Empreinte et expiration</summary><p className="break-all">{action.args_digest}</p><p>{Number.isFinite(action.expires_at) ? new Date(action.expires_at).toLocaleString("fr-CA") : "Échéance indisponible"}</p></details>
+        {action.tool === "write_file" && <SensitiveWarning preview={preview?.apercu_local} />}
         {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>Autoriser une fois</button>

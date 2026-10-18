@@ -170,6 +170,40 @@ test("only each affected granted-folder row carries its own app-data warning",()
   assert.match(all(items[1]).find(e=>e.className==="local-data-warning").textContent,/restent protégées par une carte/);
 });
 
+test("a running local call after this turn's human approval waits for its commit and respects reader navigation",()=>{
+  const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:521,scrollTop:0});
+  let resized,moves=0;const frames=[];
+  class ResizeObserver {constructor(callback){resized=callback;}observe(){}}
+  const {registration,panels,window,document}=setup({scroll,ResizeObserver});
+  window.requestAnimationFrame=fn=>frames.push(fn);document.querySelector=()=>null;
+  const target={dataset:{messageId:"running-call",localState:""},getBoundingClientRect:()=>({height:250}),scrollIntoView(){moves+=1;}};
+  document.querySelectorAll=()=>[target];
+  const approval={kind:"approval",payload:{run_id:"run",kind:{tool:"run_shell"},status:{status:"resolved"}}};
+  const tool={id:"running-call",kind:"tool",payload:{run_id:"run",run_status:"running",call:{name:"run_shell"}}};
+  const context={conversation:{id:"chat",messages:[{role:"user"},approval,tool]}};
+  const flush=()=>{let count=0;while(frames.length){assert.ok(++count<40);frames.shift()();}};
+  registration.onState(panels.state,context);assert.equal(frames.length,1);
+  frames.shift()();frames.shift()();assert.equal(moves,0);
+  target.dataset.localState="running";flush();assert.equal(moves,1);
+  registration.onState(panels.state,context);flush();assert.equal(moves,1);
+  scroll.clientHeight=301;resized();flush();assert.equal(moves,2);
+  scroll.listeners.keydown({type:"keydown",key:"PageUp"});scroll.scrollTop=80;scroll.listeners.scroll();flush();
+  scroll.clientHeight=521;resized();flush();assert.equal(moves,2);
+});
+
+test("running attention never borrows an approval from another run, tool, turn or refused decision",()=>{
+  for(const change of ["run","tool","turn","denied","expired","cancelled","missing-run"]){
+
+    const {registration,panels,window,document}=setup();const frames=[];
+    window.requestAnimationFrame=fn=>frames.push(fn);document.querySelector=()=>null;document.querySelectorAll=()=>[];
+    const approval={kind:"approval",payload:{run_id:change==="run"?"other":"run",kind:{tool:change==="tool"?"write_file":"run_shell"},status:{status:["denied","expired","cancelled"].includes(change)?change:"resolved"}}};
+    const tool={id:"call",kind:"tool",payload:{run_id:"run",run_status:"running",call:{name:"run_shell"}}};
+    if(change==="missing-run"){delete approval.payload.run_id;delete tool.payload.run_id;}
+    const messages=[{role:"user"},approval,...(change==="turn"?[{role:"user"}]:[]),tool];
+    registration.onState(panels.state,{conversation:{id:"chat",messages}});assert.equal(frames.length,0,change);
+  }
+});
+
 test("granted paths remain text and cancellation uses the existing run stop route",async()=>{
   const {root,requests,registration}=setup();
   assert.equal(all(root).find(e=>e.tagName==="code").textContent,"/tmp/<dossier>");

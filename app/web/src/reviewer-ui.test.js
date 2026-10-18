@@ -270,6 +270,7 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
+const { Card: ToolCard } = await vite.ssrLoadModule("/src/cards/tool.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
 
 test("secret cards warn about current fallback without claiming that a historical Keychain item moved", () => {
@@ -319,6 +320,22 @@ test("local cards combine reviewer status, exact action and protected preview wi
   const command = card("pending", "ask", {command:"printf bonjour",cwd:"/tmp"}, false, "run_shell");
   assert.ok(command.includes("Relecteur : "));assert.ok(command.includes("printf bonjour"));
   assert.ok(!card("resolved", "allow", read, false, "read_file").includes("Approuvé automatiquement"));
+});
+
+test("protected writes render one sensitive warning immediately before the decision controls", () => {
+  const html = card("pending", "ask", { path: "/tmp/app/new.txt", content: "test", expected_sha256: null,
+    apercu_local: { donnees_ezerbot: true, lignes_ajoutees: 1, lignes_supprimees: 0, lignes_proposees: 1, extrait: "@@ -0,0 +1,1 @@\\n+test\\n" } }, false, "write_file");
+  assert.equal(html.split('gb-local-sensitive-warning').length - 1, 1);
+  assert.match(html, /Refusez sauf certitude\.<\/p><fieldset/);
+  assert.ok(html.indexOf('gb-local-sensitive-warning') > html.indexOf("Empreinte et expiration"));
+});
+
+test("running local cards publish their committed phase and a visible stop affordance", () => {
+  const html = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "running", kind: "tool", payload: {
+    run_id: "run", run_status: "running", call: { call_id: "call", name: "run_shell", arguments: {command:"sleep 20",cwd:"/tmp"} },
+  } } }));
+  assert.match(html, /data-local-state="running"/);
+  assert.match(html, /gb-local-stop/);assert.match(html, /Annuler l’exécution/);
 });
 
 test("generic approval retains its code identifier instead of a local-action label", () => {

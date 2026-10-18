@@ -29,4 +29,7 @@
 .gb-local-waiting { padding:8px 12px; }
 .gb-local-waiting > p { margin:0; }
 .gb-local-diff-added { color:var(--ok); }
+:root[data-theme="light"] .gb-local-diff-added { color:#15803d; }
 .gb-local-diff-removed { color:var(--danger-text); }
+.gb-local-diff-hunk { color:var(--muted); font-style:italic; }
+.gb-local-card[data-local-state="running"] > .gb-local-command { max-height:120px; overflow:auto; }

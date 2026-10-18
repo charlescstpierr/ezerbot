@@ -17,9 +17,12 @@
     const pending = turn.find(m => m.kind === "approval" && m.payload?.status?.status === "pending" && (localNames.has(m.payload?.kind?.tool) || m.payload?.connector?.origin === "settings"));
     const tool = turn.find(m => m.kind === "tool" && localNames.has(m.payload?.call?.name));
     const failure = tool && (tool.payload?.outcome?.status === "failed" || ["échec", "annulé", "délai dépassé"].includes(tool.payload?.outcome?.output?.status));
-    const message = pending || (failure ? tool : null);
+    const running = tool && typeof tool.payload?.run_id === "string" && !tool.payload.outcome && tool.payload.run_status === "running"
+      && turn.some(m => m.kind === "approval" && m.payload?.run_id === tool.payload.run_id
+        && m.payload?.kind?.tool === tool.payload.call.name && m.payload?.status?.status === "resolved");
+    const message = pending || (failure || running ? tool : null);
     if (!message) return;
-    const phase = pending ? "pending" : tool.payload.outcome.status === "failed" ? "failed" : tool.payload.outcome.output.status;
+    const phase = pending ? "pending" : running ? "running" : tool.payload.outcome.status === "failed" ? "failed" : tool.payload.outcome.output.status;
     return { message, phase, token: `${context.conversation.id}:${message.id}:${phase}:${message.payload?.outcome?.reason || ""}` };
   }
   function focusAttention(context, resized = false) {
@@ -41,7 +44,7 @@
       resizeAnchor = token;
       resizePending = false;
       userScroll = null;
-      const actions = phase === "pending" ? target.querySelector?.("fieldset") : null;
+      const actions = phase === "pending" ? target.querySelector?.("fieldset") : phase === "running" ? target.querySelector?.(".gb-local-stop") : null;
       if (actions && target.getBoundingClientRect().height > scroll?.clientHeight) actions.scrollIntoView({ block: "end" });
       else target.scrollIntoView({ block: "start" });
     };

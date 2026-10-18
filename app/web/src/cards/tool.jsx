@@ -80,14 +80,14 @@ function LocalCard({ message, run, onAction, busy }) {
   const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approvalStatus, runStatus) : null;
   const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
   const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé"].includes(output?.status) ? "warning" : outcome ? "success" : "neutral");
-  return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || ""}>
+  return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || (pending && runStatus === "running" ? "running" : "")}>
     <div className="gb-local-header"><strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
     {authority?.kind === "rule" && <p>Autorisée automatiquement par une règle « Toujours » (Paramètres › Autorisations permanentes).</p>}
     {authority?.kind === "folder_grant" && <p>Lecture autorisée dans un dossier accordé.</p>}
     <pre className="gb-local-command">{typeof (call.name === "run_shell" ? args.command : args.path) === "string" ? preview : "Paramètres de l’action indisponibles ou invalides."}</pre>
     {failure && <p className="gb-local-failure" data-tone={failure.tone} role={failure.tone === "warning" ? "alert" : "status"}>{failure.message}</p>}
     {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
-    {pending && <button type="button" className="gb-retry" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
+    {pending && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
     {output?.exit_code != null && <p>Code de sortie : {output.exit_code}</p>}
     {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
     {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}

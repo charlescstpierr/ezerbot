@@ -16,8 +16,15 @@ export function localFailureView(reason, approvalStatus, runStatus) {
   if (reason.startsWith("Cet outil est désactivé")) return { label: "Désactivé", tone: "warning", message: reason };
   if (approvalStatus === "expired") return { label: "Approbation expirée", tone: "warning", message: "Le délai d’approbation est écoulé. L’action n’a pas été exécutée." };
   if (approvalStatus === "cancelled" || runStatus === "cancelled") return { label: "Annulée", tone: "warning", message: "L’action a été annulée avant son exécution." };
-  if (approvalStatus === "denied" || reason.includes("L’approbation a été refusée") || reason.startsWith("La demande a été refusée") || reason.startsWith("Approval was denied") || reason.includes("bloquée par une autorisation permanente") || reason.startsWith("Une autorisation permanente refuse cette action"))
-    return { label: "Refusée", tone: "warning", message: `L’action a été refusée et n’a pas été exécutée. ${reason}` };
+  const normalized = reason.replace(/'/g, "’");
+  const humanDenied = normalized.startsWith("La demande a été refusée") || normalized.includes("L’approbation a été refusée")
+    || /^L’action a été refusée\.?$/.test(normalized) || reason.startsWith("Approval was denied");
+  const ruleDenied = reason.includes("bloquée par une autorisation permanente") || reason.startsWith("Une autorisation permanente refuse cette action");
+  if (approvalStatus === "denied" || humanDenied || ruleDenied) {
+    const message = ruleDenied ? "L’action a été refusée par une règle « Toujours refuser » (Paramètres › Autorisations permanentes). Elle n’a pas été exécutée."
+      : `L’action a été refusée et n’a pas été exécutée.${humanDenied ? "" : ` ${reason}`}`;
+    return { label: "Refusée", tone: "warning", message };
+  }
   return { label: "Erreur", tone: "danger", message: reason };
 }
 

@@ -70,12 +70,20 @@ export function orderThread(messages) {
     const message = messages[index];
     const runId = message.payload.run_id;
     const first = ordered.findIndex((item) => item.key && item.payload?.run_id === runId);
-    if (first < 0) continue;
+    if (first < 0) {
+      // In a group, a delivery-only turn still needs its distinct author above
+      // its calls; it is not an anonymous tool card or an empty text response.
+      if (message.payload.turn_id) {
+        const opening = ordered.findIndex((item) => !chatKinds.has(item.kind) && item.payload?.run_id === runId);
+        if (opening >= 0) headings.set(opening, { id: `${message.id}:heading`, kind: "turn-heading", created_at: message.created_at, payload: message.payload });
+      }
+      continue;
+    }
     const opening = ordered.findIndex((item, position) => position < first && !chatKinds.has(item.kind)
       && (item.payload?.run_id === runId || item.payload?.parent_run_id === runId));
     if (opening < 0) continue;
     headings.set(opening, {
-      id: `${message.id}:heading`, kind: "turn-heading", created_at: message.created_at,
+      id: `${message.id}:heading`, kind: "turn-heading", created_at: message.created_at, payload: message.payload,
     });
     ordered[first] = { ...ordered[first], continuation: true };
   }

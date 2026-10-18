@@ -162,6 +162,7 @@ impl std::io::Read for GatedBody {
 }
 struct GatedResponses {
     base: String,
+    calls: Arc<AtomicUsize>,
     gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -174,6 +175,8 @@ impl GatedResponses {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let releasing = gate.clone();
         let stopping = stop.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counting = calls.clone();
         let thread = std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
                 let Some(request) = server
@@ -193,6 +196,7 @@ impl GatedResponses {
                         ),
                     );
                 } else {
+                    counting.fetch_add(1, Ordering::SeqCst);
                     let first = (0..100)
                         .map(|_| {
                             format!(
@@ -222,6 +226,7 @@ impl GatedResponses {
         });
         Self {
             base,
+            calls,
             gate,
             stop,
             thread: Some(thread),
@@ -239,6 +244,169 @@ impl Drop for GatedResponses {
         self.thread.take().unwrap().join().unwrap();
     }
 }
+#[test]
+fn converting_a_live_direct_chat_does_not_blindly_resume_its_uncertain_legacy_reply() {
+    let mut f = Fixture::new(true);
+    let gate = GatedResponses::new();
+    let mut endpoints = f.server.endpoints();
+    endpoints.api = format!("{}/v1", gate.base);
+    f.provider = Provider::with_endpoints(&f.path, endpoints, false);
+    f.provider.refresh_models();
+    wait("catalogue", || f.provider.status()["models_ready"] == true);
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    let c = f.conversation();
+    f.post(
+        "/api/bots",
+        json!({"id":"pair","name":"Pair","color":"cyan"}),
+    );
+    f.send(
+        &c,
+        "ancien-direct",
+        "Une génération commencée avant le groupe",
+    );
+    wait("ancien appel en vol", || {
+        gate.calls.load(Ordering::SeqCst) == 1
+    });
+    f.post(
+        "/api/conversations/members/add",
+        json!({"conversation_id":c,"bot_id":"pair","command_id":"conversion"}),
+    );
+    let old = f.run("ancien-direct").run_id;
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    gate.release();
+    wait("ancien propriétaire libéré", || {
+        f.provider.status()["titling"] == false
+    });
+    f.app.tick(0);
+    assert_eq!(
+        store::required(&f.db(), &old).unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"nouveau-groupe","body":"Une nouvelle demande explicite","mentions":[{"id":"pair","label":"Pair"}]}));
+    wait("nouveau tour explicite", || {
+        f.app.tick(0);
+        f.db()
+            .query_row(
+                "SELECT status='completed' FROM wrapper_group_turns WHERE root_id='nouveau-groupe'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        store::required(&f.db(), &old).unwrap().status,
+        RunStatus::Interrupted
+    );
+}
+
+#[test]
+fn multibot_live_remove_stop_and_new_human_ignore_late_remote_events() {
+    let mut f = Fixture::new(true);
+    let gate = GatedResponses::new();
+    let mut endpoints = f.server.endpoints();
+    endpoints.api = format!("{}/v1", gate.base);
+    f.provider = Provider::with_endpoints(&f.path, endpoints, false);
+    f.provider.refresh_models();
+    wait("catalogue concurrent", || {
+        f.provider.status()["models_ready"] == true
+    });
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    f.post(
+        "/api/bots",
+        json!({"id":"pair","name":"Pair","color":"cyan"}),
+    );
+    let c = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["grokbot","pair"],"title":"Concurrence"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"origine","body":"Avis collectif","mentions":[{"id":"@everyone","label":"everyone"}]}));
+    wait("premier HTTP en vol", || {
+        gate.calls.load(Ordering::SeqCst) == 1
+    });
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"humain-suivant","body":"Nouvelle question","mentions":[{"id":"pair","label":"Pair"}]}));
+    f.app.tick(0);
+    let original_prompt: String = f
+        .db()
+        .query_row(
+            "SELECT prompt FROM wrapper_group_turns WHERE root_id='origine' AND bot_id='pair'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        original_prompt.contains("Avis collectif")
+            && !original_prompt.contains("Nouvelle question")
+    );
+    assert_eq!(
+        gate.calls.load(Ordering::SeqCst),
+        1,
+        "un seul appel distant à la fois dans le groupe"
+    );
+    f.post(
+        "/api/conversations/members/remove",
+        json!({"conversation_id":c,"bot_id":"grokbot","command_id":"retirer-en-vol"}),
+    );
+    f.post(
+        "/api/stop",
+        json!({"conversation_id":c,"message_id":"groupe"}),
+    );
+    gate.release();
+    wait("tous les tours annulés", || {
+        f.app.tick(0);
+        f.db()
+            .query_row(
+                "SELECT COUNT(*)=0 FROM wrapper_group_turns WHERE status IN ('queued','running')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == c)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    assert!(messages
+        .iter()
+        .filter(|m| m["payload"]["turn_id"].is_string())
+        .all(|m| m["state"] == "stopped"));
+    let old_ids = store::runs_for_conversation(&f.db(), &c)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.run_id)
+        .collect::<Vec<_>>();
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    f.app.tick(0);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"apres-annulation","body":"Une demande vraiment nouvelle"}));
+    wait("nouvelle réponse sans réattribution", || {
+        f.app.tick(0);
+        f.db().query_row("SELECT status='completed' FROM wrapper_group_turns WHERE root_id='apres-annulation'",[],|r|r.get::<_,bool>(0)).unwrap()
+    });
+    let new_id: String = f
+        .db()
+        .query_row(
+            "SELECT run_id FROM wrapper_group_turns WHERE root_id='apres-annulation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!old_ids.contains(&new_id));
+    assert!(store::runs_for_conversation(&f.db(), &c)
+        .unwrap()
+        .iter()
+        .filter(|r| old_ids.contains(&r.run_id))
+        .all(|r| r.status == RunStatus::Cancelled));
+}
+
 #[test]
 fn simulated_mode_still_replies() {
     let mut f = Fixture::new(false);
@@ -806,6 +974,10 @@ fn model_form_suspends_and_resumes_through_wrapper_receipt() {
     assert_eq!(receipt["receipt"]["wake"]["status"], "pending");
     f.app.tick(1000);
     wait("real form resumed", || {
+        // The suspended worker can still own the run when the first wake tick
+        // arrives. Drive the periodic host like the app, rather than assuming
+        // the process-local owner has already released it on this CPU schedule.
+        f.app.tick(1000);
         f.run("actual-form").status.is_terminal()
     });
     assert_eq!(f.run("actual-form").run_id, run.run_id);
@@ -1130,10 +1302,18 @@ fn incomplete_reply_keeps_visible_text_french_notice_and_durable_usage() {
     assert_eq!(reply["body"], "Partial answer");
     assert!(reply["notice"].as_str().unwrap().contains("avant la fin"));
     assert!(reply.get("error").is_none());
-    assert_eq!(reply["payload"]["usage"], json!({"input_tokens":12340,"output_tokens":100,"cached_input_tokens":11008}));
-    wait("incomplete owner drained", || f.provider.status()["titling"] == false);
+    assert_eq!(
+        reply["payload"]["usage"],
+        json!({"input_tokens":12340,"output_tokens":100,"cached_input_tokens":11008})
+    );
+    wait("incomplete owner drained", || {
+        f.provider.status()["titling"] == false
+    });
     f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
-    assert_eq!(f.reply(&c, "incomplete")["payload"]["usage"], reply["payload"]["usage"]);
+    assert_eq!(
+        f.reply(&c, "incomplete")["payload"]["usage"],
+        reply["payload"]["usage"]
+    );
 }
 
 #[test]

@@ -1,0 +1,14 @@
+.group-bar { flex: 0 0 auto; display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 9px 27px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.group-bar[hidden] { display: none; }
+.group-bar > span { min-width: 0; overflow-wrap: anywhere; }
+.group-bar button { flex-shrink: 0; font-size: 10px; padding: 6px 8px; }
+.group-dialog { width: min(560px, calc(100% - 32px)); }
+.group-member { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.group-member-copy { flex: 1; min-width: 100px; overflow-wrap: anywhere; }
+.group-member strong { font-size: 12px; }
+.group-member small { display: block; font-size: 10px; color: var(--muted); margin-top: 4px; }
+.group-member button { font-size: 10px; padding: 6px 9px; }
+.group-coordinator { color: var(--muted); font-size: 10px; }
+.group-select { padding: 5px 12px; }
+.group-select input { accent-color: var(--accent); width: 16px; height: 16px; }
+@media (max-width: 900px) { .group-bar { padding: 8px 16px; } .topbar-actions { gap: 6px; } }

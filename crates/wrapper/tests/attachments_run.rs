@@ -253,6 +253,53 @@ fn assert_caption_only(request: &Value, caption: &str) {
 }
 
 #[test]
+fn group_recipients_each_receive_the_sending_image_then_history_keeps_captions_only() {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/bots",
+        json!({"id":"pair","name":"Pair","color":"cyan"}),
+    );
+    let c = f.post(
+        "/api/conversations",
+        json!({"title":"Images du groupe","bot_ids":["grokbot","pair"]}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let image = f.upload();
+    f.prepare(&c, &image, "Image partagée", CAPTION);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"image-groupe","body":"","attachments":[image],"mentions":[{"id":"@everyone","label":"everyone"}]}));
+    wait("deux lectures du groupe", || {
+        f.app.tick(0);
+        f.db().query_row("SELECT COUNT(*)=2 AND SUM(status='completed')=2 FROM wrapper_group_turns WHERE root_id='image-groupe'",[],|r|r.get::<_,bool>(0)).unwrap_or(false)
+    });
+    let requests = f.run_requests();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_caption(&request, "A blue square.");
+        assert_eq!(
+            user_content(&request)
+                .iter()
+                .filter(|part| part["type"] == "input_image")
+                .count(),
+            1
+        );
+    }
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"suite-groupe","body":"Que retenez-vous de cette image ?"}));
+    wait("suite du groupe", || {
+        f.app.tick(0);
+        f.db()
+            .query_row(
+                "SELECT status='completed' FROM wrapper_group_turns WHERE root_id='suite-groupe'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    });
+    assert_caption_only(f.run_requests().last().unwrap(), "A blue square.");
+}
+
+#[test]
 fn sending_turn_includes_input_image_and_caption() {
     let mut f = Fixture::new();
     let c = f.conversation();

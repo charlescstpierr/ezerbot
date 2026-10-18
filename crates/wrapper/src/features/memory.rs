@@ -506,6 +506,26 @@ fn redact_traces(
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
+    // A visible group reply may have been copied into a peer's snapshot. Limit
+    // this expansion to shared threads, never the peers' other private chats.
+    let mut shared_conversations = BTreeSet::new();
+    for bot in &bots {
+        let mut statement = conn.prepare("SELECT DISTINCT m.conversation_id FROM wrapper_members m JOIN wrapper_conversations c ON c.account_id=m.account_id AND c.id=m.conversation_id WHERE m.account_id=?1 AND m.bot_id=?2 AND c.kind='group'")?;
+        shared_conversations.extend(
+            statement
+                .query_map(params![ACCOUNT, bot], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    for conversation in &shared_conversations {
+        let busy: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_runs WHERE conversation_id=?1 AND status='running' AND run_id!=?2)", params![conversation,executing_run.unwrap_or("")], |r|r.get(0))?;
+        if busy {
+            return Err(ApiError::new(
+                409,
+                "Une réponse du groupe est en cours. Arrêtez-la avant de réessayer l’oubli.",
+            ));
+        }
+    }
     // Refuse rather than mutate another run's lifecycle behind its observer.
     // The IMMEDIATE caller transaction prevents a concurrent model callback
     // from slipping between this check and the wipe. Our own forget_fact run
@@ -583,6 +603,69 @@ fn redact_traces(
                 .query_map(params![ACCOUNT, bot], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
+    }
+    for conversation in &shared_conversations {
+        let mut statement = conn
+            .prepare("SELECT run_id,conversation_id FROM engine_runs WHERE conversation_id=?1")?;
+        for row in statement.query_map([conversation], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let row = row?;
+            if !runs.contains(&row) {
+                runs.push(row);
+            }
+        }
+        let mut statement = conn.prepare(
+            "SELECT id,snapshot,prompt,run_id FROM wrapper_group_turns WHERE conversation_id=?1",
+        )?;
+        let rows = statement
+            .query_map([conversation], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, snapshot, prompt, run_id) in rows {
+            let snapshot = snapshot
+                .map(|raw| -> Result<String, ApiError> {
+                    let mut items: Vec<grokbot_engine::contracts::HistoryItem> =
+                        serde_json::from_str(&raw)
+                            .map_err(|_| ApiError::new(500, "Instantané de groupe illisible."))?;
+                    for item in &mut items {
+                        item.text = redact_string(&item.text, &texts);
+                    }
+                    serde_json::to_string(&items)
+                        .map_err(|_| ApiError::new(500, "Instantané de groupe invalide."))
+                })
+                .transpose()?;
+            conn.execute(
+                "UPDATE wrapper_group_turns SET snapshot=?2,prompt=?3 WHERE id=?1",
+                params![id, snapshot, redact_string(&prompt, &texts)],
+            )?;
+            if let Some(run_id) = run_id {
+                let raw: String = conn.query_row(
+                    "SELECT input_json FROM wrapper_engine_runs WHERE run_id=?1",
+                    [&run_id],
+                    |r| r.get(0),
+                )?;
+                let mut item: grokbot_engine::contracts::HistoryItem =
+                    serde_json::from_str(&raw)
+                        .map_err(|_| ApiError::new(500, "Entrée de groupe illisible."))?;
+                item.text = redact_string(&item.text, &texts);
+                conn.execute(
+                    "UPDATE wrapper_engine_runs SET input_json=?2 WHERE run_id=?1",
+                    params![
+                        run_id,
+                        serde_json::to_string(&item)
+                            .map_err(|_| ApiError::new(500, "Entrée de groupe invalide."))?
+                    ],
+                )?;
+            }
+        }
+        conversations.insert(conversation.clone());
     }
     // Compute ALL coverage on original replay, including cross-conversation
     // echoes of extending corrections, before rewriting a single payload.

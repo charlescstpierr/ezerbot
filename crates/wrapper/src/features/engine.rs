@@ -37,6 +37,8 @@ struct SendMessage {
     #[serde(default)]
     attachments: Vec<String>,
     #[serde(default)]
+    mentions: Vec<super::multibot::Mention>,
+    #[serde(default)]
     simulate_loss: bool,
 }
 #[derive(Deserialize)]
@@ -358,6 +360,13 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 None
             };
             let tx = super::write_transaction(&app.connection)?;
+            super::multibot::capture(
+                &tx,
+                &input.conversation_id,
+                &input.message_id,
+                &input.mentions,
+                app.provider.connected(),
+            )?;
             super::conversations::append_entry(
                 &tx,
                 &input.conversation_id,
@@ -497,6 +506,25 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     return Err(ApiError::new(404, "Conversation introuvable."));
                 }
             }
+            if path == "/api/stop"
+                && super::multibot::is_group(&app.connection, &input.conversation_id)
+            {
+                let tx = super::write_transaction(&app.connection)?;
+                super::multibot::cancel(&app.feature_context(), &tx, &input.conversation_id, None)?;
+                tx.commit()?;
+                for run in store::runs_for_conversation(&app.connection, &input.conversation_id)? {
+                    if !run.status.is_terminal() {
+                        stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
+                    }
+                }
+                super::multibot::tick(&app.feature_context());
+                return app.conversation_response(&input.conversation_id);
+            }
+            if path == "/api/regenerate"
+                && super::multibot::is_group(&app.connection, &input.conversation_id)
+            {
+                return Err(ApiError::new(409, "Ce tour de groupe est conservé. Envoyez un nouveau message ou une mention pour demander une nouvelle réponse."));
+            }
             let trigger = user_trigger(&input.conversation_id, &input.message_id, 0);
             let old = store::latest_run_for_trigger(&app.connection, &trigger)?
                 .or(store::get(&app.connection, &input.message_id)?)
@@ -553,6 +581,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let input: Reset = parse(body)?;
             validate_conversation_id(&input.conversation_id)?;
             app.require_conversation(&input.conversation_id)?;
+            if super::multibot::is_group(&app.connection, &input.conversation_id) {
+                let tx = super::write_transaction(&app.connection)?;
+                super::multibot::cancel(&app.feature_context(), &tx, &input.conversation_id, None)?;
+                tx.commit()?;
+            }
             for run in store::runs_for_conversation(&app.connection, &input.conversation_id)? {
                 if !run.status.is_terminal() {
                     stop_run(&app.feature_context(), &run, TurnEnd::Stopped)?;
@@ -689,6 +722,10 @@ impl App {
         ) {
             return Ok(());
         }
+        if super::multibot::enqueue(&self.connection, conversation, message)? {
+            super::multibot::tick(&self.feature_context());
+            return Ok(());
+        }
         let bot: String = self.connection.query_row(
             "SELECT bot_id FROM wrapper_conversations WHERE account_id=?1 AND id=?2",
             params![ACCOUNT, conversation],
@@ -763,6 +800,27 @@ pub fn start_run(
     trigger: Trigger,
     input: HistoryItem,
 ) -> Result<Run, ApiError> {
+    create_run(ctx, trigger, input, None)
+}
+pub(crate) fn start_group_run(
+    ctx: &super::Context<'_>,
+    turn: &str,
+    prompt: &str,
+    snapshot: &str,
+) -> Result<Run, ApiError> {
+    create_run(
+        ctx,
+        user_trigger(ctx.conversation_id.unwrap(), turn, 0),
+        item(turn, Role::User, prompt.into()),
+        Some((turn, snapshot)),
+    )
+}
+fn create_run(
+    ctx: &super::Context<'_>,
+    trigger: Trigger,
+    input: HistoryItem,
+    group: Option<(&str, &str)>,
+) -> Result<Run, ApiError> {
     let bot = ctx
         .bot_id
         .ok_or_else(|| ApiError::new(400, "Bot requis."))?;
@@ -781,7 +839,9 @@ pub fn start_run(
         RunKind::Task
     };
     let run = Run {
-        run_id: format!("run-{}", random_id(ctx.connection)?),
+        run_id: group
+            .map(|(id, _)| format!("group-{id}"))
+            .unwrap_or(format!("run-{}", random_id(ctx.connection)?)),
         bot_id: bot.into(),
         conversation_id: conversation.into(),
         trigger,
@@ -792,7 +852,11 @@ pub fn start_run(
         budgets: RunBudgets::default(),
         started_at: now() as i64,
     };
-    let live = ctx.provider.connected();
+    let live = if let Some((turn, _)) = group {
+        ctx.connection.query_row("SELECT i.live FROM wrapper_group_inputs i JOIN wrapper_group_turns t ON t.account_id=i.account_id AND t.conversation_id=i.conversation_id AND t.root_id=i.message_id WHERE t.id=?1",[turn],|r|r.get(0))?
+    } else {
+        ctx.provider.connected()
+    };
     let (model, effort, tier) = if live {
         resolve_model(ctx.connection, ctx.provider)?.unwrap_or_else(|| (String::new(), None, None))
     } else {
@@ -806,7 +870,10 @@ pub fn start_run(
         |conn, _| {
             let saved = model::start(conn, &run)?;
             conn.execute("INSERT OR IGNORE INTO wrapper_engine_runs(run_id,input_json,live,model,effort,service_tier) VALUES (?1,?2,?3,?4,?5,?6)",params![saved.run_id,serde_json::to_string(&input)?,live,model,effort,tier])?;
-            if !matches!(saved.trigger, Trigger::UserMessage { .. }) {
+            if let Some((turn, snapshot)) = group {
+                conn.execute("UPDATE wrapper_group_turns SET run_id=?2,snapshot=?3,status='running' WHERE id=?1 AND status='queued'", params![turn,saved.run_id,snapshot])?;
+            }
+            if group.is_none() && !matches!(saved.trigger, Trigger::UserMessage { .. }) {
                 super::conversations::append_entry(
                     conn,
                     conversation,
@@ -822,7 +889,7 @@ pub fn start_run(
     launch(ctx, &saved)?;
     Ok(saved)
 }
-fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
+pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
     ctx.provider.cancel_run(&run.run_id);
     let mut services = Services::new(ctx)?;
     run_loop::cancel(ctx.connection, &mut services, &run.run_id, end)?;
@@ -841,6 +908,17 @@ pub fn tick(ctx: &super::Context<'_>) {
     ] {
         if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
             for run in runs {
+                if status == RunStatus::Interrupted
+                    && super::multibot::is_group(ctx.connection, &run.conversation_id)
+                {
+                    continue;
+                }
+                if super::multibot::managed(ctx.connection, &run.run_id) {
+                    if status.is_suspended() {
+                        let _ = reconcile_input_wait(ctx.connection, &run);
+                    }
+                    continue;
+                }
                 if status.is_suspended() && reconcile_input_wait(ctx.connection, &run).is_err() {
                     continue;
                 }
@@ -905,7 +983,7 @@ fn reconcile_input_wait(conn: &Connection, run: &Run) -> grokbot_engine::contrac
     }
     Ok(())
 }
-fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
+pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError> {
     if run.status.is_terminal() {
         return Ok(());
     }
@@ -1027,6 +1105,13 @@ fn drive_owned(
         if run.status.is_terminal() || run.status.is_suspended() {
             return Ok(());
         }
+        if run.status == RunStatus::Interrupted
+            && super::multibot::is_group(conn, &run.conversation_id)
+        {
+            // A group's uncertain remote attempt stays uncertain even when a
+            // callback/storage failure happens without a process restart.
+            return Ok(());
+        }
         if result.is_err() {
             let retries:i64=conn.query_row("UPDATE wrapper_engine_runs SET retries=retries+1 WHERE run_id=?1 RETURNING retries",[id],|r|r.get(0))?;
             if retries >= 3 {
@@ -1145,10 +1230,12 @@ impl RunServices for Services<'_> {
                 "task conversation is unavailable".into(),
             ));
         }
+        let source_message =
+            super::multibot::source_message(self.connection, &run.run_id, &input.entry_id)?;
         let linked = super::attachments::images_for_message(
             &ctx,
             &run.conversation_id,
-            &input.entry_id,
+            &source_message,
             &model,
             false,
         )
@@ -1209,6 +1296,16 @@ impl RunServices for Services<'_> {
         let (mut history, _) = history(self.connection, run, &input)?;
         hydrate_history_images(&ctx, &run.conversation_id, &model, &mut history)?;
         input.text.push_str(&super::attachments::document_text(&ctx, &run.conversation_id, &input.entry_id).map_err(engine_error)?);
+        if source_message != input.entry_id {
+            // A group's sending image is attached to its distinct turn input;
+            // the shared human entry must not repeat that caption a second time.
+            for entry in history
+                .iter_mut()
+                .filter(|entry| entry.entry_id == source_message)
+            {
+                entry.images.clear();
+            }
+        }
         history.push(input);
         Ok(ModelRequest {
             model,
@@ -1406,6 +1503,9 @@ fn history(
     run: &Run,
     current: &HistoryItem,
 ) -> grokbot_engine::contracts::Result<(Vec<HistoryItem>, Option<String>)> {
+    if let Some(snapshot) = super::multibot::snapshot(conn, &run.run_id)? {
+        return Ok((snapshot, None));
+    }
     let mut stmt=conn.prepare("SELECT message_id,kind FROM wrapper_messages WHERE account_id=?1 AND conversation_id=?2 ORDER BY ordinal")?;
     let rows = stmt
         .query_map(params![ACCOUNT, run.conversation_id], |r| {
@@ -1528,6 +1628,11 @@ impl RunGatewayCall<'_> {
             }
         }
         let run = store::required(self.connection, self.run_id)?;
+        // Preserve the single-bot model contract: the group-only tool is not
+        // advertised in direct chats or unrelated delegated/routine threads.
+        if !super::multibot::managed(self.connection, self.run_id) {
+            request.tools.retain(|tool| tool.name != "message_bot");
+        }
         let original = run_input(self.connection, self.run_id)?;
         let (_, reset) = history(self.connection, &run, &original)?;
         let ctx = super::Context {
@@ -1539,10 +1644,12 @@ impl RunGatewayCall<'_> {
             conversation_id: Some(&run.conversation_id),
             run_id: Some(&run.run_id),
         };
+        let source_message =
+            super::multibot::source_message(self.connection, &run.run_id, &original.entry_id)?;
         let linked = super::attachments::images_for_message_cached(
             &ctx,
             &run.conversation_id,
-            &original.entry_id,
+            &source_message,
             &request.model,
             !self.no_vision.load(Ordering::SeqCst) && !self.captions_only.load(Ordering::SeqCst),
             &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
@@ -1637,7 +1744,13 @@ impl RunGatewayCall<'_> {
                 }
             }
         }
+        if super::multibot::managed(self.connection, self.run_id) {
+            summary = None;
+        }
         loop {
+            if super::multibot::managed(self.connection, self.run_id) {
+                break;
+            }
             let start = summary
                 .as_ref()
                 .and_then(|s| {
@@ -1799,8 +1912,28 @@ impl RunGatewayCall<'_> {
                 &serde_json::to_value(outgoing)?,
             )?)?)
         };
+        let group = super::multibot::managed(self.connection, self.run_id);
+        let group_error = "Le fil dépasse le budget de contexte disponible. Ouvrez une conversation plus courte ; aucun ancien message n’a été supprimé ni résumé automatiquement.";
         let outgoing = match assemble(&request.input) {
+            Ok(outgoing) if group && outgoing.input.len() != request.input.len() => {
+                self.connection.execute(
+                    "UPDATE wrapper_engine_runs SET error=?2,error_kind='context' WHERE run_id=?1",
+                    params![self.run_id, group_error],
+                )?;
+                return emit(ModelEvent::Failed {
+                    reason: group_error.into(),
+                });
+            }
             Ok(outgoing) => outgoing,
+            Err(_) if group => {
+                self.connection.execute(
+                    "UPDATE wrapper_engine_runs SET error=?2,error_kind='context' WHERE run_id=?1",
+                    params![self.run_id, group_error],
+                )?;
+                return emit(ModelEvent::Failed {
+                    reason: group_error.into(),
+                });
+            }
             Err(error) if self.degrade_image_budget(&error, has_sending_bytes)? => {
                 return self.stream(&request, emit);
             }
@@ -2100,6 +2233,7 @@ fn run_reply(
     }
     let (state, error) = match run.status {
         RunStatus::Queued | RunStatus::Running => ("streaming", None),
+        RunStatus::Interrupted if super::multibot::is_group(conn, &run.conversation_id) => ("failed", Some("La génération distante a été interrompue. Son résultat est incertain ; elle n’a pas été relancée automatiquement.".into())),
         RunStatus::Interrupted => ("failed", Some(INTERRUPTED.into())),
         RunStatus::Failed if metadata.1.as_deref() == Some("incomplete") => ("echoed", None),
         RunStatus::Failed => ("failed", metadata.0.or_else(|| Some(INTERRUPTED.into()))),
@@ -2117,9 +2251,13 @@ fn run_reply(
         notice: metadata.2,
         proposals,
         kind: "message".into(),
-        payload: json!({"run_id":run.run_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?}),
+        payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?}),
         attachments: vec![],
     })
+}
+pub(crate) fn group_reply(ctx: &super::Context<'_>, id: &str) -> Result<Message, ApiError> {
+    let run = store::required(ctx.connection, id)?;
+    run_reply(ctx.connection, &run, format!("reply-{id}"), vec![])
 }
 pub fn reply(
     ctx: &super::Context<'_>,
@@ -2267,7 +2405,9 @@ pub fn context(ctx: &super::Context<'_>, request: &ContextRequest) -> Vec<Contex
     let mut blocks = vec![block(
         ContextSource::AppContract,
         super::priority::APP,
-        BASE_INSTRUCTIONS.into(),
+        super::multibot::contract(ctx)
+            .map(|contract| format!("{BASE_INSTRUCTIONS}\n\n{contract}"))
+            .unwrap_or_else(|| BASE_INSTRUCTIONS.into()),
     )];
     if let Ok(Some(bot))=ctx.connection.query_row("SELECT id,name,color,description,instructions,template,customized,deleted,shape FROM wrapper_bots WHERE account_id=?1 AND id=?2",params![ACCOUNT,request.bot_id],bot_from_row).optional(){
         let mut identity=format!("Tu t'appelles {}.",bot.name);
@@ -2419,6 +2559,9 @@ fn retitle(
     path: &Path,
 ) -> grokbot_engine::contracts::Result<()> {
     let run = store::required(conn, id)?;
+    if super::multibot::managed(conn, id) {
+        return Ok(());
+    }
     if run.status != RunStatus::Finished || cancel.load(Ordering::SeqCst) {
         return Ok(());
     }

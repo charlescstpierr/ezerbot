@@ -11,6 +11,19 @@ const reply = (state, parts, extra = {}) => ({
 });
 const preCall = { body: "Avant.", before: tool.id };
 
+test("group card-first and delivery-only turns retain their own structured author", () => {
+  for (const parts of [[], [{ body: "L’avis de Boréal." }]]) {
+    const message = reply("echoed", parts);
+    message.payload.bot_id = "bot-b";
+    message.payload.turn_id = "tour-b";
+    const ordered = orderThread([user, message, tool]);
+    const heading = ordered.find((m) => m.kind === "turn-heading");
+    assert.equal(heading.payload.bot_id, "bot-b");
+    assert.equal(heading.payload.turn_id, "tour-b");
+    assert.ok(ordered.indexOf(heading) < ordered.indexOf(tool));
+  }
+});
+
 for (const state of ["streaming", "failed", "stopped"]) {
   test(`${state} after pre-call text belongs below the call`, () => {
     const result = orderThread([user, reply(state, [preCall], { error: "Erreur" }), tool]);

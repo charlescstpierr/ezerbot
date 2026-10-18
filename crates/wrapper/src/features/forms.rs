@@ -121,7 +121,7 @@ fn principal_conversation(ctx: &Context<'_>, origin: &str) -> Result<String, Api
         let Some((bot, kind, parent, deleted)) = row else {
             break;
         };
-        if !deleted && bot == DEFAULT_BOT.id && kind == "chat" {
+        if !deleted && (kind == "group" || (bot == DEFAULT_BOT.id && kind == "chat")) {
             return Ok(id);
         }
         candidate = parent;
@@ -215,7 +215,7 @@ fn active_run(ctx: &Context<'_>, call: &ToolCall) -> Result<Run, ApiError> {
     {
         return Err(ApiError::new(400, "Invalid tool arguments"));
     }
-    let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0)", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?;
+    let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=?3 WHERE c.account_id=?1 AND c.id=?2 AND c.deleted=0 AND b.deleted=0 AND (c.bot_id=?3 OR (c.kind='group' AND EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id AND m.bot_id=?3 AND m.active=1))))", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?;
     if !live {
         return Err(ApiError::new(
             409,
@@ -279,6 +279,7 @@ fn request(ctx: &Context<'_>, call: &ToolCall) -> Result<HumanInputRequest, ApiE
 
 fn request_route(ctx: &Context<'_>, run: &Run, approval: bool) -> Result<ApprovalRoute, ApiError> {
     let hidden: bool = ctx.connection.query_row("SELECT kind IN ('task','routine') FROM wrapper_conversations WHERE account_id=?1 AND id=?2", params![ACCOUNT,run.conversation_id], |row| row.get(0))?;
+    let group = super::multibot::is_group(ctx.connection, &run.conversation_id);
     let principal = approval || hidden;
     Ok(ApprovalRoute {
         requesting_bot_id: run.bot_id.clone(),
@@ -287,7 +288,9 @@ fn request_route(ctx: &Context<'_>, run: &Run, approval: bool) -> Result<Approva
         } else {
             run.bot_id.clone()
         },
-        target_conversation_id: if principal {
+        target_conversation_id: if group {
+            run.conversation_id.clone()
+        } else if principal {
             principal_conversation(ctx, &run.conversation_id)?
         } else {
             run.conversation_id.clone()
@@ -575,7 +578,7 @@ fn for_entry(
             "Human input must be resolved in its displayed conversation",
         ));
     }
-    let live: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations WHERE account_id=?1 AND id=?2 AND bot_id=?3 AND deleted=0)",params![ACCOUNT,conversation,request.route.target_bot_id],|r| r.get(0))?;
+    let live: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c WHERE account_id=?1 AND id=?2 AND deleted=0 AND (bot_id=?3 OR (kind='group' AND (?3='grokbot' OR EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id AND m.bot_id=?3 AND m.active=1)))))",params![ACCOUNT,conversation,request.route.target_bot_id],|r| r.get(0))?;
     if !live {
         return Err(ApiError::new(
             409,
@@ -798,7 +801,10 @@ fn orphaned_requests(conn: &Connection) -> Result<Vec<String>, ApiError> {
     let mut statement = conn.prepare(
         "SELECT r.id FROM forms_requests r LEFT JOIN wrapper_conversations c
          ON c.account_id=?1 AND c.id=json_extract(r.route_json,'$.target_conversation_id')
-         AND c.bot_id=json_extract(r.route_json,'$.target_bot_id')
+         AND (c.bot_id=json_extract(r.route_json,'$.target_bot_id') OR
+             (c.kind='group' AND (json_extract(r.route_json,'$.target_bot_id')='grokbot' OR EXISTS(
+                 SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id
+                 AND m.bot_id=json_extract(r.route_json,'$.target_bot_id') AND m.active=1))))
          WHERE r.status='pending' AND (c.id IS NULL OR c.deleted=1)",
     )?;
     let ids = statement

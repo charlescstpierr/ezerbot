@@ -119,7 +119,7 @@ fn active_run(ctx: &Context<'_>) -> Result<Run> {
     {
         return Err(invalid("delegation does not match the active run"));
     }
-    let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0)", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?;
+    let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=?3 WHERE c.account_id=?1 AND c.id=?2 AND c.deleted=0 AND b.deleted=0 AND (c.bot_id=?3 OR (c.kind='group' AND EXISTS(SELECT 1 FROM wrapper_members m WHERE m.account_id=c.account_id AND m.conversation_id=c.id AND m.bot_id=?3 AND m.active=1))))", params![ACCOUNT,run.conversation_id,run.bot_id], |r| r.get(0))?;
     if !live {
         return Err(invalid("parent conversation is unavailable"));
     }

@@ -4,6 +4,7 @@ import "./chat.css";
 import { Thread } from "./Thread.jsx";
 import { editorOptions, readText, writeText } from "./editor.js";
 import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from "./attachment-presentation.js";
+import { mentionMenu, readMentions } from "./mentions.js";
 
 const roots = new WeakMap();
 
@@ -18,19 +19,26 @@ window.GrokbotChat = {
   },
 
   // Returns a stand-in for the former <textarea>.
-  mountInput(element, { placeholder, onInput, onSubmit, onFiles }) {
+  mountInput(element, { placeholder, onInput, onSubmit, onFiles, getMentionCandidates = () => [], onAddMember = async () => false }) {
+    const menu = mentionMenu(element, getMentionCandidates, onAddMember);
     const options = editorOptions({ placeholder, onSubmit });
     const editor = new Editor({
-      element, ...options, onUpdate: onInput,
+      element, ...options, onUpdate: ({ editor }) => { onInput(); menu.update(editor); },
+      onSelectionUpdate: ({ editor }) => menu.update(editor),
+      onBlur: () => setTimeout(() => menu.hide(), 150),
       editorProps: {
         ...options.editorProps,
+        handleKeyDown: (view, event) => menu.keydown(editor, event) || options.editorProps.handleKeyDown(view, event),
         handlePaste: (_view, event) => Boolean(onFiles?.(event.clipboardData?.files, event)),
         handleDrop: (_view, event) => Boolean(onFiles?.(event.dataTransfer?.files, event)),
       },
     });
     return {
       get value() { return readText(editor); },
-      set value(text) { writeText(editor, text); },
+      set value(text) { menu.hide(); writeText(editor, text); },
+      get mentions() { return readMentions(editor); },
+      get document() { return editor.getJSON(); },
+      set document(value) { menu.hide(); editor.commands.setContent(value, { emitUpdate: false }); },
       focus() { editor.commands.focus("end"); },
       setInvalid(invalid) { editor.view.dom.setAttribute("aria-invalid", String(invalid)); },
     };

@@ -110,14 +110,27 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         "/api/conversations" => {
             let input: CreateConversation = parse(body)?;
             let title = valid_title(input.title.as_deref().unwrap_or(DEFAULT_TITLE))?;
-            let bot_id = input.bot_id.as_deref().unwrap_or(DEFAULT_BOT.id);
-            validate_id(bot_id)?;
-            app.require_bot(bot_id)?;
+            let mut bots = input
+                .bot_ids
+                .unwrap_or_else(|| vec![input.bot_id.unwrap_or_else(|| DEFAULT_BOT.id.into())]);
+            let mut seen = HashSet::new();
+            bots.retain(|id| seen.insert(id.clone()));
+            if bots.is_empty() || bots.len() > 6 {
+                return Err(ApiError::new(400, "Choisissez de un à six bots."));
+            }
+            for id in &bots {
+                validate_id(id)?;
+                app.require_bot(id)?;
+            }
+            let bot_id = &bots[0];
             let id: String =
                 app.connection
                     .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
             let timestamp = now();
-            app.connection.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id])?;
+            let tx = super::write_transaction(&app.connection)?;
+            tx.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id])?;
+            super::multibot::initialize(&tx, &id, &bots)?;
+            tx.commit()?;
             app.conversation_response(&id)
         }
         "/api/conversations/update" => {
@@ -250,6 +263,7 @@ impl App {
             conversations.insert(
                 id.clone(),
                 Conversation {
+                    member_ids: super::multibot::members(&self.connection, &id)?,
                     id,
                     bot_id,
                     title,
@@ -276,6 +290,7 @@ impl App {
                 .or_insert_with(|| Conversation {
                     id: id.to_owned(),
                     bot_id: DEFAULT_BOT.id.into(),
+                    member_ids: vec![DEFAULT_BOT.id.into()],
                     title: "Conversation récupérée".into(),
                     favorite: false,
                     updated_at: created_at,
@@ -298,7 +313,7 @@ impl App {
                 notice: None,
                 proposals: Vec::new(),
                 kind: "message".into(),
-                payload: Value::Null,
+                payload: json!({"mentions":super::multibot::mentions(&self.connection, id, record.message_id.as_str())}),
                 attachments: super::attachments::for_message(&ctx, id, record.message_id.as_str()),
             }];
             if matches!(

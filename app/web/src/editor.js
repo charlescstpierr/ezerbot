@@ -1,12 +1,13 @@
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import { Mention } from "./mentions.js";
 
 // Formatting is off on purpose: the message is sent exactly as typed, Markdown source included.
 const plainText = Object.fromEntries(["blockquote", "bold", "bulletList", "code", "codeBlock", "heading", "horizontalRule", "italic", "link", "listItem", "listKeymap", "orderedList", "strike", "underline"].map((name) => [name, false]));
 
 export function editorOptions({ placeholder, onSubmit }) {
   return {
-    extensions: [StarterKit.configure(plainText), Placeholder.configure({ placeholder })],
+    extensions: [StarterKit.configure(plainText), Placeholder.configure({ placeholder }), Mention],
     enableInputRules: false,
     enablePasteRules: false,
     editorProps: {

@@ -88,6 +88,7 @@ pub mod delegation;
 pub mod engine;
 pub mod forms;
 pub mod memory;
+pub mod multibot;
 pub mod routines;
 pub mod skills;
 
@@ -118,6 +119,7 @@ macro_rules! registry {
 registry!(
     conversations,
     engine,
+    multibot,
     skills,
     memory,
     forms,

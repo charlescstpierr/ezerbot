@@ -241,6 +241,7 @@ impl From<SessionError> for ApiError {
 pub struct Conversation {
     pub id: String,
     pub bot_id: String,
+    pub member_ids: Vec<String>,
     pub title: String,
     pub favorite: bool,
     pub updated_at: u64,
@@ -608,6 +609,7 @@ fn seed_default_bot(connection: &Connection) -> Result<(), ApiError> {
 struct CreateConversation {
     title: Option<String>,
     bot_id: Option<String>,
+    bot_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

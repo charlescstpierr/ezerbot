@@ -89,7 +89,7 @@
     }
   }
   function sendExtras() {
-    const extras = {};
+    const extras = { mentions: ui.input?.mentions || [] };
     for (const panel of panels.values()) {
       const fields = panelCall(panel, panel.sendExtras);
       if (fields && typeof fields === "object" && !fields.then && !Array.isArray(fields)) Object.assign(extras, fields);
@@ -289,15 +289,26 @@
   }
 
   function saveDraft() {
-    if (ui.input.value) writePreference(draftKey(), ui.input.value);
-    else removePreference(draftKey());
+    if (ui.input.value) {
+      writePreference(draftKey(), ui.input.value);
+      writePreference(`${draftKey()}.document`, JSON.stringify(ui.input.document));
+    } else {
+      removePreference(draftKey());
+      removePreference(`${draftKey()}.document`);
+    }
+  }
+  function restoreDraftDocument() {
+    try {
+      const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
+      if (document && readPreference(draftKey(), "") === ui.input.value) ui.input.document = document;
+    } catch { /* Plain text remains usable when an older draft has no rich document. */ }
   }
 
   function updateComposer() {
     const pendingMessage = currentConversation()?.messages.find((message) => message.role === "user" && pendingStates.has(message.state));
     const pending = Boolean(pendingMessage);
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
-    const live = Boolean(streamingMessage());
+    const live = Boolean(streamingMessage()) && currentConversation()?.kind !== "group";
     const hasAttachments = Boolean(sendExtras().attachments?.length);
     const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
     ui.send.disabled = live ? false : busy || !connected || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked;
@@ -319,6 +330,7 @@
     selectedId = id;
     writePreference("grokbot.selected", id || "");
     setComposerText(readPreference(draftKey(), ""));
+    restoreDraftDocument();
     closeMenu();
     closeSidebar();
     render();
@@ -529,6 +541,17 @@
   // Une fabrique stable par forme : le fil ne recrée ses mascottes que si la forme change.
   const threadMascots = {};
   function threadMascot(shape) { return threadMascots[shape] ||= () => mascot?.create(false, shape); }
+  const authorMascots = {};
+  function createBotMascot(bot) {
+    const key = `${bot.id}:${bot.shape}:${bot.color}`;
+    return authorMascots[key] ||= () => {
+      const wrapper = element("span", "gb-author-mascot");
+      wrapper.dataset.botColor = bot.color;
+      const figure = mascot?.create(false, bot.shape);
+      if (figure) wrapper.append(figure);
+      return wrapper;
+    };
+  }
 
   const thread = {
     createMascot: threadMascot("galet"),
@@ -567,8 +590,9 @@
     $("edit-bot-button").disabled = !bot || bot.deleted;
     document.title = conversation ? `${conversation.title} · Ezerbot` : "Ezerbot";
     ui.welcome.hidden = hasMessages;
+    document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -727,9 +751,10 @@
   async function sendMessage(event) {
     event.preventDefault();
     const live = streamingMessage();
-    if (live) { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
+    if (live && currentConversation()?.kind !== "group") { await generation("/api/stop", live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
     const submittedDraft = ui.input.value;
+    const submittedDocument = ui.input.document;
     const body = submittedDraft.trim();
     const extras = structuredClone(sendExtras());
     let conversation = currentConversation();
@@ -741,13 +766,18 @@
     const previousDraftKey = draftKey();
     const restoreDraft = () => {
       const remainder = ui.input.value;
+      const remainderDocument = ui.input.document;
       setComposerText(submittedDraft && remainder ? `${submittedDraft}\n${remainder}` : submittedDraft || remainder);
+      ui.input.document = submittedDraft && remainder
+        ? { type: "doc", content: [...submittedDocument.content, ...remainderDocument.content] }
+        : submittedDraft ? submittedDocument : remainderDocument;
       saveDraft();
     };
     try {
       // Consume only the submitted text, before creation can yield to another edit.
       setComposerText("");
       removePreference(previousDraftKey);
+      removePreference(`${previousDraftKey}.document`);
       if (!conversation) {
         const created = await api("/api/conversations", { bot_id: chosenBot()?.id });
         upsertConversation(created.conversation);
@@ -892,7 +922,25 @@
   ui.input = window.GrokbotChat.mountInput($("composer-input"), {
     placeholder: "Qu’avez-vous en tête ?",
     onInput: () => { saveDraft(); updateComposer(); },
-    onSubmit: () => { if (!ui.send.disabled && !streamingMessage()) $("composer-form").requestSubmit(); },
+    getMentionCandidates: () => {
+      const conversation = currentConversation();
+      const ids = conversation?.member_ids || [chosenBot()?.id];
+      return [
+        ...(ids.length > 1 ? [{ id: "@everyone", name: "everyone" }] : []),
+        ...liveBots().filter((bot) => ids.includes(bot.id)),
+        ...(conversation ? liveBots().filter((bot) => !ids.includes(bot.id)).map((bot) => ({ ...bot, outside: true })) : []),
+      ];
+    },
+    onAddMember: async (botId) => {
+      const conversation = currentConversation();
+      if (!conversation) return false;
+      try {
+        const response = await api("/api/conversations/members/add", { conversation_id: conversation.id, bot_id: botId, command_id: crypto.randomUUID() });
+        if (currentConversation()?.id !== conversation.id) return false;
+        upsertConversation(response.conversation); render(); return true;
+      } catch (error) { notify(error.message); return false; }
+    },
+    onSubmit: () => { if (!ui.send.disabled && (!streamingMessage() || currentConversation()?.kind === "group")) $("composer-form").requestSubmit(); },
     onFiles: composerFiles,
   });
   $("composer-form").addEventListener("dragover", (event) => {
@@ -1055,6 +1103,7 @@
   render();
   refresh().then(() => {
     setComposerText(readPreference(draftKey(), ""));
+    restoreDraftDocument();
     updateComposer();
     scrollToLatest();
   }).catch(showConnectionError);

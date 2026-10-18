@@ -168,7 +168,9 @@ function ReplyProblem({ message, actions }) {
       </div>
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
       {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
-      {message.error_kind === "context_budget" ? null : message.error_kind === "signin"
+      {(message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
+        ? <span className="gb-notice">Envoyez un nouveau message pour demander une nouvelle réponse.</span>
+        : message.error_kind === "context_budget" ? null : message.error_kind === "signin"
         ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
         : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}
     </div>
@@ -207,7 +209,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming}>
       {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
       <div className="gb-content" ref={content}>
-        {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>}
+        {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} />{message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>}</header>}
         {message.body
           ? (
             <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
@@ -220,7 +222,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
-            {message.state === "stopped" && <><span className="gb-status"><Square />Réponse arrêtée</span><button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button></>}
+            {message.state === "stopped" && <><span className="gb-status"><Square />Réponse arrêtée</span>{!message.payload?.turn_id && !actions.isGroup && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
       </div>
@@ -237,29 +239,32 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot" }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl }), [onCopy, onRegenerate, onSignIn, usageUrl]);
+  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup]);
   const ordered = useMemo(() => orderThread(messages), [messages]);
   const last = ordered[ordered.length - 1];
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread">
         {ordered.map((message) => {
+          const author = bots.find((bot) => bot.id === message.payload?.bot_id);
+          const authorName = author?.name || botName;
+          const authorMascot = author && createBotMascot ? createBotMascot(author) : createMascot;
           if (message.kind === "turn-heading") return (
             <div className="gb-message gb-assistant gb-turn-heading" key={message.id}>
-              <Mascot create={createMascot} />
-              <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /></header>
+              <Mascot create={authorMascot} />
+              <header className="gb-meta"><strong>{authorName}</strong><Timestamp value={message.created_at} /></header>
             </div>
           );
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id}><Card message={message} busy={busy} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={createMascot} botName={botName} />;
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

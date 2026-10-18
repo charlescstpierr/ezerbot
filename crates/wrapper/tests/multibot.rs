@@ -1398,6 +1398,61 @@ fn first_completed_group_turn_generates_one_title_from_shared_visible_context() 
 }
 
 #[test]
+fn group_documents_remain_shared_once_without_private_files_after_restart() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut f = Fixture::new(true);
+    f.bot("a");
+    f.bot("b");
+    let private = f.group(&["a"]);
+    let private_doc = f.post(
+        "/api/documents",
+        json!({"name":"prive.txt","data":STANDARD.encode("DOCUMENT_PRIVE_HORS_GROUPE")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post("/api/send",json!({"conversation_id":private,"message_id":"prive","body":"Garde ce fichier dans ce fil.","attachments":[private_doc]}));
+    wait("réponse privée terminée", || {
+        f.conversation(&private)["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["state"]
+            == "echoed"
+    });
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    let c = f.group(&["a", "b"]);
+    let document = f.post(
+        "/api/documents",
+        json!({"name":"notes-partagees.txt","data":STANDARD.encode("DOCUMENT_PARTAGE_DU_GROUPE")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.script(call("lecture-pair", "b"));
+    f.script(text("Demande livrée en file."));
+    f.script(text("Document lu par le pair."));
+    f.script(text("Avis du pair reçu."));
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"document-groupe","body":"Lis les notes puis demande un avis.","mentions":[mention("a")],"attachments":[document]}));
+    f.drain();
+    f.restart();
+    f.script(text("Notes relues après redémarrage."));
+    f.send(&c, "relecture", json!([mention("b")]));
+    f.drain();
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(seen.bodies.len() - before, 5);
+    for request in &seen.bodies[before..] {
+        let input = request["input"].to_string();
+        assert_eq!(input.matches("DOCUMENT_PARTAGE_DU_GROUPE").count(), 1);
+        assert!(!input.contains("DOCUMENT_PRIVE_HORS_GROUPE"));
+        assert!(!request["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("DOCUMENT_PARTAGE_DU_GROUPE"));
+    }
+}
+
+#[test]
 fn a_failed_initial_group_turn_does_not_prevent_the_first_completed_title() {
     let mut f = Fixture::new(true);
     f.bot("a");

@@ -64,7 +64,9 @@ export function mentionMenu(element, getCandidates, addMember, createAvatar, sum
     const { $from, empty } = editor.state.selection;
     const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc");
     const match = empty && before.match(/(?:^|\s)@([^@\s]*)$/u);
-    if (!match || dismissedAt === `${$from.pos}:${before}`) { hide(); return; }
+    const selectionKey = `${$from.pos}:${before}`;
+    if (dismissedAt && (dismissedAt.doc !== editor.state.doc || dismissedAt.key !== selectionKey)) dismissedAt = null;
+    if (!match || dismissedAt?.key === selectionKey) { hide(); return; }
     range = { from: $from.pos - match[1].length - 1, to: $from.pos, doc: editor.state.doc };
     const query = match[1].toLocaleLowerCase("fr");
     if (query !== previousQuery || range.from !== previousFrom) current = 0;
@@ -105,7 +107,7 @@ export function mentionMenu(element, getCandidates, addMember, createAvatar, sum
     if (menu.hidden || event.isComposing) return false;
     if (event.key === "Escape") {
       const { $from } = editor.state.selection;
-      dismissedAt = `${$from.pos}:${$from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc")}`;
+      dismissedAt = { doc: editor.state.doc, key: `${$from.pos}:${$from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc")}` };
       hide(); event.preventDefault(); return true;
     }
     if (["ArrowDown", "ArrowUp"].includes(event.key)) {

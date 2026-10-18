@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Schema } from "@tiptap/pm/model";
-import { Mention, readMentions, splitMentionText } from "./mentions.js";
+import { Mention, readMentions, splitMentionText, mentionMenu } from "./mentions.js";
 
 const schema = new Schema({ nodes: {
   doc: { content: "paragraph+" }, paragraph: { content: "inline*" }, text: { group: "inline" },
@@ -36,6 +36,35 @@ test("sent chips use document offsets, not manual @name matches or current renam
   assert.equal(parts.map((p) => p.text).join(""), body);
   assert.deepEqual(splitMentionText(body, [{ id: "legacy", label: "Aurore" }]), [{ text: body }]);
   assert.deepEqual(splitMentionText(body, [{ id: "corrupt", label: "Aurore", offset: 1 }]), [{ text: body }]);
+});
+
+test("Escape dismisses only the unchanged query, not a newly typed @ at the same position", () => {
+  class Element {
+    constructor() { this.children = []; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren() { this.children = []; }
+    setAttribute() {}
+    querySelector() { return { scrollIntoView() {} }; }
+  }
+  const original = globalThis.document;
+  globalThis.document = { createElement: () => new Element() };
+  try {
+    const parent = new Element();
+    const editor = { state: { doc: {}, selection: { empty: true, $from: { pos: 2, parentOffset: 1, parent: { textBetween: () => "@" } } } } };
+    const menu = mentionMenu({ parentElement: parent }, () => [{ id: "b", name: "Boréal" }], async () => false);
+    const popup = parent.children[0];
+    menu.update(editor);
+    assert.equal(popup.hidden, false);
+    menu.keydown(editor, { key: "Escape", preventDefault() {} });
+    menu.update(editor);
+    assert.equal(popup.hidden, true);
+    editor.state.doc = {}; // clear and type again, with the same caret/query
+    menu.update(editor);
+    assert.equal(popup.hidden, false);
+  } finally {
+    if (original === undefined) delete globalThis.document;
+    else globalThis.document = original;
+  }
 });
 
 test("bot IDs cannot clobber shell DOM IDs and labels remain inert text", () => {

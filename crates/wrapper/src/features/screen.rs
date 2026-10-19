@@ -394,11 +394,16 @@ pub fn routes(
                     if !lease.live() {
                         return Err(ApiError::new(403, STOPPED));
                     }
-                    #[cfg(not(debug_assertions))]
-                    lease.native.resume()?;
-                    let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
-                    lease.generation.fetch_add(1, Ordering::SeqCst);
-                    lease.paused.store(false, Ordering::SeqCst);
+                    // Approval in the shell is not takeover. Its explicit
+                    // resume is idempotent while active, so another approval
+                    // cannot invalidate an already admitted gesture.
+                    if lease.paused() {
+                        #[cfg(not(debug_assertions))]
+                        lease.native.resume()?;
+                        let _permit = lease.permit.lock().unwrap_or_else(|e| e.into_inner());
+                        lease.generation.fetch_add(1, Ordering::SeqCst);
+                        lease.paused.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             #[cfg(debug_assertions)]

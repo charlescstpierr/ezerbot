@@ -69,7 +69,7 @@ test("expiry clears the banner even without a polling revision", async () => {
   assert.equal(f.registration.wantsPolling(),false);
   assert.equal(all(f.body).find(e=>e.className==="screen-overlay").hidden,true);
 });
-test("explicit consent is conversation-scoped, duration-bound, pause/resume and revoke remain reachable", async () => {
+test("scoped consent keeps shell input active; outside input pauses; resume and Escape work", async () => {
   const f=fixture();f.state.screen.bots=[{bot_id:"grokbot",enabled:true}];await f.host.refresh();
   byText(f.top,"Écran du Mac").onclick();const dialog=all(f.panels).find(e=>e.className.includes("screen-dialog"));
   const consent=all(dialog).find(e=>e.name==="screen-consent");assert.equal(consent.required,true);assert.match(dialog.textContent,/Fermez vos fenêtres privées/);
@@ -77,7 +77,14 @@ test("explicit consent is conversation-scoped, duration-bound, pause/resume and 
   const duration=all(dialog).find(e=>e.name==="screen-duration");duration.value="1";all(dialog).find(e=>e.tagName==="form").onsubmit({preventDefault(){}});await new Promise(r=>setImmediate(r));
   assert.deepEqual(JSON.parse(JSON.stringify(f.calls.at(-1))),["/api/screen/grant",{bot_id:"grokbot",conversation_id:"chat",minutes:1}]);
   assert.match(f.body.textContent,/Ezerbot contrôle l’écran — Échap pour arrêter/);assert.equal(f.registration.wantsPolling(),true);
-  await byText(dialog,"Simuler une reprise humaine").onclick();assert.match(dialog.textContent,/En pause — Vous avez la main/);assert.match(f.body.textContent,/Vous avez repris la main/);
+  // Pointer/keyboard events in Ezerbot (approval card, composer, Stop) must not
+  // produce a fake external-input request or interrupt an active session.
+  for (const name of ["pointerdown","pointermove","keydown","wheel"]) {
+    for (const fn of f.listeners[name] || []) await fn({isTrusted:true,key:"Enter",target:allow});
+  }
+  assert.equal(f.state.screen.session.paused,false);
+  assert.equal(f.calls.filter(([path])=>path==="/api/screen/fake-input").length,0);
+  await byText(dialog,"Simuler une entrée hors d’Ezerbot").onclick();assert.match(dialog.textContent,/En pause — Vous avez la main/);assert.match(f.body.textContent,/Vous avez repris la main/);
   await byText(dialog,"Reprendre le bot").onclick();assert.equal(f.calls.at(-1)[0],"/api/screen/resume");
   for(const fn of f.listeners.keydown)fn({key:"Escape",preventDefault(){}});await new Promise(r=>setImmediate(r));assert.equal(f.calls.at(-1)[0],"/api/screen/revoke");assert.equal(f.registration.wantsPolling(),false);
 });

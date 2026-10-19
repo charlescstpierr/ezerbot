@@ -192,11 +192,14 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
             .unwrap()
             .is_none());
         assert!(f.app.api("POST","/api/approvals/resolve",json!({"entry_id":r.entry_id,"submission_id":"unsafe-always","conversation_id":r.route.target_conversation_id,"decision":{"always_allow":{"scope":"global"}}}).to_string().as_bytes()).is_err());
-        // Real input pauses. The explicit approve-and-resume path resumes once.
-        f.post("/api/screen/fake-input", json!({"id":session}));
+        // The first card is approved inside Ezerbot without takeover. Other
+        // cases simulate input OUTSIDE its window, which explicitly pauses.
+        if i > 0 {
+            f.post("/api/screen/fake-input", json!({"id":session}));
+        }
         assert_eq!(
             f.app.api("GET", "/api/state", b"").unwrap()["screen"]["session"]["paused"],
-            true
+            i > 0
         );
         f.post("/api/screen/resume", json!({"id":session}));
         f.decide(&r, json!("allow_once"));
@@ -242,7 +245,7 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
         .contains("autre fil"));
     assert_eq!(f.shots(), before);
     f.chat = original;
-    // Typing in Ezerbot pauses the lease, yet the bot may still propose a card.
+    // Input outside Ezerbot pauses the lease, yet the bot may still propose a card.
     // Approving without the explicit resume never acts; resuming then acts once.
     let before = f.shots();
     f.post("/api/screen/fake-input", json!({"id":session}));

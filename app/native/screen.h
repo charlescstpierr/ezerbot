@@ -58,6 +58,17 @@ static void EZStop(BOOL pause) {
     EZReply(@{@"event":pause ? @"paused" : @"revoked"});
     dispatch_async(dispatch_get_main_queue(), ^{ EZOverlayUpdate(); if (!pause) [NSApp terminate:nil]; });
 }
+// The exception is for a proven Ezerbot WINDOW, never merely “Ezerbot is
+// frontmost”. Unknown ownership fails closed. Pure metadata fixtures exercise
+// exactly this policy in debug, without an event tap or window-server access.
+static __attribute__((unused)) BOOL EZInputForShellWindow(BOOL keyboard, pid_t ownerPID, pid_t targetPID, pid_t pointerWindowPID, BOOL focusedShellWindow) {
+    if (ownerPID <= 0) return NO;
+    return keyboard ? targetPID == ownerPID && focusedShellWindow : pointerWindowPID == ownerPID;
+}
+static __attribute__((unused)) void EZObserveHumanInput(BOOL escape, BOOL shellWindow) {
+    if (escape) EZStop(NO);
+    else if (!shellWindow) EZStop(YES);
+}
 #if defined(EZERBOT_RELEASE)
 static BOOL EZParent(void) {
     char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
@@ -80,12 +91,46 @@ static NSString *EZPermissions(void) {
     if (!CGPreflightListenEventAccess()) return @"Permission Surveillance de l’entrée manquante. Autorisez Ezerbot dans Réglages Système › Confidentialité et sécurité › Surveillance de l’entrée pour garantir la reprise humaine.";
     return nil;
 }
+static BOOL EZEventForShellWindow(CGEventType type, CGEventRef event) {
+    pid_t owner = ezOwner.processIdentifier;
+    if (owner <= 0 || ezOwner.terminated) return NO;
+    BOOL keyboard = type == kCGEventKeyDown || type == kCGEventKeyUp || type == kCGEventFlagsChanged;
+    pid_t target = (pid_t)CGEventGetIntegerValueField(event,kCGEventTargetUnixProcessID);
+    pid_t pointerOwner = 0;
+    BOOL focusedShellWindow = NO;
+    if (keyboard && target == owner && NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == owner) {
+        AXUIElementRef app = AXUIElementCreateApplication(owner); CFTypeRef window = NULL;
+        // Never let a busy WebView stall the event tap. Missing/slow metadata
+        // pauses instead of accidentally exempting an unrelated input.
+        AXUIElementSetMessagingTimeout(app,0.05f);
+        if (AXUIElementCopyAttributeValue(app,kAXFocusedWindowAttribute,&window) == kAXErrorSuccess && window && CFGetTypeID(window) == AXUIElementGetTypeID()) {
+            pid_t windowOwner = 0;
+            focusedShellWindow = AXUIElementGetPid((AXUIElementRef)window,&windowOwner) == kAXErrorSuccess && windowOwner == owner;
+        }
+        if (window) CFRelease(window); CFRelease(app);
+    } else if (!keyboard) {
+        // Annotated events identify the actual window receiving mouse input,
+        // including through our click-through overlay. A click on another app
+        // still pauses even while Ezerbot remains the frontmost application.
+        int64_t number = CGEventGetIntegerValueField(event,kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent);
+        if (number > 0 && number <= UINT32_MAX) {
+            NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,(CGWindowID)number));
+            for (NSDictionary *window in windows) {
+                CGRect bounds;
+                if ([window[(id)kCGWindowNumber] longLongValue] == number && [window[(id)kCGWindowIsOnscreen] boolValue] && [window[(id)kCGWindowBounds] isKindOfClass:NSDictionary.class] && CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(id)kCGWindowBounds],&bounds) && CGRectContainsPoint(bounds,CGEventGetLocation(event))) {
+                    pointerOwner = [window[(id)kCGWindowOwnerPID] intValue]; break;
+                }
+            }
+        }
+    }
+    return EZInputForShellWindow(keyboard,owner,target,pointerOwner,focusedShellWindow);
+}
 static CGEventRef EZHumanInput(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *context) {
     (void)proxy; (void)context;
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) { EZStop(NO); return event; }
     if (CGEventGetIntegerValueField(event,kCGEventSourceUserData) == ezEventTag) return event;
     BOOL escape = type == kCGEventKeyDown && CGEventGetIntegerValueField(event,kCGKeyboardEventKeycode) == 53;
-    EZStop(!escape);
+    EZObserveHumanInput(escape, !escape && EZEventForShellWindow(type,event));
     return event;
 }
 // A complete down/up pair shares the permit lock. There are NO held inputs or
@@ -242,7 +287,7 @@ static int EZScreenMain(int argc, const char *argv[]) {
     int lock=open(lockPath.fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
     if(lock<0||flock(lock,LOCK_EX|LOCK_NB)!=0){EZReply(@{@"error":@"Ce Mac est déjà contrôlé par une autre session Ezerbot."});return 1;}
     CGEventMask mask=CGEventMaskBit(kCGEventKeyDown)|CGEventMaskBit(kCGEventKeyUp)|CGEventMaskBit(kCGEventFlagsChanged)|CGEventMaskBit(kCGEventMouseMoved)|CGEventMaskBit(kCGEventLeftMouseDown)|CGEventMaskBit(kCGEventLeftMouseUp)|CGEventMaskBit(kCGEventRightMouseDown)|CGEventMaskBit(kCGEventRightMouseUp)|CGEventMaskBit(kCGEventOtherMouseDown)|CGEventMaskBit(kCGEventOtherMouseUp)|CGEventMaskBit(kCGEventScrollWheel)|CGEventMaskBit(kCGEventLeftMouseDragged)|CGEventMaskBit(kCGEventRightMouseDragged)|CGEventMaskBit(kCGEventOtherMouseDragged);
-    CFMachPortRef tap=CGEventTapCreate(kCGSessionEventTap,kCGHeadInsertEventTap,kCGEventTapOptionListenOnly,mask,EZHumanInput,NULL);
+    CFMachPortRef tap=CGEventTapCreate(kCGAnnotatedSessionEventTap,kCGHeadInsertEventTap,kCGEventTapOptionListenOnly,mask,EZHumanInput,NULL);
     if(!tap){EZReply(@{@"error":@"La reprise humaine ne peut pas être surveillée. Vérifiez Accessibilité et Surveillance de l’entrée dans Réglages Système."});return 1;}
     CFRunLoopSourceRef source=CFMachPortCreateRunLoopSource(NULL,tap,0); CFRunLoopAddSource(CFRunLoopGetMain(),source,kCFRunLoopCommonModes);
 #endif
@@ -266,7 +311,7 @@ static int EZScreenMain(int argc, const char *argv[]) {
                 NSString *command=request[@"command"];
                 if([command isEqualToString:@"revoke"]) {EZStop(NO);break;}
                 if([command isEqualToString:@"resume"]) {
-                    pthread_mutex_lock(&ezPermit); if(!ezRevoked){ezPaused=NO;++ezGeneration;} pthread_mutex_unlock(&ezPermit);
+                    pthread_mutex_lock(&ezPermit); if(!ezRevoked && ezPaused){ezPaused=NO;++ezGeneration;} pthread_mutex_unlock(&ezPermit);
                     EZReply(@{@"event":@"resumed"}); dispatch_async(dispatch_get_main_queue(),^{EZOverlayUpdate();});
                 } else if([command isEqualToString:@"action"]) {
                     pthread_mutex_lock(&ezPermit); uint64_t generation=ezGeneration; pthread_mutex_unlock(&ezPermit);

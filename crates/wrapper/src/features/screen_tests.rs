@@ -206,3 +206,55 @@ fn expiry_changes_poll_token_and_cancels_pending_screen_approvals() {
     startup(&path);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn approving_inside_the_shell_does_not_invalidate_an_active_permit_but_outside_input_pauses() {
+    let _mac = TEST_MAC.lock().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-screen-input-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("workspace.sqlite");
+    let mut app = App::open(&path).unwrap();
+    let chat = app
+        .api("POST", "/api/conversations", br#"{"title":"Saisie"}"#)
+        .unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.api(
+        "POST",
+        "/api/screen/bot",
+        br#"{"bot_id":"grokbot","enabled":true}"#,
+    )
+    .unwrap();
+    app.api(
+        "POST",
+        "/api/screen/grant",
+        json!({"bot_id":"grokbot","conversation_id":chat,"minutes":1})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let lease = current(&path).unwrap();
+    let permit = lease.generation.load(Ordering::SeqCst);
+    // The card's approve-and-resume step is a no-op while the shell is active.
+    let body = json!({"id":lease.id}).to_string();
+    app.api("POST", "/api/screen/resume", body.as_bytes())
+        .unwrap();
+    assert!(!lease.paused());
+    assert_eq!(lease.generation.load(Ordering::SeqCst), permit);
+    // This debug fixture denotes an input outside Ezerbot, never a real event.
+    app.api("POST", "/api/screen/fake-input", body.as_bytes())
+        .unwrap();
+    assert!(lease.paused());
+    assert_ne!(lease.generation.load(Ordering::SeqCst), permit);
+    app.api("POST", "/api/screen/resume", body.as_bytes())
+        .unwrap();
+    assert!(!lease.paused());
+    assert_ne!(lease.generation.load(Ordering::SeqCst), permit);
+    startup(&path);
+    let _ = std::fs::remove_dir_all(root);
+}

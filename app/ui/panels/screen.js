@@ -70,7 +70,7 @@
       const track = node("span", null, "toggle-track"); track.setAttribute("aria-hidden", "true");
       label.append(node("span", "Écran"), input, track); row.append(node("strong", bot.name), label); section.append(row);
     }
-    section.append(node("p", "Dans un fil existant, ouvrez « Écran du Mac » en haut pour accorder une session. Toute activité réelle de la souris ou du clavier met le bot en pause. Échap révoque le contrôle."));
+    section.append(node("p", "Dans un fil existant, ouvrez « Écran du Mac » en haut pour accorder une session. Une entrée de la souris ou du clavier hors d’une fenêtre d’Ezerbot met le bot en pause. Répondre aux cartes ou écrire dans Ezerbot ne met pas en pause. Échap révoque le contrôle partout."));
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); section.append(alert); }
     if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(section);
     else { const settings = node("details"); settings.append(node("summary", "Réglages Système…")); permissionButtons(settings); section.append(settings); }
@@ -98,7 +98,7 @@
       const actions = node("div", null, "screen-actions");
       if (s.paused) actions.append(button("Reprendre le bot", () => save("/api/screen/resume", { id: s.id }), "primary-button"));
       actions.append(button("Révoquer maintenant", stop, "danger-button"));
-      if (data.fake) actions.append(button("Simuler une reprise humaine", () => save("/api/screen/fake-input", { id: s.id })));
+      if (data.fake) actions.append(button("Simuler une entrée hors d’Ezerbot", () => save("/api/screen/fake-input", { id: s.id })));
       dialog.append(actions);
     } else {
       const chat = context.conversation, bot = context.bot;
@@ -121,15 +121,10 @@
     if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(dialog);
   }
   window.addEventListener("keydown", event => { if (event.key === "Escape" && data.session) { stop(); } }, true);
-  // Debug-only simulated takeover. Native release input monitoring is entirely
-  // outside the WebView, so changing tabs/apps cannot evade it.
-  let pausing = false;
-  async function fakeHuman(event) {
-    if (!event.isTrusted || !data.fake || !data.session || data.session.paused || pausing || event.key === "Escape") return;
-    pausing = true;
-    try { await host.api("/api/screen/fake-input", { id: data.session.id }); await host.refresh(); } finally { pausing = false; }
-  }
-  for (const name of ["pointerdown", "pointermove", "keydown", "wheel"]) window.addEventListener(name, fakeHuman, { passive: true });
+  // All DOM input is inside Ezerbot and is deliberately exempt. Debug cannot
+  // observe another Mac window: the explicit fixture button above represents
+  // that external input. Release classifies the actual destination window in
+  // the native listen-only tap; Escape remains unconditional everywhere.
   document.addEventListener("toggle", event => { if (event.target instanceof HTMLDialogElement) showOverlay(); }, true);
   const preview = node("dialog", null, "dialog screen-preview");
   document.getElementById("panels").append(preview);

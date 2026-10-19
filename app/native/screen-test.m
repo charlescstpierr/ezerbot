@@ -19,14 +19,30 @@ int main(int argc, const char *argv[]) {
         ezDeadline = NSProcessInfo.processInfo.systemUptime + 60;
         assert(EZLive(ezGeneration));
         uint64_t queued = ezGeneration;
-        EZStop(YES);
+        // Fixture window ownership only: no real CGEvent or window lookup.
+        // An approval click and typing in the proven shell window are exempt.
+        assert(EZInputForShellWindow(NO,100,100,100,YES));
+        EZObserveHumanInput(NO,EZInputForShellWindow(NO,100,100,100,YES));
+        assert(EZLive(queued)); assert(ezGeneration == queued);
+        assert(EZInputForShellWindow(YES,100,100,0,YES));
+        EZObserveHumanInput(NO,EZInputForShellWindow(YES,100,100,0,YES));
+        assert(EZLive(queued)); assert(ezGeneration == queued);
+        // Merely having Ezerbot frontmost/focused does NOT exempt another
+        // window, another keyboard target, or unavailable ownership metadata.
+        assert(!EZInputForShellWindow(NO,100,100,200,YES));
+        assert(!EZInputForShellWindow(YES,100,200,0,YES));
+        assert(!EZInputForShellWindow(YES,100,100,0,NO));
+        assert(!EZInputForShellWindow(NO,100,100,0,YES));
+        assert(!EZInputForShellWindow(NO,0,0,0,YES));
+        EZObserveHumanInput(NO,EZInputForShellWindow(NO,100,200,200,YES));
         assert(!EZLive(queued)); assert(ezPaused); assert(!ezRevoked);
         pthread_mutex_lock(&ezPermit); ezPaused = NO; ++ezGeneration; pthread_mutex_unlock(&ezPermit);
         assert(EZLive(ezGeneration)); assert(!EZLive(queued));
         NSDictionary *fixture = EZCapture();
         assert([fixture[@"fixture"] boolValue]); assert([fixture[@"image"] hasPrefix:@"data:image/png;base64,"]);
         EZAction(@{@"id":@1,@"name":@"computer_click",@"arguments":@{@"x":@10,@"y":@20,@"button":@"left"}},queued);
-        EZStop(NO); assert(ezRevoked); assert(!EZLive(ezGeneration));
+        // Escape must revoke even when it is pressed inside Ezerbot.
+        EZObserveHumanInput(YES,EZInputForShellWindow(YES,100,100,0,YES)); assert(ezRevoked); assert(!EZLive(ezGeneration));
         EZAction(@{@"id":@2,@"name":@"computer_type",@"arguments":@{@"text":@"jamais injecté"}},ezGeneration);
         ezRevoked = NO; ezDeadline = NSProcessInfo.processInfo.systemUptime - 1;
         assert(!EZLive(ezGeneration));

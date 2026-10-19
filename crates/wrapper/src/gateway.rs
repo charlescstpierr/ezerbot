@@ -177,6 +177,7 @@ impl Events {
     fn dispatch(
         &mut self,
         data: &str,
+        diagnostics: &crate::upstream::Diagnostics,
         emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
     ) -> Result<bool> {
         if data == "[DONE]" {
@@ -299,8 +300,8 @@ impl Events {
                 } else {
                     &event
                 };
-                let (code, message, _) = crate::provider::error_parts(source);
-                let failure = crate::provider::failure(0, &code, &message);
+                diagnostics.rejected(source);
+                let failure = crate::upstream::failure_from_body(0, source);
                 emit(failed(failure.message))?;
                 return Ok(true);
             }
@@ -342,6 +343,7 @@ impl Events {
 
 pub(crate) fn stream_response(
     reader: impl BufRead,
+    diagnostics: &crate::upstream::Diagnostics,
     emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
 ) -> Result<()> {
     let mut events = Events::default();
@@ -353,7 +355,7 @@ pub(crate) fn stream_response(
         };
         if line.is_empty() {
             if !data.is_empty() {
-                if events.dispatch(&data.join("\n"), emit)? {
+                if events.dispatch(&data.join("\n"), diagnostics, emit)? {
                     return Ok(());
                 }
                 data.clear();
@@ -363,7 +365,7 @@ pub(crate) fn stream_response(
         }
     }
     // Accept a final event without a trailing blank line, but never mistake EOF for Completed.
-    if !data.is_empty() && events.dispatch(&data.join("\n"), emit)? {
+    if !data.is_empty() && events.dispatch(&data.join("\n"), diagnostics, emit)? {
         return Ok(());
     }
     emit(failed(INTERRUPTED))

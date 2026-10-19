@@ -5,6 +5,7 @@
 pub mod deep_links;
 mod mcp;
 mod provider;
+mod upstream;
 
 /// Model gateway implementations are added independently of the HTTP host.
 #[doc(hidden)]

@@ -724,6 +724,12 @@ fn sse_incomplete_failed_error_and_early_eof_never_cache_partial_text() {
             "failed"
         );
     }
+    let log = std::fs::read_to_string(fixture.directory.join("logs/engine.log")).unwrap();
+    assert_eq!(log.lines().count(), 2); // Only response.failed/error, not incomplete/EOF.
+    assert!(log
+        .lines()
+        .all(|line| line.ends_with("statut=200 code=- param=- request_id=-")));
+    assert!(!log.contains("partial"));
     fixture.reply(ScriptedResponse::events(&[
         json!({"type": "response.output_text.delta", "delta": "delta only"}),
         json!({"type": "response.completed"}),

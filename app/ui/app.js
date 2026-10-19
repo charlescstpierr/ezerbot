@@ -929,7 +929,7 @@
     const actions = element("div", "provider-actions");
     const heading = element("h3", "", current.connected ? "Connecté à ChatGPT" : "Utiliser votre abonnement ChatGPT");
     if (current.connected) heading.prepend(element("span", "status-dot"));
-    copy.append(heading, element("p", "", current.connected ? current.email || "Compte ChatGPT"
+    copy.append(heading, element("p", "", current.connected ? (current.email ? `Compte ChatGPT : ${current.email}` : "Adresse e-mail du compte ChatGPT indisponible.")
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
       : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));

@@ -634,7 +634,8 @@ fn vision(
             }
         }
     };
-    vision_stream(BufReader::new(response.into_reader()))
+    let diagnostics = provider.diagnostics(&response);
+    vision_stream(BufReader::new(response.into_reader()), &diagnostics)
 }
 
 fn vision_failed() -> CaptionStatus {
@@ -643,8 +644,15 @@ fn vision_failed() -> CaptionStatus {
     }
 }
 
-fn vision_stream(reader: impl BufRead) -> CaptionStatus {
-    fn event(data: &str, text: &mut String) -> Option<CaptionStatus> {
+fn vision_stream(
+    reader: impl BufRead,
+    diagnostics: &crate::upstream::Diagnostics,
+) -> CaptionStatus {
+    fn event(
+        data: &str,
+        text: &mut String,
+        diagnostics: &crate::upstream::Diagnostics,
+    ) -> Option<CaptionStatus> {
         let body: Value = match serde_json::from_str(data) {
             Ok(body) => body,
             Err(_) => return Some(vision_failed()),
@@ -658,7 +666,15 @@ fn vision_stream(reader: impl BufRead) -> CaptionStatus {
             "response.refusal.delta" | "response.refusal.done" => {
                 return Some(CaptionStatus::skipped(now() as i64))
             }
-            "response.incomplete" | "response.failed" | "error" => return Some(vision_failed()),
+            "response.failed" | "error" => {
+                diagnostics.rejected(if body["type"] == "response.failed" {
+                    &body["response"]
+                } else {
+                    &body
+                });
+                return Some(vision_failed());
+            }
+            "response.incomplete" => return Some(vision_failed()),
             "response.completed" => {
                 if body["response"]["status"] == "incomplete"
                     || body["response"]["status"] == "failed"
@@ -708,7 +724,7 @@ fn vision_stream(reader: impl BufRead) -> CaptionStatus {
         };
         if line.is_empty() {
             if !data.is_empty() {
-                if let Some(status) = event(&data.join("\n"), &mut text) {
+                if let Some(status) = event(&data.join("\n"), &mut text, diagnostics) {
                     return status;
                 }
                 data.clear();
@@ -718,7 +734,7 @@ fn vision_stream(reader: impl BufRead) -> CaptionStatus {
         }
     }
     if !data.is_empty() {
-        if let Some(status) = event(&data.join("\n"), &mut text) {
+        if let Some(status) = event(&data.join("\n"), &mut text, diagnostics) {
             return status;
         }
     }

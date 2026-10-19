@@ -25,6 +25,8 @@ pub struct Seen {
     pub access_tokens: Vec<String>,
     pub bodies: Vec<Value>,
     pub revoked: bool,
+    /// Header supplied by the fake Responses server, never an event/body identifier.
+    pub request_id: Option<String>,
     /// FIFO replies for /v1/responses. An empty queue uses the original chat fixture.
     pub responses: VecDeque<ScriptedResponse>,
     /// Automatic memory runs independently; never consume a chat's scripted reply.
@@ -315,6 +317,10 @@ impl FakeOpenAi {
                         .map(|(_, gate)| gate.clone()),
                     _ => None,
                 };
+                let request_id = seen
+                    .request_id
+                    .clone()
+                    .filter(|_| request.url() == "/v1/responses");
                 drop(seen);
                 if let Some(gate) = gate {
                     while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
@@ -326,11 +332,14 @@ impl FakeOpenAi {
                 }
                 std::thread::sleep(delay);
                 let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
-                let _ = request.respond(
-                    tiny_http::Response::from_string(payload)
-                        .with_status_code(status)
-                        .with_header(header),
-                );
+                let mut response = tiny_http::Response::from_string(payload)
+                    .with_status_code(status)
+                    .with_header(header);
+                if let Some(id) = request_id {
+                    response = response
+                        .with_header(tiny_http::Header::from_bytes("x-request-id", id).unwrap());
+                }
+                let _ = request.respond(response);
             }
         });
         Self {

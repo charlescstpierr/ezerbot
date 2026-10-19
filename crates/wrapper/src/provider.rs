@@ -312,14 +312,17 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
         .or_else(|| body["message"].as_str())
         .or_else(|| body["detail"].as_str())
         .unwrap_or_default();
-    let param = error["param"].as_str().unwrap_or_default();
+    let param = error["param"]
+        .as_str()
+        .or_else(|| body["param"].as_str())
+        .unwrap_or_default();
     (code.into(), message.into(), param.into())
 }
 
 pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
         "subscription_sharing_usage_limit_exceeded" => Failure {
-            message: "Limite d’utilisation atteinte. Vérifiez votre abonnement, ou la limite accordée à Ezerbot, dans les réglages de ChatGPT.".into(),
+            message: "Limite d’utilisation atteinte pour Ezerbot via votre abonnement ChatGPT. Votre quota Codex peut rester disponible. Pour ajuster la limite accordée à Ezerbot : ChatGPT → Réglages → Utilisation.".into(),
             kind: "limit",
         },
         "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Ezerbot."),
@@ -338,17 +341,6 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
                 format!("OpenAI a refusé la demande (erreur {status}) : {detail}")
             })
         }
-    }
-}
-
-fn request_failure(error: ureq::Error) -> (u16, String, String, String) {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let body: Value = response.into_json().unwrap_or(Value::Null);
-            let (code, message, param) = error_parts(&body);
-            (status, code, message, param)
-        }
-        ureq::Error::Transport(_) => (0, String::new(), String::new(), String::new()),
     }
 }
 
@@ -444,6 +436,42 @@ impl Provider {
                 catalog: Mutex::new(Catalog::default()),
                 mcp: crate::mcp::Manager::default(),
             }),
+        }
+    }
+
+    pub(crate) fn diagnostics(&self, response: &ureq::Response) -> crate::upstream::Diagnostics {
+        crate::upstream::Diagnostics::new(
+            self.inner
+                .file
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_owned(),
+            response,
+        )
+    }
+
+    fn request_failure(&self, error: ureq::Error) -> (u16, String, String, String, Failure) {
+        match error {
+            ureq::Error::Status(status, response) => {
+                let diagnostics = self.diagnostics(&response);
+                let body: Value = response.into_json().unwrap_or(Value::Null);
+                diagnostics.rejected(&body);
+                let (code, message, param) = error_parts(&body);
+                (
+                    status,
+                    code,
+                    message,
+                    param,
+                    crate::upstream::failure_from_body(status, &body),
+                )
+            }
+            ureq::Error::Transport(_) => (
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+                network_failure(),
+            ),
         }
     }
 
@@ -716,10 +744,7 @@ impl Provider {
                 ("redirect_uri", &attempt.redirect_uri),
                 ("resource", RESOURCE),
             ])
-            .map_err(|error| match request_failure(error) {
-                (0, ..) => network_failure(),
-                (status, code, message, _) => failure(status, &code, &message),
-            })?;
+            .map_err(|error| self.request_failure(error).4)?;
         let tokens: TokenResponse = response
             .into_json()
             .map_err(|_| Failure::other("La réponse d’OpenAI est illisible."))?;
@@ -828,7 +853,7 @@ impl Provider {
                 .into_json()
                 .map_err(|_| Failure::other("La réponse d’OpenAI est illisible."))?,
             Err(error) => {
-                let (status, code, message, _) = request_failure(error);
+                let (status, code, _, _, failure) = self.request_failure(error);
                 if status == 0 {
                     // Une panne de réseau ne prouve rien : le jeton en place reste peut-être valide.
                     return if credentials.expires_at > seconds() {
@@ -850,7 +875,7 @@ impl Provider {
                     let _ = self.write(&credentials);
                     return Err(Failure::signin());
                 }
-                return Err(failure(status, &code, &message));
+                return Err(failure);
             }
         };
         // Le jeton d'accès, son échéance, ses permissions et le jeton de renouvellement changent ensemble.
@@ -992,7 +1017,11 @@ impl Provider {
             .set("Authorization", &format!("Bearer {token}"))
             .set("Accept", "text/event-stream")
             .send_json(body)
-            .map_err(|_| Failure::other("Extraction indisponible."))?;
+            .map_err(|error| {
+                self.request_failure(error);
+                Failure::other("Extraction indisponible.")
+            })?;
+        let diagnostics = self.diagnostics(&response);
         let mut text = String::new();
         let mut completed = false;
         // A real Responses stream repeats metadata/instructions and sends one
@@ -1000,6 +1029,7 @@ impl Provider {
         // transport bytes independently of the 4096-byte useful-text limit.
         crate::gateway::stream_response(
             BufReader::new(response.into_reader().take(512 * 1024)),
+            &diagnostics,
             &mut |event| {
                 match event {
                     ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {
@@ -1040,7 +1070,11 @@ impl Provider {
             .set("Authorization", &format!("Bearer {token}"))
             .set("Accept", "text/event-stream")
             .send_json(body)
-            .map_err(|_| Failure::other("Revue indisponible."))?;
+            .map_err(|error| {
+                self.request_failure(error);
+                Failure::other("Revue indisponible.")
+            })?;
+        let diagnostics = self.diagnostics(&response);
         let mut text = String::new();
         let mut completed = false;
         let mut invalid = false;
@@ -1064,6 +1098,13 @@ impl Provider {
             let event: Value = serde_json::from_str(line.trim())
                 .map_err(|_| Failure::other("Revue illisible."))?;
             let kind = event["type"].as_str().unwrap_or_default();
+            if kind == "response.failed" || kind == "error" {
+                diagnostics.rejected(if kind == "response.failed" {
+                    &event["response"]
+                } else {
+                    &event
+                });
+            }
             if ![
                 "response.created",
                 "response.in_progress",
@@ -1097,7 +1138,7 @@ impl Provider {
             }
             terminal = kind == "response.completed";
         }
-        crate::gateway::stream_response(std::io::Cursor::new(wire), &mut |event| {
+        crate::gateway::stream_response(std::io::Cursor::new(wire), &diagnostics, &mut |event| {
             match event {
                 ModelEvent::TextDelta { text: delta }
                     if !completed && text.len() + delta.len() <= 4096 =>
@@ -1138,9 +1179,9 @@ impl Provider {
                 .set("Authorization", &format!("Bearer {token}"))
                 .set("Accept", accept)
                 .send_json(body.clone());
-            let (status, code, message, param) = match attempt {
+            let (status, _, message, param, failure) = match attempt {
                 Ok(response) => return Ok(response),
-                Err(error) => request_failure(error),
+                Err(error) => self.request_failure(error),
             };
             if status == 401 && !refreshed {
                 refreshed = true;
@@ -1166,7 +1207,7 @@ impl Provider {
             } else if status == 0 {
                 return Err(network_failure());
             } else {
-                return Err(failure(status, &code, &message));
+                return Err(failure);
             }
         }
     }
@@ -1248,11 +1289,12 @@ impl Provider {
         if !notices.is_empty() {
             metadata(Some(&notices.join(" ")), None)?;
         }
+        let diagnostics = self.diagnostics(&response);
         let reader = Cancellable {
             reader: BufReader::new(response.into_reader()),
             cancel,
         };
-        crate::gateway::stream_response(reader, &mut |event| {
+        crate::gateway::stream_response(reader, &diagnostics, &mut |event| {
             if matches!(event, ModelEvent::Incomplete { .. }) {
                 metadata(
                     Some("OpenAI a arrêté cette réponse avant la fin."),
@@ -1297,7 +1339,12 @@ impl grokbot_engine::contracts::ModelGateway for Provider {
         let body = crate::gateway::request_body(request)?;
         match self.responses_with_options(body, true, &mut Vec::new()) {
             Ok(response) => {
-                crate::gateway::stream_response(BufReader::new(response.into_reader()), emit)
+                let diagnostics = self.diagnostics(&response);
+                crate::gateway::stream_response(
+                    BufReader::new(response.into_reader()),
+                    &diagnostics,
+                    emit,
+                )
             }
             Err(failure) => emit(grokbot_engine::contracts::ModelEvent::Failed {
                 reason: failure.message,

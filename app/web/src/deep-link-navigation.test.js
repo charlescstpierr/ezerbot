@@ -7,6 +7,23 @@ import { runInNewContext } from "node:vm";
 const shell = readFileSync(new URL("../../ui/app.js", import.meta.url), "utf8");
 const navigateSource = shell.slice(shell.indexOf("  async function navigateLink("), shell.indexOf("  async function copyLink("));
 const guard = "Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.";
+const focusSource = shell.slice(shell.indexOf("  function focusLinkTarget("), shell.indexOf("  async function navigateLink("));
+
+test("settings links reveal the section heading, even for a section taller than the dialog", () => {
+  const calls = [], classes = new Set();
+  let clearHighlight;
+  const focus = runInNewContext(`(${focusSource})`, { setTimeout: (callback) => { clearHighlight = callback; } });
+  const target = { scrollIntoView: (options) => calls.push(["scroll", options.block]),
+    focus: (options) => calls.push(["focus", options.preventScroll]),
+    classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name) } };
+  focus(target);
+  assert.equal(target.tabIndex, -1);
+  assert.deepEqual(calls, [["scroll", "start"], ["focus", true]]);
+  assert.equal(classes.has("deep-link-target"), true);
+  clearHighlight();
+  assert.equal(classes.has("deep-link-target"), false);
+  assert.throws(() => focus(null), { message: "Cette section n’est pas disponible dans cette version d’Ezerbot." });
+});
 
 function shellRouter({ open = [], botEdited = false } = {}) {
   const dialogs = Object.fromEntries(["bot-dialog", "rename-dialog", "settings-dialog"].map((id) => [id, {

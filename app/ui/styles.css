@@ -332,8 +332,11 @@ a.secondary-button { text-decoration: none; }
 .bot-link-menu summary { list-style: none; cursor: pointer; }
 .bot-link-menu summary::-webkit-details-marker { display: none; }
 .bot-link-menu .popover { top: 34px; right: 0; min-width: 165px; }
-.deep-link-target { outline: 2px solid var(--accent-ink); outline-offset: 4px; border-radius: 6px; }
-.draft-restore { color: var(--accent-ink); text-decoration: underline; font-size: 10px; }
+.deep-link-target, .deep-link-target:focus, .deep-link-target:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; border-radius: 6px; border-top-color: transparent; }
+.draft-restore { color: var(--accent-ink); text-decoration: underline; font: inherit; font-size: 10px; line-height: 1.2; padding: 0; white-space: nowrap; flex: 0 0 auto; }
+@media (max-width: 900px) {
+  .composer-caption:has(#restore-link-draft:not([hidden])) > #composer-hint:not([data-alert="true"]) { display: none; }
+}
 #bot-form > .dialog-footer { flex-wrap: wrap; }
 .bot-field { margin-top: 18px; }
 .form-label small { color: var(--subtle); margin-left: 6px; }

@@ -203,7 +203,7 @@
 
   function focusLinkTarget(target) {
     if (!target) throw new Error("Cette section n’est pas disponible dans cette version d’Ezerbot.");
-    target.tabIndex = -1; target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true });
+    target.tabIndex = -1; target.scrollIntoView({ block: "start" }); target.focus({ preventScroll: true });
     target.classList.add("deep-link-target");
     setTimeout(() => target.classList.remove("deep-link-target"), 2500);
   }
@@ -641,6 +641,7 @@
       const link = element("button", "", "Copier le lien"); link.type = "button";
       link.addEventListener("click", () => { menu.open = false; void copyLink("agent", { id: bot.id }); });
       actions.append(link); menu.append(summary, actions);
+      menu.addEventListener("toggle", () => { if (menu.open) actions.scrollIntoView({ block: "nearest", inline: "nearest" }); });
       menu.dataset.botId = bot.id; menu.open = bot.id === openMenu?.dataset.botId;
       row.append(botAvatar(bot), copy, edit, menu);
       return row;

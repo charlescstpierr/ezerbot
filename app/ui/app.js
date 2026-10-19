@@ -15,6 +15,7 @@
   // Le bot ouvert dans le dialogue; `null` pour une création, dont l'identifiant reste stable entre deux essais.
   let editingBotId = null;
   let draftBotId = null;
+  let botDialogInitial = "";
   const defaultWelcome = $("welcome-description").textContent;
   let favoriteOnly = false;
   let connected = false;
@@ -209,7 +210,8 @@
 
   async function navigateLink(destination) {
     // Never discard an unsaved editor or silently substitute another target.
-    if (document.querySelector("#bot-dialog[open], .skills-dialog[open], .routines-dialog[open]")) {
+    const botEdited = $("bot-dialog").open && JSON.stringify(botFormValues()) !== botDialogInitial;
+    if (botEdited || document.querySelector("#rename-dialog[open], .skills-dialog[open], .routines-dialog[open]")) {
       throw new Error("Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.");
     }
     for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
@@ -242,7 +244,7 @@
         previousLinkDrafts().push({ text: ui.input.value, document: ui.input.document, bot: chosenBotId });
         saveLinkDrafts();
       }
-      chosenBotId = agent || liveBots()[0]?.id;
+      chosenBotId = agent || chosenBot()?.id;
       writePreference("grokbot.bot", chosenBotId);
       setComposerText(destination.text); saveDraft(); render(); ui.input.focus();
       notify("Texte placé dans le brouillon. Rien n’a été envoyé.");
@@ -621,6 +623,9 @@
       ? "Un fil partagé pour croiser vos idées. Sans mention, le coordinateur répond."
       : chosen?.description || defaultWelcome;
 
+    // A state refresh rebuilds the rows; it must not close the menu the user is using.
+    const openMenu = $("bot-list").querySelector(".bot-link-menu[open]");
+    const focusedTag = openMenu?.contains(document.activeElement) ? document.activeElement.localName : null;
     $("bot-list").replaceChildren(...liveBots().map((bot) => {
       const row = element("div", "bot-row");
       const copy = element("div");
@@ -636,9 +641,11 @@
       const link = element("button", "", "Copier le lien"); link.type = "button";
       link.addEventListener("click", () => { menu.open = false; void copyLink("agent", { id: bot.id }); });
       actions.append(link); menu.append(summary, actions);
+      menu.dataset.botId = bot.id; menu.open = bot.id === openMenu?.dataset.botId;
       row.append(botAvatar(bot), copy, edit, menu);
       return row;
     }));
+    if (focusedTag) $("bot-list").querySelector(`.bot-link-menu[open] ${focusedTag}`)?.focus({ preventScroll: true });
   }
 
   function openBotDialog(bot) {
@@ -657,8 +664,19 @@
     $("bot-delete-button").hidden = !bot || bot.is_default;
     $("bot-copy-link").hidden = !bot;
     renderBotExtensions(bot);
+    botDialogInitial = JSON.stringify(botFormValues());
     $("bot-dialog").showModal();
     $("bot-name").focus();
+  }
+
+  function botFormValues() {
+    return {
+      name: $("bot-name").value.trim(),
+      color: $("bot-colors").querySelector("[aria-pressed=true]")?.dataset.botColor || "citron",
+      shape: $("bot-shapes").querySelector("[aria-pressed=true]")?.dataset.shape || "galet",
+      description: $("bot-description").value.trim(),
+      instructions: $("bot-instructions").value.trim(),
+    };
   }
 
   function selectBotColor(color) {
@@ -678,15 +696,8 @@
 
   async function saveBot(event) {
     event.preventDefault();
-    const name = $("bot-name").value.trim();
-    if (!name) { notify("Donnez un nom à votre bot."); $("bot-name").focus(); return; }
-    const values = {
-      name,
-      color: $("bot-colors").querySelector("[aria-pressed=true]")?.dataset.botColor || "citron",
-      shape: $("bot-shapes").querySelector("[aria-pressed=true]")?.dataset.shape || "galet",
-      description: $("bot-description").value.trim(),
-      instructions: $("bot-instructions").value.trim(),
-    };
+    const values = botFormValues();
+    if (!values.name) { notify("Donnez un nom à votre bot."); $("bot-name").focus(); return; }
     const existing = botById(editingBotId);
     // Seuls les champs modifiés partent : enregistrer sans rien changer ne personnalise pas le bot par défaut.
     const changes = existing ? Object.fromEntries(Object.entries(values).filter(([key, value]) => existing[key] !== value)) : values;
@@ -1219,6 +1230,7 @@
   });
   document.addEventListener("click", (event) => {
     if (!ui.menu.contains(event.target) && !ui.menuButton.contains(event.target)) closeMenu();
+    for (const menu of document.querySelectorAll(".bot-link-menu[open]")) if (!menu.contains(event.target)) menu.open = false;
     const opener = event.target.closest("[data-picker]");
     if (opener) { pickerKind = pickerKind === opener.dataset.picker ? null : opener.dataset.picker; renderProvider(); }
     else if (pickerKind && !$("picker").contains(event.target)) { closePicker(); renderProvider(); }

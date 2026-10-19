@@ -11,7 +11,7 @@ function composer(kind = "task") {
   const ctx = { active: true, streaming: true, conversation: { id: "thread", kind, messages: [] } };
   const removed = [], discarded = [], mascots = [];
   const input = { value: "", setReadOnly(value) { this.readOnly = value; }, setPlaceholder(value) { this.placeholder = value; }, setInvalid(value) { this.invalid = value; } };
-  const nodes = { "new-chat": {}, "composer-hint": {}, "learn-skill-button": {} };
+  const nodes = { "new-chat": {}, "composer-hint": {}, "learn-skill-button": {}, "restore-link-draft": {} };
   const use = { setAttribute() {} };
   const ui = { input, send: { dataset: {}, setAttribute() {}, querySelector: () => use }, hint: { dataset: {} }, menuButton: {} };
   const panel = { composer: { discard() { discarded.push(ctx.conversation.id); } } };
@@ -24,6 +24,7 @@ function composer(kind = "task") {
     sendExtras: () => ({}), removePreference: (key) => removed.push(key), draftKey: () => `draft.${ctx.conversation.id}`,
     setComposerText: (text) => { input.value = text; },
     busy: false, connected: true, submissionActivity: null, connectionStatus: "online",
+    deepLinks: { setReady() {} }, deepLinksBootReady: true, previousLinkDrafts: () => [], selectedId: "thread",
     $: (id) => nodes[id], mascot: { setContext: (value) => mascots.push(value) },
   });
   return { ctx, ui, removed, discarded, mascots, update };

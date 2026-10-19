@@ -107,7 +107,7 @@ impl Fixture {
     fn create(&mut self, format: &str) -> Value {
         let content = match format {
             "csv" | "xlsx" => "[[\"Été\",\"Coût\"],[\"Cœur\",\"12 €\"]]",
-            "svg" => "{\"nodes\":[\"Été\",\"Cœur\"],\"edges\":[[0,1]]}",
+            "svg" => "flowchart LR\nA[Été] -->|puis| B(Cœur)",
             "pptx" => "Été à Québec\nCœur : 12 €\n---\nDeuxième diapositive",
             _ => "Été à Québec — Cœur : 12 €",
         };
@@ -167,7 +167,10 @@ fn all_formats_are_persistent_valid_attachments_and_counted_by_storage() {
             )
             .unwrap();
         assert_eq!(file["byte_length"], bytes.len());
-        if format != "svg" {
+        if format == "svg" {
+            let svg = String::from_utf8(bytes).unwrap();
+            assert!(svg.starts_with("<svg") && svg.contains(">Été<") && svg.contains(">puis<"));
+        } else {
             let conn = f.db();
             let doc = grokbot_attachments::documents::prepare(
                 &conn,

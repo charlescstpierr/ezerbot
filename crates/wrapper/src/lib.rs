@@ -118,6 +118,7 @@ pub fn body_limit(path: &str) -> usize {
         // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
         // retain the same 20 MiB limit as images.
         "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
+        "/api/voice/memos" => features::voice::MAX_WAV_BYTES.div_ceil(3) * 4 + 128 * 1024,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
         // 2 × 20 rules × 1,000 Unicode characters, including JSON escapes.
         "/api/approvals/reviewer" => 256 * 1024,
@@ -781,6 +782,8 @@ pub struct App {
     reader: SessionStore,
     session: SubmissionSession,
     provider: Provider,
+    #[cfg(debug_assertions)]
+    debug_voice: features::voice::DebugVoice,
 }
 
 impl App {
@@ -878,6 +881,8 @@ impl App {
             reader,
             session,
             provider,
+            #[cfg(debug_assertions)]
+            debug_voice: features::voice::DebugVoice::default(),
         })
     }
 

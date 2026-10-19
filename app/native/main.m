@@ -2,6 +2,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <WebKit/WebKit.h>
 #import "notifications.h"
+#import "voice.h"
 #import <errno.h>
 #import <poll.h>
 #import <signal.h>
@@ -18,6 +19,7 @@
 @property(nonatomic) NSUInteger startupGeneration;
 @property(nonatomic) BOOL terminating;
 @property(nonatomic, strong) EzerbotNotifier *notifier;
+@property(nonatomic, strong) EzerbotVoice *voice;
 @property(nonatomic, copy) NSString *visibleConversationID;
 @property(nonatomic) BOOL conversationVisible;
 @property(nonatomic, copy) NSString *pendingNotificationID;
@@ -28,6 +30,7 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.notifier = [[EzerbotNotifier alloc] init];
+    self.voice = [[EzerbotVoice alloc] init];
 #if defined(EZERBOT_RELEASE)
     [UNUserNotificationCenter currentNotificationCenter].delegate = self;
 #endif
@@ -89,6 +92,7 @@
 }
 
 - (void)showStatus:(NSString *)title detail:(NSString *)detail failed:(BOOL)failed {
+    [self.voice cancel];
     self.webView.navigationDelegate = nil;
     self.webView.UIDelegate = nil;
     self.webView = nil;
@@ -261,6 +265,7 @@
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoice"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -320,6 +325,7 @@
     void (^reply)(NSDictionary *) = ^(NSDictionary *result) {
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
+    if ([message.name isEqual:@"ezerbotVoice"]) { [self.voice command:body reply:reply]; return; }
     if ([command isEqual:@"presence"]) {
         self.visibleConversationID = [body[@"conversation_id"] isKindOfClass:NSString.class] ? body[@"conversation_id"] : nil;
         self.conversationVisible = [body[@"visible"] isKindOfClass:NSNumber.class] && [body[@"visible"] boolValue];
@@ -494,6 +500,7 @@
 }
 
 - (void)stopBackend {
+    [self.voice cancel];
     NSTask *task = self.backendTask;
     self.backendTask = nil;
     task.terminationHandler = nil;

@@ -47,6 +47,9 @@ window.GrokbotChat = {
     return {
       get value() { return readText(editor); },
       set value(text) { menu.hide(); writeText(editor, text); },
+      appendText(text) {
+        editor.chain().focus("end").insertContent({ type: "paragraph", content: [{ type: "text", text }] }).run();
+      },
       get mentions() { return readMentions(editor); },
       get document() { return editor.getJSON(); },
       set document(value) { menu.hide(); editor.commands.setContent(value, { emitUpdate: false }); },

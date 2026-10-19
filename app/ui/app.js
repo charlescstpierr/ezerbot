@@ -93,7 +93,11 @@
     const extras = { mentions: ui.input?.mentions || [] };
     for (const panel of panels.values()) {
       const fields = panelCall(panel, panel.sendExtras);
-      if (fields && typeof fields === "object" && !fields.then && !Array.isArray(fields)) Object.assign(extras, fields);
+      if (fields && typeof fields === "object" && !fields.then && !Array.isArray(fields)) {
+        const attachments = [...(extras.attachments || []), ...(fields.attachments || [])];
+        Object.assign(extras, fields);
+        if (attachments.length) extras.attachments = attachments;
+      }
     }
     return extras;
   }
@@ -158,6 +162,7 @@
       return true;
     },
     draft: () => ui.input?.value || "",
+    appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
     get state() { return state; },
     get connected() { return connected; },
     api, refresh, notify, createBotMascot, botSummary,

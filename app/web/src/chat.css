@@ -7,6 +7,13 @@
 @source "../node_modules/@streamdown/math/dist/*.js";
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
+.gb-voice-memo { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); text-align: left; max-width: 100%; }
+.gb-voice-memo strong { font-size: 12px; font-weight: 500; }
+.gb-voice-memo audio { width: 270px; max-width: 100%; height: 34px; }
+.gb-voice-memo details { color: var(--muted); font-size: 12px; }
+.gb-voice-memo summary { cursor: pointer; }
+.gb-voice-memo p { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 400px; }
+
 .gb-document-chip { display: flex; align-items: flex-start; align-self: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); max-width: 100%; text-align: left; }
 .gb-document-chip > svg { width: 22px; height: 26px; flex: 0 0 auto; color: var(--muted); }
 .gb-document-chip > div { display: flex; flex-direction: column; min-width: 0; gap: 4px; }

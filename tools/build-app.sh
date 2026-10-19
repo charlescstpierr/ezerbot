@@ -61,9 +61,14 @@ fi
 target_dir="$("$cargo_bin" metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror "${native_flags[@]}" -mmacosx-version-min=12.3 \
-  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications \
+  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications -framework AVFoundation -framework Speech \
   "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
 cp "$target_dir/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
+if [[ "$profile" == debug ]]; then
+  cp "$project_dir/crates/wrapper/tests/fixtures/voice.wav" "$bundle/Contents/Resources/voice-fixture.wav"
+else
+  rm -f "$bundle/Contents/Resources/voice-fixture.wav"
+fi
 
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -79,6 +84,8 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>Grokbot</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Ezerbot utilise le microphone uniquement pour votre dictée ou mémo vocal, après votre clic.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Ezerbot transcrit votre voix sur ce Mac, sans envoyer l’audio à un serveur.</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>NSAppTransportSecurity</key><dict>
     <key>NSAllowsLocalNetworking</key><true/>

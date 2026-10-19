@@ -182,7 +182,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
             ("Referrer-Policy", "no-referrer"),
-            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
+            ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"),
         ] {
             response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }

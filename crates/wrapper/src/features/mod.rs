@@ -96,6 +96,7 @@ pub mod notifications;
 pub mod routines;
 pub mod skills;
 pub mod storage;
+pub mod voice;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
 struct Feature {
@@ -135,7 +136,8 @@ registry!(
     mcp,
     storage,
     notifications,
-    local
+    local,
+    voice
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

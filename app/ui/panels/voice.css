@@ -1,0 +1,21 @@
+.voice-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.voice-mode { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.voice-mode input { accent-color: var(--accent); margin: 0; }
+.voice-mic { width: 32px; height: 32px; }
+.voice-mic[aria-pressed=true] { background: var(--accent); color: var(--accent-on); border-radius: 50%; }
+.voice-region { margin: 0 16px 10px; padding: 10px 12px; background: var(--pane); border: 1px solid var(--line); border-radius: 12px; font-size: 11px; }
+.voice-status-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.voice-status { flex: 1 1 180px; color: var(--muted); line-height: 1.5; }
+.voice-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.voice-level { width: 56px; height: 12px; accent-color: var(--accent); }
+.voice-memo-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.voice-memo-chip { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 10px 26px 5px 0; max-width: 100%; min-width: 0; }
+.voice-memo-chip strong { font-size: 11px; color: var(--text); }
+.voice-memo-chip audio { height: 32px; width: 240px; max-width: 100%; }
+.voice-memo-chip .attachment-remove { position: absolute; right: 0; top: 8px; }
+.voice-region .attachment-retry { font-size: 11px; }
+@media (max-width: 900px) {
+  .voice-mode { font-size: 10px; }
+  .voice-controls { gap: 4px; }
+  .voice-region { margin-left: 10px; margin-right: 10px; }
+}

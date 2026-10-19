@@ -990,7 +990,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
 
 // Compatibility shim until the core owns a single-entry cancel API. Both the
 // user route and orphan reconciliation must resolve + wake in the same transaction.
-fn cancel_request(
+pub(crate) fn cancel_request(
     conn: &Connection,
     request: &HumanInputRequest,
     submission: &str,

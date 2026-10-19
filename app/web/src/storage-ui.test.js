@@ -27,7 +27,7 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
 }
 const fact = (id = "fact-one") => ({ id, bot_name: "Archiviste", bot_id: "bot", text: `Mémoire privée ${id}`, status: "active" });
-const empty = () => ({ usage: { images: 0, documents: 0, memory: 0, image_count: 0, document_count: 0, fact_count: 0, forget_marker_count: 0 }, orphan_facts: [] });
+const empty = () => ({ usage: { images: 0, documents: 0, screen: 0, memory: 0, image_count: 0, document_count: 0, screen_count: 0, fact_count: 0, forget_marker_count: 0 }, orphan_facts: [] });
 function mount({ initial = empty(), read, preview = { token: "preview", count: 2, bytes: 20 }, result = { deleted: 2, bytes: 20, retained: 0, already_deleted: 0 } } = {}) {
   const document = { createElement: (tag) => new Element(tag, document), getElementById: () => dialog };
   const dialog = new Element("dialog", document); dialog.open = true;
@@ -104,7 +104,7 @@ test("memory explains retained forget markers and zero counts use the singular",
   const data = empty(); data.usage.memory = 387; data.usage.forget_marker_count = 3;
   const p = mount({ initial: data }); await flush();
   const details = p.root.querySelector(".storage-usage").querySelectorAll("small").map((el) => el.textContent);
-  assert.deepEqual(details, ["0 fichier", "0 extraction", "0 fait · 3 marqueurs d’oubli"]);
+  assert.deepEqual(details, ["0 fichier", "0 extraction", "0 capture", "0 fait · 3 marqueurs d’oubli"]);
 });
 
 test("a second-window cleanup is described as already cleaned, not retained", async () => {

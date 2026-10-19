@@ -19,7 +19,16 @@ static NSTextField *ezOverlayLabel;
 static BOOL ezBusy = NO;
 #if defined(EZERBOT_RELEASE)
 static NSRunningApplication *ezOwner;
+static NSInteger ezImageWidth, ezImageHeight;
+static CGRect ezCaptureBounds;
 #endif
+// The image delivered to the model is the sole coordinate space. This pure
+// transform is also tested in debug, without reading any real display.
+static __attribute__((unused)) BOOL EZImagePoint(double x, double y, NSInteger width, NSInteger height, CGRect bounds, CGPoint *point) {
+    if (!isfinite(x) || !isfinite(y) || width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height) return NO;
+    *point = CGPointMake(bounds.origin.x + x * bounds.size.width / width, bounds.origin.y + y * bounds.size.height / height);
+    return YES;
+}
 static void EZReply(NSDictionary *value) {
     @synchronized ([NSFileHandle fileHandleWithStandardOutput]) {
         NSData *data = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
@@ -68,6 +77,7 @@ static BOOL EZParent(void) {
 static NSString *EZPermissions(void) {
     if (!AXIsProcessTrusted()) return @"Permission Accessibilité manquante. Autorisez Ezerbot dans Réglages Système › Confidentialité et sécurité › Accessibilité.";
     if (!CGPreflightScreenCaptureAccess()) return @"Permission Enregistrement de l’écran manquante. Autorisez Ezerbot dans Réglages Système › Confidentialité et sécurité › Enregistrement de l’écran.";
+    if (!CGPreflightListenEventAccess()) return @"Permission Surveillance de l’entrée manquante. Autorisez Ezerbot dans Réglages Système › Confidentialité et sécurité › Surveillance de l’entrée pour garantir la reprise humaine.";
     return nil;
 }
 static CGEventRef EZHumanInput(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *context) {
@@ -117,13 +127,16 @@ static NSDictionary *EZCapture(void) {
     if(!image) return @{@"error":@"La capture de l’écran est indisponible. Vérifiez Enregistrement de l’écran dans Réglages Système."};
     NSImage *source = [[NSImage alloc] initWithCGImage:image size:NSZeroSize];
     CGDirectDisplayID display = CGMainDisplayID(); CGRect bounds = CGDisplayBounds(display);
-    NSSize size = NSMakeSize(MIN(1280,source.size.width),MIN(1280,source.size.width)*source.size.height/source.size.width);
+    NSInteger width = MIN(1280,CGImageGetWidth(image));
+    NSInteger height = MAX(1,llround((double)width*CGImageGetHeight(image)/CGImageGetWidth(image)));
+    NSSize size = NSMakeSize(width,height);
     NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:(NSInteger)size.width pixelsHigh:(NSInteger)size.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
     [NSGraphicsContext saveGraphicsState]; NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
     [source drawInRect:NSMakeRect(0,0,size.width,size.height)]; [NSGraphicsContext restoreGraphicsState];
     NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}]; CFRelease(image);
     if(!png || png.length>4*1024*1024) return @{@"error":@"La capture dépasse la taille permise. Réduisez la résolution de l’écran."};
-    return @{@"image":[@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]],@"width":@(bounds.size.width),@"height":@(bounds.size.height)};
+    ezImageWidth = width; ezImageHeight = height; ezCaptureBounds = bounds;
+    return @{@"image":[@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]],@"width":@(width),@"height":@(height)};
 #else
     return @{@"image":@"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=",@"width":@1280,@"height":@800,@"fixture":@YES};
 #endif
@@ -170,8 +183,9 @@ static void EZPerformAction(NSDictionary *request, uint64_t generation) {
     CGRect bounds=CGDisplayBounds(CGMainDisplayID());
     if([name isEqualToString:@"computer_move"] || [name isEqualToString:@"computer_click"]) {
         double x=[args[@"x"] doubleValue], y=[args[@"y"] doubleValue];
-        if(x<0||y<0||x>=bounds.size.width||y>=bounds.size.height) {EZFinish(identifier,@"Coordonnées hors de l’écran principal. Utilisez les dimensions retournées par la capture.");return;}
-        CGPoint point=CGPointMake(bounds.origin.x+x,bounds.origin.y+y);
+        if(!ezImageWidth || !CGRectEqualToRect(bounds,ezCaptureBounds)) {EZFinish(identifier,@"Prenez une nouvelle capture avant de déplacer la souris ou cliquer : les dimensions de l’écran ont changé ou sont inconnues.");return;}
+        CGPoint point;
+        if(!EZImagePoint(x,y,ezImageWidth,ezImageHeight,bounds,&point)) {EZFinish(identifier,@"Coordonnées hors de la dernière capture. Utilisez ses dimensions en pixels.");return;}
         BOOL right=[args[@"button"] isEqualToString:@"right"], move=[name isEqualToString:@"computer_move"];
         CGMouseButton button=right?kCGMouseButtonRight:kCGMouseButtonLeft;
         CGEventType down=move?kCGEventMouseMoved:right?kCGEventRightMouseDown:kCGEventLeftMouseDown;
@@ -212,6 +226,7 @@ static int EZScreenMain(int argc, const char *argv[]) {
         // enable in Paramètres. The debug binary does not contain these calls.
         if(!AXIsProcessTrusted()) AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge NSString *)kAXTrustedCheckOptionPrompt:@YES});
         if(!CGPreflightScreenCaptureAccess()) CGRequestScreenCaptureAccess();
+        if(!CGPreflightListenEventAccess()) CGRequestListenEventAccess();
         return EZPermissions()?1:0;
     }
 #else
@@ -226,7 +241,7 @@ static int EZScreenMain(int argc, const char *argv[]) {
     NSString *lockPath=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ezerbot-screen-%u.lock",getuid()]];
     int lock=open(lockPath.fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
     if(lock<0||flock(lock,LOCK_EX|LOCK_NB)!=0){EZReply(@{@"error":@"Ce Mac est déjà contrôlé par une autre session Ezerbot."});return 1;}
-    CGEventMask mask=CGEventMaskBit(kCGEventKeyDown)|CGEventMaskBit(kCGEventKeyUp)|CGEventMaskBit(kCGEventFlagsChanged)|CGEventMaskBit(kCGEventMouseMoved)|CGEventMaskBit(kCGEventLeftMouseDown)|CGEventMaskBit(kCGEventLeftMouseUp)|CGEventMaskBit(kCGEventRightMouseDown)|CGEventMaskBit(kCGEventRightMouseUp)|CGEventMaskBit(kCGEventOtherMouseDown)|CGEventMaskBit(kCGEventOtherMouseUp)|CGEventMaskBit(kCGEventScrollWheel)|CGEventMaskBit(kCGEventLeftMouseDragged)|CGEventMaskBit(kCGEventRightMouseDragged);
+    CGEventMask mask=CGEventMaskBit(kCGEventKeyDown)|CGEventMaskBit(kCGEventKeyUp)|CGEventMaskBit(kCGEventFlagsChanged)|CGEventMaskBit(kCGEventMouseMoved)|CGEventMaskBit(kCGEventLeftMouseDown)|CGEventMaskBit(kCGEventLeftMouseUp)|CGEventMaskBit(kCGEventRightMouseDown)|CGEventMaskBit(kCGEventRightMouseUp)|CGEventMaskBit(kCGEventOtherMouseDown)|CGEventMaskBit(kCGEventOtherMouseUp)|CGEventMaskBit(kCGEventScrollWheel)|CGEventMaskBit(kCGEventLeftMouseDragged)|CGEventMaskBit(kCGEventRightMouseDragged)|CGEventMaskBit(kCGEventOtherMouseDragged);
     CFMachPortRef tap=CGEventTapCreate(kCGSessionEventTap,kCGHeadInsertEventTap,kCGEventTapOptionListenOnly,mask,EZHumanInput,NULL);
     if(!tap){EZReply(@{@"error":@"La reprise humaine ne peut pas être surveillée. Vérifiez Accessibilité et Surveillance de l’entrée dans Réglages Système."});return 1;}
     CFRunLoopSourceRef source=CFMachPortCreateRunLoopSource(NULL,tap,0); CFRunLoopAddSource(CFRunLoopGetMain(),source,kCFRunLoopCommonModes);

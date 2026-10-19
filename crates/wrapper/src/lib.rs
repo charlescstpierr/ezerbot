@@ -876,6 +876,7 @@ impl App {
         features::migrate(&connection)?;
         features::screen::startup(path);
         features::engine::startup(&connection)?;
+        features::screen::reconcile(&connection, path)?;
         if let Err(error) = features::storage::startup(&connection, path, now() as i64) {
             // Keep the app usable; the Stockage panel exposes the actionable error.
             eprintln!("Nettoyage automatique interrompu : {error}");

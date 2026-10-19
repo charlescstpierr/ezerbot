@@ -34,7 +34,7 @@ pub fn permissions() -> Result<(), ApiError> {
         .status()
         .map_err(|_| unavailable())?;
     if !status.success() {
-        return Err(ApiError::new(403,"Autorisez Accessibilité et Enregistrement de l’écran dans Réglages Système, puis réactivez ce bot."));
+        return Err(ApiError::new(403,"Autorisez Accessibilité, Enregistrement de l’écran et Surveillance de l’entrée dans Réglages Système, puis réactivez ce bot."));
     }
     Ok(())
 }

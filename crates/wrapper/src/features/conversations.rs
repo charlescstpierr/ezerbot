@@ -44,23 +44,27 @@ pub fn routes(
 
 // Detect writes from both this connection and background engine connections.
 // A process identity also invalidates the client's token after a wrapper restart.
-fn state_revision(connection: &rusqlite::Connection) -> Result<String, ApiError> {
+fn state_revision(
+    connection: &rusqlite::Connection,
+    path: &std::path::Path,
+) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
-        "{}.{}.{}",
+        "{}.{}.{}.{}",
         std::process::id(),
         external,
-        connection.total_changes()
+        connection.total_changes(),
+        super::screen::revision(path)
     ))
 }
 
 fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     match path {
-        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection)?})),
+        "/api/ping" => Ok(json!({"revision": state_revision(&app.connection, &app.db_path)?})),
         "/api/state" => {
             // Capture before reading: a concurrent write during serialization
             // must cause another refresh, never be mistaken for observed data.
-            let revision = state_revision(&app.connection)?;
+            let revision = state_revision(&app.connection, &app.db_path)?;
             let (theme, accent) = app.preferences()?;
             let provider = app.provider.status();
             let resolved = app.resolved_model()?;

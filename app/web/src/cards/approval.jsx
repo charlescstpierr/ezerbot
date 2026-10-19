@@ -3,7 +3,7 @@ import { useState } from "react";
 import { SkillProposal } from "./skill-proposal.jsx";
 import { LocalApprovalPreview, LocalApprovalWarning, SensitiveWarning, localApprovalBlocked } from "../local-approval.js";
 import { localLimits, localToolLabel, localToolNames } from "../local-call.js";
-import { screenTools, ScreenArguments } from "../screen.jsx";
+import { screenTools, screenWarnings, ScreenArguments } from "../screen.jsx";
 
 export const kind = "approval";
 
@@ -32,6 +32,7 @@ export function Card({ message, busy, onAction }) {
   const review = request.review;
   const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
     || (review?.answer?.decision === "deny" && input.status === "denied"));
+  if (screen && !pending) return <article className="gb-message gb-engine-card screen-approval-receipt" data-message-id={message.id} data-card-kind="approval"><strong>{input.status === "resolved" ? "Autorisée par vous" : input.status === "denied" ? "Refusée par vous" : input.status === "expired" ? "Délai d’approbation écoulé — action non exécutée" : "Session arrêtée — action non exécutée"}</strong> · {screenTools[action.tool]}</article>;
   if (automatic) return (
     <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
       <p className="text-sm" role="status"><strong className={input.status === "denied" ? "gb-status-alert" : undefined}>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
@@ -53,9 +54,9 @@ export function Card({ message, busy, onAction }) {
             ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
             : review.answer.reason}
         </p>}
-        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
+        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{screen ? <>Action : {screenTools[action.tool]}</> : background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
-        {screen && <p className="text-sm"><strong>{screenTools[action.tool]}</strong> sur votre Mac. Ezerbot se masquera brièvement pour viser le bureau derrière sa fenêtre, puis reviendra. Vérifiez la cible à l’écran : achat, envoi ou suppression peuvent être irréversibles. Autoriser reprend explicitement le bot en pause pour ce geste. Les champs de mot de passe sont refusés ; saisissez-les vous-même.</p>}
+        {screen && <><p className="text-sm">{screenWarnings[action.tool]}</p><p className="text-xs text-muted-foreground">Ezerbot se masque brièvement pour viser le bureau derrière sa fenêtre. Autoriser reprend explicitement le bot en pause pour ce geste.</p></>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
         {!previewAvailable
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>

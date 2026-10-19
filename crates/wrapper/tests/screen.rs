@@ -226,7 +226,22 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
         .flat_map(|c| c["messages"].as_array().unwrap())
         .any(|m| m["payload"]["screen_image"]
             .as_str()
-            .is_some_and(|s| s.starts_with("data:image/png;base64,"))));
+            .is_some_and(|s| s.starts_with("/api/screen/shot?"))));
+    // A live grant is not transferable to another thread.
+    let other = f.post("/api/conversations", json!({"title":"Autre fil"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original = std::mem::replace(&mut f.chat, other);
+    let before = f.shots();
+    f.send("other-thread", "computer_screenshot", json!({}));
+    f.finish("other-thread");
+    assert!(f.outcome("other-thread")["reason"]
+        .as_str()
+        .unwrap()
+        .contains("autre fil"));
+    assert_eq!(f.shots(), before);
+    f.chat = original;
     // Typing in Ezerbot pauses the lease, yet the bot may still propose a card.
     // Approving without the explicit resume never acts; resuming then acts once.
     let before = f.shots();
@@ -270,8 +285,12 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
     );
     let r = f.request("stale");
     f.revoke(session);
+    assert!(matches!(
+        requests::get(&f.db(), &r.id).unwrap().unwrap().status,
+        requests::RequestStatus::Cancelled { .. }
+    ));
     session = f.grant();
-    f.decide(&r, json!("allow_once"));
+    assert!(f.app.api("POST", "/api/approvals/resolve", json!({"entry_id":r.entry_id,"submission_id":"stale-approval","conversation_id":f.chat,"decision":"allow_once"}).to_string().as_bytes()).is_err());
     f.finish("stale");
     assert_eq!(f.shots(), before);
     assert_eq!(f.outcome("stale")["status"], "failed");
@@ -318,11 +337,97 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
     assert_eq!(f.shots(), before);
     f.revoke(session);
     f.grant();
+    f.send("disabled-pending", "computer_screenshot", json!({}));
+    let disabled = f.request("disabled-pending");
+    f.post(
+        "/api/screen/bot",
+        json!({"bot_id":"grokbot","enabled":false}),
+    );
+    assert_eq!(
+        f.app.api("GET", "/api/state", b"").unwrap()["screen"]["session"],
+        Value::Null
+    );
+    assert!(matches!(
+        requests::get(&f.db(), &disabled.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        requests::RequestStatus::Cancelled { .. }
+    ));
+    f.finish("disabled-pending");
+    assert_eq!(f.shots(), before);
+    f.post(
+        "/api/screen/bot",
+        json!({"bot_id":"grokbot","enabled":true}),
+    );
+    f.grant();
+    f.send("restart-pending", "computer_screenshot", json!({}));
+    let pending = f.request("restart-pending");
     let provider = Provider::with_endpoints(&f.path, f.server.endpoints(), false);
     f.app = App::open_with(&f.path, provider.clone()).unwrap();
     f.provider = provider;
     let restarted = f.app.api("GET", "/api/state", b"").unwrap();
     assert_eq!(restarted["screen"]["session"], Value::Null);
     assert_eq!(restarted["screen"]["bots"][0]["enabled"], true);
+    assert!(matches!(
+        requests::get(&f.db(), &pending.id).unwrap().unwrap().status,
+        requests::RequestStatus::Cancelled { .. }
+    ));
+    f.finish("restart-pending");
+    assert_eq!(f.outcome("restart-pending")["status"], "failed");
     assert_eq!(f.shots(), before);
+    // Realistic capture size never inflates polling payloads; pixels load only
+    // through a conversation-scoped binary route, including after a restart.
+    f.db()
+        .execute(
+            "UPDATE wrapper_screen_shots SET image=?1",
+            [format!("data:image/png;base64,{}", "A".repeat(1_400_000))],
+        )
+        .unwrap();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let raw = state.to_string();
+    assert!(!raw.contains("data:image/png;base64,"));
+    assert!(raw.len() < 100_000, "{} bytes in state", raw.len());
+    let url = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["messages"].as_array().unwrap())
+        .find_map(|m| m["payload"]["screen_image"].as_str())
+        .unwrap()
+        .to_owned();
+    let grokbot_wrapper::ApiResponse::Bytes { body, content_type } =
+        f.app.api_response("GET", &url, b"").unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(content_type, "image/png");
+    assert_eq!(body.len(), 1_050_000);
+    assert!(f
+        .app
+        .api_response("GET", &url.replace(&f.chat, "another-thread"), b"")
+        .is_err());
+    assert!(f
+        .app
+        .api_response("GET", &format!("{url}&id=duplicate"), b"")
+        .is_err());
+    assert_eq!(
+        f.app.api("GET", "/api/storage", b"").unwrap()["usage"]["screen_count"],
+        before
+    );
+    f.grant();
+    f.send("deleted-pending", "computer_screenshot", json!({}));
+    let deleted = f.request("deleted-pending");
+    f.post("/api/conversations/delete", json!({"id":f.chat}));
+    f.app.tick(now());
+    assert!(matches!(
+        requests::get(&f.db(), &deleted.id).unwrap().unwrap().status,
+        requests::RequestStatus::Cancelled { .. }
+    ));
+    assert!(f.app.api_response("GET", &url, b"").is_err());
+    assert_eq!(f.shots(), 0);
+    assert_eq!(
+        f.app.api("GET", "/api/storage", b"").unwrap()["usage"]["screen_count"],
+        0
+    );
 }

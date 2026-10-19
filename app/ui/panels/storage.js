@@ -97,6 +97,7 @@
       for (const [label, bytes, count, unit] of [
         ["Images", u.images, u.image_count, "fichier"],
         ["Documents", u.documents, u.document_count, "extraction"],
+        ["Captures d’écran", u.screen, u.screen_count, "capture"],
         ["Mémoire", u.memory, u.fact_count, "fait"],
       ]) {
         const row = node("div", "storage-usage-row");
@@ -149,7 +150,7 @@
       section.append(node("h3", "", "Stockage"), node("p", "", "Données locales de l’application. Seules les pièces jointes sans référence peuvent être nettoyées. Les brouillons et les fichiers utilisés sont conservés. Les pièces déjà envoyées restent conservées, y compris dans les conversations supprimées."));
       usage = node("div", "storage-usage");
       usage.setAttribute("aria-label", "Espace utilisé");
-      const explanation = node("p", "", "Documents : taille des extractions conservées, sans copie du fichier d’origine. Mémoire : contenu et provenance, marqueurs d’oubli inclus, hors historique. L’espace SQLite libéré est réutilisé par l’application. Les imports abandonnés depuis plus de 24 h sont nettoyés au démarrage.");
+      const explanation = node("p", "", "Documents : taille des extractions conservées, sans copie du fichier d’origine. Mémoire : contenu et provenance, marqueurs d’oubli inclus, hors historique. L’espace SQLite libéré est réutilisé par l’application. Les captures d’écran restent dans leur fil et sont effacées quand ce fil est supprimé. Les imports abandonnés depuis plus de 24 h sont nettoyés au démarrage.");
       const actions = node("div", "storage-actions");
       refresh = button("Actualiser", "secondary-button", async () => { closeConfirmation(); message(""); message("", false, "fact"); busy(true); await load(); busy(false); });
       clean = button("Nettoyer", "secondary-button", async () => {

@@ -179,6 +179,8 @@ struct Candidate {
 struct Usage {
     images: u64,
     documents: u64,
+    screen: u64,
+    screen_count: usize,
     memory: u64,
     image_count: usize,
     document_count: usize,
@@ -193,6 +195,11 @@ fn inventory(
 ) -> Result<(Usage, Vec<Candidate>), ApiError> {
     let mut usage = Usage::default();
     let mut candidates = Vec::new();
+    (usage.screen, usage.screen_count) = conn.query_row(
+        "SELECT COALESCE(SUM(length(CAST(image AS BLOB))),0),COUNT(*) FROM wrapper_screen_shots",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let directory = directory(base)?;
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => Some(entries),

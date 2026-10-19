@@ -8,6 +8,14 @@ int main(int argc, const char *argv[]) {
         // Keep the production entry compiled/linked for symbol exclusion checks,
         // but never execute it as part of this pure test.
         if (argc > 1) return EZScreenMain(argc, argv);
+        CGPoint point;
+        assert(EZImagePoint(1000,700,1280,832,CGRectMake(0,0,1470,956),&point));
+        assert(fabs(point.x-1148.4375)<0.001); assert(fabs(point.y-804.326923)<0.001);
+        assert(EZImagePoint(640,400,1280,800,CGRectMake(100,50,2560,1600),&point));
+        assert(point.x==1380 && point.y==850);
+        assert(!EZImagePoint(1280,0,1280,800,CGRectMake(0,0,1470,956),&point));
+        assert(!EZImagePoint(-1,0,1280,800,CGRectMake(0,0,1470,956),&point));
+        assert(!EZImagePoint(0,0,0,0,CGRectZero,&point));
         ezDeadline = NSProcessInfo.processInfo.systemUptime + 60;
         assert(EZLive(ezGeneration));
         uint64_t queued = ezGeneration;

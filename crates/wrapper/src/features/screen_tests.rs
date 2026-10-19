@@ -4,8 +4,10 @@ use grokbot_engine::{
     contracts::{with_tx, ApprovalCheck, RunBudgets, RunKind, Trigger},
     model::{self, Run, RunStatus},
 };
+static TEST_MAC: Mutex<()> = Mutex::new(());
 #[test]
 fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
+    let _mac = TEST_MAC.lock().unwrap();
     let root = std::env::temp_dir().join(format!(
         "ezerbot-screen-queue-{}-{}",
         std::process::id(),
@@ -109,6 +111,98 @@ fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
             .unwrap(),
         0
     );
+    startup(&path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn expiry_changes_poll_token_and_cancels_pending_screen_approvals() {
+    let _mac = TEST_MAC.lock().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-screen-expiry-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("workspace.sqlite");
+    let mut app = App::open(&path).unwrap();
+    let chat = app
+        .api("POST", "/api/conversations", br#"{"title":"Expiration"}"#)
+        .unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.api(
+        "POST",
+        "/api/screen/bot",
+        br#"{"bot_id":"grokbot","enabled":true}"#,
+    )
+    .unwrap();
+    app.api(
+        "POST",
+        "/api/screen/grant",
+        json!({"bot_id":"grokbot","conversation_id":chat,"minutes":1})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let run = Run {
+        run_id: "screen-expiry".into(),
+        bot_id: "grokbot".into(),
+        conversation_id: chat.clone(),
+        trigger: Trigger::UserMessage {
+            message_id: "expiry".into(),
+            attempt: 0,
+        },
+        kind: RunKind::Chat,
+        status: RunStatus::Running,
+        task_status: None,
+        turn_end: None,
+        budgets: RunBudgets::default(),
+        started_at: crate::now() as i64,
+    };
+    let call = ToolCall {
+        call_id: "expiry".into(),
+        name: "computer_screenshot".into(),
+        arguments: json!({}),
+    };
+    let request_id = with_tx(
+        &app.connection,
+        |conn| -> grokbot_engine::contracts::Result<String> {
+            model::start(conn, &run)?;
+            let ctx = Context {
+                connection: conn,
+                bot_id: Some("grokbot"),
+                conversation_id: Some(&chat),
+                run_id: Some(&run.run_id),
+                ..app.feature_context()
+            };
+            let grokbot_engine::contracts::SuspendCause::HumanInput { id } =
+                super::super::forms::request_tool_approval(&ctx, &run, &call).unwrap()
+            else {
+                panic!()
+            };
+            Ok(id)
+        },
+    )
+    .unwrap();
+    let before = app.api("GET", "/api/ping", b"").unwrap()["revision"].clone();
+    // Move only the fixture clock/deadline, without waiting a real minute or
+    // triggering any native activity. No database write changes the token.
+    Arc::get_mut(leases().lock().unwrap().get_mut(&path).unwrap())
+        .unwrap()
+        .expires = crate::now() - 1;
+    let after = app.api("GET", "/api/ping", b"").unwrap()["revision"].clone();
+    assert_ne!(before, after);
+    app.tick(crate::now());
+    let request = grokbot_forms::requests::get(&app.connection, &request_id)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        request.status,
+        grokbot_forms::requests::RequestStatus::Cancelled { .. }
+    ));
+    assert_eq!(state(&app.feature_context())["session"], Value::Null);
     startup(&path);
     let _ = std::fs::remove_dir_all(root);
 }

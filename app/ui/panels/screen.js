@@ -3,16 +3,33 @@
   const host = window.GrokbotPanels;
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.onclick = action; return b; };
-  let data = {}, context = {}, section, signature = "", error = "", saving = false;
+  let data = {}, context = {}, section, signature = "", error = "", saving = false, expiryTimer;
+  function updateEntry() {
+    entry.hidden = !data.session && !(context.conversation?.kind === "chat" && data.bots?.some(b => b.bot_id === context.bot?.id && b.enabled));
+  }
   const entry = button("Écran du Mac", () => { renderDialog(); dialog.showModal(); showOverlay(); }, "tool-pill screen-button");
+  entry.setAttribute("aria-label", "Écran du Mac"); entry.title = "Écran du Mac";
   document.querySelector(".topbar-actions").prepend(entry);
   const dialog = node("dialog", null, "dialog screen-dialog"); dialog.setAttribute("aria-labelledby", "screen-title");
   document.getElementById("panels").append(dialog);
-  const overlay = node("div", null, "screen-overlay"); overlay.setAttribute("role", "status"); overlay.setAttribute("popover", "manual"); document.body.append(overlay);
+  const overlay = node("div", null, "screen-overlay"); overlay.setAttribute("role", "status"); overlay.hidden = true; document.querySelector(".topbar").after(overlay);
   function showOverlay() {
-    if (data.session) { if (overlay.showPopover && !overlay.matches(":popover-open")) overlay.showPopover(); }
-    else if (overlay.hidePopover && overlay.matches(":popover-open")) overlay.hidePopover();
+    const floating = Boolean(document.querySelector("dialog[open]"));
+    if (overlay.hidePopover && overlay.matches(":popover-open")) overlay.hidePopover();
+    overlay.classList.toggle("screen-floating", floating);
+    if (floating) overlay.setAttribute("popover", "manual");
+    else overlay.removeAttribute("popover");
     overlay.hidden = !data.session;
+    if (data.session && floating && overlay.showPopover) overlay.showPopover();
+  }
+  function scheduleExpiry() {
+    clearTimeout(expiryTimer);
+    if (!data.session) return;
+    expiryTimer = setTimeout(() => {
+      data = { ...data, session: null };
+      renderOverlay(); if (dialog.open) renderDialog();
+      host.refresh().catch(() => {});
+    }, Math.max(0, data.session.expires_at - Date.now() + 50));
   }
   async function save(path, body) {
     if (saving) return;
@@ -21,7 +38,15 @@
     catch (e) { error = e.message; }
     finally { saving = false; signature = ""; renderSettings(); if (dialog.open) renderDialog(); renderOverlay(); }
   }
-  async function stop() { if (data.session) await save("/api/screen/revoke", { id: data.session.id }); }
+  // Emergency stop must never be swallowed by the ordinary save guard (e.g.
+  // a slow resume or refresh). Revoke is idempotent and has its own request.
+  async function stop() {
+    if (!data.session) return;
+    const id = data.session.id;
+    try { await host.api("/api/screen/revoke", { id }); await host.refresh(); host.notify("Contrôle de l’écran arrêté."); }
+    catch (e) { error = e.message; }
+    finally { signature = ""; renderSettings(); if (dialog.open) renderDialog(); renderOverlay(); }
+  }
   async function pane(name) {
     const bridge = window.webkit?.messageHandlers?.ezerbotNotifications;
     if (data.fake) { host.notify("Mode de test : aucun panneau système ni demande de permission."); return; }
@@ -40,14 +65,15 @@
     section.className = "setting-section screen-settings"; section.replaceChildren(node("h3", "Écran du Mac"), node("p", "Désactivé par défaut. Chaque session est limitée à un bot, un fil direct et une durée. Chaque action demande votre confirmation ; aucun achat, envoi ou suppression automatique."));
     if (data.fake) section.append(node("p", "Version de développement : écran fictif et événements enregistrés. Aucune capture réelle, saisie réelle ou permission macOS.", "screen-test-note"));
     for (const bot of host.state.bots?.filter(b => !b.deleted) || []) {
-      const label = node("label", null, "setting-toggle screen-bot-row"), input = node("input"); input.type = "checkbox"; input.setAttribute("role", "switch"); input.setAttribute("aria-label", `Contrôle de l’écran pour ${bot.name}`); input.name = `screen-${bot.id}`; input.checked = Boolean(data.bots?.find(b => b.bot_id === bot.id)?.enabled); input.disabled = saving;
+      const row = node("div", null, "screen-bot-row"), label = node("label", null, "setting-toggle"), input = node("input"); input.type = "checkbox"; input.setAttribute("role", "switch"); input.setAttribute("aria-label", `Contrôle de l’écran pour ${bot.name}`); input.name = `screen-${bot.id}`; input.checked = Boolean(data.bots?.find(b => b.bot_id === bot.id)?.enabled); input.disabled = saving;
       input.onchange = () => save("/api/screen/bot", { bot_id: bot.id, enabled: input.checked });
       const track = node("span", null, "toggle-track"); track.setAttribute("aria-hidden", "true");
-      label.append(node("span", `Autoriser ${bot.name} à demander le contrôle`), input, track); section.append(label);
+      label.append(node("span", "Écran"), input, track); row.append(node("strong", bot.name), label); section.append(row);
     }
     section.append(node("p", "Dans un fil existant, ouvrez « Écran du Mac » en haut pour accorder une session. Toute activité réelle de la souris ou du clavier met le bot en pause. Échap révoque le contrôle."));
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); section.append(alert); }
-    permissionButtons(section);
+    if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(section);
+    else { const settings = node("details"); settings.append(node("summary", "Réglages Système…")); permissionButtons(settings); section.append(settings); }
   }
   function renderOverlay() {
     overlay.replaceChildren();
@@ -58,6 +84,7 @@
     }
     showOverlay();
     entry.classList.toggle("screen-active", Boolean(data.session));
+    updateEntry();
   }
   function renderDialog() {
     dialog.replaceChildren();
@@ -66,7 +93,7 @@
     if (data.fake) dialog.append(node("p", "Écran fictif · aucune action sur votre Mac", "screen-test-note"));
     if (data.session) {
       const s = data.session, bot = host.state.bots?.find(b => b.id === s.bot_id), chat = host.state.conversations?.find(c => c.id === s.conversation_id);
-      dialog.append(node("h3", s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`));
+      dialog.append(node("h3", s.paused ? "En pause — Vous avez la main" : "Ezerbot contrôle l’écran — Échap pour arrêter"), node("p", `${bot?.name || "Bot"} · ${chat?.title || "Conversation"} · jusqu’à ${new Date(s.expires_at).toLocaleTimeString("fr-CA", { hour: "2-digit", minute: "2-digit" })}`));
       dialog.append(node("p", "L’accord n’autorise aucune action sensible sans sa carte. Vous pouvez arrêter à tout moment, même si des actions attendent. Les effets déjà livrés ne sont pas annulés."));
       const actions = node("div", null, "screen-actions");
       if (s.paused) actions.append(button("Reprendre le bot", () => save("/api/screen/resume", { id: s.id }), "primary-button"));
@@ -77,22 +104,23 @@
       const chat = context.conversation, bot = context.bot;
       dialog.append(node("p", "Le modèle pourra voir des captures de l’écran principal et proposer des gestes. Les captures et actions restent dans le fil et sont envoyées au fournisseur d’IA. Fermez vos fenêtres privées avant de commencer."));
       const available = chat?.kind === "chat" && data.bots?.some(b => b.bot_id === bot?.id && b.enabled);
-      if (!available) dialog.append(node("p", "Activez d’abord ce bot dans Paramètres › Écran du Mac, puis ouvrez un fil direct existant (envoyez un message pour créer le fil)."));
+      if (!available) dialog.append(node("p", "Activez d’abord ce bot dans Paramètres › Écran du Mac, puis ouvrez un fil direct existant (envoyez un message pour créer le fil)."), button("Ouvrir Paramètres", () => { dialog.close(); document.getElementById("settings-button").click(); }));
       else {
         dialog.append(node("h3", `${bot.name} · ${chat.title}`));
         const form = node("form"), label = node("label", "Durée de cet accord", "form-label"), duration = node("select", null, "text-input"); duration.name = "screen-duration";
         for (const minutes of [1,5,15]) { const opt = node("option", `${minutes} minute${minutes > 1 ? "s" : ""}`); opt.value = String(minutes); duration.append(opt); }
         duration.value = "5"; label.append(duration);
         const consent = node("label", null, "screen-consent"), check = node("input"); check.type = "checkbox"; check.required = true; check.name = "screen-consent";
-        consent.append(check, node("span", "J’autorise les captures de cet écran pour ce bot et ce fil, pendant cette durée. Je peux arrêter avec Échap à tout moment."));
-        const allow = node("button", "Accorder cette session", "primary-button"); allow.type = "submit"; allow.disabled = saving;
-        form.append(label, consent, allow); form.onsubmit = event => { event.preventDefault(); save("/api/screen/grant", { bot_id: bot.id, conversation_id: chat.id, minutes: Number(duration.value) }); }; dialog.append(form);
+        consent.append(check, node("span", "J’autorise ce bot à voir cet écran et à proposer des gestes, chacun soumis à ma confirmation, dans ce fil et pendant cette durée. Échap arrête tout."));
+        const allow = node("button", "Accorder cette session", "primary-button"); allow.type = "submit"; allow.disabled = true;
+        check.onchange = () => { allow.disabled = saving || !check.checked; };
+        form.append(label, consent, allow); form.onsubmit = event => { event.preventDefault(); if (check.checked) save("/api/screen/grant", { bot_id: bot.id, conversation_id: chat.id, minutes: Number(duration.value) }); }; dialog.append(form);
       }
     }
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); dialog.append(alert); }
-    permissionButtons(dialog);
+    if (/permission|Accessibilité|Enregistrement|Surveillance/i.test(error)) permissionButtons(dialog);
   }
-  window.addEventListener("keydown", event => { if (event.key === "Escape" && data.session) { event.preventDefault(); stop(); } }, true);
+  window.addEventListener("keydown", event => { if (event.key === "Escape" && data.session) { stop(); } }, true);
   // Debug-only simulated takeover. Native release input monitoring is entirely
   // outside the WebView, so changing tabs/apps cannot evade it.
   let pausing = false;
@@ -102,11 +130,11 @@
     try { await host.api("/api/screen/fake-input", { id: data.session.id }); await host.refresh(); } finally { pausing = false; }
   }
   for (const name of ["pointerdown", "pointermove", "keydown", "wheel"]) window.addEventListener(name, fakeHuman, { passive: true });
-  document.addEventListener("toggle", event => { if (event.target instanceof HTMLDialogElement && data.session) { if (overlay.hidePopover && overlay.matches(":popover-open")) overlay.hidePopover(); showOverlay(); } }, true);
+  document.addEventListener("toggle", event => { if (event.target instanceof HTMLDialogElement) showOverlay(); }, true);
   const preview = node("dialog", null, "dialog screen-preview");
   document.getElementById("panels").append(preview);
   window.EzerbotScreen = { pane, preview(image) {
-    if (typeof image !== "string" || !image.startsWith("data:image/png;base64,")) return;
+    if (typeof image !== "string" || !image.startsWith("/api/screen/shot?")) return;
     const img = node("img"); img.src = image; img.alt = "Capture de l’écran après l’action";
     const header = node("div", null, "dialog-header"); header.append(node("h2", "Capture de l’écran"), button("Fermer", () => preview.close()));
     preview.replaceChildren(header, img); preview.showModal(); showOverlay();
@@ -114,7 +142,7 @@
   host.register({
     id: "screen",
     settingsSection(container) { section = container; renderSettings(); },
-    onState(state, ctx) { const changed = JSON.stringify(data) !== JSON.stringify(state.screen || {}); data = state.screen || {}; context = ctx; renderSettings(); if (changed) { renderOverlay(); if (dialog.open) renderDialog(); } },
+    onState(state, ctx) { const incoming = state.screen || {}; const next = { ...incoming, session: incoming.session?.expires_at > Date.now() ? incoming.session : null }; const changed = JSON.stringify(data) !== JSON.stringify(next); data = next; context = ctx; renderSettings(); updateEntry(); if (changed) { scheduleExpiry(); renderOverlay(); if (dialog.open) renderDialog(); } },
     wantsPolling() { return Boolean(data.session); },
   });
 })();

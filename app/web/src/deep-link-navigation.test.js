@@ -25,16 +25,16 @@ test("settings links reveal the section heading, even for a section taller than 
   assert.throws(() => focus(null), { message: "Cette section n’est pas disponible dans cette version d’Ezerbot." });
 });
 
-function shellRouter({ open = [], botEdited = false } = {}) {
-  const dialogs = Object.fromEntries(["bot-dialog", "rename-dialog", "settings-dialog"].map((id) => [id, {
+function shellRouter({ open = [], botEdited = false, memoryEdited = false } = {}) {
+  const dialogs = Object.fromEntries(["bot-dialog", "rename-dialog", "settings-dialog", "skills-dialog", "routines-dialog"].map((id) => [id, {
     id, open: open.includes(id), close() { this.open = false; },
   }]));
   const bots = [{ id: "grokbot" }, { id: "redacteur" }];
   const ctx = { chosenBotId: "redacteur", notices: [], text: null };
   const navigate = runInNewContext(`(${navigateSource})`, {
-    $: (id) => dialogs[id],
+    $: (id) => id === "bot-extensions" ? { querySelector: (selector) => memoryEdited && selector === ".memory-editor:not([hidden])" ? {} : null } : dialogs[id],
     document: { querySelector(selector) {
-      return selector.split(",").map((part) => part.trim().match(/^#([\w-]+)\[open\]$/)?.[1]).map((id) => dialogs[id]).find((dialog) => dialog?.open) || null;
+      return selector.split(",").map((part) => part.trim().match(/^[#.]([\w-]+)\[open\]$/)?.[1]).map((id) => dialogs[id]).find((dialog) => dialog?.open) || null;
     }, querySelectorAll: () => Object.values(dialogs).filter((dialog) => dialog.open) },
     botFormValues: () => ({ name: botEdited ? "Rédactrice" : "Rédacteur" }), botDialogInitial: JSON.stringify({ name: "Rédacteur" }),
     state: { conversations: [] }, botById: (id) => bots.find((bot) => bot.id === id), liveBots: () => bots,
@@ -62,6 +62,39 @@ test("an edited bot sheet blocks the link; an untouched one is simply replaced",
   const viewed = shellRouter({ open: ["bot-dialog"] });
   await assert.rejects(viewed.navigate({ kind: "conversation", id: "missing" }), { message: "Cette conversation est introuvable ou inaccessible sur ce Mac." });
   assert.equal(viewed.dialogs["bot-dialog"].open, false);
+});
+
+test("a memory correction inside an unchanged bot sheet remains protected", async () => {
+  const r = shellRouter({ open: ["bot-dialog"], memoryEdited: true });
+  await assert.rejects(r.navigate({ kind: "settings", id: "shortcuts" }), { message: guard });
+  assert.equal(r.dialogs["bot-dialog"].open, true);
+});
+
+test("skill and routine editors block incoming navigation without closing their drafts", async () => {
+  for (const id of ["skills-dialog", "routines-dialog"]) {
+    const r = shellRouter({ open: [id] });
+    await assert.rejects(r.navigate({ kind: "settings", id: "shortcuts" }), { message: guard });
+    assert.equal(r.dialogs[id].open, true);
+  }
+});
+
+test("restoring an open bot menu never pulls the settings scroll back to it", () => {
+  const source = shell.slice(shell.indexOf('      const menu = element("details", "bot-link-menu");'), shell.indexOf("      row.append(botAvatar(bot), copy, edit, menu);"));
+  const build = (restored) => runInNewContext(`(() => { ${source}; return {menu, actions}; })()`, {
+    bot: { id: "redacteur", name: "Rédacteur" }, openMenu: restored ? { dataset: { botId: "redacteur" } } : null,
+    icon() {}, copyLink() {}, element: () => ({ dataset: {}, handlers: {}, reveals: 0,
+      append() {}, setAttribute() {}, addEventListener(name, callback) { this.handlers[name] = callback; },
+      scrollIntoView() { this.reveals++; } }),
+  });
+  const restored = build(true);
+  restored.menu.handlers.toggle();
+  assert.equal(restored.actions.reveals, 0);
+  restored.menu.open = false; restored.menu.handlers.toggle();
+  restored.menu.open = true; restored.menu.handlers.toggle();
+  assert.equal(restored.actions.reveals, 1, "a later user opening is still revealed");
+  const fresh = build(false);
+  fresh.menu.open = true; fresh.menu.handlers.toggle();
+  assert.equal(fresh.actions.reveals, 1);
 });
 
 test("a compose link without a bot keeps the bot the user chose", async () => {

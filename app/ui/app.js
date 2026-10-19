@@ -210,7 +210,8 @@
 
   async function navigateLink(destination) {
     // Never discard an unsaved editor or silently substitute another target.
-    const botEdited = $("bot-dialog").open && JSON.stringify(botFormValues()) !== botDialogInitial;
+    const botEdited = $("bot-dialog").open && (JSON.stringify(botFormValues()) !== botDialogInitial
+      || Boolean($("bot-extensions").querySelector(".memory-editor:not([hidden])")));
     if (botEdited || document.querySelector("#rename-dialog[open], .skills-dialog[open], .routines-dialog[open]")) {
       throw new Error("Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.");
     }
@@ -658,8 +659,12 @@
       const link = element("button", "", "Copier le lien"); link.type = "button";
       link.addEventListener("click", () => { menu.open = false; void copyLink("agent", { id: bot.id }); });
       actions.append(link); menu.append(summary, actions);
-      menu.addEventListener("toggle", () => { if (menu.open) actions.scrollIntoView({ block: "nearest", inline: "nearest" }); });
-      menu.dataset.botId = bot.id; menu.open = bot.id === openMenu?.dataset.botId;
+      let restoringMenu = bot.id === openMenu?.dataset.botId;
+      menu.addEventListener("toggle", () => {
+        if (menu.open && !restoringMenu) actions.scrollIntoView({ block: "nearest", inline: "nearest" });
+        restoringMenu = false;
+      });
+      menu.dataset.botId = bot.id; menu.open = restoringMenu;
       row.append(botAvatar(bot), copy, edit, menu);
       return row;
     }));

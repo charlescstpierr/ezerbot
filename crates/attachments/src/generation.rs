@@ -51,23 +51,26 @@ pub fn xml(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+// Keeps runs of spaces and indentation (tab = 4 spaces): aligned columns stay
+// aligned in Courier. Breaks on the last space that fits, else mid-word.
 fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for line in s.lines() {
-        let mut current = String::new();
-        for word in line.split_whitespace() {
-            if current.chars().count() + word.chars().count() + 1 > width && !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-            }
-            for c in word.chars() {
-                if current.chars().count() >= width {
-                    lines.push(std::mem::take(&mut current));
+        let mut rest: Vec<char> = line.replace('\t', "    ").trim_end().chars().collect();
+        while rest.len() > width {
+            let indent = rest.iter().take_while(|c| **c == ' ').count();
+            match (indent + 1..=width).rev().find(|&i| rest[i] == ' ') {
+                Some(i) => {
+                    lines.push(rest[..i].iter().collect::<String>().trim_end().to_string());
+                    rest.drain(..=i);
                 }
-                current.push(c);
+                None => {
+                    lines.push(rest[..width].iter().collect());
+                    rest.drain(..width);
+                }
             }
-            current.push(' ');
         }
-        lines.push(current.trim_end().into());
+        lines.push(rest.into_iter().collect());
     }
     if lines.is_empty() {
         lines.push(String::new());
@@ -112,6 +115,7 @@ pub fn generate(request: &Request) -> Result<Generated> {
         ));
     }
     let mut preview_lines = lines.clone();
+    let mut table = None;
     let mut pages = lines.len().div_ceil(48);
     let bytes = match format {
         "md" => request.content.as_bytes().to_vec(),
@@ -135,7 +139,7 @@ pub fn generate(request: &Request) -> Result<Generated> {
             {
                 return Err(invalid("Le tableau doit contenir 1 à 1 000 lignes, 1 à 50 colonnes et au plus 1 000 caractères par cellule."));
             }
-            preview_lines = rows.iter().take(15).map(|r| r.join("  |  ")).collect();
+            table = Some(table_preview(&rows));
             pages = 1;
             if format == "csv" {
                 csv(&rows)
@@ -158,7 +162,7 @@ pub fn generate(request: &Request) -> Result<Generated> {
     if bytes.len() > documents::MAX_BYTES {
         return Err(invalid("Le fichier généré dépasse 20 Mo."));
     }
-    let preview = text_preview(&preview_lines, format);
+    let preview = table.unwrap_or_else(|| text_preview(&preview_lines, format));
     Ok(Generated {
         name,
         format: format.into(),
@@ -167,12 +171,49 @@ pub fn generate(request: &Request) -> Result<Generated> {
         pages,
     })
 }
+/// A spreadsheet has cells, not pages. Keep a bounded, readable thumbnail even
+/// for a three-row table; truncate only the preview, never the stored data.
+fn table_preview(rows: &[Vec<String>]) -> String {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(1).min(6);
+    let count = rows.len().min(8);
+    let w = 640;
+    let h = count * 32 + 24;
+    let cell = 616.0 / cols as f64;
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" font-family=\"Arial,Helvetica,sans-serif\" font-size=\"14\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/>");
+    for (r, row) in rows.iter().take(count).enumerate() {
+        for c in 0..cols {
+            let (x, y) = (12.0 + c as f64 * cell, 12 + r * 32);
+            let text = row
+                .get(c)
+                .map(String::as_str)
+                .unwrap_or("")
+                .replace(['\n', '\r', '\t'], " ");
+            let limit = ((cell - 16.0) / 8.0) as usize;
+            let mut shown: String = text.chars().take(limit).collect();
+            if text.chars().count() > limit {
+                shown.pop();
+                shown.push('…');
+            }
+            svg.push_str(&format!("<rect x=\"{x:.1}\" y=\"{y}\" width=\"{cell:.1}\" height=\"32\" fill=\"{}\" stroke=\"#e2e8f0\"/><text x=\"{:.1}\" y=\"{}\" fill=\"#172033\"{}>{}</text>", if r == 0 { "#f1f5f9" } else { "#fff" }, x + 8.0, y + 21, if r == 0 { " font-weight=\"bold\"" } else { "" }, xml(&shown)));
+        }
+    }
+    svg.push_str("</svg>");
+    svg
+}
 fn text_preview(lines: &[String], format: &str) -> String {
     let slide = format == "pptx";
+    let cropped = matches!(format, "md" | "docx");
     let (w, h, count) = if slide {
         (960, 540, 16)
     } else {
         (595, 842, 48)
+    };
+    let reflowed;
+    let lines = if cropped {
+        reflowed = wrap(&lines.join("\n"), 47);
+        reflowed.as_slice()
+    } else {
+        lines
     };
     // Thumbnails use the file's own family: Courier for PDF and plain text,
     // the sans-serif Office font for DOCX and PPTX.
@@ -181,10 +222,13 @@ fn text_preview(lines: &[String], format: &str) -> String {
     } else {
         "Courier New,Courier,monospace"
     };
-    let mut svg=format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/><g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\">");
+    let mut body = format!(
+        "<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\" xml:space=\"preserve\">"
+    );
     let mut y = 42;
+    let mut right: f64 = 320.0;
     for (i, line) in lines.iter().take(count).enumerate() {
-        let (heading, text) = if format == "docx" {
+        let (heading, text) = if matches!(format, "docx" | "md") {
             heading(line)
         } else {
             (0, line.as_str())
@@ -194,7 +238,8 @@ fn text_preview(lines: &[String], format: &str) -> String {
             (true, _) => (18, 28),
             (false, 1) => (18, 26),
             (false, 2) => (15, 22),
-            (false, 3) => (13, 19),
+            (false, 3) => (16, 22),
+            _ if cropped => (16, 22),
             _ => (12, 15),
         };
         y += advance;
@@ -203,7 +248,8 @@ fn text_preview(lines: &[String], format: &str) -> String {
             .chars()
             .take(if slide { 80 } else { 70 })
             .collect::<String>();
-        svg.push_str(&format!(
+        right = right.max(84.0 + visible.chars().count() as f64 * font_size as f64 * 0.6);
+        body.push_str(&format!(
             "<text x=\"42\" y=\"{y}\" font-size=\"{font_size}\"{}>{}</text>",
             if heading > 0 {
                 " font-weight=\"bold\""
@@ -216,8 +262,17 @@ fn text_preview(lines: &[String], format: &str) -> String {
             break;
         }
     }
-    svg.push_str("</g></svg>");
-    svg
+    let w = if cropped {
+        (right.ceil() as i32).min(w)
+    } else {
+        w
+    };
+    let h = if cropped {
+        (y + 42).max(w * 45 / 100).min(h)
+    } else {
+        h
+    };
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/>{body}</g></svg>")
 }
 /// Markdown heading level (1 to 3) and its text; 0 for an ordinary line.
 fn heading(line: &str) -> (usize, &str) {
@@ -234,7 +289,7 @@ fn winansi(c: char) -> Result<u8> {
     Ok(match c {
         '\u{20}'..='\u{7e}'|'\u{a0}'..='\u{ff}' => c as u8,
         '\u{202f}'=>160,'€'=>128,'‚'=>130,'ƒ'=>131,'„'=>132,'…'=>133,'†'=>134,'‡'=>135,'ˆ'=>136,'‰'=>137,'Š'=>138,'‹'=>139,'Œ'=>140,'Ž'=>142,'‘'=>145,'’'=>146,'“'=>147,'”'=>148,'•'=>149,'–'=>150,'—'=>151,'˜'=>152,'™'=>153,'š'=>154,'›'=>155,'œ'=>156,'ž'=>158,'Ÿ'=>159,
-        _=> return Err(invalid("Ce PDF contient un caractère non pris en charge par Courier. Utilisez DOCX pour ce texte (les accents français sont pris en charge en PDF).")),
+        _=> return Err(invalid(&format!("Ce PDF contient « {c} » (U+{:04X}), non pris en charge par Courier. Remplacez-le ou utilisez DOCX (les accents français sont pris en charge en PDF).", c as u32))),
     })
 }
 fn pdf(lines: &[String]) -> Result<Vec<u8>> {
@@ -353,7 +408,7 @@ fn csv(rows: &[Vec<String>]) -> Vec<u8> {
         out.push_str(
             &row.iter()
                 .map(|s| {
-                    let value = if s.trim_start().starts_with(['=', '+', '-', '@', '\t', '\r']) {
+                    let value = if formula_like(s) {
                         format!("'{s}")
                     } else {
                         s.clone()
@@ -367,6 +422,41 @@ fn csv(rows: &[Vec<String>]) -> Vec<u8> {
     }
     out.into_bytes()
 }
+/// A cell a spreadsheet could run as a formula. Signed numbers ("-12,50",
+/// "+300 €") stay data; any other leading = + - @ tab or CR is neutralised.
+fn formula_like(s: &str) -> bool {
+    if s.starts_with(['\t', '\r']) {
+        return true;
+    }
+    let t = s.trim_start();
+    if t.starts_with(['=', '@']) {
+        return true;
+    }
+    let Some(body) = t.strip_prefix(['+', '-']) else {
+        return false;
+    };
+    let body = body.trim_end();
+    let body = body
+        .strip_suffix(['%', '€', '$'])
+        .unwrap_or(body)
+        .trim_end();
+    !(body.starts_with(|c: char| c.is_ascii_digit())
+        && body
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_whitespace() || c == '.' || c == ','))
+}
+/// A plain decimal stored as a spreadsheet number: no leading zeros (codes keep
+/// them as text), at most 15 significant digits, never a formula.
+fn xlsx_number(s: &str) -> bool {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
+    !int.is_empty()
+        && int.bytes().all(|b| b.is_ascii_digit())
+        && frac.bytes().all(|b| b.is_ascii_digit())
+        && !(digits.contains('.') && frac.is_empty())
+        && (int == "0" || !int.starts_with('0'))
+        && int.len() + frac.len() <= 15
+}
 fn column(mut n: usize) -> String {
     let mut s = String::new();
     loop {
@@ -379,7 +469,7 @@ fn column(mut n: usize) -> String {
     s
 }
 fn xlsx(rows: &[Vec<String>]) -> Result<Vec<u8>> {
-    let data=rows.iter().enumerate().map(|(i,row)|format!("<row r=\"{}\">{}</row>",i+1,row.iter().enumerate().map(|(j,s)|format!("<c r=\"{}{}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",column(j),i+1,xml(s))).collect::<String>())).collect::<String>();
+    let data=rows.iter().enumerate().map(|(i,row)|format!("<row r=\"{}\">{}</row>",i+1,row.iter().enumerate().map(|(j,s)|if xlsx_number(s){format!("<c r=\"{}{}\"><v>{s}</v></c>",column(j),i+1)}else{format!("<c r=\"{}{}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",column(j),i+1,xml(s))}).collect::<String>())).collect::<String>();
     package(vec![
         ("xl/workbook.xml".into(),format!("{XML}<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"{REL}\"><sheets><sheet name=\"Données\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>")),
         ("xl/_rels/workbook.xml.rels".into(),rels(&[("rId1","worksheet".into(),"worksheets/sheet1.xml".into())])),
@@ -525,6 +615,7 @@ enum Shape {
     Diamond,
 }
 struct Node {
+    /// One to three lines, separated by '\n' (Mermaid `<br>`).
     label: String,
     shape: Shape,
 }
@@ -542,21 +633,22 @@ struct Graph {
     edges: Vec<Edge>,
     horizontal: bool,
 }
+const MAX_NODES: usize = 20;
+const MAX_EDGES: usize = 40;
 fn mermaid_error() -> Error {
     invalid("Diagramme Mermaid non pris en charge : commencez par « flowchart TD » ou « flowchart LR », puis des liens comme A[Départ] --> B{Choix} -->|oui| C(Arrivée).")
 }
-// Subset of Mermaid flowcharts: nodes, shapes, links and link labels. Styling,
-// click handlers and subgraph boxes are ignored; nothing in the input is executed.
+// Subset of Mermaid flowcharts: nodes, shapes, `&` groups, links and link
+// labels. Styling, click handlers and subgraph boxes are ignored; nothing in the
+// input is executed or linked.
 fn mermaid(content: &str) -> Result<Graph> {
     let mut lines = content
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("%%") && !l.starts_with("```"));
-    let mut header = lines
-        .next()
-        .ok_or_else(mermaid_error)?
-        .trim_end_matches(';')
-        .split_whitespace();
+    let first = lines.next().ok_or_else(mermaid_error)?;
+    let (header, tail) = first.split_once(';').unwrap_or((first, ""));
+    let mut header = header.split_whitespace();
     if !matches!(header.next(), Some("flowchart" | "graph")) {
         return Err(mermaid_error());
     }
@@ -574,7 +666,11 @@ fn mermaid(content: &str) -> Result<Graph> {
         horizontal,
     };
     let mut ids = Vec::<String>::new();
-    for statement in lines.flat_map(|l| l.split(';')).map(str::trim) {
+    let statements = tail
+        .split(';')
+        .chain(lines.flat_map(|l| l.split(';')))
+        .map(str::trim);
+    for statement in statements {
         let keyword = statement.split_whitespace().next().unwrap_or("");
         if keyword.is_empty()
             || matches!(
@@ -591,41 +687,65 @@ fn mermaid(content: &str) -> Result<Graph> {
         {
             continue;
         }
-        let mut rest = statement;
-        let mut previous: Option<(usize, Link)> = None;
-        loop {
-            let (node, after) = mermaid_node(rest, &mut ids, &mut graph)?;
-            if let Some((from, (label, dashed, arrow))) = previous.take() {
-                graph.edges.push(Edge {
-                    from,
-                    to: node,
-                    label,
-                    dashed,
-                    arrow,
-                });
-            }
-            let after = after.trim_start();
-            if after.is_empty() {
-                break;
-            }
-            let (link, after) = mermaid_link(after).ok_or_else(mermaid_error)?;
-            previous = Some((node, link));
-            rest = after.trim_start();
+        if mermaid_statement(statement, &mut ids, &mut graph).is_none() {
+            let shown: String = statement.chars().take(80).collect();
+            return Err(invalid(&format!("Ligne Mermaid non comprise : « {shown} ». Utilisez des liens comme A[Départ] --> B{{Choix}} -->|oui| C(Arrivée), ou A & B --> C.")));
+        }
+        if graph.nodes.len() > MAX_NODES || graph.edges.len() > MAX_EDGES {
+            break;
         }
     }
     Ok(graph)
+}
+/// `A[x] & B --> C -->|oui| D`: every node of a group links to every node of the next.
+fn mermaid_statement(s: &str, ids: &mut Vec<String>, graph: &mut Graph) -> Option<()> {
+    let mut rest = s;
+    let mut previous: Option<(Vec<usize>, Link)> = None;
+    loop {
+        let mut group = Vec::new();
+        let after = loop {
+            let (node, after) = mermaid_node(rest.trim_start(), ids, graph)?;
+            group.push(node);
+            match after.trim_start().strip_prefix('&') {
+                Some(next) => rest = next,
+                None => break after.trim_start(),
+            }
+        };
+        if let Some((from, (label, dashed, arrow))) = previous.take() {
+            for &f in &from {
+                for &t in &group {
+                    if graph.edges.len() > MAX_EDGES {
+                        return Some(());
+                    }
+                    graph.edges.push(Edge {
+                        from: f,
+                        to: t,
+                        label: label.clone(),
+                        dashed,
+                        arrow,
+                    });
+                }
+            }
+        }
+        if after.is_empty() {
+            return Some(());
+        }
+        let (link, after) = mermaid_link(after)?;
+        previous = Some((group, link));
+        rest = after;
+    }
 }
 fn mermaid_node<'a>(
     s: &'a str,
     ids: &mut Vec<String>,
     graph: &mut Graph,
-) -> Result<(usize, &'a str)> {
+) -> Option<(usize, &'a str)> {
     let end = s
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
         .unwrap_or(s.len());
     let (id, rest) = s.split_at(end);
     if id.is_empty() {
-        return Err(mermaid_error());
+        return None;
     }
     let mut definition = None;
     for (open, close, shape) in [
@@ -638,13 +758,16 @@ fn mermaid_node<'a>(
         ("{", "}", Shape::Diamond),
     ] {
         if let Some(inner) = rest.strip_prefix(open) {
-            let close_at = inner.find(close).ok_or_else(mermaid_error)?;
+            let close_at = inner.find(close)?;
             let label = inner[..close_at].trim();
             let label = label
                 .strip_prefix('"')
                 .and_then(|l| l.strip_suffix('"'))
                 .unwrap_or(label);
-            definition = Some((label.to_string(), shape, &inner[close_at + close.len()..]));
+            let label = ["<br/>", "<br />", "<br>", "<BR>", "<BR/>"]
+                .iter()
+                .fold(label.to_string(), |l, br| l.replace(br, "\n"));
+            definition = Some((label, shape, &inner[close_at + close.len()..]));
             break;
         }
     }
@@ -659,7 +782,7 @@ fn mermaid_node<'a>(
             ids.len() - 1
         }
     };
-    Ok(match definition {
+    Some(match definition {
         Some((label, shape, rest)) => {
             graph.nodes[index] = Node { label, shape };
             (index, rest)
@@ -667,34 +790,49 @@ fn mermaid_node<'a>(
         None => (index, rest),
     })
 }
+/// `-->`, `--->`, `---`, `-.->`, `-.-`, `==>`, `===`, then an optional `|label|`;
+/// or the inline forms `-- label -->` and `== label ==>`.
 fn mermaid_link(s: &str) -> Option<(Link, &str)> {
-    for (op, dashed, arrow) in [
-        ("-.->", true, true),
-        ("-->", false, true),
-        ("==>", false, true),
-        ("---", false, false),
-    ] {
-        if let Some(rest) = s.strip_prefix(op) {
-            let trimmed = rest.trim_start();
-            if let Some(inner) = trimmed.strip_prefix('|') {
-                let end = inner.find('|')?;
-                let label = inner[..end].trim();
-                return Some((
-                    ((!label.is_empty()).then(|| label.into()), dashed, arrow),
-                    &inner[end + 1..],
-                ));
-            }
-            return Some(((None, dashed, arrow), rest));
+    let (dashed, arrow, rest) = if let Some(r) = s.strip_prefix("-.") {
+        let r = r.trim_start_matches('.').strip_prefix('-')?;
+        match r.strip_prefix('>') {
+            Some(r) => (true, true, r),
+            None => (true, false, r),
         }
+    } else if s.starts_with("--") || s.starts_with("==") {
+        let stroke = s.chars().next()?;
+        let r = s.trim_start_matches(stroke);
+        let count = s.len() - r.len();
+        if let Some(r) = r.strip_prefix('>') {
+            (false, true, r)
+        } else if count >= 3 {
+            (false, false, r)
+        } else {
+            let close = if stroke == '-' { "--" } else { "==" };
+            let end = r.find(close)?;
+            let label = r[..end].trim();
+            let after = r[end..].trim_start_matches(stroke);
+            let (arrow, after) = match after.strip_prefix('>') {
+                Some(after) => (true, after),
+                None => (false, after),
+            };
+            return Some((
+                ((!label.is_empty()).then(|| label.into()), false, arrow),
+                after,
+            ));
+        }
+    } else {
+        return None;
+    };
+    if let Some(inner) = rest.trim_start().strip_prefix('|') {
+        let end = inner.find('|')?;
+        let label = inner[..end].trim();
+        return Some((
+            ((!label.is_empty()).then(|| label.into()), dashed, arrow),
+            &inner[end + 1..],
+        ));
     }
-    // Mermaid's inline label form: A -- texte --> B
-    let inner = s.strip_prefix("--")?;
-    let end = inner.find("-->")?;
-    let label = inner[..end].trim();
-    Some((
-        ((!label.is_empty()).then(|| label.into()), false, true),
-        &inner[end + 3..],
-    ))
+    Some(((None, dashed, arrow), rest))
 }
 fn diagram(content: &str) -> Result<String> {
     let graph = if content.trim_start().starts_with('{') {
@@ -730,18 +868,21 @@ fn diagram(content: &str) -> Result<String> {
         mermaid(content)?
     };
     if graph.nodes.is_empty()
-        || graph.nodes.len() > 20
-        || graph.edges.len() > 40
+        || graph.nodes.len() > MAX_NODES
+        || graph.edges.len() > MAX_EDGES
         || graph.nodes.iter().any(|n| {
-            n.label.trim().is_empty() || n.label.chars().count() > 40 || !valid_text(&n.label)
+            n.label.trim().is_empty()
+                || n.label.lines().count() > 3
+                || n.label.lines().any(|l| l.chars().count() > 40)
+                || !valid_text(&n.label)
         })
         || graph
             .edges
             .iter()
             .filter_map(|e| e.label.as_ref())
-            .any(|l| l.chars().count() > 30 || !valid_text(l))
+            .any(|l| l.chars().count() > 30 || !valid_text(l) || l.contains('\n'))
     {
-        return Err(invalid("Diagramme invalide : 1 à 20 nœuds (40 caractères chacun), 40 liens maximum (étiquettes de 30 caractères)."));
+        return Err(invalid("Diagramme invalide : 1 à 20 nœuds (3 lignes de 40 caractères au plus), 40 liens maximum (étiquettes de 30 caractères)."));
     }
     Ok(render(&graph))
 }
@@ -756,9 +897,83 @@ fn mark_back_edges(graph: &Graph, v: usize, state: &mut [u8], back: &mut [bool])
     }
     state[v] = 2;
 }
-// Layered layout: cycles are broken by DFS back edges, ranks follow the longest
-// path, and back edges loop around the side so they never cross a node.
-fn render(graph: &Graph) -> String {
+type Point = (f64, f64);
+#[derive(Clone, Copy)]
+enum Segment {
+    Line(Point, Point),
+    Curve(Point, Point, Point, Point),
+}
+impl Segment {
+    fn at(&self, t: f64) -> Point {
+        match *self {
+            Segment::Line(a, b) => (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t),
+            Segment::Curve(a, b, c, d) => {
+                let u = 1.0 - t;
+                let f = |a: f64, b: f64, c: f64, d: f64| {
+                    u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
+                };
+                (f(a.0, b.0, c.0, d.0), f(a.1, b.1, c.1, d.1))
+            }
+        }
+    }
+    fn reversed(self) -> Self {
+        match self {
+            Segment::Line(a, b) => Segment::Line(b, a),
+            Segment::Curve(a, b, c, d) => Segment::Curve(d, c, b, a),
+        }
+    }
+}
+/// Screen rectangle by centre and size.
+#[derive(Clone, Copy)]
+struct Rect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+impl Rect {
+    fn overlaps(&self, o: &Rect) -> bool {
+        (self.x - o.x).abs() * 2.0 < self.w + o.w && (self.y - o.y).abs() * 2.0 < self.h + o.h
+    }
+}
+struct Routed {
+    segments: Vec<Segment>,
+    label: Option<Rect>,
+}
+struct Layout {
+    width: f64,
+    height: f64,
+    nodes: Vec<Rect>,
+    edges: Vec<Routed>,
+}
+fn node_size(node: &Node) -> (f64, f64) {
+    let longest = node
+        .label
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines = node.label.lines().count().max(1) as f64;
+    let w = (longest as f64 * 10.0 + 40.0).clamp(120.0, 440.0);
+    let h = 56.0 + 20.0 * (lines - 1.0);
+    if node.shape == Shape::Diamond {
+        (w + 60.0, h + 20.0)
+    } else {
+        (w, h)
+    }
+}
+fn label_width(label: &str) -> f64 {
+    label.chars().count() as f64 * 7.5 + 14.0
+}
+// Layered (Sugiyama-style) layout. Back edges found by DFS are routed reversed;
+// an edge spanning several ranks gets a virtual waypoint on every rank between,
+// so it travels through a free slot instead of under a node. Barycentre sweeps
+// order each rank. Curves only bend inside the gaps between ranks, and labels sit
+// in those gaps too, so neither can cover a node.
+fn layout(graph: &Graph) -> Layout {
+    const SLOT: f64 = 16.0;
+    const SPACING: f64 = 48.0;
+    const MARGIN: f64 = 40.0;
     let n = graph.nodes.len();
     let mut state = vec![0; n];
     let mut back = vec![false; graph.edges.len()];
@@ -767,131 +982,302 @@ fn render(graph: &Graph) -> String {
             mark_back_edges(graph, v, &mut state, &mut back);
         }
     }
+    // (upper, lower) node of each edge in rank order.
+    let ends: Vec<(usize, usize)> = graph
+        .edges
+        .iter()
+        .zip(&back)
+        .map(|(e, &b)| if b { (e.to, e.from) } else { (e.from, e.to) })
+        .collect();
     let mut rank = vec![0usize; n];
     for _ in 0..n {
-        for (e, _) in graph.edges.iter().zip(&back).filter(|(_, b)| !**b) {
-            rank[e.to] = rank[e.to].max(rank[e.from] + 1);
+        for (e, &b) in graph.edges.iter().zip(&back) {
+            if !b {
+                rank[e.to] = rank[e.to].max(rank[e.from] + 1);
+            }
         }
     }
-    let size = |node: &Node| {
-        let w = (node.label.chars().count() as f64 * 10.0 + 40.0).clamp(120.0, 440.0);
-        if node.shape == Shape::Diamond {
-            (w + 60.0, 76.0)
-        } else {
-            (w, 56.0)
-        }
-    };
     let ranks = rank.iter().max().unwrap() + 1;
+    // Sizes on the rank axis ("along") and within a rank ("across").
+    let sizes: Vec<(f64, f64)> = graph.nodes.iter().map(node_size).collect();
+    let (across, along): (Vec<f64>, Vec<f64>) = sizes
+        .iter()
+        .map(|&(w, h)| if graph.horizontal { (h, w) } else { (w, h) })
+        .unzip();
+    let self_loop: Vec<bool> = (0..n)
+        .map(|v| graph.edges.iter().any(|e| e.from == v && e.to == v))
+        .collect();
+    // Items 0..n are nodes; the rest are waypoints. chains[e] lists an edge's items.
+    let mut item_rank = rank.clone();
     let mut layers = vec![Vec::new(); ranks];
     for v in 0..n {
         layers[rank[v]].push(v);
     }
-    let widest = graph.nodes.iter().map(|n| size(n).0).fold(0.0, f64::max);
-    let widest_layer = layers.iter().map(Vec::len).max().unwrap() as f64;
-    let (cell, step) = if graph.horizontal {
-        (110.0, widest + 110.0)
-    } else {
-        (widest + 50.0, 140.0)
-    };
-    let (inner_w, inner_h) = if graph.horizontal {
-        (ranks as f64 * step - 110.0, widest_layer * cell)
-    } else {
-        (widest_layer * cell, ranks as f64 * step - 64.0)
-    };
-    let (w, h) = (inner_w + 160.0, inner_h + 120.0);
-    let mut center = vec![(0.0, 0.0); n];
-    for (r, layer) in layers.iter().enumerate() {
-        let offset = (widest_layer - layer.len() as f64) * cell / 2.0;
-        for (j, &v) in layer.iter().enumerate() {
-            let across = 40.0 + offset + (j as f64 + 0.5) * cell;
-            center[v] = if graph.horizontal {
-                (40.0 + widest / 2.0 + r as f64 * step, across + 20.0)
-            } else {
-                (across, 40.0 + 38.0 + r as f64 * step)
-            };
+    let mut chains = Vec::with_capacity(graph.edges.len());
+    for &(upper, lower) in &ends {
+        let mut chain = vec![upper];
+        if upper != lower {
+            let between = rank[upper] + 1..rank[lower];
+            for (r, layer) in layers
+                .iter_mut()
+                .enumerate()
+                .take(between.end)
+                .skip(between.start)
+            {
+                item_rank.push(r);
+                layer.push(item_rank.len() - 1);
+                chain.push(item_rank.len() - 1);
+            }
+            chain.push(lower);
+        }
+        chains.push(chain);
+    }
+    let items = item_rank.len();
+    let (mut above, mut below) = (vec![Vec::new(); items], vec![Vec::new(); items]);
+    for chain in &chains {
+        for pair in chain.windows(2) {
+            below[pair[0]].push(pair[1]);
+            above[pair[1]].push(pair[0]);
         }
     }
-    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" font-family=\"Helvetica,Arial,sans-serif\"><rect width=\"{w:.0}\" height=\"{h:.0}\" fill=\"#fff\"/><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0 L10 5 L0 10Z\" fill=\"#64748b\"/></marker></defs>");
-    let mut labels = String::new();
-    let mut loops = 0.0;
-    for (e, &is_back) in graph.edges.iter().zip(&back) {
-        let ((sx, sy), (tx, ty)) = (center[e.from], center[e.to]);
-        let ((sw, sh), (tw, th)) = (size(&graph.nodes[e.from]), size(&graph.nodes[e.to]));
-        let (path, mid) = if is_back {
-            loops += 1.0;
-            if graph.horizontal {
-                let (a, b) = ((sx, sy + sh / 2.0), (tx, ty + th / 2.0));
-                let y = a.1.max(b.1) + 30.0 + 12.0 * loops;
-                (
-                    format!(
-                        "M{:.0} {:.0} C{:.0} {y:.0} {:.0} {y:.0} {:.0} {:.0}",
-                        a.0, a.1, a.0, b.0, b.0, b.1
-                    ),
-                    ((a.0 + b.0) / 2.0, y - 8.0),
-                )
-            } else {
-                let (a, b) = ((sx + sw / 2.0, sy), (tx + tw / 2.0, ty));
-                let x = a.0.max(b.0) + 34.0 + 12.0 * loops;
-                (
-                    format!(
-                        "M{:.0} {:.0} C{x:.0} {:.0} {x:.0} {:.0} {:.0} {:.0}",
-                        a.0, a.1, a.1, b.1, b.0, b.1
-                    ),
-                    (x - 8.0, (a.1 + b.1) / 2.0),
-                )
-            }
-        } else if graph.horizontal {
-            let (a, b) = ((sx + sw / 2.0, sy), (tx - tw / 2.0, ty));
-            let m = (a.0 + b.0) / 2.0;
-            (
-                format!(
-                    "M{:.0} {:.0} C{m:.0} {:.0} {m:.0} {:.0} {:.0} {:.0}",
-                    a.0, a.1, a.1, b.1, b.0, b.1
-                ),
-                (m, (a.1 + b.1) / 2.0),
-            )
+    for sweep in 0..6 {
+        let down = sweep % 2 == 0;
+        let order: Vec<usize> = if down {
+            (1..ranks).collect()
         } else {
-            let (a, b) = ((sx, sy + sh / 2.0), (tx, ty - th / 2.0));
-            let m = (a.1 + b.1) / 2.0;
-            (
-                format!(
-                    "M{:.0} {:.0} C{:.0} {m:.0} {:.0} {m:.0} {:.0} {:.0}",
-                    a.0, a.1, a.0, b.0, b.0, b.1
-                ),
-                ((a.0 + b.0) / 2.0, m),
-            )
+            (0..ranks.saturating_sub(1)).rev().collect()
         };
+        for r in order {
+            let reference = &layers[if down { r - 1 } else { r + 1 }];
+            let mut position = vec![f64::NAN; items];
+            for (i, &item) in reference.iter().enumerate() {
+                position[item] = i as f64;
+            }
+            let mut keyed: Vec<(f64, usize)> = layers[r]
+                .iter()
+                .enumerate()
+                .map(|(i, &item)| {
+                    let near = if down { &above[item] } else { &below[item] };
+                    let known: Vec<f64> = near
+                        .iter()
+                        .map(|&o| position[o])
+                        .filter(|p| !p.is_nan())
+                        .collect();
+                    let key = if known.is_empty() {
+                        i as f64
+                    } else {
+                        known.iter().sum::<f64>() / known.len() as f64
+                    };
+                    (key, item)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            layers[r] = keyed.into_iter().map(|(_, item)| item).collect();
+        }
+    }
+    let allocation = |item: usize| {
+        if item < n {
+            across[item] + if self_loop[item] { 56.0 } else { 0.0 }
+        } else {
+            SLOT
+        }
+    };
+    let layer_width = |layer: &Vec<usize>| {
+        layer.iter().map(|&i| allocation(i)).sum::<f64>()
+            + SPACING * layer.len().saturating_sub(1) as f64
+    };
+    let total_across = layers.iter().map(layer_width).fold(0.0, f64::max);
+    let mut item_across = vec![0.0; items];
+    for layer in &layers {
+        let mut cursor = MARGIN + (total_across - layer_width(layer)) / 2.0;
+        for &item in layer {
+            item_across[item] = cursor
+                + if item < n {
+                    across[item] / 2.0
+                } else {
+                    SLOT / 2.0
+                };
+            cursor += allocation(item) + SPACING;
+        }
+    }
+    let widest_label = graph
+        .edges
+        .iter()
+        .filter_map(|e| e.label.as_deref())
+        .map(label_width)
+        .fold(0.0, f64::max);
+    let gap = if graph.horizontal {
+        (widest_label + 44.0).max(84.0)
+    } else {
+        84.0
+    };
+    let half: Vec<f64> = layers
+        .iter()
+        .map(|layer| {
+            layer
+                .iter()
+                .filter(|&&i| i < n)
+                .map(|&v| along[v] / 2.0)
+                .fold(28.0, f64::max)
+        })
+        .collect();
+    let mut centre = vec![0.0; ranks];
+    let mut cursor = MARGIN;
+    for r in 0..ranks {
+        centre[r] = cursor + half[r];
+        cursor += 2.0 * half[r] + gap;
+    }
+    let total_along = cursor - gap + MARGIN;
+    let screen = |across: f64, along: f64| {
+        if graph.horizontal {
+            (along, across)
+        } else {
+            (across, along)
+        }
+    };
+    let nodes: Vec<Rect> = (0..n)
+        .map(|v| {
+            let (x, y) = screen(item_across[v], centre[rank[v]]);
+            Rect {
+                x,
+                y,
+                w: sizes[v].0,
+                h: sizes[v].1,
+            }
+        })
+        .collect();
+    let mut placed_labels: Vec<Rect> = Vec::new();
+    let mut parallel: Vec<(usize, usize)> = Vec::new();
+    let mut edges = Vec::with_capacity(graph.edges.len());
+    for (e, edge) in graph.edges.iter().enumerate() {
+        let (upper, lower) = ends[e];
+        let mut segments = Vec::new();
+        if upper == lower {
+            let (a, l) = (
+                item_across[upper] + across[upper] / 2.0,
+                centre[rank[upper]],
+            );
+            segments.push(Segment::Curve(
+                screen(a, l - 10.0),
+                screen(a + 44.0, l - 34.0),
+                screen(a + 44.0, l + 34.0),
+                screen(a, l + 10.0),
+            ));
+        } else {
+            // Parallel edges between the same two nodes fan out slightly.
+            let twins = parallel.iter().filter(|&&p| p == (upper, lower)).count();
+            parallel.push((upper, lower));
+            let offset = [0.0, 14.0, -14.0, 28.0, -28.0][twins.min(4)];
+            let mut points = vec![(
+                item_across[upper] + offset,
+                centre[rank[upper]] + along[upper] / 2.0,
+            )];
+            for &waypoint in &chains[e][1..chains[e].len() - 1] {
+                let r = item_rank[waypoint];
+                points.push((item_across[waypoint], centre[r] - half[r]));
+                points.push((item_across[waypoint], centre[r] + half[r]));
+            }
+            points.push((
+                item_across[lower] + offset,
+                centre[rank[lower]] - along[lower] / 2.0,
+            ));
+            for (i, pair) in points.windows(2).enumerate() {
+                let (p, q) = (pair[0], pair[1]);
+                segments.push(if i % 2 == 1 {
+                    Segment::Line(screen(p.0, p.1), screen(q.0, q.1))
+                } else {
+                    let m = (p.1 + q.1) / 2.0;
+                    Segment::Curve(
+                        screen(p.0, p.1),
+                        screen(p.0, m),
+                        screen(q.0, m),
+                        screen(q.0, q.1),
+                    )
+                });
+            }
+            if back[e] {
+                segments = segments.into_iter().rev().map(Segment::reversed).collect();
+            }
+        }
+        // The label sits on the first bend after the edge's own source, inside a gap.
+        let label = edge.label.as_deref().map(|text| {
+            let w = label_width(text);
+            let first = segments[0];
+            [0.5, 0.3, 0.7, 0.2, 0.8]
+                .iter()
+                .map(|&t| {
+                    let (x, y) = first.at(t);
+                    Rect { x, y, w, h: 22.0 }
+                })
+                .find(|r| !placed_labels.iter().chain(&nodes).any(|o| o.overlaps(r)))
+                .unwrap_or_else(|| {
+                    let (x, y) = first.at(0.5);
+                    Rect { x, y, w, h: 22.0 }
+                })
+        });
+        placed_labels.extend(label);
+        edges.push(Routed { segments, label });
+    }
+    let (width, height) = screen(total_across + 2.0 * MARGIN, total_along);
+    Layout {
+        width,
+        height,
+        nodes,
+        edges,
+    }
+}
+fn render(graph: &Graph) -> String {
+    let layout = layout(graph);
+    let (w, h) = (layout.width, layout.height);
+    let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" width=\"{w:.0}\" height=\"{h:.0}\" font-family=\"Helvetica,Arial,sans-serif\"><rect width=\"{w:.0}\" height=\"{h:.0}\" fill=\"#fff\"/><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0 L10 5 L0 10Z\" fill=\"#64748b\"/></marker></defs>");
+    let mut labels = String::new();
+    for (edge, routed) in graph.edges.iter().zip(&layout.edges) {
+        let start = match routed.segments[0] {
+            Segment::Line(a, _) | Segment::Curve(a, ..) => a,
+        };
+        let mut path = format!("M{:.0} {:.0}", start.0, start.1);
+        for segment in &routed.segments {
+            path.push_str(&match *segment {
+                Segment::Line(_, b) => format!(" L{:.0} {:.0}", b.0, b.1),
+                Segment::Curve(_, b, c, d) => format!(
+                    " C{:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
+                    b.0, b.1, c.0, c.1, d.0, d.1
+                ),
+            });
+        }
         svg.push_str(&format!(
             "<path d=\"{path}\" fill=\"none\" stroke=\"#64748b\" stroke-width=\"2\"{}{}/>",
-            if e.dashed {
+            if edge.dashed {
                 " stroke-dasharray=\"6 5\""
             } else {
                 ""
             },
-            if e.arrow {
+            if edge.arrow {
                 " marker-end=\"url(#arrow)\""
             } else {
                 ""
             }
         ));
-        if let Some(label) = &e.label {
-            let lw = label.chars().count() as f64 * 7.5 + 14.0;
-            labels.push_str(&format!("<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{lw:.0}\" height=\"22\" rx=\"4\" fill=\"#fff\" stroke=\"#cbd5e1\"/><text x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"13\" fill=\"#334155\">{}</text>", mid.0 - lw / 2.0, mid.1 - 11.0, mid.0, mid.1 + 4.5, xml(label)));
+        if let (Some(text), Some(r)) = (&edge.label, routed.label) {
+            labels.push_str(&format!("<rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"22\" rx=\"4\" fill=\"#fff\" stroke=\"#cbd5e1\"/><text x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"13\" fill=\"#334155\">{}</text>", r.x - r.w / 2.0, r.y - 11.0, r.w, r.x, r.y + 4.5, xml(text)));
         }
     }
-    for (node, &(x, y)) in graph.nodes.iter().zip(&center) {
-        let (nw, nh) = size(node);
-        let (l, t) = (x - nw / 2.0, y - nh / 2.0);
+    for (node, r) in graph.nodes.iter().zip(&layout.nodes) {
+        let (x, y, l, t) = (r.x, r.y, r.x - r.w / 2.0, r.y - r.h / 2.0);
         svg.push_str(&match node.shape {
-            Shape::Diamond => format!("<polygon points=\"{x:.0},{t:.0} {:.0},{y:.0} {x:.0},{:.0} {l:.0},{y:.0}\" fill=\"#fef3c7\" stroke=\"#d97706\" stroke-width=\"1.5\"/>", l + nw, t + nh),
-            shape => format!("<rect x=\"{l:.0}\" y=\"{t:.0}\" width=\"{nw:.0}\" height=\"{nh:.0}\" rx=\"{}\" fill=\"#eff6ff\" stroke=\"#2563eb\" stroke-width=\"1.5\"/>", if shape == Shape::Round { 28 } else { 8 }),
+            Shape::Diamond => format!("<polygon points=\"{x:.0},{t:.0} {:.0},{y:.0} {x:.0},{:.0} {l:.0},{y:.0}\" fill=\"#fef3c7\" stroke=\"#d97706\" stroke-width=\"1.5\"/>", l + r.w, t + r.h),
+            shape => format!("<rect x=\"{l:.0}\" y=\"{t:.0}\" width=\"{:.0}\" height=\"{:.0}\" rx=\"{}\" fill=\"#eff6ff\" stroke=\"#2563eb\" stroke-width=\"1.5\"/>", r.w, r.h, if shape == Shape::Round { 28 } else { 8 }),
         });
-        svg.push_str(&format!(
-            "<text x=\"{x:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"16\" fill=\"#172033\">{}</text>",
-            y + 5.5,
-            xml(&node.label)
-        ));
+        let lines: Vec<&str> = node.label.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            svg.push_str(&format!(
+                "<text x=\"{x:.0}\" y=\"{:.0}\" text-anchor=\"middle\" font-size=\"16\" fill=\"#172033\">{}</text>",
+                y + 5.5 + (i as f64 - (lines.len() as f64 - 1.0) / 2.0) * 20.0,
+                xml(line)
+            ));
+        }
     }
+    // Labels are placed in gaps between ranks, never over a node.
     svg.push_str(&labels);
     svg.push_str("</svg>");
     svg
@@ -1029,7 +1415,6 @@ mod tests {
         for bad in [
             "sequenceDiagram\nA->>B: x",
             "flowchart XY\nA-->B",
-            "flowchart TD\nA & B --> C",
             "flowchart TD\nA[ouvert --> B",
         ] {
             let Err(Error::InvalidInput(message)) = diagram(bad) else {
@@ -1037,6 +1422,13 @@ mod tests {
             };
             assert!(message.contains("Mermaid"), "{message}");
         }
+        let Err(Error::InvalidInput(message)) = diagram("graph TD\nA --> B\nC ~~> D") else {
+            panic!()
+        };
+        assert!(
+            message.contains("Ligne Mermaid non comprise : « C ~~> D »"),
+            "{message}"
+        );
         let long = format!("flowchart TD\nA[{}] --> B", "x".repeat(41));
         assert!(diagram(&long).is_err());
     }
@@ -1072,5 +1464,209 @@ mod tests {
             .unwrap()
             .text
             .contains("Bilan d’été"));
+    }
+    fn inside(r: &Rect, p: Point) -> bool {
+        (p.0 - r.x).abs() < r.w / 2.0 - 2.0 && (p.1 - r.y).abs() < r.h / 2.0 - 2.0
+    }
+    /// No link passes under a node it does not join; no label covers a node or another label.
+    fn assert_clear(source: &str) -> Layout {
+        let graph = mermaid(source).unwrap();
+        well_formed(&render(&graph));
+        let layout = layout(&graph);
+        for (edge, routed) in graph.edges.iter().zip(&layout.edges) {
+            for (v, node) in layout.nodes.iter().enumerate() {
+                if v == edge.from || v == edge.to {
+                    continue;
+                }
+                for segment in &routed.segments {
+                    for step in 0..=40 {
+                        let p = segment.at(step as f64 / 40.0);
+                        assert!(
+                            !inside(node, p),
+                            "{source}: lien {}→{} sous le nœud {v} en {p:?}",
+                            edge.from,
+                            edge.to
+                        );
+                    }
+                }
+            }
+        }
+        let labels: Vec<Rect> = layout.edges.iter().filter_map(|e| e.label).collect();
+        for (i, label) in labels.iter().enumerate() {
+            assert!(
+                !layout.nodes.iter().any(|n| n.overlaps(label)),
+                "{source}: étiquette {i} sur un nœud"
+            );
+            assert!(
+                !labels[i + 1..].iter().any(|o| o.overlaps(label)),
+                "{source}: étiquettes superposées"
+            );
+        }
+        layout
+    }
+    #[test]
+    fn mermaid_links_never_cross_or_hide_nodes() {
+        // Review case: B→D and A→D skip ranks; the label used to hide « Traitement ».
+        assert_clear("flowchart TD\n  A[Demande reçue] --> B{Complète ?}\n  B -->|oui| C[Traitement]\n  C --> D[Réponse envoyée]\n  B -->|non, rejet direct| D\n  A --> D");
+        assert_clear("flowchart TD\nA-->B-->C\nA-->|non| C");
+        assert_clear("graph LR\nA[Préparation]-->B-->C-->D\nA-->|raccourci très long ici| D\nD-.->|reprise| A");
+        assert_clear("flowchart TD\nA-->B-->C-->D-->E\nE-->A\nD-->B\nA-->E\nC-->C\nB-->D");
+        assert_clear("flowchart TD\nA & B --> C & D\nA --> D\nD --> A\nB -->|x| D");
+        let svg = diagram("flowchart TD\nA-->B-->C\nA-->|non| C").unwrap();
+        assert!(svg.contains(">B<") && svg.contains(">non<"));
+    }
+    #[test]
+    fn mermaid_accepts_common_syntax_variants() {
+        let graph = mermaid("graph TD; A[Début] --> B[Fin]").unwrap();
+        assert_eq!((graph.nodes.len(), graph.edges.len()), (2, 1));
+        let graph = mermaid("flowchart LR\nA --> B & C\nA ---> D\nD ==> E\nE === F\nF -.- G\nG -..-> H\nH == fort ==> I").unwrap();
+        let links: Vec<_> = graph
+            .edges
+            .iter()
+            .map(|e| (e.from, e.to, e.arrow, e.dashed, e.label.clone()))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                (0, 1, true, false, None),
+                (0, 2, true, false, None),
+                (0, 3, true, false, None),
+                (3, 4, true, false, None),
+                (4, 5, false, false, None),
+                (5, 6, false, true, None),
+                (6, 7, true, true, None),
+                (7, 8, true, false, Some("fort".into())),
+            ]
+        );
+        let svg =
+            diagram("flowchart TD\nB[Mise à jour<br/>du dossier] --> C[Fin<br>du<br />cycle]")
+                .unwrap();
+        well_formed(&svg);
+        assert!(
+            !svg.contains("br")
+                && svg.contains(">Mise à jour<")
+                && svg.contains(">du dossier<")
+                && svg.contains(">cycle<")
+        );
+        assert!(
+            diagram("flowchart TD\nA[a<br>b<br>c<br>d] --> B").is_err(),
+            "4 lignes"
+        );
+        let many = format!(
+            "flowchart TD\n{} --> {}",
+            (0..10)
+                .map(|i| format!("A{i}"))
+                .collect::<Vec<_>>()
+                .join(" & "),
+            (0..10)
+                .map(|i| format!("B{i}"))
+                .collect::<Vec<_>>()
+                .join(" & ")
+        );
+        assert!(
+            diagram(&many).is_err(),
+            "100 liens refusés sans tout générer"
+        );
+    }
+    #[test]
+    fn previews_fit_short_documents_and_render_spreadsheet_cells() {
+        for format in ["csv", "xlsx", "md", "docx", "pdf"] {
+            let result = generate(&Request {
+                name: "Aperçu".into(),
+                format: format.into(),
+                content: if matches!(format, "csv" | "xlsx") {
+                    r#"[["Nom","Coût"],["Élodie","1250"],["Cœur & été","-12.50"]]"#.into()
+                } else {
+                    "# Bilan d’été\nÉlodie : 1250 €".into()
+                },
+            })
+            .unwrap();
+            well_formed(&result.preview);
+            let size = result
+                .preview
+                .split("viewBox=\"0 0 ")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let height: usize = size.split_whitespace().nth(1).unwrap().parse().unwrap();
+            if format == "pdf" {
+                assert_eq!(height, 842);
+            } else {
+                assert!(height < 400, "{format}: {height}");
+            }
+            if matches!(format, "csv" | "xlsx") {
+                assert_eq!(result.preview.matches("<rect").count(), 7);
+                assert!(
+                    result.preview.contains("font-weight=\"bold\"")
+                        && result.preview.contains("Cœur &amp; été")
+                );
+            }
+        }
+    }
+    #[test]
+    fn layout_text_csv_and_xlsx_keep_data_intact() {
+        assert_eq!(
+            wrap("Poste      Montant\n\tLoyer    1 250 €", 70),
+            vec!["Poste      Montant", "    Loyer    1 250 €"]
+        );
+        assert_eq!(wrap("aaaa bbbb cccc", 9), vec!["aaaa bbbb", "cccc"]);
+        assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        let Err(Error::InvalidInput(message)) = generate(&Request {
+            name: "Étapes".into(),
+            format: "pdf".into(),
+            content: "Étape 1 → étape 2".into(),
+        }) else {
+            panic!()
+        };
+        assert!(message.contains("« → » (U+2192)"), "{message}");
+        let text = String::from_utf8(csv(&[vec![
+            "-12,50".into(),
+            "+300 €".into(),
+            "-2+3".into(),
+            "=1+1".into(),
+            "@SUM(A1)".into(),
+            "-".into(),
+            "Été".into(),
+        ]]))
+        .unwrap();
+        assert_eq!(
+            text,
+            "\u{feff}\"-12,50\",\"+300 €\",\"'-2+3\",\"'=1+1\",\"'@SUM(A1)\",\"'-\",\"Été\"\r\n"
+        );
+        for (cell, number) in [
+            ("1250", true),
+            ("-12.5", true),
+            ("0.75", true),
+            ("007", false),
+            ("1.", false),
+            ("1 250", false),
+            ("=1", false),
+            ("1e5", false),
+            ("1234567890123456", false),
+        ] {
+            assert_eq!(xlsx_number(cell), number, "{cell}");
+        }
+        let book = xlsx(&[vec!["Coût".into(), "1250".into(), "007".into()]]).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&book)).unwrap();
+        let mut sheet = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("xl/worksheets/sheet1.xml").unwrap(),
+            &mut sheet,
+        )
+        .unwrap();
+        assert!(
+            sheet.contains("<c r=\"B1\"><v>1250</v></c>") && sheet.contains(">007</t>"),
+            "{sheet}"
+        );
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        documents::migrate(&conn).unwrap();
+        let read = documents::prepare(&conn, "Budget.xlsx", &book).unwrap();
+        assert!(
+            read.text.contains("1250") && read.text.contains("Coût"),
+            "{}",
+            read.text
+        );
     }
 }

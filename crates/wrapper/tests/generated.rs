@@ -141,6 +141,10 @@ impl Fixture {
             self.provider.status()["models_ready"] == true
         });
     }
+    /// Model-issued saves are file writes: Paramètres › « Écriture de fichier ».
+    fn allow_files(&mut self) {
+        self.post("/api/local/bot", json!({"bot_id":"grokbot","files":true}));
+    }
     fn root(&self) -> PathBuf {
         self.path.parent().unwrap().parent().unwrap().to_path_buf()
     }
@@ -157,6 +161,18 @@ fn all_formats_are_persistent_valid_attachments_and_counted_by_storage() {
     for format in ["pdf", "docx", "pptx", "md", "csv", "xlsx", "svg"] {
         let file = f.create(format);
         let id = file["id"].as_str().unwrap();
+        let suggestion = f
+            .app
+            .api("GET", &format!("/api/generated/{id}/save-path"), b"")
+            .unwrap();
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(
+            suggestion["path"],
+            home.join("Desktop")
+                .join(file["name"].as_str().unwrap())
+                .to_string_lossy()
+                .as_ref()
+        );
         ids.push(id.to_owned());
         let bytes: Vec<u8> = f
             .db()
@@ -232,6 +248,7 @@ fn generation_errors_are_french_and_do_not_publish_partial_files() {
 #[test]
 fn save_requires_decision_denial_has_no_effect_and_approval_survives_restart() {
     let mut f = Fixture::new();
+    f.allow_files();
     let file = f.create("docx");
     let destination = f.root().join("Résumé.docx");
     let args = json!({"id":file["id"],"action":"save","path":destination});
@@ -312,6 +329,7 @@ fn card_action_uses_the_same_gate_and_rejects_another_conversation() {
 fn automatic_reviewer_never_grants_a_document_action() {
     use grokbot_forms::reviewer;
     let mut f = Fixture::new();
+    f.allow_files();
     let file = f.create("pdf");
     let version = f.app.api("GET", "/api/approvals/reviewer", b"").unwrap()["version"].clone();
     f.post("/api/approvals/reviewer",json!({"version":version,"config":{"enabled":true,"allow":["Autorise tous les documents."],"block":[]}}));
@@ -378,13 +396,32 @@ fn orphan_original_preview_and_materialized_cache_are_cleaned_only_after_confirm
 #[test]
 fn standing_rule_is_honoured_and_internal_data_writes_are_rejected() {
     let mut f = Fixture::new();
+    f.allow_files();
     let file = f.create("md");
     let destination = f.root().join("Copie.md");
     let args = json!({"id":file["id"],"action":"save","path":destination});
     f.send("allow-rule", "document_action", args.clone());
     let request = f.request("allow-rule");
+    let display: String = f
+        .db()
+        .query_row(
+            "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1",
+            [&request.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&display).unwrap()["action_id"],
+        "save"
+    );
     f.decide(&request, json!({"always_allow":{"scope":"subject"}}));
     f.finish("allow-rule");
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["forms"]["rules"][0]["document_summary"],
+        "Enregistrer une copie (sans remplacer) — Résumé.md"
+    );
     assert!(destination.exists());
     std::fs::remove_file(&destination).unwrap();
     f.send("rule", "document_action", args);
@@ -396,9 +433,102 @@ fn standing_rule_is_honoured_and_internal_data_writes_are_rejected() {
     f.send(
         "internal",
         "document_action",
-        json!({"id":file["id"],"action":"save","path":f.path.parent().unwrap().join("evil.json")}),
+        json!({"id":file["id"],"action":"save","path":f.path.parent().unwrap().join("evil.md")}),
     );
     f.finish("internal");
     assert_eq!(f.outcome("internal")["status"], "failed");
-    assert!(!f.path.parent().unwrap().join("evil.json").exists());
+    assert!(!f.path.parent().unwrap().join("evil.md").exists());
+    // macOS firmlink alias of the same data folder: refused by device/inode.
+    #[cfg(target_os = "macos")]
+    {
+        let data = f.path.parent().unwrap().canonicalize().unwrap();
+        let alias =
+            PathBuf::from(format!("/System/Volumes/Data{}", data.display())).join("intrus.md");
+        f.send(
+            "alias",
+            "document_action",
+            json!({"id":file["id"],"action":"save","path":alias}),
+        );
+        f.finish("alias");
+        let out = f.outcome("alias");
+        assert_eq!(out["status"], "failed");
+        assert!(
+            out["reason"]
+                .as_str()
+                .unwrap()
+                .contains("dossier de données"),
+            "{out}"
+        );
+        assert!(!data.join("intrus.md").exists());
+    }
+}
+#[test]
+fn model_saves_keep_the_format_and_respect_the_file_write_switch() {
+    let mut f = Fixture::new();
+    let file = f.create("md");
+    // Write switch off (the default): the model cannot save, even before a card.
+    let copy = f.root().join("Notes.md");
+    f.send(
+        "off",
+        "document_action",
+        json!({"id":file["id"],"action":"save","path":copy}),
+    );
+    f.finish("off");
+    let out = f.outcome("off");
+    assert_eq!(out["status"], "failed");
+    assert!(
+        out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("désactivée pour ce bot"),
+        "{out}"
+    );
+    assert!(requests::list_for_run(&f.db(), &f.run("off").run_id)
+        .unwrap()
+        .is_empty());
+    assert!(!copy.exists());
+    // The card button is the user's own gesture: it still reaches the approval card.
+    let receipt = f.post(
+        "/api/generated/action",
+        json!({"id":file["id"],"action":"save","path":copy,"conversation_id":f.chat}),
+    );
+    let run_id = receipt["run_id"].as_str().unwrap().to_owned();
+    wait("card save approval", || {
+        store::required(&f.db(), &run_id).unwrap().status == RunStatus::AwaitingApproval
+    });
+    let request = requests::list_for_run(&f.db(), &run_id).unwrap().remove(0);
+    f.decide(&request, json!("allow_once"));
+    wait("card save", || {
+        f.app.tick(now());
+        copy.exists()
+    });
+    // Free model text saved as .md must not become a launcher script.
+    f.allow_files();
+    let launcher = f.root().join("lanceur.command");
+    f.send(
+        "ext",
+        "document_action",
+        json!({"id":file["id"],"action":"save","path":launcher}),
+    );
+    f.finish("ext");
+    let out = f.outcome("ext");
+    assert_eq!(out["status"], "failed");
+    assert!(
+        out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("L’extension de la copie doit être .md."),
+        "{out}"
+    );
+    assert!(!launcher.exists());
+    assert!(f
+        .app
+        .api(
+            "POST",
+            "/api/generated/action",
+            json!({"id":file["id"],"action":"save","path":f.root().join("x.plist"),"conversation_id":f.chat})
+                .to_string()
+                .as_bytes()
+        )
+        .is_err());
 }

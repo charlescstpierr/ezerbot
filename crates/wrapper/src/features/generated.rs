@@ -72,7 +72,7 @@ pub fn tools() -> Vec<ToolSpec> {
         description:"Créer un fichier local dans la conversation : pdf, docx, pptx, md, csv, xlsx ou diagramme svg. name est un simple nom de fichier. content : texte brut (en DOCX, les lignes # titre et - puce sont mises en forme ; en PDF, les marqueurs Markdown restent du texte), diapositives PPTX séparées par une ligne --- (16 lignes par diapositive ; titre coupé à 50 caractères, texte à 80), tableau CSV/XLSX sous forme JSON de lignes de chaînes [[\"Nom\",\"Coût\"],[\"Été\",\"12\"]], ou diagramme SVG en Mermaid flowchart TD/LR (A[Texte] --> B{Choix} -->|oui| C(Fin), liens -->, ---, -.->, ==> ; style, click et sous-graphes ignorés ; 20 nœuds). Autres types Mermaid non pris en charge. Maximum 100 000 octets, 50 diapositives. PDF Courier prend en charge le français mais pas les emoji. Aucun accès extérieur ; la carte permet ensuite d’ouvrir ou enregistrer avec approbation.".into(),
         schema:json!({"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"format":{"type":"string","enum":["pdf","docx","pptx","md","csv","xlsx","svg"]},"content":{"type":"string"}},"required":["name","format","content"]}),requires_approval:false,
     },ToolSpec {
-        name:"document_action".into(), description:"Ouvrir un document généré, l’afficher dans le Finder ou en enregistrer une copie sur le Mac, après approbation. id vient de create_document. action : open, reveal ou save ; path=null sauf save (chemin absolu d’un NOUVEAU fichier, aucun remplacement).".into(),
+        name:"document_action".into(), description:"Ouvrir un document généré, l’afficher dans le Finder ou en enregistrer une copie sur le Mac, après approbation. id vient de create_document. action : open, reveal ou save ; path=null sauf save (chemin absolu d’un NOUVEAU fichier, même extension que le format, aucun remplacement ; nécessite « Écriture de fichier » activée pour ce bot).".into(),
         schema:json!({"type":"object","additionalProperties":false,"properties":{"id":{"type":"string"},"action":{"type":"string","enum":["open","reveal","save"]},"path":{"type":["string","null"]}},"required":["id","action","path"]}),requires_approval:true,
     }]
 }
@@ -170,9 +170,30 @@ fn destination(value: &str) -> Result<PathBuf, ApiError> {
     }
     Ok(path)
 }
+/// True when `path` or one of its ancestors is the same directory as `data`,
+/// by device and inode: an alias such as /System/Volumes/Data/Users/… cannot
+/// slip past a textual prefix check.
+fn inside_directory(path: &Path, data: &Path) -> Result<bool, ApiError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let data = fs::metadata(data).map_err(io)?;
+        for ancestor in path.ancestors() {
+            match fs::metadata(ancestor) {
+                Ok(m) if (m.dev(), m.ino()) == (data.dev(), data.ino()) => return Ok(true),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io(e)),
+            }
+        }
+        Ok(false)
+    }
+    #[cfg(not(unix))]
+    Ok(path.starts_with(data))
+}
 pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     let a = args(call)?;
-    get(ctx.connection, &a.id)?;
+    let file = get(ctx.connection, &a.id)?;
     match a.action.as_str() {
         "save" => {
             let p = destination(
@@ -180,17 +201,37 @@ pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
                     .as_deref()
                     .ok_or_else(|| ApiError::new(400, "Le chemin de la copie est requis."))?,
             )?;
+            // The copy's type must stay the generated format: free model text
+            // saved as .md cannot become a .command, .plist or .sh.
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)
+                .as_deref()
+                != Some(file.format.as_str())
+            {
+                return Err(ApiError::new(
+                    400,
+                    format!("L’extension de la copie doit être .{}.", file.format),
+                ));
+            }
+            // A save the model asks for is a file write: it honours the same
+            // per-bot switch as write_file. A card button is the user's own
+            // gesture (host run, or the card route with no run yet).
+            let host = ctx.run_id.is_none_or(|id| id.starts_with("mcp-host-"));
+            if !host
+                && !super::local::enabled(ctx.connection, ctx.bot_id.unwrap_or(""), "write_file")
+            {
+                return Err(ApiError::new(
+                    403,
+                    "L’écriture de fichiers est désactivée pour ce bot dans Paramètres › Terminal et fichiers sur ce Mac. Utilisez le bouton « Enregistrer sous… » de la carte.",
+                ));
+            }
             if p.symlink_metadata().is_ok() {
                 return Err(ApiError::new(409,"Un fichier existe déjà à cet emplacement. Choisissez un autre nom ; aucun remplacement n’est effectué."));
             }
             // A model cannot use save to modify app metadata, credentials or blobs.
-            let data = ctx
-                .db_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .canonicalize()
-                .map_err(io)?;
-            if p.starts_with(data) {
+            let data = ctx.db_path.parent().unwrap_or(Path::new("."));
+            if inside_directory(&p, data)? {
                 return Err(ApiError::new(
                     403,
                     "Enregistrez la copie en dehors du dossier de données d’Ezerbot.",
@@ -212,7 +253,7 @@ pub fn approval_display(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, Api
     let a = args(call)?;
     let file = get(ctx.connection, &a.id)?;
     Ok(
-        json!({"document":file.name,"taille":file.byte_length,"action":match a.action.as_str(){"save"=>"Enregistrer une copie (sans remplacer)","open"=>"Ouvrir avec l’application par défaut",_=>"Afficher dans le Finder"},"destination":a.path,"id":a.id}),
+        json!({"document":file.name,"taille":file.byte_length,"action_id":a.action,"action":match a.action.as_str(){"save"=>"Enregistrer une copie (sans remplacer)","open"=>"Ouvrir avec l’application par défaut",_=>"Afficher dans le Finder"},"destination":a.path,"id":a.id}),
     )
 }
 fn io(e: std::io::Error) -> ApiError {
@@ -389,6 +430,28 @@ pub fn routes(
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
     if method == "GET" {
+        if let Some(id) = path
+            .strip_prefix("/api/generated/")
+            .and_then(|s| s.strip_suffix("/save-path"))
+        {
+            return Some((|| {
+                let file = get(&app.connection, id)?;
+                // A suggestion only: no directory is created and no write occurs
+                // until the separate action is approved.
+                let home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            400,
+                            "Le dossier personnel est introuvable. Saisissez un chemin complet.",
+                        )
+                    })?;
+                Ok(ApiResponse::Json(
+                    json!({"path": home.join("Desktop").join(file.name)}),
+                ))
+            })());
+        }
         if let Some(id) = path
             .strip_prefix("/api/generated/")
             .and_then(|s| s.strip_suffix("/preview"))

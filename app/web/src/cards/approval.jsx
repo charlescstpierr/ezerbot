@@ -4,6 +4,7 @@ import { SkillProposal } from "./skill-proposal.jsx";
 import { LocalApprovalPreview, LocalApprovalWarning, SensitiveWarning, localApprovalBlocked } from "../local-approval.js";
 import { localLimits, localToolLabel, localToolNames } from "../local-call.js";
 import { screenTools, screenWarnings, ScreenArguments } from "../screen.jsx";
+import { documentApprovalEffect } from "../generated-presentation.js";
 
 export const kind = "approval";
 
@@ -59,7 +60,7 @@ export function Card({ message, busy, onAction }) {
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
         {screen && <><p className="text-sm">{screenWarnings[action.tool]}</p><p className="text-xs text-muted-foreground">Ezerbot se masque brièvement pour viser le bureau derrière sa fenêtre. Autoriser reprend explicitement le bot en pause pour ce geste.</p></>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
-        {action.tool === "document_action" && preview && <div className="gb-document-approval"><strong>{preview.document}</strong><p>{preview.action}</p>{preview.destination && <p className="gb-file-path">{preview.destination}</p>}<p className="text-xs text-muted-foreground">{preview.destination ? "Un nouveau fichier sera écrit sur le Mac. Aucun remplacement." : "Le document sera ouvert par macOS, en dehors d’Ezerbot."}</p></div>}
+        {action.tool === "document_action" && preview && <div className="gb-document-approval"><strong className="text-sm font-semibold">{preview.document}</strong><p className="text-sm">{preview.action}</p>{preview.destination && <p className="gb-file-path">{preview.destination}</p>}<p className="text-xs text-muted-foreground">{documentApprovalEffect(preview.action_id)}</p></div>}
         {!previewAvailable
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
           : background ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à exécuter les routines dues quand l’app est fermée ? Un agent macOS sera installé pour votre session uniquement. Les résultats et les alertes suivront vos réglages habituels." : "Retirer l’agent macOS de cette session ? Les routines ne s’exécuteront plus quand Ezerbot est fermé. Vos routines, résultats et historiques seront conservés."}</p> : lifecycle ? <>

@@ -835,7 +835,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 allow: false,
             },
         )?;
-        let rules = redact_value(&vault(&ctx)?, &json!(approvals::list_rules(&tx)?))?;
+        let rules = redact_value(&vault(&ctx)?, &rules_value(&tx)?)?;
         tx.commit()?;
         return Ok(json!({"rules":rules}));
     }
@@ -1105,6 +1105,32 @@ fn request_value(
     }
     Ok(value)
 }
+// Presentation metadata only: the digest remains the sole binding of a subject
+// rule. Do not change the persisted approval contract to add a human label.
+fn rules_value(conn: &Connection) -> Result<Value, ApiError> {
+    let mut values = Vec::new();
+    for rule in approvals::list_rules(conn)? {
+        let mut value = json!(rule);
+        if rule.tool == "document_action" && rule.scope == RuleScope::Subject {
+            let display: Option<String> = conn.query_row(
+                "SELECT c.display_json FROM wrapper_forms_calls c JOIN forms_requests r ON r.id=c.request_id
+                 WHERE json_extract(r.kind_json,'$.tool')=?1 AND json_extract(r.kind_json,'$.args_digest')=?2
+                   AND json_extract(r.route_json,'$.requesting_bot_id')=?3 AND json_extract(r.route_json,'$.target_bot_id')=?4
+                 ORDER BY r.rowid DESC LIMIT 1",
+                params![rule.tool, rule.args_digest, rule.route.requesting_bot_id, rule.route.target_bot_id], |r| r.get(0),
+            ).optional()?;
+            if let Some(display) = display.and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+                if let (Some(action), Some(name)) =
+                    (display["action"].as_str(), display["document"].as_str())
+                {
+                    value["document_summary"] = json!(format!("{action} — {name}"));
+                }
+            }
+        }
+        values.push(value);
+    }
+    Ok(json!(values))
+}
 pub fn state(ctx: &Context<'_>) -> Value {
     fn load(ctx: &Context<'_>) -> Result<Value, ApiError> {
         let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' OR rowid IN (SELECT rowid FROM forms_requests ORDER BY rowid DESC LIMIT 100) ORDER BY rowid")?;
@@ -1120,7 +1146,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let vault = vault(ctx)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":vault.list()?,"storage":vault.storage_status(),"rules":approvals::list_rules(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":vault.list()?,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))

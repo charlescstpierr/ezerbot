@@ -40,7 +40,8 @@ export function LocalApprovalPreview({ tool, arguments: args }) {
 }
 
 export function LocalApprovalWarning({ tool, scope }) {
-  if (scope !== "global" || !["run_shell", "write_file"].includes(tool)) return null;
+  if (scope !== "global" || !["run_shell", "write_file", "document_action"].includes(tool)) return null;
+  if (tool === "document_action") return h("p", { role: "alert", className: "my-2 text-xs gb-local-global-warning" }, "Attention : ce bot pourra ouvrir des documents et enregistrer de nouveaux fichiers n’importe où sur votre Mac sans vous demander.");
   const action = tool === "run_shell" ? "exécuter toute commande, sans sandbox," : "créer ou remplacer tout fichier";
   return h("p", { role: "alert", className: "my-2 text-xs gb-local-global-warning" }, `Attention : ce bot pourra ${action} sur votre Mac sans vous demander.`);
 }

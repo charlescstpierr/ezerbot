@@ -300,8 +300,7 @@ impl Events {
                 } else {
                     &event
                 };
-                diagnostics.rejected(source);
-                let failure = crate::upstream::failure_from_body(0, source);
+                let failure = diagnostics.stream_failure(source);
                 emit(failed(failure.message))?;
                 return Ok(true);
             }

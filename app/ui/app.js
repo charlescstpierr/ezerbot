@@ -52,6 +52,8 @@
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
+  let followAfterLayout = null;
+  let scrollGeneration = 0;
   // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
   // botSection may return a cleanup function, called before remount and on dialog close.
   // onState(state, context), onConnection(connected, context), onCardAction(message, action, detail, context); only true claims an action.
@@ -377,7 +379,7 @@
   }
   async function loadState() {
     const previous = currentConversation();
-    const groupWasActive = previous?.kind === "group" && Boolean(streamingMessage(previous));
+    const wasLive = Boolean(streamingMessage(previous));
     const previousTail = previous?.messages.at(-1)?.id;
     state = await api("/api/state");
     for (const conversation of state.conversations) observeSavedConversation(conversation);
@@ -393,9 +395,10 @@
     if (selectedId && !state.conversations.some((item) => item.id === selectedId)) selectedId = null;
     writePreference("grokbot.selected", selectedId || "");
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
-    render();
     const current = currentConversation();
-    if (pinned && (streamingMessage() || (current?.kind === "group" && current.id === previous?.id && (groupWasActive || current.messages.at(-1)?.id !== previousTail)))) scrollToLatest();
+    // A terminal error (or a one-chunk success) may never have a streaming DOM
+    // frame. Follow the transition after React commits, not just live deltas.
+    render(pinned && (Boolean(streamingMessage()) || (current?.id === previous?.id && (wasLive || current?.messages.at(-1)?.id !== previousTail))));
     schedulePoll();
   }
 
@@ -521,7 +524,6 @@
     closeMenu();
     closeSidebar();
     render(true);
-    scrollToLatest();
     if (focus) ui.input.focus();
   }
 
@@ -794,14 +796,18 @@
     },
   };
 
-  function render(followGroup = false) {
+  function render(followLatest = false) {
     const conversation = currentConversation();
-    // React commits asynchronously: a frame callback alone can run before the
-    // admitted turns/cards exist, making the next poll wrongly think we scrolled up.
-    const follow = (conversation?.kind === "group" || conversation?.messages.some((message) => message.kind === "memory_auto")) && (followGroup || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
+    // Keep an explicit request until React's layout effect runs, even if a
+    // subsequent busy/status render replaces this render before it commits.
+    if (followLatest && conversation) followAfterLayout = conversation.id;
+    const generation = scrollGeneration;
+    const follow = (conversation?.kind === "group" || conversation?.messages.some((message) => message.kind === "memory_auto")) && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     const onLayout = () => {
-      if (currentConversation()?.id !== conversation?.id) return;
-      if (!scrollToPendingApproval() && follow) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+      if (currentConversation()?.id !== conversation?.id || generation !== scrollGeneration) return;
+      const requested = Boolean(conversation && followAfterLayout === conversation.id);
+      if (!scrollToPendingApproval() && (requested || follow)) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+      if (requested) followAfterLayout = null;
     };
     const hasMessages = Boolean(conversation?.messages.length);
     const name = state.account.name || "Espace personnel";
@@ -975,8 +981,7 @@
     try {
       const response = await api(path, { conversation_id: conversation.id, message_id: messageId });
       upsertConversation(response.conversation);
-      render();
-      if (conversation.kind === "group" && currentConversation()?.id === conversation.id && pinned) scrollToLatest();
+      render(currentConversation()?.id === conversation.id && pinned && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);
       schedulePoll();
     } catch (error) { notify(error.message); }
   }
@@ -991,7 +996,30 @@
   }
 
   function scrollToLatest() {
-    requestAnimationFrame(() => { if (!scrollToPendingApproval()) ui.scroll.scrollTop = ui.scroll.scrollHeight; });
+    render(true); // onLayout runs after the thread/cards actually exist.
+  }
+
+  function cancelScrollFollow() {
+    followAfterLayout = null;
+    scrollGeneration += 1;
+    approvalFollow.cancel();
+  }
+
+  function observeViewportResize() {
+    const scroll = ui.scroll;
+    const pinned = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
+    const viewport = { width: scroll.clientWidth, height: scroll.clientHeight, pinned: pinned() };
+    scroll.addEventListener("scroll", () => {
+      // A resize may dispatch scroll before ResizeObserver. Keep the position
+      // from the old viewport until the observer has consumed that resize.
+      if (scroll.clientWidth === viewport.width && scroll.clientHeight === viewport.height) viewport.pinned = pinned();
+    }, { passive: true });
+    new ResizeObserver(() => {
+      const changed = scroll.clientWidth !== viewport.width || scroll.clientHeight !== viewport.height;
+      const follow = viewport.pinned;
+      viewport.width = scroll.clientWidth; viewport.height = scroll.clientHeight; viewport.pinned = pinned();
+      if (changed && follow) scrollToLatest();
+    }).observe(scroll);
   }
 
   function newConversation() {
@@ -1024,7 +1052,7 @@
     const body = window.GrokbotChat.teachPrompt;
     try {
       const response = await api("/api/send", { conversation_id: conversation.id, message_id: messageId, body });
-      upsertConversation(response.conversation); render(true); scrollToLatest(); schedulePoll();
+      upsertConversation(response.conversation); render(true); schedulePoll();
     } catch (error) {
       try { await refresh(); } catch { showConnectionError(error); }
       notify("Demande d’apprentissage non confirmée. Vérifiez le fil avant de réessayer.");
@@ -1036,6 +1064,7 @@
     const live = streamingMessage();
     if (live && ui.send.dataset.mode === "stop") { await generation("/api/stop", currentConversation()?.kind === "group" ? "groupe" : live.id.replace(/^reply-/, "")); return; }
     if (ui.send.disabled) return;
+    const submittedScrollGeneration = scrollGeneration;
     const submittedDraft = ui.input.value;
     const submittedDocument = ui.input.document;
     const body = submittedDraft.trim();
@@ -1075,15 +1104,13 @@
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
-      render(true);
-      scrollToLatest();
+      render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
       simulateLoss = false;
       $("simulate-loss").checked = false;
       upsertConversation(response.conversation);
       delivered = response.conversation.messages.some((message) => message.id === messageId && ["accepted", "echoed"].includes(message.state));
-      render(true);
-      scrollToLatest();
+      render(scrollGeneration === submittedScrollGeneration);
       schedulePoll();
     } catch (error) {
       if (messageId) {
@@ -1235,12 +1262,13 @@
   });
   // Cancel only for explicit reading/navigation gestures, not for scroll events
   // caused by streaming, layout changes or our own scrollToLatest callbacks.
-  for (const event of ["wheel", "touchmove"]) ui.scroll.addEventListener(event, () => approvalFollow.cancel(), { passive: true });
-  ui.scroll.addEventListener("pointerdown", (event) => { if (event.target === ui.scroll) approvalFollow.cancel(); });
+  for (const event of ["wheel", "touchmove"]) ui.scroll.addEventListener(event, cancelScrollFollow, { passive: true });
+  ui.scroll.addEventListener("pointerdown", (event) => { if (event.target === ui.scroll) cancelScrollFollow(); });
   ui.scroll.addEventListener("keydown", (event) => {
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
-        && !event.target.closest('input, textarea, select, button, summary, [contenteditable="true"]')) approvalFollow.cancel();
+        && !event.target.closest('input, textarea, select, button, summary, [contenteditable="true"]')) cancelScrollFollow();
   });
+  observeViewportResize();
   $("composer-form").addEventListener("submit", sendMessage);
   $("learn-skill-button").addEventListener("click", () => void learnConversation());
   document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => {

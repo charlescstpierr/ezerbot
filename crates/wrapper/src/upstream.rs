@@ -1,4 +1,5 @@
 //! Minimal diagnostics for upstream refusals. Never retain a body, free-form message or headers.
+use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ pub(crate) struct Diagnostics {
     path: PathBuf,
     status: u16,
     request_id: String,
+    failure_kind: Cell<&'static str>,
 }
 
 impl Diagnostics {
@@ -20,7 +22,19 @@ impl Diagnostics {
             path: directory.join("logs/engine.log"),
             status: response.status(),
             request_id: response.header("x-request-id").unwrap_or_default().into(),
+            failure_kind: Cell::new("other"),
         }
+    }
+
+    pub(crate) fn stream_failure(&self, body: &Value) -> Failure {
+        self.rejected(body);
+        let failure = failure_from_body(0, body);
+        self.failure_kind.set(failure.kind);
+        failure
+    }
+
+    pub(crate) fn failure_kind(&self) -> &'static str {
+        self.failure_kind.get()
     }
 
     /// One append per rejected HTTP attempt or terminal SSE error, including retries.
@@ -89,7 +103,7 @@ impl Diagnostics {
 }
 
 /// Only explicit upstream reset fields are used, never the code or a retry/rate-limit header.
-/// Accept Unix seconds or an ISO date; normalize with SQLite's existing date parser.
+/// Accept Unix seconds or an ISO date; parse UTC, then display the local time without seconds.
 fn reset_time(body: &Value) -> Option<String> {
     let error = body.get("error").filter(|v| v.is_object()).unwrap_or(body);
     let value = error.get("reset_at").or_else(|| error.get("resets_at"))?;
@@ -101,7 +115,7 @@ fn reset_time(body: &Value) -> Option<String> {
             }
             connection
                 .query_row(
-                    "SELECT strftime('%d/%m/%Y à %H:%M:%S UTC', ?1, 'unixepoch')",
+                    "SELECT strftime('%d/%m à %H h %M', ?1, 'unixepoch', 'localtime')",
                     [seconds],
                     |r| r.get(0),
                 )
@@ -121,7 +135,7 @@ fn reset_time(body: &Value) -> Option<String> {
             }
             connection
                 .query_row(
-                    "SELECT strftime('%d/%m/%Y à %H:%M:%S UTC', ?1)",
+                    "SELECT strftime('%d/%m à %H h %M', ?1, 'localtime')",
                     [date],
                     |r| r.get(0),
                 )
@@ -136,7 +150,7 @@ pub(crate) fn failure_from_body(status: u16, body: &Value) -> Failure {
     if result.kind == "limit" {
         if let Some(reset) = reset_time(body) {
             result.message.push_str(&format!(
-                " Réinitialisation annoncée par OpenAI : le {reset}."
+                " Réinitialisation prévue par OpenAI : le {reset}."
             ));
         }
     }

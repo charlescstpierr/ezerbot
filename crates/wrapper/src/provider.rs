@@ -322,7 +322,7 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
 pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
         "subscription_sharing_usage_limit_exceeded" => Failure {
-            message: "Limite d’utilisation atteinte pour Ezerbot via votre abonnement ChatGPT. Votre quota Codex peut rester disponible. Pour ajuster la limite accordée à Ezerbot : ChatGPT → Réglages → Utilisation.".into(),
+            message: "Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT. Votre quota Codex peut rester disponible. Pour ajuster cette limite : ChatGPT → Réglages → Utilisation.".into(),
             kind: "limit",
         },
         "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Ezerbot."),
@@ -1305,15 +1305,9 @@ impl Provider {
                 )?;
             }
             if let ModelEvent::Failed { reason } = &event {
-                let kind = if reason.contains("Limite d’utilisation")
-                    || reason.contains("Limite d'utilisation")
-                {
-                    "limit"
-                } else if reason.contains("Reconnectez") {
-                    "signin"
-                } else {
-                    "other"
-                };
+                // Preserve the upstream Failure's classification independently
+                // of its French wording. Parser/transport failures stay "other".
+                let kind = diagnostics.failure_kind();
                 metadata(
                     None,
                     Some(&Failure {

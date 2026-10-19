@@ -1109,7 +1109,7 @@ fn stream_failures_keep_french_provider_mapping_and_bound_remote_details() {
     ] {
         fixture.events(&[event]);
         assert!(
-            matches!(fixture.collect(&request()).as_slice(), [ModelEvent::Failed { reason }] if reason.starts_with("Limite d’utilisation atteinte pour Ezerbot"))
+            matches!(fixture.collect(&request()).as_slice(), [ModelEvent::Failed { reason }] if reason.starts_with("Ezerbot a atteint la limite d’utilisation"))
         );
     }
     fixture.events(&[json!({"type": "response.failed", "response": {"error": {"code": "unknown", "message": "é".repeat(5000)}}})]);

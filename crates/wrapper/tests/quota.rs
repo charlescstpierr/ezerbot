@@ -126,7 +126,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         if expected_kind == "limit" {
             assert!(error
                 .message
-                .contains("pour Ezerbot via votre abonnement ChatGPT"));
+                .contains("Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT"));
             assert!(error.message.contains("quota Codex peut rester disponible"));
             assert!(error.message.contains("ChatGPT → Réglages → Utilisation"));
             assert!(!error.message.contains("Réinitialisation"));
@@ -161,6 +161,17 @@ fn successful_calls_do_not_log_and_bad_metadata_cannot_inject_lines() {
     }
 }
 
+fn local_reset_time() -> String {
+    rusqlite::Connection::open_in_memory()
+        .unwrap()
+        .query_row(
+            "SELECT strftime('%d/%m à %H h %M', '2026-10-20T18:00:00Z', 'localtime')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn http_reset_is_explicit_validated_and_limited_to_the_usage_card() {
     let fixture = Fixture::new();
@@ -176,10 +187,13 @@ fn http_reset_is_explicit_validated_and_limited_to_the_usage_card() {
         ));
         let message = fixture.raw().unwrap_err().message;
         assert!(
-            message.contains("Réinitialisation annoncée par OpenAI : le"),
+            message.ends_with(&format!(
+                "Réinitialisation prévue par OpenAI : le {}.",
+                local_reset_time()
+            )),
             "{message}"
         );
-        assert!(message.contains("UTC"));
+        assert!(!message.contains("UTC") && !message.contains(":00:00"));
     }
     for reset in [
         Value::Null,
@@ -257,7 +271,12 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
                 assert!(error["error"]
                     .as_str()
                     .unwrap()
-                    .contains("20/10/2026 à 18:00:00 UTC"));
+                    .contains(&local_reset_time()));
+                // The SSE classification must not depend on the old French title.
+                assert!(!error["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Limite d’utilisation"));
             }
             drop(app);
             let restarted = Provider::with_endpoints(
@@ -315,7 +334,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     let fixture = Fixture::new();
     fixture.reply(ScriptedResponse::json(
         429,
-        json!({"error":{"code":"subscription_sharing_usage_limit_exceeded"}}),
+        json!({"error":{"code":"subscription_sharing_usage_limit_exceeded", "reset_at":"2026-10-20T18:00:00Z"}}),
     ));
     std::fs::create_dir(fixture.directory.join("logs")).unwrap();
     let mut log = std::fs::File::create(fixture.directory.join("logs/engine.log")).unwrap();
@@ -326,6 +345,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
             .arg(fixture.directory.join("workspace.sqlite"))
             .env("HOME", &fixture.directory)
             .env("CFFIXED_USER_HOME", &fixture.directory)
+            .env("TZ", "America/Toronto")
             .env("GROKBOT_FAKE_OPENAI", &fixture.server.base)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -362,6 +382,22 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     );
     wait("native-style diagnostic", || {
         fixture.log().contains("OpenAI refus")
+    });
+    wait("local reset card", || {
+        let state: Value = ureq::get(&format!("{base}/api/state"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        state["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["error"].as_str().is_some_and(|text| {
+                    text.ends_with("Réinitialisation prévue par OpenAI : le 20/10 à 14 h 00.")
+                })
+            })
     });
     // Same open file description as the native shell. A direct O_APPEND write
     // from another handle would leave this offset stale and overwrite the log.

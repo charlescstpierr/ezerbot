@@ -154,6 +154,11 @@ a.gb-retry { text-decoration: none; }
 .gb-retry-primary { background: var(--text); border-color: var(--text); color: var(--canvas); }
 .gb-problem { width: 100%; margin-top: 10px; border-color: var(--line); background: var(--soft); color: var(--text); }
 .gb-problem > .lucide { color: var(--danger-text); }
+.gb-problem-actions { display: flex; flex-wrap: nowrap; gap: 12px; }
+.gb-problem-actions .gb-retry { white-space: nowrap; }
+@media (max-width: 1000px) {
+  .gb-problem-actions { flex-basis: 100%; padding-left: 29px; }
+}
 .gb-problem .gb-retry { border-color: var(--line); color: var(--text); }
 .gb-problem .gb-retry-primary { background: var(--text); border-color: var(--text); color: var(--canvas); }
 .gb-notice, .gb-reply-advice { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }

@@ -195,6 +195,10 @@ function Dots() {
 
 function ReplyProblem({ message, actions }) {
   const limit = message.error_kind === "limit";
+  const advice = (message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
+    ? "Envoyez un nouveau message pour demander une nouvelle réponse."
+    : actions.isTask ? "Poursuivez dans la conversation principale." : null;
+  const retry = !advice && message.error_kind !== "context_budget";
   return (
     <div className="gb-pending gb-problem" role="alert">
       <TriangleAlert />
@@ -203,13 +207,13 @@ function ReplyProblem({ message, actions }) {
         <p>{message.error}</p>
       </div>
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
-      {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
-      {(message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
-        ? <p className="gb-reply-advice">Envoyez un nouveau message pour demander une nouvelle réponse.</p>
-        : actions.isTask ? <p className="gb-reply-advice">Poursuivez dans la conversation principale.</p>
-        : message.error_kind === "context_budget" ? null : message.error_kind === "signin"
-        ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
-        : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}
+      {(limit || retry) && <div className="gb-problem-actions">
+        {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
+        {retry && (message.error_kind === "signin"
+          ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
+          : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>)}
+      </div>}
+      {advice && <p className="gb-reply-advice">{advice}</p>}
     </div>
   );
 }

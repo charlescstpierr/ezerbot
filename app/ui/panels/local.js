@@ -14,9 +14,9 @@
     let lastUser = -1;
     for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i].role === "user") { lastUser = i; break; }
     const turn = messages.slice(lastUser + 1).reverse();
-    // MCP settings decisions share the approval surface and must also remain
-    // reachable after resize; do not treat connector arguments as local tools.
-    const pending = turn.find(m => m.kind === "approval" && m.payload?.status?.status === "pending" && (localNames.has(m.payload?.kind?.tool) || m.payload?.connector?.origin === "settings"));
+    // Host settings decisions share the approval surface and must also remain
+    // reachable after resize; their arguments are not local tool commands.
+    const pending = turn.find(m => m.kind === "approval" && m.payload?.status?.status === "pending" && (localNames.has(m.payload?.kind?.tool) || m.payload?.kind?.tool === "routines_background_configure" || m.payload?.connector?.origin === "settings"));
     const tool = turn.find(m => m.kind === "tool" && localNames.has(m.payload?.call?.name));
     const failure = tool && (tool.payload?.outcome?.status === "failed" || ["échec", "annulé", "délai dépassé"].includes(tool.payload?.outcome?.output?.status));
     const running = tool && typeof tool.payload?.run_id === "string" && !tool.payload.outcome && tool.payload.run_status === "running"

@@ -161,7 +161,9 @@
         const reveal = () => {
           const target = [...ui.messages.querySelectorAll("[data-message-id]")].find((el) => el.dataset.messageId === messageId);
           if (target) {
-            target.scrollIntoView({ block: "center" }); target.tabIndex = -1; target.focus({ preventScroll: true });
+            if (target.dataset.cardKind === "approval" && target.dataset.requestStatus === "pending") window.GrokbotChat.revealPendingApproval(target, ui.scroll);
+            else target.scrollIntoView({ block: "center" });
+            target.tabIndex = -1; target.focus({ preventScroll: true });
             target.classList.add("routine-run-target"); setTimeout(() => target.classList.remove("routine-run-target"), 2500);
           }
           else if (++attempts < 20) setTimeout(reveal, 50);

@@ -16,7 +16,8 @@
 .notification-toggle > span:first-child { flex: 1; min-width: 0; }
 .notification-toggle.is-muted strong { color: var(--muted); }
 .notification-toggle.is-muted .toggle-track { opacity: .45; }
-.notifications-settings .notification-warning { display: flex; align-items: flex-start; gap: 8px; color: var(--warning-text); background: var(--warning-bg); border: 1px solid var(--warning-line); border-radius: 8px; padding: 10px; }
+.routines-background-settings .routines-agent-status { margin-top: 10px; }
+.notifications-settings .notification-warning, .routines-background-settings .notification-warning { display: flex; align-items: flex-start; gap: 8px; color: var(--warning-text); background: var(--warning-bg); border: 1px solid var(--warning-line); border-radius: 8px; padding: 10px; }
 .notification-warning svg { width: 16px; height: 16px; flex: none; }
 [data-notification-card]:focus, [data-message-id]:focus { outline: none; }
 .notification-target { position: relative; outline: none; box-shadow: inset 0 0 0 2px var(--accent-ink); border-radius: 10px; scroll-margin-block: 12px; }

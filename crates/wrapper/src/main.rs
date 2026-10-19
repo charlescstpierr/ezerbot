@@ -51,7 +51,7 @@ fn options() -> Result<Option<Options>, String> {
                 db = args.next().ok_or("--db attend un chemin SQLite.")?.into();
             }
             "--help" | "-h" => {
-                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--headless-routines]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
+                println!("grokbot-wrapper [--port 0] [--db chemin.sqlite] [--routine-wake]\nApplication locale, transport simulé. Écoute exclusivement 127.0.0.1.");
                 return Ok(None);
             }
             _ => return Err(format!("Argument inconnu : {arg}")),
@@ -188,8 +188,8 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 1
             }
         };
-        // Keep the OS owner lock until ALL threads die, also on a deadline or
-        // transport failure. A foreground opener cannot race late worker writes.
+        // run() has drained every engine worker (including on interruption).
+        // Retain Owner until process death; idle provider threads cannot outlive it.
         std::process::exit(code);
     }
     let server = Server::http(("127.0.0.1", options.port))?;

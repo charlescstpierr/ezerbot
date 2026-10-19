@@ -17,6 +17,7 @@ export function Card({ message, busy, onAction }) {
   const action = request.kind || {};
   const lifecycle = request.connector && typeof action.tool === "string" && (action.tool.startsWith("mcp_start_") || action.tool.startsWith("mcp_remove_"));
   const background = action.tool === "routines_background_configure";
+  const configuration = background ? request.configuration_result : null;
   const preview = request.arguments;
   const previewAvailable = preview != null && (!lifecycle || (typeof preview.commande === "string" && Array.isArray(preview.arguments) && Array.isArray(preview.variables_privées)));
   const argumentPreview = <ActionArguments value={preview} />;
@@ -42,7 +43,7 @@ export function Card({ message, busy, onAction }) {
   );
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
-    <HumanInputCard message={message} title="Approbation demandée" input={input}>
+    <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background}>
       <div className="space-y-3" data-follow-actions={background || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
@@ -78,6 +79,7 @@ export function Card({ message, busy, onAction }) {
             <div className="flex flex-wrap gap-2"><button type="button" className="gb-retry" disabled={blocked} onClick={() => decide({ always_allow: { scope } })}>Toujours autoriser</button><button type="button" className="gb-retry" onClick={() => decide({ never: { scope } })}>Toujours refuser</button></div>
           </details>}
         </fieldset>}
+        {background && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
         {pending && expired && <p className="text-sm">Le délai de décision est écoulé. Actualisation de l’état…</p>}
       </div>
     </HumanInputCard>

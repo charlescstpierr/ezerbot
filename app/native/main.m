@@ -196,7 +196,7 @@
     [self stopBackend];
     NSUInteger generation = ++self.startupGeneration;
     self.backendURL = nil;
-    [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local… Une routine en cours se termine avant l’ouverture." failed:NO];
+    [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local… Une routine en cours enregistre son état avant l’ouverture." failed:NO];
     NSFileManager *files = [NSFileManager defaultManager];
     NSError *error = nil;
     NSURL *applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
@@ -265,11 +265,11 @@
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSMutableData *line = [NSMutableData data];
         NSString *problem = nil;
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:180];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:240];
         BOOL complete = NO;
         while (!complete && line.length <= 8192) {
             int remaining = (int)MAX(0, [deadline timeIntervalSinceNow] * 1000);
-            if (remaining == 0) { problem = @"Le moteur reste occupé après trois minutes. Réessayez après la fin de la routine."; break; }
+            if (remaining == 0) { problem = @"Le moteur reste occupé après quatre minutes. Réessayez après la fin de la routine."; break; }
             struct pollfd ready = {.fd = reader.fileDescriptor, .events = POLLIN};
             int result = poll(&ready, 1, remaining);
             if (result < 0 && errno == EINTR) continue;

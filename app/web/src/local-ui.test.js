@@ -146,14 +146,14 @@ test("tall pending approvals expose their action fieldset instead of clipping bu
   while(frames.length)frames.shift()();assert.equal(actionBlock,"end");assert.equal(cardMoves,0);
 });
 
-test("MCP settings approvals without a user turn keep their decisions reachable on resize",()=>{
+for (const tool of ["mcp_start_fixture", "routines_background_configure"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
   const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:521,scrollTop:0});
   let resized,cardMoves=0,actions=0;const frames=[];
   class ResizeObserver {constructor(callback){resized=callback;}observe(){}}
   const {registration,panels,window,document}=setup({scroll,ResizeObserver});
   window.requestAnimationFrame=fn=>frames.push(fn);document.querySelector=()=>null;
   document.querySelectorAll=()=>[{dataset:{messageId:"mcp-settings"},getBoundingClientRect:()=>({height:450}),scrollIntoView(){cardMoves+=1;},querySelector:()=>({scrollIntoView(options){assert.equal(options.block,"end");actions+=1;}})}];
-  const context={conversation:{id:"management",messages:[{id:"mcp-settings",kind:"approval",payload:{status:{status:"pending"},kind:{tool:"mcp_start_fixture"},connector:{origin:"settings"}}}]}};
+  const context={conversation:{id:"management",messages:[{id:"mcp-settings",kind:"approval",payload:{status:{status:"pending"},kind:{tool},...(tool.startsWith("mcp_")?{connector:{origin:"settings"}}:{})}}]}};
   const flush=()=>{let count=0;while(frames.length){assert.ok(++count<40);frames.shift()();}};
   registration.onState(panels.state,context);flush();assert.equal(cardMoves,1);
   scroll.clientHeight=301;scroll.clientWidth=560;resized();flush();assert.equal(actions,1);

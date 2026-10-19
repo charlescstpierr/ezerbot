@@ -92,6 +92,11 @@ pub trait RunServices {
         }
     }
     fn is_cancelled(&self, run_id: &str) -> bool;
+    /// Owner handover is resumable, unlike a user Stop. The live worker must
+    /// checkpoint its elapsed interval before relinquishing process ownership.
+    fn is_interrupted(&self) -> bool {
+        false
+    }
     /// Transactional capability reaction: use conn for occurrence updates and
     /// child wakes. Never commit or perform nontransactional external effects.
     /// A failed reaction rolls back its event and is retried with the operation.
@@ -254,6 +259,9 @@ fn checkpoint(
     let run = store::required(conn, run_id)?;
     if run.status.is_terminal() {
         return ended(&run).map(Some);
+    }
+    if services.is_interrupted() {
+        return Err(invalid("engine owner handover"));
     }
     if services.is_cancelled(run_id) {
         return cancel(conn, services, run_id, TurnEnd::Stopped).map(Some);
@@ -1347,6 +1355,7 @@ mod tests {
         suspend: Option<SuspendCause>,
         cancel: Arc<AtomicBool>,
         cancel_in_tool: bool,
+        interrupt: Arc<AtomicBool>,
         journaled_external: bool,
         external_calls: usize,
         cancel_in_context: bool,
@@ -1465,6 +1474,9 @@ mod tests {
         }
         fn is_cancelled(&self, _: &str) -> bool {
             self.cancel.load(Ordering::SeqCst)
+        }
+        fn is_interrupted(&self) -> bool {
+            self.interrupt.load(Ordering::SeqCst)
         }
         fn on_run_event(&mut self, conn: &Connection, event: &RunEvent) -> Result<()> {
             assert!(!conn.is_autocommit());
@@ -2537,6 +2549,50 @@ mod tests {
             .iter()
             .any(|event| event.kind == RunEventKind::ToolCall));
         assert_eq!(count(&conn, "effects"), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_handover_checkpoints_budget_and_resumes_without_a_second_run() -> Result<()> {
+        struct Handover(Arc<AtomicBool>);
+        impl ModelGateway for Handover {
+            fn stream(
+                &self,
+                _: &ModelRequest,
+                emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
+            ) -> Result<()> {
+                std::thread::sleep(Duration::from_millis(20));
+                self.0.store(true, Ordering::SeqCst);
+                emit(ModelEvent::Completed)
+            }
+        }
+        let conn = database(true, RunBudgets::default())?;
+        let mut services = Services::default();
+        assert!(run(
+            &conn,
+            &Handover(services.interrupt.clone()),
+            &mut services,
+            "run"
+        )
+        .is_err());
+        assert_eq!(
+            store::required(&conn, "run")?.status,
+            RunStatus::Interrupted
+        );
+        let usage = store::budget_usage(&conn, "run", now_ms())?;
+        assert!(usage.elapsed_ms >= 20);
+        assert_eq!(usage.model_calls, 1);
+        services.interrupt.store(false, Ordering::SeqCst);
+        let gateway = Scripted::new(vec![vec![
+            call("complete", "complete_task", json!({"summary":"same run"})),
+            ModelEvent::Completed,
+        ]]);
+        assert_eq!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Ended(TurnEnd::Finished)
+        );
+        assert_eq!(store::budget_usage(&conn, "run", now_ms())?.model_calls, 2);
+        assert!(store::budget_usage(&conn, "run", now_ms())?.elapsed_ms >= usage.elapsed_ms);
         Ok(())
     }
 

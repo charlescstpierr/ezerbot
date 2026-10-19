@@ -20,6 +20,8 @@ struct Fixture {
     app: Option<Child>,
     url: String,
     fake: FakeOpenAi,
+    binary: PathBuf,
+    database: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
@@ -33,18 +35,20 @@ impl Fixture {
         fs::write(root.join("workspace.chatgpt-auth.json"),json!({"host_id":"test","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":now()/1000+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         let fake = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let mut f = Self {
+            database: root.join("workspace.sqlite"),
             root,
             app: None,
             url: String::new(),
             fake,
+            binary: env!("CARGO_BIN_EXE_grokbot-wrapper").into(),
         };
         f.open();
         f
     }
     fn command(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"));
+        let mut c = Command::new(&self.binary);
         c.args(["--db"])
-            .arg(self.root.join("workspace.sqlite"))
+            .arg(&self.database)
             .current_dir(&self.root)
             .env("HOME", &self.root)
             .env("CFFIXED_USER_HOME", &self.root)
@@ -167,6 +171,9 @@ fn installation_denial_error_restart_and_clean_uninstall() {
     let mut f = Fixture::new();
     assert_eq!(f.state()["routines_background"]["enabled"], false);
     let request = f.request(true);
+    let duplicate = f.post("/api/routines/background", json!({"enabled":true}));
+    assert_eq!(duplicate["run_id"], request["run_id"]);
+    assert_eq!(duplicate["approval_message_id"], request["entry_id"]);
     f.decide(&request, json!("deny"));
     std::thread::sleep(Duration::from_millis(150));
     assert!(!f.plist().exists());
@@ -192,6 +199,15 @@ fn installation_denial_error_restart_and_clean_uninstall() {
             .is_some_and(|s| s.contains("simulé"))
     });
     assert!(f.plist().exists());
+    wait("failure on decision card", || {
+        f.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| {
+                r["run_id"] == request["run_id"] && r["configuration_result"]["status"] == "failed"
+            })
+    });
     assert_eq!(f.state()["routines_background"]["enabled"], true);
     fs::remove_file(f.root.join("launchctl-fail")).unwrap();
     f.configure(false);
@@ -339,6 +355,11 @@ fn opening_app_during_headless_run_waits_for_owner_and_does_not_duplicate() {
         ),
         1
     );
+    // Handover asks the live worker to checkpoint instead of killing it.
+    f.fake.seen.lock().unwrap().responses.push_back(tool(
+        "complete_task",
+        json!({"summary":"Reprise de la même occurrence"}),
+    ));
     gate.store(true, Ordering::SeqCst);
     assert!(headless.wait().unwrap().success());
     let mut line = String::new();
@@ -351,7 +372,9 @@ fn opening_app_during_headless_run_waits_for_owner_and_does_not_duplicate() {
         .into();
     f.app = Some(foreground);
     assert_eq!(f.history(&id)["occurrences"].as_array().unwrap().len(), 1);
-    assert_eq!(f.history(&id)["occurrences"][0]["status"]["status"], "done");
+    wait("foreground completes handed-over occurrence", || {
+        f.history(&id)["occurrences"][0]["status"]["status"] == "done"
+    });
 }
 
 #[test]
@@ -398,6 +421,119 @@ fn killed_headless_owner_releases_lock_and_restart_reuses_occurrence_and_run() {
         ),
         1
     );
+}
+
+#[test]
+fn moved_binary_can_repair_and_uninstall_but_another_workspace_cannot() {
+    let mut f = Fixture::new();
+    f.configure(true);
+    f.stop();
+    let moved = f.root.join("renamed-wrapper");
+    fs::copy(&f.binary, &moved).unwrap();
+    f.binary = moved.clone();
+    f.open();
+    // Re-approve activation directly to repair the executable path.
+    let request = f.request(true);
+    f.decide(&request, json!("allow_once"));
+    wait("agent points to moved binary", || {
+        fs::read_to_string(f.plist())
+            .unwrap()
+            .contains(moved.to_str().unwrap())
+    });
+    f.configure(false);
+    assert!(!f.plist().exists());
+    f.configure(true);
+    f.stop();
+    // A moved database retains the old ownership path and can also withdraw.
+    let old = f.root.join("workspace.sqlite");
+    let saved = f.root.join("moved.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&old).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+    }
+    fs::rename(&old, &saved).unwrap();
+    fs::copy(
+        f.root.join("workspace.chatgpt-auth.json"),
+        f.root.join("moved.chatgpt-auth.json"),
+    )
+    .unwrap();
+    f.database = saved;
+    f.open();
+    // The DB moved: disable still recognizes the persisted previous plist path.
+    f.configure(false);
+    f.configure(true);
+    let body = fs::read_to_string(f.plist()).unwrap();
+    let foreign = body.replace(
+        f.database.to_str().unwrap(),
+        "/tmp/another-workspace.sqlite",
+    );
+    fs::write(f.plist(), &foreign).unwrap();
+    let request = f.request(false);
+    f.decide(&request, json!("allow_once"));
+    wait("foreign agent refused", || {
+        f.state()["routines_background"]["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("autre espace"))
+    });
+    assert_eq!(fs::read_to_string(f.plist()).unwrap(), foreign);
+    fs::write(f.plist(), body).unwrap();
+    f.configure(false);
+    let records = fs::read_to_string(f.root.join("launchctl-recording.jsonl")).unwrap();
+    assert!(records.contains("bootout"));
+}
+
+#[test]
+fn deadline_checkpoints_elapsed_budget_and_cannot_replay_forever() {
+    let mut f = Fixture::new();
+    f.configure(true);
+    f.routine(now() + 700);
+    f.fake.seen.lock().unwrap().response_delay = Some(Duration::from_millis(900));
+    f.stop();
+    std::thread::sleep(Duration::from_millis(750));
+    let db = f.root.join("workspace.sqlite");
+    let wake = || {
+        f.command()
+            .arg("--routine-wake")
+            .env("GROKBOT_ROUTINE_PASS_MS", "500")
+            .output()
+            .unwrap()
+    };
+    assert!(!wake().status.success());
+    assert_eq!(
+        one_row(
+            &db,
+            "SELECT count(*) FROM engine_runs WHERE status='interrupted'"
+        ),
+        1
+    );
+    let first = one_row(&db, "SELECT json_extract(usage,'$.elapsed_ms') FROM engine_runs WHERE trigger_kind='occurrence'");
+    assert!(first >= 850, "elapsed interval lost: {first}");
+    // Two passes consume the run's budget, not 12 repeated charged calls.
+    rusqlite::Connection::open(&db).unwrap().execute(
+        "UPDATE engine_runs SET record=json_set(record,'$.budgets.duration_ms',?1) WHERE trigger_kind='occurrence'", [first + 700],
+    ).unwrap();
+    assert!(!wake().status.success());
+    let second = one_row(&db, "SELECT json_extract(usage,'$.elapsed_ms') FROM engine_runs WHERE trigger_kind='occurrence'");
+    assert!(second > first);
+    assert!(f.wake().status.success()); // budget already exhausted, no third request
+    assert_eq!(one_row(&db, "SELECT json_extract(usage,'$.model_calls') FROM engine_runs WHERE trigger_kind='occurrence'"), 2);
+    assert_eq!(
+        one_row(
+            &db,
+            "SELECT count(*) FROM scheduler_occurrences WHERE status='failed'"
+        ),
+        1
+    );
+    assert_eq!(
+        one_row(&db, "SELECT count(*) FROM scheduler_occurrences"),
+        1
+    );
+    f.open();
+    assert!(f.state()["routines_background"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("échoué"));
 }
 
 #[test]

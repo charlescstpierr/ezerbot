@@ -909,6 +909,17 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
+    if name == super::routines_background::ACTION {
+        let existing: Option<(String, String, String)> = ctx.connection.query_row(
+            "SELECT r.conversation_id,r.run_id,e.payload FROM engine_runs r JOIN engine_run_events e ON e.run_id=r.run_id WHERE r.run_id LIKE 'mcp-host-%' AND r.status IN ('queued','running','interrupted','awaiting_approval') AND e.kind='tool_call' AND json_extract(e.payload,'$.name')=?1 AND NOT EXISTS(SELECT 1 FROM forms_requests f WHERE f.run_id=r.run_id AND f.status<>'pending') ORDER BY r.rowid DESC LIMIT 1",
+            [name], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        if let Some((conversation, id, payload)) = existing {
+            let call: grokbot_engine::contracts::ToolCall =
+                serde_json::from_str(&payload).map_err(Error::from)?;
+            return host_action_response(&conversation, &id, &call);
+        }
+    }
     let conversation = super::mcp::approval_conversation(ctx)?;
     let run = Run {
         run_id: format!("mcp-host-{}", random_id(ctx.connection)?),
@@ -945,7 +956,23 @@ pub(crate) fn queue_approved_action(
         Ok(())
     })?;
     launch(&local, &run)?;
-    Ok(json!({"conversation_id":conversation,"run_id":run.run_id}))
+    host_action_response(
+        &conversation,
+        &run.run_id,
+        &grokbot_engine::contracts::ToolCall {
+            call_id: format!("{}-call", run.run_id),
+            name: name.into(),
+            arguments,
+        },
+    )
+}
+fn host_action_response(
+    conversation: &str,
+    run_id: &str,
+    call: &grokbot_engine::contracts::ToolCall,
+) -> Result<Value, ApiError> {
+    let (entry_id, _) = super::forms::approval_identity(run_id, call)?;
+    Ok(json!({"conversation_id":conversation,"run_id":run_id,"approval_message_id":entry_id}))
 }
 
 pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Result<(), ApiError> {
@@ -1181,7 +1208,7 @@ fn drive_owned(
     for _ in 0..4 {
         let result = run_loop::run(conn, gateway, services, id);
         let run = store::required(conn, id)?;
-        if run.status.is_terminal() || run.status.is_suspended() {
+        if run.status.is_terminal() || run.status.is_suspended() || services.is_interrupted() {
             return Ok(());
         }
         if run.status == RunStatus::Interrupted
@@ -1542,6 +1569,9 @@ impl RunServices for Services<'_> {
     }
     fn is_cancelled(&self, _: &str) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+    fn is_interrupted(&self) -> bool {
+        self.provider.interrupting()
     }
     fn on_run_event(
         &mut self,

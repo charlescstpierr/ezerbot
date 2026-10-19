@@ -391,7 +391,10 @@ fn guarded_identity(
     }
     approval_identity(&run.run_id, call)
 }
-fn approval_identity(run_id: &str, call: &ToolCall) -> Result<(String, String), ApiError> {
+pub(crate) fn approval_identity(
+    run_id: &str,
+    call: &ToolCall,
+) -> Result<(String, String), ApiError> {
     let digest = approvals::args_digest(&call.name, &call.arguments)?;
     let bytes = serde_json::to_vec(&(run_id, &call.call_id, &digest))
         .map_err(|_| ApiError::new(400, "Invalid approval binding"))?;
@@ -1080,6 +1083,17 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
+        if tool == super::routines_background::ACTION {
+            let result: Option<String> = ctx.connection.query_row(
+                "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
+                [&request.run_id], |r| r.get(0),
+            ).optional()?;
+            value["configuration_result"] = result
+                .map(|s| serde_json::from_str::<Value>(&s))
+                .transpose()
+                .map_err(|_| ApiError::new(500, "Résultat de configuration illisible."))?
+                .unwrap_or(Value::Null);
+        }
         if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
         }

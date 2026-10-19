@@ -44,41 +44,55 @@ fn io(error: std::io::Error) -> ApiError {
 pub struct Owner {
     _file: File,
 }
+fn canonical(db: &Path) -> Result<PathBuf, ApiError> {
+    Ok(if db.exists() {
+        fs::canonicalize(db).map_err(io)?
+    } else {
+        let parent = db
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(io)?;
+        fs::canonicalize(parent).map_err(io)?.join(
+            db.file_name()
+                .ok_or_else(|| fail("Chemin SQLite invalide."))?,
+        )
+    })
+}
+fn try_lock(db: &Path, extension: &str) -> Result<Option<File>, ApiError> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(canonical(db)?.with_extension(extension))
+        .map_err(io)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(io(error)),
+    }
+}
+/// A second OS lock held by a foreground opener while it waits for the owner.
+/// A headless pass that sees it hands the engine over instead of finishing.
+fn foreground_waiting(db: &Path) -> bool {
+    matches!(try_lock(db, "engine-wanted"), Ok(None))
+}
 impl Owner {
     pub fn try_acquire(db: &Path) -> Result<Option<Self>, ApiError> {
-        let db = if db.exists() {
-            fs::canonicalize(db).map_err(io)?
-        } else {
-            let parent = db
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            fs::create_dir_all(parent).map_err(io)?;
-            fs::canonicalize(parent).map_err(io)?.join(
-                db.file_name()
-                    .ok_or_else(|| fail("Chemin SQLite invalide."))?,
-            )
-        };
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true).truncate(false);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let file = options
-            .open(db.with_extension("engine-owner"))
-            .map_err(io)?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(io(error)),
-        }
+        Ok(try_lock(db, "engine-owner")?.map(|file| Self { _file: file }))
     }
     pub fn foreground(db: &Path) -> Result<Self, ApiError> {
         let start = Instant::now();
+        let mut wanted = None;
         loop {
+            if wanted.is_none() {
+                wanted = try_lock(db, "engine-wanted")?;
+            }
             if let Some(owner) = Self::try_acquire(db)? {
                 return Ok(owner);
             }
-            if start.elapsed() > Duration::from_secs(180) {
+            if start.elapsed() > Duration::from_secs(210) {
                 return Err(fail(
                     "Le moteur est déjà utilisé. Réessayez après la fin de la routine.",
                 ));
@@ -143,6 +157,36 @@ impl Agent {
             plist,
             recorder,
         }
+    }
+    fn owns(&self, db: &Path, previous: Option<&str>) -> Result<bool, ApiError> {
+        let output = Command::new("/usr/bin/plutil")
+            .args(["-convert", "json", "-o", "-"])
+            .arg(&self.plist)
+            .output()
+            .map_err(io)?;
+        if !output.status.success() {
+            return Err(fail(
+                "Le fichier de l’agent macOS est illisible. Aucun fichier n’a été modifié.",
+            ));
+        }
+        let value: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| fail("Le fichier de l’agent macOS est invalide."))?;
+        let arguments = &value["ProgramArguments"];
+        let same_path = |value: &Value, path: &Path| {
+            value.as_str().is_some_and(|s| {
+                Path::new(s) == path || fs::canonicalize(s).is_ok_and(|p| p == path)
+            })
+        };
+        Ok(value["Label"] == LABEL
+            && arguments[1] == "--routine-wake"
+            && arguments[2] == "--db"
+            && (same_path(&arguments[3], db)
+                || previous.is_some_and(|p| arguments[3].as_str() == Some(p)))
+            && same_path(&value["EnvironmentVariables"]["HOME"], &self.home)
+            && same_path(
+                &value["EnvironmentVariables"]["CFFIXED_USER_HOME"],
+                &self.home,
+            ))
     }
     fn domain(&self) -> Result<String, ApiError> {
         if self.recorder.is_some() {
@@ -311,16 +355,15 @@ fn configure(ctx: &Context<'_>, enabled: bool) -> Result<(), ApiError> {
         [],
         |r| r.get(0),
     )?;
-    if previous.as_deref().is_some_and(|p| Path::new(p) != db) {
-        return Err(fail("Cet agent appartient à un autre espace local."));
+    // Binary paths change when an app is moved or upgraded. Ownership is the
+    // label, HOME and database, never byte equality with today's executable.
+    // The persisted old database path also permits withdrawing a moved workspace.
+    if agent.plist.exists() && !agent.owns(&db, previous.as_deref())? {
+        return Err(fail(
+            "Cet agent appartient à un autre espace local. Aucun fichier n’a été modifié.",
+        ));
     }
     if enabled {
-        // Never overwrite a different workspace's per-user agent.
-        if agent.plist.exists()
-            && fs::read_to_string(&agent.plist).map_err(io)? != plist(&binary, &db, &agent.home)
-        {
-            return Err(fail("Un agent Ezerbot existe pour un autre emplacement. Désactivez-le depuis cet espace avant de continuer."));
-        }
         if agent.plist.exists() {
             agent.control(&["bootout".into(), job.clone()], true)?;
         }
@@ -351,15 +394,7 @@ fn configure(ctx: &Context<'_>, enabled: bool) -> Result<(), ApiError> {
         }
     } else {
         let present = agent.plist.exists();
-        // Disable only the exact job owned by this database/binary. If its
-        // plist was removed externally, still unregister our persisted job.
-        if present
-            && fs::read_to_string(&agent.plist).map_err(io)? != plist(&binary, &db, &agent.home)
-        {
-            return Err(fail(
-                "L’agent appartient à un autre emplacement. Aucun fichier n’a été supprimé.",
-            ));
-        }
+        // If the plist was removed externally, unregister our persisted job.
         if present || previous.is_some() {
             agent.control(&["bootout".into(), job], true)?;
         }
@@ -444,6 +479,11 @@ pub fn run(app: &mut App) -> Result<(), ApiError> {
         |r| r.get(0),
     )?;
     let result = drive(app);
+    // Even errors must drain workers before main exits and releases its lock.
+    app.provider.interrupt_runs();
+    while app.provider.has_run_workers() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let ctx = app.feature_context();
     let failed_after: i64 = ctx.connection.query_row(
         "SELECT count(*) FROM scheduler_occurrences WHERE status='failed'",
@@ -499,23 +539,41 @@ fn drive(app: &mut App) -> Result<(), ApiError> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // Same per-run budget as the app, plus a margin to let the engine settle.
+    // Debug tests may shorten the pass deadline, never the run's own budget.
+    let deadline = pass_deadline();
     // Materialize once: don't stay alive forever for short-interval schedules.
     super::routines::tick(&app.feature_context());
+    let start = Instant::now();
     loop {
+        if foreground_waiting(app.feature_context().db_path) {
+            return Ok(()); // run() drains/checkpoints workers before releasing Owner
+        }
+        if start.elapsed() > deadline {
+            return Err(fail("Le passage a atteint sa limite. Les routines reprendront avec leur budget conservé au prochain réveil ou à l’ouverture d’Ezerbot."));
+        }
         let ctx = app.feature_context();
         super::engine::tick_routines(&ctx);
         let active: bool = ctx.connection.query_row("WITH RECURSIVE threads(id) AS (SELECT conversation_id FROM scheduler_routines UNION SELECT c.id FROM wrapper_conversations c JOIN threads t ON c.parent_id=t.id) SELECT EXISTS(SELECT 1 FROM engine_runs e JOIN threads t ON e.conversation_id=t.id WHERE e.status IN ('queued','running','interrupted'))", [], |r|r.get(0))?;
         if !active && !app.provider.has_run_workers() {
             break;
         }
-        if start.elapsed() > Duration::from_secs(120) {
-            // The process exits under its OS lock. On the next wake, startup
-            // recovery turns any running attempt into Interrupted, never Done.
-            return Err(fail("La routine a dépassé deux minutes. Elle reprendra au prochain réveil ou à l’ouverture d’Ezerbot."));
-        }
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+fn pass_deadline() -> Duration {
+    #[cfg(debug_assertions)]
+    if Agent::environment().is_ok() {
+        if let Ok(ms) = std::env::var("GROKBOT_ROUTINE_PASS_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                return Duration::from_millis(ms.max(100));
+            }
+        }
+    }
+    Duration::from_millis(grokbot_engine::contracts::RunBudgets::default().duration_ms)
+        + Duration::from_secs(30)
 }
 
 #[cfg(test)]

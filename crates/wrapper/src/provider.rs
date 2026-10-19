@@ -196,6 +196,7 @@ struct Inner {
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
     catalog: Mutex<Catalog>,
@@ -438,6 +439,7 @@ impl Provider {
                     cancel: None,
                 }),
                 runs: Mutex::new(HashMap::new()),
+                interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
                 mcp: crate::mcp::Manager::default(),
@@ -1172,12 +1174,23 @@ impl Provider {
     /// Process-local ownership only; durable lifecycle belongs to grokbot-engine.
     pub(crate) fn claim_run(&self, id: &str) -> Option<Arc<AtomicBool>> {
         let mut runs = lock(&self.inner.runs);
-        if runs.contains_key(id) {
+        if self.interrupting() || runs.contains_key(id) {
             return None;
         }
         let cancel = Arc::new(AtomicBool::new(false));
         runs.insert(id.into(), cancel.clone());
         Some(cancel)
+    }
+    pub(crate) fn interrupting(&self) -> bool {
+        self.inner.interrupting.load(Ordering::SeqCst)
+    }
+    /// Freeze admission and ask all workers to persist Interrupted, not Stopped.
+    pub(crate) fn interrupt_runs(&self) {
+        let runs = lock(&self.inner.runs);
+        self.inner.interrupting.store(true, Ordering::SeqCst);
+        for cancel in runs.values() {
+            cancel.store(true, Ordering::SeqCst);
+        }
     }
     pub(crate) fn has_run_workers(&self) -> bool {
         !lock(&self.inner.runs).is_empty()

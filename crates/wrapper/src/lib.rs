@@ -874,6 +874,7 @@ impl App {
         seed_default_bot(&connection)?;
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
+        features::screen::startup(path);
         features::engine::startup(&connection)?;
         if let Err(error) = features::storage::startup(&connection, path, now() as i64) {
             // Keep the app usable; the Stockage panel exposes the actionable error.

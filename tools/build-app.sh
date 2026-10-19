@@ -61,7 +61,7 @@ fi
 target_dir="$("$cargo_bin" metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror "${native_flags[@]}" -mmacosx-version-min=12.3 \
-  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications -framework AVFoundation -framework Speech \
+  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications -framework AVFoundation -framework Speech -framework ApplicationServices -framework Security \
   "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
 cp "$target_dir/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
 if [[ "$profile" == debug ]]; then
@@ -91,6 +91,8 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Ezerbot utilise le microphone uniquement pour votre dictée ou mémo vocal, après votre clic.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Ezerbot transcrit votre voix sur ce Mac, sans envoyer l’audio à un serveur.</string>
+  <key>NSAccessibilityUsageDescription</key><string>Ezerbot contrôle la souris et le clavier uniquement pendant une session que vous autorisez.</string>
+  <key>NSScreenCaptureUsageDescription</key><string>Ezerbot partage des captures avec le modèle uniquement pendant une session que vous autorisez.</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>NSAppTransportSecurity</key><dict>
     <key>NSAllowsLocalNetworking</key><true/>

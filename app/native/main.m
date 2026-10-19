@@ -3,6 +3,7 @@
 #import <WebKit/WebKit.h>
 #import "notifications.h"
 #import "voice.h"
+#import "screen.h"
 #import <errno.h>
 #import <poll.h>
 #import <signal.h>
@@ -394,6 +395,18 @@
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
     if ([message.name isEqual:@"ezerbotVoice"]) { [self.voice command:body reply:reply]; return; }
+    if ([command isEqual:@"screenSettings"]) {
+        NSDictionary *panes = @{@"accessibility":@"Privacy_Accessibility", @"recording":@"Privacy_ScreenCapture", @"input":@"Privacy_ListenEvent"};
+        NSString *pane = [body[@"pane"] isKindOfClass:NSString.class] ? panes[body[@"pane"]] : nil;
+        if (!pane) { replyHandler(nil, @"Panneau système inconnu."); return; }
+#if defined(EZERBOT_RELEASE)
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:[@"x-apple.systempreferences:com.apple.preference.security?" stringByAppendingString:pane]]];
+        reply(@{@"status":@"ok"});
+#else
+        reply(@{@"status":@"recording"});
+#endif
+        return;
+    }
     if ([command isEqual:@"presence"]) {
         self.visibleConversationID = [body[@"conversation_id"] isKindOfClass:NSString.class] ? body[@"conversation_id"] : nil;
         self.conversationVisible = [body[@"visible"] isKindOfClass:NSNumber.class] && [body[@"visible"] boolValue];
@@ -604,6 +617,7 @@
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc > 1 && (strcmp(argv[1], "--screen-helper") == 0 || strcmp(argv[1], "--screen-permissions") == 0)) return EZScreenMain(argc, argv);
         if (argc == 3 && strcmp(argv[1], "--notify-background") == 0) {
             // Same signed app identity and privacy-safe notifier as the WebView;
             // no window, backend, permission prompt or personal workspace access.

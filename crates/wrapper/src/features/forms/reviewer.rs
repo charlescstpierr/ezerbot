@@ -107,7 +107,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
     }
     let active: i64 = ctx.connection.query_row("SELECT count(*) FROM forms_requests WHERE status='pending' AND json_extract(review_json,'$.pending')=1 AND json_extract(review_json,'$.started_at')>?1", [clock(ctx).saturating_sub(12_000)], |r| r.get(0))?;
     let available = (4 - active).max(0);
-    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' AND json_extract(kind_json,'$.tool')<>'propose_skill' AND substr(json_extract(kind_json,'$.tool'),1,10)!='mcp_start_' AND substr(json_extract(kind_json,'$.tool'),1,11)!='mcp_remove_' ORDER BY rowid LIMIT ?1")?;
+    let mut statement = ctx.connection.prepare("SELECT id FROM forms_requests WHERE status='pending' AND review_json IS NULL AND json_extract(kind_json,'$.kind')='approval' AND json_extract(kind_json,'$.tool')<>'propose_skill' AND substr(json_extract(kind_json,'$.tool'),1,9)!='computer_' AND substr(json_extract(kind_json,'$.tool'),1,10)!='mcp_start_' AND substr(json_extract(kind_json,'$.tool'),1,11)!='mcp_remove_' ORDER BY rowid LIMIT ?1")?;
     let ids = statement
         .query_map([available], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -152,7 +152,8 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         let action = json!({"tool":tool,"arguments":serde_json::from_str::<Value>(&display).unwrap_or(Value::Null)});
         let payload = json!({"rules":config,"action":action});
         let safe = redact_value(&vault(ctx)?, &payload)?;
-        let fallback = if super::super::local::is_tool(tool) {
+        let fallback = if super::super::local::is_tool(tool) || super::super::screen::is_tool(tool)
+        {
             Some("Les actions sur votre Mac demandent votre décision.")
         } else if safe != payload || has_opaque_data(&action) || action["arguments"].is_null() {
             Some("L’action contient des données masquées ou sensibles. Vérifiez-la vous-même.")
@@ -207,7 +208,8 @@ pub(super) fn complete(
     let Some(request) = requests::get(&tx, id)? else {
         return Ok(());
     };
-    if matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill") {
+    if matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::super::screen::is_tool(tool))
+    {
         return Ok(());
     }
     let Some(current) = reviewer::get(&tx, id)? else {

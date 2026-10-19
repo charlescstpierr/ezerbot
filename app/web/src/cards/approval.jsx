@@ -3,6 +3,7 @@ import { useState } from "react";
 import { SkillProposal } from "./skill-proposal.jsx";
 import { LocalApprovalPreview, LocalApprovalWarning, SensitiveWarning, localApprovalBlocked } from "../local-approval.js";
 import { localLimits, localToolLabel, localToolNames } from "../local-call.js";
+import { screenTools, ScreenArguments } from "../screen.jsx";
 
 export const kind = "approval";
 
@@ -15,12 +16,13 @@ export function Card({ message, busy, onAction }) {
   const { request, pending, act } = input;
   const [scope, setScope] = useState(message.payload?.connector ? "global" : "subject");
   const action = request.kind || {};
+  const screen = Boolean(screenTools[action.tool]);
   const lifecycle = request.connector && typeof action.tool === "string" && (action.tool.startsWith("mcp_start_") || action.tool.startsWith("mcp_remove_"));
   const background = action.tool === "routines_background_configure";
   const configuration = background ? request.configuration_result : null;
   const preview = request.arguments;
   const previewAvailable = preview != null && (!lifecycle || (typeof preview.commande === "string" && Array.isArray(preview.arguments) && Array.isArray(preview.variables_privées)));
-  const argumentPreview = <ActionArguments value={preview} />;
+  const argumentPreview = screen ? <ScreenArguments tool={action.tool} arguments={preview || {}} /> : <ActionArguments value={preview} />;
   const expired = Number.isFinite(action.expires_at) && action.expires_at <= Date.now();
   const disabled = busy || input.busy || !pending || expired;
   const blocked = !previewAvailable || localApprovalBlocked(action.tool, preview);
@@ -28,7 +30,7 @@ export function Card({ message, busy, onAction }) {
   const decide = (decision) => act("forms.decide", { decision });
   if (action.tool === "propose_skill") return <SkillProposal message={message} input={input} disabled={disabled} expired={expired} />;
   const review = request.review;
-  const automatic = !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
+  const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
     || (review?.answer?.decision === "deny" && input.status === "denied"));
   if (automatic) return (
     <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
@@ -44,7 +46,7 @@ export function Card({ message, busy, onAction }) {
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
     <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background}>
-      <div className="space-y-3" data-follow-actions={background || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
+      <div className="space-y-3" data-follow-actions={background || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
           <strong>Relecteur : </strong>{review.pending
@@ -53,6 +55,7 @@ export function Card({ message, busy, onAction }) {
         </p>}
         {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
+        {screen && <p className="text-sm"><strong>{screenTools[action.tool]}</strong> sur votre Mac. Ezerbot se masquera brièvement pour viser le bureau derrière sa fenêtre, puis reviendra. Vérifiez la cible à l’écran : achat, envoi ou suppression peuvent être irréversibles. Autoriser reprend explicitement le bot en pause pour ce geste. Les champs de mot de passe sont refusés ; saisissez-les vous-même.</p>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
         {!previewAvailable
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
@@ -68,10 +71,10 @@ export function Card({ message, busy, onAction }) {
         {action.tool === "write_file" && <SensitiveWarning preview={preview?.apercu_local} />}
         {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>Autoriser une fois</button>
+            <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>{screen ? "Autoriser une fois et reprendre" : "Autoriser une fois"}</button>
             <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
           </div>
-          {!lifecycle && !["read_file", "list_directory"].includes(action.tool) && <details>
+          {!screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool) && <details>
             <summary className="text-sm">Mémoriser une règle…</summary>
             <label className="mt-2 block space-y-1 text-sm"><span>Portée pour ce bot et cet outil</span><select className={inputClass} id={`${message.id}-approval-scope`} value={scope} onChange={(event) => setScope(event.target.value)}><option value="subject">Seulement ces arguments identiques</option><option value="global">Toutes les actions de cet outil</option></select></label>
             <p className="my-2 text-xs text-muted-foreground">Les prochaines demandes correspondantes seront traitées automatiquement. Vous pouvez retirer la règle dans les réglages.</p>

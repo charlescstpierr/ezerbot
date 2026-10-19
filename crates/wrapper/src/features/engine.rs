@@ -1460,6 +1460,10 @@ impl RunServices for Services<'_> {
                 !super::local::is_tool(&s.name)
                     || super::local::enabled(self.connection, &run.bot_id, &s.name)
             })
+            .filter(|s| {
+                !super::screen::is_tool(&s.name)
+                    || super::screen::enabled(self.connection, &run.bot_id)
+            })
             .collect()
     }
     fn call_tool(
@@ -1506,24 +1510,32 @@ impl RunServices for Services<'_> {
         self.call_tool(conn, run, call)
     }
     fn is_journaled_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
-        super::local::is_tool(&call.name)
+        super::local::is_tool(&call.name) || super::screen::is_tool(&call.name)
     }
     fn external_unavailable_reason(
         &self,
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> Option<String> {
-        super::local::validate(&self.ctx(self.connection, run), call)
-            .err()
-            .map(|e| e.message)
+        let ctx = self.ctx(self.connection, run);
+        (if super::screen::is_tool(&call.name) {
+            super::screen::validate(&ctx, call)
+        } else {
+            super::local::validate(&ctx, call)
+        })
+        .err()
+        .map(|e| e.message)
     }
     fn call_journaled_external_tool(
         &mut self,
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> ToolOutcome {
-        let outcome =
-            super::local::execute(&self.ctx(self.connection, run), call, self.cancel.clone());
+        let outcome = if super::screen::is_tool(&call.name) {
+            super::screen::execute(&self.ctx(self.connection, run), call, self.cancel.clone())
+        } else {
+            super::local::execute(&self.ctx(self.connection, run), call, self.cancel.clone())
+        };
         // No private vault values may leak through command/file output.
         match vault(self.path)
             .and_then(|v| redact::redact_value(&v, &serde_json::to_value(outcome)?))
@@ -1541,6 +1553,13 @@ impl RunServices for Services<'_> {
         run: &Run,
         call: &grokbot_engine::contracts::ToolCall,
     ) -> grokbot_engine::contracts::Result<ApprovalCheck> {
+        if super::screen::is_tool(&call.name) {
+            if let Err(error) = super::screen::validate_request(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
         if super::local::is_tool(&call.name) {
             if let Err(error) = super::local::validate(&self.ctx(conn, run), call) {
                 return Ok(ApprovalCheck::Denied {
@@ -1838,6 +1857,13 @@ impl RunGatewayCall<'_> {
         if !super::multibot::managed(self.connection, self.run_id) {
             request.tools.retain(|tool| tool.name != "message_bot");
         }
+        super::screen::hydrate(self.connection, self.run_id, &mut request.input);
+        let screen_ids: Vec<String> = request
+            .input
+            .iter()
+            .filter(|e| e.entry_id.starts_with("screen:"))
+            .map(|e| e.entry_id.clone())
+            .collect();
         let original = run_input(self.connection, self.run_id)?;
         let (_, reset) = history(self.connection, &run, &original)?;
         let ctx = super::Context {
@@ -1862,6 +1888,7 @@ impl RunGatewayCall<'_> {
         // keep this run's follow-up bytes through its tool continuations too.
         let sending_entry_ids: Vec<&str> = std::iter::once(original.entry_id.as_str())
             .chain(followups.iter().map(String::as_str))
+            .chain(screen_ids.iter().map(String::as_str))
             .collect();
         for sending in request.input.iter_mut().filter(|entry| {
             entry.role == Role::User
@@ -2643,6 +2670,10 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
             }
         }
     }
+    let screen_image = outcome
+        .as_ref()
+        .and_then(|o| o["output"]["capture_id"].as_str())
+        .and_then(|id| super::screen::thumbnail(ctx, id));
     let mut display_call = event.payload;
     if display_call["name"] == "propose_skill" {
         // Keep canonical skill content in its lazy approval, not every state row.
@@ -2655,6 +2686,7 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome,
             "authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
+            "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
         run.started_at.max(0) as u64,
     ))

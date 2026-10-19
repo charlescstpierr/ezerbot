@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from "react";
 import { localCallView, localStatusLabel, localFailureView, localLimits, localToolLabel } from "../local-call.js";
 import { LocalResult } from "../local-result.js";
+import { ScreenCard, screenTools } from "../screen.jsx";
 
 export const kind = "tool";
 
@@ -105,6 +106,7 @@ export function Card({ message, onAction, busy }) {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Appel d’outil indisponible.</article>;
   }
   const run = view?.run(runId);
+  if (screenTools[call.name]) return <ScreenCard message={message} />;
   if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const background = call.name === "routines_background_configure";
   const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);

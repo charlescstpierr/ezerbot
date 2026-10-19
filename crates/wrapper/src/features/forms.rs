@@ -369,7 +369,7 @@ fn create_request(
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
     // Defense in depth if a standing rule appears between gate check and request.
     if approval
-        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool) || super::local::is_read(tool))
+        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool) || super::local::is_read(tool) || super::screen::is_tool(tool))
     {
         if let Some(receipt) =
             approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
@@ -426,6 +426,9 @@ pub fn request_tool_approval(
         } else {
             call.arguments.clone()
         };
+        if super::screen::is_tool(&call.name) {
+            display["session_écran"] = super::screen::approval_session(ctx);
+        }
         if let Some(preview) = super::local::approval_preview(ctx, call)? {
             display["apercu_local"] = preview;
         }
@@ -515,7 +518,7 @@ pub fn check_tool_approval(
             }),
         };
     }
-    if super::mcp::is_lifecycle(&call.name) {
+    if super::mcp::is_lifecycle(&call.name) || super::screen::is_tool(&call.name) {
         return Ok(ApprovalCheck::Ask);
     }
     // Skill revisions always require the user's explicit click, even if an
@@ -921,13 +924,13 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             else {
                 return Err(ApiError::new(400, "Request is not an approval"));
             };
-            if super::mcp::is_lifecycle(tool)
+            if (super::mcp::is_lifecycle(tool) || super::screen::is_tool(tool))
                 && matches!(
                     input.decision,
                     ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
                 )
             {
-                return Err(ApiError::new(400, "Le démarrage et la suppression d’un connecteur exigent une décision ponctuelle."));
+                return Err(ApiError::new(400, "Le contrôle de l’écran et la gestion d’un connecteur exigent une décision ponctuelle."));
             }
             if tool == "propose_skill"
                 && !matches!(

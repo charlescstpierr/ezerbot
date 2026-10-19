@@ -355,6 +355,13 @@
       activity.set(request.entry_id, { ...previous, busy: true, error: null });
       changed();
       try {
+        if (action === "forms.decide" && request.kind?.tool?.startsWith("computer_") && detail?.decision === "allow_once") {
+          const session = context.state.screen?.session;
+          // The visible button says “et reprendre”: approving is also the human's
+          // explicit resume after their mouse/keyboard paused the native permit.
+          // Without a session the engine re-checks and fails with its clear reason.
+          if (session) await panels.api("/api/screen/resume", { id: session.id });
+        }
         const response = await panels.api(path, body);
         if (!response.accepted || !response.receipt?.wake) throw new Error("Missing receipt");
         activity.set(request.entry_id, { busy: false, receipt: response.receipt });

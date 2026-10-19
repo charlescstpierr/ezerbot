@@ -95,6 +95,7 @@ pub mod multibot;
 pub mod notifications;
 pub mod routines;
 pub mod routines_background;
+pub mod screen;
 pub mod skills;
 pub mod storage;
 pub mod voice;
@@ -139,7 +140,8 @@ registry!(
     storage,
     notifications,
     local,
-    voice
+    voice,
+    screen
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

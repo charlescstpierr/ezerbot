@@ -226,10 +226,11 @@ a.secondary-button { text-decoration: none; }
 .connection-banner { display: flex; align-items: center; justify-content: center; gap: 15px; background: var(--warning-bg); color: var(--warning-text); padding: 10px 20px; font-size: 11px; line-height: 1.5; }
 .connection-banner button { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 10px; padding: 3px; text-decoration: underline; text-underline-offset: 3px; }
 .connection-banner .icon { width: 13px; height: 13px; }
-.toast { pointer-events: none; position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--canvas); border-radius: 8px; font-size: 12px; padding: 13px 20px; width: max-content; max-width: min(460px, calc(100% - 24px)); overflow-wrap: anywhere; box-shadow: 0 7px 22px #0002; line-height: 1.5; text-align: center; }
+.toast { pointer-events: none; position: fixed; inset: auto auto var(--toast-bottom, 96px) var(--toast-left, 50%); margin: 0; border: 0; transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--canvas); border-radius: 8px; font-size: 12px; padding: 13px 20px; width: max-content; max-width: min(460px, calc(100vw - 24px)); overflow-wrap: anywhere; box-shadow: 0 7px 22px #0002; line-height: 1.5; text-align: center; }
 
 .dialog { border: 1px solid var(--line); border-radius: 12px; padding: 27px; background: var(--pane); color: var(--text); width: min(470px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; box-shadow: 0 20px 80px #00000050; }
 .dialog::backdrop { background: var(--scrim); }
+#link-error-dialog::backdrop { background: rgb(0 0 0 / .35); }
 .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 26px; }
 .dialog h2 { font-size: 22px; font-weight: 550; letter-spacing: -.6px; margin: 0; line-height: 1.35; }
 .dialog-eyebrow { color: var(--subtle); font-size: 9px; letter-spacing: 1.4px; margin: 0 0 8px; }

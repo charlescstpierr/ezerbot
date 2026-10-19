@@ -309,9 +309,26 @@
 
   function notify(message) {
     clearTimeout(toastTimer);
+    const anchor = [...document.querySelectorAll("dialog[open]")].at(-1) || document.querySelector(".composer-dock");
+    const box = anchor.getBoundingClientRect();
+    const footer = anchor.querySelector(".dialog-footer")?.getBoundingClientRect();
+    const bottom = anchor.localName === "dialog"
+      ? footer && footer.top >= box.top && footer.top < box.bottom ? innerHeight - footer.top + 8 : innerHeight - box.bottom + 16
+      : innerHeight - box.top + 8;
+    // Keep the live status inside the active modal (not inert), then enter its
+    // top layer. Older WebKit also renders it here without the popover API.
+    if (ui.toast.isConnected) ui.toast.hidePopover?.();
+    anchor.append(ui.toast);
+    ui.toast.style.setProperty("--toast-left", `${box.left + box.width / 2}px`);
+    ui.toast.style.setProperty("--toast-bottom", `${bottom}px`);
     ui.toast.textContent = message;
     ui.toast.hidden = false;
-    toastTimer = setTimeout(() => { ui.toast.hidden = true; }, 4000);
+    ui.toast.showPopover?.();
+    toastTimer = setTimeout(() => {
+      if (ui.toast.isConnected) ui.toast.hidePopover?.();
+      ui.toast.hidden = true;
+      document.querySelector(".composer-dock").append(ui.toast);
+    }, 4000);
   }
 
   async function copyText(text) {

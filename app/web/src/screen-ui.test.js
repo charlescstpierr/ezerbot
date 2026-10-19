@@ -17,7 +17,7 @@ class Element {
   showPopover() { this.popover = true; }
   hidePopover() { this.popover = false; }
   matches() { return Boolean(this.popover); }
-  get classList() { return { toggle() {} }; }
+  get classList() { return { toggle: (name,enabled) => { const classes=new Set(this.className.split(" ").filter(Boolean)); if(enabled)classes.add(name);else classes.delete(name);this.className=[...classes].join(" "); } }; }
 }
 const all = e => [e,...e.children.flatMap(all)];
 const byText = (e,text) => all(e).find(n => n.tagName === "button" && n.textContent === text);
@@ -77,6 +77,7 @@ test("scoped consent keeps shell input active; outside input pauses; resume and 
   const duration=all(dialog).find(e=>e.name==="screen-duration");duration.value="1";all(dialog).find(e=>e.tagName==="form").onsubmit({preventDefault(){}});await new Promise(r=>setImmediate(r));
   assert.deepEqual(JSON.parse(JSON.stringify(f.calls.at(-1))),["/api/screen/grant",{bot_id:"grokbot",conversation_id:"chat",minutes:1}]);
   assert.match(f.body.textContent,/Ezerbot contrôle l’écran — Échap pour arrêter/);assert.equal(f.registration.wantsPolling(),true);
+  const preview=all(f.panels).find(e=>e.className.includes("screen-preview"));assert.match(preview.className,/screen-preview-active/);
   // Pointer/keyboard events in Ezerbot (approval card, composer, Stop) must not
   // produce a fake external-input request or interrupt an active session.
   for (const name of ["pointerdown","pointermove","keydown","wheel"]) {
@@ -87,4 +88,5 @@ test("scoped consent keeps shell input active; outside input pauses; resume and 
   await byText(dialog,"Simuler une entrée hors d’Ezerbot").onclick();assert.match(dialog.textContent,/En pause — Vous avez la main/);assert.match(f.body.textContent,/Vous avez repris la main/);
   await byText(dialog,"Reprendre le bot").onclick();assert.equal(f.calls.at(-1)[0],"/api/screen/resume");
   for(const fn of f.listeners.keydown)fn({key:"Escape",preventDefault(){}});await new Promise(r=>setImmediate(r));assert.equal(f.calls.at(-1)[0],"/api/screen/revoke");assert.equal(f.registration.wantsPolling(),false);
+  assert.doesNotMatch(preview.className,/screen-preview-active/);
 });

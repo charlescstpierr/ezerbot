@@ -221,6 +221,49 @@ fn screen_consent_approval_takeover_revocation_restart_and_vision() {
                             .starts_with("data:image/png;base64,"))))
         ));
     }
+    // A model can propose several gestures in one batch. The later click has
+    // no human decision while the screenshot's card waits; never infer one.
+    let before_pair = f.shots();
+    f.server.seen.lock().unwrap().responses.push_back(ScriptedResponse::events(&[
+        json!({"type":"response.output_item.done","item":{"id":"fc-pair-shot","type":"function_call","call_id":"pair-shot","name":"computer_screenshot","arguments":"{}"}}),
+        json!({"type":"response.output_item.done","item":{"id":"fc-pair-click","type":"function_call","call_id":"pair","name":"computer_click","arguments":json!({"x":640,"y":400,"button":"left"}).to_string()}}),
+        json!({"type":"response.completed"}),
+    ]));
+    f.post("/api/send",json!({"conversation_id":f.chat,"message_id":"pair","body":"Propose deux gestes factices, chacun avec sa propre carte"}));
+    let first = f.request("pair");
+    assert!(
+        matches!(&first.kind,requests::InputKind::Approval{tool,..} if tool=="computer_screenshot")
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let click = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["messages"].as_array().unwrap())
+        .find(|m| m["payload"]["call"]["call_id"] == "pair")
+        .unwrap();
+    assert_eq!(click["payload"]["approval_status"], Value::Null);
+    assert_eq!(click["payload"]["outcome"], Value::Null);
+    assert_eq!(click["payload"]["run_status"], "awaiting_approval");
+    assert_eq!(f.shots(), before_pair);
+    f.decide(&first, json!("allow_once"));
+    wait("second screen approval", || {
+        f.app.tick(now());
+        requests::list_for_run(&f.db(),&f.run("pair").unwrap().run_id).unwrap().iter().any(|r|r.status==requests::RequestStatus::Pending && matches!(&r.kind,requests::InputKind::Approval{tool,..} if tool=="computer_click"))
+    });
+    let second = requests::list_for_run(&f.db(), &f.run("pair").unwrap().run_id)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.status == requests::RequestStatus::Pending)
+        .unwrap();
+    f.decide(&second, json!("deny"));
+    f.finish("pair");
+    assert_eq!(f.outcome("pair")["status"], "failed");
+    assert_eq!(
+        f.shots(),
+        before_pair + 1,
+        "only the approved screenshot acts"
+    );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
     assert!(state["conversations"]
         .as_array()

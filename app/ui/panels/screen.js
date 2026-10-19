@@ -20,6 +20,7 @@
     if (floating) overlay.setAttribute("popover", "manual");
     else overlay.removeAttribute("popover");
     overlay.hidden = !data.session;
+    preview.classList.toggle("screen-preview-active", Boolean(data.session));
     if (data.session && floating && overlay.showPopover) overlay.showPopover();
   }
   function scheduleExpiry() {

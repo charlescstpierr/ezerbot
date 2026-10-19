@@ -294,6 +294,9 @@ static int EZScreenMain(int argc, const char *argv[]) {
     NSRect screen=NSScreen.mainScreen.frame;
     ezOverlay=[[NSPanel alloc] initWithContentRect:NSMakeRect(NSMidX(screen)-240,NSMaxY(screen)-80,480,44) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
     ezOverlay.level=NSScreenSaverWindowLevel; ezOverlay.hidesOnDeactivate=NO; ezOverlay.ignoresMouseEvents=YES;
+    // Keep the always-visible safety panel out of window-sharing/capture paths.
+    // Never hide it temporarily while the bot is controlling the desktop.
+    ezOverlay.sharingType=NSWindowSharingNone;
     ezOverlay.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorStationary;
     ezOverlay.backgroundColor=[NSColor colorWithCalibratedRed:0.12 green:0.13 blue:0.16 alpha:0.98];
     ezOverlayLabel=[NSTextField labelWithString:@"Ezerbot contrôle l’écran — Échap pour arrêter"];

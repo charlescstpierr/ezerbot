@@ -208,6 +208,30 @@ fn expiry_changes_poll_token_and_cancels_pending_screen_approvals() {
 }
 
 #[test]
+fn idle_reconciliation_does_not_take_a_writer_lock() {
+    let _mac = TEST_MAC.lock().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-screen-idle-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("workspace.sqlite");
+    let app = App::open(&path).unwrap();
+    app.connection.busy_timeout(Duration::ZERO).unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let before = app.connection.total_changes();
+    // This must succeed while another connection owns the writer lock. A
+    // zero-row DELETE would fail, even though screen control was never enabled.
+    reconcile(&app.connection, &path).unwrap();
+    assert_eq!(app.connection.total_changes(), before);
+    writer.execute_batch("ROLLBACK").unwrap();
+    startup(&path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn approving_inside_the_shell_does_not_invalidate_an_active_permit_but_outside_input_pauses() {
     let _mac = TEST_MAC.lock().unwrap();
     let root = std::env::temp_dir().join(format!(

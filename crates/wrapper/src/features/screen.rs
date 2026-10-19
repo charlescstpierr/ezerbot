@@ -123,7 +123,10 @@ pub fn revision(path: &Path) -> String {
 pub fn reconcile(conn: &rusqlite::Connection, path: &Path) -> Result<(), ApiError> {
     // A deleted thread is the person's explicit decision to discard its local
     // screen journal. Do not retain private desktop pixels indefinitely.
-    conn.execute("DELETE FROM wrapper_screen_shots WHERE conversation_id IN (SELECT id FROM wrapper_conversations WHERE deleted=1)", [])?;
+    let stale_shots: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_screen_shots s JOIN wrapper_conversations c ON c.id=s.conversation_id WHERE c.deleted=1)", [], |r|r.get(0))?;
+    if stale_shots {
+        conn.execute("DELETE FROM wrapper_screen_shots WHERE conversation_id IN (SELECT id FROM wrapper_conversations WHERE deleted=1)", [])?;
+    }
     let active = current(path).filter(|l| l.live());
     let mut statement = conn.prepare("SELECT r.id,c.display_json FROM forms_requests r JOIN wrapper_forms_calls c ON c.request_id=r.id WHERE r.status='pending' AND json_extract(r.kind_json,'$.kind')='approval' AND json_extract(r.kind_json,'$.tool') IN ('computer_screenshot','computer_move','computer_click','computer_scroll','computer_type','computer_key')")?;
     let stale = statement

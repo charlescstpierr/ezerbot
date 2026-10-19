@@ -66,6 +66,18 @@ test("deleting a bot while Settings stays open refreshes private facts without A
   p.state(true); await flush(); assert.equal(p.readCount(), 2, "unchanged polls do not repeatedly scan storage");
 });
 
+test("deleting a thread while Settings stays open refreshes screen usage without Actualiser", async () => {
+  const data=empty();data.usage.screen=43700;data.usage.screen_count=2;
+  const p=mount({initial:data});await flush();
+  const state=(conversations)=>p.registration.onState({bots:[{id:"bot",name:"Archiviste",deleted:false}],conversations});
+  state([{id:"thread",deleted:false}]);await flush();
+  assert.match(p.root.textContent,/2 captures/);
+  data.usage.screen=0;data.usage.screen_count=0;
+  state([]);await flush();
+  assert.match(p.root.textContent,/0 capture/);
+  const reads=p.readCount();state([]);await flush();
+  assert.equal(p.readCount(),reads,"unchanged conversation lists do not repeatedly scan storage");
+});
 test("an old storage response cannot overwrite a bot-deletion refresh queued in flight", async () => {
   let resolveOld;
   const p = mount({ read: (n, data) => n === 1 ? new Promise((resolve) => { resolveOld = resolve; }) : structuredClone(data) });

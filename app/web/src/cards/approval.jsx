@@ -32,7 +32,8 @@ export function Card({ message, busy, onAction }) {
   const review = request.review;
   const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
     || (review?.answer?.decision === "deny" && input.status === "denied"));
-  if (screen && !pending) return <article className="gb-message gb-engine-card screen-approval-receipt" data-message-id={message.id} data-card-kind="approval"><strong>{input.status === "resolved" ? "Autorisée par vous" : input.status === "denied" ? "Refusée par vous" : input.status === "expired" ? "Délai d’approbation écoulé — action non exécutée" : "Session arrêtée — action non exécutée"}</strong> · {screenTools[action.tool]}</article>;
+  // The corresponding ScreenCard carries the durable decision in its footer.
+  if (screen && !pending) return null;
   if (automatic) return (
     <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
       <p className="text-sm" role="status"><strong className={input.status === "denied" ? "gb-status-alert" : undefined}>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>

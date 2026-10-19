@@ -13,7 +13,7 @@
   const counted = (n, singular, many) => `${n} ${plural(n, singular, many)}`;
   let section, usage, facts, factsTitle, factsList, factsDescription, factNotice;
   let notice, confirmation, clean, refresh, dialog, activeConfirmation;
-  let pending = false, loading = 0, loadRevision = 0, needsReload = false, botsSignature;
+  let pending = false, loading = 0, loadRevision = 0, needsReload = false, inventorySignature;
   function button(text, cls, action) {
     const el = node("button", cls, text);
     el.type = "button";
@@ -140,8 +140,11 @@
     id: "storage",
     onState(state) {
       if (!state.bots) return;
-      const signature = JSON.stringify(state.bots.map((b) => [b.id, Boolean(b.deleted), b.name]).sort((a, b) => a[0].localeCompare(b[0])));
-      if (signature !== botsSignature) { botsSignature = signature; needsReload = true; }
+      const signature = JSON.stringify({
+        bots: state.bots.map((b) => [b.id, Boolean(b.deleted), b.name]).sort((a, b) => a[0].localeCompare(b[0])),
+        conversations: (state.conversations || []).map((c) => [c.id, Boolean(c.deleted)]).sort((a, b) => a[0].localeCompare(b[0])),
+      });
+      if (signature !== inventorySignature) { inventorySignature = signature; needsReload = true; }
       void reloadIfNeeded();
     },
     settingsSection(container) {

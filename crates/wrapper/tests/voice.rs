@@ -77,20 +77,22 @@ fn wav_validation_refuses_empty_wrong_format_and_excessive_duration() {
     invalid[22] = 2;
     assert!(voice::wav_duration(&invalid).is_err());
     let mut long = WAV[..44].to_vec();
-    long.resize(44 + 61 * 32000, 0);
+    long.resize(44 + 62 * 32000, 0);
     let len = long.len();
     long[4..8].copy_from_slice(&((len - 8) as u32).to_le_bytes());
     long[40..44].copy_from_slice(&((len - 44) as u32).to_le_bytes());
     assert!(voice::wav_duration(&long).is_err());
     let mut just_over = WAV[..44].to_vec();
-    just_over.resize(44 + 60 * 32000 + 2, 0);
+    just_over.resize(44 + 60 * 32000 + 1600, 0);
     let len = just_over.len();
     just_over[4..8].copy_from_slice(&((len - 8) as u32).to_le_bytes());
     just_over[40..44].copy_from_slice(&((len - 44) as u32).to_le_bytes());
-    assert!(voice::wav_duration(&just_over)
-        .unwrap_err()
-        .to_string()
-        .contains("60 secondes"));
+    assert_eq!(voice::wav_duration(&just_over).unwrap(), 60_000);
+    // The same tolerance applies to a real upload, not only the WAV parser.
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    let memo = f.post("/api/voice/memos", json!({"conversation_id":conversation,"upload_id":"cap-plus-buffer","data":STANDARD.encode(&just_over),"transcript":"La fin du mémo.","language":"fr"}));
+    assert_eq!(memo["duration_ms"], 60_000);
 }
 
 #[test]
@@ -170,6 +172,41 @@ fn draft_persists_remove_requires_ownership_and_sent_memo_is_immutable() {
             b""
         )
         .is_err());
+}
+
+#[test]
+fn deleting_conversation_purges_only_its_unsent_memos_across_restart() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    let other = f.conversation();
+    let sent = f.upload(&conversation, "sent");
+    f.post("/api/send", json!({"conversation_id":conversation,"message_id":"sent-voice","body":"Mémo relu.","attachments":[sent["id"]]}));
+    let draft = f.upload(&conversation, "discard");
+    let kept = f.upload(&other, "keep");
+    f.post("/api/conversations/delete", json!({"id":conversation}));
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["voice"]["drafts"].as_array().unwrap().len(), 1);
+    assert_eq!(state["voice"]["drafts"][0]["id"], kept["id"]);
+    assert_eq!(
+        f.app
+            .api_response(
+                "GET",
+                &format!("/api/voice/audio/{}", draft["id"].as_str().unwrap()),
+                b""
+            )
+            .unwrap_err()
+            .status,
+        404
+    );
+    assert!(f
+        .app
+        .api_response(
+            "GET",
+            &format!("/api/voice/audio/{}", sent["id"].as_str().unwrap()),
+            b""
+        )
+        .is_ok());
 }
 
 #[test]

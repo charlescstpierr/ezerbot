@@ -162,6 +162,7 @@
       return true;
     },
     draft: () => ui.input?.value || "",
+    draftDocument: () => ui.input?.document,
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
     get state() { return state; },
     get connected() { return connected; },
@@ -413,9 +414,9 @@
     if (focus) ui.input.focus();
   }
 
-  // Images staged before the first message belong to the current bot/thread.
+  // All staged attachments, including voice memos, belong to this bot/thread.
   function stagedOnEmptyThread() {
-    return Boolean(!currentConversation()?.messages.length && $("composer-attachments").querySelector(".attachment-chip"));
+    return Boolean(!currentConversation()?.messages.length && $("composer-attachments").querySelector(".attachment-chip, .voice-memo-chip"));
   }
 
   function leaveEmptyThread() {
@@ -503,7 +504,7 @@
       chip.addEventListener("click", () => {
         if (busy) return;
         if (stagedOnEmptyThread()) {
-          notify(`Retirez l’image jointe pour changer de bot, ou envoyez-la à ${currentBot()?.name || "ce bot"}.`);
+          notify(`Retirez les pièces jointes pour changer de bot, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`);
           return;
         }
         chosenBotId = bot.id;
@@ -610,7 +611,7 @@
       $("bot-dialog").close();
       render();
       notify(existing ? "Bot enregistré." : keepStagedBot
-        ? `${bot.name} est prêt. Retirez l’image jointe pour le choisir, ou envoyez-la à ${currentBot()?.name || "ce bot"}.`
+        ? `${bot.name} est prêt. Retirez les pièces jointes pour le choisir, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`
         : `${bot.name} est prêt.`);
     } catch (error) { notify(error.message); }
     finally { $("bot-save").disabled = false; }

@@ -131,7 +131,7 @@ function MessageAttachments({ message, align = "end" }) {
             if (attachment.kind === "voice") return <div key={`${id}-${index}`} className="gb-voice-memo">
               <strong>Mémo vocal · {Math.ceil((attachment.duration_ms || 0) / 1000)} s</strong>
               <audio controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" />
-              <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>
+              {attachment.transcript?.trim() && !message.body?.includes(attachment.transcript.trim()) && <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>}
             </div>;
             if (attachment.kind === "document") return <div key={`${id}-${index}`} className="gb-document-chip">
               <svg width="22" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{documentIconPaths.map((d) => <path key={d} d={d} />)}</svg>

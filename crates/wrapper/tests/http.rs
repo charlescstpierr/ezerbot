@@ -186,6 +186,100 @@ fn accepted_by_host(status: u16) -> bool {
 }
 
 #[test]
+fn voice_audio_supports_webkit_byte_ranges() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let host = Host::new();
+    let post = |path: &str, body: Value| -> Value {
+        ureq::post(&format!("{}{path}", host.url))
+            .set("X-Grokbot-Request", "local")
+            .send_json(body)
+            .unwrap()
+            .into_json()
+            .unwrap()
+    };
+    let conversation = post("/api/conversations", json!({}));
+    let wav = include_bytes!("fixtures/voice.wav");
+    let memo = post(
+        "/api/voice/memos",
+        json!({"conversation_id":conversation["conversation"]["id"],"upload_id":"range-test","data":STANDARD.encode(wav),"transcript":"Test de lecture locale.","language":"fr"}),
+    );
+    let url = format!(
+        "{}/api/voice/audio/{}",
+        host.url,
+        memo["id"].as_str().unwrap()
+    );
+    let full = ureq::get(&url).call().unwrap();
+    assert_eq!(full.status(), 200);
+    assert_eq!(full.header("Accept-Ranges"), Some("bytes"));
+    assert!(full.header("Content-Range").is_none());
+    let mut bytes = Vec::new();
+    full.into_reader().read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, wav);
+    for (range, start, end) in [
+        ("bytes=0-1", 0, 1),
+        ("bytes=100-199", 100, 199),
+        ("bytes=32000-", 32000, wav.len() - 1),
+        ("bytes=-12", wav.len() - 12, wav.len() - 1),
+        ("bytes=32000-999999", 32000, wav.len() - 1),
+        ("bytes=-999999", 0, wav.len() - 1),
+    ] {
+        let response = ureq::get(&url).set("Range", range).call().unwrap();
+        assert_eq!(response.status(), 206, "{range}");
+        assert_eq!(response.header("Accept-Ranges"), Some("bytes"));
+        assert_eq!(
+            response.header("Content-Range"),
+            Some(format!("bytes {start}-{end}/{}", wav.len()).as_str())
+        );
+        assert_eq!(
+            response
+                .header("Content-Length")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            end - start + 1
+        );
+        let mut bytes = Vec::new();
+        response.into_reader().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, wav[start..=end]);
+    }
+    for range in [
+        "bytes=999999-",
+        "bytes=20-10",
+        "bytes=-0",
+        "bytes=0-1,3-4",
+        "bytes=no",
+        "bytes=-",
+        "bytes=+1-2",
+    ] {
+        let response = match ureq::get(&url).set("Range", range).call() {
+            Err(ureq::Error::Status(416, response)) => response,
+            other => panic!("{range}: {other:?}"),
+        };
+        assert_eq!(
+            response.header("Content-Range"),
+            Some(format!("bytes */{}", wav.len()).as_str())
+        );
+    }
+    // A Range header does not change JSON or error responses.
+    assert_eq!(
+        ureq::get(&format!("{}/api/state", host.url))
+            .set("Range", "bytes=0-1")
+            .call()
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        status(
+            ureq::get(&format!("{}/api/voice/audio/missing", host.url))
+                .set("Range", "bytes=0-1")
+                .call()
+        ),
+        404
+    );
+}
+
+#[test]
 fn binary_post_only_allowed_on_attachment_route() {
     let host = Host::new();
     let image = b"\x89PNG\r\n\x1a\n\0\xff";

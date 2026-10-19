@@ -21,17 +21,29 @@ const byClass = (element, className) => descendants(element).find((item) => item
 const allByClass = (element, className) => descendants(element).filter((item) => item.className === className);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-function panel(response) {
+function panel(response, welcome = false) {
   const root = new Element("div");
   const document = { createElement: (tag) => new Element(tag), createElementNS: (_ns, tag) => new Element(tag), getElementById: () => root };
   const ctx = { conversation: { id: "chat", messages: [] }, bot: { id: "bot" }, state: { conversations: [{ id: "chat", bot_id: "bot", messages: [] }], preferences: {}, provider: {}, attachments: { document_character_limit: 200000, document_payload_limit: 300000 } } };
   let registration;
   const requests = [], notifications = [];
   let uploadNonce = 0;
-  const panels = { register(value) { registration = value; }, composerChanged() {}, draft: () => "", notify: (text) => notifications.push(text) };
+  const storage = new Map();
+  const richDocument = {type:"doc",content:[{type:"paragraph",content:[{type:"botMention",attrs:{id:"grokbot",label:"Ezerbot"}},{type:"text",text:"Mon brouillon"}]}]};
+  const panels = { register(value) { registration = value; }, composerChanged() {}, draft: () => welcome ? "Mon brouillon" : "", draftDocument: () => richDocument, notify: (text) => notifications.push(text),
+    async api() {return {conversation:{id:"created-chat"}};}, async refresh() {},
+    openConversation(id) {
+      storage.set("grokbot.draft.new", "Mon brouillon");
+      storage.set("grokbot.draft.new.document", JSON.stringify(richDocument));
+      assert.equal(storage.get(`grokbot.draft.${id}.document`), JSON.stringify(richDocument));
+      ctx.conversation={id,messages:[]}; registration.onState(ctx.state,ctx); return true;
+    },
+  };
+  if (welcome) ctx.conversation = null;
   runInNewContext(readFileSync(new URL("../../ui/panels/attachments.js", import.meta.url), "utf8"), {
     window: { GrokbotPanels: panels, GrokbotChat: { formatAttachmentSize, documentBudgetMessage, createDocumentIcon: () => createDocumentIcon(document) }, addEventListener() {} },
     document, File, Uint8Array, btoa, AbortController, TypeError, SyntaxError, DOMException,
+    localStorage: {setItem(key,value){storage.set(key,String(value));},removeItem(key){storage.delete(key);}},
     crypto: { randomUUID: () => `upload-${++uploadNonce}` },
     setTimeout: () => 1, clearTimeout() {}, MutationObserver: class { observe() {} },
     URL: { createObjectURL: () => "blob:test", revokeObjectURL() {} },
@@ -47,8 +59,17 @@ function panel(response) {
     },
   });
   registration.composer.mount(root, ctx);
-  return { root, ctx, requests, notifications, registration, add: (files) => registration.composer.onFiles(files, null, ctx), blocked: () => registration.composer.blocked(ctx) };
+  return { root, ctx, requests, notifications, registration, storage, add: (files) => registration.composer.onFiles(files, null, ctx), blocked: () => registration.composer.blocked(ctx) };
 }
+
+test("welcome attachment handoff preserves rich text and clears both home draft keys", async () => {
+  const p = panel(undefined, true);
+  p.add([new File(["texte"], "notes.txt")]); await flush();
+  assert.equal(p.ctx.conversation.id,"created-chat");
+  assert.equal(p.requests.length,1);
+  assert.ok(p.storage.has("grokbot.draft.created-chat.document"));
+  assert.equal([...p.storage.keys()].some(key=>key.startsWith("grokbot.draft.new")),false);
+});
 
 test("shared attachment sizes use French o / Ko / Mo formatting", () => {
   for (const [bytes, expected] of [[0, "0 o"], [54, "54 o"], [502, "502 o"], [1024, "1 Ko"], [1536, "1,5 Ko"], [34918, "34,1 Ko"], [1024 * 1024, "1 Mo"], [21 * 1024 * 1024, "21 Mo"]]) assert.equal(formatAttachmentSize(bytes), expected);

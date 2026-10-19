@@ -7,15 +7,25 @@
 .voice-status-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .voice-status { flex: 1 1 180px; color: var(--muted); line-height: 1.5; }
 .voice-time { font-variant-numeric: tabular-nums; color: var(--muted); }
-.voice-level { width: 56px; height: 12px; accent-color: var(--accent); }
+.voice-level { width: 56px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.voice-level span { display: block; height: 100%; width: calc(var(--level, 0) * 100%); background: var(--accent); transition: width .1s linear; }
+.voice-region[data-tone="danger"] .voice-status { color: var(--danger-text); }
+.voice-region[data-tone="warning"] { background: var(--warning-bg); border-color: var(--warning-line); }
+.voice-region[data-tone="warning"] .voice-status { color: var(--warning-text); }
 .voice-memo-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .voice-memo-chip { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 10px 26px 5px 0; max-width: 100%; min-width: 0; }
 .voice-memo-chip strong { font-size: 11px; color: var(--text); }
 .voice-memo-chip audio { height: 32px; width: 240px; max-width: 100%; }
 .voice-memo-chip .attachment-remove { position: absolute; right: 0; top: 8px; }
-.voice-region .attachment-retry { font-size: 11px; }
+.voice-region .attachment-retry { font-size: 11px; align-self: center; }
+.voice-status-row[hidden] { display: none; }
 @media (max-width: 900px) {
   .voice-mode { font-size: 10px; }
   .voice-controls { gap: 4px; }
   .voice-region { margin-left: 10px; margin-right: 10px; }
+}
+@media (max-height: 640px) {
+  .voice-region { padding: 6px 10px; margin-bottom: 6px; }
+  .voice-memo-chip { flex-direction: row; align-items: center; padding: 4px 26px 4px 0; }
+  .voice-memo-chip .attachment-remove { top: 50%; transform: translateY(-50%); }
 }

@@ -128,6 +128,31 @@ fn provider(db: &std::path::Path) -> Provider {
     Provider::new(db)
 }
 
+/// A single byte range is enough for WebKit's media loader. Reject malformed,
+/// multiple and unsatisfiable ranges rather than silently returning the full WAV.
+fn audio_range(value: &str, length: usize) -> Option<(usize, usize)> {
+    let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    if length == 0 {
+        return None;
+    }
+    let decimal = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<usize>().ok())
+            .flatten()
+    };
+    if start.is_empty() {
+        let suffix = decimal(end)?;
+        return (suffix > 0).then(|| (length.saturating_sub(suffix), length - 1));
+    }
+    let start = decimal(start)?;
+    let end = if end.is_empty() {
+        length - 1
+    } else {
+        decimal(end)?.min(length - 1)
+    };
+    (start < length && start <= end).then_some((start, end))
+}
+
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     grokbot_forms::vault::enable_os_vault(signature::stable_identity());
     let mut app = App::open_with(&options.db, provider(&options.db))?;
@@ -153,7 +178,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             continue;
         };
         let is_api = request.url().starts_with("/api/");
-        let (status, body, content_type) = match payload(&mut request, port, &mut app) {
+        let (mut status, mut body, content_type) = match payload(&mut request, port, &mut app) {
             Ok(response) => {
                 let (body, content_type) = response.into_parts();
                 if header_safe(&content_type) {
@@ -175,7 +200,26 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 "application/json; charset=utf-8".into(),
             ),
         };
+        let mut media_headers = Vec::new();
+        if status == 200 && content_type.starts_with("audio/") {
+            media_headers.push(("Accept-Ranges", "bytes".to_owned()));
+            if let Some(range) = request.headers().iter().find(|h| h.field.equiv("Range")) {
+                let length = body.len();
+                if let Some((start, end)) = audio_range(range.value.as_str(), length) {
+                    body = body[start..=end].to_vec();
+                    status = 206;
+                    media_headers.push(("Content-Range", format!("bytes {start}-{end}/{length}")));
+                } else {
+                    body.clear();
+                    status = 416;
+                    media_headers.push(("Content-Range", format!("bytes */{length}")));
+                }
+            }
+        }
         let mut response = Response::from_data(body).with_status_code(StatusCode(status));
+        for (name, value) in media_headers {
+            response.add_header(Header::from_bytes(name, value).expect("media response header"));
+        }
         for (name, value) in [
             ("Content-Type", content_type.as_str()),
             ("Cache-Control", if is_api { "no-store" } else { "no-cache" }),

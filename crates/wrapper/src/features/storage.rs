@@ -356,6 +356,10 @@ pub(super) fn discard_conversation_draft(conn: &Connection, draft: &str) -> Resu
         "DELETE FROM wrapper_storage_drafts WHERE draft_id=?1",
         [draft],
     )?;
+    conn.execute(
+        "DELETE FROM wrapper_voice_memos WHERE conversation_id=?1 AND message_id IS NULL",
+        [draft],
+    )?;
     Ok(())
 }
 

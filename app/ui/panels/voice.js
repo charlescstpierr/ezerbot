@@ -14,13 +14,14 @@
   };
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;
-  let context, control, memoMode, mic, region, statusText, meter, timer, cancel, retry, settings, list;
+  let context, control, memoMode, mic, region, row, statusText, meter, timer, cancel, retry, settings, list;
   let session = null, phase = "idle", revision = 0, timeout, processing = false, pendingMemo = null, memoItems = [];
   const consumed = new Set();
   // Keep successful local uploads across an older in-flight /api/state reply.
   // Send/remove receipts, not a stale polling snapshot, relinquish ownership.
   const localMemos = new Map();
-  const live = () => ["preparing", "authorizing", "recording", "transcribing", "saving"].includes(phase);
+  const live = () => ["authorizing", "recording", "transcribing", "saving"].includes(phase);
+  const tones = { mic_denied: "danger", speech_denied: "danger", no_microphone: "danger", failed: "danger", upload_failed: "danger", offline_unavailable: "warning", limited: "warning" };
   const language = () => document.documentElement.lang || "fr";
   async function bridge(command, extra = {}) {
     const body = { command, token: session?.token || "", language: language(), ...extra };
@@ -42,13 +43,15 @@
     mic.disabled = (live() && !recording) || context?.conversation?.kind === "task";
     memoMode.disabled = live();
     region.hidden = phase === "idle" && !memoItems.length;
+    if (tones[phase]) region.dataset.tone = tones[phase]; else delete region.dataset.tone;
+    row.hidden = phase === "idle";
     cancel.hidden = phase === "idle";
-    cancel.textContent = ["ready", "limited"].includes(phase) ? "Fermer" : "Annuler";
+    cancel.textContent = live() ? "Annuler" : "Fermer";
     retry.hidden = !["failed", "upload_failed"].includes(phase);
     settings.hidden = !["mic_denied", "speech_denied", "offline_unavailable"].includes(phase);
     meter.hidden = !recording;
     timer.hidden = !recording;
-    statusText.textContent = errors[phase] || ({preparing:"Préparation du mémo…",authorizing:"Autorisation du microphone…",recording: "Écoute en cours · Échap pour arrêter · 60 s maximum", transcribing:"Transcription sur ce Mac…",saving:"Enregistrement du mémo…",ready:"Transcription ajoutée au brouillon. Relisez-la avant d’envoyer.",limited:"Limite de 60 secondes atteinte. L’enregistrement est arrêté ; relisez la transcription avant d’envoyer."}[phase] || "");
+    statusText.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording: "Écoute en cours · Échap pour arrêter", transcribing:"Transcription sur ce Mac…",saving:"Enregistrement du mémo…",ready:"Transcription ajoutée au brouillon. Relisez-la avant d’envoyer.",limited:"Limite de 60 secondes atteinte. L’enregistrement est arrêté ; relisez la transcription avant d’envoyer."}[phase] || "");
     const existing = new Map([...list.children].map((el) => [el.dataset.id, el]));
     for (const item of memoItems) {
       if (existing.has(item.id)) { existing.delete(item.id); continue; }
@@ -77,20 +80,22 @@
     await panels.refresh();
     if (key(context) !== before) throw new Error("La conversation a changé. Recommencez la dictée ici.");
     const draft = panels.draft();
-    if (draft) localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
+    if (draft) {
+      localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
+      localStorage.setItem(`grokbot.draft.${conversation.id}.document`, JSON.stringify(panels.draftDocument()));
+    }
+    // The memo session follows its own new thread instead of being cancelled by it.
+    if (session) session.key = conversation.id;
     if (!panels.openConversation(conversation.id)) throw new Error("Ouvrez la conversation créée pour joindre le mémo.");
-    try { localStorage.removeItem("grokbot.draft.new"); } catch { /* Draft is already handed off. */ }
+    try {
+      localStorage.removeItem("grokbot.draft.new");
+      localStorage.removeItem("grokbot.draft.new.document");
+    } catch { /* Draft is already handed off. */ }
   }
   async function start() {
     if (live()) return;
-    // Release the preceding dictation before a memo creates/selects its thread;
-    // otherwise that legitimate navigation cancels the new preparation.
     reset();
-    const preparingRevision = revision;
-    phase = "preparing"; changed();
     try {
-      if (memoMode.checked) await ensureConversation();
-      if (preparingRevision !== revision) return;
       session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked };
       phase = "authorizing"; changed();
       const rev = revision;
@@ -101,6 +106,11 @@
   async function saveMemo(result, rev) {
     phase = "saving"; pendingMemo = result; changed();
     try {
+      // A thread is created only for a memo ready to keep, never for a refusal,
+      // a cancellation or a failed transcription.
+      await ensureConversation();
+      if (rev !== revision) return;
+      result.conversation_id = context.conversation.id;
       const memo = await panels.api("/api/voice/memos", { conversation_id: context.conversation.id, upload_id: result.token, data: result.data, transcript: result.transcript, language: result.language || language() });
       if (rev !== revision) {
         await panels.api("/api/voice/remove", {id:memo.id,conversation_id:result.conversation_id}).catch(() => {});
@@ -110,12 +120,13 @@
       localMemos.set(memo.id, memo);
       if (!memoItems.some((m) => m.id === memo.id)) memoItems.push(memo);
       pendingMemo = null;
-      finish(result);
+      finish(result, true);
     } catch (error) { if (rev === revision) { phase = "upload_failed"; panels.notify(error.message); changed(); } }
   }
-  function finish(result) {
+  function finish(result, memo = false) {
     panels.appendDraft(result.transcript);
-    phase = result.too_long ? "limited" : "ready";
+    // A kept memo is visible as its chip; only the duration cap still needs a note.
+    phase = result.too_long ? "limited" : memo ? "idle" : "ready";
     bridge("cancel").catch(() => {}); // Wipe temporary WAV and recognition task.
     changed();
   }
@@ -124,11 +135,12 @@
     if (result.token && result.token !== session.token) return;
     phase = result.status;
     timer.textContent = `${Math.floor((result.elapsed_ms || 0) / 60000)}:${String(Math.floor((result.elapsed_ms || 0) / 1000) % 60).padStart(2,"0")} / 1:00`;
-    meter.value = Math.max(0, Math.min(1, result.level || 0));
+    const level = Math.max(0, Math.min(1, result.level || 0));
+    meter.style.setProperty("--level", String(level)); meter.setAttribute("aria-valuenow", level.toFixed(2));
     if (phase === "ready" && !processing) {
       processing = true;
       if (!result.transcript?.trim()) { phase = "failed"; processing = false; changed(); return; }
-      if (session.memo) { result.conversation_id = context.conversation.id; await saveMemo(result, rev); }
+      if (session.memo) await saveMemo(result, rev);
       else finish(result);
       return;
     }
@@ -163,8 +175,9 @@
         mic.onclick = () => phase === "recording" ? stop() : start();
         control.append(label, mic); document.getElementById("send-button").before(control);
         region = node("section", "voice-region"); region.setAttribute("aria-label", "Dictée et mémos vocaux");
-        const row = node("div", "voice-status-row"); statusText = node("span", "voice-status"); statusText.setAttribute("role", "status");
-        meter = node("meter", "voice-level"); meter.min = 0; meter.max = 1; meter.setAttribute("aria-label", "Niveau du microphone");
+        row = node("div", "voice-status-row"); statusText = node("span", "voice-status"); statusText.setAttribute("role", "status");
+        // Styled bar, not <meter>: the native gauge ignores the accent color.
+        meter = node("div", "voice-level"); meter.setAttribute("role", "meter"); meter.setAttribute("aria-valuemin", "0"); meter.setAttribute("aria-valuemax", "1"); meter.setAttribute("aria-label", "Niveau du microphone"); meter.append(node("span"));
         timer = node("span", "voice-time"); timer.setAttribute("aria-label", "Durée de l’enregistrement");
         cancel = node("button", "attachment-retry", "Annuler"); cancel.type = "button"; cancel.onclick = () => { reset(); changed(); };
         retry = node("button", "attachment-retry", "Réessayer"); retry.type = "button"; retry.onclick = async () => {
@@ -180,7 +193,7 @@
         window.addEventListener("beforeunload", reset);
         render();
       },
-      blocked: () => live() || ["failed", "upload_failed"].includes(phase),
+      blocked: () => live(),
       discard() { reset(); memoItems = []; render(); },
       onSent({extras}) { for (const id of extras.attachments || []) { consumed.add(id); localMemos.delete(id); } memoItems = memoItems.filter((m) => !consumed.has(m.id)); if (!live() && !panels.draft().trim()) phase = "idle"; render(); },
     },

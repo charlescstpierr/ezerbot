@@ -20,7 +20,10 @@ empty_hooks!(
     link_attachments
 );
 pub const MAX_SECONDS: u32 = 60;
-pub const MAX_WAV_BYTES: usize = 16_000 * 2 * MAX_SECONDS as usize + 4096;
+// AVAudioRecorder stops at 60s; allow one final CoreAudio buffer plus its
+// padded WAV header. The displayed duration remains capped at 60s.
+const MAX_CAPTURE_SECONDS: u32 = MAX_SECONDS + 1;
+pub const MAX_WAV_BYTES: usize = 16_000 * 2 * MAX_CAPTURE_SECONDS as usize + 4096;
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch(
@@ -100,13 +103,13 @@ pub fn wav_duration(bytes: &[u8]) -> Result<u32, ApiError> {
     if cursor != bytes.len() || format.is_none() {
         return Err(invalid());
     }
-    if len > MAX_SECONDS as usize * 32_000 {
+    if len > MAX_CAPTURE_SECONDS as usize * 32_000 {
         return Err(ApiError::new(
             400,
             "Enregistrement trop long : la limite est de 60 secondes.",
         ));
     }
-    Ok((len as u32 * 1000) / 32_000)
+    Ok(((len as u32 * 1000) / 32_000).min(MAX_SECONDS * 1000))
 }
 
 fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {

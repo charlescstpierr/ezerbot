@@ -341,7 +341,7 @@ impl App {
                 notice: None,
                 proposals: Vec::new(),
                 kind: "message".into(),
-                payload: json!({"mentions":super::multibot::mentions(&self.connection, id, record.message_id.as_str())}),
+                payload: json!({"mentions":super::multibot::mentions(&self.connection, id, record.message_id.as_str()), "demonstration_id":super::demonstrations::message_source(&ctx, record.message_id.as_str())}),
                 attachments: super::attachments::for_message(&ctx, id, record.message_id.as_str()),
             }];
             if matches!(

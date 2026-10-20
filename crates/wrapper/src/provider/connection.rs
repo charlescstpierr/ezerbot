@@ -108,6 +108,27 @@ impl Provider {
         Ok(())
     }
 
+    /// Stable account binding without storing tokens in demonstration metadata.
+    pub(crate) fn demonstration_identity(&self) -> String {
+        let session = self.session();
+        let _guard = lock(&session.inner.credentials);
+        let c = session.read().unwrap_or_default();
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&json!([
+                    session.inner.codex,
+                    session.inner.local_revoked.load(Ordering::SeqCst),
+                    c.subject,
+                    c.account_id,
+                    c.email,
+                    c.client_id,
+                ]))
+                .unwrap_or_default()
+            )
+        )
+    }
+
     pub fn connected(&self) -> bool {
         self.session().connected()
     }

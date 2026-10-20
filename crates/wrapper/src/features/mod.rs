@@ -85,6 +85,7 @@ macro_rules! empty_hooks {
 pub mod attachments;
 pub mod conversations;
 pub mod delegation;
+pub mod demonstrations;
 pub mod engine;
 pub mod forms;
 pub mod generated;
@@ -146,7 +147,8 @@ registry!(
     local,
     voice,
     meetings,
-    screen
+    screen,
+    demonstrations
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

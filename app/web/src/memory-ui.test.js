@@ -24,17 +24,17 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 async function fixture() {
   const initial = { fact_id: "fact-one", bot_id: "bot", text: "Je préfère le thé vert.", scope: "private", learned_at: 1, provenance: { source: "automatic" } };
-  let current = initial, registration, refreshes = 0, refreshFailure = false;
+  let current = initial, registration, refreshes = 0, refreshFailure = false, memoryData = {};
   const requests = [], root = new Element("div");
   const state = { bots: [{ id: "bot", name: "Ezerbot" }], provider: { connected: true, models_ready: true }, memory_auto: { available: true, revision: 1 }, conversations: [{ messages: [{ kind: "memory_auto", payload: { ...initial, active: true } }] }] };
   const panels = {
     state, register(value) { registration = value; }, notify() {},
     async api(path, body) {
       requests.push(path);
-      if (path === "/api/memory") return { facts: current ? [current] : [] };
+      if (path === "/api/memory") return { facts: current ? [current] : [], ...memoryData };
       if (path === "/api/memory/forget") { current = null; return { forgotten: [body.fact_id] }; }
       if (path === "/api/memory/correct") { current = { ...current, fact_id: "fact-two", text: body.text }; return { fact: current }; }
-      if (path === "/api/memory/promote") { current.scope = "team"; return { created: [current.fact_id], already_in_team: [], kept_private_count: 0 }; }
+      if (path === "/api/memory/promote") { current.scope = "team"; return { created: [current.fact_id], already_in_team: [], kept_private_count: 0, shared_count: 1 }; }
       if (path === "/api/memory/automatic/undo") throw new Error("Ce fait a changé.");
       throw new Error(path);
     },
@@ -53,7 +53,7 @@ async function fixture() {
   const cleanup = registration.botSection(state.bots[0], root);
   await flush();
   refreshes = 0; // Initial revision reconciliation is not an action refresh.
-  return { root, state, panels, registration, requests, cleanup, failRefresh: () => { refreshFailure = true; }, setCurrent: (fact) => { current = fact; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
+  return { root, state, panels, registration, requests, cleanup, failRefresh: () => { refreshFailure = true; }, setCurrent: (fact) => { current = fact; }, setMemoryData: (data) => { memoryData = data; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
 }
 
 test("forgetting through the real panel refreshes the thread into an inactive, text-free receipt", async () => {
@@ -97,6 +97,45 @@ test("sharing refreshes the thread and a rejected card action also reconciles it
     await assert.rejects(f.registration.onCardAction(stale, "undo"), /Ce fait a changé/);
     assert.equal(f.refreshes(), 2);
     assert.equal(f.card().payload.active, false);
+  } finally { f.cleanup(); }
+});
+
+test("panel searches accent-insensitively, filters scope/source and warns at saturation", async () => {
+  const f = await fixture();
+  try {
+    f.setCurrent({ fact_id: "fact-boreal", bot_id: "bot", text: "Projet Boréal", scope: "private", learned_at: 1, provenance: { source: "automatic" } });
+    f.setMemoryData({ automatic: { saturated: true, catalogue_chars: 6200 }, sharing_classes: { "fact-boreal": "work" }, profile: { version: 12, sections: [{ title: "Projets et travail", count: 1, facts: [{ text: "Projet Boréal" }] }], log: [{ version: 12, action: "learned", changed_at: 1 }] } });
+    button(f.root, "Actualiser").listeners.click(); await flush();
+    assert.match(byClass(f.root, "memory-saturation").textContent, /6 000/);
+    assert.equal(byClass(f.root, "memory-saturation").hidden, false);
+    assert.match(byClass(f.root, "memory-profile").textContent, /v12/);
+    const search = walk(f.root).find((el) => el.type === "search");
+    search.value = "boreal"; search.listeners.input();
+    assert.match(byClass(f.root, "memory-list").textContent, /Projet Boréal/);
+    search.value = "introuvable"; search.listeners.input();
+    assert.match(byClass(f.root, "memory-list").textContent, /Aucun résultat/);
+    search.value = ""; search.listeners.input();
+    const [scope, source] = walk(f.root).filter((el) => el.tagName === "select");
+    scope.value = "team"; scope.listeners.change(); assert.match(byClass(f.root, "memory-list").textContent, /Aucun résultat/);
+    scope.value = ""; source.value = "user_stated"; source.listeners.change(); assert.match(byClass(f.root, "memory-list").textContent, /Aucun résultat/);
+    source.value = "automatic"; source.listeners.change(); assert.match(byClass(f.root, "memory-list").textContent, /Projet Boréal/);
+    const all = byClass(f.root, "memory-select-all").children[0]; all.checked = true; all.listeners.change();
+    assert.ok(button(f.root, "Partager la sélection (1)"));
+  } finally { f.cleanup(); }
+});
+
+test("personal facts are excluded by default and consent-card confirmation carries server counts", async () => {
+  const f = await fixture();
+  try {
+    f.setMemoryData({ sharing_classes: { "fact-one": "personal" } });
+    button(f.root, "Actualiser").listeners.click(); await flush();
+    assert.equal(byClass(f.root, "memory-select-all").children[0].disabled, true);
+    assert.equal(byClass(f.root, "memory-fact-choice").children[0].checked, false);
+    const offered = { kind: "memory_share", payload: { bot_id: "bot", facts: [{ fact_id: "fact-one" }] } };
+    let report;
+    assert.equal(await f.registration.onCardAction(offered, "share", { fact_ids: ["fact-one"], onConfirmed: (value) => { report = value; } }), true);
+    assert.equal(report.shared_count, 1);
+    await assert.rejects(f.registration.onCardAction(offered, "share", { fact_ids: ["forged"] }), /Sélection invalide/);
   } finally { f.cleanup(); }
 });
 

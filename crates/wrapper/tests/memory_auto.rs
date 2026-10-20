@@ -982,6 +982,147 @@ fn rich_group_mentions_are_removed_but_email_values_remain_excluded() {
 }
 
 #[test]
+fn plain_everyone_in_group_learns_without_changing_structured_routing() {
+    let mut f = Fixture::new();
+    f.bot();
+    let c = f.conv("grokbot");
+    f.post(
+        "/api/conversations/members/add",
+        json!({"conversation_id":c,"bot_id":"other","command_id":"member"}),
+    );
+    let text = "Je préfère les réponses structurées.";
+    f.script(json!([fact(text, None)]));
+    f.script(json!([fact(text, None)]));
+    f.post(
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"plain-group","body":format!("@everyone {text}")}),
+    );
+    wait("groupe texte brut terminé", || {
+        f.state();
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM wrapper_group_turns WHERE status='completed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    });
+    f.settle();
+    // Bare text does not forge structured recipients. The primary bot is the
+    // existing default target; it must still extract despite the '@' token.
+    assert_eq!(f.cards(&c).len(), 1);
+    assert_eq!(f.facts("grokbot").len(), 1);
+    assert!(f.facts("other").is_empty());
+    assert_eq!(f.calls().len(), 1);
+    assert!(f
+        .calls()
+        .iter()
+        .all(|b| !b["input"].to_string().contains("@everyone")));
+}
+
+#[test]
+fn responses_round_trip_recalls_an_old_fact_from_five_hundred_before_answering() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    for i in 0..500 {
+        facts::remember(
+            &f.db(),
+            &facts::Fact {
+                fact_id: String::new(),
+                bot_id: "grokbot".into(),
+                scope: Scope::Private,
+                text: if i == 0 {
+                    "Le projet Boréal utilise le port 4317.".into()
+                } else {
+                    format!("Le projet récent {i} dispose de sa documentation de développement.")
+                },
+                provenance: facts::Provenance {
+                    conversation_id: None,
+                    entry_id: None,
+                    source: Source::UserStated,
+                },
+                learned_at: i,
+                status: FactStatus::Active,
+                sensitive: false,
+            },
+        )
+        .unwrap();
+    }
+    {
+        let mut seen = f.server.seen.lock().unwrap();
+        seen.responses.push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_item.done","item":{"id":"fc-recall","type":"function_call","status":"completed","call_id":"recall","name":"recall_memory","arguments":json!({"query":"port Boreal","limit":5}).to_string()}}),
+            json!({"type":"response.completed"})]));
+        seen.responses.push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"Le projet Boréal utilise le port 4317, selon le souvenir retrouvé."}),json!({"type":"response.completed"})]));
+    }
+    f.send(&c, "recall-old", "Quel port utilise le projet Boréal ?");
+    f.settle();
+    let seen = f.server.seen.lock().unwrap();
+    let chat: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|b| b["tools"].is_array())
+        .collect();
+    assert_eq!(chat.len(), 2);
+    assert!(!chat[0].to_string().contains("4317"));
+    assert!(chat[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "recall_memory"));
+    assert!(chat[1]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["type"] == "function_call_output"
+            && i["output"].as_str().unwrap_or_default().contains("4317")));
+    drop(seen);
+    assert!(f
+        .messages(&c)
+        .iter()
+        .any(|m| m["body"].as_str().unwrap_or_default().contains("4317")));
+}
+
+#[test]
+fn plain_everyone_produces_a_receipt_and_consent_card_without_weakening_email_guard() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let text = "Je travaille sur le projet Boréal.";
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "plain", &format!("@everyone {text}"));
+    f.settle();
+    assert_eq!(f.cards(&c).len(), 1);
+    let offer = f
+        .messages(&c)
+        .into_iter()
+        .find(|m| m["kind"] == "memory_share")
+        .unwrap();
+    assert_eq!(offer["payload"]["facts"][0]["class"], "work");
+    assert_eq!(offer["payload"]["facts"][0]["shared"], false);
+    assert_eq!(f.facts("grokbot")[0].scope, Scope::Private);
+    assert!(!f.calls()[0]["input"].to_string().contains("@everyone"));
+    let id = f.facts("grokbot")[0].fact_id.clone();
+    f.post(
+        "/api/memory/forget",
+        json!({"bot_id":"grokbot","fact_id":id}),
+    );
+    let offer = f
+        .messages(&c)
+        .into_iter()
+        .find(|m| m["kind"] == "memory_share")
+        .unwrap();
+    assert_eq!(offer["payload"]["facts"], json!([]));
+    f.send(&c, "address", "@everyone Je préfère x@exemple.fr.");
+    f.settle();
+    assert_eq!(f.calls().len(), 1);
+    f.send(&c, "substring", "@everyoneElse Je préfère le thé vert.");
+    f.settle();
+    assert_eq!(f.calls().len(), 1);
+}
+
+#[test]
 fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");
@@ -1010,6 +1151,19 @@ fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
     assert!(f.calls().is_empty());
     assert_eq!(f.facts("grokbot").len(), 30);
     assert!(f.cards(&c).is_empty());
+    let status = f.post("/api/memory", json!({"bot_id":"grokbot"}));
+    assert_eq!(status["automatic"]["saturated"], true);
+    assert!(status["automatic"]["catalogue_chars"].as_u64().unwrap() > 6000);
+    for fact in f.facts("grokbot").into_iter().take(20) {
+        f.post(
+            "/api/memory/forget",
+            json!({"bot_id":"grokbot","fact_id":fact.fact_id}),
+        );
+    }
+    assert_eq!(
+        f.post("/api/memory", json!({"bot_id":"grokbot"}))["automatic"]["saturated"],
+        false
+    );
 }
 
 #[test]

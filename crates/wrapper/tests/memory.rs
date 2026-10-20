@@ -498,7 +498,7 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
         post(&mut app, "/api/memory", json!({"bot_id": "grokbot"}))["facts"],
         json!([])
     );
-    assert_eq!(features::memory::tools().len(), 3);
+    assert_eq!(features::memory::tools().len(), 4);
     for spec in features::memory::tools() {
         assert!(!spec.description.is_empty());
         assert!(!spec.requires_approval);
@@ -508,6 +508,102 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
             spec.schema["required"].as_array().unwrap().len()
         );
     }
+}
+
+#[test]
+fn five_hundred_facts_recalled_outside_prompt_with_scoped_search_and_status() {
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let conv = conversation(&mut app, "grokbot");
+    let old = remember(
+        &app,
+        "grokbot",
+        "Le projet Boréal utilise le port 4317.",
+        false,
+    );
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute("UPDATE memory_facts SET learned_at=1", [])
+        .unwrap();
+    for i in 1..500 {
+        let mut f = facts::Fact {
+            fact_id: String::new(),
+            bot_id: "grokbot".into(),
+            scope: facts::Scope::Private,
+            text: format!(
+                "Le projet récent {i} est en développement et dispose de sa propre documentation."
+            ),
+            provenance: facts::Provenance {
+                conversation_id: None,
+                entry_id: None,
+                source: Source::UserStated,
+            },
+            learned_at: i + 1,
+            status: FactStatus::Active,
+            sensitive: false,
+        };
+        // Direct writes avoid 500 unrelated model tool events in this fixture.
+        f.fact_id.clear();
+        facts::remember(&conn, &f).unwrap();
+    }
+    let prompt = memory_text(&app, &conv);
+    assert!(!prompt.contains("4317"));
+    assert!(prompt.contains("recall_memory"));
+    let result = done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query":"port Boreal","limit":5}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(result["facts"][0]["text"], old["text"]);
+    assert_eq!(result["facts"][0]["fact_id"], old["fact_id"]);
+    assert!(done(
+        app.invoke_tool(
+            "other",
+            "recall_memory",
+            json!({"query":"Boreal","limit":5})
+        )
+        .unwrap()
+    )["facts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let listed = post(&mut app, "/api/memory", json!({"bot_id":"grokbot"}));
+    assert_eq!(listed["automatic"]["saturated"], true);
+    assert_eq!(listed["profile"]["total"], 500);
+    assert_eq!(
+        listed["sharing_classes"][old["fact_id"].as_str().unwrap()],
+        "work"
+    );
+    for args in [
+        json!({"query":"Boreal","limit":0}),
+        json!({"query":"Boreal","limit":21}),
+        json!({"query":" ","limit":1}),
+        json!({"query":"Boreal","limit":1,"bot_id":"other"}),
+    ] {
+        assert!(matches!(
+            app.invoke_tool("grokbot", "recall_memory", args).unwrap(),
+            ToolOutcome::Failed { .. }
+        ));
+    }
+    post(
+        &mut app,
+        "/api/memory/forget",
+        json!({"bot_id":"grokbot","fact_id":old["fact_id"]}),
+    );
+    assert!(done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query":"Boreal","limit":5})
+        )
+        .unwrap()
+    )["facts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

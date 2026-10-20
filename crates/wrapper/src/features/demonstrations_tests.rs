@@ -88,9 +88,42 @@ fn lifecycle_denial_double_start_stop_and_discard() {
     post(&mut app, "/api/demonstrations/stop", json!({"id":id}));
     post(&mut app, "/api/demonstrations/stop", json!({"id":id}));
     assert_eq!(owned(&app.connection, &id).unwrap()["status"], "review");
+    let summary = app
+        .api("GET", &format!("/api/demonstrations/summary?id={id}"), b"")
+        .unwrap();
+    assert!(
+        summary["demonstration"]["memory_image_count"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(summary["demonstration"]["saved_image_count"], 0);
+    assert!(!summary["demonstration"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("pixels"));
+    assert!(summary["demonstration"]["notice"]
+        .as_str()
+        .unwrap()
+        .starts_with("Ajoutez"));
     post(&mut app, "/api/demonstrations/discard", json!({"id":id}));
     assert!(recordings().lock().unwrap().get(&app.db_path).is_none());
     assert_eq!(owned(&app.connection, &id).unwrap()["summary"], "");
+    // Native overlay Stop reaches tick rather than the HTTP Stop route. Model
+    // that signal with the fixture, without a real input observer or capture.
+    let id = start(&mut app, &c);
+    recordings()
+        .lock()
+        .unwrap()
+        .get_mut(&app.db_path)
+        .unwrap()
+        .stopped = true;
+    app.tick(crate::now());
+    assert_eq!(
+        owned(&app.connection, &id).unwrap()["notice"],
+        REVIEW_NOTICE
+    );
+    post(&mut app, "/api/demonstrations/discard", json!({"id":id}));
 }
 #[test]
 fn cap_capture_error_restart_and_account_change() {
@@ -111,6 +144,10 @@ fn cap_capture_error_restart_and_account_change() {
     post(&mut app, "/api/demonstrations/discard", json!({"id":id}));
     let id = start(&mut app, &c);
     post(&mut app, "/api/demonstrations/fake-error", json!({"id":id}));
+    assert!(state(&app.feature_context())["session"]["capture_error"]
+        .as_str()
+        .unwrap()
+        .contains("Erreur de capture"));
     assert!(owned(&app.connection, &id).unwrap()["notice"]
         .as_str()
         .unwrap()
@@ -122,6 +159,32 @@ fn cap_capture_error_restart_and_account_change() {
     let id = start(&mut app, &c);
     account_changed(&app.feature_context()).unwrap();
     assert_eq!(owned(&app.connection, &id).unwrap()["status"], "discarded");
+}
+#[test]
+fn restart_cancellation_notice_is_durable_until_acknowledged_once() {
+    let _m = MAC.lock().unwrap();
+    let db = Db::new();
+    let mut app = db.open();
+    let c = chat(&mut app);
+    let id = start(&mut app, &c);
+    drop(app);
+    let mut app = db.open();
+    let restarted = state(&app.feature_context());
+    assert!(restarted["session"].is_null());
+    assert_eq!(restarted["pending_notice"]["id"], id);
+    assert!(restarted["pending_notice"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("redémarrage"));
+    post(
+        &mut app,
+        "/api/demonstrations/acknowledge",
+        json!({"id":id}),
+    );
+    assert!(state(&app.feature_context())["pending_notice"].is_null());
+    drop(app);
+    let app = db.open();
+    assert!(state(&app.feature_context())["pending_notice"].is_null());
 }
 #[test]
 fn rolled_back_cancellation_keeps_media_until_a_committed_decision() {

@@ -143,6 +143,22 @@ fn demonstration_to_skill_save_discard_cancel_restart_and_raw_retention() {
             .find(|r| r["id"] == request.id)
             .unwrap();
         assert_eq!(card["arguments"]["demonstration"]["id"], id);
+        assert!(state["demonstrations"]["session"]["notice"]
+            .as_str()
+            .unwrap()
+            .contains("prête"));
+        let summary = f
+            .app
+            .api("GET", &format!("/api/demonstrations/summary?id={id}"), b"")
+            .unwrap();
+        assert_eq!(summary["demonstration"]["keep_images"], keep);
+        assert!(
+            summary["demonstration"]["memory_image_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(summary["demonstration"]["saved_image_count"], 0);
         assert_eq!(
             f.db()
                 .query_row("SELECT count(*) FROM skills_library", [], |r| r
@@ -176,6 +192,25 @@ fn demonstration_to_skill_save_discard_cancel_restart_and_raw_retention() {
             .unwrap()
             .contains("Éditeur fictif"));
         assert_eq!(!d["images"].as_array().unwrap().is_empty(), keep);
+        assert_eq!(d["demonstration"]["memory_image_count"], 0);
+        assert_eq!(
+            d["demonstration"]["saved_image_count"].as_u64().unwrap(),
+            d["images"].as_array().unwrap().len() as u64
+        );
+        let saved_card: Value = serde_json::from_str(
+            &f.db()
+                .query_row(
+                    "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1",
+                    [&request.id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved_card["demonstration"]["saved_image_count"],
+            d["demonstration"]["saved_image_count"]
+        );
         let skill = d["demonstration"]["skill_id"].clone();
         f.restart();
         let links = f.app.api("GET", "/api/state", b"").unwrap()["demonstrations"]["links"].clone();

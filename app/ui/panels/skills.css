@@ -2,7 +2,7 @@
 .skills-section h3 { margin: 0 0 10px; font-size: 14px; }
 .skills-section h3:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
 .skills-note { color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
-.skills-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.skills-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
 .skills-file-input { display: none; }
 .skills-list { list-style: none; margin: 12px 0; padding: 0; max-height: 300px; overflow: auto; }
 .skills-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
@@ -11,7 +11,7 @@
 .skills-row strong { font-size: 12px; }
 .skills-row small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; white-space: pre-wrap; }
 .skills-row button { flex-shrink: 0; }
-.skills-row > div > button { margin-top: 8px; }
+.skills-row > .skills-row-actions { flex: 0 0 auto; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 .skills-section button:disabled, .skills-dialog button:disabled { opacity: .5; cursor: wait; }
 .skills-report, .skills-history { margin: 16px 0; font-size: 11px; }
 .skills-report summary, .skills-history summary { cursor: pointer; color: var(--text); line-height: 1.7; }

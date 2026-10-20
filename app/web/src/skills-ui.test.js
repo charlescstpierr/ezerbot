@@ -22,19 +22,20 @@ class Element {
 const descendants = (element) => [element, ...element.children.flatMap(descendants)];
 const byClass = (element, name) => descendants(element).find((child) => child.className === name);
 
-function panel(fileCount = 1) {
+function panel(fileCount = 1, withDemonstration = false) {
   const root = new Element("div");
   const skill = { skill_id: "skill_internal_123", version: 1, name: "resume", display_name: "Résumé express", description: "En trois puces.", file_count: fileCount };
   const content = { ...skill, body: "Texte original.", editable_body: "Texte original.", files: [{ path: "exemple.md", content: "Texte annexe <script>non exécuté</script>" }] };
   let registration;
   const requests = [];
   const panels = {
-    state: { skills: { by_bot: { bot: [skill] } } },
+    state: { skills: { by_bot: { bot: [skill] } }, demonstrations: { links: withDemonstration ? [{ skill_id: skill.skill_id, id: "demo" }] : [] } },
     register(value) { registration = value; },
-    async api(path) { requests.push(path); return { versions: [{ ...skill, content }] }; },
+    async api(path) { requests.push(path); return path === "/api/skills/import" ? { report: [{ status: { status: "written", skill_id: skill.skill_id } }] } : { versions: [{ ...skill, content }] }; },
+    async refresh() {}, notify() {},
   };
   runInNewContext(readFileSync(new URL("../../ui/panels/skills.js", import.meta.url), "utf8"), {
-    window: { GrokbotPanels: panels }, TextEncoder,
+    window: { GrokbotPanels: panels }, TextEncoder, btoa,
     document: { createElement: (tag) => new Element(tag), getElementById: () => root },
   });
   registration.botSection({ id: "bot" }, root);
@@ -47,8 +48,29 @@ test("skill list keeps the human title and version but not the internal id", () 
   assert.equal(row.children[0].textContent, "Résumé expressEn trois puces.Version 1 · 1 annexe");
   assert.ok(!row.textContent.includes(skill.skill_id));
   // Keep the durable id for edit routing, not for display.
-  assert.equal(row.children[1].dataset.skillId, skill.skill_id);
+  assert.equal(byClass(row, "skills-row-actions").children[0].dataset.skillId, skill.skill_id);
   assert.equal(byClass(root, "skills-history-content").textContent, "");
+});
+
+test("skill actions share an aligned group and source links have distinct accessible names", () => {
+  const { root } = panel(1, true);
+  const actions = byClass(root, "skills-row-actions");
+  assert.equal(actions.children.length, 2);
+  assert.equal(actions.children[1]["aria-label"], "Voir la démonstration : Résumé express");
+  assert.equal(byClass(root, "skills-row").children[0].children.some(child => child.tagName === "button"), false);
+});
+
+test("Show the bot stays locked with other skill actions while an import is pending", async () => {
+  const { root } = panel();
+  const demonstrate = descendants(root).find(el => el.tagName === "button" && el.textContent === "Montrer au bot");
+  const input = descendants(root).find(el => el.name === "skills-files");
+  let release;
+  input.files = [{ name: "note.md", size: 5, arrayBuffer: () => new Promise(resolve => { release = resolve; }) }];
+  input.listeners.change();
+  assert.equal(demonstrate.disabled, true);
+  release(new TextEncoder().encode("Texte").buffer);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(demonstrate.disabled, false);
 });
 
 test("skill list shows a bounded companion-file count", () => {
@@ -58,7 +80,7 @@ test("skill list shows a bounded companion-file count", () => {
 
 test("skill editor hides the id while still loading its exact version history", async () => {
   const { root, skill, requests } = panel();
-  byClass(root, "skills-row").children[1].listeners.click();
+  byClass(root, "skills-row-actions").children[0].listeners.click();
   await new Promise((resolve) => setImmediate(resolve));
   const dialog = byClass(root, "dialog skills-dialog");
   assert.equal(dialog.open, true);

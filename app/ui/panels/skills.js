@@ -320,7 +320,7 @@
     function render() {
       if (!alive) return;
       const locked = job.running || job.mutating;
-      for (const control of [add, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
+      for (const control of [add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
       const skills = panels.state.skills?.by_bot?.[bot.id] || [];
       add.disabled = locked || skills.length >= 250;
       const next = JSON.stringify([skills, locked, panels.state.skills?.error, panels.state.demonstrations?.links]);
@@ -338,10 +338,13 @@
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;
-          row.append(copy, edit);
+          const rowActions = node("div", "skills-row-actions"); rowActions.append(edit);
           const demonstration = panels.state.demonstrations?.links?.find(link => link.skill_id === skill.skill_id);
-          if (demonstration) copy.append(button("Voir la démonstration", () => window.EzerbotDemonstration?.showSummary(demonstration.id)));
-          list.append(row);
+          if (demonstration) {
+            const view = button("Voir la démonstration", () => window.EzerbotDemonstration?.showSummary(demonstration.id));
+            view.setAttribute("aria-label", `Voir la démonstration : ${displayName(skill)}`); rowActions.append(view);
+          }
+          row.append(copy, rowActions); list.append(row);
         }
       }
       if (focusPending && !locked && !dialog.open) {

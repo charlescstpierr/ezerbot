@@ -11,7 +11,8 @@
     document.getElementById("conversation-menu-button").setAttribute("aria-expanded", "false");
     open(context.bot?.id);
   }, ""); menu.id = "show-bot-button";
-  const icon = document.getElementById("learn-skill-button").querySelector("svg")?.cloneNode(true); if (icon) menu.prepend(icon);
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg"); icon.classList.add("icon"); icon.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("href", "#i-monitor"); icon.append(use); menu.prepend(icon);
   document.getElementById("learn-skill-button").after(menu);
   const entry = button("Démonstration", () => open(), "tool-pill"); entry.hidden = true; document.querySelector(".topbar-actions").prepend(entry);
   const summaryDialog = node("dialog", null, "dialog demonstration-dialog"); summaryDialog.setAttribute("aria-label", "Synthèse de la démonstration"); document.getElementById("panels").append(summaryDialog);
@@ -47,7 +48,8 @@
       await host.api("/api/demonstrations/start", { bot_id: bot, conversation_id: chat.id, consent: true });
       explanation = ""; keep = false;
       await host.refresh();
-      for (const d of document.querySelectorAll("dialog[open]")) d.close();
+      // Closing another editor would discard unsaved bot/skill changes.
+      dialog.close();
       host.openConversation(chat.id);
       // The persistent recording overlay is the status; no stale toast should
       // cover the later approval after a very short demonstration.
@@ -67,10 +69,8 @@
     if (await action("/api/demonstrations/draft", { id: data.session.id, explanation, keep_images: keep })) { dialog.close(); openCard(); }
   }
   function updateOverlay() {
-    const floating = Boolean(document.querySelector("dialog[open]"));
-    const key = JSON.stringify([data.session?.id, data.session?.status, data.fake, floating, busy, context.conversation?.kind]);
+    const key = JSON.stringify([data.session?.id, data.session?.status, data.fake, busy, context.conversation?.kind]);
     if (key === overlaySignature) return; overlaySignature = key;
-    if (overlay.hidePopover && overlay.matches(":popover-open")) overlay.hidePopover();
     overlay.replaceChildren();
     const s = data.session, recording = s?.status === "recording";
     overlay.hidden = !recording; entry.hidden = !s;
@@ -79,13 +79,13 @@
     const countdown = node("span", remaining(s)); countdown.dataset.demoCountdown = "true";
     overlay.append(node("strong", "Enregistrement de la démonstration"), countdown, button("Arrêter", stop));
     if (data.fake) overlay.append(node("small", "Écran fictif · aucune entrée réelle"));
-    if (floating) { overlay.setAttribute("popover", "manual"); if (overlay.showPopover) overlay.showPopover(); }
-    else overlay.removeAttribute("popover");
+    // This is an ordinary flex item under the main panel's topbar. In a modal,
+    // recording controls are also available in its dedicated session dialog.
   }
   function render() {
     const s = data.session;
     const next = JSON.stringify([s, target, error, busy, data.fake]); if (signature === next) return; signature = next;
-    dialog.replaceChildren(header(s?.status === "review" ? "Démonstration arrêtée" : "Montrer au bot"));
+    dialog.replaceChildren(header(s?.capture_error ? "Enregistrement interrompu" : s?.status === "review" ? "Démonstration arrêtée" : s?.status === "recording" ? "Enregistrement de la démonstration" : "Montrer au bot"));
     if (data.fake) dialog.append(node("p", "Mode de test : captures fictives et événements synthétiques. Aucune permission macOS ni entrée réelle.", "screen-test-note"));
     if (!s) {
       const bot = host.state.bots?.find(b => b.id === target);
@@ -95,7 +95,7 @@
       const begin = button("Commencer la démonstration", start, "primary-button"); begin.disabled = true; check.onchange = () => { begin.disabled = !check.checked || busy || !bot; };
       dialog.append(label, begin);
     } else {
-      if (s.notice) dialog.append(node("p", s.notice, "demonstration-note"));
+      if (s.notice) { const notice = node("p", s.notice, s.capture_error ? "screen-error" : "demonstration-note"); if (s.capture_error) notice.setAttribute("role", "alert"); dialog.append(notice); }
       if (s.status === "recording") {
         dialog.append(node("p", "Vous avez la main. Le bandeau reste visible pendant toute la démonstration."), button("Arrêter", stop, "primary-button"), button("Annuler et supprimer", discard));
         if (data.fake) dialog.append(button("Simuler une erreur de capture", () => action("/api/demonstrations/fake-error", { id: s.id })));
@@ -117,18 +117,24 @@
     if (!summaryDialog.open) summaryDialog.showModal();
     try {
       const { demonstration: d, images } = await host.api(`/api/demonstrations/summary?id=${encodeURIComponent(id)}`);
-      summaryDialog.replaceChildren(summaryHeader(), node("p", d.explanation || "Sans explication ajoutée"), node("pre", d.summary, "demonstration-summary"), node("p", images?.length ? `${images.length} ${images.length === 1 ? "capture conservée" : "captures conservées"} à votre demande.` : "Aucune capture brute conservée après la décision."));
-      if (d.notice) summaryDialog.append(node("p", d.notice));
+      const view = window.GrokbotChat.demonstrationSummaryView(d, { id: data.session?.status === "review" ? data.session.id : null, explanation, keepImages: keep });
+      summaryDialog.replaceChildren(summaryHeader(), node("p", view.explanation), node("pre", view.summary, "demonstration-summary"), node("p", view.media));
       for (const image of images || []) { const img = node("img"); img.src = image; img.alt = "Capture conservée de la démonstration"; img.width = 1280; img.height = 800; img.loading = "lazy"; summaryDialog.append(img); }
     } catch (e) { summaryDialog.replaceChildren(summaryHeader("Synthèse indisponible"), node("p", e.message)); }
   }
-  dialog.addEventListener("cancel", event => { if (data.session?.status === "recording") { event.preventDefault(); void discard(); } });
-  document.addEventListener("toggle", event => { if (event.target instanceof HTMLDialogElement) updateOverlay(); }, true);
+  // Escape, like Fermer, only closes the controls. Only the explicit destructive
+  // buttons may discard the recording; native recording continues visibly.
+  const acknowledgedNotices = new Set();
   // Update text only: rebuilding Arrêter each second would lose keyboard focus.
   setInterval(() => { const count = overlay.querySelector("[data-demo-countdown]"); if (count && data.session) count.textContent = remaining(data.session); }, 1000);
   window.EzerbotDemonstration = { open, showSummary };
   host.register({ id: "demonstrations", onState(state, ctx) {
     const previous = lastSession; data = state.demonstrations || {}; context = ctx; lastSession = data.session;
+    const notice = data.pending_notice;
+    if (notice && !acknowledgedNotices.has(notice.id)) {
+      acknowledgedNotices.add(notice.id); host.notify(notice.text);
+      host.api("/api/demonstrations/acknowledge", { id: notice.id }).catch(() => {});
+    }
     updateOverlay(); if (dialog.open) render();
     if (previous?.status === "recording" && data.session?.status === "review") open();
     if (previous && !data.session && data.notice) { if (dialog.open) dialog.close(); host.notify(data.notice); }

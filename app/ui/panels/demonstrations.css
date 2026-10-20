@@ -1,14 +1,17 @@
 .demonstration-dialog { width: min(580px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow-y: auto; }
 .demonstration-dialog > p { font-size: 13px; line-height: 1.6; margin: 12px 0; color: var(--muted); }
+.demonstration-dialog > .screen-error { color: var(--danger-text); }
 .demonstration-dialog > h3 { font-size: 14px; margin-top: 14px; }
 .demonstration-dialog > button { margin: 6px 6px 6px 0; }
+.demonstration-dialog button:disabled { opacity: .45; cursor: not-allowed; }
 .demonstration-dialog .form-label { display: grid; gap: 8px; margin: 16px 0; }
 .demonstration-dialog textarea { width: 100%; resize: vertical; }
 .demonstration-summary { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--font-sans, sans-serif); padding: 12px; background: var(--soft); border-radius: 10px; }
 .demonstration-dialog img { width: 100%; height: auto; border-radius: 10px; margin: 8px 0; }
-.demonstration-overlay { position: fixed; top: 66px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 14px; padding: 10px 16px; max-width: calc(100vw - 32px); width: max-content; border: 1px solid var(--accent); border-radius: 12px; background: var(--pane); color: var(--text); box-shadow: 0 6px 24px #0003; font-size: 12px; }
+/* A flex item in .main-panel, not a viewport overlay: reserves its own space
+   below the topbar, never covers the sidebar, toolbar or first chat message. */
+.demonstration-overlay { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 14px; padding: 10px 16px; margin: 8px 16px 0; min-width: 0; border: 1px solid var(--accent); border-radius: 12px; background: var(--pane); color: var(--text); font-size: 12px; }
 .demonstration-overlay[hidden] { display: none; }
-.demonstration-overlay[popover] { margin: 0; inset: 66px auto auto 50%; }
 .demonstration-overlay small { flex-basis: 100%; text-align: center; color: var(--muted); }
 .demonstration-overlay .secondary-button { min-height: 30px; padding: 4px 12px; }
-@media (max-width: 850px) { .demonstration-overlay { top: 60px; font-size: 11px; gap: 6px; } .demonstration-overlay[popover] { top: 60px; } }
+@media (max-width: 850px) { .demonstration-overlay { margin: 6px 10px 0; padding: 8px; font-size: 11px; gap: 6px; } }

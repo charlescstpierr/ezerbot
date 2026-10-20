@@ -4,6 +4,14 @@
 .meeting-bar[hidden], .meeting-interrupted[hidden] { display: none; }
 .meeting-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .meeting-row strong { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+.meeting-info { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: baseline; }
+.meeting-phase { min-width: 0; }
+.meeting-source { white-space: nowrap; font-weight: 400; }
+.meeting-name { grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 400; }
+.meeting-interrupted .meeting-interrupted-row { display: flex; flex-wrap: nowrap; align-items: flex-start; }
+.meeting-interrupted-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.meeting-interrupted-row > button { flex: 0 0 auto; }
+.meeting-interrupted[data-tone=warning] { background: var(--warning-bg); border-color: var(--warning-line); color: var(--warning-text); }
 .meeting-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: nowrap; }
 .meeting-row button { min-height: 28px; padding: 4px 8px; font-size: 10px; white-space: nowrap; }
 .meeting-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--muted); }
@@ -18,22 +26,35 @@
 .meeting-reminder, .meeting-cap { color: var(--muted); font-size: 10px; margin: 7px 0 0; }
 .meeting-review { display: grid; gap: 10px; margin-top: 8px; }
 .meeting-review[hidden] { display: none; }
-.meeting-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6rem; overflow-y: auto; padding: 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
-.meeting-review-actions { display: grid; gap: 8px; }
-.meeting-review-actions > button { justify-self: start; }
+.meeting-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6rem; overflow-y: auto; margin: 6px 0 0; padding: 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.meeting-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .meeting-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; line-height: 1.6; }
-.meeting-consent input { accent-color: var(--accent); flex: 0 0 auto; margin-top: 3px; }
+.meeting-consent input { accent-color: var(--accent); flex: 0 0 auto; margin: 3px 0 0; }
+.meeting-dialog > .meeting-consent { margin-top: 12px; }
 .meeting-dialog > label:not(.meeting-consent) { display: grid; gap: 7px; margin: 16px 0; font-size: 11px; }
 .meeting-dialog input:not([type=checkbox]) { padding: 9px; background: var(--pane); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: inherit; }
 .meeting-dialog h2 { margin: 0; font-size: 18px; }
+.meeting-confirmation h2 { margin: 0 0 10px; font-size: 18px; }
 .meeting-dialog .delete-description, .meeting-confirmation .delete-description { font-size: 12px; line-height: 1.7; }
 .meeting-error { color: var(--danger-text); font-size: 11px; }
 .meeting-retention { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
 .meeting-retention select { width: 100%; }
+.meeting-empty { width: min(720px, 100%); margin: auto; padding: 12px 24px; color: var(--muted); text-align: center; }
+.meeting-empty h2 { margin: 0 0 6px; font-size: 14px; font-weight: 500; color: var(--text); }
+.meeting-empty p { margin: 0; font-size: 11px; line-height: 1.6; }
+@media (max-height: 640px) {
+  .meeting-review { gap: 6px; margin-top: 6px; }
+  .meeting-review .meeting-cap { margin: 0; }
+  .meeting-review pre { max-height: 4.5rem; }
+}
 @media (max-width: 880px) {
   .meeting-bar { padding: 8px 12px; }
-  .meeting-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: start; gap: 6px; }
+  .meeting-bar .meeting-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: start; gap: 6px; }
   .meeting-dot { margin-top: 4px; }
-  .meeting-actions { grid-column: 2 / -1; justify-self: end; }
+  .meeting-bar .meeting-actions { grid-column: 2 / -1; justify-self: end; }
+  .meeting-bar[data-phase=ready] .meeting-info { grid-column: 2; grid-row: 1 / span 2; }
+  .meeting-bar[data-phase=ready] .meeting-dot { grid-column: 1; grid-row: 1; }
+  .meeting-bar[data-phase=ready] .meeting-clock { grid-column: 3; grid-row: 1; }
+  .meeting-bar[data-phase=ready] .meeting-actions { grid-column: 3; grid-row: 2; }
   .meeting-dialog .dialog-footer, .meeting-confirmation .dialog-footer { flex-wrap: wrap; }
 }

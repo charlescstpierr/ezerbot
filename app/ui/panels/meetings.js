@@ -14,7 +14,7 @@
     unavailable: "L’enregistrement de réunion est disponible dans l’application Mac Ezerbot.",
     consent_required: "Confirmez le consentement de toutes les personnes avant d’enregistrer.",
   };
-  let context, startButton, bar, info, clock, pause, stop, discard, retry, review, keep, save, retention, interrupted, notice, openThread, settings;
+  let context, startButton, bar, info, phaseLabel, meetingName, sourceLabel, clock, pause, stop, discard, retry, review, keep, save, retention, interrupted, notice, openThread, settings, emptyView, emptyHeading, emptyDescription;
   let dialog, title, consent, begin, dialogError, confirmation, confirmationTitle, confirmationText, confirmationAccept, finishConfirmation;
   let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false, lastActive = false;
   const active = () => ["authorizing", "recording", "paused", "transcribing", "saving"].includes(phase);
@@ -47,8 +47,16 @@
     if (tone) bar.dataset.tone = tone; else delete bar.dataset.tone;
     startButton.disabled = !!session || Boolean(panels.voiceActive?.()) || context?.conversation?.kind === "task";
     startButton.title = panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
-    const name = session?.title ? ` · ${session.title}` : "";
-    info.textContent = errors[phase] || ({authorizing:`Autorisation du microphone${name}…`,recording:`Réunion en cours${name} · Microphone actif`,paused:`Réunion en pause${name} · Microphone arrêté`,transcribing:`Microphone arrêté${name} · Transcription sur ce Mac…`,ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : `Capture arrêtée${name} · Transcription prête`,saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
+    phaseLabel.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours",paused:"Réunion en pause",transcribing:"Transcription sur ce Mac…",ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : "Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
+    meetingName.textContent = session?.title || ""; meetingName.title = session?.title || "";
+    meetingName.hidden = !session?.title;
+    sourceLabel.hidden = !["recording", "paused", "transcribing"].includes(phase);
+    sourceLabel.textContent = phase === "recording" ? "Microphone actif" : "Microphone arrêté";
+    const ownEmpty = Boolean(session && context?.conversation?.id === session.conversation_id && !context.conversation.messages?.length && !emptyCapture() && phase !== "idle");
+    emptyView.hidden = !ownEmpty;
+    document.getElementById("welcome").hidden = ownEmpty || Boolean(context?.conversation?.messages?.length);
+    emptyHeading.textContent = ({paused:"Réunion en pause",transcribing:"Transcription en cours",ready:"Capture terminée",failed:"Transcription à réessayer",save_failed:"Réunion à conserver"})[phase] || "Réunion en cours";
+    emptyDescription.textContent = phase === "failed" ? "Réessayez la transcription ou supprimez la capture." : "Le résumé apparaîtra ici après conservation de la réunion.";
     pause.hidden = !["recording", "paused"].includes(phase); pause.textContent = phase === "paused" ? "Reprendre" : "Pause";
     stop.hidden = !["recording", "paused"].includes(phase);
     discard.hidden = phase === "saving";
@@ -60,7 +68,7 @@
     openThread.hidden = !session || context?.conversation?.id === session.conversation_id;
     notice.hidden = !["authorizing", "recording", "paused"].includes(phase);
     review.hidden = !["ready", "save_failed"].includes(phase);
-    clock.hidden = !["recording", "paused", "transcribing"].includes(phase);
+    clock.hidden = !["recording", "paused", "transcribing"].includes(phase) && !(phase === "ready" && pending?.too_long);
     if (active() !== lastActive) {
       lastActive = active(); window.dispatchEvent(new Event("grokbot:meeting-change"));
     }
@@ -74,7 +82,7 @@
       pending = result;
       if (!result.data) { phase = "no_audio"; errors.no_audio = "Aucun audio enregistré. Vérifiez le microphone, puis recommencez."; }
       else if (!result.transcript?.trim()) phase = "failed";
-      review.querySelector(".meeting-cap").textContent = result.too_long ? "Limite de 10 minutes atteinte : la capture a été arrêtée automatiquement. La transcription disponible est conservable." : "Audio supprimé après transcription par défaut. La transcription et le résumé restent dans la conversation.";
+      review.querySelector(".meeting-cap").textContent = result.too_long ? "La capture s’est arrêtée automatiquement. Vous pouvez conserver la transcription." : "Audio supprimé par défaut ; rétention de l’audio gardé dans Paramètres.";
       review.querySelector("pre").textContent = result.transcript || "";
     }
     render();
@@ -181,7 +189,9 @@
         document.getElementById("panels").append(confirmation);
         bar = node("section", "meeting-bar"); bar.id = "meeting-recording"; bar.setAttribute("aria-label", "Capture de réunion");
         const row = node("div", "meeting-row"); const dot = node("span", "meeting-dot"); dot.setAttribute("aria-hidden", "true");
-        info = node("strong"); info.setAttribute("role", "status"); clock = node("span", "meeting-clock");
+        info = node("strong", "meeting-info"); info.setAttribute("role", "status");
+        phaseLabel = node("span", "meeting-phase"); meetingName = node("span", "meeting-name"); sourceLabel = node("span", "meeting-source");
+        info.append(phaseLabel,sourceLabel,meetingName); clock = node("span", "meeting-clock");
         pause = button("Pause", () => command(phase === "paused" ? "resume" : "pause")); stop = button("Arrêter", () => command("stop"));
         discard = button("Supprimer", cancelCapture); discard.id = "meeting-discard";
         retry = button("Réessayer la transcription", () => command("retry"));
@@ -191,12 +201,15 @@
         notice = node("p", "meeting-reminder", "Capture consentie · Prévenez toute nouvelle personne qui rejoint la réunion.");
         review = node("div", "meeting-review"); review.append(node("p", "meeting-cap"));
         const details = node("details"); details.append(node("summary", "", "Vérifier la transcription"),node("pre"));
-        const keepLabel = node("label", "meeting-consent"); keep = node("input"); keep.type = "checkbox"; keep.id = "meeting-keep-audio"; keepLabel.append(keep,document.createTextNode("Garder aussi l’audio sur ce Mac (selon la rétention dans Paramètres)"));
+        const keepLabel = node("label", "meeting-consent"); keep = node("input"); keep.type = "checkbox"; keep.id = "meeting-keep-audio"; keepLabel.append(keep,document.createTextNode("Garder l’audio sur ce Mac"));
         save = button("Conserver et produire le résumé", saveCapture, "primary-button"); save.id = "meeting-save";
         const reviewActions = node("div", "meeting-review-actions"); reviewActions.append(keepLabel,save);
         review.append(reviewActions,details);
         bar.append(row,notice,review); document.querySelector(".topbar").after(bar);
-        interrupted = node("div", "meeting-interrupted"); document.querySelector(".topbar").after(interrupted);
+        interrupted = node("div", "meeting-interrupted"); interrupted.dataset.tone = "warning"; interrupted.setAttribute("role", "status"); document.querySelector(".topbar").after(interrupted);
+        emptyView = node("section", "meeting-empty"); emptyView.id = "meeting-empty"; emptyView.setAttribute("role", "status");
+        emptyHeading = node("h2"); emptyDescription = node("p"); emptyView.append(emptyHeading,emptyDescription);
+        document.getElementById("welcome").before(emptyView);
         window.addEventListener("beforeunload", () => { clearTimeout(timer); if (session) bridge("cancel").catch(() => {}); });
         window.addEventListener("grokbot:voice-change", render);
         render();
@@ -212,7 +225,7 @@
         interrupted.replaceChildren();
         for (const item of state.meetings?.interrupted || []) {
           if (session?.id === item.id) continue;
-          const warning = node("div", "meeting-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue au redémarrage. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await panels.api("/api/meetings/discard", { id: item.id, preserve_conversation: hasDraft(item.conversation_id) }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
+          const warning = node("div", "meeting-row meeting-interrupted-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue au redémarrage. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await panels.api("/api/meetings/discard", { id: item.id, preserve_conversation: hasDraft(item.conversation_id) }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
         }
         interrupted.hidden = !interrupted.children.length;
       }

@@ -6,6 +6,7 @@ class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.className = ""; this.dataset = {}; this.attributes = {}; this.checked = false; this.listeners = {}; }
   append(...children) { for (const child of children) { this.children.push(child); child.parent = this; } }
   after(child) { this.parent.append(child); }
+  before(child) { const parent=this.parent; child.parent=parent; parent.children.splice(parent.children.indexOf(this),0,child); }
   replaceChildren(...children) { this.children = []; this.append(...children); }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
@@ -15,7 +16,7 @@ class Element {
 }
 const descendants = el => [el, ...el.children.flatMap(descendants)];
 function fixture() {
-  const root = new Element("div"), top = new Element("header"), panels = new Element("div"), settings = new Element("div"); root.append(top, panels, settings);
+  const root = new Element("div"), top = new Element("header"), panels = new Element("div"), settings = new Element("div"), welcome = new Element("div"); welcome.id="welcome"; root.append(top, welcome, panels, settings);
   const context = { conversation: { id: "chat" }, bot: { id: "grokbot" }, state: { meetings: { debug_fake: true } } };
   let registration, poll, token, status = "recording", delayed;
   const calls = [], requests = [], notices = [], events = [], storage = new Map();
@@ -23,13 +24,13 @@ function fixture() {
     calls.push(body); token = body.token;
     if (body.command === "status" && delayed) return new Promise(resolve => { delayed.resolve = resolve; });
     return { token, status: ({start:status,stop:status === "failed" ? "failed" : "ready",cancel:"idle",pause:"paused",resume:"recording",retry:"ready"})[body.command] || status,
-      transcript: "Décision : jeudi. Alice prépare la démo.", data: status === "no_audio" ? "" : "UklGRg==", elapsed_ms: 4200, too_long: status === "too_long" };
+      transcript: "Décision : jeudi. Alice prépare la démo.", data: status === "no_audio" ? "" : "UklGRg==", elapsed_ms: status === "too_long" ? 600000 : 4200, too_long: status === "too_long" };
   };
   const host = { register(panel) { registration = panel; }, composerChanged() {}, notify(message) { notices.push(message); }, draft: () => "", draftDocument: () => ({}),
     async refresh() {}, openConversation(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
     async api(path, body) { requests.push({path,body}); if (path === "/api/meetings/start") return { id: "meeting_one", conversation_id: body.conversation_id || "created", title: body.title }; return {}; },
   };
-  const document = { createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"),{textContent:text}), getElementById: () => panels, querySelector: () => top };
+  const document = { createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"),{textContent:text}), getElementById: id => id === "welcome" ? welcome : panels, querySelector: () => top };
   runInNewContext(readFileSync(new URL("../../ui/panels/meetings.js",import.meta.url),"utf8"),{
     document, window: {GrokbotPanels:host,webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener(){},dispatchEvent(event){events.push(event.type);}},
     Event:class {constructor(type){this.type=type;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
@@ -49,9 +50,13 @@ test("meeting consent, destination/title, dictation signal, pause/resume, defaul
   assert.equal(f.id("meeting-begin").disabled,true); await f.id("meeting-begin").onclick(); assert.equal(f.calls.length,0);
   await f.start(); assert.equal(f.registration.composer.blocked(),true); assert.equal(f.id("meeting-recording").hidden,false);
   assert.equal(f.host.meetingActive(),true); assert.ok(f.events.includes("grokbot:meeting-change")); assert.match(f.registration.composer.blockedReason(),/Envoi suspendu/);
-  assert.ok(descendants(f.root).some(el=>el.textContent?.includes("Réunion en cours · Réunion")));
+  assert.equal(f.root.querySelector(".meeting-phase").textContent,"Réunion en cours");
+  assert.equal(f.root.querySelector(".meeting-name").textContent,"Réunion");
+  assert.equal(f.root.querySelector(".meeting-source").textContent,"Microphone actif");
+  assert.equal(f.id("meeting-empty").hidden,false); assert.equal(f.id("welcome").hidden,true);
   f.registration.onState(f.context.state,{...f.context,conversation:{id:"other"}}); assert.equal(f.calls.length,1,"navigation never cancels capture");
-  assert.equal(f.id("meeting-open-conversation").hidden,false); f.id("meeting-open-conversation").onclick(); assert.equal(f.context.conversation.id,"chat");
+  assert.equal(f.id("meeting-open-conversation").hidden,false); assert.equal(f.id("meeting-empty").hidden,true); assert.equal(f.id("welcome").hidden,false);
+  f.id("meeting-open-conversation").onclick(); assert.equal(f.context.conversation.id,"chat");
   await f.text("Pause").onclick(); await f.text("Reprendre").onclick(); await f.text("Arrêter").onclick();
   assert.equal(f.host.meetingActive(),false); assert.equal(f.id("meeting-recording").dataset.phase,"ready"); assert.equal(f.id("meeting-keep-audio").checked,false);
   assert.equal(f.root.querySelector(".meeting-reminder").hidden,true);
@@ -74,6 +79,9 @@ test("denial, no audio, cap and retry have alert tones, correct exits and system
   f.status="recording"; await f.start(); f.status="failed"; await f.text("Arrêter").onclick(); assert.equal(f.id("meeting-recording").dataset.tone,"danger");
   f.status="too_long"; await f.text("Réessayer la transcription").onclick(); assert.equal(f.id("meeting-recording").dataset.tone,"warning");
   assert.ok(descendants(f.root).some(el=>el.textContent==="Limite de 10 minutes atteinte · Capture arrêtée"));
+  assert.equal(f.root.querySelector(".meeting-clock").hidden,false); assert.equal(f.root.querySelector(".meeting-clock").textContent,"10:00 / 10:00");
+  assert.equal(f.root.querySelector(".meeting-name").textContent,"Réunion");
+  assert.doesNotMatch(f.root.querySelector(".meeting-cap").textContent,/10 minutes/);
 });
 test("deleting raw audio or a capture uses styled asynchronous decisions, never window.confirm",async()=>{
   const f=fixture(); await f.start();
@@ -110,8 +118,26 @@ test("dismissing a restarted capture preserves its conversation when notes are p
   await f.text("Fermer").onclick(); assert.equal(f.requests.find(r=>r.path==="/api/meetings/discard").body.preserve_conversation,true);
 });
 
+test("restart warning has its own fluid row, never the narrow recorder grid",()=>{
+  const f=fixture(); f.registration.onState({meetings:{interrupted:[{id:"old",title:"Revue hebdomadaire des décisions de l’équipe",conversation_id:"chat"}]}},f.context);
+  const warning=f.root.querySelector(".meeting-interrupted"); assert.equal(warning.dataset.tone,"warning");
+  assert.equal(warning.children[0].className,"meeting-row meeting-interrupted-row");
+  const css=readFileSync(new URL("../../ui/panels/meetings.css",import.meta.url),"utf8");
+  const compact=css.slice(css.indexOf("@media (max-width: 880px)"));
+  assert.match(compact,/\.meeting-bar \.meeting-row \{ display: grid/);
+  assert.doesNotMatch(compact,/(?:^|\n)\s*\.meeting-row\s*\{/);
+  assert.match(css,/\.meeting-interrupted-row > span \{ flex: 1; min-width: 0/);
+  assert.match(css,/\.meeting-review pre \{ max-height: 4\.5rem/);
+  assert.match(css,/\.meeting-bar\[data-phase=ready\] \.meeting-info \{ grid-column: 2; grid-row: 1 \/ span 2;/);
+});
+
+test("existing conversation messages are never hidden by the meeting empty state",async()=>{
+  const f=fixture(); f.context.conversation.messages=[{id:"existing"}]; f.registration.onState(f.context.state,f.context); await f.start();
+  assert.equal(f.id("meeting-empty").hidden,true); assert.equal(f.id("welcome").hidden,true);
+});
+
 test("meeting surfaces never invoke native confirm or browser media; unavailable summary copy is conditional",()=>{
   const source=readFileSync(new URL("../../ui/panels/meetings.js",import.meta.url),"utf8"); assert.doesNotMatch(source,/\bconfirm\s*\(|navigator\.mediaDevices|new (?:webkit)?SpeechRecognition/);
-  const card=readFileSync(new URL("./cards/meeting.jsx",import.meta.url),"utf8"); assert.match(card,/message\.body && <p[^>]+>Résumé généré/); assert.match(card,/month: "long"/);
+  const card=readFileSync(new URL("./cards/meeting.jsx",import.meta.url),"utf8"); assert.match(card,/message\.body && <p[^>]+>Résumé généré/); assert.match(card,/month: "long"/); assert.match(card,/<audio controls preload="metadata"/);
   const app=readFileSync(new URL("../../ui/app.js",import.meta.url),"utf8"); assert.match(app,/composer\?\.blockedReason/); assert.match(app,/typeof blockedReason === "string" \? blockedReason/);
 });

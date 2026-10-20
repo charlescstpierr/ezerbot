@@ -1,4 +1,5 @@
-.demonstration-dialog { width: min(580px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+.demonstration-dialog { --demonstration-padding: 27px; padding: var(--demonstration-padding); width: min(580px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+.demonstration-dialog > .dialog-header { position: sticky; top: calc(-1 * var(--demonstration-padding)); margin-top: calc(-1 * var(--demonstration-padding)); z-index: 1; background: var(--pane); padding-top: var(--demonstration-padding); padding-bottom: 8px; }
 .demonstration-dialog > p { font-size: 13px; line-height: 1.6; margin: 12px 0; color: var(--muted); }
 .demonstration-dialog > .screen-error { color: var(--danger-text); }
 .demonstration-dialog > h3 { font-size: 14px; margin-top: 14px; }
@@ -10,8 +11,12 @@
 .demonstration-dialog img { width: 100%; height: auto; border-radius: 10px; margin: 8px 0; }
 /* A flex item in .main-panel, not a viewport overlay: reserves its own space
    below the topbar, never covers the sidebar, toolbar or first chat message. */
-.demonstration-overlay { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 14px; padding: 10px 16px; margin: 8px 16px 0; min-width: 0; border: 1px solid var(--accent); border-radius: 12px; background: var(--pane); color: var(--text); font-size: 12px; }
+.demonstration-overlay { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 14px; padding: 10px 16px; margin: 8px 16px 0; min-width: 0; border: 1px solid var(--accent-ink); border-radius: 12px; background: var(--soft); color: var(--text); font-size: 12px; }
 .demonstration-overlay[hidden] { display: none; }
+.demonstration-controls { padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; cursor: pointer; }
+.demonstration-controls:hover { text-decoration: underline; }
+#show-bot-button:disabled { opacity: .45; cursor: not-allowed; }
 .demonstration-overlay small { flex-basis: 100%; text-align: center; color: var(--muted); }
 .demonstration-overlay .secondary-button { min-height: 30px; padding: 4px 12px; }
+@media (max-width: 760px) { .demonstration-dialog { --demonstration-padding: 23px; } }
 @media (max-width: 850px) { .demonstration-overlay { margin: 6px 10px 0; padding: 8px; font-size: 11px; gap: 6px; } }

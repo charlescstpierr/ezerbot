@@ -337,6 +337,30 @@ fn demonstration_to_skill_save_discard_cancel_restart_and_raw_retention() {
         .unwrap()
         .contains("Réessayez"));
     f.post("/api/demonstrations/discard", json!({"id":id}));
+    // An explicitly accepted partial recording keeps the failure warning in
+    // both the model input and the saved provenance, never posing as complete.
+    let id = f.post(
+        "/api/demonstrations/start",
+        json!({"bot_id":"grokbot","conversation_id":f.chat,"consent":true}),
+    )["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post("/api/demonstrations/fake-error", json!({"id":id}));
+    let request = f.draft(&id, "Note interrompue", false);
+    assert!(f.server.seen.lock().unwrap().bodies.iter().any(|body| body
+        .to_string()
+        .contains("la démonstration peut être incomplète")));
+    f.decide(&request, json!("allow_once"));
+    f.finish(&id, "saved");
+    let partial = f
+        .app
+        .api("GET", &format!("/api/demonstrations/summary?id={id}"), b"")
+        .unwrap();
+    assert!(partial["demonstration"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("la démonstration peut être incomplète"));
     // Signing out cancels the pending approval before changing identity. It can
     // no longer save or retain even opt-in media under the next account.
     let id = f.record();

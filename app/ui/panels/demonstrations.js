@@ -4,6 +4,7 @@
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const el = node("button", text, cls); el.type = "button"; el.onclick = action; return el; };
   let data = {}, context = {}, target = null, busy = false, error = "", explanation = "", keep = false, signature = "", lastSession = null;
+  const connectionRequired = "Connectez un fournisseur d’IA avant de montrer une tâche : la démonstration lui sera envoyée pour proposer la skill.";
   const dialog = node("dialog", null, "dialog demonstration-dialog"); dialog.setAttribute("aria-labelledby", "demonstration-title"); document.getElementById("panels").append(dialog);
   const overlay = node("div", null, "demonstration-overlay"); overlay.hidden = true; overlay.setAttribute("role", "status"); document.querySelector(".topbar").after(overlay);
   const menu = button("Montrer au bot", () => {
@@ -23,12 +24,20 @@
     busy = true; error = ""; render();
     try { await host.api(path, body); await host.refresh(); return true; }
     catch (e) { error = e.message; return false; }
-    finally { busy = false; signature = ""; render(); }
+    finally { busy = false; signature = ""; render(); updateOverlay(); }
+  }
+  function focusControl(preferred = null) {
+    if (!dialog.open || summaryDialog.open) return;
+    const controls = [...dialog.querySelectorAll("button, textarea, input")].filter(control => !control.disabled);
+    const restore = controls.find(control => preferred?.name ? control.name === preferred.name : preferred?.text && control.tagName === "BUTTON" && control.textContent === preferred.text);
+    const next = restore || (data.session?.status === "review" && controls.find(control => control.name === "demonstration-explanation")) || controls[0];
+    next?.focus({ preventScroll: true });
+    if (restore?.setSelectionRange && typeof preferred?.start === "number") restore.setSelectionRange(preferred.start, preferred.end);
   }
   function header(title) { const h = node("div", null, "dialog-header"); const name = node("h2", title); name.id = "demonstration-title"; h.append(name, button("Fermer", () => dialog.close())); return h; }
   function open(bot) {
     target = bot || data.session?.bot_id || context.bot?.id; error = ""; signature = ""; render();
-    if (!dialog.open) dialog.showModal(); updateOverlay();
+    if (!dialog.open) dialog.showModal(); focusControl(); updateOverlay();
   }
   function openCard() {
     const s = data.session; if (!s) return;
@@ -39,6 +48,7 @@
   async function start() {
     if (busy || !target) return;
     const consent = dialog.querySelector("[name=demonstration-consent]"); if (!consent?.checked) return;
+    if (!host.state.provider?.connected) { error = connectionRequired; signature = ""; render(); return; }
     busy = true; error = "";
     const bot = target;
     try {
@@ -73,26 +83,30 @@
     if (key === overlaySignature) return; overlaySignature = key;
     overlay.replaceChildren();
     const s = data.session, recording = s?.status === "recording";
-    overlay.hidden = !recording; entry.hidden = !s;
+    overlay.hidden = !recording; entry.hidden = !s || recording;
     menu.disabled = busy || (!s && context.conversation?.kind !== "chat");
     if (!recording) return;
     const countdown = node("span", remaining(s)); countdown.dataset.demoCountdown = "true";
-    overlay.append(node("strong", "Enregistrement de la démonstration"), countdown, button("Arrêter", stop));
+    const controls = button("Enregistrement de la démonstration", () => open(), "demonstration-controls"); controls.title = "Ouvrir les contrôles de la démonstration";
+    overlay.append(controls, countdown, button("Arrêter", stop));
     if (data.fake) overlay.append(node("small", "Écran fictif · aucune entrée réelle"));
     // This is an ordinary flex item under the main panel's topbar. In a modal,
     // recording controls are also available in its dedicated session dialog.
   }
   function render() {
     const s = data.session;
-    const next = JSON.stringify([s, target, error, busy, data.fake]); if (signature === next) return; signature = next;
+    const next = JSON.stringify([s, target, error, busy, data.fake, host.state.provider?.connected]); if (signature === next) return; signature = next;
+    const active = document.activeElement;
+    const preferred = dialog.contains(active) ? { name: active.name, text: active.textContent, start: active.selectionStart, end: active.selectionEnd } : null;
     dialog.replaceChildren(header(s?.capture_error ? "Enregistrement interrompu" : s?.status === "review" ? "Démonstration arrêtée" : s?.status === "recording" ? "Enregistrement de la démonstration" : "Montrer au bot"));
     if (data.fake) dialog.append(node("p", "Mode de test : captures fictives et événements synthétiques. Aucune permission macOS ni entrée réelle.", "screen-test-note"));
     if (!s) {
       const bot = host.state.bots?.find(b => b.id === target);
       dialog.append(node("h3", bot?.name || "Choisissez un bot"), node("p", "Faites la tâche sur votre Mac pendant qu’Ezerbot observe l’écran principal, les clics, les touches de navigation et les changements d’application. Aucun contrôle du Mac n’est accordé."), node("p", "Une capture toutes les 5 secondes, pendant 10 minutes au plus. Aucune saisie de texte n’est enregistrée, même hors des mots de passe ; les captures sont suspendues dans les champs privés ou invérifiables. Fermez vos fenêtres privées avant de commencer."), node("p", "Après Arrêter, ajoutez une explication : jusqu’à 12 captures échantillonnées et la synthèse seront envoyées à votre fournisseur d’IA pour proposer une skill. Les captures sont supprimées après votre décision, sauf conservation explicite. Rien n’est enregistré comme skill sans Enregistrer."));
+      if (!host.state.provider?.connected) { const notice = node("p", connectionRequired, "screen-error"); notice.setAttribute("role", "alert"); dialog.append(notice); }
       const label = node("label", null, "screen-consent"), check = node("input"); check.type = "checkbox"; check.name = "demonstration-consent";
       label.append(check, node("span", "J’autorise cet enregistrement et l’envoi au modèle pour préparer une proposition de skill."));
-      const begin = button("Commencer la démonstration", start, "primary-button"); begin.disabled = true; check.onchange = () => { begin.disabled = !check.checked || busy || !bot; };
+      const begin = button("Commencer la démonstration", start, "primary-button"); begin.disabled = true; check.onchange = () => { begin.disabled = !check.checked || busy || !bot || !host.state.provider?.connected; };
       dialog.append(label, begin);
     } else {
       if (s.notice) { const notice = node("p", s.notice, s.capture_error ? "screen-error" : "demonstration-note"); if (s.capture_error) notice.setAttribute("role", "alert"); dialog.append(notice); }
@@ -106,8 +120,9 @@
       } else dialog.append(node("p", "Le bot prépare la carte Enregistrer / Ignorer dans la conversation. Enregistrer conserve une synthèse liée à la skill, sans accorder de permission d’exécution."), button(s.request_id ? "Voir la proposition" : "Ouvrir le fil", openCard), button("Annuler et supprimer", discard));
     }
     if (busy) dialog.append(node("p", "Opération en cours…", "skills-note"));
-    if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); dialog.append(alert); }
+    if (error && (host.state.provider?.connected || error !== connectionRequired)) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); dialog.append(alert); }
     for (const control of dialog.querySelectorAll("button, textarea, input")) if (busy) control.disabled = true;
+    focusControl(preferred);
   }
   function summaryHeader(title = "Synthèse de la démonstration") {
     const header = node("div", null, "dialog-header"); header.append(node("h2", title), button("Fermer", () => summaryDialog.close())); return header;

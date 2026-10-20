@@ -39,7 +39,7 @@ function panel(fileCount = 1, withDemonstration = false) {
     document: { createElement: (tag) => new Element(tag), getElementById: () => root },
   });
   registration.botSection({ id: "bot" }, root);
-  return { root, skill, panels, requests };
+  return { root, skill, panels, requests, registration };
 }
 
 test("skill list keeps the human title and version but not the internal id", () => {
@@ -70,6 +70,16 @@ test("Show the bot stays locked with other skill actions while an import is pend
   assert.equal(demonstrate.disabled, true);
   release(new TextEncoder().encode("Texte").buffer);
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(demonstrate.disabled, false);
+});
+
+test("starting a demonstration gives persistent feedback inside the retained bot editor", () => {
+  const { root, panels, registration } = panel();
+  const demonstrate = descendants(root).find(el => el.tagName === "button" && el.textContent === "Montrer au bot");
+  panels.state.demonstrations.session = { id: "demo", bot_id: "bot", status: "recording" };
+  registration.onState();
+  assert.equal(demonstrate.textContent, "Démonstration en cours…");
+  assert.equal(demonstrate.title, "Ouvrir les contrôles de la démonstration");
   assert.equal(demonstrate.disabled, false);
 });
 

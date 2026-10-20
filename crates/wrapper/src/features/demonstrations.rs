@@ -209,7 +209,12 @@ fn stop_recording(ctx: &Context<'_>, id: &str, notice: &str) -> Result<(), ApiEr
     } else {
         "captures périodiques"
     };
-    let summary = format!("Démonstration du Mac · {} s · {} {}.\nLes saisies de texte ne sont jamais enregistrées. Écran principal seulement.\nÉvénements observés (extrait borné) :\n{}", ctx.now_ms.saturating_sub(r.started).min(CAP)/1000, r.frames.len(), captures, events);
+    let interrupted = if r.error.is_some() {
+        "Enregistrement interrompu par une erreur de capture ; la démonstration peut être incomplète.\n"
+    } else {
+        ""
+    };
+    let summary = format!("Démonstration du Mac · {} s · {} {}.\n{}Les saisies de texte ne sont jamais enregistrées. Écran principal seulement.\nÉvénements observés (extrait borné) :\n{}", ctx.now_ms.saturating_sub(r.started).min(CAP)/1000, r.frames.len(), captures, interrupted, events);
     let summary = grokbot_forms::redact::redact_value(&super::forms::vault(ctx)?, &json!(summary))?;
     let message = r.error.as_deref().unwrap_or(notice);
     ctx.connection.execute("UPDATE wrapper_demonstrations SET status='review',ended_at=?2,summary=?3,notice=?4,capture_error=?5 WHERE id=?1 AND status='recording'",params![id,ctx.now_ms,summary.as_str().unwrap_or(""),message,r.error.as_deref()])?;
@@ -447,6 +452,9 @@ pub fn routes(
                         403,
                         "Votre accord explicite est nécessaire pour enregistrer une démonstration.",
                     ));
+                }
+                if !app.provider.connected() {
+                    return Err(ApiError::new(409, "Connectez un fournisseur d’IA avant de montrer une tâche : la démonstration lui sera envoyée pour proposer la skill."));
                 }
                 if pending_id(&app.connection).is_some() || active() || super::screen::active() {
                     return Err(ApiError::new(409,"Une démonstration ou une session d’écran est déjà en cours. Arrêtez-la ou terminez sa proposition d’abord."));

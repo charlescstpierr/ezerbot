@@ -19,6 +19,13 @@ test("pending approval uses the persisted choice, never another review's local f
   assert.ok(!view.media.includes("après la décision"));
   assert.match(demonstrationSummaryView({ ...d, memory_image_count: 0, keep_images: false }).media, /Aucune capture en mémoire/);
 });
+test("a capture failure is disclosed in historical summaries as well as new recordings", () => {
+  const d = { ...summary, status: "saved", capture_error: "Capture interrompue" };
+  const first = demonstrationSummaryView(d).summary;
+  assert.match(first, /Enregistrement interrompu par une erreur de capture ; la démonstration peut être incomplète\./);
+  assert.equal(demonstrationSummaryView({ ...d, summary: first }).summary, first);
+});
+
 test("saved summaries and cards report actual persisted frames, including zero", () => {
   assert.equal(demonstrationSummaryView({ ...summary, status: "saved" }).media, "Synthèse liée conservée, sans captures.");
   assert.equal(demonstrationSummaryView({ ...summary, status: "saved", saved_image_count: 1 }).media, "1 capture conservée à votre demande.");

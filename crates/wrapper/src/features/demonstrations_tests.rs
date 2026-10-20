@@ -12,8 +12,31 @@ impl Db {
         std::fs::create_dir_all(&p).unwrap();
         Self(p)
     }
+    fn credentials(&self) -> PathBuf {
+        self.0.join("workspace.chatgpt-auth.json")
+    }
+    fn connect(&self) {
+        std::fs::write(self.credentials(), json!({"host_id":"fixture","client_id":"fixture-client","access_token":"fake-access","refresh_token":"fake-refresh","subject":"fixture-subject","account_id":"fixture-account","expires_at":crate::now()/1000+86400,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+    }
+    fn open_disconnected(&self) -> App {
+        let path = self.0.join("workspace.sqlite");
+        // Never send the fixture bearer to a real provider, including catalogue
+        // refreshes caused by /api/state. Port 9 refuses any optional request.
+        let provider = crate::Provider::with_endpoints(
+            &path,
+            crate::Endpoints {
+                api: "http://127.0.0.1:9/v1".into(),
+                ..crate::Endpoints::default()
+            },
+            false,
+        );
+        App::open_with(&path, provider).unwrap()
+    }
     fn open(&self) -> App {
-        App::open(&self.0.join("workspace.sqlite")).unwrap()
+        if !self.credentials().exists() {
+            self.connect();
+        }
+        self.open_disconnected()
     }
 }
 impl Drop for Db {
@@ -47,6 +70,56 @@ fn start(app: &mut App, c: &str) -> String {
 // One synthetic Mac lease at a time, just like the native helper. Other feature
 // tests cannot cause permission requests: debug capture is fixture-only.
 use super::super::screen::TEST_MAC as MAC;
+#[test]
+fn disconnected_start_is_refused_without_recording_and_first_connection_can_start() {
+    let _m = MAC.lock().unwrap();
+    let db = Db::new();
+    let mut app = db.open_disconnected();
+    let c = chat(&mut app);
+    let result = app
+        .api(
+            "POST",
+            "/api/demonstrations/start",
+            json!({"bot_id":"grokbot","conversation_id":c,"consent":true})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(result.status, 409);
+    assert!(result.message.contains("avant de montrer une tâche"));
+    assert_eq!(
+        app.connection
+            .query_row("SELECT count(*) FROM wrapper_demonstrations", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(!recordings().lock().unwrap().contains_key(&app.db_path));
+    db.connect();
+    let id = start(&mut app, &c);
+    assert_eq!(owned(&app.connection, &id).unwrap()["status"], "recording");
+    post(&mut app, "/api/demonstrations/discard", json!({"id":id}));
+}
+#[test]
+fn mutable_profile_fields_keep_the_recording_but_another_account_discards_it() {
+    let _m = MAC.lock().unwrap();
+    let db = Db::new();
+    let mut app = db.open();
+    let c = chat(&mut app);
+    let id = start(&mut app, &c);
+    post(&mut app, "/api/demonstrations/stop", json!({"id":id}));
+    let mut credentials: Value =
+        serde_json::from_slice(&std::fs::read(db.credentials()).unwrap()).unwrap();
+    credentials["email"] = json!("profil-modifie@exemple.test");
+    credentials["client_id"] = json!("client-complete-apres-connexion");
+    std::fs::write(db.credentials(), credentials.to_string()).unwrap();
+    app.tick(crate::now());
+    assert_eq!(owned(&app.connection, &id).unwrap()["status"], "review");
+    credentials["account_id"] = json!("autre-compte");
+    std::fs::write(db.credentials(), credentials.to_string()).unwrap();
+    app.tick(crate::now());
+    assert_eq!(owned(&app.connection, &id).unwrap()["status"], "discarded");
+}
 #[test]
 fn lifecycle_denial_double_start_stop_and_discard() {
     let _m = MAC.lock().unwrap();
@@ -152,6 +225,10 @@ fn cap_capture_error_restart_and_account_change() {
         .as_str()
         .unwrap()
         .contains("Erreur de capture"));
+    assert!(owned(&app.connection, &id).unwrap()["summary"]
+        .as_str()
+        .unwrap()
+        .contains("la démonstration peut être incomplète"));
     drop(app);
     let mut app = db.open();
     assert!(pending_id(&app.connection).is_none());

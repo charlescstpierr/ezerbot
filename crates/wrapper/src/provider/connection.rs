@@ -116,15 +116,8 @@ impl Provider {
         format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&json!([
-                    session.inner.codex,
-                    session.inner.local_revoked.load(Ordering::SeqCst),
-                    c.subject,
-                    c.account_id,
-                    c.email,
-                    c.client_id,
-                ]))
-                .unwrap_or_default()
+                serde_json::to_vec(&json!([session.inner.codex, c.account_id, c.subject,]))
+                    .unwrap_or_default()
             )
         )
     }

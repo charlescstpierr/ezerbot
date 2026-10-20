@@ -320,6 +320,9 @@
     function render() {
       if (!alive) return;
       const locked = job.running || job.mutating;
+      const recording = panels.state.demonstrations?.session;
+      demonstrate.textContent = recording?.status === "recording" && recording.bot_id === bot.id ? "Démonstration en cours…" : "Montrer au bot";
+      demonstrate.title = recording?.status === "recording" && recording.bot_id === bot.id ? "Ouvrir les contrôles de la démonstration" : "Montrer une tâche sur votre Mac";
       for (const control of [add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
       const skills = panels.state.skills?.by_bot?.[bot.id] || [];
       add.disabled = locked || skills.length >= 250;

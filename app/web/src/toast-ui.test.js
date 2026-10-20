@@ -57,6 +57,15 @@ test("the foremost bot sheet anchors feedback above its visible action buttons",
   assert.deepEqual(f.calls, ["hide", "show", "hide", "show"]);
 });
 
+test("document save feedback anchors above the destination dialog action footer", () => {
+  const component = readFileSync(new URL("./generated-document.jsx", import.meta.url), "utf8");
+  assert.match(component, /className="gb-file-actions dialog-footer"/);
+  const f = fixture({ dialogs: [{ top: 490 }] });
+  f.notify("Destination vérifiée.");
+  assert.equal(f.positions["--toast-bottom"], "298px");
+  assert.equal(f.toast.parent, f.sheets[0]);
+});
+
 test("older WebKit without popover support hosts the status inside the active modal", () => {
   const f = fixture({ dialogs: [undefined], popover: false });
   f.notify("Lien copié. Il n’accorde aucun droit d’accès.");

@@ -21,14 +21,14 @@ function SaveDialog({ file, pending, error, onSave, onClose }) {
     }).catch(() => {});
     return () => { active = false; };
   }, [file.id]);
-  return <dialog className="gb-file-save" ref={dialog} onCancel={onClose} aria-labelledby={`save-${file.id}`}>
+  return <dialog className="gb-file-save" ref={dialog} onClose={onClose} aria-labelledby={`save-${file.id}`}>
     <form onSubmit={(e) => { e.preventDefault(); onSave(path); }}>
       <h3 id={`save-${file.id}`}>Enregistrer sous…</h3>
       <p>Choisissez le chemin complet d’un nouveau fichier sur votre Mac. Aucun fichier existant ne sera remplacé.</p>
       <label>Chemin de destination<input ref={input} name="document-destination" autoFocus required value={path} onChange={(e) => setPath(e.target.value)} /></label>
       <p className="gb-file-hint">Une carte d’approbation vous demandera de confirmer l’écriture. L’extension doit rester .{file.format}.</p>
       {error && <p className="gb-file-error" role="alert">{error}</p>}
-      <div className="gb-file-actions"><button type="button" className="gb-retry" disabled={pending} onClick={onClose}>Annuler</button><button type="submit" className="gb-retry gb-retry-primary" disabled={pending || !path.startsWith("/")}>Demander l’enregistrement</button></div>
+      <div className="gb-file-actions dialog-footer"><button type="button" className="gb-retry" disabled={pending} onClick={onClose}>Annuler</button><button type="submit" className="gb-retry gb-retry-primary" disabled={pending || !path.startsWith("/")}>Demander l’enregistrement</button></div>
     </form>
   </dialog>;
 }
@@ -36,7 +36,7 @@ function SaveDialog({ file, pending, error, onSave, onClose }) {
 function PreviewDialog({ file, onClose }) {
   const dialog = useRef(null);
   useEffect(() => { dialog.current.showModal(); }, []);
-  return <dialog className="gb-file-save gb-file-zoom" ref={dialog} onCancel={onClose} aria-label={`Aperçu : ${file.name}`}>
+  return <dialog className="gb-file-save gb-file-zoom" ref={dialog} onClose={onClose} aria-label={`Aperçu : ${file.name}`}>
     <div className="gb-local-header"><strong>{file.name}</strong><button type="button" className="gb-retry" autoFocus onClick={onClose}>Fermer</button></div>
     <div className={`gb-file-zoom-content${file.format === "svg" ? " gb-file-zoom-diagram" : ""}`}><img src={file.preview_url} alt={`Aperçu agrandi : ${file.name}`} /></div>
   </dialog>;
@@ -64,7 +64,7 @@ export function GeneratedDocument({ file, message }) {
   return <article className="gb-message gb-engine-card gb-generated-file" data-message-id={message.id} data-card-kind="generated-document">
     <div className="gb-file-heading"><strong title={file.name}>{file.name}</strong><span>Document créé</span></div>
     <p className="gb-file-metadata">{file.format.toUpperCase()} · {formatAttachmentSize(file.byte_length)}{file.format === "pptx" && ` · ${file.pages} diapositive${file.pages > 1 ? "s" : ""}`}{file.format === "pdf" && ` · ${file.pages} page${file.pages > 1 ? "s" : ""}`}</p>
-    {previewError ? <p className="gb-file-hint">Aperçu indisponible. Le fichier peut toujours être ouvert ou enregistré.</p> : <button type="button" className="gb-file-preview-button" onClick={() => setZoom(true)} aria-label={`Agrandir l’aperçu de ${file.name}`}><img className={`gb-file-preview${file.format === "svg" ? " gb-file-diagram" : ""}`} src={file.preview_url} alt={file.format === "svg" ? `Diagramme : ${file.name}` : `Aperçu du document : ${file.name}`} onError={() => setPreviewError(true)} /></button>}
+    {previewError ? <p className="gb-file-hint">Aperçu indisponible. Le fichier peut toujours être ouvert ou enregistré.</p> : <button type="button" className={`gb-file-preview-button${["csv", "xlsx"].includes(file.format) ? " gb-file-preview-table" : ""}`} onClick={() => setZoom(true)} aria-label={`Agrandir l’aperçu de ${file.name}`}><img className={`gb-file-preview${file.format === "svg" ? " gb-file-diagram" : ""}`} src={file.preview_url} alt={file.format === "svg" ? `Diagramme : ${file.name}` : `Aperçu du document : ${file.name}`} onError={() => setPreviewError(true)} /></button>}
     <div className="gb-file-actions"><button type="button" className="gb-retry gb-retry-primary" disabled={pending} onClick={() => act("open")}>Ouvrir</button><button type="button" className="gb-retry" disabled={pending} onClick={() => act("reveal")}>Afficher dans le Finder</button><button type="button" className="gb-retry" disabled={pending} onClick={() => { setError(""); setSaving(true); }}>Enregistrer sous…</button></div>
     <p className="gb-file-hint">Conservé dans le stockage d’Ezerbot. Les actions sur le Mac nécessitent votre approbation.</p>
     {error && !saving && <p className="gb-file-error" role="alert">{error}</p>}
@@ -78,9 +78,9 @@ export function DocumentTool({ message, run }) {
   const view = documentToolView(message.payload, run);
   return <article className="gb-message gb-engine-card gb-local-card gb-document-status" data-message-id={message.id} data-card-kind="tool" data-local-state={view.state}>
     <div className="gb-local-header"><strong>{view.title}</strong><span className="gb-local-status" data-tone={view.tone}>{view.label}</span></div>
-    {view.failure ? <p className="gb-local-failure" data-tone={view.tone} role="alert">{view.summary}</p> : <p role="status">{outcome?.output?.message || (view.label === "Accord requis" ? "Confirmez l’action dans la carte d’approbation." : view.label)}</p>}
+    {view.failure ? <p className="gb-local-failure" data-tone={view.tone} role="alert">{view.summary}</p> : <p role="status">{outcome?.output?.message || (view.state === "running" ? (call.name === "create_document" ? "Création du document en cours." : "L’action est en cours sur votre Mac.") : view.label === "Accord requis" ? "Confirmez l’action dans la carte d’approbation." : "Le résultat sera affiché ici.")}</p>}
     {typeof call.arguments?.path === "string" && <pre className="gb-local-command">{call.arguments.path}</pre>}
-    {view.failure && <details><summary>Détails techniques</summary><pre className="gb-local-command">{view.failure.message}</pre></details>}
+    {view.failure && view.summary !== view.failure.message && <details><summary>Détails techniques</summary><pre className="gb-local-command">{view.failure.message}</pre></details>}
     {authorized_by?.kind === "rule" && <p className="gb-file-hint">Action autorisée par une règle « Toujours ».</p>}
   </article>;
 }

@@ -216,7 +216,7 @@
     // Never discard an unsaved editor or silently substitute another target.
     const botEdited = $("bot-dialog").open && (JSON.stringify(botFormValues()) !== botDialogInitial
       || Boolean($("bot-extensions").querySelector(".memory-editor:not([hidden])")));
-    if (botEdited || document.querySelector("#rename-dialog[open], .skills-dialog[open], .routines-dialog[open]")) {
+    if (botEdited || document.querySelector("#rename-dialog[open], .skills-dialog[open], .routines-dialog[open], dialog.gb-file-save:not(.gb-file-zoom)[open]")) {
       throw new Error("Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.");
     }
     for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();

@@ -26,7 +26,7 @@ test("settings links reveal the section heading, even for a section taller than 
 });
 
 function shellRouter({ open = [], botEdited = false, memoryEdited = false } = {}) {
-  const dialogs = Object.fromEntries(["bot-dialog", "rename-dialog", "settings-dialog", "skills-dialog", "routines-dialog"].map((id) => [id, {
+  const dialogs = Object.fromEntries(["bot-dialog", "rename-dialog", "settings-dialog", "skills-dialog", "routines-dialog", "document-save", "document-zoom"].map((id) => [id, {
     id, open: open.includes(id), close() { this.open = false; },
   }]));
   const bots = [{ id: "grokbot" }, { id: "redacteur" }];
@@ -34,6 +34,7 @@ function shellRouter({ open = [], botEdited = false, memoryEdited = false } = {}
   const navigate = runInNewContext(`(${navigateSource})`, {
     $: (id) => id === "bot-extensions" ? { querySelector: (selector) => memoryEdited && selector === ".memory-editor:not([hidden])" ? {} : null } : dialogs[id],
     document: { querySelector(selector) {
+      if (selector.includes("dialog.gb-file-save:not(.gb-file-zoom)[open]") && dialogs["document-save"].open) return dialogs["document-save"];
       return selector.split(",").map((part) => part.trim().match(/^[#.]([\w-]+)\[open\]$/)?.[1]).map((id) => dialogs[id]).find((dialog) => dialog?.open) || null;
     }, querySelectorAll: () => Object.values(dialogs).filter((dialog) => dialog.open) },
     botFormValues: () => ({ name: botEdited ? "Rédactrice" : "Rédacteur" }), botDialogInitial: JSON.stringify({ name: "Rédacteur" }),
@@ -76,6 +77,19 @@ test("skill and routine editors block incoming navigation without closing their 
     await assert.rejects(r.navigate({ kind: "settings", id: "shortcuts" }), { message: guard });
     assert.equal(r.dialogs[id].open, true);
   }
+});
+
+test("an incoming link preserves a generated document destination but may close its preview", async () => {
+  const saving = shellRouter({ open: ["document-save"] });
+  saving.dialogs["document-save"].destination = "/tmp/Résumé à conserver.md";
+  await assert.rejects(saving.navigate({ kind: "compose", text: "Autre brouillon" }), { message: guard });
+  assert.equal(saving.dialogs["document-save"].open, true);
+  assert.equal(saving.dialogs["document-save"].destination, "/tmp/Résumé à conserver.md");
+  assert.equal(saving.ctx.text, null);
+  const preview = shellRouter({ open: ["document-zoom"] });
+  await preview.navigate({ kind: "compose", text: "Autre brouillon" });
+  assert.equal(preview.dialogs["document-zoom"].open, false);
+  assert.equal(preview.ctx.text, "Autre brouillon");
 });
 
 test("restoring an open bot menu never pulls the settings scroll back to it", () => {

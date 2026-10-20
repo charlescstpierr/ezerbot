@@ -22,6 +22,8 @@
 .local-settings > .local-folder-error { color:var(--danger-text); font-size:11px; margin:6px 0 0; padding-bottom:6px; scroll-margin-block:8px; overflow-wrap:anywhere; }
 .gb-local-status { border:1px solid var(--line); background:var(--soft); border-radius:99px; padding:2px 8px; font-size:11px; }
 .gb-local-status[data-tone="success"] { color:var(--ok); }
+:root[data-theme="light"] .gb-local-status[data-tone="success"] { color:#177a42; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .gb-local-status[data-tone="success"] { color:#177a42; } }
 .gb-local-status[data-tone="danger"] { color:var(--danger-text); }
 .gb-local-status[data-tone="warning"] { color:var(--warning-text); background:var(--warning-bg); border-color:var(--warning-line); }
 .gb-local-card > .gb-local-failure { padding:10px; border-radius:7px; font-size:12px; }

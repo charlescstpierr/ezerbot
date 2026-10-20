@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
-import { floatingConversations, floatingReply, floatingPendingRequests } from "./floating-view.js";
+import { floatingConversations, floatingReply, floatingPendingRequests, floatingHasMore, resizeFloatingInput } from "./floating-view.js";
 
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.events = {}; this.value = "cmd+option+space"; }
@@ -21,7 +21,7 @@ function fixture(status = "recording") {
     async refresh() { calls.push("refresh"); },
     async focusConversation(id) { calls.push(id); return id === "visible"; },
   };
-  const window = { GrokbotPanels: host, webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } };
+  const window = { GrokbotPanels: host, ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
   runInNewContext(readFileSync(new URL("../../ui/panels/floating.js", import.meta.url), "utf8"), { window, document: { createElement: (tag) => new Element(tag) } });
   const nodes = (element) => [element, ...element.children.flatMap(nodes)];
   const all = nodes(root);
@@ -41,7 +41,16 @@ test("debug recording-only registration persists the chosen shortcut", async () 
   await f.save.events.click();
   assert.equal(f.requests[0].path, "/api/floating/settings");
   assert.equal(f.requests[0].body.shortcut, "ctrl+option+space");
+  assert.match(f.status.textContent, /Raccourci enregistré : ⌃ ⌥ Espace/);
   assert.match(f.status.textContent, /aucun raccourci global/);
+  assert.equal(f.select.disabled, false);
+});
+
+test("saved shortcut confirmation keeps the browser-only scope explicit", async () => {
+  const f = fixture(null); f.select.value = "cmd+option+j";
+  await f.save.events.click();
+  assert.match(f.status.textContent, /Raccourci enregistré : ⌘ ⌥ J/);
+  assert.match(f.status.textContent, /navigateur/);
 });
 
 test("selection publication is ordered, deduplicated and excludes task/routine composers", async () => {
@@ -78,9 +87,48 @@ test("pending approval follows its originating run even when routed to the coord
   assert.deepEqual(floatingPendingRequests(state,null),[]);
 });
 
+test("while awaiting input the last actual text reply replaces the empty suspended snapshot", () => {
+  const conversation = {messages:[{role:"assistant",kind:"message",body:"Dernière vraie réponse"},{role:"assistant",kind:"message",body:""}]};
+  assert.equal(floatingReply(conversation).body, "");
+  assert.equal(floatingReply(conversation, true).body, "Dernière vraie réponse");
+});
+
+test("compact composer grows to its content, caps at 120px and shrinks after sending", () => {
+  const element = {style:{},scrollHeight:20};
+  resizeFloatingInput(element); assert.equal(element.style.height,"40px");
+  element.scrollHeight = 80; resizeFloatingInput(element); assert.equal(element.style.height,"80px");
+  element.scrollHeight = 200; resizeFloatingInput(element); assert.equal(element.style.height,"120px"); assert.equal(element.style.overflowY,"auto");
+  element.scrollHeight = 20; resizeFloatingInput(element); assert.equal(element.style.height,"40px"); assert.equal(element.style.overflowY,"hidden");
+});
+
+test("overflow hint disappears at the bottom and tolerates fractional pixel rounding", () => {
+  assert.equal(floatingHasMore({scrollHeight:900,clientHeight:300,scrollTop:0}),true);
+  assert.equal(floatingHasMore({scrollHeight:900,clientHeight:300,scrollTop:600}),false);
+  assert.equal(floatingHasMore({scrollHeight:900,clientHeight:300,scrollTop:599.5}),false);
+  assert.equal(floatingHasMore(null),false);
+});
+
+test("compact layout keeps decisions outside the scroll region and disabled actions visibly muted", () => {
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /<\/div>\s*\{requests\.map\(\(request\) => <div className="floating-notice"/);
+  assert.match(source, /floating-notice floating-failure/);
+  assert.match(source, /!inNativePanel && <button className="icon-button floating-close"/);
+  assert.ok(!source.includes("reply?.body || reply?.error"));
+  assert.match(source, /live && reply\?\.body && <small>/);
+  const css = readFileSync(new URL("./floating.css", import.meta.url), "utf8");
+  assert.match(css, /\.floating-composer \.primary-button:disabled \{ background: var\(--soft\); color: var\(--subtle\); filter: none;/);
+  assert.match(css, /\.floating-panel footer button \{[^}]*margin-left: auto;/);
+  assert.match(css, /\.setting-section > \.floating-settings-status \{ margin: 8px 0 0;/);
+  assert.match(css, /-webkit-line-clamp: 2/);
+  assert.ok(!/padding|border/.test(css.match(/\.floating-question \{([^}]+)\}/)[1]), "Clamp padding belongs outside the clipped text to avoid a partial third line");
+  assert.match(css, /resize: none/);
+});
+
 test("native test builds compile out global registration and all event capture", () => {
   const source = readFileSync(new URL("../../native/floating.h", import.meta.url), "utf8");
   assert.match(source, /#if defined\(EZERBOT_RELEASE\)\n\s*\/\/ Carbon registers/);
   assert.ok(!/CGEventTapCreate|addGlobalMonitorForEvents|AXIsProcessTrusted|CGRequestListenEventAccess/.test(source));
   assert.match(source, /NSWindowCollectionBehaviorCanJoinAllSpaces/);
+  assert.match(source, /initWithContentRect:NSMakeRect\(80, 80, 420, 560\)/);
+  assert.match(source, /panel.minSize = NSMakeSize\(360, 520\)/);
 });

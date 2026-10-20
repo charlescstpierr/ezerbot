@@ -276,6 +276,7 @@ fn start_precaption(app: &App, body: &[u8]) -> Result<Value, ApiError> {
         None => resolved_model(&ctx)
             .ok_or_else(|| ApiError::new(409, "Le catalogue de modèles est en préparation."))?,
     };
+    let model = ctx.provider.image_description_model(&model);
     let records = submissions(&ctx)?;
     let projection =
         caption_projection(&ctx, &records, &input.conversation_id, &input.draft, None)?;
@@ -1273,6 +1274,7 @@ pub(super) fn images_for_message_cached(
         params![model, ctx.now_ms],
         |row| row.get(0),
     )?;
+    let no_vision = no_vision || !ctx.provider.accepts_images(model);
     attachments
         .iter()
         .map(|attachment| {
@@ -1409,6 +1411,7 @@ fn resolved_model(ctx: &Context<'_>) -> Option<String> {
         .or_else(|| models.first())
         .map(|model| model.slug.clone())
         .or(preferred)
+        .map(|model| ctx.provider.image_description_model(&model))
 }
 
 pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock> {

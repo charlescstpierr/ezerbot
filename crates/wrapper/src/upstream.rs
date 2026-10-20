@@ -115,7 +115,7 @@ fn reset_time(body: &Value) -> Option<String> {
             }
             connection
                 .query_row(
-                    "SELECT strftime('%d/%m à %H h %M', ?1, 'unixepoch', 'localtime')",
+                    "SELECT strftime('%d/%m à %H h %M', ?1, 'unixepoch', 'localtime')",
                     [seconds],
                     |r| r.get(0),
                 )
@@ -135,7 +135,7 @@ fn reset_time(body: &Value) -> Option<String> {
             }
             connection
                 .query_row(
-                    "SELECT strftime('%d/%m à %H h %M', ?1, 'localtime')",
+                    "SELECT strftime('%d/%m à %H h %M', ?1, 'localtime')",
                     [date],
                     |r| r.get(0),
                 )
@@ -150,7 +150,7 @@ pub(crate) fn failure_from_body(status: u16, body: &Value) -> Failure {
     if result.kind == "limit" {
         if let Some(reset) = reset_time(body) {
             result.message.push_str(&format!(
-                " Réinitialisation prévue par OpenAI : le {reset}."
+                " Réinitialisation prévue par OpenAI : le {reset}."
             ));
         }
     }

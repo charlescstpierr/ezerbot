@@ -354,8 +354,9 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
 
 pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
-        "usage_limit_reached" | "usage_not_included" => Failure {
-            message: "La limite d’utilisation Codex de ce compte ChatGPT est atteinte. Attendez la réinitialisation du quota Codex ou vérifiez votre forfait dans ChatGPT → Réglages → Utilisation.".into(),
+        "usage_not_included" => Failure::other("Votre forfait ChatGPT n’inclut pas Codex. Choisissez « Sign in with ChatGPT » dans les paramètres ou vérifiez votre forfait."),
+        "usage_limit_reached" => Failure {
+            message: "La limite d’utilisation Codex de ce compte ChatGPT est atteinte. Attendez la réinitialisation du quota ou consultez Codex → Réglages → Utilisation.".into(),
             kind: "limit",
         },
         "subscription_sharing_usage_limit_exceeded" => Failure {
@@ -763,9 +764,11 @@ impl Session {
             // Libérer le port avant l’échange réseau, qui peut être lent ou annulé.
             drop(server.take());
             let outcome = match (query.get("error"), query.get("code")) {
-                (Some(error), _) if error == "access_denied" => Err(
-                    "Vous avez refusé l’accès. Ezerbot n’utilise pas votre abonnement.".to_owned(),
-                ),
+                (Some(error), _) if error == "access_denied" => Err(if self.inner.codex {
+                    "Vous avez refusé l’accès. Ezerbot n’utilise pas votre quota Codex.".to_owned()
+                } else {
+                    "Vous avez refusé l’accès. Ezerbot n’utilise pas votre abonnement.".to_owned()
+                }),
                 (Some(_), _) => Err("OpenAI a refusé la connexion. Recommencez.".into()),
                 (None, Some(code)) => self
                     .complete(&attempt, code, query.get("client_id"), query.get("scope"))

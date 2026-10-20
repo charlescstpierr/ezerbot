@@ -301,6 +301,97 @@ fn quota_reset_http_sse_and_expired_refresh_are_french_and_not_retried() {
 }
 
 #[test]
+fn text_only_spark_uses_vision_caption_but_never_receives_image_bytes() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    post(
+        &mut app,
+        "/api/preferences",
+        json!({"model":"gpt-5.3-codex-spark"}),
+    );
+    let c = post(
+        &mut app,
+        "/api/conversations",
+        json!({"title":"Image avec Spark"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=").unwrap();
+    let image = app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"Un pixel blanc."}),
+        json!({"type":"response.completed"}),
+    ]));
+    let prepare = json!({"conversation_id":c,"attachment_id":image,"draft":"Décris ce pixel"});
+    post(&mut app, "/api/attachments/precaption", prepare.clone());
+    wait("description vision pour Spark", || {
+        let result = post(&mut app, "/api/attachments/precaption", prepare.clone());
+        assert_eq!(result["model"], "gpt-5.5");
+        result["caption"]["status"] == "ready"
+    });
+    drop(app);
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"La description montre un pixel blanc."}),
+        json!({"type":"response.completed"}),
+    ]));
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"spark-image","body":"Décris ce pixel","attachments":[image]}),
+    );
+    wait("réponse Spark avec description", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == "reply-spark-image" && message["state"] == "echoed")
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(seen.bodies[0]["model"], "gpt-5.5");
+    assert!(seen.bodies[0]["input"].to_string().contains("input_image"));
+    let spark = seen
+        .bodies
+        .iter()
+        .find(|body| body["model"] == "gpt-5.3-codex-spark")
+        .unwrap();
+    assert!(spark["input"].to_string().contains("Un pixel blanc."));
+    assert!(!spark["input"].to_string().contains("input_image"));
+    let before = seen.bodies.len();
+    drop(seen);
+    assert!(f.provider.responses(json!({"model":"gpt-5.3-codex-spark","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]})).is_err());
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+}
+
+#[test]
+fn plan_without_codex_is_not_a_temporary_quota_limit() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    f.reply(ScriptedResponse::json(
+        403,
+        json!({"error":{"type":"usage_not_included", "resets_at":1900000000}}),
+    ));
+    let failure = f
+        .provider
+        .responses(json!({"model":"gpt-5.5","stream":true,"input":[]}))
+        .unwrap_err();
+    assert_eq!(failure.kind, "other");
+    assert!(failure
+        .message
+        .contains("Votre forfait ChatGPT n’inclut pas Codex"));
+    assert!(failure.message.contains("Sign in with ChatGPT"));
+    assert!(!failure.message.contains("Attendez") && !failure.message.contains("Réinitialisation"));
+    assert!(!failure.message.contains("abonnement") && !failure.message.contains("partage"));
+}
+
+#[test]
 fn existing_sharing_session_is_preserved_and_new_install_prefers_codex() {
     let f = Fixture::new();
     assert_eq!(f.provider.status()["backend"], "codex");
@@ -475,7 +566,9 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
         "/api/send",
         json!({"conversation_id":c,"message_id":"delegate-message","body":"Délègue la relecture"}),
     );
-    let refused = app.api("POST", "/api/provider/select", br#"{"backend":"sharing"}"#).unwrap_err();
+    let refused = app
+        .api("POST", "/api/provider/select", br#"{"backend":"sharing"}"#)
+        .unwrap_err();
     assert_eq!(refused.status, 409);
     assert!(refused.message.contains("avant de changer de connexion"));
     assert_eq!(f.provider.status()["backend"], "codex");

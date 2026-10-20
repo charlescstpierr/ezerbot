@@ -80,7 +80,10 @@ impl Provider {
         self.sharing.cancel_signin();
         self.codex.cancel_signin();
         let temporary = self.selection_file.with_extension("json.tmp");
-        if let Some(parent) = temporary.parent().filter(|path| !path.as_os_str().is_empty()) {
+        if let Some(parent) = temporary
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent).map_err(storage_failure)?;
         }
         let mut options = fs::OpenOptions::new();
@@ -132,6 +135,16 @@ impl Provider {
     }
     pub fn refresh_models(&self) {
         self.session().refresh_models();
+    }
+    pub(crate) fn accepts_images(&self, model: &str) -> bool {
+        !self.session().inner.codex || model != "gpt-5.3-codex-spark"
+    }
+    pub(crate) fn image_description_model(&self, model: &str) -> String {
+        if self.accepts_images(model) {
+            model.into()
+        } else {
+            "gpt-5.5".into()
+        }
     }
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
         self.session().responses(body)

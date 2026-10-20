@@ -109,6 +109,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         (503, "subscription_sharing_user_unavailable", "other"),
         (403, "subscription_sharing_invalid_user", "signin"),
         (429, "usage_limit_reached", "limit"),
+        (403, "usage_not_included", "other"),
         (429, "rate_limit_exceeded", "other"),
         (429, "insufficient_quota", "other"),
         (400, "subscription_sharing_unsupported_capability", "other"),
@@ -127,10 +128,12 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
             if code == "subscription_sharing_usage_limit_exceeded" {
                 assert!(error.message.contains("Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT"));
                 assert!(error.message.contains("quota Codex peut rester disponible"));
+                assert!(error.message.contains("ChatGPT → Réglages → Utilisation"));
             } else {
                 assert!(error.message.contains("limite d’utilisation Codex"));
+                assert!(error.message.contains("Codex → Réglages → Utilisation"));
+                assert!(!error.message.contains("abonnement"));
             }
-            assert!(error.message.contains("ChatGPT → Réglages → Utilisation"));
             assert!(!error.message.contains("Réinitialisation"));
         }
     }
@@ -167,7 +170,7 @@ fn local_reset_time() -> String {
     rusqlite::Connection::open_in_memory()
         .unwrap()
         .query_row(
-            "SELECT strftime('%d/%m à %H h %M', '2026-10-20T18:00:00Z', 'localtime')",
+            "SELECT strftime('%d/%m à %H h %M', '2026-10-20T18:00:00Z', 'localtime')",
             [],
             |row| row.get(0),
         )
@@ -190,7 +193,7 @@ fn http_reset_is_explicit_validated_and_limited_to_the_usage_card() {
         let message = fixture.raw().unwrap_err().message;
         assert!(
             message.ends_with(&format!(
-                "Réinitialisation prévue par OpenAI : le {}.",
+                "Réinitialisation prévue par OpenAI : le {}.",
                 local_reset_time()
             )),
             "{message}"
@@ -237,6 +240,7 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
             ("subscription_sharing_invalid_user", "signin"),
             ("rate_limit_exceeded", "other"),
             ("usage_limit_reached", "limit"),
+            ("usage_not_included", "other"),
             ("insufficient_quota", "other"),
             ("subscription_sharing_unsupported_capability", "other"),
         ] {
@@ -397,7 +401,7 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
             .iter()
             .any(|message| {
                 message["error"].as_str().is_some_and(|text| {
-                    text.ends_with("Réinitialisation prévue par OpenAI : le 20/10 à 14 h 00.")
+                    text.ends_with("Réinitialisation prévue par OpenAI : le 20/10 à 14 h 00.")
                 })
             })
     });

@@ -163,6 +163,20 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| Failure::other("Demande Codex invalide."))?;
+    if object.get("model").and_then(Value::as_str) == Some("gpt-5.3-codex-spark")
+        && object
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|input| {
+                input.iter().any(|item| {
+                    item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| part["type"] == "input_image")
+                    })
+                })
+            })
+    {
+        return Err(Failure::other("GPT-5.3 Codex Spark ne lit pas les images. Choisissez GPT-5.5 ou envoyez une description de l’image."));
+    }
     object.insert("store".into(), json!(false));
     object.insert("stream".into(), json!(true));
     if object
@@ -220,7 +234,7 @@ pub(super) fn models() -> Vec<Model> {
         slug: id.into(),
         name: name.into(),
         description: if id.ends_with("spark") {
-            "Quota Codex · texte uniquement"
+            "Quota Codex · texte uniquement (images décrites par GPT-5.5)"
         } else {
             "Quota Codex · texte et images"
         }

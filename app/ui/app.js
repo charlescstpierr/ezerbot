@@ -180,6 +180,13 @@
       }
       return true;
     },
+    async focusConversation(id) {
+      if (busy) return false;
+      // Native panel navigation shares deep-link editor/draft protection and
+      // closes overlays before revealing the complete conversation.
+      await navigateLink({ kind: "conversation", id });
+      return true;
+    },
     draft: () => ui.input?.value || "",
     draftDocument: () => ui.input?.document,
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },

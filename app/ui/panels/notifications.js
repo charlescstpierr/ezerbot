@@ -4,7 +4,7 @@
   const node = (tag, text, className) => { const el = document.createElement(tag); if (text) el.textContent = text; if (className) el.className = className; return el; };
   const kinds = { reply: "Réponses terminées", approval: "Autorisations demandées", form: "Formulaires en attente", secret: "Secrets demandés", routine: "Routines terminées ou en échec", delegation: "Sous-tâches terminées" };
   let current = null, data = null, loading = false, section, message, nativeFocus = null, pendingOpen = null;
-  let permission = "unknown", error = "", saving = false;
+  let permission = "unknown", error = "", pollFailure = "", saving = false;
   let listSignature = "", settingsSignature = "";
   const bridge = () => window.webkit?.messageHandlers?.ezerbotNotifications;
   async function native(command, fields = {}) {
@@ -64,6 +64,7 @@
   }
   function statusText() {
     if (error) return error;
+    if (pollFailure) return pollFailure;
     if (window.EzerbotIPhone?.remote) return "Les types et Ne pas déranger s’appliquent au Mac et à l’iPhone. Activez les notifications de cet appareil dans la section iPhone.";
     if (permission === "denied") return "Notifications refusées par macOS. Autorisez Ezerbot dans Réglages Système › Notifications, puis réessayez.";
     if (data?.settings?.dnd) return "Ne pas déranger est actif : les alertes sont suspendues, les événements restent dans la liste.";
@@ -95,11 +96,11 @@
   }
   function renderSettings() {
     if (!section) return;
-    const signature = JSON.stringify([data?.settings, permission, error, saving]);
+    const signature = JSON.stringify([data?.settings, permission, error, pollFailure, saving]);
     if (signature === settingsSignature) return;
     settingsSignature = signature;
     section.replaceChildren(node("h3", "Notifications"));
-    const warning = permission === "denied" || Boolean(error);
+    const warning = permission === "denied" || Boolean(error || pollFailure);
     message = node("p", null, warning ? "notification-warning" : ""); message.role = warning ? "alert" : "status";
     if (warning) {
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -161,6 +162,7 @@
       const p0 = presence();
       await native("presence", { conversation_id: p0.conversation_id, visible: p0.visible });
       data = window.EzerbotIPhone?.remote ? await host.api("/api/notifications") : await host.api("/api/notifications/poll", p0);
+      pollFailure = "";
       renderList();
       if (!section?.querySelector("input:focus")) renderSettings();
       for (const item of data.deliveries || []) {
@@ -174,7 +176,7 @@
       const visible = p.focused && p.visible ? data.items.filter(item => item.conversation_id === p.conversation_id).map(item => item.id) : [];
       if (visible.length) { data = await host.api("/api/notifications/read", { ids: visible }); renderList(); }
       focusTarget();
-    } catch (e) { error = e.message; renderSettings(); }
+    } catch (e) { pollFailure = e.message; renderSettings(); }
     finally { loading = false; }
   }
   window.EzerbotNotifications = {

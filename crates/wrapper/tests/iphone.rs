@@ -93,6 +93,46 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn presence_reports_only_the_authenticated_devices_push_state() {
+    let mut f = Fixture::new();
+    let (id, token) = f.pair();
+    let body = json!({"conversation_id":null,"visible":false});
+    assert_eq!(
+        f.remote("POST", "/api/iphone/presence", body.clone(), Some(&token))
+            .unwrap(),
+        json!({"ok":true,"push":false})
+    );
+    f.app
+        .feature_context()
+        .connection
+        .execute(
+            "UPDATE iphone_devices SET subscription='{}' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+    let state = f
+        .remote("POST", "/api/iphone/presence", body, Some(&token))
+        .unwrap();
+    assert_eq!(state, json!({"ok":true,"push":true}));
+    f.remote(
+        "POST",
+        "/api/iphone/push",
+        json!({"subscription":null}),
+        Some(&token),
+    )
+    .unwrap();
+    assert_eq!(
+        f.remote(
+            "POST",
+            "/api/iphone/presence",
+            json!({"conversation_id":null,"visible":false}),
+            Some(&token)
+        )
+        .unwrap()["push"],
+        false
+    );
+}
+#[test]
 fn off_by_default_confirmation_refusal_restart_and_revocation() {
     let mut f = Fixture::new();
     assert!(!iphone::enabled(&f.app));

@@ -194,7 +194,12 @@ pub fn remote(
             "UPDATE iphone_devices SET conversation_id=?2,visible=?3,last_seen=?4 WHERE id=?1",
             params![id, input.conversation_id, input.visible, now],
         )?;
-        return Ok(ApiResponse::Json(json!({"ok":true})));
+        let push: bool = app.connection.query_row(
+            "SELECT subscription IS NOT NULL FROM iphone_devices WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )?;
+        return Ok(ApiResponse::Json(json!({"ok":true,"push":push})));
     }
     if path == "/api/iphone/push-key" && method == "GET" {
         return push::public_key(&app.connection).map(|key| ApiResponse::Json(json!({"key":key})));

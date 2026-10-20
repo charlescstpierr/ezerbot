@@ -91,6 +91,8 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         let r = response(ureq::get(&format!("{remote}{path}")).call());
         assert_eq!(r.status(), 200, "{path}");
         assert_eq!(r.header("X-Frame-Options"), Some("DENY"));
+        assert_eq!(r.header("Connection"), Some("close"));
+        assert_eq!(r.header("Cache-Control"), Some("no-store"));
     }
     // A fresh browser can load these together over persistent HTTP/1.1 sockets.
     // Exercise the actual host, framing and connection reuse, not source strings.
@@ -246,7 +248,85 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .status(),
         403
     );
+    // Forced-close private responses retain binary data and WebKit byte ranges.
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let conversation: Value = post(&host.url, "/api/conversations", json!({}))
+        .into_json()
+        .unwrap();
+    let wav = include_bytes!("fixtures/voice.wav");
+    let memo:Value=post(&host.url,"/api/voice/memos",json!({"conversation_id":conversation["conversation"]["id"],"upload_id":"phone-range","data":STANDARD.encode(wav),"transcript":"Lecture de test.","language":"fr"})).into_json().unwrap();
+    let ranged = ureq::get(&format!(
+        "{remote}/api/voice/audio/{}",
+        memo["id"].as_str().unwrap()
+    ))
+    .set("Cookie", cookie)
+    .set("Range", "bytes=0-43")
+    .call()
+    .unwrap();
+    assert_eq!(ranged.status(), 206);
+    assert_eq!(ranged.header("Connection"), Some("close"));
+    assert_eq!(
+        ranged.header("Content-Range"),
+        Some(format!("bytes 0-43/{}", wav.len()).as_str())
+    );
+    let mut received = Vec::new();
+    ranged.into_reader().read_to_end(&mut received).unwrap();
+    assert_eq!(received, &wav[..44]);
+    // Reuse the SAME accepted socket over disable/re-enable. A newly bound
+    // listener cannot read an old tiny_http queue: this reproduced the blank PWA.
+    use std::io::{Read, Write};
+    fn exchange_socket(
+        reader: &mut BufReader<std::net::TcpStream>,
+    ) -> std::io::Result<(u16, Vec<String>)> {
+        reader.get_mut().write_all(
+            b"GET /iphone.css HTTP/1.1\r\nHost: 127.0.0.1:47863\r\nConnection: keep-alive\r\n\r\n",
+        )?;
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if line.is_empty() {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut headers = Vec::new();
+        let mut length = 0;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+            headers.push(line.trim().to_ascii_lowercase());
+        }
+        reader.read_exact(&mut vec![0; length])?;
+        Ok((status, headers))
+    }
+    let socket = std::net::TcpStream::connect("127.0.0.1:47863").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .unwrap();
+    let mut socket = BufReader::new(socket);
+    assert_eq!(exchange_socket(&mut socket).unwrap().0, 200);
+    for _ in 0..4 {
+        post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
+        // Access is denied on both old and fresh connections, never left hanging.
+        let denial = response(ureq::get(&format!("{remote}/iphone.js")).call());
+        assert_eq!(denial.status(), 403);
+        assert_eq!(denial.header("Connection"), Some("close"));
+        assert_eq!(denial.header("Cache-Control"), Some("no-store"));
+        post(&host.url, "/api/iphone/enabled", json!({"enabled":true}));
+        let start = std::time::Instant::now();
+        assert_eq!(exchange_socket(&mut socket).unwrap().0, 200);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
     post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
+    let (status, headers) = exchange_socket(&mut socket).unwrap();
+    assert_eq!(status, 403);
+    assert!(headers.iter().any(|h| h == "connection: close"));
     std::thread::sleep(Duration::from_millis(120));
     let disabled = ureq::get(&format!("{remote}/api/state"))
         .set("Cookie", cookie)

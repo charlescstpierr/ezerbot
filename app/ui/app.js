@@ -1342,7 +1342,8 @@
   $("sidebar-toggle").addEventListener("click", () => {
     const open = document.body.classList.toggle("sidebar-open");
     $("sidebar-toggle").setAttribute("aria-expanded", String(open));
-    if (open) ui.search.focus();
+    if (open && !window.EzerbotIPhone?.remote) ui.search.focus();
+    else if (open) $("sidebar-close").focus({ preventScroll: true });
   });
   $("sidebar-close").addEventListener("click", closeSidebar);
   $("sidebar-scrim").addEventListener("click", closeSidebar);

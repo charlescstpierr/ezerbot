@@ -450,6 +450,9 @@ mod tests {
                     assert!(Instant::now() < deadline, "fake push timeout");
                     std::thread::sleep(Duration::from_millis(10));
                 };
+                // Darwin can inherit O_NONBLOCK from the accepting listener.
+                // Read the complete fake HTTP request with a bounded timeout.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();

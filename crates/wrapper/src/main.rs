@@ -71,6 +71,41 @@ fn error(status: u16, message: &str) -> ApiError {
     }
 }
 
+/// tiny_http filters Connection from Response::add_header. For disabled access,
+/// write the fixed denial explicitly so browsers/proxies retire their connection.
+fn remote_disabled(request: Request) -> std::io::Result<()> {
+    let body = json!({"error":"L’accès iPhone est désactivé sur le Mac."}).to_string();
+    let mut writer = request.into_writer();
+    write!(writer, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n\r\n{}", body.len(), body)?;
+    writer.flush()
+}
+
+/// Retire private HTTP connections at every response, also across host restarts.
+/// Keep tiny_http's framing (including ranges, cookies, chunking and HEAD), but
+/// add the hop-by-hop header on the wire because Response filters that header.
+fn respond_remote(
+    request: Request,
+    response: Response<std::io::Cursor<Vec<u8>>>,
+) -> std::io::Result<()> {
+    let mut encoded = Vec::new();
+    response.raw_print(
+        &mut encoded,
+        request.http_version().clone(),
+        request.headers(),
+        request.method().as_str() == "HEAD",
+        None,
+    )?;
+    let split = encoded
+        .windows(2)
+        .position(|p| p == b"\r\n")
+        .ok_or(std::io::ErrorKind::InvalidData)?;
+    let mut writer = request.into_writer();
+    writer.write_all(&encoded[..split])?;
+    writer.write_all(b"\r\nConnection: close")?;
+    writer.write_all(&encoded[split..])?;
+    writer.flush()
+}
+
 fn payload(
     request: &mut Request,
     port: u16,
@@ -286,9 +321,11 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                     Some("Le port 47863 est occupé. Libérez-le ou désactivez l’accès iPhone."),
                 ),
             }
-        } else if !iphone {
-            remote_server = None;
         }
+        // Retain this loopback listener once enabled. Dropping tiny_http::Server
+        // strands accepted keep-alive sockets in its old queue; a re-created
+        // listener can never answer those sockets. Disabled access is a denial,
+        // including for old connections, not an orphaned request queue.
         // Never change the desktop listener's loopback/Host protections. The
         // stable second port is also loopback: only Tailscale Serve exposes it.
         // Alternate when both queues are busy: a phone (even an unpaired one)
@@ -311,7 +348,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             (local_request, false)
         } else {
             (
-                server.recv_timeout(if iphone {
+                server.recv_timeout(if remote_server.is_some() {
                     Duration::from_millis(50)
                 } else {
                     TICK_INTERVAL
@@ -328,6 +365,12 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             continue;
         };
         remote_turn = !remote;
+        if remote && !grokbot_wrapper::features::iphone::enabled(&app) {
+            if let Err(error) = remote_disabled(request) {
+                eprintln!("Réponse iPhone désactivé interrompue : {error}");
+            }
+            continue;
+        }
         let is_api = request.url().starts_with("/api/");
         let mut cookie = None;
         let (mut status, mut body, content_type) = match payload(
@@ -399,7 +442,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
         for (name, value) in [
             ("Content-Type", content_type.as_str()),
-            ("Cache-Control", if is_api { "no-store" } else { "no-cache" }),
+            ("Cache-Control", if is_api || remote { "no-store" } else { "no-cache" }),
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
             ("Referrer-Policy", "no-referrer"),
@@ -407,7 +450,12 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         ] {
             response.add_header(Header::from_bytes(name, value).expect("validated response header"));
         }
-        if let Err(error) = request.respond(response) {
+        let result = if remote {
+            respond_remote(request, response)
+        } else {
+            request.respond(response)
+        };
+        if let Err(error) = result {
             eprintln!("Réponse HTTP interrompue : {error}");
         }
     }

@@ -902,9 +902,13 @@
     const current = provider();
     const { model, effort, fast } = state.preferences || {};
     const selected = (current.models || []).find((item) => item.slug === model);
-    $("mode-badge-text").textContent = current.connected ? "ChatGPT" : "Local";
+    const isCodex = current.backend === "codex";
+    $("mode-badge-text").textContent = current.connected ? (isCodex ? "Codex" : "ChatGPT") : "Local";
     $("plan-banner").hidden = current.connected;
-    document.querySelectorAll("[data-provider-signin]").forEach((button) => { button.disabled = current.signin === "pending"; });
+    document.querySelectorAll("[data-provider-signin]").forEach((button) => {
+      button.disabled = current.signin === "pending";
+      button.textContent = isCodex ? "Se connecter via Codex" : "Continuer avec ChatGPT";
+    });
 
     const tools = $("composer-tools");
     if (current.connected) {
@@ -925,7 +929,7 @@
     if (current.connected) {
       const link = element("a", "", "Gérer l’utilisation");
       link.href = usageUrl; link.target = "_blank"; link.rel = "noreferrer";
-      note.replaceChildren(document.createTextNode("Abonnement ChatGPT utilisé · "), link);
+      note.replaceChildren(document.createTextNode(isCodex ? "Quota Codex utilisé · " : "Partage d’abonnement ChatGPT · "), link);
     } else {
       note.replaceChildren(element("span", "simulation-dot"), document.createTextNode("Réponses simulées"));
     }
@@ -933,32 +937,56 @@
     const card = element("div", "provider-card");
     const copy = element("div");
     const actions = element("div", "provider-actions");
-    const heading = element("h3", "", current.connected ? "Connecté à ChatGPT" : "Utiliser votre abonnement ChatGPT");
+    const choice = element("fieldset", "provider-choice");
+    choice.append(element("legend", "", "Connexion"));
+    for (const [id, title, description] of [
+      ["codex", "Compte ChatGPT via Codex (recommandé)", "Utilise le quota Codex de votre forfait, comme pi et Codex CLI."],
+      ["sharing", "Sign in with ChatGPT", "Partage d’abonnement : une limite propre à Ezerbot peut s’appliquer."],
+    ]) {
+      const label = element("label", "provider-option");
+      const radio = element("input"); radio.type = "radio"; radio.name = "connection-backend"; radio.value = id;
+      radio.checked = current.backend === id; radio.disabled = current.signin === "pending";
+      radio.addEventListener("change", async () => { await providerAction("/api/provider/select", { backend: id }); await refresh().catch(() => {}); });
+      const text = element("span");
+      text.append(element("strong", "", title), element("small", "", description + (current.connections?.[id] ? " Compte connecté." : "")));
+      label.append(radio, text); choice.append(label);
+    }
+    const heading = element("h3", "", current.connected ? (isCodex ? "Connecté via Codex" : "Connecté à ChatGPT") : "Utiliser votre compte ChatGPT");
     if (current.connected) heading.prepend(element("span", "status-dot"));
     copy.append(heading, element("p", "", current.connected ? (current.email ? `Compte ChatGPT : ${current.email}` : "Adresse e-mail du compte ChatGPT indisponible.")
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
       : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
+    const planNames = { plus: "Plus", pro: "Pro", free: "Gratuit", team: "Équipe", business: "Business", enterprise: "Entreprise", edu: "Éducation" };
+    if (current.connected) copy.append(element("p", "", `Forfait : ${planNames[current.plan] || current.plan || "non communiqué par OpenAI"}`));
+    if (current.connected && isCodex) copy.append(element("p", "", "Cette session est propre à Ezerbot. La déconnexion l’efface sur ce Mac uniquement."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
     const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
     if (current.connected) {
       const link = element("a", "secondary-button", "Gérer l’utilisation");
       link.href = usageUrl; link.target = "_blank"; link.rel = "noreferrer";
       actions.append(link, action("Se déconnecter", "secondary-button", signOut));
+    } else if (current.retained) {
+      copy.append(element("p", "provider-error", "Connexion suspendue sur ce Mac. Des identifiants restent sur le disque : réessayez de les effacer avant de fermer Ezerbot."));
+      actions.append(action("Réessayer la déconnexion", "secondary-button", signOut));
     } else if (current.signin === "pending") {
       actions.append(action("Annuler", "secondary-button", () => providerAction("/api/provider/cancel")));
     } else {
-      actions.append(action("Continuer avec ChatGPT", "chatgpt-button", signIn));
+      actions.append(action(isCodex ? "Se connecter via Codex" : "Continuer avec ChatGPT", "chatgpt-button", signIn));
     }
     card.append(copy, actions);
-    $("provider-section").replaceChildren(card);
+    $("provider-section").replaceChildren(choice, card);
 
     const dialog = $("plan-dialog");
+    $("plan-title").textContent = isCodex ? "Vous utilisez votre quota Codex" : "Vous utilisez votre abonnement ChatGPT";
+    dialog.querySelector(".delete-description").textContent = isCodex
+      ? "Les réponses d’Ezerbot comptent dans le quota Codex de votre compte ChatGPT, et non dans le partage d’abonnement accordé à une application. Vos sessions pi et Codex CLI restent indépendantes."
+      : "Les réponses d’Ezerbot comptent dans le partage d’abonnement ChatGPT. Une limite propre à Ezerbot peut s’appliquer, même si votre quota Codex reste disponible.";
     if (current.connected && !current.welcomed && !dialog.open) dialog.showModal();
   }
 
-  async function providerAction(path) {
+  async function providerAction(path, body = {}) {
     try {
-      const response = await api(path, {});
+      const response = await api(path, body);
       state.provider = response.provider;
       renderProvider();
       schedulePoll();
@@ -971,7 +999,7 @@
   async function signOut() {
     const response = await providerAction("/api/provider/signout");
     if (response && !response.revoked) notify("Déconnecté sur ce Mac. OpenAI n’a pas confirmé : vous pouvez retirer Ezerbot dans les réglages de ChatGPT.");
-    if (response) await refresh().catch(() => {});
+    await refresh().catch(() => {});
   }
 
   async function generation(path, messageId) {

@@ -218,7 +218,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
             .provider
             .models()
             .iter()
-            .any(|m| m.slug.contains("mini") || m.slug.contains("nano"));
+            .any(|m| m.slug.contains("mini") || m.slug.contains("nano") || m.slug == "gpt-6-luna");
     let pending = connected && ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM memory_auto_jobs WHERE state='queued' OR (state='running' AND updated_at>?1))", [ctx.now_ms.saturating_sub(30_000)], |r| r.get::<_,bool>(0)).unwrap_or(false);
     let revision = ctx
         .connection

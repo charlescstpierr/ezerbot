@@ -59,6 +59,11 @@ struct Configuration {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectionChoice {
+    backend: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
@@ -323,6 +328,7 @@ pub fn routes(
             "/api/send"
                 | "/api/reconcile"
                 | "/api/provider/signin"
+                | "/api/provider/select"
                 | "/api/provider/cancel"
                 | "/api/provider/welcomed"
                 | "/api/provider/signout"
@@ -463,11 +469,43 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
+        "/api/provider/select" => {
+            let input: ConnectionChoice = parse(body)?;
+            if app.provider.status()["backend"] != input.backend {
+                // Une reprise doit garder son modèle et sa session d’origine, même
+                // quand aucun worker ne tourne pendant l’attente d’un formulaire.
+                for status in [
+                    RunStatus::Queued, RunStatus::Running, RunStatus::Interrupted,
+                    RunStatus::AwaitingApproval, RunStatus::AwaitingHumanInput, RunStatus::AwaitingChildren,
+                ] {
+                    for run in store::runs_with_status(&app.connection, status)? {
+                        let live: bool = app.connection.query_row(
+                            "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
+                            [&run.run_id], |row| row.get(0),
+                        )?;
+                        if live {
+                            return Err(ApiError::new(409, "Terminez ou arrêtez les réponses, formulaires et sous-tâches en attente avant de changer de connexion."));
+                        }
+                    }
+                }
+            }
+            app.provider
+                .select_backend(&input.backend)
+                .map_err(|failure| ApiError::new(409, failure.message))?;
+            Ok(json!({"provider":app.provider.status()}))
+        }
         "/api/provider/signin" => {
             let _: Empty = parse(body)?;
-            app.provider
+            let url = app.provider
                 .start_signin()
                 .map_err(|f| ApiError::new(503, f.message))?;
+            // Permet de conduire le faux OAuth dans un navigateur isolé, sans ouvrir
+            // le navigateur personnel. Aucun jeton n’est exposé.
+            #[cfg(debug_assertions)]
+            if url.starts_with("http://127.0.0.1:") {
+                return Ok(json!({"provider":app.provider.status(),"authorization_url":url}));
+            }
+            let _ = url;
             Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/cancel" => {
@@ -500,7 +538,9 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     }
                 }
             }
-            let revoked = app.provider.signout();
+            let revoked = app.provider
+                .signout()
+                .map_err(|f| ApiError::new(500, f.message))?;
             Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
         }
         "/api/stop" | "/api/regenerate" => {

@@ -122,6 +122,8 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
 fn provider(db: &std::path::Path) -> Provider {
     #[cfg(debug_assertions)]
     if let Ok(base) = std::env::var("GROKBOT_FAKE_OPENAI") {
+        let base = fake_openai_base(&base)
+            .expect("GROKBOT_FAKE_OPENAI doit viser http://127.0.0.1:<port>.");
         let endpoints = grokbot_wrapper::Endpoints {
             authorize: format!("{base}/authorize"),
             token: format!("{base}/token"),
@@ -130,9 +132,23 @@ fn provider(db: &std::path::Path) -> Provider {
             issuer: base.clone(),
             api: format!("{base}/v1"),
         };
-        return Provider::with_endpoints(db, endpoints, false);
+        let codex = grokbot_wrapper::Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            ..endpoints.clone()
+        };
+        return Provider::with_backends(db, endpoints, codex, false);
     }
     Provider::new(db)
+}
+
+#[cfg(debug_assertions)]
+fn fake_openai_base(base: &str) -> Option<String> {
+    // L’override de QA ne peut jamais détourner les identifiants vers un hôte distant.
+    let port = base
+        .strip_prefix("http://127.0.0.1:")?
+        .parse::<u16>()
+        .ok()?;
+    (port != 0).then(|| format!("http://127.0.0.1:{port}"))
 }
 
 /// A single byte range is enough for WebKit's media loader. Reject malformed,
@@ -265,6 +281,26 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         }
         if let Err(error) = request.respond(response) {
             eprintln!("Réponse HTTP interrompue : {error}");
+        }
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod fake_tests {
+    #[test]
+    fn override_accepts_only_an_explicit_loopback_port() {
+        assert_eq!(
+            super::fake_openai_base("http://127.0.0.1:12345").as_deref(),
+            Some("http://127.0.0.1:12345")
+        );
+        for value in [
+            "https://api.openai.com",
+            "http://example.com:123",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:123@evil.test",
+            "http://127.0.0.1:123/path",
+        ] {
+            assert!(super::fake_openai_base(value).is_none());
         }
     }
 }

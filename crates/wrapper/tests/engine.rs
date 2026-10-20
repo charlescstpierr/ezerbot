@@ -16,7 +16,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
+use support::{form, wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 struct Fixture {
     app: App,
     provider: Provider,
@@ -117,12 +117,15 @@ impl Fixture {
         serde_json::from_str(&record).unwrap()
     }
     fn authorize(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        std::fs::write(self.path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"access-2","refresh_token":"refresh-2","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
-        self.provider.refresh_models();
+        // Une vraie connexion factice, pas un remplacement du fichier derrière
+        // une session volontairement révoquée en mémoire après déconnexion.
+        let url = self.provider.start_signin().unwrap();
+        let query = form(url.split_once('?').unwrap().1);
+        self.server.seen.lock().unwrap().nonce = query["nonce"].clone();
+        ureq::get(&format!(
+            "{}?code=fake-restored&state={}&client_id={CLIENT}",
+            query["redirect_uri"], query["state"],
+        )).call().unwrap();
         wait("catalogue restored", || {
             self.provider.status()["models_ready"] == true
         });

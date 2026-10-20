@@ -1,6 +1,8 @@
-//! Accès à l'abonnement ChatGPT par le parcours « Sign in with ChatGPT » d'OpenAI pour les
-//! applications open source hébergées localement.
-//! Référence : <https://developers.openai.com/siwc/token-sharing-open-source>
+//! Sessions indépendantes : quota Codex (protocole pi openai-codex) et partage
+//! d’abonnement « Sign in with ChatGPT ». Aucun identifiant d’un autre logiciel n’est lu.
+mod codex;
+mod connection;
+pub use connection::Provider;
 
 use std::collections::HashMap;
 use std::fs;
@@ -38,6 +40,17 @@ pub struct Endpoints {
     pub jwks: String,
     pub issuer: String,
     pub api: String,
+}
+
+impl Endpoints {
+    pub fn codex() -> Self {
+        Self {
+            authorize: "https://auth.openai.com/oauth/authorize".into(),
+            token: "https://auth.openai.com/oauth/token".into(),
+            api: "https://chatgpt.com/backend-api/codex".into(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Endpoints {
@@ -96,7 +109,7 @@ pub struct Tier {
     pub description: String,
 }
 
-/// Un modèle du catalogue du compte. Rien n'est inventé ici : tout vient de `GET /v1/models`.
+/// Catalogue du compte (`GET /v1/models`) ou catalogue Codex statique repris de pi.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Model {
     pub slug: String,
@@ -110,6 +123,10 @@ pub struct Model {
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Credentials {
     host_id: String,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    plan: Option<String>,
     client_id: Option<String>,
     email: Option<String>,
     subject: Option<String>,
@@ -136,12 +153,24 @@ impl Credentials {
                 .any(|scope| scope == PLAN_SCOPE)
     }
 
+    fn usable(&self, codex: bool) -> bool {
+        if codex {
+            self.access_token.is_some()
+                && self.refresh_token.is_some()
+                && self.account_id.as_ref().is_some_and(|id| !id.is_empty())
+        } else {
+            self.connected()
+        }
+    }
+
     fn clear_tokens(&mut self) {
         self.access_token = None;
         self.refresh_token = None;
         self.id_token = None;
         self.expires_at = 0;
         self.scopes.clear();
+        self.account_id = None;
+        self.plan = None;
     }
 }
 
@@ -186,9 +215,12 @@ struct Attempt {
     redirect_uri: String,
     saved_client: Option<String>,
     saved_subject: Option<String>,
+    cancel: Arc<AtomicBool>,
 }
 
 struct Inner {
+    codex: bool,
+    local_revoked: AtomicBool,
     file: PathBuf,
     endpoints: Endpoints,
     open_browser: bool,
@@ -204,7 +236,7 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub struct Provider {
+struct Session {
     inner: Arc<Inner>,
 }
 
@@ -303,6 +335,7 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
     let error = &body["error"];
     let code = error["code"]
         .as_str()
+        .or_else(|| error["type"].as_str())
         .or_else(|| error.as_str())
         .or_else(|| body["code"].as_str())
         .unwrap_or_default();
@@ -321,6 +354,10 @@ pub(crate) fn error_parts(body: &Value) -> (String, String, String) {
 
 pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
     match code {
+        "usage_limit_reached" | "usage_not_included" => Failure {
+            message: "La limite d’utilisation Codex de ce compte ChatGPT est atteinte. Attendez la réinitialisation du quota Codex ou vérifiez votre forfait dans ChatGPT → Réglages → Utilisation.".into(),
+            kind: "limit",
+        },
         "subscription_sharing_usage_limit_exceeded" => Failure {
             message: "Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT. Votre quota Codex peut rester disponible. Pour ajuster cette limite : ChatGPT → Réglages → Utilisation.".into(),
             kind: "limit",
@@ -404,24 +441,31 @@ pub struct ToolCall {
 }
 
 fn page(title: &str, detail: &str) -> String {
+    let escape = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let title = escape(title);
+    let detail = escape(detail);
     format!("<!doctype html><html lang=\"fr\"><meta charset=\"utf-8\"><title>Ezerbot</title><body style=\"margin:0;display:grid;place-items:center;height:100vh;background:#0a0b0d;color:#e6e7ea;font:16px -apple-system,sans-serif\"><main style=\"max-width:420px;padding:24px;text-align:center\"><h1 style=\"font-size:22px\">{title}</h1><p style=\"color:#9a9fa9\">{detail}</p></main></body></html>")
 }
 
-impl Provider {
-    pub fn new(db: &Path) -> Self {
-        Self::with_endpoints(db, Endpoints::default(), true)
-    }
-
-    pub fn with_endpoints(db: &Path, endpoints: Endpoints, open_browser: bool) -> Self {
+impl Session {
+    fn with_endpoints(db: &Path, endpoints: Endpoints, open_browser: bool, codex: bool) -> Self {
         let directory = db.parent().filter(|parent| !parent.as_os_str().is_empty());
         let file = directory.unwrap_or(Path::new(".")).join(format!(
-            "{}.chatgpt-auth.json",
+            "{}.{}-auth.json",
             db.file_stem()
                 .and_then(|stem| stem.to_str())
-                .unwrap_or("grokbot")
+                .unwrap_or("grokbot"),
+            if codex { "codex" } else { "chatgpt" }
         ));
         Self {
             inner: Arc::new(Inner {
+                codex,
+                local_revoked: AtomicBool::new(false),
                 file,
                 endpoints,
                 open_browser,
@@ -497,6 +541,11 @@ impl Provider {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(
             &serde_json::to_vec_pretty(credentials).expect("identifiants sérialisables"),
         )?;
@@ -518,9 +567,12 @@ impl Provider {
     }
 
     pub fn connected(&self) -> bool {
+        if self.inner.local_revoked.load(Ordering::SeqCst) {
+            return false;
+        }
         let _guard = lock(&self.inner.credentials);
         self.read()
-            .is_some_and(|credentials| credentials.connected())
+            .is_some_and(|credentials| credentials.usable(self.inner.codex))
     }
 
     pub fn status(&self) -> Value {
@@ -528,7 +580,10 @@ impl Provider {
             let _guard = lock(&self.inner.credentials);
             self.read().unwrap_or_default()
         };
-        let connected = credentials.connected();
+        let retained =
+            self.inner.local_revoked.load(Ordering::SeqCst) && credentials.usable(self.inner.codex);
+        let connected = credentials.usable(self.inner.codex)
+            && !self.inner.local_revoked.load(Ordering::SeqCst);
         let (signin, error) = match &lock(&self.inner.signin).phase {
             Phase::Idle => ("idle", None),
             Phase::Pending => ("pending", None),
@@ -543,7 +598,10 @@ impl Provider {
         }
         json!({
             "connected": connected,
+            "retained": retained,
+            "backend": if self.inner.codex { "codex" } else { "sharing" },
             "email": if connected { credentials.email } else { None },
+            "plan": if connected { credentials.plan } else { None },
             "signin": signin, "error": error,
             "welcomed": credentials.welcomed,
             "models": if connected { models } else { Vec::new() },
@@ -569,6 +627,13 @@ impl Provider {
 
     /// Ouvre la page d'autorisation d'OpenAI et attend son retour sur une adresse de bouclage.
     pub fn start_signin(&self) -> Result<String, Failure> {
+        if self.inner.local_revoked.load(Ordering::SeqCst)
+            && self.read().is_some_and(|c| c.usable(self.inner.codex))
+        {
+            return Err(Failure::other(
+                "Terminez d’abord la déconnexion sur ce Mac.",
+            ));
+        }
         self.cancel_signin();
         let credentials = {
             let _guard = lock(&self.inner.credentials);
@@ -576,23 +641,37 @@ impl Provider {
                 Failure::other("Impossible d’enregistrer les identifiants sur ce Mac.")
             })?
         };
-        let (server, port) = CALLBACK_PORTS
-            .filter_map(|port| {
-                tiny_http::Server::http(("127.0.0.1", port))
-                    .ok()
-                    .map(|server| (server, port))
+        let ports = if self.inner.codex {
+            1455..=1455
+        } else {
+            CALLBACK_PORTS
+        };
+        let (server, port) = (0..if self.inner.codex { 8 } else { 1 })
+            .find_map(|attempt| {
+                if attempt > 0 { thread::sleep(Duration::from_millis(50)); }
+                ports.clone().find_map(|port| {
+                    tiny_http::Server::http(("127.0.0.1", port)).ok().map(|server| (server, port))
+                })
             })
-            .next()
             .ok_or_else(|| {
                 Failure::other(
-                    "Aucun port local n’est libre pour terminer la connexion (1455 à 1465).",
+                    "Le port de connexion local est occupé. Fermez toute autre connexion ChatGPT en cours, puis recommencez.",
                 )
             })?;
+        let cancel = Arc::new(AtomicBool::new(false));
         let attempt = Attempt {
+            cancel: cancel.clone(),
             state: random_token(32),
             nonce: random_token(32),
             verifier: random_token(48),
-            redirect_uri: format!("http://127.0.0.1:{port}{CALLBACK_PATH}"),
+            redirect_uri: format!(
+                "http://{}:{port}{CALLBACK_PATH}",
+                if self.inner.codex {
+                    "localhost"
+                } else {
+                    "127.0.0.1"
+                }
+            ),
             saved_client: credentials.client_id.clone(),
             saved_subject: credentials.subject.clone(),
         };
@@ -625,6 +704,9 @@ impl Provider {
                 query.push(("id_token_hint", id_token.clone()));
             }
         }
+        if self.inner.codex {
+            query = codex::authorization_query(&attempt);
+        }
         let url = format!(
             "{}?{}",
             self.inner.endpoints.authorize,
@@ -634,7 +716,6 @@ impl Provider {
                 .collect::<Vec<_>>()
                 .join("&")
         );
-        let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut signin = lock(&self.inner.signin);
             signin.phase = Phase::Pending;
@@ -652,6 +733,7 @@ impl Provider {
     }
 
     fn await_callback(&self, server: tiny_http::Server, attempt: Attempt, cancel: Arc<AtomicBool>) {
+        let mut server = Some(server);
         let deadline = Instant::now() + SIGN_IN_WINDOW;
         let outcome = loop {
             if cancel.load(Ordering::SeqCst) {
@@ -660,7 +742,11 @@ impl Provider {
             if Instant::now() >= deadline {
                 break Err("La connexion a expiré. Recommencez.".to_owned());
             }
-            let Ok(Some(request)) = server.recv_timeout(Duration::from_millis(250)) else {
+            let Ok(Some(request)) = server
+                .as_ref()
+                .expect("serveur actif")
+                .recv_timeout(Duration::from_millis(250))
+            else {
                 continue;
             };
             let url = request.url().to_owned();
@@ -674,11 +760,13 @@ impl Provider {
                 let _ = request.respond(tiny_http::Response::empty(400));
                 continue;
             }
+            // Libérer le port avant l’échange réseau, qui peut être lent ou annulé.
+            drop(server.take());
             let outcome = match (query.get("error"), query.get("code")) {
                 (Some(error), _) if error == "access_denied" => Err(
                     "Vous avez refusé l’accès. Ezerbot n’utilise pas votre abonnement.".to_owned(),
                 ),
-                (Some(error), _) => Err(format!("OpenAI a refusé la connexion ({error}).")),
+                (Some(_), _) => Err("OpenAI a refusé la connexion. Recommencez.".into()),
                 (None, Some(code)) => self
                     .complete(&attempt, code, query.get("client_id"), query.get("scope"))
                     .map_err(|failure| failure.message),
@@ -718,6 +806,9 @@ impl Provider {
         issued_client: Option<&String>,
         callback_scope: Option<&String>,
     ) -> Result<(), Failure> {
+        if self.inner.codex {
+            return self.complete_codex(attempt, code);
+        }
         let client_id = match (&attempt.saved_client, issued_client) {
             // Un premier enregistrement doit rendre un identifiant émis, jamais le gabarit.
             (None, Some(issued)) if issued != REGISTRATION_CLIENT => issued.clone(),
@@ -768,6 +859,10 @@ impl Provider {
             .clone()
             .or_else(|| callback_scope.cloned())
             .unwrap_or_default();
+        let _signin = lock(&self.inner.signin);
+        if attempt.cancel.load(Ordering::SeqCst) {
+            return Err(Failure::other("Connexion annulée."));
+        }
         let _guard = lock(&self.inner.credentials);
         let mut credentials = self
             .load_or_create()
@@ -785,6 +880,7 @@ impl Provider {
         self.write(&credentials)
             .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
         if granted {
+            self.inner.local_revoked.store(false, Ordering::SeqCst);
             Ok(())
         } else {
             // Une identité valide ne suffit pas : sans cette permission, aucune demande ne part.
@@ -826,9 +922,12 @@ impl Provider {
     /// Rend un jeton d'accès valide, renouvelé s'il expire bientôt ou si `force` le demande.
     fn bearer(&self, force: bool) -> Result<String, Failure> {
         let _guard = lock(&self.inner.credentials);
+        if self.inner.local_revoked.load(Ordering::SeqCst) {
+            return Err(Failure::signin());
+        }
         let mut credentials = self
             .read()
-            .filter(Credentials::connected)
+            .filter(|c| c.usable(self.inner.codex))
             .ok_or_else(Failure::signin)?;
         let access = credentials
             .access_token
@@ -842,12 +941,15 @@ impl Provider {
             .refresh_token
             .clone()
             .expect("vérifié par connected");
-        let response = agent().post(&self.inner.endpoints.token).send_form(&[
+        let mut fields = vec![
             ("grant_type", "refresh_token"),
             ("client_id", &client_id),
             ("refresh_token", &refresh),
-            ("resource", RESOURCE),
-        ]);
+        ];
+        if !self.inner.codex {
+            fields.push(("resource", RESOURCE));
+        }
+        let response = agent().post(&self.inner.endpoints.token).send_form(&fields);
         let tokens: TokenResponse = match response {
             Ok(response) => response
                 .into_json()
@@ -879,6 +981,9 @@ impl Provider {
             }
         };
         // Le jeton d'accès, son échéance, ses permissions et le jeton de renouvellement changent ensemble.
+        if self.inner.codex {
+            codex::update_profile(&mut credentials, &tokens)?;
+        }
         credentials.access_token = Some(tokens.access_token.clone());
         credentials.expires_at = seconds() + tokens.expires_in;
         if let Some(refresh) = tokens.refresh_token {
@@ -897,30 +1002,39 @@ impl Provider {
     }
 
     /// Révoque la session renouvelable puis efface les jetons. Rend `false` si OpenAI n'a pas confirmé.
-    pub fn signout(&self) -> bool {
+    pub fn signout(&self) -> Result<bool, Failure> {
         self.cancel_signin();
+        self.inner.local_revoked.store(true, Ordering::SeqCst);
         // The engine route durably stops only provider-consuming runs. A blanket
         // signal here could cancel an already-suspended form during owner release.
         let _guard = lock(&self.inner.credentials);
         let Some(mut credentials) = self.read() else {
-            return true;
+            return Ok(true);
         };
-        let revoked = match (&credentials.refresh_token, &credentials.client_id) {
-            (Some(refresh), Some(client_id)) => agent()
-                .post(&self.inner.endpoints.revoke)
-                .send_form(&[
-                    ("token", refresh),
-                    ("token_type_hint", "refresh_token"),
-                    ("client_id", client_id),
-                ])
-                .is_ok(),
-            _ => true,
-        };
-        // L'enregistrement (client, hôte, courriel) reste : il sert à la prochaine connexion.
+        let refresh_token = credentials.refresh_token.clone();
+        let client_id = credentials.client_id.clone();
         credentials.clear_tokens();
-        let _ = self.write(&credentials);
+        self.write(&credentials).map_err(|_| {
+            Failure::other(
+                "Impossible d’effacer la connexion sur ce Mac. Réessayez avant de fermer Ezerbot.",
+            )
+        })?;
         *lock(&self.inner.catalog) = Catalog::default();
-        revoked
+        // Comme pi, Codex déconnecte localement; aucune révocation distante n’est documentée.
+        let revoked = self.inner.codex
+            || match (&refresh_token, &client_id) {
+                (Some(refresh), Some(client_id)) => agent()
+                    .post(&self.inner.endpoints.revoke)
+                    .send_form(&[
+                        ("token", refresh),
+                        ("token_type_hint", "refresh_token"),
+                        ("client_id", client_id),
+                    ])
+                    .is_ok(),
+                _ => true,
+            };
+        // L’enregistrement local reste, sans aucun jeton.
+        Ok(revoked)
     }
 
     pub fn models(&self) -> Vec<Model> {
@@ -948,6 +1062,9 @@ impl Provider {
     }
 
     fn fetch_models(&self) -> Result<Vec<Model>, Failure> {
+        if self.inner.codex {
+            return Ok(codex::models());
+        }
         let token = self.bearer(false)?;
         let body: Value = agent()
             .get(&format!("{}/models", self.inner.endpoints.api))
@@ -973,7 +1090,11 @@ impl Provider {
         let models = self.models();
         let model = models
             .iter()
-            .filter(|m| m.slug.contains("nano") || m.slug.contains("mini"))
+            .filter(|m| {
+                m.slug.contains("nano")
+                    || m.slug.contains("mini")
+                    || (self.inner.codex && m.slug == "gpt-6-luna")
+            })
             .min_by_key(|m| {
                 if m.slug.contains("nano") {
                     0
@@ -1006,16 +1127,13 @@ impl Provider {
         // rotation lock (and cannot randomly lose a job to the UI's status read).
         let credentials = self
             .read()
-            .filter(Credentials::connected)
+            .filter(|c| c.usable(self.inner.codex))
             .filter(|c| c.expires_at > seconds() + 15)
             .ok_or_else(Failure::signin)?;
         let token = credentials.access_token.ok_or_else(Failure::signin)?;
-        let response = ureq::AgentBuilder::new()
+        let response = self
+            .request(&token, &mut body)?
             .timeout(Duration::from_secs(12))
-            .build()
-            .post(&format!("{}/responses", self.inner.endpoints.api))
-            .set("Authorization", &format!("Bearer {token}"))
-            .set("Accept", "text/event-stream")
             .send_json(body)
             .map_err(|error| {
                 self.request_failure(error);
@@ -1061,14 +1179,12 @@ impl Provider {
 
     /// Isolated, bounded policy call. No transcript, tools, cached conversation,
     /// effort/Fast retry or provider error text enters the reviewer boundary.
-    pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
+    pub(crate) fn review(&self, mut body: Value) -> Result<String, Failure> {
         use grokbot_engine::contracts::ModelEvent;
         let token = self.bearer(false)?;
-        let response = agent()
-            .post(&format!("{}/responses", self.inner.endpoints.api))
+        let response = self
+            .request(&token, &mut body)?
             .timeout(Duration::from_secs(10))
-            .set("Authorization", &format!("Bearer {token}"))
-            .set("Accept", "text/event-stream")
             .send_json(body)
             .map_err(|error| {
                 self.request_failure(error);
@@ -1167,18 +1283,9 @@ impl Provider {
         notices: &mut Vec<String>,
     ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
-        let accept = if body["stream"] == true {
-            "text/event-stream"
-        } else {
-            "application/json"
-        };
         let mut refreshed = false;
         loop {
-            let attempt = agent()
-                .post(&format!("{}/responses", self.inner.endpoints.api))
-                .set("Authorization", &format!("Bearer {token}"))
-                .set("Accept", accept)
-                .send_json(body.clone());
+            let attempt = self.request(&token, &mut body)?.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {
                 Ok(response) => return Ok(response),
                 Err(error) => self.request_failure(error),
@@ -1187,6 +1294,7 @@ impl Provider {
                 refreshed = true;
                 token = self.bearer(true)?;
             } else if capability_fallback
+                && !self.inner.codex
                 && status == 400
                 && (param.contains("service_tier") || message.contains("service_tier"))
                 && body.get("service_tier").is_some()
@@ -1196,6 +1304,7 @@ impl Provider {
                     .remove("service_tier");
                 notices.push("OpenAI n’accepte pas la vitesse Fast avec cette connexion. La réponse a utilisé la vitesse Standard.".into());
             } else if capability_fallback
+                && !self.inner.codex
                 && status == 400
                 && (param.contains("reasoning") || message.contains("reasoning"))
                 && body.get("reasoning").is_some()

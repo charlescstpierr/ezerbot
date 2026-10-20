@@ -108,7 +108,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         (503, "subscription_sharing_usage_unavailable", "other"),
         (503, "subscription_sharing_user_unavailable", "other"),
         (403, "subscription_sharing_invalid_user", "signin"),
-        (429, "usage_limit_reached", "other"),
+        (429, "usage_limit_reached", "limit"),
         (429, "rate_limit_exceeded", "other"),
         (429, "insufficient_quota", "other"),
         (400, "subscription_sharing_unsupported_capability", "other"),
@@ -124,10 +124,12 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         assert!(log.ends_with(&format!("OpenAI refus : statut={status} code={code} param=prompt_cache_key request_id=req_quota_test\n")),"{log}");
         assert!(!log.contains("private") && !log.contains("@"));
         if expected_kind == "limit" {
-            assert!(error
-                .message
-                .contains("Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT"));
-            assert!(error.message.contains("quota Codex peut rester disponible"));
+            if code == "subscription_sharing_usage_limit_exceeded" {
+                assert!(error.message.contains("Ezerbot a atteint la limite d’utilisation que lui accorde votre abonnement ChatGPT"));
+                assert!(error.message.contains("quota Codex peut rester disponible"));
+            } else {
+                assert!(error.message.contains("limite d’utilisation Codex"));
+            }
             assert!(error.message.contains("ChatGPT → Réglages → Utilisation"));
             assert!(!error.message.contains("Réinitialisation"));
         }
@@ -234,7 +236,7 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
             ("subscription_sharing_user_unavailable", "other"),
             ("subscription_sharing_invalid_user", "signin"),
             ("rate_limit_exceeded", "other"),
-            ("usage_limit_reached", "other"),
+            ("usage_limit_reached", "limit"),
             ("insufficient_quota", "other"),
             ("subscription_sharing_unsupported_capability", "other"),
         ] {

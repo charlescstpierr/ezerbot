@@ -20,6 +20,10 @@ pub const CLIENT: &str = "oaiapp_test";
 pub struct Seen {
     pub nonce: String,
     pub forms: Vec<HashMap<String, String>>,
+    pub headers: Vec<HashMap<String, String>>,
+    pub refresh_error: bool,
+    pub invalid_codex_account: bool,
+    pub token_gate: Option<Arc<AtomicBool>>,
     pub bearer: Vec<String>,
     /// Distinct issued tokens let tests detect reuse of a stale bearer after refresh.
     pub access_tokens: Vec<String>,
@@ -210,18 +214,38 @@ impl FakeOpenAi {
                     "/token" => {
                         let fields = form(&body);
                         let refresh = fields["grant_type"] == "refresh_token";
+                        let codex = fields["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann";
                         seen.forms.push(fields);
                         let sequence = seen.access_tokens.len() + 1;
-                        let access = format!("access-{sequence}");
+                        let access = if codex {
+                            let auth = if seen.invalid_codex_account {
+                                json!({})
+                            } else {
+                                json!({"chatgpt_account_id":"account-test", "chatgpt_plan_type":"plus"})
+                            };
+                            encode(&Header::new(Algorithm::RS256), &json!({
+                                "https://api.openai.com/auth":auth, "email":"codex@exemple.com", "sequence":sequence,
+                            }), &EncodingKey::from_rsa_pem(SIGNING_KEY).unwrap()).unwrap()
+                        } else {
+                            format!("access-{sequence}")
+                        };
                         seen.access_tokens.push(access.clone());
                         let reply = json!({
                             "access_token": access,
                             "refresh_token": format!("refresh-{sequence}"),
-                            "id_token": id_token(&issuer, &seen.nonce),
+                            "id_token": if codex { access.clone() } else { id_token(&issuer, &seen.nonce) },
                             "token_type": "Bearer", "expires_in": if refresh { 3600 } else { 1 },
                             "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke",
                         });
-                        (200, "application/json".into(), reply.to_string())
+                        if refresh && seen.refresh_error {
+                            (
+                                400,
+                                "application/json".into(),
+                                json!({"error":{"code":"invalid_grant"}}).to_string(),
+                            )
+                        } else {
+                            (200, "application/json".into(), reply.to_string())
+                        }
                     }
                     "/revoke" => {
                         seen.revoked = true;
@@ -242,7 +266,19 @@ impl FakeOpenAi {
                         }
                         (200, "application/json".into(), models.to_string())
                     }
-                    "/v1/responses" => {
+                    "/v1/responses" | "/backend-api/codex/responses" => {
+                        seen.headers.push(
+                            request
+                                .headers()
+                                .iter()
+                                .map(|h| {
+                                    (
+                                        h.field.to_string().to_ascii_lowercase(),
+                                        h.value.to_string(),
+                                    )
+                                })
+                                .collect(),
+                        );
                         seen.bearer.push(bearer);
                         let request_body: Value = serde_json::from_str(&body).unwrap();
                         seen.bodies.push(request_body.clone());
@@ -316,6 +352,11 @@ impl FakeOpenAi {
                         .filter(|(at, _)| *at == seen.bodies.len())
                         .map(|(_, gate)| gate.clone()),
                     _ => None,
+                };
+                let gate = if request.url() == "/token" {
+                    seen.token_gate.clone()
+                } else {
+                    gate
                 };
                 let request_id = seen
                     .request_id

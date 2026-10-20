@@ -58,10 +58,10 @@
     </div>
     <button class="new-chat" id="new-chat"><svg class="icon"><use href="#i-plus"/></svg><span>Nouvelle conversation</span><kbd>⌘ N</kbd></button>
     <label class="search-field"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" autocomplete="off" placeholder="Rechercher" aria-label="Rechercher une conversation"><kbd>⌘ K</kbd></label>
+    <div class="sidebar-bots" role="group" aria-labelledby="sidebar-bots-label"><span class="section-label" id="sidebar-bots-label">BOTS</span><div class="sidebar-bot-list" id="sidebar-bot-list"></div></div>
     <div class="sidebar-filter-row"><span class="section-label">CONVERSATIONS</span><button id="favorites-filter" class="favorites-filter" aria-label="Afficher les favoris" aria-pressed="false" title="Afficher les favoris"><svg class="icon"><use href="#i-star"/></svg></button></div>
     <nav class="conversation-list" id="conversation-list" aria-label="Vos conversations"><p class="sidebar-empty">Vos conversations apparaîtront ici.</p></nav>
     <div class="sidebar-bottom">
-      <div class="sidebar-companion"><span class="sidebar-mascot" data-mascot="sidebar" aria-hidden="true"></span><div><strong id="companion-status">À votre rythme.</strong><small>Votre petit compagnon local.</small></div></div>
       <div class="local-note"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><div><strong>Chez vous, sur votre Mac.</strong><span>Historique enregistré localement.</span></div></div>
       <button class="account-button" id="settings-button"><span class="account-avatar" id="account-avatar">V</span><span class="account-copy"><strong id="account-name">Espace personnel</strong><span>Paramètres de l’application</span></span><svg class="icon"><use href="#i-settings"/></svg></button>
     </div>
@@ -93,7 +93,6 @@
         <h2>Une idée en tête<span> ?</span></h2>
         <p class="welcome-description" id="welcome-description">Posez-la ici. On lui fait une place.</p>
         <div class="plan-banner" id="plan-banner" hidden><span>Utilisez votre abonnement ChatGPT pour obtenir de vraies réponses.</span><button class="chatgpt-button" type="button" data-provider-signin>Continuer avec ChatGPT</button></div>
-        <div class="bot-picker" role="group" aria-labelledby="bot-picker-label"><span class="bot-picker-label" id="bot-picker-label">Avec qui ?</span><div class="bot-chips" id="bot-chips"></div></div>
         <div class="suggestion-grid">
           <button class="suggestion" data-prompt="Aide-moi à donner forme à cette idée : "><span class="suggestion-icon"><svg class="icon"><use href="#i-bulb"/></svg></span><span><strong>Faire grandir une idée</strong><small>Du premier déclic au prochain pas</small></span><svg class="icon suggestion-arrow"><use href="#i-arrow"/></svg></button>
           <button class="suggestion" data-prompt="Aide-moi à écrire un texte clair sur "><span class="suggestion-icon"><svg class="icon"><use href="#i-write"/></svg></span><span><strong>Trouver les bons mots</strong><small>Un texte clair, à votre manière</small></span><svg class="icon suggestion-arrow"><use href="#i-arrow"/></svg></button>
@@ -110,8 +109,9 @@
         <form class="composer" id="composer-form">
           <div id="composer-input" class="composer-input"></div>
           <div id="composer-attachments"></div>
-          <div class="composer-bottom"><span class="composer-model"><span class="composer-mascot" data-mascot="composer" aria-hidden="true"></span><span class="composer-tools" id="composer-tools"></span></span><button class="send-button" id="send-button" type="submit" aria-label="Envoyer le message" title="Envoyer le message" disabled><svg class="icon"><use href="#i-send"/></svg></button></div>
+          <div class="composer-bottom"><span class="composer-model" id="composer-model"><button class="composer-bot" id="composer-bot" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" title="Choisir le bot"><span class="composer-mascot" data-mascot="composer" aria-hidden="true"></span><span class="composer-bot-name" id="composer-bot-name">Ezerbot</span><svg class="icon composer-chevron" aria-hidden="true"><use href="#i-chevron"/></svg></button><span class="composer-tools" id="composer-tools"></span></span><button class="send-button" id="send-button" type="submit" aria-label="Envoyer le message" title="Envoyer le message" disabled><svg class="icon"><use href="#i-send"/></svg></button></div>
           <div class="popover picker" id="picker" role="menu" hidden></div>
+          <div class="popover picker bot-menu" id="bot-menu" role="menu" aria-label="Avec qui ?" hidden></div>
         </form>
         <div class="composer-caption"><span id="composer-hint">Entrée pour envoyer <span class="caption-dot">·</span> ⇧ Entrée pour une nouvelle ligne</span><button type="button" class="draft-restore" id="restore-link-draft" hidden>Reprendre le brouillon précédent</button><span class="simulation-note" id="mode-note"></span></div>
       </div>
@@ -137,6 +137,7 @@
 
   <dialog class="dialog bot-dialog" id="bot-dialog" aria-labelledby="bot-dialog-title"><form id="bot-form" novalidate>
     <div class="dialog-header"><div><p class="dialog-eyebrow">VOS BOTS</p><h2 id="bot-dialog-title">Nouveau bot</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="bot-preview" id="bot-preview" aria-hidden="true"><span class="bot-preview-mascot" id="bot-preview-mascot"></span><strong class="bot-preview-name" id="bot-preview-name"></strong><span class="bot-preview-description" id="bot-preview-description"></span></div>
     <label class="form-label" for="bot-name">Nom</label><input class="text-input" id="bot-name" maxlength="40" required autocomplete="off" placeholder="Par exemple : Relecteur">
     <p class="form-label bot-field" id="bot-shape-label">Forme</p><div class="accent-options shape-options" id="bot-shapes" role="group" aria-labelledby="bot-shape-label"></div>
     <p class="form-label bot-field" id="bot-color-label">Couleur</p><div class="accent-options" id="bot-colors" role="group" aria-labelledby="bot-color-label"></div>
@@ -164,7 +165,6 @@
           <g class="mascot-squish">
             <path class="mascot-shell" d="M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z" fill="url(#mascot-pearl)"/>
             <path class="mascot-sheen" d="M68 217C37 194 39 144 55 103C72 61 110 37 151 37C198 33 249 60 270 104C290 145 291 193 267 219C241 248 195 251 153 249C117 248 88 234 68 217Z" fill="url(#mascot-glow)"/>
-            <path class="mascot-highlight" d="M72 105C88 71 121 52 157 52" stroke="white" stroke-opacity=".22" stroke-width="2.4" stroke-linecap="round"/>
             <g class="mascot-gaze">
               <g class="mascot-blink">
                 <rect class="mascot-eye mascot-eye-left" x="147" y="116" width="23" height="44" rx="11.5" transform="rotate(-22 158.5 138)"/>

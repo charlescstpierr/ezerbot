@@ -108,3 +108,11 @@ test("connection radio focus survives a selection response and subsequent pollin
     assert.equal(document.activeElement.checked, true);
   }
 });
+
+test("the sign-in banner stays hidden while either ChatGPT account is connected", () => {
+  const { context, nodes, state } = mount("codex");
+  assert.equal(nodes.get("plan-banner").hidden, false);
+  state.provider.connections = { codex: false, sharing: true };
+  context.renderProvider();
+  assert.equal(nodes.get("plan-banner").hidden, true);
+});

@@ -113,8 +113,8 @@ def verify_ui_regressions():
     // Tiptap observes the DOM edit in a microtask before firing onInput.
     await new Promise(resolve => setTimeout(resolve, 0));
   };
-  const choose = name => [...document.querySelectorAll('.bot-chip')].find(node => node.textContent.trim() === name).click();
-  const chip = () => document.querySelector('.bot-chip[aria-pressed=true]').textContent.trim();
+  const choose = name => [...document.querySelectorAll('.sidebar-bot')].find(node => node.textContent.trim() === name).click();
+  const chip = () => document.querySelector('.sidebar-bot[aria-pressed=true]').textContent.trim();
   const cmdN = () => document.dispatchEvent(new KeyboardEvent('keydown', {key:'n', metaKey:true, bubbles:true, cancelable:true}));
   const saved = () => api('/api/state');
   const send = async body => {

@@ -186,6 +186,9 @@
     get state() { return state; },
     get connected() { return connected; },
     api, refresh, notify, createBotMascot, botSummary,
+    followVoiceReply(conversationId) {
+      if (window.EzerbotVoiceMode?.active() && currentConversation()?.id === conversationId) render(true);
+    },
     async sendVoice(text, conversationId) {
       const conversation = currentConversation();
       if (!connected || busy || conversation?.id !== conversationId || conversation.kind === "task") throw new Error("Ouvrez une conversation disponible pour envoyer la transcription.");

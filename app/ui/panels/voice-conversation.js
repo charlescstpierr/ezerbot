@@ -17,11 +17,12 @@
   };
   let ctx, token = "", settingsToken = "", conversationId, scopeKey, reader, epoch = 0, timer, ticking = false;
   const contextKey = context => context.conversation?.id || `new:${context.bot?.id || "grokbot"}`;
-  let button, bar, label, transcript, stop, leave, systemSettings, voiceSelect, speedInput, speedLabel, notice;
+  let button, bar, label, transcript, heldNotice, stop, leave, systemSettings, voiceSelect, speedInput, speedLabel, notice;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
+  let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false, settingsDirty = false;
   const active = () => Boolean(token);
-  window.EzerbotVoiceMode = { active, stopSpeech };
+  window.EzerbotVoiceMode = { active, stopSpeech, mountToggle(container) { if (button) container.prepend(button); } };
   async function bridge(command, extra = {}) {
     const body = {command, token:command === "settings" ? settingsToken : token, ...extra};
     const native = window.webkit?.messageHandlers?.ezerbotVoiceSession;
@@ -33,20 +34,25 @@
     if (!button) return;
     button.disabled = !active() && (!ctx?.connected || ctx?.conversation?.kind === "task");
     button.setAttribute("aria-pressed", String(active()));
-    button.title = button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Parler et écouter les réponses sur ce Mac";
+    button.title = button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
     label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
     bar.dataset.phase = phase;
     bar.dataset.tone = detail ? "danger" : "";
     transcript.textContent = liveText || "Votre transcription apparaîtra ici. L’audio reste sur ce Mac.";
-    stop.hidden = !active() || phase === "authorizing";
+    transcript.hidden = Boolean(detail) && !liveText;
+    transcript.scrollTop = transcript.scrollHeight;
+    heldNotice.hidden = !inputHeld || !window.GrokbotChat.voiceNeedsAction(ctx.conversation?.messages || []);
+    stop.hidden = !active() || !["speaking","thinking","sending"].includes(phase);
     leave.textContent = active() ? "Quitter" : "Fermer";
     systemSettings.hidden = !["mic_denied","speech_denied","offline_unavailable"].includes(phase);
+    window.EzerbotDictation?.refresh();
   }
   function exit(clear = true) {
     clearTimeout(timer); epoch++;
     if (token) bridge("cancel").catch(() => {});
     token = ""; reader = null; conversationId = null; sending = false; paused = false;
+    inputHeld = false; followResumedReply = false;
     if (clear) { phase = "idle"; detail = ""; liveText = ""; scopeKey = null; }
     render(); panels.composerChanged();
   }
@@ -83,6 +89,7 @@
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
     phase = "authorizing"; detail = ""; liveText = ""; lastUtterance = 0; lastBarge = 0; paused = false;
+    inputHeld = false; followResumedReply = false;
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
@@ -126,7 +133,9 @@
         if (!needsAction) { reader.interrupt(ctx.conversation?.messages || []); await stopRun(); }
         if (rev !== epoch) return;
       }
+      if (!needsAction) inputHeld = false;
       if (needsAction !== paused) {
+        followResumedReply = !needsAction;
         paused = needsAction;
         await bridge(paused ? "pause" : "resume");
         if (rev !== epoch) return;
@@ -134,7 +143,7 @@
       if (result.utterance_id > lastUtterance) {
         lastUtterance = result.utterance_id;
         if (needsAction) {
-          liveText = "Transcription non envoyée : répondez d’abord dans la carte.";
+          inputHeld = true;
         } else if (result.final_text?.trim() && !sending) {
           liveText = result.final_text; phase = "sending"; sending = true; render();
           reader.nextTurn();
@@ -150,6 +159,10 @@
         if (rev !== epoch) return;
         if (errors[receipt.status]) { fail(receipt.status); return; }
         if (receipt.barged > lastBarge) break; // Native STT already interrupted queued speech.
+      }
+      if (chunks.length && followResumedReply) {
+        followResumedReply = false;
+        panels.followVoiceReply?.(conversationId);
       }
       const thinking = (ctx.conversation?.messages || []).some(pendingReply);
       phase = needsAction ? "waiting" : result.speaking || chunks.length ? "speaking" : thinking ? "thinking" : "listening";
@@ -199,15 +212,23 @@
     composer: {
       mount(container, context) {
         ctx = context;
-        button = el("button","voice-session-toggle","Mode voix"); button.type = "button"; button.onclick = start;
-        document.getElementById("send-button").before(button);
+        button = el("button","voice-session-toggle"); button.type = "button"; button.onclick = start;
+        button.setAttribute("aria-label","Mode voix");
+        const icon = el("span","voice-session-icon"); icon.setAttribute("aria-hidden","true");
+        icon.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M4 10v4m4-7v10m4-14v18m4-14v10m4-7v4"/></svg>';
+        button.append(icon,el("span","voice-session-label","Mode voix"));
+        const controls = document.querySelector?.(".voice-controls");
+        if (controls) controls.prepend(button);
+        else document.getElementById("send-button").before(button); // Dictation mounts this group later in the panel load order.
         bar = el("section","voice-session-bar"); bar.setAttribute("aria-label","Conversation vocale");
         const row = el("div","voice-session-row"); label = el("strong","voice-session-state"); label.setAttribute("role","status");
         stop = el("button","attachment-retry","Interrompre"); stop.type = "button"; stop.onclick = () => interrupt().catch(error => fail("failed",error.message));
         leave = el("button","attachment-retry","Quitter"); leave.type = "button"; leave.onclick = () => exit();
         systemSettings = el("button","attachment-retry","Ouvrir Réglages Système"); systemSettings.type = "button"; systemSettings.onclick = () => bridge("settings", {reason:phase}).catch(() => panels.notify("Ouvrez Réglages Système › Confidentialité et sécurité."));
         row.append(label,stop,leave,systemSettings);
-        transcript = el("p","voice-live-transcript"); bar.append(row,transcript); container.append(bar);
+        transcript = el("p","voice-live-transcript");
+        heldNotice = el("p","voice-held-notice","Transcription non envoyée : répondez d’abord dans la carte."); heldNotice.setAttribute("role","status");
+        bar.append(row,transcript,heldNotice); container.append(bar);
         document.addEventListener("keydown", event => {
           if (event.key === "Escape" && active()) { event.preventDefault(); event.stopImmediatePropagation(); interrupt().catch(error => fail("failed",error.message)); }
         },true);

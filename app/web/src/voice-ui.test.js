@@ -20,7 +20,7 @@ function fixture() {
   const calls = [], uploads = [], created = [];
   const storage = new Map();
   const richDocument = {type:"doc",content:[{type:"paragraph",content:[{type:"botMention",attrs:{id:"grokbot",label:"Ezerbot"}},{type:"text",text:draft}]}]};
-  let holdStatus = false, delayedStatus;
+  let holdStatus = false, delayedStatus, conversationVoice = false;
   const bridge = async body => {
     calls.push(body.command); if (body.command === "start") token = body.token;
     if (body.command === "status" && holdStatus) return new Promise(resolve => { delayedStatus = resolve; });
@@ -37,11 +37,24 @@ function fixture() {
       ctx.conversation={id}; registration.onState(ctx.state, ctx); return true;
     }, notify() {}, draft() {return draft;}, draftDocument() {return richDocument;} };
   const document = {documentElement:{lang:"fr"},createElement:tag=>new Element(tag), createTextNode:text=>Object.assign(new Element("text"),{textContent:text}), getElementById:()=>send, addEventListener(name, fn) { if (name === "keydown") keydown = fn; }};
+  const window = {GrokbotPanels:host,EzerbotVoiceMode:{active:()=>conversationVoice},webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener() {}};
   runInNewContext(readFileSync(new URL("../../ui/panels/voice.js", import.meta.url),"utf8"), {
-    localStorage:{setItem(key,value){storage.set(key,String(value));},getItem(key){return storage.get(key) ?? null;},removeItem(key){storage.delete(key);}}, window:{GrokbotPanels:host,webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener() {}}, document, crypto:{randomUUID:()=>"voice-token"},setTimeout(fn){poll=fn;},clearTimeout(){poll=null;},
+    localStorage:{setItem(key,value){storage.set(key,String(value));},getItem(key){return storage.get(key) ?? null;},removeItem(key){storage.delete(key);}}, window, document, crypto:{randomUUID:()=>"voice-token"},setTimeout(fn){poll=fn;},clearTimeout(){poll=null;},
   });
-  return { root, ctx, registration, calls, uploads, created, storage, get draft(){return draft;}, set result(value){result=value;}, holdPoll() { holdStatus = true; }, releasePoll() { delayedStatus({status:"recording",token}); }, keydown: event=>keydown(event), poll:async()=>{await poll?.();await flush();} };
+  return { root, ctx, registration, calls, uploads, created, storage, setVoiceActive(value){conversationVoice=value;window.EzerbotDictation.refresh();}, get draft(){return draft;}, set result(value){result=value;}, holdPoll() { holdStatus = true; }, releasePoll() { delayedStatus({status:"recording",token}); }, keydown: event=>keydown(event), poll:async()=>{await poll?.();await flush();} };
 }
+test("conversation voice immediately disables dictation and memo, and restores them on exit", async () => {
+  const f=fixture();const mic=cls(f.root,"voice-mic"),memo=cls(f.root,"voice-mode").children[0];
+  f.setVoiceActive(true);
+  assert.equal(mic.disabled,true);assert.equal(memo.disabled,true);
+  assert.equal(mic.title,"Indisponible pendant le mode voix");
+  assert.match(mic.attributes["aria-label"],/indisponible/);
+  await mic.onclick();assert.equal(f.calls.length,0,"there is no second capture session");
+  f.setVoiceActive(false);
+  assert.equal(mic.disabled,false);assert.equal(memo.disabled,false);
+  assert.equal(mic.title,"Dicter un message");
+});
+
 test("dictation level, Escape stop and review never send the message", async () => {
   const f = fixture();
   await cls(f.root,"voice-mic").onclick();

@@ -268,8 +268,15 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
             );
             wait("erreur durable", || reply(&mut app)["error_kind"] == kind);
             let error = reply(&mut app);
-            assert_eq!(fixture.log().lines().count(), 1);
-            assert!(fixture.log().ends_with(&format!(
+            assert_eq!(
+                fixture
+                    .log()
+                    .lines()
+                    .filter(|line| line.contains("OpenAI refus"))
+                    .count(),
+                1
+            );
+            assert!(fixture.log().contains(&format!(
                 "statut=200 code={code} param=input request_id=req_quota_test\n"
             )));
             assert!(!fixture.log().contains("private") && !fixture.log().contains("confidentiel"));
@@ -409,7 +416,14 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     // from another handle would leave this offset stale and overwrite the log.
     writeln!(log, "native shutdown").unwrap();
     let contents = fixture.log();
-    assert_eq!(contents.lines().count(), 3);
+    assert_eq!(
+        contents
+            .lines()
+            .filter(|line| !line.contains("upstream turn="))
+            .count(),
+        3
+    );
+    assert!(contents.contains("code=started") && contents.contains("code=failed"));
     assert!(contents.starts_with("native startup\n"));
     assert!(contents.contains("statut=429 code=subscription_sharing_usage_limit_exceeded param=- request_id=req_quota_test\n"));
     assert!(contents.ends_with("native shutdown\n"));

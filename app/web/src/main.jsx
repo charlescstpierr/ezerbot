@@ -6,6 +6,7 @@ import { editorOptions, readText, writeText } from "./editor.js";
 import { createDocumentIcon, formatAttachmentSize, documentBudgetMessage } from "./attachment-presentation.js";
 import { mentionMenu, readMentions } from "./mentions.js";
 import { pendingReply } from "./thread-order.js";
+import { connectionMessages } from "./connection-view.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
 import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { createDeepLinkQueue } from "./deep-links.js";
@@ -27,6 +28,7 @@ window.GrokbotChat = {
   documentBudgetMessage,
   createDocumentIcon: () => createDocumentIcon(document),
   isPendingReply: pendingReply,
+  connectionMessages,
   renderThread(container, props) {
     if (!roots.has(container)) roots.set(container, createRoot(container));
     roots.get(container).render(<Thread {...props} />);

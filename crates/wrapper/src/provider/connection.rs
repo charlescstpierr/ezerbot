@@ -114,9 +114,80 @@ impl Provider {
     pub fn status(&self) -> Value {
         let mut value = self.session().status();
         value["titling"] = json!(self.sharing.inner.titling.load(Ordering::SeqCst) > 0);
+        value["simulation"] = json!(self.simulation_allowed());
+        value["connection_test"] = lock(&self.session().inner.probe).clone();
         value["connections"] =
             json!({"codex":self.codex.connected(), "sharing":self.sharing.connected()});
         value
+    }
+    pub(crate) fn simulation_allowed(&self) -> bool {
+        cfg!(debug_assertions) && self.sharing.inner.simulation.load(Ordering::SeqCst)
+    }
+    /// Debug-only local fake control; never changes production deadlines.
+    #[cfg(debug_assertions)]
+    pub fn configure_fake_chat(&self, timeout: Duration, simulation: bool) {
+        for session in [&self.sharing, &self.codex] {
+            if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
+                *lock(&session.inner.deadlines) = super::reliable::Deadlines {
+                    first: timeout,
+                    stall: timeout,
+                    total: timeout * 5,
+                };
+                session.inner.simulation.store(simulation, Ordering::SeqCst);
+            }
+        }
+    }
+    pub(crate) fn test_connection(&self) {
+        let session = self.session();
+        {
+            let mut probe = lock(&session.inner.probe);
+            if probe["state"] == "running" {
+                return;
+            }
+            *probe = json!({"state":"running"});
+        }
+        thread::spawn(move || {
+            let mut failure = None;
+            let mut completed = false;
+            let model = session
+                .models()
+                .first()
+                .map(|model| model.slug.clone())
+                .unwrap_or_else(|| {
+                    if session.inner.codex {
+                        "gpt-5.5"
+                    } else {
+                        "gpt-5"
+                    }
+                    .into()
+                });
+            let result = session.reliable_stream(
+                json!({"model": model,
+                    "input":[{"role":"user","content":"Réponds seulement OK."}],
+                    "instructions":"Test de connexion. Réponds seulement OK.",
+                    "store":false,"stream":true,"max_output_tokens":16}),
+                &AtomicBool::new(false),
+                Some("connection-test"),
+                &mut |_, error| {
+                    if let Some(error) = error {
+                        failure = Some(error.message.clone());
+                    }
+                    Ok(())
+                },
+                &mut |event| {
+                    completed |= matches!(event, grokbot_engine::contracts::ModelEvent::Completed);
+                    Ok(())
+                },
+            );
+            if !session.connected() {
+                failure = Some(Failure::signin().message);
+            }
+            *lock(&session.inner.probe) = if completed && result.is_ok() && failure.is_none() {
+                json!({"state":"ok","message":"OK — ChatGPT répond."})
+            } else {
+                json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
+            };
+        });
     }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()
@@ -149,14 +220,13 @@ impl Provider {
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
         self.session().responses(body)
     }
-    pub(super) fn responses_with_options(
-        &self,
-        body: Value,
-        fallback: bool,
-        notices: &mut Vec<String>,
-    ) -> Result<ureq::Response, Failure> {
+    pub(crate) fn responses_background(&self, body: Value) -> Result<ureq::Response, Failure> {
+        self.session().responses_background(body)
+    }
+    pub(crate) fn background_ready(&self) -> bool {
         self.session()
-            .responses_with_options(body, fallback, notices)
+            .read()
+            .is_some_and(|c| c.expires_at > seconds() + REFRESH_MARGIN)
     }
     pub(crate) fn diagnostics(&self, response: &ureq::Response) -> crate::upstream::Diagnostics {
         self.sharing.diagnostics(response)
@@ -171,16 +241,33 @@ impl Provider {
     pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
         self.session().review(body)
     }
+    pub(super) fn stream_canonical(
+        &self,
+        request: &grokbot_engine::contracts::ModelRequest,
+        emit: &mut dyn FnMut(
+            grokbot_engine::contracts::ModelEvent,
+        ) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        self.session().reliable_stream(
+            crate::gateway::request_body(request)?,
+            &AtomicBool::new(false),
+            None,
+            &mut |_, _| Ok(()),
+            emit,
+        )
+    }
     pub(crate) fn stream_run(
         &self,
         request: &grokbot_engine::contracts::ModelRequest,
         cancel: &AtomicBool,
+        turn: Option<&str>,
         metadata: &mut MetadataSink<'_>,
         emit: &mut dyn FnMut(
             grokbot_engine::contracts::ModelEvent,
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
-        self.session().stream_run(request, cancel, metadata, emit)
+        self.session()
+            .stream_run(request, cancel, turn, metadata, emit)
     }
     pub(crate) fn mcp(&self) -> &crate::mcp::Manager {
         self.sharing.mcp()

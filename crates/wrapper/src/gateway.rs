@@ -294,6 +294,10 @@ impl Events {
                 })?;
                 return Ok(true);
             }
+            "response.refusal.delta" | "response.refusal.done" => {
+                emit(failed("OpenAI a refusé de répondre à cette demande. Reformulez votre message ou réessayez."))?;
+                return Ok(true);
+            }
             "response.failed" | "error" => {
                 let source = if kind == "response.failed" {
                     &event["response"]
@@ -345,15 +349,30 @@ pub(crate) fn stream_response(
     diagnostics: &crate::upstream::Diagnostics,
     emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
 ) -> Result<()> {
+    stream_response_observed(reader, diagnostics, &mut |_| Ok(()), emit)
+}
+
+pub(crate) fn stream_response_observed(
+    reader: impl BufRead,
+    diagnostics: &crate::upstream::Diagnostics,
+    observed: &mut dyn FnMut(&str) -> Result<()>,
+    emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
+) -> Result<()> {
     let mut events = Events::default();
     let mut data = Vec::new();
+    let mut bytes = 0usize;
     for line in reader.lines() {
         let line = match line {
             Ok(line) => line,
             Err(_) => return emit(failed(INTERRUPTED)),
         };
+        bytes = bytes.saturating_add(line.len());
+        if bytes > 32 * 1024 * 1024 || line.len() > 2 * 1024 * 1024 {
+            return emit(failed("La réponse d’OpenAI dépasse la taille autorisée. Réessayez avec une demande plus courte."));
+        }
         if line.is_empty() {
             if !data.is_empty() {
+                observed(&data.join("\n"))?;
                 if events.dispatch(&data.join("\n"), diagnostics, emit)? {
                     return Ok(());
                 }
@@ -364,8 +383,11 @@ pub(crate) fn stream_response(
         }
     }
     // Accept a final event without a trailing blank line, but never mistake EOF for Completed.
-    if !data.is_empty() && events.dispatch(&data.join("\n"), diagnostics, emit)? {
-        return Ok(());
+    if !data.is_empty() {
+        observed(&data.join("\n"))?;
+        if events.dispatch(&data.join("\n"), diagnostics, emit)? {
+            return Ok(());
+        }
     }
     emit(failed(INTERRUPTED))
 }

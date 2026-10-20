@@ -328,6 +328,7 @@ pub fn routes(
             "/api/send"
                 | "/api/reconcile"
                 | "/api/provider/signin"
+                | "/api/provider/test"
                 | "/api/provider/select"
                 | "/api/provider/cancel"
                 | "/api/provider/welcomed"
@@ -380,7 +381,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 &input.message_id,
                 &input.mentions,
                 text,
-                app.provider.connected(),
+                app.provider.connected() || !app.provider.simulation_allowed(),
             )?;
             super::conversations::append_entry(
                 &tx,
@@ -469,19 +470,29 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
+        "/api/provider/test" => {
+            let _: Empty = parse(body)?;
+            app.provider.test_connection();
+            Ok(json!({"provider":app.provider.status()}))
+        }
         "/api/provider/select" => {
             let input: ConnectionChoice = parse(body)?;
             if app.provider.status()["backend"] != input.backend {
                 // Une reprise doit garder son modèle et sa session d’origine, même
                 // quand aucun worker ne tourne pendant l’attente d’un formulaire.
                 for status in [
-                    RunStatus::Queued, RunStatus::Running, RunStatus::Interrupted,
-                    RunStatus::AwaitingApproval, RunStatus::AwaitingHumanInput, RunStatus::AwaitingChildren,
+                    RunStatus::Queued,
+                    RunStatus::Running,
+                    RunStatus::Interrupted,
+                    RunStatus::AwaitingApproval,
+                    RunStatus::AwaitingHumanInput,
+                    RunStatus::AwaitingChildren,
                 ] {
                     for run in store::runs_with_status(&app.connection, status)? {
                         let live: bool = app.connection.query_row(
                             "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
-                            [&run.run_id], |row| row.get(0),
+                            [&run.run_id],
+                            |row| row.get(0),
                         )?;
                         if live {
                             return Err(ApiError::new(409, "Terminez ou arrêtez les réponses, formulaires et sous-tâches en attente avant de changer de connexion."));
@@ -496,7 +507,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/provider/signin" => {
             let _: Empty = parse(body)?;
-            let url = app.provider
+            let url = app
+                .provider
                 .start_signin()
                 .map_err(|f| ApiError::new(503, f.message))?;
             // Permet de conduire le faux OAuth dans un navigateur isolé, sans ouvrir
@@ -538,7 +550,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     }
                 }
             }
-            let revoked = app.provider
+            let revoked = app
+                .provider
                 .signout()
                 .map_err(|f| ApiError::new(500, f.message))?;
             Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
@@ -908,7 +921,7 @@ fn create_run(
     let live = if let Some((turn, _)) = group {
         ctx.connection.query_row("SELECT i.live FROM wrapper_group_inputs i JOIN wrapper_group_turns t ON t.account_id=i.account_id AND t.conversation_id=i.conversation_id AND t.root_id=i.message_id WHERE t.id=?1",[turn],|r|r.get(0))?
     } else {
-        ctx.provider.connected()
+        ctx.provider.connected() || !ctx.provider.simulation_allowed()
     };
     let (model, effort, tier) = if live {
         resolve_model(ctx.connection, ctx.provider)?.unwrap_or_else(|| (String::new(), None, None))
@@ -1145,8 +1158,20 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
         [&run.run_id],
         |r| r.get(0),
     )?;
-    // Do not silently turn a real interrupted job into a simulated success.
-    if live && !ctx.provider.connected() {
+    // Missing credentials are a durable thread card, never a queued spinner or
+    // a simulated success. Legacy simulated jobs cannot run in production.
+    if (live && !ctx.provider.connected())
+        || (!live && !ctx.provider.simulation_allowed() && !run.run_id.starts_with("mcp-host-"))
+    {
+        ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='signin' WHERE run_id=?1", params![run.run_id,"Connecte ton compte ChatGPT pour recevoir une réponse. Ta question est conservée ; tu pourras réessayer après la connexion."])?;
+        let mut services = Services::new(ctx)?;
+        fail_host(ctx.connection, &mut services, &run.run_id)?;
+        crate::upstream::turn(
+            ctx.db_path.parent().unwrap_or(Path::new(".")),
+            &run.run_id,
+            0,
+            "signin_required",
+        );
         return Ok(());
     }
     if live {
@@ -2444,10 +2469,10 @@ impl ModelGateway for ProviderGateway<'_> {
         if request.model == "mcp-local" {
             return emit(ModelEvent::Completed);
         }
-        if request.model == "simulated" {
+        if request.model == "simulated" && self.provider.simulation_allowed() {
             return crate::gateway::SimulatedGateway.stream(request, emit);
         }
-        self.provider.stream_run(request,self.cancel,&mut |notice,failure| {
+        self.provider.stream_run(request,self.cancel,self.metadata.map(|(_, id)| id),&mut |notice,failure| {
             if let Some((path,id))=self.metadata {
                 let conn=database(path)?;
                 let vault=vault(path)?;
@@ -2566,7 +2591,6 @@ fn run_reply(
         RunStatus::Queued | RunStatus::Running => ("streaming", None),
         RunStatus::Interrupted if super::multibot::is_group(conn, &run.conversation_id) => ("failed", Some("La génération distante a été interrompue. Son résultat est incertain ; elle n’a pas été relancée automatiquement.".into())),
         RunStatus::Interrupted => ("failed", Some(INTERRUPTED.into())),
-        RunStatus::Failed if metadata.1.as_deref() == Some("incomplete") => ("echoed", None),
         RunStatus::Failed => ("failed", metadata.0.or_else(|| Some(INTERRUPTED.into()))),
         RunStatus::Cancelled => ("stopped", None),
         _ => ("echoed", None),
@@ -2965,7 +2989,10 @@ fn retitle(
             return Ok(());
         }
     }
-    if run.status != RunStatus::Finished || cancel.load(Ordering::SeqCst) {
+    if run.status != RunStatus::Finished
+        || cancel.load(Ordering::SeqCst)
+        || !provider.background_ready()
+    {
         return Ok(());
     }
     let Trigger::UserMessage { attempt: 0, .. } = run.trigger else {

@@ -67,38 +67,60 @@ impl Diagnostics {
             field(&code),
             field(&param)
         );
-        // The native shell already redirects stderr to this file. Use its open
-        // handle so its non-append offset cannot later overwrite a direct append.
-        #[cfg(unix)]
-        {
-            use std::os::{fd::AsFd, unix::fs::MetadataExt};
-            let stderr = std::io::stderr()
-                .as_fd()
-                .try_clone_to_owned()
-                .and_then(|fd| fs::File::from(fd).metadata());
-            if let (Ok(log), Ok(stderr)) = (fs::metadata(&self.path), stderr) {
-                if log.dev() == stderr.dev() && log.ino() == stderr.ino() {
-                    eprint!("{line}");
-                    return;
-                }
+        append(&self.path, &line);
+    }
+}
+
+/// Per-attempt status only: opaque local turn digest, HTTP integer and a local
+/// fixed code. No prompt, generated text, credentials or upstream headers.
+pub(crate) fn turn(directory: &std::path::Path, id: &str, status: u16, code: &'static str) {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(id.as_bytes()));
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    append(
+        &directory.join("logs/engine.log"),
+        &format!(
+            "[{timestamp}] upstream turn={} status={status} code={code}\n",
+            &digest[..16]
+        ),
+    );
+}
+
+fn append(path: &std::path::Path, line: &str) {
+    // The native shell already redirects stderr to this file. Use its open
+    // handle so its non-append offset cannot later overwrite a direct append.
+    #[cfg(unix)]
+    {
+        use std::os::{fd::AsFd, unix::fs::MetadataExt};
+        let stderr = std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .and_then(|fd| fs::File::from(fd).metadata());
+        if let (Ok(log), Ok(stderr)) = (fs::metadata(path), stderr) {
+            if log.dev() == stderr.dev() && log.ino() == stderr.ino() {
+                eprint!("{line}");
+                return;
             }
         }
-        let Some(directory) = self.path.parent() else {
-            return;
-        };
-        if fs::create_dir_all(directory).is_err() {
-            return;
-        }
-        let mut options = OpenOptions::new();
-        options.append(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        if let Ok(mut file) = options.open(&self.path) {
-            let _ = file.write_all(line.as_bytes());
-        }
+    }
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

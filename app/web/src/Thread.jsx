@@ -193,9 +193,14 @@ function Dots() {
   return <div className="gb-dots" aria-hidden="true"><i /><i /><i /></div>;
 }
 
+function SignInCard({ actions }) {
+  return <div className="gb-pending gb-problem" role="alert"><TriangleAlert /><div className="gb-pending-copy"><strong>Connecte ton compte ChatGPT</strong><p>Ta question est conservée. Connecte-toi via Codex, puis réessaie.</p></div><div className="gb-problem-actions"><button type="button" className="gb-retry gb-retry-primary" onClick={actions.onSignIn}>Se connecter via Codex</button><button type="button" className="gb-retry" onClick={() => actions.onRegenerate(actions.message)}><RefreshCw />Réessayer</button></div></div>;
+}
+
 function ReplyProblem({ message, actions }) {
+  if (message.error_kind === "signin") return <SignInCard actions={{ ...actions, message }} />;
   const limit = message.error_kind === "limit";
-  const advice = (message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
+  const advice = message.error_kind === "local_connection" ? null : (message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
     ? "Envoyez un nouveau message pour demander une nouvelle réponse."
     : actions.isTask ? "Poursuivez dans la conversation principale." : null;
   const retry = !advice && message.error_kind !== "context_budget";
@@ -211,7 +216,7 @@ function ReplyProblem({ message, actions }) {
         {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
         {retry && (message.error_kind === "signin"
           ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
-          : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>)}
+          : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Réessayer</button>)}
       </div>}
       {advice && <p className="gb-reply-advice">{advice}</p>}
     </div>
@@ -263,9 +268,9 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
               {message.body}
             </Streamdown>
           )
-          : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : message.payload?.wait_reason === "signin" ? "En attente de connexion" : "En attente"}</span> : streaming && <Dots />}
+          : queued && message.payload?.wait_reason === "signin" ? <SignInCard actions={{ ...actions, message }} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
-        {message.notice && (!queued || message.payload?.parent_turn_id) && <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>}
+        {message.notice && (!queued || message.payload?.parent_turn_id) && (streaming && message.notice.startsWith("Préparation d’un outil") ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>{message.notice}</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}

@@ -2,6 +2,7 @@
 //! d’abonnement « Sign in with ChatGPT ». Aucun identifiant d’un autre logiciel n’est lu.
 mod codex;
 mod connection;
+mod reliable;
 pub use connection::Provider;
 
 use std::collections::HashMap;
@@ -220,6 +221,10 @@ struct Attempt {
 
 struct Inner {
     codex: bool,
+    deadlines: Mutex<reliable::Deadlines>,
+    transports: AtomicUsize,
+    simulation: AtomicBool,
+    probe: Mutex<Value>,
     local_revoked: AtomicBool,
     file: PathBuf,
     endpoints: Endpoints,
@@ -325,7 +330,9 @@ fn parse_query(url: &str) -> HashMap<String, String> {
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(180))
+        .timeout_read(Duration::from_secs(12))
+        .timeout_write(Duration::from_secs(12))
+        .timeout(Duration::from_secs(12))
         .build()
 }
 
@@ -367,7 +374,7 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
         "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
         "subscription_sharing_invalid_user" => Failure::signin(),
         _ if status == 401 => Failure::signin(),
-        _ if status == 503 => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
+        _ if status == 503 => Failure::other(format!("Le service d’OpenAI est indisponible (HTTP 503). Réessayez dans quelques minutes.{}", if message.is_empty() { String::new() } else { format!(" Détail : {}", message.chars().take(300).collect::<String>()) })),
         _ => {
             let detail: String = if message.is_empty() { code } else { message }.chars().take(300).collect();
             Failure::other(if status == 0 {
@@ -466,6 +473,13 @@ impl Session {
         Self {
             inner: Arc::new(Inner {
                 codex,
+                deadlines: Mutex::new(reliable::Deadlines::default()),
+                transports: AtomicUsize::new(0),
+                simulation: AtomicBool::new(
+                    cfg!(debug_assertions)
+                        && std::env::var_os("GROKBOT_DISABLE_SIMULATION").is_none(),
+                ),
+                probe: Mutex::new(json!({"state":"idle"})),
                 local_revoked: AtomicBool::new(false),
                 file,
                 endpoints,
@@ -571,16 +585,14 @@ impl Session {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return false;
         }
-        let _guard = lock(&self.inner.credentials);
+        // Atomic rename makes a read-only snapshot safe. Never wait behind a
+        // network refresh on the UI/server thread.
         self.read()
             .is_some_and(|credentials| credentials.usable(self.inner.codex))
     }
 
     pub fn status(&self) -> Value {
-        let credentials = {
-            let _guard = lock(&self.inner.credentials);
-            self.read().unwrap_or_default()
-        };
+        let credentials = self.read().unwrap_or_default();
         let retained =
             self.inner.local_revoked.load(Ordering::SeqCst) && credentials.usable(self.inner.codex);
         let connected = credentials.usable(self.inner.codex)
@@ -924,6 +936,14 @@ impl Session {
 
     /// Rend un jeton d'accès valide, renouvelé s'il expire bientôt ou si `force` le demande.
     fn bearer(&self, force: bool) -> Result<String, Failure> {
+        if !force && !self.inner.local_revoked.load(Ordering::SeqCst) {
+            if let Some(credentials) = self
+                .read()
+                .filter(|c| c.usable(self.inner.codex) && c.expires_at > seconds() + REFRESH_MARGIN)
+            {
+                return credentials.access_token.ok_or_else(Failure::signin);
+            }
+        }
         let _guard = lock(&self.inner.credentials);
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::signin());
@@ -1180,6 +1200,19 @@ impl Session {
         self.responses_with_options(body, false, &mut Vec::new())
     }
 
+    fn responses_background(&self, mut body: Value) -> Result<ureq::Response, Failure> {
+        // Optional preparation never owns credential rotation or blocks a chat.
+        let credentials = self
+            .read()
+            .filter(|c| c.usable(self.inner.codex) && c.expires_at > seconds())
+            .ok_or_else(Failure::signin)?;
+        let token = credentials.access_token.ok_or_else(Failure::signin)?;
+        self.request(&token, &mut body)?
+            .timeout(Duration::from_secs(12))
+            .send_json(body)
+            .map_err(|error| self.request_failure(error).4)
+    }
+
     /// Isolated, bounded policy call. No transcript, tools, cached conversation,
     /// effort/Fast retry or provider error text enters the reviewer boundary.
     pub(crate) fn review(&self, mut body: Value) -> Result<String, Failure> {
@@ -1281,18 +1314,42 @@ impl Session {
     /// One authentication refresh is shared across all attempts of this logical request.
     fn responses_with_options(
         &self,
+        body: Value,
+        capability_fallback: bool,
+        notices: &mut Vec<String>,
+    ) -> Result<ureq::Response, Failure> {
+        self.responses_checked(
+            body,
+            capability_fallback,
+            notices,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+    }
+
+    fn responses_checked(
+        &self,
         mut body: Value,
         capability_fallback: bool,
         notices: &mut Vec<String>,
+        abandoned: &AtomicBool,
+        on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
         let mut refreshed = false;
         loop {
+            if abandoned.load(Ordering::SeqCst) {
+                return Err(Failure::other("Réponse annulée."));
+            }
             let attempt = self.request(&token, &mut body)?.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    on_status(response.status());
+                    return Ok(response);
+                }
                 Err(error) => self.request_failure(error),
             };
+            on_status(status);
             if status == 401 && !refreshed {
                 refreshed = true;
                 token = self.bearer(true)?;
@@ -1370,12 +1427,13 @@ impl Session {
         &self,
         request: &grokbot_engine::contracts::ModelRequest,
         cancel: &AtomicBool,
+        turn: Option<&str>,
         metadata: &mut MetadataSink<'_>,
         emit: &mut dyn FnMut(
             grokbot_engine::contracts::ModelEvent,
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
-        use grokbot_engine::contracts::{Error, ModelEvent};
+        use grokbot_engine::contracts::Error;
         if cancel.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput("run cancelled".into()));
         }
@@ -1388,48 +1446,7 @@ impl Session {
                 }
             }
         }
-        let mut notices = Vec::new();
-        let response = match self.responses_with_options(body, true, &mut notices) {
-            Ok(response) => response,
-            Err(failure) => {
-                metadata(None, Some(&failure))?;
-                return emit(ModelEvent::Failed {
-                    reason: failure.message,
-                });
-            }
-        };
-        if !notices.is_empty() {
-            metadata(Some(&notices.join(" ")), None)?;
-        }
-        let diagnostics = self.diagnostics(&response);
-        let reader = Cancellable {
-            reader: BufReader::new(response.into_reader()),
-            cancel,
-        };
-        crate::gateway::stream_response(reader, &diagnostics, &mut |event| {
-            if matches!(event, ModelEvent::Incomplete { .. }) {
-                metadata(
-                    Some("OpenAI a arrêté cette réponse avant la fin."),
-                    Some(&Failure {
-                        message: "OpenAI a arrêté cette réponse avant la fin.".into(),
-                        kind: "incomplete",
-                    }),
-                )?;
-            }
-            if let ModelEvent::Failed { reason } = &event {
-                // Preserve the upstream Failure's classification independently
-                // of its French wording. Parser/transport failures stay "other".
-                let kind = diagnostics.failure_kind();
-                metadata(
-                    None,
-                    Some(&Failure {
-                        message: reason.clone(),
-                        kind,
-                    }),
-                )?;
-            }
-            emit(event)
-        })
+        self.reliable_stream(body, cancel, turn, metadata, emit)
     }
 }
 
@@ -1442,20 +1459,7 @@ impl grokbot_engine::contracts::ModelGateway for Provider {
             grokbot_engine::contracts::ModelEvent,
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
-        let body = crate::gateway::request_body(request)?;
-        match self.responses_with_options(body, true, &mut Vec::new()) {
-            Ok(response) => {
-                let diagnostics = self.diagnostics(&response);
-                crate::gateway::stream_response(
-                    BufReader::new(response.into_reader()),
-                    &diagnostics,
-                    emit,
-                )
-            }
-            Err(failure) => emit(grokbot_engine::contracts::ModelEvent::Failed {
-                reason: failure.message,
-            }),
-        }
+        self.stream_canonical(request, emit)
     }
 }
 

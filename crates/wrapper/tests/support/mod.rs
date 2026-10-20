@@ -39,6 +39,10 @@ pub struct Seen {
     pub memory_delay: Duration,
     /// Optional provider telemetry for default chat replies (titles remain independent).
     pub usage: Option<Value>,
+    /// GET WHAM usage is independent of model responses and their telemetry.
+    pub quota_reply: Option<ScriptedResponse>,
+    pub quota_headers: Vec<HashMap<String, String>>,
+    pub quota_gate: Option<Arc<AtomicBool>>,
     /// Hold a catalogue or a numbered response without locking observations.
     pub models_gate: Option<Arc<AtomicBool>>,
     pub model_requests: usize,
@@ -251,6 +255,22 @@ impl FakeOpenAi {
                         seen.revoked = true;
                         (200, "application/json".into(), String::new())
                     }
+                    "/backend-api/wham/usage" => {
+                        seen.quota_headers.push(
+                            request
+                                .headers()
+                                .iter()
+                                .map(|h| {
+                                    (
+                                        h.field.to_string().to_ascii_lowercase(),
+                                        h.value.to_string(),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        let reply = seen.quota_reply.take().unwrap_or_else(|| ScriptedResponse::json(200, json!({"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":35,"limit_window_seconds":18000,"reset_at":4102444800u64},"secondary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_at":4102531200u64}}})));
+                        (reply.status, reply.content_type, reply.body)
+                    }
                     "/v1/models" => {
                         seen.model_requests += 1;
                         seen.bearer.push(bearer);
@@ -355,6 +375,8 @@ impl FakeOpenAi {
                 };
                 let gate = if request.url() == "/token" {
                     seen.token_gate.clone()
+                } else if request.url() == "/backend-api/wham/usage" {
+                    seen.quota_gate.clone()
                 } else {
                     gate
                 };

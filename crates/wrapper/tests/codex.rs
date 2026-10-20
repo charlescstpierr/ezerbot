@@ -191,6 +191,63 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
 }
 
 #[test]
+fn usage_reads_wham_with_ezerbot_oauth_refresh_and_no_model_call() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    assert_eq!(f.provider.codex_usage(false)["status"], "loading");
+    wait("quota Codex", || {
+        f.provider.codex_usage(false)["status"] == "ready"
+    });
+    let quota = f.provider.codex_usage(false);
+    assert_eq!(quota["quota"]["secondary"]["remaining_percent"], 18.0);
+    assert_eq!(quota["quota"]["secondary"]["reset_at"], 4102531200u64);
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(seen.forms.len(), 2); // expired Ezerbot session was refreshed
+    assert_eq!(seen.forms[1]["refresh_token"], "refresh-1");
+    assert_eq!(seen.quota_headers.len(), 1); // state reads coalesce
+    assert_eq!(seen.quota_headers[0]["chatgpt-account-id"], "account-test");
+    assert_eq!(
+        seen.quota_headers[0]["authorization"],
+        format!("Bearer {}", seen.access_tokens[1])
+    );
+    assert!(seen.bodies.is_empty());
+    drop(seen);
+    assert!(!quota.to_string().contains("refresh-") && !quota.to_string().contains("account-test"));
+    f.provider.select_backend("sharing").unwrap();
+    assert_eq!(f.provider.codex_usage(false)["status"], "unsupported");
+    f.provider.select_backend("codex").unwrap();
+    f.provider.signout().unwrap();
+    assert_eq!(f.provider.codex_usage(false)["status"], "signin");
+}
+
+#[test]
+fn usage_retries_one_unauthorized_read_with_the_renewed_ezerbot_session() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    f.server.seen.lock().unwrap().quota_reply = Some(ScriptedResponse::json(
+        401,
+        json!({"error":"expired-private-token"}),
+    ));
+    f.provider.codex_usage(false);
+    wait("quota après renouvellement", || {
+        f.provider.codex_usage(false)["status"] == "ready"
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(seen.quota_headers.len(), 2);
+    assert_eq!(seen.forms.len(), 3);
+    assert_ne!(
+        seen.quota_headers[0]["authorization"],
+        seen.quota_headers[1]["authorization"]
+    );
+    assert_eq!(
+        seen.quota_headers[1]["authorization"],
+        format!("Bearer {}", seen.access_tokens[2])
+    );
+}
+
+#[test]
 fn denial_cancel_missing_account_and_late_token_never_connect() {
     let _serial = OAUTH.lock().unwrap();
     let f = Fixture::new();

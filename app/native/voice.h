@@ -179,7 +179,7 @@
     NSString *token = body[@"token"];
     if (![command isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || token.length > 128) { reply(@{@"status":@"invalid"}); return; }
     if ([command isEqual:@"start"]) {
-        if (self.status && [@[@"authorizing",@"recording",@"paused",@"transcribing"] containsObject:self.status]) { reply(@{@"status":@"busy"}); return; }
+        if (self.status && [@[@"authorizing",@"recording",@"paused",@"transcribing"] containsObject:self.status]) { reply(@{@"status":self.meeting && ![body[@"purpose"] isEqual:@"meeting"] ? @"meeting_busy" : @"busy"}); return; }
         BOOL meeting = [body[@"purpose"] isEqual:@"meeting"];
         if (meeting && ![body[@"consent"] isEqual:@YES]) { reply(@{@"status":@"consent_required"}); return; }
         [self cancel]; self.token = token; self.meeting = meeting; self.maxSeconds = meeting ? 600 : 60;

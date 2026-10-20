@@ -351,7 +351,14 @@ impl DebugVoice {
                 self.status.as_str(),
                 "recording" | "transcribing" | "paused"
             ) {
-                return Err(ApiError::new(409, "Une dictée est déjà en cours."));
+                return Err(ApiError::new(
+                    409,
+                    if self.meeting {
+                        "Une réunion est en cours. Arrêtez-la avant de dicter."
+                    } else {
+                        "Une dictée est déjà en cours."
+                    },
+                ));
             }
             self.meeting = command.purpose.as_deref() == Some("meeting");
             if self.meeting && !command.consent {

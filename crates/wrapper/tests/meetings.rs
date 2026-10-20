@@ -386,3 +386,101 @@ fn group_summary_is_projected_once_in_its_meeting_card() {
         .iter()
         .any(|m| m["payload"]["root_id"] == format!("summary-{id}") && m["kind"] == "message"));
 }
+
+#[test]
+fn dedicated_conversation_uses_chosen_title_and_only_unused_owned_threads_are_removed() {
+    let mut f = Fixture::new();
+    assert!(f
+        .error(
+            "/api/meetings/start",
+            json!({"title":"Conseil","consent":false})
+        )
+        .contains("consentement"));
+    assert!(f.state()["conversations"].as_array().unwrap().is_empty());
+    let meeting = f.post(
+        "/api/meetings/start",
+        json!({"title":"Conseil du jeudi","consent":true}),
+    );
+    let c = meeting["conversation_id"].as_str().unwrap();
+    assert_eq!(meeting["created_conversation"], true);
+    assert_eq!(f.state()["conversations"][0]["title"], "Conseil du jeudi");
+    f.reopen();
+    f.post("/api/meetings/discard", json!({"id":meeting["id"]}));
+    assert!(!f.state()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == c));
+    let existing = f.conversation();
+    let id = f.start(&existing);
+    f.post("/api/meetings/discard", json!({"id":id}));
+    assert!(f.state()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == existing));
+    let meeting = f.post(
+        "/api/meetings/start",
+        json!({"title":"Notes en cours","consent":true}),
+    );
+    f.post(
+        "/api/meetings/discard",
+        json!({"id":meeting["id"],"preserve_conversation":true}),
+    );
+    assert!(f.state()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == meeting["conversation_id"]));
+}
+
+#[test]
+fn dedicated_title_survives_summary_and_a_conversation_with_messages_is_not_discarded() {
+    let mut f = Fixture::new();
+    f.connect();
+    let meeting = f.post(
+        "/api/meetings/start",
+        json!({"title":"Titre choisi par moi","consent":true}),
+    );
+    let id = meeting["id"].as_str().unwrap();
+    f.finish(id, false);
+    f.post("/api/meetings/summarize", json!({"id":id}));
+    wait("chosen title", || {
+        f.card(id)["payload"]["summary_state"] == "echoed"
+    });
+    f.reopen();
+    assert_eq!(
+        f.state()["conversations"][0]["title"],
+        "Titre choisi par moi"
+    );
+    let meeting = f.post(
+        "/api/meetings/start",
+        json!({"title":"Conversation à garder","consent":true}),
+    );
+    f.post("/api/send",json!({"conversation_id":meeting["conversation_id"],"message_id":"notes","body":"Garde ces notes"}));
+    f.post("/api/meetings/discard", json!({"id":meeting["id"]}));
+    assert!(f.state()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == meeting["conversation_id"]));
+}
+
+#[test]
+fn dictation_during_meeting_is_refused_with_the_correct_french_reason() {
+    let mut f = Fixture::new();
+    f.post(
+        "/api/voice/debug",
+        json!({"command":"start","token":"meeting","purpose":"meeting","consent":true}),
+    );
+    assert!(f
+        .error(
+            "/api/voice/debug",
+            json!({"command":"start","token":"dictation"})
+        )
+        .contains("Une réunion est en cours"));
+    f.post(
+        "/api/voice/debug",
+        json!({"command":"cancel","token":"meeting"}),
+    );
+}

@@ -41,7 +41,7 @@ function fixture() {
   runInNewContext(readFileSync(new URL("../../ui/panels/voice.js", import.meta.url),"utf8"), {
     localStorage:{setItem(key,value){storage.set(key,String(value));},getItem(key){return storage.get(key) ?? null;},removeItem(key){storage.delete(key);}}, window, document, crypto:{randomUUID:()=>"voice-token"},setTimeout(fn){poll=fn;},clearTimeout(){poll=null;},
   });
-  return { root, ctx, registration, calls, uploads, created, storage, setVoiceActive(value){conversationVoice=value;window.EzerbotDictation.refresh();}, get draft(){return draft;}, set result(value){result=value;}, holdPoll() { holdStatus = true; }, releasePoll() { delayedStatus({status:"recording",token}); }, keydown: event=>keydown(event), poll:async()=>{await poll?.();await flush();} };
+  return { root, ctx, registration, calls, uploads, created, storage, setVoiceActive(value){conversationVoice=value;window.EzerbotDictation.refresh();}, get draft(){return draft;}, set meeting(value){host.meetingActive=()=>value; registration.onState(ctx.state,ctx);}, set result(value){result=value;}, holdPoll() { holdStatus = true; }, releasePoll() { delayedStatus({status:"recording",token}); }, keydown: event=>keydown(event), poll:async()=>{await poll?.();await flush();} };
 }
 test("conversation voice immediately disables dictation and memo, and restores them on exit", async () => {
   const f=fixture();const mic=cls(f.root,"voice-mic"),memo=cls(f.root,"voice-mode").children[0];
@@ -150,6 +150,15 @@ test("a staged memo on an empty thread prevents bot switching just like other at
     messages = [{}]; assert.equal(staged(),false,"nonempty thread is not reassigned by bot selection");
   }
   assert.match(source,/Retirez les pièces jointes pour changer de bot/);
+});
+
+test("meeting capture disables dictation and memo with an explicit French explanation", async () => {
+  const f=fixture(); f.meeting=true;
+  assert.equal(cls(f.root,"voice-mic").disabled,true);
+  assert.equal(cls(f.root,"voice-mode").children[0].disabled,true);
+  assert.match(cls(f.root,"voice-mic").title,/Indisponible pendant/);
+  await cls(f.root,"voice-mic").onclick(); assert.equal(f.calls.length,0);
+  f.meeting=false; assert.equal(cls(f.root,"voice-mic").disabled,false);
 });
 
 test("denial explains System Settings and never accesses browser media", async () => {

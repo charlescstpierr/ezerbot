@@ -1,24 +1,39 @@
 .meeting-start { white-space: nowrap; }
+.meeting-start:disabled, .meeting-dialog .primary-button:disabled { opacity: .45; cursor: default; }
 .meeting-bar, .meeting-interrupted { flex: 0 0 auto; border-bottom: 1px solid var(--line); padding: 10px 18px; background: var(--pane); font-size: 11px; line-height: 1.5; max-height: 48vh; overflow: auto; }
 .meeting-bar[hidden], .meeting-interrupted[hidden] { display: none; }
 .meeting-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.meeting-row strong { flex: 1 1 190px; font-size: 11px; }
-.meeting-row button { min-height: 28px; padding: 4px 9px; font-size: 10px; }
+.meeting-row strong { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+.meeting-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: nowrap; }
+.meeting-row button { min-height: 28px; padding: 4px 8px; font-size: 10px; white-space: nowrap; }
 .meeting-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--muted); }
 .meeting-bar[data-phase=recording] .meeting-dot { background: var(--danger-text); }
-.meeting-clock { font-variant-numeric: tabular-nums; color: var(--muted); }
+.meeting-bar[data-tone=danger] { border-left: 3px solid var(--danger-text); }
+.meeting-bar[data-tone=danger] strong { color: var(--danger-text); }
+.meeting-bar[data-tone=danger] .meeting-dot { background: var(--danger-text); }
+.meeting-bar[data-tone=warning] { background: var(--warning-bg); border-color: var(--warning-line); }
+.meeting-bar[data-tone=warning] strong, .meeting-bar[data-tone=warning] .meeting-cap { color: var(--warning-text); }
+.meeting-bar[data-tone=warning] .meeting-dot { background: var(--warning-text); }
+.meeting-clock { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 .meeting-reminder, .meeting-cap { color: var(--muted); font-size: 10px; margin: 7px 0 0; }
 .meeting-review { display: grid; gap: 10px; margin-top: 8px; }
 .meeting-review[hidden] { display: none; }
-.meeting-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 100px; overflow-y: auto; font: inherit; }
-.meeting-review > button { justify-self: start; }
+.meeting-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6rem; overflow-y: auto; padding: 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.meeting-review-actions { display: grid; gap: 8px; }
+.meeting-review-actions > button { justify-self: start; }
 .meeting-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; line-height: 1.6; }
 .meeting-consent input { accent-color: var(--accent); flex: 0 0 auto; margin-top: 3px; }
 .meeting-dialog > label:not(.meeting-consent) { display: grid; gap: 7px; margin: 16px 0; font-size: 11px; }
-.meeting-dialog input:not([type=checkbox]), .meeting-retention select { padding: 9px; background: var(--pane); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+.meeting-dialog input:not([type=checkbox]) { padding: 9px; background: var(--pane); color: var(--text); border: 1px solid var(--line); border-radius: 7px; font: inherit; }
 .meeting-dialog h2 { margin: 0; font-size: 18px; }
-.meeting-dialog .delete-description { font-size: 12px; }
+.meeting-dialog .delete-description, .meeting-confirmation .delete-description { font-size: 12px; line-height: 1.7; }
 .meeting-error { color: var(--danger-text); font-size: 11px; }
 .meeting-retention { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
 .meeting-retention select { width: 100%; }
-@media (max-width: 880px) { .meeting-bar { padding: 8px 12px; } .meeting-row strong { flex-basis: 180px; } .meeting-dialog .dialog-footer { flex-wrap: wrap; } }
+@media (max-width: 880px) {
+  .meeting-bar { padding: 8px 12px; }
+  .meeting-row { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: start; gap: 6px; }
+  .meeting-dot { margin-top: 4px; }
+  .meeting-actions { grid-column: 2 / -1; justify-self: end; }
+  .meeting-dialog .dialog-footer, .meeting-confirmation .dialog-footer { flex-wrap: wrap; }
+}

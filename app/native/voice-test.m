@@ -33,6 +33,8 @@ int main(void) {
         assert([result[@"status"] isEqual:@"consent_required"]);
         [voice command:@{@"command":@"start",@"token":@"meeting",@"purpose":@"meeting",@"consent":@YES} reply:reply];
         assert([result[@"status"] isEqual:@"recording"] && voice.maxSeconds == 600);
+        [voice command:@{@"command":@"start",@"token":@"dictation"} reply:reply];
+        assert([result[@"status"] isEqual:@"meeting_busy"]);
         [voice command:@{@"command":@"pause",@"token":@"meeting"} reply:reply];
         assert([result[@"status"] isEqual:@"paused"]);
         [voice command:@{@"command":@"resume",@"token":@"meeting"} reply:reply];

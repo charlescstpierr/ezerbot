@@ -17,10 +17,10 @@ export function Card({ message, onAction }) {
       : <button type="button" className="gb-retry" onClick={() => onAction("meeting-summary")}>{retry ? "Réessayer le résumé" : meeting.summary_state === "pending" ? "Produire le résumé" : "Refaire le résumé"}</button>}
     <details className="gb-meeting-transcript"><summary>Transcription jointe</summary><pre>{meeting.transcript}</pre></details>
     {meeting.audio_url ? <div className="gb-meeting-audio">
-      <p className="gb-engine-note">Audio gardé sur ce Mac jusqu’au {new Date(meeting.audio_expires_at).toLocaleDateString("fr-CA")}.</p>
+      <p className="gb-engine-note">Audio gardé sur ce Mac jusqu’au {new Date(meeting.audio_expires_at).toLocaleDateString("fr-CA", { day: "numeric", month: "long", year: "numeric" })}.</p>
       <audio controls preload="none" src={meeting.audio_url} aria-label="Écouter l’audio de la réunion" />
       <button type="button" className="gb-retry" onClick={() => onAction("meeting-delete-audio")}>Supprimer l’audio</button>
-    </div> : <p className="gb-engine-note">Audio supprimé · La transcription et le résumé sont conservés.</p>}
-    <p className="gb-engine-note">Résumé généré par le bot : vérifiez les décisions, responsables et échéances avant de les utiliser. Aucune action n’est exécutée par cette carte.</p>
+    </div> : <p className="gb-engine-note">Audio supprimé · {message.body ? "La transcription et le résumé sont conservés." : "La transcription est conservée."}</p>}
+    {message.body && <p className="gb-engine-note">Résumé généré par le bot : vérifiez les décisions, responsables et échéances avant de les utiliser. Aucune action n’est exécutée par cette carte.</p>}
   </article>;
 }

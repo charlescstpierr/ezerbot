@@ -12,7 +12,7 @@ empty_hooks!(tools, call_tool, context, on_run_event);
 pub const MAX_SECONDS: u32 = 600;
 pub const MAX_WAV_BYTES: usize = (MAX_SECONDS as usize + 1) * 32_000 + 4096;
 const DAY: u64 = 86_400_000;
-const SELECT: &str = "SELECT id,conversation_id,title,status,transcript,duration_ms,created_at,expires_at,length(audio),message_id FROM wrapper_meetings";
+const SELECT: &str = "SELECT id,conversation_id,title,status,transcript,duration_ms,created_at,expires_at,length(audio),message_id,owned_conversation FROM wrapper_meetings";
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_meetings (
@@ -22,6 +22,10 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_meeting_settings (id INTEGER PRIMARY KEY CHECK(id=1), audio_days INTEGER NOT NULL);
         INSERT OR IGNORE INTO wrapper_meeting_settings VALUES (1,7);
         UPDATE wrapper_meetings SET status='interrupted',audio=NULL,expires_at=NULL WHERE status='recording';")?;
+    let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_meetings') WHERE name='owned_conversation')", [], |r| r.get(0))?;
+    if !owned {
+        conn.execute_batch("ALTER TABLE wrapper_meetings ADD COLUMN owned_conversation INTEGER NOT NULL DEFAULT 0;")?;
+    }
     purge(conn, crate::now())?;
     Ok(())
 }
@@ -41,7 +45,7 @@ fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         json!({"id":id,"kind":"meeting","conversation_id":row.get::<_,String>(1)?,"title":row.get::<_,String>(2)?,
         "status":row.get::<_,String>(3)?,"transcript":row.get::<_,String>(4)?,"duration_ms":row.get::<_,u32>(5)?,
         "created_at":row.get::<_,u64>(6)?,"audio_expires_at":if kept {expires} else {None},
-        "audio_url":if kept {Some(format!("/api/meetings/audio/{id}"))} else {None},"message_id":row.get::<_,Option<String>>(9)?}),
+        "audio_url":if kept {Some(format!("/api/meetings/audio/{id}"))} else {None},"message_id":row.get::<_,Option<String>>(9)?,"created_conversation":row.get::<_,bool>(10)?}),
     )
 }
 fn get(conn: &Connection, id: &str) -> Result<Value, ApiError> {
@@ -180,7 +184,8 @@ pub fn routes(
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Start {
-                conversation_id: String,
+                conversation_id: Option<String>,
+                bot_id: Option<String>,
                 title: String,
                 consent: bool,
             }
@@ -188,8 +193,15 @@ pub fn routes(
             if !input.consent {
                 return Err(ApiError::new(403,"Confirmez le consentement de toutes les personnes avant d’enregistrer la réunion."));
             }
-            app.require_conversation(&input.conversation_id)?;
-            super::delegation::ensure_send_allowed(&app.feature_context(), &input.conversation_id)?;
+            if let Some(conversation) = &input.conversation_id {
+                app.require_conversation(conversation)?;
+                super::delegation::ensure_send_allowed(&app.feature_context(), conversation)?;
+            }
+            let bot = input.bot_id.as_deref().unwrap_or(crate::DEFAULT_BOT.id);
+            if input.conversation_id.is_none() {
+                validate_id(bot)?;
+                app.require_bot(bot)?;
+            }
             let title = input.title.trim();
             if title.is_empty() || title.len() > 200 {
                 return Err(ApiError::new(
@@ -213,7 +225,18 @@ pub fn routes(
                 tx.query_row("SELECT 'meeting_'||lower(hex(randomblob(16)))", [], |r| {
                     r.get(0)
                 })?;
-            tx.execute("INSERT INTO wrapper_meetings (id,conversation_id,title,status,created_at) VALUES (?1,?2,?3,'recording',?4)", params![id,input.conversation_id,title,crate::now()])?;
+            let owned = input.conversation_id.is_none();
+            let conversation = match input.conversation_id {
+                Some(id) => id,
+                None => {
+                    let conversation: String =
+                        tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
+                    tx.execute("INSERT INTO wrapper_conversations (account_id,id,title,title_customized,created_at,updated_at,bot_id) VALUES (?1,?2,?3,1,?4,?4,?5)", params![crate::ACCOUNT,conversation,title,crate::now(),bot])?;
+                    super::multibot::initialize(&tx, &conversation, &[bot.to_owned()])?;
+                    conversation
+                }
+            };
+            tx.execute("INSERT INTO wrapper_meetings (id,conversation_id,title,status,created_at,owned_conversation) VALUES (?1,?2,?3,'recording',?4,?5)", params![id,conversation,title,crate::now(),owned])?;
             tx.commit()?;
             Ok(ApiResponse::Json(get(&app.connection, &id)?))
         })()),
@@ -293,7 +316,14 @@ pub fn routes(
             app.api_response("POST", "/api/send", &serde_json::to_vec(&send).unwrap())
         })()),
         ("POST", "/api/meetings/discard") => Some((|| {
-            let input: Identity = parse(body)?;
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Discard {
+                id: String,
+                #[serde(default)]
+                preserve_conversation: bool,
+            }
+            let input: Discard = parse(body)?;
             let tx = write_transaction(&app.connection)?;
             let meeting = get(&tx, &input.id)?;
             if meeting["status"] == "ready" {
@@ -302,7 +332,13 @@ pub fn routes(
                     "La réunion est déjà conservée dans la conversation.",
                 ));
             }
-            tx.execute("DELETE FROM wrapper_meetings WHERE id=?1", [input.id])?;
+            tx.execute("DELETE FROM wrapper_meetings WHERE id=?1", [&input.id])?;
+            // Only this capture's dedicated, still-empty conversation is eligible.
+            // Never remove existing threads, messages, staged files or local notes.
+            if meeting["created_conversation"] == true && !input.preserve_conversation {
+                let conversation = meeting["conversation_id"].as_str().unwrap();
+                tx.execute("UPDATE wrapper_conversations SET deleted=1 WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM wrapper_messages WHERE conversation_id=?1) AND NOT EXISTS(SELECT 1 FROM submissions WHERE conversation_id=?1) AND NOT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1) AND NOT EXISTS(SELECT 1 FROM wrapper_storage_drafts WHERE draft_id=?1) AND NOT EXISTS(SELECT 1 FROM wrapper_storage_uploads WHERE draft_id=?1 AND cancelled=0) AND NOT EXISTS(SELECT 1 FROM wrapper_voice_memos WHERE conversation_id=?1)", [conversation])?;
+            }
             tx.commit()?;
             Ok(ApiResponse::Json(json!({"discarded":true})))
         })()),

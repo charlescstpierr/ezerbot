@@ -14,10 +14,23 @@
     unavailable: "L’enregistrement de réunion est disponible dans l’application Mac Ezerbot.",
     consent_required: "Confirmez le consentement de toutes les personnes avant d’enregistrer.",
   };
-  let context, startButton, bar, info, clock, pause, stop, discard, retry, review, keep, save, retention, interrupted;
-  let dialog, title, consent, begin, dialogError;
-  let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false;
+  let context, startButton, bar, info, clock, pause, stop, discard, retry, review, keep, save, retention, interrupted, notice, openThread, settings;
+  let dialog, title, consent, begin, dialogError, confirmation, confirmationTitle, confirmationText, confirmationAccept, finishConfirmation;
+  let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false, lastActive = false;
   const active = () => ["authorizing", "recording", "paused", "transcribing", "saving"].includes(phase);
+  const emptyCapture = () => ["mic_denied", "speech_denied", "no_microphone", "offline_unavailable", "busy", "meeting_busy", "unavailable", "consent_required", "no_audio"].includes(phase);
+  // A shared signal also updates dictation immediately, not at the next state poll.
+  panels.meetingActive = active;
+  function confirmDelete(heading, description, label) {
+    if (finishConfirmation) return Promise.resolve(false);
+    confirmationTitle.textContent = heading; confirmationText.textContent = description; confirmationAccept.textContent = label;
+    return new Promise((resolve) => {
+      finishConfirmation = (accepted) => {
+        finishConfirmation = null; confirmation.close(); resolve(accepted);
+      };
+      confirmation.showModal();
+    });
+  }
   const bridge = (command) => {
     const body = { command, token: session?.id || "", purpose: "meeting", consent: true, language: "fr" };
     const native = window.webkit?.messageHandlers?.ezerbotVoice;
@@ -30,14 +43,27 @@
     if (!bar) return;
     bar.hidden = phase === "idle";
     bar.dataset.phase = phase;
-    startButton.disabled = !!session || context?.conversation?.kind === "task";
-    info.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours · Microphone actif",paused:"Réunion en pause · Microphone arrêté",transcribing:"Microphone arrêté · Transcription sur ce Mac…",ready:"Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
+    const tone = phase === "offline_unavailable" || (phase === "ready" && pending?.too_long) ? "warning" : ["mic_denied", "speech_denied", "no_microphone", "failed", "no_audio", "save_failed"].includes(phase) ? "danger" : "";
+    if (tone) bar.dataset.tone = tone; else delete bar.dataset.tone;
+    startButton.disabled = !!session || Boolean(panels.voiceActive?.()) || context?.conversation?.kind === "task";
+    startButton.title = panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
+    const name = session?.title ? ` · ${session.title}` : "";
+    info.textContent = errors[phase] || ({authorizing:`Autorisation du microphone${name}…`,recording:`Réunion en cours${name} · Microphone actif`,paused:`Réunion en pause${name} · Microphone arrêté`,transcribing:`Microphone arrêté${name} · Transcription sur ce Mac…`,ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : `Capture arrêtée${name} · Transcription prête`,saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
     pause.hidden = !["recording", "paused"].includes(phase); pause.textContent = phase === "paused" ? "Reprendre" : "Pause";
     stop.hidden = !["recording", "paused"].includes(phase);
     discard.hidden = phase === "saving";
+    discard.textContent = emptyCapture() ? "Fermer" : "Supprimer";
+    discard.setAttribute("aria-label", emptyCapture() ? "Fermer la capture" : "Supprimer la capture");
+    discard.title = emptyCapture() ? "Fermer" : "Supprimer la capture";
     retry.hidden = phase !== "failed";
+    settings.hidden = !["mic_denied", "speech_denied", "offline_unavailable"].includes(phase);
+    openThread.hidden = !session || context?.conversation?.id === session.conversation_id;
+    notice.hidden = !["authorizing", "recording", "paused"].includes(phase);
     review.hidden = !["ready", "save_failed"].includes(phase);
     clock.hidden = !["recording", "paused", "transcribing"].includes(phase);
+    if (active() !== lastActive) {
+      lastActive = active(); window.dispatchEvent(new Event("grokbot:meeting-change"));
+    }
     panels.composerChanged();
   }
   async function accept(result, rev) {
@@ -67,35 +93,34 @@
     catch (error) { phase = "failed"; render(); panels.notify(error.message); }
     finally { requestBusy = false; }
   }
+  const hasDraft = (conversation) => context?.conversation?.id === conversation ? !!panels.draft().trim() : !!localStorage.getItem(`grokbot.draft.${conversation}`)?.trim();
   async function cancelCapture() {
     if (!session) { phase = "idle"; render(); return; }
-    if (["recording", "paused", "transcribing", "ready", "failed", "save_failed"].includes(phase) && !confirm("Supprimer cette capture de réunion ? Aucun audio ni transcription ne sera conservé.")) return;
+    if (!emptyCapture() && !await confirmDelete("Supprimer la capture ?", "L’audio et la transcription de cette capture seront supprimés. Une conversation créée uniquement pour elle sera retirée si elle est toujours vide.", "Supprimer la capture")) return;
     clearTimeout(timer); ++generation;
     try {
-      await bridge("cancel");
-      await panels.api("/api/meetings/discard", { id: session.id });
+      if (!["busy", "meeting_busy"].includes(phase)) await bridge("cancel");
+      await panels.api("/api/meetings/discard", { id: session.id, preserve_conversation: hasDraft(session.conversation_id) });
       session = pending = null; phase = "idle"; render(); await panels.refresh();
     } catch (error) { panels.notify(error.message); render(); }
   }
   async function start() {
     if (session || !consent.checked) return;
+    if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
     try {
-      let conversation = context.conversation;
-      if (!conversation) {
-        const result = await panels.api("/api/conversations", { bot_id: context.bot?.id });
-        conversation = result.conversation;
-        const draft = panels.draft();
+      const welcome = !context.conversation, draft = panels.draft();
+      session = await panels.api("/api/meetings/start", { conversation_id: context.conversation?.id || null, bot_id: context.bot?.id, title: title.value, consent: consent.checked });
+      const rev = ++generation; phase = "authorizing"; keep.checked = false; pending = null;
+      if (welcome) {
         if (draft) {
-          localStorage.setItem(`grokbot.draft.${conversation.id}`, draft);
-          localStorage.setItem(`grokbot.draft.${conversation.id}.document`, JSON.stringify(panels.draftDocument()));
+          localStorage.setItem(`grokbot.draft.${session.conversation_id}`, draft);
+          localStorage.setItem(`grokbot.draft.${session.conversation_id}.document`, JSON.stringify(panels.draftDocument()));
         }
         await panels.refresh();
-        if (!panels.openConversation(conversation.id)) throw new Error("Ouvrez la conversation créée avant d’enregistrer.");
+        if (!panels.openConversation(session.conversation_id)) throw new Error("Ouvrez la conversation créée avant d’enregistrer.");
         localStorage.removeItem("grokbot.draft.new"); localStorage.removeItem("grokbot.draft.new.document");
       }
-      session = await panels.api("/api/meetings/start", { conversation_id: conversation.id, title: title.value, consent: consent.checked });
-      const rev = ++generation; phase = "authorizing"; keep.checked = false; pending = null;
       dialog.close(); render(); await accept(await bridge("start"), rev);
     } catch (error) {
       dialogError.textContent = error.message; panels.notify(error.message);
@@ -129,8 +154,8 @@
     composer: {
       mount(_container, ctx) {
         context = ctx;
-        startButton = button("Enregistrer une réunion", () => { title.value = "Réunion"; consent.checked = false; begin.disabled = true; dialogError.textContent = ""; dialog.showModal(); }, "attachment-choose meeting-start");
-        startButton.id = "meeting-start";
+        startButton = button("● Enregistrer une réunion", () => { title.value = "Réunion"; consent.checked = false; begin.disabled = true; dialogError.textContent = ""; dialog.showModal(); }, "attachment-choose meeting-start");
+        startButton.id = "meeting-start"; startButton.setAttribute("aria-label", "Enregistrer une réunion");
         const attach = _container.querySelector(".attachment-choose");
         if (attach) attach.after(startButton); else _container.append(startButton);
         dialog = node("dialog", "dialog small-dialog meeting-dialog"); dialog.setAttribute("aria-labelledby", "meeting-consent-title");
@@ -142,22 +167,42 @@
         begin = button("Commencer l’enregistrement", start, "primary-button"); begin.id = "meeting-begin";
         const footer = node("div", "dialog-footer"); footer.append(button("Annuler", () => dialog.close()), begin);
         dialogError = node("p", "meeting-error"); dialogError.setAttribute("role", "alert"); dialog.append(heading,titleLabel,reminder,consentLabel,dialogError,footer); document.getElementById("panels").append(dialog);
+        confirmation = node("dialog", "dialog small-dialog meeting-confirmation"); confirmation.id = "meeting-confirmation";
+        confirmation.setAttribute("aria-labelledby", "meeting-confirmation-title");
+        confirmationTitle = node("h2"); confirmationTitle.id = "meeting-confirmation-title";
+        confirmationText = node("p", "delete-description");
+        const confirmationActions = node("div", "dialog-footer");
+        const confirmationCancel = button("Annuler", () => finishConfirmation?.(false)); confirmationCancel.id = "meeting-confirmation-cancel";
+        confirmationAccept = button("Supprimer", () => finishConfirmation?.(true), "danger-button"); confirmationAccept.id = "meeting-confirmation-accept";
+        confirmationActions.append(confirmationCancel, confirmationAccept);
+        confirmation.append(confirmationTitle, confirmationText, confirmationActions);
+        confirmation.addEventListener("cancel", (event) => { event.preventDefault(); finishConfirmation?.(false); });
+        confirmation.addEventListener("close", () => { if (!confirmation.open) finishConfirmation?.(false); });
+        document.getElementById("panels").append(confirmation);
         bar = node("section", "meeting-bar"); bar.id = "meeting-recording"; bar.setAttribute("aria-label", "Capture de réunion");
         const row = node("div", "meeting-row"); const dot = node("span", "meeting-dot"); dot.setAttribute("aria-hidden", "true");
         info = node("strong"); info.setAttribute("role", "status"); clock = node("span", "meeting-clock");
         pause = button("Pause", () => command(phase === "paused" ? "resume" : "pause")); stop = button("Arrêter", () => command("stop"));
-        discard = button("Supprimer la capture", cancelCapture); retry = button("Réessayer la transcription", () => command("retry")); row.append(dot,info,clock,pause,stop,retry,discard);
-        const notice = node("p", "meeting-reminder", "Capture consentie · Prévenez toute nouvelle personne qui rejoint la réunion. Vous pouvez naviguer : cet indicateur reste visible.");
+        discard = button("Supprimer", cancelCapture); discard.id = "meeting-discard";
+        retry = button("Réessayer la transcription", () => command("retry"));
+        openThread = button("Ouvrir la conversation", () => panels.openConversation(session.conversation_id)); openThread.id = "meeting-open-conversation";
+        settings = button("Ouvrir Réglages Système", () => bridge("settings").catch(() => panels.notify("Ouvrez Réglages Système › Confidentialité et sécurité › Microphone."))); settings.id = "meeting-system-settings";
+        const actions = node("div", "meeting-actions"); actions.append(openThread,pause,stop,retry,settings,discard); row.append(dot,info,clock,actions);
+        notice = node("p", "meeting-reminder", "Capture consentie · Prévenez toute nouvelle personne qui rejoint la réunion.");
         review = node("div", "meeting-review"); review.append(node("p", "meeting-cap"));
         const details = node("details"); details.append(node("summary", "", "Vérifier la transcription"),node("pre"));
         const keepLabel = node("label", "meeting-consent"); keep = node("input"); keep.type = "checkbox"; keep.id = "meeting-keep-audio"; keepLabel.append(keep,document.createTextNode("Garder aussi l’audio sur ce Mac (selon la rétention dans Paramètres)"));
-        save = button("Conserver et produire le résumé", saveCapture, "primary-button"); review.append(details,keepLabel,save);
+        save = button("Conserver et produire le résumé", saveCapture, "primary-button"); save.id = "meeting-save";
+        const reviewActions = node("div", "meeting-review-actions"); reviewActions.append(keepLabel,save);
+        review.append(reviewActions,details);
         bar.append(row,notice,review); document.querySelector(".topbar").after(bar);
         interrupted = node("div", "meeting-interrupted"); document.querySelector(".topbar").after(interrupted);
         window.addEventListener("beforeunload", () => { clearTimeout(timer); if (session) bridge("cancel").catch(() => {}); });
+        window.addEventListener("grokbot:voice-change", render);
         render();
       },
       blocked: () => active(),
+      blockedReason: () => phase === "transcribing" ? "Envoi suspendu pendant la transcription de la réunion. Patientez jusqu’à la fin." : phase === "saving" ? "Enregistrement de la réunion en cours. Patientez pour envoyer." : "Envoi suspendu pendant l’enregistrement de la réunion. Arrêtez la capture pour envoyer.",
       // Navigation does not end or hide capture. Only explicit stop/discard does.
     },
     onState(state, ctx) {
@@ -167,7 +212,7 @@
         interrupted.replaceChildren();
         for (const item of state.meetings?.interrupted || []) {
           if (session?.id === item.id) continue;
-          const warning = node("div", "meeting-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue au redémarrage. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await panels.api("/api/meetings/discard", { id: item.id }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
+          const warning = node("div", "meeting-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue au redémarrage. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await panels.api("/api/meetings/discard", { id: item.id, preserve_conversation: hasDraft(item.conversation_id) }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
         }
         interrupted.hidden = !interrupted.children.length;
       }
@@ -178,7 +223,7 @@
       if (message.kind !== "meeting") return false;
       const meeting = message.payload;
       if (action === "meeting-delete-audio") {
-        if (!confirm("Supprimer définitivement l’audio de cette réunion ? La transcription et le résumé seront conservés.")) return true;
+        if (!await confirmDelete("Supprimer l’audio ?", "L’audio de cette réunion sera supprimé définitivement. La transcription et le résumé disponible resteront dans la conversation.", "Supprimer l’audio")) return true;
         await panels.api("/api/meetings/delete-audio", { id: meeting.id });
       } else if (action === "meeting-summary") {
         if (meeting.summary_state === "pending") await panels.api("/api/meetings/summarize", { id: meeting.id });

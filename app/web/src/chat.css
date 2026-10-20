@@ -121,7 +121,7 @@
 .gb-meeting > header .gb-engine-label { margin-left: 0; }
 .gb-meeting-transcript { margin-top: 16px; font-size: 12px; }
 .gb-meeting-transcript summary { cursor: pointer; color: var(--muted); }
-.gb-meeting-transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 12px; background: var(--pane); border-radius: 8px; font: inherit; line-height: 1.7; }
+.gb-meeting-transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 12px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font: inherit; line-height: 1.7; }
 .gb-meeting-audio { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
 .gb-meeting-audio > p { flex-basis: 100%; }
 .gb-meeting-audio audio { width: min(100%, 310px); height: 34px; }

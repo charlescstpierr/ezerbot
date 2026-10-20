@@ -1163,7 +1163,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     if (live && !ctx.provider.connected())
         || (!live && !ctx.provider.simulation_allowed() && !run.run_id.starts_with("mcp-host-"))
     {
-        ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='signin' WHERE run_id=?1", params![run.run_id,"Connecte ton compte ChatGPT pour recevoir une réponse. Ta question est conservée ; tu pourras réessayer après la connexion."])?;
+        ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='signin' WHERE run_id=?1", params![run.run_id,"Connectez votre compte ChatGPT pour recevoir une réponse. Votre question est conservée ; vous pourrez réessayer après la connexion."])?;
         let mut services = Services::new(ctx)?;
         fail_host(ctx.connection, &mut services, &run.run_id)?;
         crate::upstream::turn(

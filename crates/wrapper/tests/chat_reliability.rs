@@ -39,6 +39,8 @@ struct Fake {
     seen: Arc<Mutex<Vec<Value>>>,
     refresh: Arc<Mutex<Option<Fault>>>,
     side_hang: Arc<AtomicBool>,
+    partial_released: Arc<AtomicBool>,
+    partial_finished: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 fn event(stream: &mut TcpStream, value: Value) {
@@ -71,12 +73,16 @@ impl Fake {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let refresh = Arc::new(Mutex::new(None));
         let side_hang = Arc::new(AtomicBool::new(false));
-        let (s, q, b, r, side) = (
+        let partial_released = Arc::new(AtomicBool::new(false));
+        let partial_finished = Arc::new(AtomicBool::new(false));
+        let (s, q, b, r, side, late, finished) = (
             stop.clone(),
             queue.clone(),
             seen.clone(),
             refresh.clone(),
             side_hang.clone(),
+            partial_released.clone(),
+            partial_finished.clone(),
         );
         let thread = std::thread::spawn(move || {
             let mut workers = vec![];
@@ -85,12 +91,23 @@ impl Fake {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                let (s, q, b, r, side) = (s.clone(), q.clone(), b.clone(), r.clone(), side.clone());
+                let (s, q, b, r, side, late, finished) = (
+                    s.clone(),
+                    q.clone(),
+                    b.clone(),
+                    r.clone(),
+                    side.clone(),
+                    late.clone(),
+                    finished.clone(),
+                );
                 workers.push(std::thread::spawn(move || {
+                    // Accepted sockets can inherit O_NONBLOCK on BSD/macOS.
+                    // Only the listener is polled; request parsing must block.
+                    socket.set_nonblocking(false).expect("fake accepted socket blocking mode");
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut reader = BufReader::new(socket.try_clone().unwrap()); let mut line = String::new();
-                    if reader.read_line(&mut line).is_err() { return; } let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
-                    let mut length=0; loop { line.clear(); if reader.read_line(&mut line).unwrap_or(0)==0 || line=="\r\n" { break; }
+                    if reader.read_line(&mut line).expect("fake request-line read failed") == 0 { return; } let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                    let mut length=0; loop { line.clear(); if reader.read_line(&mut line).expect("fake request-header read failed")==0 || line=="\r\n" { break; }
                         if let Some((name,v))=line.split_once(':') { if name.eq_ignore_ascii_case("content-length") { length=v.trim().parse().unwrap(); } } }
                     let mut bytes=vec![0;length]; if reader.read_exact(&mut bytes).is_err() { return; }
                     if path.ends_with("/models") { let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{\"models\":[]}}"); return; }
@@ -116,7 +133,17 @@ impl Fake {
                     let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); let _=socket.flush();
                     match fault {
                         Fault::Silent => hold(&mut socket,&s,false),
-                        Fault::Partial | Fault::Drop => { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Début conservé."})); if matches!(fault,Fault::Partial) { hold(&mut socket,&s,false); } },
+                        Fault::Partial | Fault::Drop => {
+                            event(&mut socket,json!({"type":"response.output_text.delta","delta":"Début conservé."}));
+                            if matches!(fault,Fault::Partial) {
+                                while !late.load(Ordering::SeqCst) && !s.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(5)); }
+                                if !s.load(Ordering::SeqCst) {
+                                    event(&mut socket,json!({"type":"response.output_text.delta","delta":"Résultat tardif à ignorer."}));
+                                    event(&mut socket,json!({"type":"response.completed"}));
+                                    finished.store(true,Ordering::SeqCst);
+                                }
+                            }
+                        },
                         Fault::Keepalive => hold(&mut socket,&s,true),
                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
                         Fault::ToolStall => { event(&mut socket,json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc","call_id":"waiting","name":"local_exec"}})); hold(&mut socket,&s,true); },
@@ -139,6 +166,8 @@ impl Fake {
             seen,
             refresh,
             side_hang,
+            partial_released,
+            partial_finished,
             thread: Some(thread),
         }
     }
@@ -290,9 +319,17 @@ fn every_transport_hang_ends_with_a_persisted_french_error_and_retry_works() {
 }
 #[test]
 fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
-    let mut f = Fixture::new(true);
+    // Cancellation, not network-deadline timing, is the subject of this test.
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
     f.send(Fault::Partial);
-    until(|| f.reply()["body"] == "Début conservé.");
+    until(|| {
+        let reply = f.reply();
+        assert_ne!(
+            reply["state"], "failed",
+            "partial response failed before cancellation: {reply}"
+        );
+        reply["body"] == "Début conservé."
+    });
     let start = Instant::now();
     post(
         &mut f.app,
@@ -309,7 +346,10 @@ fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
     );
     let reply = f.settled();
     assert_eq!(reply["body"], "Réponse factice terminée.");
-    std::thread::sleep(Duration::from_millis(2400));
+    // Release a real late completion only after the replacement has finished.
+    // A controlled event is stronger than hoping an old socket timed out.
+    f.fake.partial_released.store(true, Ordering::SeqCst);
+    until(|| f.fake.partial_finished.load(Ordering::SeqCst));
     assert_eq!(f.reply(), reply);
 }
 #[test]
@@ -346,7 +386,16 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
         }
         f.send(Fault::Happy);
         let reply = f.settled();
-        assert_eq!(reply["error_kind"], "signin");
+        assert_eq!(
+            reply["error_kind"],
+            if expired { "signin_expired" } else { "signin" }
+        );
+        if expired {
+            assert!(reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("session ChatGPT a expiré"));
+        }
         assert_eq!(reply["body"], "");
         let mut reopened = App::open_with(&f.db, f.provider.clone()).unwrap();
         let state = reopened.api("GET", "/api/state", b"").unwrap();
@@ -503,6 +552,21 @@ fn connection_test_is_bounded_and_reports_precise_error_then_ok() {
     assert!(bodies
         .iter()
         .all(|b| b.get("prompt_cache_key").is_none() && b.get("tools").is_none()));
+}
+
+#[test]
+fn connection_test_without_an_account_explains_the_required_action_without_network() {
+    let mut f = Fixture::new(false);
+    let result = post(&mut f.app, "/api/provider/test", json!({}));
+    assert_eq!(
+        result["provider"]["connection_test"]["state"],
+        "unavailable"
+    );
+    assert_eq!(
+        result["provider"]["connection_test"]["message"],
+        "Aucun compte connecté. Connectez-vous via Codex ci-dessus."
+    );
+    assert!(f.fake.seen.lock().unwrap().is_empty());
 }
 
 #[test]

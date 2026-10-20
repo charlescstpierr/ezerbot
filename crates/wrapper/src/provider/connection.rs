@@ -139,6 +139,10 @@ impl Provider {
     }
     pub(crate) fn test_connection(&self) {
         let session = self.session();
+        if !session.connected() {
+            *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez-vous via Codex ci-dessus."});
+            return;
+        }
         {
             let mut probe = lock(&session.inner.probe);
             if probe["state"] == "running" {

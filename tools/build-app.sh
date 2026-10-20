@@ -61,7 +61,7 @@ fi
 target_dir="$("$cargo_bin" metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 clang -fobjc-arc -Wall -Wextra -Werror "${native_flags[@]}" -mmacosx-version-min=12.3 \
-  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications -framework AVFoundation -framework Speech -framework ApplicationServices -framework Security \
+  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications -framework AVFoundation -framework Speech -framework ApplicationServices -framework Security -framework Carbon \
   "$project_dir/app/native/main.m" -o "$bundle/Contents/MacOS/Ezerbot"
 cp "$target_dir/$profile/grokbot-wrapper" "$bundle/Contents/MacOS/grokbot-wrapper"
 if [[ "$profile" == debug ]]; then

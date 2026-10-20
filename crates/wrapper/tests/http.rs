@@ -186,6 +186,36 @@ fn accepted_by_host(status: u16) -> bool {
 }
 
 #[test]
+fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
+    let host = Host::new();
+    let page = ureq::get(&format!("{}/floating", host.url)).call().unwrap();
+    assert!(page
+        .header("Content-Security-Policy")
+        .unwrap()
+        .contains("frame-ancestors 'none'"));
+    let html = page.into_string().unwrap();
+    assert!(html.contains("floating-root") && html.contains("/chat.js"));
+    assert!(!html.contains("src=\"/app.js\""));
+    let body = br#"{"shortcut":"disabled"}"#;
+    let refusal = ureq::post(&format!("{}/api/floating/settings", host.url))
+        .set("Origin", "https://example.invalid")
+        .set("X-Grokbot-Request", "local")
+        .set("Content-Type", "application/json")
+        .send_bytes(body);
+    assert_eq!(status(refusal), 403);
+    assert_eq!(
+        host.post("/api/floating/settings", "application/json", body),
+        200
+    );
+    let settings: Value = ureq::get(&format!("{}/api/floating", host.url))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(settings["shortcut"], "disabled");
+}
+
+#[test]
 fn voice_audio_supports_webkit_byte_ranges() {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let host = Host::new();

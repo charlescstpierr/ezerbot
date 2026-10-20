@@ -1,0 +1,27 @@
+/* Compact native NSPanel content; /floating also enables safe browser QA. */
+body.floating-body { display: block; padding: 0; background: var(--canvas); }
+#floating-root { height: 100%; }
+.floating-panel { height: 100%; display: flex; flex-direction: column; gap: 10px; padding: 18px; max-width: 650px; margin: auto; }
+.floating-heading { display: flex; align-items: center; gap: 12px; }
+.floating-heading > div { flex: 1; min-width: 0; }
+.floating-heading small { color: var(--muted); font-size: 9px; letter-spacing: .1em; }
+.floating-heading h1 { font-size: 19px; font-weight: 600; margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#floating-mascot { display: block; width: 42px; height: 42px; flex: 0 0 42px; }
+#floating-mascot .mascot { width: 100%; height: 100%; }
+.floating-panel .form-label { margin: 0; font-size: 11px; color: var(--muted); }
+.floating-panel select, .floating-shortcut { font: inherit; color: var(--text); background: var(--soft); border: 1px solid var(--line); border-radius: 9px; padding: 8px; width: 100%; min-width: 0; }
+.floating-panel select, .floating-shortcut { appearance: none; -webkit-appearance: none; padding-right: 28px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%239a9fa9' stroke-width='1.6'%3E%3Cpath d='m3 5 4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 9px center; }
+.floating-latest { min-height: 60px; flex: 1; overflow: auto; border: 1px solid var(--line); background: var(--pane); border-radius: 12px; padding: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.floating-answer { white-space: pre-wrap; margin: 0; }
+.floating-question { color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); padding-bottom: 10px; margin: 0 0 10px; white-space: pre-wrap; max-height: 75px; overflow: auto; }
+.floating-latest small, .floating-notice { color: var(--muted); font-size: 11px; }
+.floating-composer { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: flex; align-items: flex-end; gap: 8px; background: var(--soft); }
+.floating-composer:focus-within { border-color: var(--accent-ink); }
+.floating-composer textarea { font: inherit; width: 100%; height: 64px; max-height: 130px; min-height: 45px; resize: vertical; border: 0; background: none; color: var(--text); }
+.floating-composer button { flex-shrink: 0; }
+.floating-panel footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.floating-panel footer span { font-size: 9px; color: var(--muted); }
+.floating-panel footer button { font-size: 11px; padding: 7px 9px; }
+.floating-error { color: var(--danger-text); font-size: 11px; margin: 0; max-height: 65px; overflow: auto; }
+.floating-settings-actions { display: flex; gap: 8px; margin-top: 10px; }
+@media (max-width: 370px) { .floating-panel { padding: 12px; gap: 8px; } .floating-panel footer span { display: none; } }

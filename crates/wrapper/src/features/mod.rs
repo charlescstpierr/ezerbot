@@ -86,6 +86,7 @@ pub mod attachments;
 pub mod conversations;
 pub mod delegation;
 pub mod engine;
+pub mod floating;
 pub mod forms;
 pub mod generated;
 pub mod local;
@@ -141,6 +142,7 @@ registry!(
     mcp,
     storage,
     notifications,
+    floating,
     local,
     voice,
     screen

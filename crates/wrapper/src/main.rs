@@ -12,6 +12,7 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 mod signature;
 
 const INDEX: &str = include_str!("../../../app/ui/index.html");
+const FLOATING: &str = include_str!("../../../app/ui/floating.html");
 const STYLES: &str = include_str!("../../../app/ui/styles.css");
 const SCRIPT: &str = include_str!("../../../app/ui/app.js");
 const MASCOT_SCRIPT: &str = include_str!("../../../app/ui/mascot.js");
@@ -87,6 +88,7 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
     if method == "GET" {
         let asset = match path.as_str() {
             "/" => Some((INDEX, "text/html; charset=utf-8")),
+            "/floating" => Some((FLOATING, "text/html; charset=utf-8")),
             "/styles.css" => Some((STYLES, "text/css; charset=utf-8")),
             "/app.js" => Some((SCRIPT, "text/javascript; charset=utf-8")),
             "/mascot.js" => Some((MASCOT_SCRIPT, "text/javascript; charset=utf-8")),

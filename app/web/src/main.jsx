@@ -9,8 +9,10 @@ import { pendingReply } from "./thread-order.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
 import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { createDeepLinkQueue } from "./deep-links.js";
+import { mountFloating } from "./floating.jsx";
 
 const roots = new WeakMap();
+if (document.getElementById("floating-root")) mountFloating(document.getElementById("floating-root"));
 
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {

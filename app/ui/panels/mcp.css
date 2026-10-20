@@ -1,4 +1,12 @@
 .mcp-section { min-width: 0; }
+.mcp-section h4 { font-size: 12px; margin: 14px 0 4px; }
+.mcp-catalogue-card > p { line-height: 1.5; margin: 8px 0; }
+.mcp-catalogue-card a { text-decoration: none; }
+.mcp-status-authorizing { color: var(--warning-text); }
+.mcp-status-authorizing .status-dot { background: var(--warning-text); }
+.mcp-status-reconnect { color: var(--danger-text); }
+.mcp-status-reconnect .status-dot { background: var(--danger-text); }
+.mcp-catalogue-card .mcp-form { padding-bottom: 8px; }
 .mcp-list { display: grid; gap: 12px; margin: 12px 0; }
 .mcp-server { border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; font-size: 12px; }
 .mcp-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }

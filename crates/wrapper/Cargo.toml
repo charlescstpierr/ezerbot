@@ -31,6 +31,7 @@ jsonwebtoken = "9"
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", default-features = false }

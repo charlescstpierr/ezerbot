@@ -3,7 +3,7 @@ use super::*;
 use crate::mcp::{Connection as Handle, Error as McpError};
 use std::sync::Arc;
 
-fn retire(ctx: &Context<'_>, id: &str) {
+pub(super) fn retire(ctx: &Context<'_>, id: &str) {
     let old = ctx
         .provider
         .mcp()
@@ -17,7 +17,7 @@ fn retire(ctx: &Context<'_>, id: &str) {
 }
 
 // Publish only for the same process: an old EOF must not retire a replacement.
-fn publish(
+pub(super) fn publish(
     ctx: &Context<'_>,
     id: &str,
     handle: &Arc<Handle>,
@@ -81,14 +81,17 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
     }
     for server in servers(ctx.connection)? {
         if call.name == format!("mcp_start_{}", server.id) {
-            if call.arguments != lifecycle_arguments(&server, "start", false)
-                && call.arguments != lifecycle_arguments(&server, "start", true)
+            if call.arguments != lifecycle_arguments(ctx, &server, "start", false)
+                && call.arguments != lifecycle_arguments(ctx, &server, "start", true)
             {
                 return Err(invalid(
                     "La commande MCP ne correspond pas à la configuration à approuver.",
                 ));
             }
             retire(ctx, &server.id);
+            if let Some(result) = catalogue::start(ctx, &server, &call.arguments)? {
+                return Ok(result);
+            }
             let env = environment(ctx, &server)?;
             let client = match Client::spawn(&server.command, &server.arguments, &env) {
                 Ok(client) => client,
@@ -135,10 +138,13 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
             return tools.map(|tools| json!({"message":"Connecteur MCP connecté.","outils":tools}));
         }
         if call.name == format!("mcp_remove_{}", server.id) {
-            if call.arguments != lifecycle_arguments(&server, "remove", false) {
+            if call.arguments != lifecycle_arguments(ctx, &server, "remove", false) {
                 return Err(invalid(
                     "La suppression MCP ne correspond pas à la configuration à approuver.",
                 ));
+            }
+            if let Some(result) = catalogue::remove(ctx, &server, &call.arguments)? {
+                return Ok(result);
             }
             retire(ctx, &server.id);
             let tx = write_transaction(ctx.connection)?;
@@ -172,6 +178,7 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
             {
                 return Err(invalid("Ce connecteur MCP est désactivé pour ce bot."));
             }
+            catalogue::ensure(ctx, &server)?;
             let handle=ctx.provider.mcp().0.lock().unwrap_or_else(|e|e.into_inner()).get(&server.id).cloned()
                 .ok_or_else(||invalid("Le serveur MCP est déconnecté. Démarrez le connecteur dans les paramètres."))?;
             if !handle.ready.load(Ordering::Acquire) {
@@ -230,6 +237,7 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
                 }
                 Err(error @ McpError::Transport(_)) => {
                     let message = error.to_string();
+                    catalogue::auth_error(ctx, &server.id, &message);
                     publish(
                         ctx,
                         &server.id,

@@ -1,5 +1,7 @@
 //! Local JSON-RPC 2.0 / newline-delimited stdio client (REA NM04, NM07).
-//! No shell, network transport, inherited credentials or server-request execution.
+//! No shell, inherited credentials or server-request execution.
+mod http;
+pub(crate) use http::AUTH_REQUIRED;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -43,7 +45,8 @@ impl std::fmt::Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) struct Client {
-    child: Child,
+    child: Option<Child>,
+    remote: Option<http::Remote>,
     identity: u64,
     input: Option<mpsc::SyncSender<Vec<u8>>>,
     frames: mpsc::Receiver<Result<Value>>,
@@ -118,7 +121,8 @@ impl Client {
             }
         });
         Ok(Self {
-            child,
+            child: Some(child),
+            remote: None,
             identity: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             input: Some(input),
             frames,
@@ -126,6 +130,19 @@ impl Client {
             catalog_dirty: false,
             environment: environment.clone(),
         })
+    }
+    pub(crate) fn remote(endpoint: String, token: String) -> Self {
+        let (_, frames) = mpsc::sync_channel(1);
+        Self {
+            child: None,
+            remote: Some(http::Remote::new(endpoint, token.clone())),
+            identity: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
+            input: None,
+            frames,
+            next: 0,
+            catalog_dirty: false,
+            environment: HashMap::from([("ACCESS_TOKEN".into(), token)]),
+        }
     }
     fn send(&mut self, value: Value) -> Result<()> {
         let bytes = serde_json::to_vec(&value).map_err(|_| "Requête MCP invalide.".to_owned())?;
@@ -158,6 +175,9 @@ impl Client {
         Ok(())
     }
     pub(crate) fn catalog_changed(&mut self) -> Result<bool> {
+        if self.remote.is_some() {
+            return Ok(false);
+        }
         // Only idle connections call this; no response is consumed out of turn.
         for _ in 0..32 {
             match self.frames.try_recv() {
@@ -169,6 +189,9 @@ impl Client {
         Ok(self.catalog_dirty)
     }
     pub(crate) fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        if let Some(remote) = &mut self.remote {
+            return remote.notify(method, params);
+        }
         self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
     }
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -182,6 +205,12 @@ impl Client {
     ) -> Result<Value> {
         self.next += 1;
         let id = self.next;
+        if let Some(remote) = &mut self.remote {
+            return remote.exchange(
+                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+                timeout,
+            );
+        }
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
         let deadline = Instant::now() + timeout;
         loop {
@@ -236,7 +265,15 @@ impl Client {
         }
     }
     pub(crate) fn initialize(&mut self) -> Result<Vec<Value>> {
-        let result = self.request("initialize", json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"Ezerbot","version":"0.1.0"}}))?;
+        self.initialize_with_timeout(TIMEOUT)
+    }
+    pub(crate) fn initialize_with_timeout(&mut self, timeout: Duration) -> Result<Vec<Value>> {
+        let version = if self.remote.is_some() {
+            "2025-06-18"
+        } else {
+            "2024-11-05"
+        };
+        let result = self.request_with_timeout("initialize", json!({"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"Ezerbot","version":"0.1.0"}}), timeout)?;
         if !matches!(
             result["protocolVersion"].as_str(),
             Some("2024-11-05" | "2025-03-26" | "2025-06-18")
@@ -291,13 +328,26 @@ impl Client {
     pub(crate) fn identity(&self) -> u64 {
         self.identity
     }
+    /// Only fixed, trusted catalogue adapters may classify non-secret bootstrap
+    /// configuration as public. Manual servers keep every variable private.
+    pub(crate) fn retain_private_environment(&mut self, names: &[&str]) {
+        self.environment
+            .retain(|key, _| names.contains(&key.as_str()));
+    }
     pub(crate) fn private_environment(&self) -> &HashMap<String, String> {
         &self.environment
     }
     pub(crate) fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        if let Some(remote) = &self.remote {
+            return remote.alive();
+        }
+        self.child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
     pub(crate) fn stop(&mut self) {
+        // Dropping a remote handle performs no unapproved session DELETE.
+        self.remote.take();
         // MCP stdio shutdown: close stdin, allow EOF cleanup, then reap/terminate.
         self.input.take();
         let deadline = Instant::now() + Duration::from_millis(300);
@@ -305,9 +355,13 @@ impl Client {
             std::thread::sleep(Duration::from_millis(10));
         }
         if self.alive() {
-            let _ = self.child.kill();
+            if let Some(child) = &mut self.child {
+                let _ = child.kill();
+            }
         }
-        let _ = self.child.wait();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
     }
 }
 impl Drop for Client {

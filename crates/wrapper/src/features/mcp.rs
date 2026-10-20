@@ -2,6 +2,7 @@
 //! bot selection and grants; NM04 establishes JSON lines, NM07 EOF cleanup.
 //! Command launch/removal are host-generated tool calls through forms.rs too.
 use super::{write_transaction, Context};
+mod catalogue;
 mod execution;
 use crate::{mcp::Client, parse, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::contracts::{RunEventKind, ToolCall, ToolOutcome, ToolSpec};
@@ -87,6 +88,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_mcp_approval_chat (account_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL);",
     )?;
+    catalogue::migrate(conn)?;
     Ok(())
 }
 /// Settings actions have one stable, host-owned destination, never the most
@@ -601,44 +603,46 @@ fn active_private(ctx: &Context<'_>) -> HashMap<String, String> {
         .collect()
 }
 
-pub fn state(ctx: &Context<'_>) -> Value {
-    let refresh_error = ctx.provider.mcp().2.load(Ordering::Acquire);
-    let load = || -> Result<Value, ApiError> {
-        let mut live = ctx
-            .provider
-            .mcp()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut result = Vec::new();
-        for server in servers(ctx.connection)? {
-            let status = match live.get_mut(&server.id) {
-                Some(handle) if !handle.ready.load(Ordering::Acquire) => "starting",
-                Some(handle) => match handle.client.try_lock() {
-                    Ok(mut client) => {
-                        if client.alive() {
-                            "connected"
-                        } else {
-                            "crashed"
-                        }
+fn state_servers(ctx: &Context<'_>) -> Result<Vec<Value>, ApiError> {
+    let mut live = ctx
+        .provider
+        .mcp()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut result = Vec::new();
+    for server in servers(ctx.connection)? {
+        let status = match live.get_mut(&server.id) {
+            Some(handle) if !handle.ready.load(Ordering::Acquire) => "starting",
+            Some(handle) => match handle.client.try_lock() {
+                Ok(mut client) => {
+                    if client.alive() {
+                        "connected"
+                    } else {
+                        "crashed"
                     }
-                    Err(_) => "busy",
-                },
-                None if server.error.as_deref() == Some(crate::mcp::DISCONNECTED) => "crashed",
-                None if server.error.is_some() => "error",
-                None => "disconnected",
-            };
-            let mut stmt = ctx.connection.prepare(
-                "SELECT bot_id FROM wrapper_mcp_bots WHERE server_id=?1 ORDER BY bot_id",
-            )?;
-            let bots = stmt
-                .query_map([&server.id], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let tools: Vec<_> = server.tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"namespace":namespace(&server,t)})).collect();
-            result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
-        }
+                }
+                Err(_) => "busy",
+            },
+            None if server.error.as_deref() == Some(crate::mcp::DISCONNECTED) => "crashed",
+            None if server.error.is_some() => "error",
+            None => "disconnected",
+        };
+        let mut stmt = ctx
+            .connection
+            .prepare("SELECT bot_id FROM wrapper_mcp_bots WHERE server_id=?1 ORDER BY bot_id")?;
+        let bots = stmt
+            .query_map([&server.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let tools: Vec<_> = server.tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"namespace":namespace(&server,t)})).collect();
+        result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
+    }
+    Ok(result)
+}
+pub fn state(ctx: &Context<'_>) -> Value {
+    let load = || -> Result<Value, ApiError> {
         Ok(
-            json!({"servers":result,"error":refresh_error.then_some("L’actualisation des outils est différée. Le dernier état connu reste affiché.")}),
+            json!({"servers":state_servers(ctx)?,"catalogue":catalogue::state(ctx)?,"error":ctx.provider.mcp().2.load(Ordering::Acquire).then_some("L’actualisation des outils est différée. Le dernier état connu reste affiché.")}),
         )
     };
     load().unwrap_or_else(|_| json!({"error":"Les connecteurs MCP sont indisponibles."}))
@@ -652,18 +656,35 @@ pub fn routes(
     if method != "POST"
         || !matches!(
             path,
-            "/api/mcp/add" | "/api/mcp/select" | "/api/mcp/restart" | "/api/mcp/remove"
+            "/api/mcp/add"
+                | "/api/mcp/select"
+                | "/api/mcp/restart"
+                | "/api/mcp/remove"
+                | "/api/connectors/connect"
+                | "/api/connectors/disconnect"
         )
     {
         return None;
     }
     Some(route(app, path, body).map(ApiResponse::Json))
 }
-fn lifecycle_arguments(server: &Server, action: &str, restarting: bool) -> Value {
-    json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}})
+fn lifecycle_arguments(
+    ctx: &Context<'_>,
+    server: &Server,
+    action: &str,
+    restarting: bool,
+) -> Value {
+    let mut args = json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
+    if let Some(catalogue) = catalogue::preview(ctx, server) {
+        args["catalogue"] = catalogue;
+    }
+    args
 }
 
 fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
+    if path.starts_with("/api/connectors/") {
+        return catalogue::routes(app, path, body);
+    }
     let ctx = app.feature_context();
     if path == "/api/mcp/add" {
         let add: Add = parse(body)?;
@@ -781,7 +802,7 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .contains_key(&server.id);
-    let args = lifecycle_arguments(&server, action, restarting);
+    let args = lifecycle_arguments(&ctx, &server, action, restarting);
     super::engine::queue_approved_action(&ctx, &format!("mcp_{action}_{}", server.id), args)
 }
 

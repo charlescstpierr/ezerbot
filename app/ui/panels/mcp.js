@@ -6,7 +6,64 @@
   const button = (text, fn, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.addEventListener("click", fn); return b; };
   const label = (text, input) => { const n = node("label"); n.append(node("span", text), input); return n; };
   const input = (name, placeholder, type = "text") => { const n = node("input"); n.type = type; n.name = name; n.placeholder = placeholder; n.autocomplete = "off"; n.spellcheck = false; return n; };
-  let section, list, feedback, key;
+  let section, list, catalogue, feedback, key;
+  function renderCatalogue(items, bots) {
+    catalogue.replaceChildren();
+    if (!items.length) return;
+    catalogue.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
+    for (const item of items) {
+      const card = node("article", null, "mcp-server mcp-catalogue-card");
+      card.setAttribute("data-connector", item.id);
+      const heading = node("div", null, "mcp-heading");
+      const status = node("span", null, `mcp-status mcp-status-${item.status}`);
+      const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
+      status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:"Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Déconnecté"})[item.status] || "Déconnecté"));
+      heading.append(node("strong", item.name), status);
+      card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
+      if (item.message) card.append(node("p", item.message, ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
+      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"), node("p", `Portées OAuth : ${item.scopes}`, "mcp-note"), node("p", `${item.license} · ${item.source}`, "mcp-note"));
+      const form = node("form", null, "mcp-form");
+      const client = input(`${item.id}-client`, "Identifiant de l’application OAuth"); client.maxLength = 512;
+      const secret = input(`${item.id}-secret`, "Secret de l’application OAuth", "password"); secret.maxLength = 1024;
+      if (item.needs_client) form.append(label("Identifiant OAuth", client), label("Secret OAuth — jamais réaffiché", secret), node("p", "Laissez les champs vides pour réutiliser la configuration enregistrée. Ne saisissez pas le mot de passe de votre compte.", "mcp-note"));
+      const submit = node("button", "Connecter", "primary-button"); submit.type = "submit";
+      form.append(submit); setup.append(form); card.append(setup);
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const body = {id:item.id,client_id:client.value,client_secret:secret.value};
+        client.value = ""; secret.value = "";
+        try { await act("/api/connectors/connect", body, submit); }
+        finally { delete body.client_secret; delete body.client_id; }
+      });
+      const actions = node("div", null, "mcp-actions");
+      const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", () => {
+        if (item.needs_client && !item.server) { setup.open = true; client.focus?.(); }
+        else return act("/api/connectors/connect", {id:item.id}, connect);
+      }, "primary-button");
+      if (item.status !== "authorizing") actions.append(connect);
+      if (item.authorization_url && item.status === "authorizing") {
+        const link = node("a", "Ouvrir la page de connexion", "secondary-button");
+        link.href = item.authorization_url; link.target = "_blank"; link.rel = "noopener noreferrer";
+        actions.append(link);
+      }
+      if (item.server) {
+        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); actions.append(remove);
+        if (item.status === "connected") {
+          const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
+          for (const bot of bots) {
+            const check = input(`catalogue-${item.id}-${bot.id}`, "", "checkbox"); check.checked = item.server.enabled_bots.includes(bot.id);
+            check.addEventListener("change", () => act("/api/mcp/select", {id:item.server.id,bot_id:bot.id,enabled:check.checked}, check));
+            choices.append(label(bot.name, check));
+          }
+          card.append(choices);
+          const tools = node("details"); tools.append(node("summary", `Outils (${item.server.tools.length})`));
+          for (const tool of item.server.tools) tools.append(node("p", `${tool.name} — ${tool.description || "Sans description"}`, "mcp-note"));
+          card.append(tools);
+        }
+      }
+      card.append(actions); catalogue.append(card);
+    }
+  }
   async function act(path, body, b) {
     b.disabled = true;
     feedback.textContent = "";
@@ -24,17 +81,21 @@
       key = undefined;
       await panels.refresh().catch(() => {});
       render(panels.state);
+      feedback.scrollIntoView?.({block:"nearest"});
     }
     finally { b.disabled = false; }
   }
   function render(state) {
     if (!list) return;
-    const servers = state.mcp?.servers || [];
+    const items = state.mcp?.catalogue || [];
+    const catalogueIds = new Set(items.map(i => i.server?.id).filter(Boolean));
+    const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);
-    const next = JSON.stringify([servers, bots.map(b => [b.id,b.name]),state.mcp?.error]);
+    const next = JSON.stringify([servers, items, bots.map(b => [b.id,b.name]),state.mcp?.error]);
     if (next === key) return;
     key = next;
     list.replaceChildren();
+    renderCatalogue(items, bots);
     if (state.mcp?.error) list.append(node("p", state.mcp.error, "mcp-error"));
     if (!servers.length) list.append(node("p", "Aucun connecteur ajouté.", "mcp-note"));
     for (const server of servers) {
@@ -72,7 +133,9 @@
     id: "mcp",
     settingsSection(container) {
       section = container; section.className = "setting-section mcp-section";
-      section.append(node("h3", "Connecteurs"),node("p", "Ajoutez un serveur MCP local (stdio). Démarrage et appels exigent votre accord. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
+      section.append(node("h3", "Connecteurs"),node("p", "Choisissez un service du catalogue ou ajoutez votre propre serveur MCP. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
+      catalogue = node("div", null, "mcp-catalogue mcp-list"); section.append(catalogue);
+      section.append(node("h4", "Serveurs personnalisés"));
       list = node("div", null, "mcp-list"); section.append(list);
       const details = node("details", null, "mcp-add"); details.append(node("summary", "Ajouter un serveur MCP"));
       const form = node("form", null, "mcp-form");
@@ -113,6 +176,6 @@
       render(panels.state);
     },
     onState: render,
-    wantsPolling({state}) { return document.getElementById("settings-dialog")?.open && Boolean(state.mcp?.servers?.length); },
+    wantsPolling({state}) { return document.getElementById("settings-dialog")?.open && Boolean(state.mcp?.servers?.length || state.mcp?.catalogue?.length); },
   });
 })();

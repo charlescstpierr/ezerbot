@@ -17,12 +17,12 @@ class Node {
   querySelectorAll(selector) { return this.all().filter(n => selector === "input" ? n.tag === "input" : selector === 'input[type="password"]' && n.tag === "input" && n.type === "password"); }
   reset() { for (const n of this.all()) n.value = ""; }
 }
-async function mount(servers = [], actionResult = {}) {
+async function mount(servers = [], actionResult = {}, catalogue = []) {
   const root = new Node("section"), calls = [], notifications = [], opened = [];
   const dialog = { open: true, close() { this.open = false; } };
   let panel;
   const panels = {
-    state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers } },
+    state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers, catalogue } },
     register(value) { panel = value; },
     async api(path, body) { calls.push({ path, body }); return actionResult; },
     async refresh() {}, notify(text) { notifications.push(text); },
@@ -76,4 +76,43 @@ test("MCP statuses have accessible text, decorative dots, and one shared per-bot
   assert.deepEqual(statuses.map(n => n.textContent), ["Connecté", "Serveur arrêté", "En erreur", "Occupé", "Démarrage en cours"]);
   assert.ok(statuses.every(n => n.children[0].className === "status-dot" && n.children[0].attrs["aria-hidden"] === "true"));
   assert.equal(root.all().filter(n => n.tag === "p" && n.textContent.startsWith("La désactivation")).length, 1);
+});
+
+
+const service = { id: "gmail", name: "Gmail", status: "disconnected", description: "Courriels", permissions: "Lecture et envoi", scopes: "gmail.modify", setup: "Client OAuth de bureau", license: "MIT", source: "https://example.test", needs_client: true };
+
+test("catalogue explains permissions and submits private setup only to its host approval path", async () => {
+  const { root, calls, opened } = await mount([], {conversation_id:"approbations"}, [service]);
+  assert.match(root.textContent, /Catalogue/);
+  assert.match(root.textContent, /Autorisations : Lecture et envoi/);
+  root.all().find(n => n.name === "gmail-client").value = "client-factice";
+  const secret = root.all().find(n => n.name === "gmail-secret");
+  assert.equal(secret.type, "password");
+  secret.value = "secret-factice";
+  const form = root.all().find(n => n.tag === "form");
+  await form.events.submit({preventDefault(){}});
+  assert.equal(calls[0].path, "/api/connectors/connect");
+  assert.equal(calls[0].body.id, "gmail");
+  assert.equal(secret.value, "");
+  assert.equal(calls[0].body.client_secret, undefined, "temporary secret reference is cleared after submission");
+  assert.deepEqual(opened, ["approbations"]);
+});
+
+test("connected catalogue services use the existing bot selection and explicit disconnect approvals", async () => {
+  const server = {id:"catalogue-gmail",enabled_bots:[],tools:[{name:"echo",description:"Outil factice"}]};
+  const { root, calls } = await mount([server], {}, [{...service,status:"connected",server}]);
+  assert.equal(root.all().filter(n => n.tag === "article").length, 1, "not duplicated as a custom server");
+  const check = root.all().find(n => n.type === "checkbox"); check.checked = true;
+  await check.events.change();
+  assert.equal(calls[0].path, "/api/mcp/select"); assert.equal(calls[0].body.id, server.id);
+  await root.all().find(n => n.tag === "button" && n.textContent === "Déconnecter").events.click();
+  assert.equal(calls[1].path, "/api/connectors/disconnect");
+});
+
+test("pending OAuth has a browser link, while expired credentials have a reconnect action", async () => {
+  const { root } = await mount([], {}, [{...service,status:"authorizing",authorization_url:"http://127.0.0.1:1234/authorize"},{...service,id:"github",name:"GitHub",status:"reconnect"}]);
+  const link = root.all().find(n => n.tag === "a");
+  assert.equal(link.target, "_blank"); assert.equal(link.rel, "noopener noreferrer");
+  assert.equal(root.all().filter(n => n.tag === "button" && n.textContent === "Reconnecter").length, 1);
+  assert.match(root.textContent, /À reconnecter/);
 });

@@ -10,7 +10,9 @@
   function renderCatalogue(items, bots) {
     catalogue.replaceChildren();
     if (!items.length) return;
-    catalogue.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
+    const header = node("div", null, "mcp-catalogue-header");
+    header.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
+    catalogue.append(header);
     for (const item of items) {
       const card = node("article", null, "mcp-server mcp-catalogue-card");
       card.setAttribute("data-connector", item.id);
@@ -20,26 +22,54 @@
       status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:"Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Déconnecté"})[item.status] || "Déconnecté"));
       heading.append(node("strong", item.name), status);
       card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
-      if (item.message) card.append(node("p", item.message, ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
-      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"), node("p", `Portées OAuth : ${item.scopes}`, "mcp-note"), node("p", `${item.license} · ${item.source}`, "mcp-note"));
-      const form = node("form", null, "mcp-form");
-      const client = input(`${item.id}-client`, "Identifiant de l’application OAuth"); client.maxLength = 512;
-      const secret = input(`${item.id}-secret`, "Secret de l’application OAuth", "password"); secret.maxLength = 1024;
-      if (item.needs_client) form.append(label("Identifiant OAuth", client), label("Secret OAuth — jamais réaffiché", secret), node("p", "Laissez les champs vides pour réutiliser la configuration enregistrée. Ne saisissez pas le mot de passe de votre compte.", "mcp-note"));
-      const submit = node("button", "Connecter", "primary-button"); submit.type = "submit";
-      form.append(submit); setup.append(form); card.append(setup);
-      form.addEventListener("submit", async event => {
-        event.preventDefault();
-        const body = {id:item.id,client_id:client.value,client_secret:secret.value};
-        client.value = ""; secret.value = "";
-        try { await act("/api/connectors/connect", body, submit); }
-        finally { delete body.client_secret; delete body.client_id; }
-      });
+      if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
+      if (item.message) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
+      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
+      const copyable = (caption, value) => {
+        setup.append(node("p", caption, "mcp-note"));
+        const row = node("div", null, "mcp-copy-row");
+        const copy = button("Copier", async () => {
+          try { await panels.copyText(value); copy.textContent = "Copié"; }
+          catch { feedback.textContent = "Sélectionnez le texte pour le copier. La copie automatique n’est pas disponible."; feedback.scrollIntoView?.({block:"nearest"}); }
+        });
+        copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${item.name}`);
+        row.append(node("code", value), copy); setup.append(row);
+      };
+      if (item.redirect_uri) copyable("URL de retour OAuth", item.redirect_uri);
+      if (item.id === "notion") setup.append(node("p", "Autorisations choisies pendant le consentement Notion.", "mcp-note"));
+      else copyable("Portées OAuth", item.scopes_label || item.scopes);
+      setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
+      let form, client, secret;
+      if (item.needs_client && item.status !== "authorizing") {
+        form = node("form", null, "mcp-form"); form.id = `connector-setup-${item.id}`;
+        client = input(`${item.id}-client`, "Identifiant de l’application OAuth"); client.maxLength = 512;
+        secret = input(`${item.id}-secret`, "Secret de l’application OAuth", "password"); secret.maxLength = 1024;
+        client.required = secret.required = !item.has_client;
+        form.append(label("Identifiant OAuth", client), label("Secret OAuth — jamais réaffiché", secret));
+        if (item.has_client) form.append(node("p", "Laissez les champs vides pour réutiliser la configuration enregistrée.", "mcp-note"));
+        form.append(node("p", "Ne saisissez pas le mot de passe de votre compte.", "mcp-note"));
+        setup.append(form);
+      }
+      card.append(setup);
       const actions = node("div", null, "mcp-actions");
-      const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", () => {
-        if (item.needs_client && !item.server) { setup.open = true; client.focus?.(); }
+      const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", event => {
+        event?.preventDefault();
+        if (form && !item.has_client && !setup.open) { setup.open = true; client.focus?.(); }
+        else if (form && setup.open) return form.requestSubmit();
         else return act("/api/connectors/connect", {id:item.id}, connect);
-      }, "primary-button");
+      }, ["disconnected","reconnect","error"].includes(item.status) ? "primary-button" : "secondary-button");
+      connect.setAttribute("data-connector-action", "connect");
+      if (form) {
+        // One visible CTA, also the form's default submit button (Enter works).
+        connect.type = "submit"; connect.setAttribute("form", form.id);
+        form.addEventListener("submit", async event => {
+          event.preventDefault();
+          const body = {id:item.id,client_id:client.value,client_secret:secret.value};
+          client.value = ""; secret.value = "";
+          try { await act("/api/connectors/connect", body, connect); }
+          finally { delete body.client_secret; delete body.client_id; }
+        });
+      }
       if (item.status !== "authorizing") actions.append(connect);
       if (item.authorization_url && item.status === "authorizing") {
         const link = node("a", "Ouvrir la page de connexion", "secondary-button");
@@ -48,7 +78,7 @@
       }
       if (item.server) {
         const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); actions.append(remove);
-        if (item.status === "connected") {
+        {
           const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
           for (const bot of bots) {
             const check = input(`catalogue-${item.id}-${bot.id}`, "", "checkbox"); check.checked = item.server.enabled_bots.includes(bot.id);
@@ -56,7 +86,7 @@
             choices.append(label(bot.name, check));
           }
           card.append(choices);
-          const tools = node("details"); tools.append(node("summary", `Outils (${item.server.tools.length})`));
+          const tools = node("details"); tools.append(node("summary", `Outils (${item.server.tools.length})${item.status === "connected" ? "" : " · dernier catalogue connu"}`));
           for (const tool of item.server.tools) tools.append(node("p", `${tool.name} — ${tool.description || "Sans description"}`, "mcp-note"));
           card.append(tools);
         }

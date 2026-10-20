@@ -7,6 +7,24 @@ mod oauth;
 
 static EFFECTS: Mutex<()> = Mutex::new(());
 const PURPOSE: &str = grokbot_forms::vault::MCP_ENV_PURPOSE;
+const REVOCATION_WARNING: &str = "Déconnecté sur ce Mac ; révocation distante non confirmée. Retirez aussi l’accès d’Ezerbot dans les réglages du service.";
+fn scopes_label(m: Manifest) -> &'static str {
+    if m.id == "notion" {
+        "Choisies pendant le consentement Notion"
+    } else {
+        m.scopes
+    }
+}
+fn setup_redirect(m: Manifest) -> Option<&'static str> {
+    match m.id {
+        "slack" => Some("http://127.0.0.1:52187/oauth/slack/callback"),
+        "github" => Some("http://127.0.0.1/oauth/github/callback"),
+        _ => None,
+    }
+}
+pub(super) fn id_for_server(ctx: &Context<'_>, id: &str) -> Option<&'static str> {
+    record(ctx, id).ok().flatten().map(|(m, _, _, _)| m.id)
+}
 #[derive(Clone, Copy)]
 pub(super) struct Manifest {
     pub id: &'static str,
@@ -24,9 +42,9 @@ pub(super) const MANIFESTS: &[Manifest] = &[
     Manifest { id:"gmail", name:"Gmail", description:"Rechercher et lire vos courriels, préparer et envoyer des messages.", permissions:"Lecture et modification des messages, envoi de courriels ; adresse du compte. Chaque outil reste soumis à vos approbations.", scopes:"openid email https://www.googleapis.com/auth/gmail.modify", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
     Manifest { id:"calendar", name:"Google Calendar", description:"Consulter vos agendas et gérer vos événements.", permissions:"Lecture et modification des agendas et événements ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/calendar", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
     Manifest { id:"drive", name:"Google Drive", description:"Rechercher, lire et organiser les fichiers de votre Drive.", permissions:"Lecture et modification de tous les fichiers Drive accessibles au compte ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/drive", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
-    Manifest { id:"slack", name:"Slack", description:"Rechercher des discussions, lire les fils et envoyer des messages.", permissions:"Recherche des messages et fichiers, lecture des conversations et fichiers, envoi de messages, lecture des utilisateurs.", scopes:"search:read.public search:read.private search:read.im search:read.mpim search:read.files search:read.users channels:history groups:history im:history mpim:history files:read chat:write users:read users:read.email", source:"https://docs.slack.dev/ai/slack-mcp-server/", license:"Service officiel Slack · aucun logiciel redistribué", setup:"Une app Slack interne (ou publiée) autorisée par votre administrateur est nécessaire. Ajoutez les portées indiquées et le retour OAuth http://127.0.0.1:52187/oauth/slack/callback ; saisissez l’identifiant et le secret de cette app.", endpoint:"https://mcp.slack.com/mcp" },
+    Manifest { id:"slack", name:"Slack", description:"Rechercher des discussions, lire les fils et envoyer des messages.", permissions:"Recherche des messages et fichiers, lecture des conversations et fichiers, envoi de messages, lecture des utilisateurs.", scopes:"search:read.public search:read.private search:read.im search:read.mpim search:read.files search:read.users channels:history groups:history im:history mpim:history files:read chat:write users:read users:read.email", source:"https://docs.slack.dev/ai/slack-mcp-server/", license:"Service officiel Slack · aucun logiciel redistribué", setup:"Une app Slack interne (ou publiée) autorisée par votre administrateur est nécessaire. Ajoutez les portées et l’URL de retour indiquées ci-dessous ; saisissez l’identifiant et le secret de cette app.", endpoint:"https://mcp.slack.com/mcp" },
     Manifest { id:"notion", name:"Notion", description:"Rechercher et modifier les pages de votre espace Notion.", permissions:"Accès aux pages et espaces choisis pendant le consentement Notion, en lecture et écriture.", scopes:"default", source:"https://developers.notion.com/docs/mcp", license:"Service officiel Notion · aucun logiciel redistribué", setup:"Connexion dans le navigateur. Vous choisirez les espaces et pages autorisés chez Notion ; aucun identifiant d’application à saisir.", endpoint:"https://mcp.notion.com/mcp" },
-    Manifest { id:"github", name:"GitHub", description:"Consulter et gérer les dépôts, issues et demandes de fusion.", permissions:"Accès en lecture et écriture aux dépôts privés et publics (repo), lecture des organisations (read:org).", scopes:"repo read:org", source:"https://github.com/github/github-mcp-server", license:"MIT · serveur officiel GitHub hébergé, aucun logiciel redistribué", setup:"Créez une OAuth App GitHub avec une URL de retour http://127.0.0.1/oauth/github/callback. Saisissez son identifiant et son secret. GitHub autorise le port local attribué à la connexion.", endpoint:"https://api.githubcopilot.com/mcp/" },
+    Manifest { id:"github", name:"GitHub", description:"Consulter et gérer les dépôts, issues et demandes de fusion.", permissions:"Accès en lecture et écriture aux dépôts privés et publics (repo), lecture des organisations (read:org).", scopes:"repo read:org", source:"https://github.com/github/github-mcp-server", license:"MIT · serveur officiel GitHub hébergé, aucun logiciel redistribué", setup:"Créez une OAuth App GitHub avec l’URL de retour indiquée ci-dessous. Saisissez son identifiant et son secret. GitHub autorise le port local attribué à la connexion.", endpoint:"https://api.githubcopilot.com/mcp/" },
 ];
 fn manifest(id: &str) -> Result<Manifest, ApiError> {
     MANIFESTS
@@ -58,15 +76,26 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
         let id = server_id(m.id);
         let row: Option<(String,Option<String>,i64,Option<String>)> = ctx.connection.query_row("SELECT phase,message,expires_at,authorization_url FROM wrapper_connector_catalogue WHERE id=?1", [m.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let server = local.iter().find(|s| s["id"] == id).cloned();
+        let configured = row.is_some();
         let (phase, message, expires, url) =
             row.unwrap_or_else(|| ("disconnected".into(), None, 0, None));
+        let private = if configured {
+            credentials(ctx, &id)?.unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        let has_client = private.contains_key("CLIENT_ID")
+            && (m.id == "notion" || private.contains_key("CLIENT_SECRET"));
+        let can_refresh = private.contains_key("REFRESH_TOKEN");
+        let expired = expires > 0 && expires <= wall_clock() as i64 + 30_000;
+        let warning = message.as_deref() == Some(REVOCATION_WARNING);
         let status = if phase == "authorizing"
             || phase == "reconnect"
             || phase == "error"
             || phase == "disconnected"
         {
             phase.as_str()
-        } else if expires > 0 && expires <= wall_clock() as i64 + 30_000 {
+        } else if expired && !can_refresh {
             "reconnect"
         } else if server
             .as_ref()
@@ -84,16 +113,25 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
         let message = if status == "saved" {
             Some("Identifiants conservés dans le coffre. Reconnectez le service pour démarrer ses outils.".to_owned())
         } else if status == "reconnect" && phase == "connected" {
-            Some("Le jeton a expiré. Reconnectez le service ; les appels déjà autorisés peuvent renouveler un jeton valide.".to_owned())
+            Some("Le jeton a expiré. Reconnectez le service.".to_owned())
+        } else if status == "connected" && expired && can_refresh {
+            Some("Le jeton sera renouvelé au prochain appel autorisé.".to_owned())
         } else if status == "error" && phase == "connected" {
             server
                 .as_ref()
                 .and_then(|s| s["error"].as_str())
                 .map(str::to_owned)
         } else {
-            message
+            message.filter(|s| !s.starts_with("Connecté."))
         };
-        items.push(json!({"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":m.id!="notion","status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
+        let message = message.map(|s| {
+            if s == crate::mcp::AUTH_REQUIRED {
+                "La connexion a expiré ou a été révoquée. Reconnectez le service.".to_owned()
+            } else {
+                s
+            }
+        });
+        items.push(json!({"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(*m),"redirect_uri":setup_redirect(*m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":m.id!="notion","has_client":has_client,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
     }
     Ok(json!(items))
 }
@@ -164,10 +202,33 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         json!({"id":id}).to_string().as_bytes(),
     )
 }
-pub(super) fn preview(ctx: &Context<'_>, server: &Server) -> Option<Value> {
-    let (m, _, _, revision) = record(ctx, &server.id).ok()??;
+pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Option<Value> {
+    let (m, phase, _, revision) = record(ctx, &server.id).ok()??;
+    let private = credentials(ctx, &server.id).ok()??;
+    let mut names: Vec<_> = private
+        .keys()
+        .filter(|k| k.as_str() != "EMAIL")
+        .cloned()
+        .collect();
+    names.sort();
+    let action = format!(
+        "{} {}",
+        if action == "remove" {
+            "Déconnecter"
+        } else if phase != "disconnected" || private.contains_key("ACCESS_TOKEN") {
+            "Reconnecter"
+        } else {
+            "Connecter"
+        },
+        m.name
+    );
+    let connection = if m.endpoint.is_empty() {
+        "Le serveur Google workspace-mcp 2.1.1 est téléchargé si nécessaire, puis lancé avec uvx sur ce Mac."
+    } else {
+        "Le serveur officiel du service est contacté par HTTPS ; aucun programme supplémentaire n’est installé."
+    };
     Some(
-        json!({"service":m.name,"permissions":m.permissions,"portées":m.scopes,"source":m.source,"licence":m.license,"révision":revision,"connexion":"Ouverture du navigateur, échange OAuth, stockage privé et découverte des outils. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service. Le serveur Google est téléchargé et lancé avec uvx ; les autres serveurs sont contactés par HTTPS.","déconnexion":"Révocation distante, suppression locale des jetons et des règles, arrêt du connecteur."}),
+        json!({"id":m.id,"service":m.name,"action":action,"transport":if m.endpoint.is_empty(){"stdio"}else{"https"},"variables_privées":names,"permissions":m.permissions,"portées":scopes_label(m),"source":m.source,"licence":m.license,"révision":revision,"connexion":format!("{connection} Si une identification est nécessaire, le navigateur s’ouvre pour OAuth et les jetons sont conservés dans le coffre. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."),"déconnexion":"Révocation distante, suppression locale des jetons et des règles, arrêt du connecteur. La configuration de l’application OAuth est conservée pour une prochaine connexion."}),
     )
 }
 fn credentials(ctx: &Context<'_>, id: &str) -> Result<Option<HashMap<String, String>>, ApiError> {
@@ -441,7 +502,17 @@ pub(super) fn remove(
     ctx.connection.execute("UPDATE wrapper_connector_catalogue SET generation=generation+1,authorization_url=NULL WHERE server_id=?1",[&server.id])?;
     let revoked = oauth::revoke(m, &env);
     let tx = write_transaction(ctx.connection)?;
-    super::super::forms::vault(ctx)?.remove(&secret_name(&server.id))?;
+    // A provider app's registration is configuration, not an account token.
+    // Keep just it so a deliberate reconnect need not ask for the same setup.
+    let client: HashMap<_, _> = env
+        .into_iter()
+        .filter(|(key, _)| matches!(key.as_str(), "CLIENT_ID" | "CLIENT_SECRET"))
+        .collect();
+    if client.is_empty() {
+        super::super::forms::vault(ctx)?.remove(&secret_name(&server.id))?;
+    } else {
+        save(ctx, &server.id, &client)?;
+    }
     tx.execute(
         "DELETE FROM wrapper_mcp_bots WHERE server_id=?1",
         [&server.id],
@@ -456,9 +527,9 @@ pub(super) fn remove(
         ],
     )?;
     let message = if revoked {
-        "Déconnecté. Les jetons et règles de ce connecteur ont été supprimés."
+        "Déconnecté. Les jetons et règles de ce connecteur ont été supprimés. La configuration OAuth est conservée."
     } else {
-        "Déconnecté sur ce Mac ; révocation distante non confirmée. Retirez aussi l’accès d’Ezerbot dans les réglages du service."
+        REVOCATION_WARNING
     };
     tx.execute("UPDATE wrapper_connector_catalogue SET phase='disconnected',message=?2,expires_at=0,account_email=NULL WHERE server_id=?1",params![server.id,message])?;
     tx.commit()?;

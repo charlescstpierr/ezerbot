@@ -483,6 +483,16 @@ fn needs_recovery(ctx: &Context<'_>, name: &str) -> bool {
 pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> Option<Value> {
     let mut label = display(ctx, name)?;
     let recoverable = needs_recovery(ctx, name);
+    let server_id = name
+        .strip_prefix("mcp_start_")
+        .or_else(|| name.strip_prefix("mcp_remove_"))
+        .or_else(|| name.strip_prefix("mcp_")?.split_once('_').map(|(id, _)| id));
+    let catalogue_id = server_id.and_then(|id| catalogue::id_for_server(ctx, id));
+    if let Some(id) = catalogue_id {
+        label
+            .as_object_mut()?
+            .insert("catalogue_id".into(), json!(id));
+    }
     if is_lifecycle(name) {
         let title = arguments["action"]
             .as_str()
@@ -492,12 +502,19 @@ pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> 
                     "Démarrer le connecteur"
                         | "Redémarrer le connecteur"
                         | "Supprimer le connecteur"
-                )
+                ) || (catalogue_id.is_some()
+                    && ["Connecter", "Reconnecter", "Déconnecter"]
+                        .iter()
+                        .any(|verb| {
+                            *s == format!("{verb} {}", label["server"].as_str().unwrap_or(""))
+                        }))
             })
             .unwrap_or_else(|| label["tool"].as_str().unwrap_or("Gérer le connecteur"));
-        return Some(
-            json!({"server":label["server"],"tool":title,"origin":"settings","action":if name.starts_with("mcp_start_") {"start"} else {"remove"},"recoverable":recoverable}),
-        );
+        let mut display = json!({"server":label["server"],"tool":title,"origin":"settings","action":if name.starts_with("mcp_start_") {"start"} else {"remove"},"recoverable":recoverable});
+        if let Some(id) = catalogue_id {
+            display["catalogue_id"] = json!(id);
+        }
+        return Some(display);
     }
     label
         .as_object_mut()?
@@ -675,7 +692,9 @@ fn lifecycle_arguments(
     restarting: bool,
 ) -> Value {
     let mut args = json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
-    if let Some(catalogue) = catalogue::preview(ctx, server) {
+    if let Some(catalogue) = catalogue::preview(ctx, server, action) {
+        args["action"] = catalogue["action"].clone();
+        args["variables_privées"] = catalogue["variables_privées"].clone();
         args["catalogue"] = catalogue;
     }
     args

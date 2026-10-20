@@ -212,7 +212,12 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        self.post("/api/connectors/connect", json!({"id":id}))["run_id"]
+        let body = if id != "notion" && self.item(id)["has_client"] != true {
+            json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
+        } else {
+            json!({"id":id})
+        };
+        self.post("/api/connectors/connect", body)["run_id"]
             .as_str()
             .unwrap()
             .into()
@@ -347,10 +352,24 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     assert_eq!(f.oauth.count("/token"), 0);
     assert_eq!(f.item("gmail")["authorization_url"], Value::Null);
     f.decide(&denied, json!("deny"));
+    assert_eq!(f.item("gmail")["has_client"], true);
     assert_eq!(f.oauth.count("/token"), 0);
     assert_eq!(f.item("gmail")["status"], "disconnected");
     let run = f.connect("gmail");
     f.decide(&run, json!("allow_once"));
+    let state = f.state();
+    let request = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap();
+    assert_eq!(request["connector"]["tool"], "Connecter Gmail");
+    assert_eq!(request["connector"]["catalogue_id"], "gmail");
+    assert!(request["configuration_result"]["output"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("navigateur"));
     assert_eq!(f.callback("gmail", false, true), 400);
     assert_eq!(f.oauth.count("/token"), 0);
     assert_eq!(f.callback("gmail", true, false), 400);
@@ -392,7 +411,37 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         )
         .unwrap();
     let before = f.oauth.count("/token");
+    assert_eq!(f.item("gmail")["status"], "connected");
+    assert_eq!(f.item("gmail")["can_refresh"], true);
+    assert_eq!(f.item("gmail")["account"], "personne@example.test");
+    assert!(f.item("gmail")["message"]
+        .as_str()
+        .unwrap()
+        .contains("prochain appel autorisé"));
+    assert_eq!(
+        f.item("gmail")["server"]["enabled_bots"],
+        json!(["grokbot"])
+    );
+    // Expiry without a refresh token, unlike normal expiry, requires a sign-in.
+    let key = format!("MCP_{}_ENV", server["id"].as_str().unwrap()).to_uppercase();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    let original = vault.get(&key).unwrap().unwrap();
+    let mut without_refresh: Value = serde_json::from_str(&original).unwrap();
+    without_refresh["variables"]
+        .as_object_mut()
+        .unwrap()
+        .remove("REFRESH_TOKEN");
+    vault
+        .set(
+            &key,
+            grokbot_forms::vault::MCP_ENV_PURPOSE,
+            &without_refresh.to_string(),
+        )
+        .unwrap();
     assert_eq!(f.item("gmail")["status"], "reconnect");
+    vault
+        .set(&key, grokbot_forms::vault::MCP_ENV_PURPOSE, &original)
+        .unwrap();
     assert_eq!(f.oauth.count("/token"), before);
     let run = f.tool_run(&server, "tool-standing-refresh");
     f.script(vec![json!({"type":"response.completed"})]);
@@ -452,13 +501,18 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(
-        grokbot_wrapper::features::forms::vault(&f.app.feature_context())
+    let remaining: Value = serde_json::from_str(
+        &grokbot_wrapper::features::forms::vault(&f.app.feature_context())
             .unwrap()
             .get(&format!("MCP_{removed_id}_ENV").to_uppercase())
             .unwrap()
-            .is_none()
-    );
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(remaining["variables"].get("ACCESS_TOKEN").is_none());
+    assert!(remaining["variables"].get("REFRESH_TOKEN").is_none());
+    assert_eq!(f.item("drive")["has_client"], true);
+    assert_eq!(f.item("drive")["account"], Value::Null);
     assert_eq!(before + 1, f.oauth.count("/revoke"));
     f.oauth.seen.lock().unwrap().revoke_error = true;
     let run = f.post("/api/connectors/disconnect", json!({"id":"slack"}))["run_id"]
@@ -466,6 +520,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         .unwrap()
         .to_owned();
     f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("slack")["warning"], true);
     assert!(f.item("slack")["message"]
         .as_str()
         .unwrap()

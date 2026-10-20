@@ -262,13 +262,19 @@ pub(super) fn begin(
                     respond(
                         request,
                         400,
+                        m.name,
                         "Retour OAuth invalide. Revenez dans Ezerbot pour reconnecter le service.",
                     );
                     continue;
                 }
                 let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
                 if !current() {
-                    respond(request, 409, "Cette demande a été remplacée ou annulée.");
+                    respond(
+                        request,
+                        409,
+                        m.name,
+                        "Cette demande a été remplacée ou annulée.",
+                    );
                     return Ok(());
                 }
                 let completion = (|| -> Result<(), ApiError> {
@@ -305,8 +311,8 @@ pub(super) fn begin(
                     Ok(())
                 })();
                 match completion {
-                    Ok(())=>respond(request,200,"Connexion réussie. Vous pouvez revenir dans Ezerbot et activer les outils pour vos bots."),
-                    Err(error)=>{phase(&ctx,&server.id,"reconnect",&error.message)?;respond(request,400,"La connexion n’a pas abouti. Revenez dans Ezerbot pour voir les indications et réessayer.");},
+                    Ok(())=>respond(request,200,m.name,"Les outils de ce service sont prêts à être activés pour vos bots dans Ezerbot."),
+                    Err(error)=>{phase(&ctx,&server.id,"reconnect",&error.message)?;respond(request,400,m.name,"La connexion n’a pas abouti. Revenez dans Ezerbot pour voir les indications et réessayer.");},
                 }
                 return Ok(());
             }
@@ -343,8 +349,33 @@ pub(super) fn begin(
         json!({"message":"Connexion en attente dans le navigateur. Retrouvez le lien et l’état dans Paramètres › Connecteurs."}),
     )
 }
-fn respond(request: tiny_http::Request, status: u16, text: &str) {
-    let html = format!("<!doctype html><html lang=fr><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Ezerbot · Connexion</title><body><h1>Ezerbot</h1><p>{text}</p></body></html>");
+fn callback_html(status: u16, service: &str, text: &str) -> String {
+    fn escaped(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    }
+    // Replace public, escaped text last; the template contains no remote resources.
+    include_str!("callback.html")
+        .replace(
+            "{{status}}",
+            if status == 200 { "success" } else { "error" },
+        )
+        .replace(
+            "{{title}}",
+            if status == 200 {
+                "Connexion réussie"
+            } else {
+                "Connexion interrompue"
+            },
+        )
+        .replace("{{service}}", &escaped(service))
+        .replace("{{message}}", &escaped(text))
+}
+fn respond(request: tiny_http::Request, status: u16, service: &str, text: &str) {
+    let html = callback_html(status, service, text);
     let _ = request.respond(
         Response::from_string(html)
             .with_status_code(StatusCode(status))
@@ -352,7 +383,7 @@ fn respond(request: tiny_http::Request, status: u16, text: &str) {
             .with_header(
                 Header::from_bytes(
                     "Content-Security-Policy",
-                    "default-src 'none'; frame-ancestors 'none'",
+                    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
                 )
                 .unwrap(),
             )
@@ -407,5 +438,28 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
         }
         Ok(_) => true,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn callback_pages_are_self_contained_themed_and_escape_public_text() {
+        for (status, title, tone) in [
+            (200, "Connexion réussie", "success"),
+            (400, "Connexion interrompue", "error"),
+        ] {
+            let html = callback_html(status, "Gmail <test>", "Un texte <img src=x> & un conseil.");
+            assert!(html.contains(title));
+            assert!(html.contains(&format!("data-status=\"{tone}\"")));
+            assert!(html.contains("prefers-color-scheme: dark"));
+            assert!(html.contains("max-width:420px"));
+            assert!(html.contains("Gmail &lt;test&gt;"));
+            assert!(!html.contains("<img"));
+            assert!(html.contains("Vous pouvez fermer cet onglet et revenir dans Ezerbot."));
+            assert!(!html.contains("<script"));
+            assert!(!html.contains("{{"));
+        }
     }
 }

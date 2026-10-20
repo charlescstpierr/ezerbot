@@ -184,7 +184,7 @@
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
     get state() { return state; },
     get connected() { return connected; },
-    api, refresh, notify, createBotMascot, botSummary,
+    api, refresh, notify, copyText, createBotMascot, botSummary,
     followVoiceReply(conversationId) {
       if (window.EzerbotVoiceMode?.active() && currentConversation()?.id === conversationId) render(true);
     },

@@ -1088,7 +1088,7 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        if tool == super::routines_background::ACTION {
+        if tool == super::routines_background::ACTION || super::mcp::is_lifecycle(tool) {
             let result: Option<String> = ctx.connection.query_row(
                 "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
                 [&request.run_id], |r| r.get(0),

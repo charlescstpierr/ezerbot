@@ -62,13 +62,16 @@ function suspension(message, view) {
   return { label: "État de l’appel indisponible" };
 }
 
-function openConnectors() {
+export function openConnectors(connector) {
   const dialog = document.getElementById("settings-dialog");
   if (!dialog?.open) document.getElementById("settings-button")?.click();
   requestAnimationFrame(() => {
     const section = document.querySelector(".mcp-section");
-    section?.scrollIntoView({ block: "start" });
-    section?.querySelector("button, summary")?.focus({ preventScroll: true });
+    const id = connector?.catalogue_id || window.GrokbotPanels?.state?.mcp?.catalogue?.find(item => item.name === connector?.server)?.id;
+    const card = id && [...(section?.querySelectorAll("[data-connector]") || [])].find(item => item.dataset.connector === id);
+    const target = card || section;
+    target?.scrollIntoView({ block: "start" });
+    (card?.querySelector('[data-connector-action="connect"]') || target?.querySelector(".mcp-actions a, button, summary"))?.focus({ preventScroll: true });
   });
 }
 
@@ -136,7 +139,7 @@ export function Card({ message, onAction, busy }) {
           : <p className="gb-engine-note">Le résultat ne contient pas de texte. Consultez les données techniques ci-dessous.</p>}
           <details><summary>Données techniques du résultat</summary><Data value={outcome.output} /></details></>
         : background ? <p>{outcome.output?.message}</p> : <Data value={outcome.output} />}</>}
-      {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector?.recoverable === true && !refused && <button type="button" className="gb-retry" onClick={openConnectors}>Ouvrir les connecteurs</button>}</>}
+      {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector?.recoverable === true && !refused && <button type="button" className="gb-retry" onClick={() => openConnectors(connector)}>Ouvrir les connecteurs</button>}</>}
       {note && <p className="gb-engine-note">{note}</p>}
     </Disclosure>
   );

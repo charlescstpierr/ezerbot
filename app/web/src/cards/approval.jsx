@@ -20,7 +20,7 @@ export function Card({ message, busy, onAction }) {
   const screen = Boolean(screenTools[action.tool]);
   const lifecycle = request.connector && typeof action.tool === "string" && (action.tool.startsWith("mcp_start_") || action.tool.startsWith("mcp_remove_"));
   const background = action.tool === "routines_background_configure";
-  const configuration = background ? request.configuration_result : null;
+  const configuration = background || lifecycle ? request.configuration_result : null;
   const preview = request.arguments;
   const previewAvailable = preview != null && (!lifecycle || (typeof preview.commande === "string" && Array.isArray(preview.arguments) && Array.isArray(preview.variables_privées)));
   const argumentPreview = screen ? <ScreenArguments tool={action.tool} arguments={preview || {}} /> : <ActionArguments value={preview} />;
@@ -48,7 +48,7 @@ export function Card({ message, busy, onAction }) {
   );
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
   return (
-    <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background}>
+    <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background && !lifecycle}>
       <div className="space-y-3" data-follow-actions={background || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
@@ -65,9 +65,11 @@ export function Card({ message, busy, onAction }) {
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
           : background ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à exécuter les routines dues quand l’app est fermée ? Un agent macOS sera installé pour votre session uniquement. Les résultats et les alertes suivront vos réglages habituels." : "Retirer l’agent macOS de cette session ? Les routines ne s’exécuteront plus quand Ezerbot est fermé. Vos routines, résultats et historiques seront conservés."}</p> : lifecycle ? <>
             <dl className="grid gap-3 text-sm" aria-label="Configuration du connecteur">
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Commande</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>
-              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 ml-0 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : "Aucune variable privée."}</dd></div>
+              {!(preview.catalogue && action.tool.startsWith("mcp_remove_")) && <>
+                <div className="min-w-0"><dt className="text-xs text-muted-foreground">{preview.catalogue?.transport === "https" ? "Adresse du service" : "Commande"}</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
+                {preview.catalogue?.transport !== "https" && <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>}
+              </>}
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 ml-0 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : preview.catalogue ? "Les jetons reçus après votre consentement seront conservés dans le coffre." : "Aucune variable privée."}</dd></div>
             </dl>
             {preview.catalogue && <div className="space-y-2 text-sm"><p><strong>{preview.catalogue.service}</strong> · {preview.catalogue.licence}</p><p>{preview.catalogue.permissions}</p><p className="text-xs text-muted-foreground">Portées OAuth : {preview.catalogue.portées}</p><p>{action.tool.startsWith("mcp_remove_") ? preview.catalogue.déconnexion : preview.catalogue.connexion}</p></div>}
             {action.tool.startsWith("mcp_remove_") && !preview.catalogue && <p className="text-sm">Le processus sera arrêté. La configuration, les règles permanentes et les variables privées de ce connecteur seront supprimées.</p>}
@@ -87,7 +89,7 @@ export function Card({ message, busy, onAction }) {
             <div className="flex flex-wrap gap-2"><button type="button" className="gb-retry" disabled={blocked} onClick={() => decide({ always_allow: { scope } })}>Toujours autoriser</button><button type="button" className="gb-retry" onClick={() => decide({ never: { scope } })}>Toujours refuser</button></div>
           </details>}
         </fieldset>}
-        {background && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
+        {(background || lifecycle) && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
         {pending && expired && <p className="text-sm">Le délai de décision est écoulé. Actualisation de l’état…</p>}
       </div>
     </HumanInputCard>

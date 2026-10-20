@@ -16,15 +16,18 @@ class Node {
   all() { return [this, ...this.children.flatMap(n => n.all())]; }
   querySelectorAll(selector) { return this.all().filter(n => selector === "input" ? n.tag === "input" : selector === 'input[type="password"]' && n.tag === "input" && n.type === "password"); }
   reset() { for (const n of this.all()) n.value = ""; }
+  focus() { this.focused = true; }
+  requestSubmit() { return this.events.submit({preventDefault(){}}); }
 }
 async function mount(servers = [], actionResult = {}, catalogue = []) {
-  const root = new Node("section"), calls = [], notifications = [], opened = [];
+  const root = new Node("section"), calls = [], notifications = [], opened = [], copies = [];
   const dialog = { open: true, close() { this.open = false; } };
   let panel;
   const panels = {
     state: { bots: [{ id: "grokbot", name: "Ezerbot" }], mcp: { servers, catalogue } },
     register(value) { panel = value; },
-    async api(path, body) { calls.push({ path, body }); return actionResult; },
+    async api(path, body) { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return actionResult; },
+    async copyText(text) { copies.push(text); },
     async refresh() {}, notify(text) { notifications.push(text); },
     openConversation(id) { opened.push(id); return true; },
   };
@@ -32,7 +35,7 @@ async function mount(servers = [], actionResult = {}, catalogue = []) {
   const context = vm.createContext({ window: { GrokbotPanels: panels }, document });
   vm.runInContext(await readFile(new URL("../../ui/panels/mcp.js", import.meta.url), "utf8"), context);
   panel.settingsSection(root);
-  return { root, calls, notifications, opened, dialog };
+  return { root, calls, notifications, opened, dialog, copies };
 }
 
 test("MCP management opens its approval without a toast over the decision buttons", async () => {
@@ -94,7 +97,8 @@ test("catalogue explains permissions and submits private setup only to its host 
   assert.equal(calls[0].path, "/api/connectors/connect");
   assert.equal(calls[0].body.id, "gmail");
   assert.equal(secret.value, "");
-  assert.equal(calls[0].body.client_secret, undefined, "temporary secret reference is cleared after submission");
+  assert.equal(calls[0].body.client_secret, "secret-factice", "the submitted request contains the private setup, never the rendered card");
+  assert.equal(root.all().filter(n => n.tag === "article").flatMap(n => n.all()).filter(n => n.tag === "button" && n.textContent === "Connecter").length, 1);
   assert.deepEqual(opened, ["approbations"]);
 });
 
@@ -115,4 +119,56 @@ test("pending OAuth has a browser link, while expired credentials have a reconne
   assert.equal(link.target, "_blank"); assert.equal(link.rel, "noopener noreferrer");
   assert.equal(root.all().filter(n => n.tag === "button" && n.textContent === "Reconnecter").length, 1);
   assert.match(root.textContent, /À reconnecter/);
+});
+
+test("catalogue has one CTA, no Notion form, and no saved-client claim for a new client", async () => {
+  const { root, calls } = await mount([], {}, [service,{...service,id:"notion",name:"Notion",needs_client:false,scopes:"default"}]);
+  const [gmail,notion] = root.all().filter(n => n.tag === "article");
+  assert.equal(gmail.all().filter(n => n.tag === "button" && n.textContent === "Connecter").length, 1);
+  assert.ok(!gmail.textContent.includes("réutiliser la configuration"));
+  const action=gmail.all().find(n => n.attrs["data-connector-action"] === "connect");
+  await action.events.click();
+  assert.equal(calls.length,0);
+  assert.equal(gmail.all().find(n => n.name === "gmail-client").focused,true);
+  assert.equal(gmail.all().filter(n => n.tag === "form")[0].children.some(n => n.tag === "button"),false);
+  assert.equal(notion.all().filter(n => n.tag === "form").length,0);
+  assert.ok(!notion.textContent.includes("default"));
+  await notion.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.equal(calls[0].body.id,"notion");
+});
+
+test("a retained OAuth client connects directly and only an open setup submits changed credentials", async () => {
+  const { root,calls } = await mount([],{},[{...service,has_client:true}]);
+  const card=root.all().find(n => n.tag === "article");
+  assert.match(card.textContent,/Laissez les champs vides/);
+  const action=card.all().find(n => n.attrs["data-connector-action"] === "connect");
+  await action.events.click();
+  assert.deepEqual(calls[0].body,{id:"gmail"});
+  const setup=card.all().find(n => n.tag === "details");setup.open=true;
+  card.all().find(n => n.name === "gmail-client").value="changed-client";
+  card.all().find(n => n.name === "gmail-secret").value="changed-secret";
+  await action.events.click();
+  assert.equal(calls[1].body.client_id,"changed-client");
+  assert.equal(calls[1].body.client_secret,"changed-secret");
+});
+
+test("bot switches and last tools stay available in every persisted connection state", async () => {
+  for (const status of ["connected","authorizing","reconnect","saved","error"]) {
+    const server={id:"gmail-server",enabled_bots:["grokbot"],tools:[{name:"echo",description:"Outil"}]};
+    const {root}=await mount([server],{},[{...service,server,status,account:"factice@example.test"}]);
+    assert.equal(root.all().find(n=>n.type==="checkbox").checked,true);
+    assert.ok(root.textContent.includes("Outils (1)"));
+    assert.ok(root.textContent.includes("Compte connecté : factice@example.test"));
+    const action=root.all().find(n=>n.attrs["data-connector-action"]==="connect");
+    if (status==="connected" || status==="saved") assert.equal(action.className,"secondary-button");
+  }
+});
+
+test("revocation warning has an action tone and public setup values can be copied", async () => {
+  const redirect="http://127.0.0.1:52187/oauth/slack/callback";
+  const {root,copies}=await mount([],{},[{...service,id:"slack",name:"Slack",warning:true,message:"Révocation distante non confirmée.",redirect_uri:redirect}]);
+  assert.equal(root.all().find(n=>n.textContent==="Révocation distante non confirmée.").className,"mcp-warning");
+  const copy=root.all().find(n=>n.attrs["aria-label"]==="Copier url de retour oauth — Slack");
+  await copy.events.click();
+  assert.deepEqual(copies,[redirect]);assert.equal(copy.textContent,"Copié");
 });

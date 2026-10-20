@@ -1,11 +1,12 @@
 .mcp-section { min-width: 0; }
-.mcp-section h4 { font-size: 12px; margin: 14px 0 4px; }
+.mcp-section h4 { margin: 24px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.mcp-catalogue-header { display: grid; gap: 4px; margin-top: 24px; }
+.mcp-catalogue-header > h4, .mcp-catalogue-header > p { margin: 0; }
+.mcp-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.mcp-copy-row code { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; user-select: all; -webkit-user-select: all; }
+.mcp-copy-row button { font-size: 11px; padding: 7px 9px; }
 .mcp-catalogue-card > p { line-height: 1.5; margin: 8px 0; }
 .mcp-catalogue-card a { text-decoration: none; }
-.mcp-status-authorizing { color: var(--warning-text); }
-.mcp-status-authorizing .status-dot { background: var(--warning-text); }
-.mcp-status-reconnect { color: var(--danger-text); }
-.mcp-status-reconnect .status-dot { background: var(--danger-text); }
 .mcp-catalogue-card .mcp-form { padding-bottom: 8px; }
 .mcp-list { display: grid; gap: 12px; margin: 12px 0; }
 .mcp-server { border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-width: 0; font-size: 12px; }
@@ -14,11 +15,11 @@
 .mcp-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .mcp-status .status-dot { flex: 0 0 auto; background: var(--subtle); }
 .mcp-status-connected, .mcp-status-busy { color: var(--text); }
-.mcp-status-starting { color: var(--warning-text); }
-.mcp-status-starting .status-dot { background: var(--warning-text); }
-.mcp-status-error, .mcp-status-crashed { color: var(--danger-text); }
+.mcp-status-starting, .mcp-status-authorizing, .mcp-status-saved { color: var(--warning-text); }
+.mcp-status-starting .status-dot, .mcp-status-authorizing .status-dot, .mcp-status-saved .status-dot { background: var(--warning-text); }
+.mcp-status-error, .mcp-status-crashed, .mcp-status-reconnect { color: var(--danger-text); }
 .mcp-status-connected .status-dot, .mcp-status-busy .status-dot { background: var(--ok); }
-.mcp-status-error .status-dot, .mcp-status-crashed .status-dot { background: var(--danger-text); }
+.mcp-status-error .status-dot, .mcp-status-crashed .status-dot, .mcp-status-reconnect .status-dot { background: var(--danger-text); }
 .mcp-server details, .mcp-add { margin: 10px 0; }
 .mcp-server summary, .mcp-add > summary { cursor: pointer; font-size: 12px; }
 .mcp-server summary:focus-visible, .mcp-add > summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; border-radius: 3px; }
@@ -29,8 +30,9 @@
 .mcp-server p { overflow-wrap: anywhere; }
 .mcp-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .mcp-section .mcp-error { color: var(--danger-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.mcp-section .mcp-warning { color: var(--warning-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.mcp-actions button, .mcp-env-row button { font-size: 11px; padding: 7px 9px; }
+.mcp-actions button, .mcp-actions a, .mcp-env-row button { font-size: 11px; line-height: 1.2; padding: 7px 9px; }
 .mcp-bots { border: 0; padding: 0; margin: 12px 0; display: flex; flex-wrap: wrap; gap: 10px; }
 .mcp-bots legend { color: var(--muted); margin-bottom: 6px; font-size: 11px; }
 .mcp-bots label { display: flex; align-items: center; gap: 6px; flex-direction: row-reverse; }

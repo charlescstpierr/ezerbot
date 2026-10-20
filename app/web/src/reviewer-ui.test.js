@@ -270,8 +270,39 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
-const { Card: ToolCard } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { Card: ToolCard, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
+
+test("connector lifecycle cards show the provider-specific action and its result, not a bare resume receipt", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    for (const remove of [false,true]) {
+      const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"connector",kind:"approval",payload:{
+        entry_id:"connector",status:{status:"resolved"},route:{requesting_bot_id:"grokbot"},
+        kind:{kind:"approval",tool:remove?"mcp_remove_fixture":"mcp_start_fixture",expires_at:Date.now()+60000},
+        connector:{server:"Notion",tool:remove?"Déconnecter Notion":"Connecter Notion",origin:"settings"},
+        arguments:{commande:"https://mcp.notion.com/mcp",arguments:[],variables_privées:[],catalogue:{transport:"https",service:"Notion",licence:"Service officiel",permissions:"Pages choisies",portées:"Choisies pendant le consentement Notion",connexion:"Le serveur est contacté par HTTPS.",déconnexion:"Les jetons sont supprimés."}},
+        configuration_result:{status:"done",output:{message:remove?"Déconnecté sur ce Mac.":"Connexion en attente dans le navigateur."}},
+      }}}));
+      assert.ok(html.includes(remove?"Déconnecter Notion":"Connecter Notion"));
+      assert.ok(html.includes(remove?"Déconnecté sur ce Mac.":"Connexion en attente dans le navigateur."));
+      assert.ok(!html.includes("Repris"));assert.ok(!html.includes("CLIENT_SECRET"));assert.ok(!html.includes("Google"));
+      assert.equal(html.includes("Adresse du service"),!remove);assert.ok(!html.includes(">Commande<"));
+    }
+  } finally {delete globalThis.window;}
+});
+
+test("connector recovery reveals the affected card and focuses its single action", () => {
+  const focus=[],scroll=[];
+  const target={dataset:{connector:"gmail"},scrollIntoView(){scroll.push("gmail");},querySelector(){return{focus(){focus.push("reconnect");}};}};
+  const unrelated={dataset:{connector:"notion"}};
+  const section={querySelectorAll(){return[unrelated,target];},scrollIntoView(){scroll.push("section");}};
+  const dialog={open:false};
+  globalThis.document={getElementById(id){return id==="settings-dialog"?dialog:{click(){dialog.open=true;}};},querySelector(){return section;}};
+  globalThis.window={};globalThis.requestAnimationFrame=fn=>fn();
+  try {openConnectors({catalogue_id:"gmail"});assert.equal(dialog.open,true);assert.deepEqual(scroll,["gmail"]);assert.deepEqual(focus,["reconnect"]);}
+  finally {delete globalThis.document;delete globalThis.window;delete globalThis.requestAnimationFrame;}
+});
 
 test("secret cards warn about current fallback without claiming that a historical Keychain item moved", () => {
   for (const backend of ["file_fallback", "keychain", "file"]) {

@@ -29,10 +29,26 @@ test("rendered GeneratedDocument reopens after dialog.close() and survives incom
     };
     await until(() => window.GrokbotPanels?.state?.conversations?.length, "Fixture non chargée");
     const panels = window.GrokbotPanels;
-    const conversation = panels.state.conversations.find(c => c.messages?.some(m => m.payload?.outcome?.output?.id?.startsWith("generated_")));
+    const conversations = panels.state.conversations.filter(c => c.messages?.some(m => m.payload?.outcome?.output?.id?.startsWith("generated_")));
+    const conversation = conversations[0];
     expect(conversation, "La fixture doit contenir un résultat create_document");
+    // Check the rendered target, not just a successful programmatic click: an
+    // auto-sized button + percentage max-width once collapsed these to 2×2 px.
+    for (const thread of conversations) {
+      panels.openConversation(thread.id);
+      const message = thread.messages.find(m => m.payload?.outcome?.output?.id?.startsWith("generated_"));
+      await until(() => document.querySelector('[data-card-kind="generated-document"][data-message-id="' + CSS.escape(message.id) + '"]'), "Carte non rendue");
+      const cards = [...document.querySelectorAll(".gb-generated-file")];
+      await until(() => cards.every(card => { const image = card.querySelector("img"); return image?.complete && image.naturalWidth > 0; }), "Miniature non chargée");
+      for (const card of cards) {
+        const image = card.querySelector("img"), rect = image.getBoundingClientRect();
+        const paged = /^(PDF|DOCX|PPTX|MD) ·/.test(card.querySelector(".gb-file-metadata").textContent);
+        expect(rect.width > 2 && rect.height >= (paged ? 80 : 3), "Miniature invisible ou trop petite : " + card.querySelector("strong").textContent + " " + rect.width + "×" + rect.height);
+      }
+    }
     panels.openConversation(conversation.id);
-    await until(() => document.querySelector(".gb-generated-file"), "GeneratedDocument non rendu");
+    const firstMessage = conversation.messages.find(m => m.payload?.outcome?.output?.id?.startsWith("generated_"));
+    await until(() => document.querySelector('[data-card-kind="generated-document"][data-message-id="' + CSS.escape(firstMessage.id) + '"]'), "GeneratedDocument non rendu");
     const saveButton = () => document.querySelector(".gb-generated-file .gb-file-actions button:last-child");
     const previewButton = () => document.querySelector(".gb-generated-file .gb-file-preview-button");
     const save = () => document.querySelector("dialog.gb-file-save:not(.gb-file-zoom)");

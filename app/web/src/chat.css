@@ -27,12 +27,12 @@
 .gb-file-heading > span { color: var(--ok); font-size: 11px; }
 :root[data-theme="light"] .gb-file-heading > span { color: #177a42; }
 .gb-file-metadata, .gb-file-hint { margin: 7px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.gb-file-preview { display: block; width: auto; max-width: min(100%, 560px); height: auto; max-height: 190px; margin: 12px 0; border: 1px solid var(--line); border-radius: 5px; background: white; object-fit: contain; object-position: left top; }
+.gb-file-preview { display: block; width: auto; max-width: 100%; height: 190px; margin: 12px 0; border: 1px solid var(--line); border-radius: 5px; background: white; object-fit: contain; object-position: left top; }
 .gb-file-diagram { height: auto; max-height: 260px; max-width: 100%; }
 .gb-file-preview-button { display: block; max-width: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
 .gb-file-preview-button:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; border-radius: 5px; }
 .gb-file-preview-table { width: min(100%, 560px); }
-.gb-file-preview-table .gb-file-preview { width: 100%; max-height: none; }
+.gb-file-preview-table .gb-file-preview { width: 100%; height: auto; max-height: none; }
 .gb-file-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .gb-file-error { color: var(--danger-text); font-size: 12px; overflow-wrap: anywhere; }
 .gb-file-path { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--font-mono); }
@@ -51,7 +51,7 @@
 .gb-file-zoom-content { overflow: auto; max-height: calc(100vh - 150px); margin-top: 16px; border: 1px solid var(--line); border-radius: 6px; background: white; }
 .gb-file-zoom-content img { display: block; width: 100%; height: auto; }
 .gb-file-zoom-diagram img { width: auto; max-width: none; margin: auto; }
-@media (max-height: 600px) { .gb-file-preview { max-height: 135px; } .gb-file-diagram { height: auto; max-height: 160px; } }
+@media (max-height: 600px) { .gb-file-preview { height: 135px; } .gb-file-diagram { height: auto; max-height: 160px; } }
 
 .gb-skill-proposal { min-width: 0; overflow-wrap: anywhere; }
 .gb-skill-text { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); color: var(--text); font: 12px/1.6 var(--font-mono); tab-size: 2; }

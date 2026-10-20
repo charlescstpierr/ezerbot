@@ -364,6 +364,8 @@
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     (void)webView; (void)navigation;
     self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
+    [self.voice cancel];
+    self.window.title = @"Ezerbot"; self.window.titleVisibility = NSWindowTitleHidden;
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
@@ -399,7 +401,14 @@
     void (^reply)(NSDictionary *) = ^(NSDictionary *result) {
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
-    if ([message.name isEqual:@"ezerbotVoice"]) { [self.voice command:body reply:reply]; return; }
+    if ([message.name isEqual:@"ezerbotVoice"]) {
+        [self.voice command:body reply:^(NSDictionary *result) {
+            BOOL recording = self.voice.meeting && [@[@"authorizing",@"recording",@"paused",@"transcribing"] containsObject:self.voice.status];
+            self.window.title = recording ? @"● Réunion · Ezerbot" : @"Ezerbot";
+            self.window.titleVisibility = recording ? NSWindowTitleVisible : NSWindowTitleHidden;
+            reply(result);
+        }]; return;
+    }
     if ([message.name isEqual:@"ezerbotVoiceSession"]) { [self.voiceSession command:body reply:reply]; return; }
     if ([command isEqual:@"screenSettings"]) {
         NSDictionary *panes = @{@"accessibility":@"Privacy_Accessibility", @"recording":@"Privacy_ScreenCapture", @"input":@"Privacy_ListenEvent"};

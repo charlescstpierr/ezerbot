@@ -177,6 +177,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             }
             tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
             super::storage::discard_conversation_draft(&tx, &input.id)?;
+            tx.execute("UPDATE wrapper_meetings SET audio=NULL,expires_at=NULL,status=CASE WHEN status='recording' THEN 'interrupted' ELSE status END WHERE conversation_id=?1", [&input.id])?;
             tx.commit()?;
             Ok(json!({"ok": true}))
         }
@@ -354,7 +355,11 @@ impl App {
                     pair.push(reply);
                 }
             }
-            ordered.entry(id.into()).or_default().push((ordinal, pair));
+            // Meeting summaries are projected inside their durable meeting card,
+            // not as a second visible copy of the internal summary request.
+            if !super::meetings::is_summary(&self.connection, id, record.message_id.as_str())? {
+                ordered.entry(id.into()).or_default().push((ordinal, pair));
+            }
         }
         let mut statement = self.connection.prepare("SELECT ordinal, conversation_id, kind, message_id, created_at FROM wrapper_messages WHERE account_id = ?1 AND kind <> 'submission' ORDER BY ordinal")?;
         let rows = statement.query_map([ACCOUNT], |row| {
@@ -368,7 +373,9 @@ impl App {
         })?;
         for row in rows {
             let (ordinal, conversation_id, kind, id, created_at) = row?;
+            let meeting_reply: bool = kind == "group_reply" && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_group_turns t JOIN wrapper_meetings m ON m.conversation_id=t.conversation_id AND m.message_id=t.root_id WHERE t.id=?1 AND t.parent_id IS NULL)",[&id],|r|r.get(0))?;
             if hidden.contains(&conversation_id)
+                || meeting_reply
                 || (kind == "group_notice"
                     && !super::multibot::notice_visible(&self.connection, &id)?)
             {

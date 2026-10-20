@@ -29,7 +29,20 @@ int main(void) {
         [voice command:@{@"command":@"status",@"token":@"two"} reply:reply];
         assert([result[@"status"] isEqual:@"ready"] && [result[@"too_long"] boolValue]);
         [voice cancel];
-        puts("voice native debug: fixture, level, stop, stale, cancel, cap OK; no permissions");
+        [voice command:@{@"command":@"start",@"token":@"meeting",@"purpose":@"meeting"} reply:reply];
+        assert([result[@"status"] isEqual:@"consent_required"]);
+        [voice command:@{@"command":@"start",@"token":@"meeting",@"purpose":@"meeting",@"consent":@YES} reply:reply];
+        assert([result[@"status"] isEqual:@"recording"] && voice.maxSeconds == 600);
+        [voice command:@{@"command":@"pause",@"token":@"meeting"} reply:reply];
+        assert([result[@"status"] isEqual:@"paused"]);
+        [voice command:@{@"command":@"resume",@"token":@"meeting"} reply:reply];
+        assert([result[@"status"] isEqual:@"recording"]);
+        voice.started = [NSDate dateWithTimeIntervalSinceNow:-601];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+        [voice command:@{@"command":@"status",@"token":@"meeting"} reply:reply];
+        assert([result[@"status"] isEqual:@"ready"] && [result[@"too_long"] boolValue]);
+        [voice cancel];
+        puts("voice/meeting native debug: fixture, consent, pause/resume, level, stop, stale, cancel, caps OK; no permissions");
     }
     return 0;
 }

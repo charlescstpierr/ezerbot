@@ -90,6 +90,7 @@ pub mod forms;
 pub mod generated;
 pub mod local;
 pub mod mcp;
+pub mod meetings;
 pub mod memory;
 pub mod memory_auto;
 pub mod multibot;
@@ -144,6 +145,7 @@ registry!(
     notifications,
     local,
     voice,
+    meetings,
     screen
 );
 

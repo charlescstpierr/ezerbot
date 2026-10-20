@@ -39,17 +39,25 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
 /// Accept only bounded mono PCM16 WAV, not arbitrary bytes labelled audio/wav.
 /// Both the native recorder and debug fixture use this format.
 pub fn wav_duration(bytes: &[u8]) -> Result<u32, ApiError> {
+    wav_duration_bounded(bytes, MAX_SECONDS)
+}
+
+/// Shared PCM validator for dictation and segmented, on-device meeting capture.
+pub(super) fn wav_duration_bounded(bytes: &[u8], max_seconds: u32) -> Result<u32, ApiError> {
+    let too_long = || {
+        ApiError::new(
+            400,
+            format!("Enregistrement trop long : la limite est de {max_seconds} secondes."),
+        )
+    };
     let invalid = || {
         ApiError::new(
             400,
             "Enregistrement illisible. Réessayez avec le microphone.",
         )
     };
-    if bytes.len() > MAX_WAV_BYTES {
-        return Err(ApiError::new(
-            400,
-            "Enregistrement trop long : la limite est de 60 secondes.",
-        ));
+    if bytes.len() > (max_seconds as usize + 1) * 32_000 + 4096 {
+        return Err(too_long());
     }
     if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(invalid());
@@ -104,13 +112,10 @@ pub fn wav_duration(bytes: &[u8]) -> Result<u32, ApiError> {
     if cursor != bytes.len() || format.is_none() {
         return Err(invalid());
     }
-    if len > MAX_CAPTURE_SECONDS as usize * 32_000 {
-        return Err(ApiError::new(
-            400,
-            "Enregistrement trop long : la limite est de 60 secondes.",
-        ));
+    if len > (max_seconds as usize + 1) * 32_000 {
+        return Err(too_long());
     }
-    Ok(((len as u32 * 1000) / 32_000).min(MAX_SECONDS * 1000))
+    Ok(((len as u32 * 1000) / 32_000).min(max_seconds * 1000))
 }
 
 fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -316,6 +321,8 @@ pub(crate) struct DebugVoice {
     scenario: String,
     started: u64,
     attempts: u32,
+    meeting: bool,
+    accumulated: u64,
 }
 #[cfg(debug_assertions)]
 impl DebugVoice {
@@ -330,15 +337,30 @@ impl DebugVoice {
             scenario: Option<String>,
             #[serde(default)]
             language: Option<String>,
+            #[serde(default)]
+            purpose: Option<String>,
+            #[serde(default)]
+            consent: bool,
         }
         let command: Command = parse(body)?;
         if let Some(scenario) = command.scenario {
             self.scenario = scenario;
         }
         if command.command == "start" {
-            if matches!(self.status.as_str(), "recording" | "transcribing") {
+            if matches!(
+                self.status.as_str(),
+                "recording" | "transcribing" | "paused"
+            ) {
                 return Err(ApiError::new(409, "Une dictée est déjà en cours."));
             }
+            self.meeting = command.purpose.as_deref() == Some("meeting");
+            if self.meeting && !command.consent {
+                return Err(ApiError::new(
+                    403,
+                    "Confirmez le consentement avant d’enregistrer la réunion.",
+                ));
+            }
+            self.accumulated = 0;
             self.token = command.token;
             self.started = crate::now();
             self.attempts = 0;
@@ -357,7 +379,18 @@ impl DebugVoice {
         } else {
             match command.command.as_str() {
                 "cancel" => self.status = "idle".into(),
+                "pause" if self.meeting && self.status == "recording" => {
+                    self.accumulated += crate::now().saturating_sub(self.started);
+                    self.status = "paused".into();
+                }
+                "resume" if self.meeting && self.status == "paused" => {
+                    self.started = crate::now();
+                    self.status = "recording".into();
+                }
                 "stop" | "retry" => {
+                    if self.status == "recording" {
+                        self.accumulated += crate::now().saturating_sub(self.started);
+                    }
                     self.attempts += 1;
                     self.status = if self.scenario == "failed" && self.attempts == 1 {
                         "failed"
@@ -370,20 +403,29 @@ impl DebugVoice {
                 _ => return Err(ApiError::new(400, "Commande vocale inconnue.")),
             }
         }
-        let elapsed = crate::now().saturating_sub(self.started);
-        if self.status == "recording"
-            && (elapsed >= MAX_SECONDS as u64 * 1000 || self.scenario == "too_long")
-        {
+        let cap = if self.meeting {
+            super::meetings::MAX_SECONDS
+        } else {
+            MAX_SECONDS
+        } as u64
+            * 1000;
+        let elapsed = self.accumulated
+            + if self.status == "recording" {
+                crate::now().saturating_sub(self.started)
+            } else {
+                0
+            };
+        if self.status == "recording" && (elapsed >= cap || self.scenario == "too_long") {
             self.status = "ready".into();
         }
         let ready = self.status == "ready";
         let fixture = include_bytes!("../../tests/fixtures/voice.wav");
         Ok(
             json!({"status":if self.status.is_empty() {"idle"} else {&self.status},"token":self.token,
-            "elapsed_ms":elapsed.min(60_000),"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
+            "elapsed_ms":if self.scenario == "too_long" {cap} else {elapsed.min(cap)},"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
             "transcript":if ready {"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."} else {""},
-            "data":if ready {STANDARD.encode(fixture)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
-            "too_long":ready && (elapsed >= 60_000 || self.scenario == "too_long"),"fake":true}),
+            "data":if ready && self.scenario != "no_audio" {STANDARD.encode(fixture)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
+            "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }
 }

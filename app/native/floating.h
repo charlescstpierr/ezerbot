@@ -92,9 +92,9 @@ static OSStatus EZFloatingHotKey(EventHandlerCallRef next, EventRef event, void 
         if (NSIntersectsRect(candidate.visibleFrame, frame)) { screen = candidate; break; }
     }
     NSRect bounds = screen.visibleFrame;
-    if (NSIsEmptyRect(bounds)) return NSMakeRect(80, 80, 420, 470);
+    if (NSIsEmptyRect(bounds)) return NSMakeRect(80, 80, 420, 588);
     frame.size.width = MIN(MAX(360, frame.size.width), bounds.size.width);
-    frame.size.height = MIN(MAX(440, frame.size.height), bounds.size.height);
+    frame.size.height = MIN(MAX(520, frame.size.height), bounds.size.height);
     frame.origin.x = MIN(MAX(NSMinX(bounds), frame.origin.x), NSMaxX(bounds) - frame.size.width);
     frame.origin.y = MIN(MAX(NSMinY(bounds), frame.origin.y), NSMaxY(bounds) - frame.size.height);
     return frame;
@@ -103,7 +103,7 @@ static OSStatus EZFloatingHotKey(EventHandlerCallRef next, EventRef event, void 
 - (void)show {
     if (!self.backendURL) return;
     if (!self.panel) {
-        EzerbotFloatingWindow *panel = [[EzerbotFloatingWindow alloc] initWithContentRect:NSMakeRect(80, 80, 420, 440)
+        EzerbotFloatingWindow *panel = [[EzerbotFloatingWindow alloc] initWithContentRect:NSMakeRect(80, 80, 420, 560)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskNonactivatingPanel
             backing:NSBackingStoreBuffered defer:NO];
         panel.title = @"Panneau · Ezerbot";
@@ -111,7 +111,7 @@ static OSStatus EZFloatingHotKey(EventHandlerCallRef next, EventRef event, void 
         panel.floatingPanel = YES; panel.hidesOnDeactivate = NO;
         panel.becomesKeyOnlyIfNeeded = NO; panel.level = NSFloatingWindowLevel;
         panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
-        panel.minSize = NSMakeSize(360, 440); panel.maxSize = NSMakeSize(650, 850);
+        panel.minSize = NSMakeSize(360, 520); panel.maxSize = NSMakeSize(650, 850);
         __weak EzerbotFloating *weakSelf = self;
         panel.dismiss = ^{ [weakSelf close]; };
         NSDictionary *saved = self.geometryPath ? [NSDictionary dictionaryWithContentsOfFile:self.geometryPath] : nil;

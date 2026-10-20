@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./floating.css";
 
-import { floatingConversations, floatingReply, floatingPendingRequests } from "./floating-view.js";
+import { floatingConversations, floatingReply, floatingPendingRequests, floatingHasMore, resizeFloatingInput } from "./floating-view.js";
 
 async function api(path, body) {
   const controller = new AbortController();
@@ -26,6 +26,10 @@ function Floating() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [uncertain, setUncertain] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const latest = useRef(null);
+  const replyContent = useRef(null);
+  const inNativePanel = Boolean(window.webkit?.messageHandlers?.ezerbotFloating);
   const pending = useRef(null);
   const draftValue = useRef("");
   draftValue.current = draft;
@@ -38,6 +42,9 @@ function Floating() {
   const currentBot = state?.bots.find((b) => b.id === (conversation?.bot_id || bot));
   const reply = floatingReply(conversation);
   const requests = floatingPendingRequests(state, conversation);
+  const displayReply = requests.length ? floatingReply(conversation, true) : reply;
+  const question = conversation?.messages.filter((m) => m.role === "user").at(-1)?.body;
+  const failed = reply?.state === "failed";
   const live = conversation?.messages.some((m) => ["streaming", "generating", "queued", "dispatching", "unknown"].includes(m.state));
   const unavailable = Boolean(target && !conversation);
 
@@ -59,6 +66,17 @@ function Floating() {
       setState(value); input.current?.focus();
     } catch { setError("Le moteur local est indisponible. Votre brouillon reste ici."); }
   }
+  useLayoutEffect(() => { resizeFloatingInput(input.current); }, [draft]);
+  useLayoutEffect(() => { if (latest.current) latest.current.scrollTop = 0; }, [target, reply?.id]);
+  useEffect(() => {
+    const measure = () => setOverflowing(floatingHasMore(latest.current));
+    const observer = new ResizeObserver(measure);
+    observer.observe(latest.current); observer.observe(replyContent.current);
+    const resize = () => resizeFloatingInput(input.current);
+    window.addEventListener("resize", resize);
+    measure();
+    return () => { observer.disconnect(); window.removeEventListener("resize", resize); };
+  }, []);
   useEffect(() => {
     mounted.current = true;
     window.EzerbotFloating = { open };
@@ -128,20 +146,25 @@ function Floating() {
     } finally { sending.current = false; setBusy(false); input.current?.focus(); }
   }
   return <section className="floating-panel">
-    <header className="floating-heading"><span id="floating-mascot" aria-hidden="true" /><div><small>VOTRE BOT, À PORTÉE DE MAIN</small><h1>{conversation?.kind === "group" ? "Groupe" : currentBot?.name || "Ezerbot"}</h1></div><button className="secondary-button" title="Fermer · Échap" aria-label="Fermer le panneau" onClick={() => native({ command: "close" })}>×</button></header>
+    <header className="floating-heading"><span id="floating-mascot" aria-hidden="true" /><div><small>VOTRE BOT, À PORTÉE DE MAIN</small><h1>{conversation?.kind === "group" ? "Groupe" : currentBot?.name || "Ezerbot"}</h1></div>{!inNativePanel && <button className="icon-button floating-close" title="Fermer · Échap" aria-label="Fermer le panneau" onClick={() => window.close()}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button>}</header>
     <label className="form-label" htmlFor="floating-target">Envoyer dans</label>
     <select className="text-input" id="floating-target" value={target} disabled={busy || uncertain} onChange={(e) => { setTarget(e.target.value); setError(""); }}>
       <option value="">Nouvelle conversation · {state?.bots.find((b) => b.id === bot)?.name || "Ezerbot"}</option>
       {unavailable && <option value={target}>Conversation indisponible</option>}
       {conversations.map((c) => <option key={c.id} value={c.id}>{c.title} · {c.kind === "group" ? "Groupe" : state.bots.find((b) => b.id === c.bot_id)?.name}</option>)}
     </select>
-    <div className="floating-latest" role="region" aria-label="Dernière réponse" tabIndex={0}>
-      {conversation?.messages.filter((m) => m.role === "user").at(-1) && <p className="floating-question">{conversation.messages.filter((m) => m.role === "user").at(-1).body}</p>}
-      <p className="floating-answer">{reply?.body || reply?.error || (requests.length ? "Le bot attend votre réponse ou votre autorisation." : live ? "Le bot prépare sa réponse…" : unavailable ? "Ce fil a été supprimé ou n’est plus accessible. Choisissez une autre conversation." : "Une question, une idée ? Votre prochain échange apparaîtra ici.")}</p>
-      {live && <small>Réponse en cours…</small>}
-      {requests.map((request) => <div className="floating-notice" key={request.id}><p>Votre décision est attendue dans Ezerbot. Aucune action n’est autorisée depuis ce panneau.</p><button type="button" className="secondary-button" onClick={() => full(request.route.target_conversation_id)}>Voir la demande</button></div>)}
-      {reply?.state === "failed" && <p role="alert">La réponse a échoué. Ouvrez le fil pour la reprendre.</p>}
+    <div className={`floating-reading${overflowing ? " is-overflowing" : ""}`}>
+      <div ref={latest} className="floating-latest" role="region" aria-label="Dernière réponse" tabIndex={0} onScroll={() => setOverflowing(floatingHasMore(latest.current))}>
+        <div ref={replyContent}>
+          {question && <div className="floating-question-preview"><p className="floating-question" title={question}>{question}</p></div>}
+          <p className="floating-answer">{displayReply?.body || (failed || requests.length ? "" : live ? "Le bot prépare sa réponse…" : unavailable ? "Ce fil a été supprimé ou n’est plus accessible. Choisissez une autre conversation." : "Une question, une idée ? Votre prochain échange apparaîtra ici.")}</p>
+          {live && reply?.body && <small>Réponse en cours…</small>}
+        </div>
+      </div>
+      {overflowing && <span className="floating-overflow-hint">↓ Faites défiler pour lire la suite</span>}
     </div>
+    {requests.map((request) => <div className="floating-notice" key={request.id} role="status"><p>Votre décision est attendue dans Ezerbot.</p><button type="button" className="secondary-button" onClick={() => full(request.route.target_conversation_id)}>Voir la demande</button></div>)}
+    {failed && <div className="floating-notice floating-failure" role="alert"><div><strong>La réponse a échoué.</strong><p className="floating-error">{reply.error || "Ouvrez le fil pour reprendre la réponse."}</p></div><button type="button" className="secondary-button" onClick={() => full(target)}>Ouvrir le fil</button></div>}
     {error && <p className="floating-error" role="alert">{error}</p>}
     <form className="floating-composer" onSubmit={send}>
       <textarea ref={input} id="floating-message" name="message" aria-label="Message au bot" placeholder="Qu’avez-vous en tête ?" value={draft} maxLength={16384} readOnly={busy || uncertain} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit(); } }} />

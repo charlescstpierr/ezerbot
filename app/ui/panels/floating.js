@@ -39,16 +39,19 @@
       const actions = text("div", "", "floating-settings-actions");
       save = text("button", "Enregistrer le raccourci", "secondary-button"); save.type = "button";
       save.addEventListener("click", async () => {
-        save.disabled = true;
+        save.disabled = true; select.disabled = true;
+        const shortcut = select.value;
         const previous = P.state.floating?.shortcut || "cmd+option+j";
         try {
-          await configure(select.value);
-          await P.api("/api/floating/settings", { shortcut: select.value });
+          await configure(shortcut);
+          const environment = status.textContent;
+          await P.api("/api/floating/settings", { shortcut });
           chosen = null; await P.refresh();
+          status.textContent = `Raccourci enregistré : ${names.find(([value]) => value === shortcut)?.[1] || shortcut}. ${environment}`;
         } catch (error) {
           try { await configure(previous); } catch { /* Keep the actionable error below. */ }
           status.textContent = error.message;
-        } finally { save.disabled = false; }
+        } finally { save.disabled = false; select.disabled = false; }
       });
       const open = text("button", "Ouvrir le panneau", "primary-button"); open.type = "button";
       open.addEventListener("click", async () => {
@@ -56,7 +59,7 @@
           await contextWork;
           const result = bridge({ command: "show" });
           if (result) await result;
-          else window.open("/floating", "ezerbot-floating", "width=420,height=440");
+          else window.open("/floating", "ezerbot-floating", "width=420,height=560");
         } catch (error) { status.textContent = error.message; }
       });
       status = text("p", "", "floating-settings-status"); status.setAttribute("role", "status");

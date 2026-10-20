@@ -75,15 +75,18 @@ int main(int argc, const char *argv[]) {
         EZJavaScript(floating.webView,@"window.__denied='pending'; window.webkit.messageHandlers.ezerbotFloating.postMessage({command:'configure',shortcut:'cmd+option+j'}).then(()=>window.__denied='unsafe',()=>window.__denied='denied'); true");
         EZWait(^BOOL { return ![EZJavaScript(floating.webView,@"window.__denied") isEqual:@"pending"]; });
         NSCAssert([EZJavaScript(floating.webView,@"window.__denied") isEqual:@"denied"], @"Panel cannot configure a global shortcut");
-        EZJavaScript(floating.webView,@"document.querySelector('textarea').focus(); document.execCommand('insertText',false,'Message du panneau Cocoa, fenêtre principale masquée.'); true");
+        EZJavaScript(floating.webView,@"document.querySelector('textarea').focus(); document.execCommand('insertText',false,'Message du panneau Cocoa, fenêtre principale masquée. Voici une question volontairement longue pour vérifier que deux lignes suffisent au résumé, sans cacher le début de la réponse du bot.'); true");
         EZWait(^BOOL { return [EZJavaScript(floating.webView,@"!document.querySelector('.floating-composer button').disabled") boolValue]; });
         EZJavaScript(floating.webView,@"document.querySelector('.floating-composer').requestSubmit(); true");
         EZWait(^BOOL { return [EZJavaScript(floating.webView,@"document.querySelector('.floating-question')?.textContent.includes('panneau Cocoa') && !document.querySelector('textarea').value") boolValue]; });
         NSCAssert(!shell.window.visible,@"Native send leaves main hidden");
         EZWait(^BOOL { return [EZJavaScript(shell.webView,@"document.querySelector('#messages').textContent.includes('panneau Cocoa')") boolValue]; });
+        NSCAssert([EZJavaScript(floating.webView,@"!document.querySelector('[aria-label=\"Fermer le panneau\"]')") boolValue], @"Native panel has only its Cocoa close control");
+        // The scripted fake model returns a long answer for the compact-view QA.
+        EZWait(^BOOL { return [EZJavaScript(floating.webView,@"document.querySelector('.floating-answer').textContent.length > 600") boolValue]; });
         EZJavaScript(floating.webView,@"document.documentElement.dataset.theme='dark'");
         EZShot(floating.webView,[output stringByAppendingPathComponent:@"shots/native-panel-dark.png"]);
-        NSRect moved = [floating visibleFrame:NSMakeRect(140,150,420,470)];
+        NSRect moved = [floating visibleFrame:NSMakeRect(140,150,420,600)];
         [floating.panel setFrame:moved display:YES]; [floating savePosition];
         [floating.panel cancelOperation:nil];
         NSCAssert(!floating.panel.visible, @"Escape closes the panel");
@@ -96,8 +99,11 @@ int main(int argc, const char *argv[]) {
         EZWait(^BOOL { return [EZJavaScript(floating.webView,@"document.querySelectorAll('#floating-target option').length > 1") boolValue]; });
         EZJavaScript(floating.webView,@"document.documentElement.dataset.theme='light'");
         EZShot(floating.webView,[output stringByAppendingPathComponent:@"shots/native-panel-light.png"]);
-        [floating.panel setFrame:NSMakeRect(moved.origin.x,moved.origin.y,360,440) display:YES];
+        [floating.panel setFrame:NSMakeRect(moved.origin.x,moved.origin.y,360,520) display:YES];
         NSCAssert([EZJavaScript(floating.webView,@"document.querySelector('footer').getBoundingClientRect().bottom <= innerHeight + 1 && document.body.scrollWidth <= innerWidth") boolValue], @"Composer and full-conversation action fit at the minimum native size");
+        NSCAssert([EZJavaScript(floating.webView,@"(() => { const region=document.querySelector('.floating-latest'), answer=document.querySelector('.floating-answer'); return region.getBoundingClientRect().bottom - answer.getBoundingClientRect().top - parseFloat(getComputedStyle(region).paddingBottom) - 22 >= 8 * parseFloat(getComputedStyle(answer).lineHeight); })()") boolValue], @"At least eight full reply lines remain above the overflow fade at the minimum native size");
+        NSCAssert([EZJavaScript(floating.webView,@"(() => { const q=document.querySelector('.floating-question'); return q.title.length > 100 && q.getBoundingClientRect().height <= 2 * parseFloat(getComputedStyle(q).lineHeight) + 1; })()") boolValue], @"Question preview is two complete lines, with the full text in its title");
+        NSCAssert([EZJavaScript(floating.webView,@"getComputedStyle(document.querySelector('textarea')).resize === 'none'") boolValue], @"No native textarea resize handle");
         EZShot(floating.webView,[output stringByAppendingPathComponent:@"shots/native-panel-minimum.png"]);
         // The existing seeded conversation is selected from the actual dropdown.
         id target = EZJavaScript(floating.webView,@"document.querySelector('#floating-target option[value]:not([value=\"\"])')?.value || ''");

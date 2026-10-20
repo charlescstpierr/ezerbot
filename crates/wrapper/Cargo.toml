@@ -31,6 +31,10 @@ jsonwebtoken = "9"
 sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
+# Already locked via jsonwebtoken: RFC 8291 encryption and VAPID ES256.
+ring = "0.17"
+# Existing locked URL parser; endpoint validation must not use string heuristics.
+url = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", default-features = false }

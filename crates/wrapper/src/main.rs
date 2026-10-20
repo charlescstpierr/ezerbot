@@ -71,7 +71,12 @@ fn error(status: u16, message: &str) -> ApiError {
     }
 }
 
-fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiResponse, ApiError> {
+fn payload(
+    request: &mut Request,
+    port: u16,
+    app: &mut App,
+    remote: bool,
+) -> Result<ApiResponse, ApiError> {
     let method = request.method().as_str().to_owned();
     let path = request.url().to_owned();
     let headers: Vec<_> = request
@@ -79,13 +84,25 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
         .iter()
         .map(|header| (header.field.as_str().to_string(), header.value.to_string()))
         .collect();
-    validate_headers_for_path(port, &method, &path, &headers)?;
+    if remote {
+        grokbot_wrapper::features::iphone::validate_headers(&method, &headers)?;
+        if !grokbot_wrapper::features::iphone::enabled(app) {
+            return Err(error(403, "L’accès iPhone est désactivé sur le Mac."));
+        }
+    } else {
+        validate_headers_for_path(port, &method, &path, &headers)?;
+    }
     let limit = body_limit(&path);
     if request.body_length().is_some_and(|length| length > limit) {
         return Err(too_large(&path));
     }
     if method == "GET" {
-        let asset = match path.as_str() {
+        let asset_path = if path.starts_with("/?notification=") {
+            "/"
+        } else {
+            path.as_str()
+        };
+        let asset = match asset_path {
             "/" => Some((INDEX, "text/html; charset=utf-8")),
             "/styles.css" => Some((STYLES, "text/css; charset=utf-8")),
             "/app.js" => Some((SCRIPT, "text/javascript; charset=utf-8")),
@@ -95,8 +112,39 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
             "/chat.css" => Some((CHAT_STYLES, "text/css; charset=utf-8")),
             "/panels.js" => Some((PANELS_SCRIPT, "text/javascript; charset=utf-8")),
             "/panels.css" => Some((PANELS_STYLES, "text/css; charset=utf-8")),
+            "/iphone.js" => Some((
+                include_str!("../../../app/ui/iphone.js"),
+                "text/javascript; charset=utf-8",
+            )),
+            "/iphone.css" => Some((
+                include_str!("../../../app/ui/iphone.css"),
+                "text/css; charset=utf-8",
+            )),
+            "/sw.js" => Some((
+                include_str!("../../../app/web/public/sw.js"),
+                "text/javascript; charset=utf-8",
+            )),
+            "/manifest.webmanifest" => Some((
+                include_str!("../../../app/web/public/manifest.webmanifest"),
+                "application/manifest+json",
+            )),
             _ => None,
         };
+        let icon = match path.as_str() {
+            "/icon-192.png" => {
+                Some(include_bytes!("../../../app/web/public/icon-192.png").as_slice())
+            }
+            "/icon-512.png" => {
+                Some(include_bytes!("../../../app/web/public/icon-512.png").as_slice())
+            }
+            _ => None,
+        };
+        if let Some(bytes) = icon {
+            return Ok(ApiResponse::Bytes {
+                content_type: "image/png".into(),
+                body: bytes.to_vec(),
+            });
+        }
         if let Some((content, content_type)) = asset {
             return Ok(ApiResponse::Bytes {
                 content_type: content_type.into(),
@@ -114,7 +162,11 @@ fn payload(request: &mut Request, port: u16, app: &mut App) -> Result<ApiRespons
     if body.len() > limit {
         return Err(too_large(&path));
     }
-    app.api_response(&method, &path, &body)
+    if remote {
+        grokbot_wrapper::features::iphone::remote(app, &method, &path, &body, &headers)
+    } else {
+        app.api_response(&method, &path, &body)
+    }
 }
 
 /// Les builds de développement peuvent viser un faux serveur OpenAI pour essayer l'interface
@@ -214,10 +266,59 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         .to_ip()
         .ok_or("Adresse locale non disponible.")?
         .port();
+    if port == grokbot_wrapper::features::iphone::PORT {
+        return Err("Le port 47863 est réservé à l’accès iPhone.".into());
+    }
+    let mut remote_server: Option<Server> = None;
+    let mut remote_turn = false;
     println!("{}", json!({"url": format!("http://127.0.0.1:{port}")}));
     std::io::stdout().flush()?;
     loop {
-        let request = server.recv_timeout(TICK_INTERVAL)?;
+        let iphone = grokbot_wrapper::features::iphone::enabled(&app);
+        if iphone && remote_server.is_none() {
+            match Server::http(("127.0.0.1", grokbot_wrapper::features::iphone::PORT)) {
+                Ok(listener) => {
+                    remote_server = Some(listener);
+                    grokbot_wrapper::features::iphone::listener_error(&app, None);
+                }
+                Err(_) => grokbot_wrapper::features::iphone::listener_error(
+                    &app,
+                    Some("Le port 47863 est occupé. Libérez-le ou désactivez l’accès iPhone."),
+                ),
+            }
+        } else if !iphone {
+            remote_server = None;
+        }
+        // Never change the desktop listener's loopback/Host protections. The
+        // stable second port is also loopback: only Tailscale Serve exposes it.
+        // Alternate when both queues are busy: a phone (even an unpaired one)
+        // must never starve the Mac window's revoke/disable controls.
+        let local_request = if remote_turn {
+            None
+        } else {
+            server.try_recv()?
+        };
+        let remote_request = if local_request.is_none() {
+            remote_server
+                .as_ref()
+                .and_then(|s| s.try_recv().ok().flatten())
+        } else {
+            None
+        };
+        let (request, remote) = if remote_request.is_some() {
+            (remote_request, true)
+        } else if local_request.is_some() {
+            (local_request, false)
+        } else {
+            (
+                server.recv_timeout(if iphone {
+                    Duration::from_millis(50)
+                } else {
+                    TICK_INTERVAL
+                })?,
+                false,
+            )
+        };
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -226,9 +327,33 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         let Some(mut request) = request else {
             continue;
         };
+        remote_turn = !remote;
         let is_api = request.url().starts_with("/api/");
-        let (mut status, mut body, content_type) = match payload(&mut request, port, &mut app) {
-            Ok(response) => {
+        let mut cookie = None;
+        let (mut status, mut body, content_type) = match payload(
+            &mut request,
+            port,
+            &mut app,
+            remote,
+        ) {
+            Ok(mut response) => {
+                if remote && request.url() == "/api/iphone/exchange" {
+                    if let ApiResponse::Json(ref mut value) = response {
+                        if let Some(credential) = value
+                            .as_object_mut()
+                            .and_then(|v| v.remove("credential"))
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                        {
+                            let secure = if cfg!(debug_assertions) {
+                                ""
+                            } else {
+                                "; Secure"
+                            };
+                            cookie = Some(format!("ezerbot_device={credential}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000{secure}"));
+                            value["paired"] = json!(true);
+                        }
+                    }
+                }
                 let (body, content_type) = response.into_parts();
                 if header_safe(&content_type) {
                     (200, body, content_type)
@@ -266,6 +391,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             }
         }
         let mut response = Response::from_data(body).with_status_code(StatusCode(status));
+        if let Some(cookie) = cookie {
+            response.add_header(Header::from_bytes("Set-Cookie", cookie).expect("device cookie"));
+        }
         for (name, value) in media_headers {
             response.add_header(Header::from_bytes(name, value).expect("media response header"));
         }

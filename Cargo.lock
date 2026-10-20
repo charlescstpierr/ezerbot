@@ -475,6 +475,7 @@ dependencies = [
  "grokbot-store",
  "grokbot-submission-journal",
  "jsonwebtoken",
+ "ring",
  "rusqlite",
  "security-framework",
  "serde",
@@ -482,6 +483,7 @@ dependencies = [
  "sha2",
  "tiny_http",
  "ureq",
+ "url",
 ]
 
 [[package]]

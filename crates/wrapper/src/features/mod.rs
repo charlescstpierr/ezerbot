@@ -100,6 +100,7 @@ pub mod routines_background;
 pub mod screen;
 pub mod skills;
 pub mod storage;
+pub mod usage;
 pub mod voice;
 pub mod voice_session;
 
@@ -142,6 +143,7 @@ registry!(
     generated,
     mcp,
     storage,
+    usage,
     notifications,
     local,
     voice,

@@ -41,6 +41,7 @@
   let preferencesLoaded = false;
   let pollTimer;
   let pickerKind = null;
+  let revealedBotId = null;
   function usageUrl() {
     return provider().backend === "codex"
       ? "https://chatgpt.com/codex/settings/usage"
@@ -649,6 +650,18 @@
     render();
   }
 
+  function revealChosenBot() {
+    const list = $("sidebar-bot-list");
+    const pressed = list.querySelector("[aria-pressed=true]");
+    if (pressed && (pressed.offsetTop < list.scrollTop || pressed.offsetTop + pressed.offsetHeight > list.scrollTop + list.clientHeight)) list.scrollTop = pressed.offsetTop;
+  }
+
+  // Un fondu bas signale qu'il reste des bots à faire défiler.
+  function fadeBotList() {
+    const list = $("sidebar-bot-list");
+    list.classList.toggle("has-more", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
+  }
+
   function closeBotMenu() {
     $("bot-menu").hidden = true;
     $("bot-menu").replaceChildren();
@@ -679,7 +692,9 @@
       return button;
     };
     const actions = chosen && !chosen.deleted ? [action("edit", `Modifier ${chosen.name}`, () => openBotDialog(chosen))] : [];
-    menu.replaceChildren(element("h4", "", "Avec qui ?"), ...options, element("div", "menu-divider"), ...actions, action("plus", "Nouveau bot", () => openBotDialog(null)));
+    const list = element("div", "bot-menu-list");
+    list.append(...options);
+    menu.replaceChildren(element("h4", "", "Avec qui ?"), list, element("div", "menu-divider"), ...actions, action("plus", "Nouveau bot", () => openBotDialog(null)));
     $("composer-bot").setAttribute("aria-expanded", "true");
   }
 
@@ -696,14 +711,11 @@
       button.addEventListener("click", () => chooseBot(bot));
       return button;
     });
-    const add = element("button", "sidebar-bot add-bot");
-    add.type = "button";
-    add.title = "Nouveau bot";
-    const plus = element("span", "sidebar-bot-add");
-    plus.append(icon("plus"));
-    add.append(plus, element("span", "", "Nouveau"));
-    add.addEventListener("click", () => openBotDialog(null));
-    $("sidebar-bot-list").replaceChildren(...bots, add);
+    const list = $("sidebar-bot-list");
+    list.replaceChildren(...bots);
+    // Ramène le bot choisi dans la vue quand il change, sans contrarier un défilement manuel.
+    if (chosen?.id !== revealedBotId) { revealedBotId = chosen?.id; revealChosenBot(); }
+    fadeBotList();
     // La barre d'écriture montre le bot du fil ; il ne se change que sur un fil direct encore vide.
     $("composer-bot-name").textContent = chosen?.name || "Ezerbot";
     $("composer-bot").disabled = Boolean(conversation?.messages.length) || ["group", "task", "routine"].includes(conversation?.kind);
@@ -1507,12 +1519,17 @@
   }));
   if (mascot) $("bot-preview-mascot").append(mascot.create(true));
   for (const id of ["bot-name", "bot-description"]) $(id).addEventListener("input", renderBotPreview);
+  $("sidebar-bot-list").addEventListener("scroll", fadeBotList, { passive: true });
+  // Le nombre de tuiles par rangée suit la largeur de la barre latérale.
+  window.addEventListener("resize", () => { revealChosenBot(); fadeBotList(); });
   $("composer-bot").addEventListener("click", () => {
     if (!$("bot-menu").hidden) { closeBotMenu(); return; }
     if (pickerKind) { closePicker(); renderProvider(); }
     $("bot-menu").hidden = false;
     renderBotMenu();
-    $("bot-menu").querySelector("[aria-checked=true]")?.focus();
+    const checked = $("bot-menu").querySelector("[aria-checked=true]");
+    checked?.scrollIntoView({ block: "nearest" });
+    checked?.focus({ preventScroll: true });
   });
   $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);

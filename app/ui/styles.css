@@ -187,8 +187,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill small { font-size: 11px; }
 .composer .tool-pill .icon { width: 13px; height: 13px; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex-wrap: nowrap; }
-.composer-bot { flex: 0 0 auto; }
+.composer .composer-tools { flex: 0 0 auto; flex-wrap: nowrap; }
+.composer .composer-bot { flex: 0 1 auto; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(380px, 60vh); overflow-y: auto; }
 .picker h4 { margin: 6px 10px; color: var(--subtle); font-size: 9px; font-weight: 600; letter-spacing: 1.1px; text-transform: uppercase; }
@@ -202,6 +202,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .bot-menu .bot-avatar { width: 24px; height: 21px; flex: 0 0 auto; }
 .bot-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-menu .bot-menu-action .icon { visibility: visible; margin-top: 0; color: var(--muted); }
+.bot-menu { overflow: visible; max-height: none; }
+.bot-menu-list { max-height: 236px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .picker-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 2px 2px; padding: 8px 10px; border-radius: 7px; background: var(--soft); color: var(--muted); font-size: 10px; }
 .usage-link { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 3px; }
 .chatgpt-button { display: inline-flex; align-items: center; justify-content: center; padding: 9px 14px; border-radius: 8px; border: 1px solid #ffffff38; background: #000; color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -329,15 +331,15 @@ a.secondary-button { text-decoration: none; }
 .bot-avatar { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; --mascot-eye: var(--bot-color, var(--subtle)); }
 .shape-options .bot-avatar { width: 26px; height: 22.75px; }
 .sidebar-bots { margin: -8px 0 16px; }
-.sidebar-bots .section-label { display: block; margin: 0 9px 7px; }
-.sidebar-bot-list { display: flex; flex-wrap: wrap; gap: 3px; max-height: 136px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.sidebar-bot-list { position: relative; display: flex; flex-wrap: wrap; gap: 3px; max-height: 111px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .sidebar-bot { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 54px; min-width: 0; padding: 7px 2px 6px; border-radius: 8px; color: var(--sidebar-muted); font-size: 9px; transition: background .15s, color .15s, box-shadow .15s; }
 .sidebar-bot > span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-bot:hover { background: var(--soft); color: var(--text); }
 .sidebar-bot[aria-pressed="true"] { background: var(--pane); color: var(--text); box-shadow: inset 0 0 0 1px var(--bot-color, var(--line)); }
 .sidebar-bot .bot-avatar { width: 30px; height: 26.25px; }
-.sidebar-bot-add { display: grid; place-items: center; width: 30px; height: 26px; border-radius: 8px; border: 1px dashed var(--line); }
-.sidebar-bot-add .icon { width: 13px; height: 13px; }
+.sidebar-bot-list.has-more { -webkit-mask-image: linear-gradient(#000 80%, transparent); mask-image: linear-gradient(#000 80%, transparent); }
+/* Le citron ou le blanc d'un bot disparaissent sur fond clair : le contour se mêle au texte. */
+[data-theme="light"] .sidebar-bot[aria-pressed="true"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bot-color, var(--line)) 60%, var(--text)); }
 .setting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .setting-heading p { font-size: 11px; color: var(--muted); margin: 0 0 14px; line-height: 1.6; }
 .setting-heading .secondary-button { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 8px 11px; }
@@ -362,9 +364,17 @@ a.secondary-button { text-decoration: none; }
 .bot-preview-mascot { display: block; width: 120px; height: 105px; }
 .bot-preview-name { margin-top: 6px; max-width: 100%; font-size: 15px; font-weight: 650; letter-spacing: -.3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-preview-name.is-empty { color: var(--subtle); font-weight: 500; }
-.bot-preview-description { margin-top: 3px; max-width: 100%; color: var(--muted); font-size: 11px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.bot-preview-description { min-height: 3em; margin-top: 3px; max-width: 100%; color: var(--muted); font-size: 11px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* L'aperçu reste visible pendant qu'on fait défiler le formulaire, sauf dans une fenêtre basse. */
+/* Le liseré couvre l'anneau de focus des champs qui défilent sous l'aperçu collé. */
+.bot-preview { box-shadow: 0 0 0 6px var(--pane); }
 @media (min-height: 721px) { .bot-preview { position: sticky; top: -27px; z-index: 2; } }
+@media (max-height: 720px) {
+  .bot-preview { position: sticky; top: -27px; z-index: 2; flex-direction: row; gap: 12px; padding: 8px 14px; margin-bottom: 14px; text-align: left; }
+  .bot-preview-mascot { width: 56px; height: 49px; flex: 0 0 auto; }
+  .bot-preview-name { margin-top: 0; }
+  .bot-preview-description { display: none; }
+}
 .bot-field { margin-top: 18px; }
 .form-label small { color: var(--subtle); margin-left: 6px; }
 textarea.text-input { display: block; resize: vertical; min-height: 58px; line-height: 1.55; }
@@ -402,6 +412,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .sidebar { padding-top: 22px; }
   .brand-row { margin-bottom: 14px; }
   .search-field { margin: 10px 0 14px; }
+  .sidebar-bots { margin-top: -2px; }
   .local-note { display: none; }
   .account-button { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 11px; }
 }
@@ -417,6 +428,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer .tool-pill small { display: none; }
 }
 @media (max-width: 900px) and (min-width: 761px) {
+  .composer-bot-name { max-width: 96px; }
   .suggestion-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .suggestion { flex-direction: row; align-items: center; gap: 10px; padding: 11px; }
   .suggestion strong { font-size: 10px; }

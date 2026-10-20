@@ -878,6 +878,7 @@
     button.type = "button";
     button.dataset.picker = kind;
     button.title = `${label} : ${value}`;
+    button.setAttribute("aria-label", button.title);
     button.disabled = !enabled;
     button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-expanded", String(pickerKind === kind));
@@ -923,6 +924,8 @@
     const scrollHint = element("small", "picker-scroll-hint", "Liste défilante ↕");
     scrollHint.hidden = true;
     foot.append(scrollHint, element("span", "", provider().backend === "codex" ? "Quota Codex utilisé" : "Partage d’abonnement ChatGPT"), link);
+    if (picker.dataset.kind !== pickerKind) picker.scrollTop = 0;
+    picker.dataset.kind = pickerKind;
     picker.replaceChildren(element("h4", "", title), ...options, foot);
     scrollHint.hidden = !(picker.scrollHeight > picker.clientHeight);
   }

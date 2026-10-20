@@ -132,6 +132,44 @@ test("effort picker displays actual wire levels and submits the selected value",
   assert.doesNotMatch(nodes.get("composer-tools").textContent, /Par défaut/);
 });
 
+test("sharing renders all three values with accessible labels and submits Fast", async () => {
+  const { context, nodes, state } = mount("sharing", true);
+  const calls = [];
+  context.icon = () => context.element("svg");
+  context.notify = (message) => assert.fail(message);
+  context.api = async (path, body) => { calls.push({ path, body }); return { preferences: body }; };
+  runInNewContext(source.slice(source.indexOf("  function pill("), source.indexOf("  function renderPicker(")), context);
+  state.provider.models = [{ slug: "gpt-6.1-sol", name: "GPT-6.1 Sol", efforts: [{ effort: "medium", description: "Équilibré" }], tiers: [{ id: "priority", name: "Fast" }] }];
+  state.preferences = { model: "gpt-6.1-sol", effort: "medium", fast: false };
+  context.pickerKind = "speed";
+  context.renderProvider();
+  const buttons = nodes.get("composer-tools").querySelectorAll("button");
+  assert.deepEqual(buttons.map((button) => button.querySelector("b").textContent), ["GPT-6.1 Sol", "medium", "Standard"]);
+  assert.deepEqual(buttons.map((button) => button.attributes["aria-label"]), ["Modèle : GPT-6.1 Sol", "Effort : medium", "Vitesse : Standard"]);
+  await nodes.get("picker").querySelectorAll("button")[1].listeners.click();
+  assert.equal(calls[0].path, "/api/preferences");
+  assert.equal(calls[0].body.fast, true);
+  const speed = nodes.get("composer-tools").querySelectorAll("button")[2];
+  assert.equal(speed.querySelector("b").textContent, "Fast");
+  assert.equal(speed.attributes["aria-label"], "Vitesse : Fast");
+});
+
+test("changing picker kind resets scroll without resetting a same-kind refresh", () => {
+  const { context, nodes } = mount("codex", true);
+  const picker = nodes.get("picker");
+  picker.scrollTop = 43;
+  context.pickerKind = "effort";
+  context.renderPicker();
+  assert.equal(picker.scrollTop, 0);
+  assert.equal(picker.dataset.kind, "effort");
+  picker.scrollTop = 21;
+  context.renderPicker();
+  assert.equal(picker.scrollTop, 21);
+  context.pickerKind = "model";
+  context.renderPicker();
+  assert.equal(picker.scrollTop, 0);
+});
+
 test("connection radio focus survives a selection response and subsequent polling renders", () => {
   const { context, nodes, state, document } = mount("codex");
   nodes.get("provider-section").querySelector("input[name=connection-backend][value=sharing]").focus();

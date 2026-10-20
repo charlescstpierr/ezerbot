@@ -136,14 +136,18 @@ impl Provider {
     pub fn refresh_models(&self) {
         self.session().refresh_models();
     }
+    pub(crate) fn retired_model_replacement(&self, model: &str) -> Option<&'static str> {
+        (self.session().inner.codex && matches!(model, "gpt-5.5" | "gpt-5.3-codex-spark"))
+            .then_some(codex::DEFAULT_MODEL)
+    }
     pub(crate) fn accepts_images(&self, model: &str) -> bool {
-        !self.session().inner.codex || model != "gpt-5.3-codex-spark"
+        !self.session().inner.codex || codex::models().iter().any(|m| m.slug == model)
     }
     pub(crate) fn image_description_model(&self, model: &str) -> String {
         if self.accepts_images(model) {
             model.into()
         } else {
-            "gpt-5.5".into()
+            codex::DEFAULT_MODEL.into()
         }
     }
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
@@ -213,4 +217,38 @@ impl Provider {
 
 fn storage_failure(_: std::io::Error) -> Failure {
     Failure::other("Impossible d’enregistrer le mode de connexion sur ce Mac.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_image_fallback_and_retired_selection_use_supported_default_only() {
+        let db = std::env::temp_dir()
+            .join(format!("ezerbot-model-selection-{}", new_host_id()))
+            .join("workspace.sqlite");
+        let provider =
+            Provider::with_backends(&db, Endpoints::default(), Endpoints::codex(), false);
+        assert!(provider.accepts_images(codex::DEFAULT_MODEL));
+        for model in ["gpt-5.5", "gpt-5.3-codex-spark", "unknown"] {
+            assert!(!provider.accepts_images(model));
+            assert_eq!(
+                provider.image_description_model(model),
+                codex::DEFAULT_MODEL
+            );
+        }
+        for retired in ["gpt-5.5", "gpt-5.3-codex-spark"] {
+            assert_eq!(
+                provider.retired_model_replacement(retired),
+                Some(codex::DEFAULT_MODEL)
+            );
+        }
+        assert_eq!(provider.retired_model_replacement("gpt-6-sol"), None);
+        assert_eq!(provider.image_description_model("gpt-6-sol"), "gpt-6-sol");
+        *lock(&provider.selected) = false;
+        assert!(provider.accepts_images("gpt-5.5"));
+        assert_eq!(provider.image_description_model("gpt-5.5"), "gpt-5.5");
+        assert_eq!(provider.retired_model_replacement("gpt-5.5"), None);
+    }
 }

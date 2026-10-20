@@ -77,7 +77,7 @@ impl Fixture {
     fn raw(&self) -> Result<ureq::Response, String> {
         self.provider
             .responses(
-                json!({"model":"gpt-5.5", "instructions":"Consignes", "input":[], "stream":true}),
+                json!({"model":"gpt-6.1-sol", "instructions":"Consignes", "input":[], "stream":true}),
             )
             .map_err(|f| f.message)
     }
@@ -96,7 +96,7 @@ fn post(app: &mut App, path: &str, value: Value) -> Value {
 }
 fn request() -> ModelRequest {
     ModelRequest {
-        model: "gpt-5.5".into(),
+        model: "gpt-6.1-sol".into(),
         instructions: "Consignes locales".into(),
         input: vec![HistoryItem {
             entry_id: "user".into(),
@@ -162,7 +162,13 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
     let status = f.provider.status();
     assert_eq!(status["email"], "codex@exemple.com");
     assert_eq!(status["plan"], "plus");
-    assert_eq!(status["models"].as_array().unwrap().len(), 9);
+    let models = status["models"].as_array().unwrap();
+    assert_eq!(models.len(), 7);
+    assert_eq!(models[0]["slug"], "gpt-6.1-sol");
+    assert!(models.iter().all(|model| !matches!(
+        model["slug"].as_str(),
+        Some("gpt-5.5" | "gpt-5.3-codex-spark")
+    )));
     assert!(!status.to_string().contains("refresh-"));
     #[cfg(unix)]
     {
@@ -301,20 +307,16 @@ fn quota_reset_http_sse_and_expired_refresh_are_french_and_not_retried() {
 }
 
 #[test]
-fn text_only_spark_uses_vision_caption_but_never_receives_image_bytes() {
+fn codex_vision_caption_and_reply_use_supported_models() {
     let _serial = OAUTH.lock().unwrap();
     let f = Fixture::new();
     f.login();
     let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
-    post(
-        &mut app,
-        "/api/preferences",
-        json!({"model":"gpt-5.3-codex-spark"}),
-    );
+    post(&mut app, "/api/preferences", json!({"model":"gpt-6-sol"}));
     let c = post(
         &mut app,
         "/api/conversations",
-        json!({"title":"Image avec Spark"}),
+        json!({"title":"Image avec Codex"}),
     )["conversation"]["id"]
         .as_str()
         .unwrap()
@@ -330,9 +332,9 @@ fn text_only_spark_uses_vision_caption_but_never_receives_image_bytes() {
     ]));
     let prepare = json!({"conversation_id":c,"attachment_id":image,"draft":"Décris ce pixel"});
     post(&mut app, "/api/attachments/precaption", prepare.clone());
-    wait("description vision pour Spark", || {
+    wait("description vision Codex", || {
         let result = post(&mut app, "/api/attachments/precaption", prepare.clone());
-        assert_eq!(result["model"], "gpt-5.5");
+        assert_eq!(result["model"], "gpt-6-sol");
         result["caption"]["status"] == "ready"
     });
     drop(app);
@@ -344,29 +346,257 @@ fn text_only_spark_uses_vision_caption_but_never_receives_image_bytes() {
     post(
         &mut app,
         "/api/send",
-        json!({"conversation_id":c,"message_id":"spark-image","body":"Décris ce pixel","attachments":[image]}),
+        json!({"conversation_id":c,"message_id":"codex-image","body":"Décris ce pixel","attachments":[image]}),
     );
-    wait("réponse Spark avec description", || {
+    wait("réponse Codex avec image", || {
         app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == "reply-spark-image" && message["state"] == "echoed")
+            .any(|message| message["id"] == "reply-codex-image" && message["state"] == "echoed")
     });
     let seen = f.server.seen.lock().unwrap();
-    assert_eq!(seen.bodies[0]["model"], "gpt-5.5");
-    assert!(seen.bodies[0]["input"].to_string().contains("input_image"));
-    let spark = seen
-        .bodies
-        .iter()
-        .find(|body| body["model"] == "gpt-5.3-codex-spark")
-        .unwrap();
-    assert!(spark["input"].to_string().contains("Un pixel blanc."));
-    assert!(!spark["input"].to_string().contains("input_image"));
-    let before = seen.bodies.len();
+    assert!(seen.bodies.len() >= 2);
+    for body in &seen.bodies[..2] {
+        assert_eq!(body["model"], "gpt-6-sol");
+        assert!(body["input"].to_string().contains("input_image"));
+    }
+}
+
+#[test]
+fn every_advertised_codex_effort_is_selected_persisted_and_sent_unchanged() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let models = app.api("GET", "/api/state", b"").unwrap()["provider"]["models"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let c = post(
+        &mut app,
+        "/api/conversations",
+        json!({"title":"Efforts Codex"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    for model in models {
+        let slug = model["slug"].as_str().unwrap();
+        let levels: Vec<_> = model["efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect();
+        // pi 1.3.0: off=null on Astra / 6.1 Sol, off=none elsewhere;
+        // minimal maps to low, xhigh and max are explicitly supported.
+        let expected = if matches!(slug, "gpt-6-astra" | "gpt-6.1-sol") {
+            vec!["low", "medium", "high", "xhigh", "max"]
+        } else {
+            vec!["none", "low", "medium", "high", "xhigh", "max"]
+        };
+        assert_eq!(levels, expected, "{slug}");
+        for effort in levels {
+            let selected = post(
+                &mut app,
+                "/api/preferences",
+                json!({"model":slug,"effort":effort}),
+            );
+            assert_eq!(selected["preferences"]["model"], slug);
+            assert_eq!(selected["preferences"]["effort"], effort);
+            f.reply(ScriptedResponse::events(&[
+                json!({"type":"response.output_text.delta","delta":"Réponse avec effort choisi."}),
+                json!({"type":"response.completed"}),
+            ]));
+            let message = format!("effort-{slug}-{effort}");
+            post(
+                &mut app,
+                "/api/send",
+                json!({"conversation_id":c,"message_id":message,"body":"Réponds en texte."}),
+            );
+            wait("réponse avec effort choisi", || {
+                app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| {
+                        item["id"] == format!("reply-{message}") && item["state"] == "echoed"
+                    })
+            });
+            let seen = f.server.seen.lock().unwrap();
+            let body = seen.bodies.last().unwrap();
+            assert_eq!(body["model"], slug);
+            assert_eq!(body["reasoning"], json!({"effort":effort,"summary":"auto"}));
+            let saved: String = conn
+                .query_row(
+                    "SELECT effort FROM wrapper_engine_runs ORDER BY rowid DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(saved, effort);
+        }
+    }
+}
+
+#[test]
+fn first_simple_question_uses_supported_default_and_persists_answer_text() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let c = post(&mut app, "/api/conversations", json!({"title":"Calcul"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"17 × 23 = **391**."}),
+        json!({"type":"response.completed"}),
+    ]));
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"simple","body":"Combien font 17 × 23 ?"}),
+    );
+    wait("réponse texte au premier message", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["id"] == "reply-simple"
+                    && message["state"] == "echoed"
+                    && message["body"] == "17 × 23 = **391**."
+            })
+    });
+    let seen = f.server.seen.lock().unwrap();
+    let body = &seen.bodies[0];
+    assert_eq!(body["model"], "gpt-6.1-sol");
+    assert!(body["input"].to_string().contains("Combien font 17 × 23 ?"));
+    // The emitted Responses instructions are the owned prompt contract, not
+    // evidence that a scripted backend can interpret natural language.
+    let instructions = body["instructions"].as_str().unwrap();
+    assert!(instructions.contains(
+        "For a simple question or a request to write text, answer directly in your response text"
+    ));
+    assert!(instructions.contains("only for genuine multi-step work requiring tools"));
+    assert!(instructions.contains("A complete_task summary never replaces the answer"));
     drop(seen);
-    assert!(f.provider.responses(json!({"model":"gpt-5.3-codex-spark","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]})).is_err());
-    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let record: String = conn
+        .query_row(
+            "SELECT record FROM engine_runs WHERE conversation_id=?1",
+            [&c],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let run: Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(run["kind"], "chat");
+    assert!(run["task_status"].is_null());
+    let tool_calls: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM engine_run_events WHERE kind='tool_call'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tool_calls, 0);
+}
+
+#[test]
+fn retired_codex_preferences_migrate_durably_without_changing_other_choices() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    post(
+        &mut app,
+        "/api/preferences",
+        json!({"model":"gpt-6-sol","effort":"high","fast":true}),
+    );
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    for retired in ["gpt-5.5", "gpt-5.3-codex-spark"] {
+        conn.execute("UPDATE wrapper_preferences SET model=?1", [retired])
+            .unwrap();
+        drop(app);
+        let restarted = Fixture::provider(&f.db, &f.server);
+        assert!(restarted.models().is_empty());
+        app = App::open_with(&f.db, restarted).unwrap();
+        app.api("GET", "/api/state", b"").unwrap();
+        // Migration is durable even while the restarted catalogue is loading.
+        let saved: String = conn
+            .query_row("SELECT model FROM wrapper_preferences", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(saved, "gpt-6.1-sol");
+        wait("catalogue après redémarrage", || {
+            let state = app.api("GET", "/api/state", b"").unwrap();
+            assert_eq!(state["preferences"]["fast"], true);
+            state["preferences"]["model"] == "gpt-6.1-sol"
+                && state["preferences"]["effort"] == "high"
+        });
+    }
+    post(&mut app, "/api/preferences", json!({"model":"gpt-6-sol"}));
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
+        "gpt-6-sol"
+    );
+    post(
+        &mut app,
+        "/api/provider/select",
+        json!({"backend":"sharing"}),
+    );
+    post(&mut app, "/api/preferences", json!({"model":"gpt-5.5"}));
+    app.api("GET", "/api/state", b"").unwrap();
+    let saved: String = conn
+        .query_row("SELECT model FROM wrapper_preferences", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(saved, "gpt-5.5", "sharing preferences must not be migrated");
+    post(&mut app, "/api/provider/select", json!({"backend":"codex"}));
+    assert_eq!(
+        app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
+        "gpt-6.1-sol"
+    );
+}
+
+#[test]
+fn unsupported_model_refusal_proposes_switching_without_retry_or_signout() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    for retired in ["gpt-5.5", "gpt-5.3-codex-spark"] {
+        let before = f.server.seen.lock().unwrap().bodies.len();
+        let failure = f
+            .provider
+            .responses(json!({"model":retired,"input":[]}))
+            .unwrap_err();
+        assert!(failure
+            .message
+            .contains("Choisissez un autre modèle dans le sélecteur"));
+        assert_eq!(failure.kind, "other");
+        assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before + 1);
+        assert!(f.provider.connected());
+    }
+    for body in [
+        json!({"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}),
+        json!({"error":{"type":"invalid_request_error","message":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}}),
+    ] {
+        let before = f.server.seen.lock().unwrap().bodies.len();
+        f.reply(ScriptedResponse::json(400, body));
+        let message = f.raw().unwrap_err();
+        assert!(
+            message.contains("Choisissez un autre modèle dans le sélecteur"),
+            "{message}"
+        );
+        assert!(!message.contains("Reconnectez-vous"));
+        assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before + 1);
+        assert!(f.provider.connected());
+    }
 }
 
 #[test]
@@ -380,7 +610,7 @@ fn plan_without_codex_is_not_a_temporary_quota_limit() {
     ));
     let failure = f
         .provider
-        .responses(json!({"model":"gpt-5.5","stream":true,"input":[]}))
+        .responses(json!({"model":"gpt-6.1-sol","stream":true,"input":[]}))
         .unwrap_err();
     assert_eq!(failure.kind, "other");
     assert!(failure
@@ -416,7 +646,7 @@ fn app_tools_memory_cache_quota_card_and_restart_are_durable() {
     let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
-        "gpt-5.5"
+        "gpt-6.1-sol"
     );
     let c = post(&mut app, "/api/conversations", json!({"title":"Codex"}))["conversation"]["id"]
         .as_str()

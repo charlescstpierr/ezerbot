@@ -10,7 +10,8 @@ const rendering = source.slice(source.indexOf("  function renderPicker()"), sour
 function mount(backend, connected = false) {
   let document;
   class Element {
-    constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.className = ""; }
+    constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.className = ""; this.dataset = {}; this.attributes = {}; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
     contains(node) { return node === this || this.children.some((child) => child.contains(node)); }
     replaceChildren(...children) {
@@ -95,6 +96,33 @@ test("conversation action links track the selected backend instead of capturing 
   assert.equal({ ...context.actions }.usageUrl, "https://chatgpt.com/settings/usage");
   backend = "codex";
   assert.equal({ ...context.actions }.usageUrl, "https://chatgpt.com/codex/settings/usage");
+});
+
+test("effort picker displays actual wire levels and submits the selected value", async () => {
+  const { context, nodes, state } = mount("codex", true);
+  const calls = [];
+  context.icon = () => context.element("svg");
+  context.notify = (message) => assert.fail(message);
+  context.api = async (path, body) => { calls.push({ path, body }); return { preferences: body }; };
+  const names = source.slice(source.indexOf("  const effortNames"), source.indexOf("\n", source.indexOf("  const effortNames")));
+  const naming = source.slice(source.indexOf("  function effortName("), source.indexOf("\n\n  function icon("));
+  const pickerControls = source.slice(source.indexOf("  function pill("), source.indexOf("  function renderPicker("));
+  runInNewContext(names + naming + pickerControls, context);
+  state.provider.models = [{ slug: "gpt-6.1-sol", name: "GPT-6.1 Sol", tiers: [], efforts: ["low", "medium", "high", "xhigh", "max"].map((effort) => ({ effort, description: effort })) }];
+  state.preferences = { model: "gpt-6.1-sol", effort: "medium" };
+  context.pickerKind = "effort";
+  context.renderProvider();
+  assert.match(nodes.get("composer-tools").textContent, /medium · Équilibré/);
+  const options = nodes.get("picker").querySelectorAll("button");
+  assert.deepEqual(options.map((option) => option.textContent.split(" · ")[0]), ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(options[1].attributes["aria-checked"], "true");
+  await options[3].listeners.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/preferences");
+  assert.equal(calls[0].body.effort, "xhigh");
+  assert.equal(state.preferences.effort, "xhigh");
+  assert.match(nodes.get("composer-tools").textContent, /xhigh · Très élevé/);
+  assert.doesNotMatch(nodes.get("composer-tools").textContent, /Par défaut/);
 });
 
 test("connection radio focus survives a selection response and subsequent polling renders", () => {

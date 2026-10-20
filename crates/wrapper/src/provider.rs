@@ -368,6 +368,7 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
         "subscription_sharing_invalid_user" => Failure::signin(),
         _ if status == 401 => Failure::signin(),
         _ if status == 503 => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
+        _ if status == 400 && message.to_ascii_lowercase().contains("model is not supported") => Failure::other("OpenAI n’accepte pas ce modèle avec votre connexion. Choisissez un autre modèle dans le sélecteur en haut de la conversation, puis relancez votre message."),
         _ => {
             let detail: String = if message.is_empty() { code } else { message }.chars().take(300).collect();
             Failure::other(if status == 0 {

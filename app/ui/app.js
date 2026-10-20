@@ -311,7 +311,7 @@
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
   function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
-  function effortName(effort) { return effortNames[effort] || (effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : "Par défaut"); }
+  function effortName(effort) { return effort ? `${effort} · ${effortNames[effort] || effort}` : "Par défaut"; }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");

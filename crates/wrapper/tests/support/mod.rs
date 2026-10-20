@@ -282,7 +282,19 @@ impl FakeOpenAi {
                         seen.bearer.push(bearer);
                         let request_body: Value = serde_json::from_str(&body).unwrap();
                         seen.bodies.push(request_body.clone());
-                        if let Some(key) = request_body["prompt_cache_key"]
+                        if request.url() == "/backend-api/codex/responses"
+                            && matches!(
+                                request_body["model"].as_str(),
+                                Some("gpt-5.5" | "gpt-5.3-codex-spark")
+                            )
+                        {
+                            // Real-account refusals observed on 2026-10-20. Keep
+                            // fresh-install tests from succeeding with retired defaults.
+                            (400, "application/json".into(), json!({"detail":format!(
+                                "The '{}' model is not supported when using Codex with a ChatGPT account.",
+                                request_body["model"].as_str().unwrap()
+                            )}).to_string())
+                        } else if let Some(key) = request_body["prompt_cache_key"]
                             .as_str()
                             .filter(|key| key.chars().count() > 64)
                         {

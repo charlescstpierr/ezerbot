@@ -7,6 +7,7 @@ use super::*;
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const SCOPE: &str = "openid profile email offline_access";
 const AUTH_CLAIM: &str = "https://api.openai.com/auth";
+pub(super) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 
 pub(super) fn authorization_query(attempt: &Attempt) -> Vec<(&'static str, String)> {
     vec![
@@ -163,20 +164,6 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| Failure::other("Demande Codex invalide."))?;
-    if object.get("model").and_then(Value::as_str) == Some("gpt-5.3-codex-spark")
-        && object
-            .get("input")
-            .and_then(Value::as_array)
-            .is_some_and(|input| {
-                input.iter().any(|item| {
-                    item["content"].as_array().is_some_and(|content| {
-                        content.iter().any(|part| part["type"] == "input_image")
-                    })
-                })
-            })
-    {
-        return Err(Failure::other("GPT-5.3 Codex Spark ne lit pas les images. Choisissez GPT-5.5 ou envoyez une description de l’image."));
-    }
     object.insert("store".into(), json!(false));
     object.insert("stream".into(), json!(true));
     if object
@@ -194,13 +181,10 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     object.remove("max_output_tokens");
     object.remove("temperature");
     if !object.contains_key("reasoning") {
-        let effort = if matches!(
-            object["model"].as_str(),
-            Some("gpt-6-astra" | "gpt-6.1-sol")
-        ) {
-            "medium"
-        } else {
+        let effort = if supports_no_reasoning(object["model"].as_str().unwrap_or_default()) {
             "none"
+        } else {
+            "medium"
         };
         object.insert("reasoning".into(), json!({"effort":effort}));
     }
@@ -215,43 +199,45 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Catalogue statique, comme pi (et non /v1/models, réservé au partage).
-/// Le modèle vision généraliste est placé en tête pour les nouvelles installations.
+// pi's thinkingLevelMap.off is null for these two models; the others map
+// off to "none". Advertise wire efforts, not duplicate aliases (minimal → low).
+fn supports_no_reasoning(model: &str) -> bool {
+    !matches!(model, "gpt-6-astra" | "gpt-6.1-sol")
+}
+
+/// Catalogue statique (et non /v1/models, réservé au partage).
+/// Ces modèles ont été acceptés par un vrai compte ChatGPT le 2026-10-20.
+/// Le défaut vision généraliste est aussi le repli pour les descriptions d’image.
 pub(super) fn models() -> Vec<Model> {
     [
-        ("gpt-5.5", "GPT-5.5"),
-        ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+        (DEFAULT_MODEL, "GPT-6.1 Sol"),
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
         ("gpt-5.6-terra", "GPT-5.6 Terra"),
         ("gpt-6-astra", "GPT-6 Astra"),
         ("gpt-6-luna", "GPT-6 Luna"),
         ("gpt-6-sol", "GPT-6 Sol"),
-        ("gpt-6.1-sol", "GPT-6.1 Sol"),
     ]
     .into_iter()
     .map(|(id, name)| Model {
         slug: id.into(),
         name: name.into(),
-        description: if id.ends_with("spark") {
-            "Quota Codex · texte uniquement (images décrites par GPT-5.5)"
-        } else {
-            "Quota Codex · texte et images"
-        }
-        .into(),
-        efforts: [
-            ("low", "Léger"),
-            ("medium", "Équilibré"),
-            ("high", "Approfondi"),
-            ("xhigh", "Très approfondi"),
-        ]
-        .into_iter()
-        .chain((!matches!(id, "gpt-5.5" | "gpt-5.3-codex-spark")).then_some(("max", "Maximum")))
-        .map(|(effort, description)| Effort {
-            effort: effort.into(),
-            description: description.into(),
-        })
-        .collect(),
+        description: "Quota Codex · texte et images".into(),
+        efforts: supports_no_reasoning(id)
+            .then_some(("none", "Aucun"))
+            .into_iter()
+            .chain([
+                ("low", "Léger"),
+                ("medium", "Équilibré"),
+                ("high", "Approfondi"),
+                ("xhigh", "Très approfondi"),
+                ("max", "Maximum"),
+            ])
+            .map(|(effort, description)| Effort {
+                effort: effort.into(),
+                description: description.into(),
+            })
+            .collect(),
         default_effort: Some("medium".into()),
         tiers: vec![],
     })
@@ -263,7 +249,7 @@ mod tests {
     use super::*;
     #[test]
     fn body_keeps_tools_images_cache_and_reasoning_but_removes_unsupported_limits() {
-        let mut body = json!({"model":"gpt-5.5","instructions":"Consignes", "store":true,
+        let mut body = json!({"model":DEFAULT_MODEL,"instructions":"Consignes", "store":true,
             "input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}],
             "tools":[{"type":"function","name":"remember","parameters":{"type":"object"}}],
             "prompt_cache_key":"conversation", "reasoning":{"effort":"high"}, "max_output_tokens":900});

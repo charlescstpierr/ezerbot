@@ -820,7 +820,7 @@ pub(crate) fn resolve_model(
     conn: &Connection,
     provider: &Provider,
 ) -> grokbot_engine::contracts::Result<Option<ResolvedModel>> {
-    let (model, effort, fast): (Option<String>, Option<String>, bool) = conn
+    let (mut model, effort, fast): (Option<String>, Option<String>, bool) = conn
         .query_row(
             "SELECT model,effort,fast FROM wrapper_preferences WHERE account_id=?1",
             [ACCOUNT],
@@ -828,6 +828,18 @@ pub(crate) fn resolve_model(
         )
         .optional()?
         .unwrap_or((None, None, false));
+    // Persist the Codex upgrade even before the async catalogue is ready. Do not
+    // rewrite sharing selections or overwrite a concurrently changed preference.
+    if let Some(replacement) = model
+        .as_deref()
+        .and_then(|model| provider.retired_model_replacement(model))
+    {
+        conn.execute(
+            "UPDATE wrapper_preferences SET model=?2 WHERE account_id=?1 AND model=?3",
+            params![ACCOUNT, replacement, model],
+        )?;
+        model = Some(replacement.into());
+    }
     let models = provider.models();
     Ok(models
         .iter()

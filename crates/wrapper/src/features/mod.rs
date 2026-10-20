@@ -99,6 +99,7 @@ pub mod routines_background;
 pub mod screen;
 pub mod skills;
 pub mod storage;
+pub mod templates;
 pub mod voice;
 pub mod voice_session;
 
@@ -144,7 +145,8 @@ registry!(
     notifications,
     local,
     voice,
-    screen
+    screen,
+    templates
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

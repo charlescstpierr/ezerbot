@@ -30,6 +30,7 @@ ureq = { version = "2", features = ["json"] }
 jsonwebtoken = "9"
 sha2 = "0.10"
 base64 = "0.22"
+flate2 = "1"
 getrandom = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

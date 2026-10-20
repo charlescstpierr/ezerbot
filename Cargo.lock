@@ -462,6 +462,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "core-foundation",
+ "flate2",
  "getrandom",
  "grokbot-attachments",
  "grokbot-delegation",

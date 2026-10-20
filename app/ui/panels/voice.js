@@ -12,6 +12,7 @@
     upload_failed: "Le mémo n’a pas pu être conservé. Réessayez l’enregistrement local du mémo.",
     busy: "Une autre dictée est déjà en cours. Arrêtez-la avant de recommencer.",
     meeting_busy: "Une réunion est en cours. Arrêtez-la avant de dicter.",
+    microphone_busy: "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.",
   };
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;

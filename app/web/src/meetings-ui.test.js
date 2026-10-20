@@ -18,7 +18,7 @@ const descendants = el => [el, ...el.children.flatMap(descendants)];
 function fixture() {
   const root = new Element("div"), top = new Element("header"), panels = new Element("div"), settings = new Element("div"), welcome = new Element("div"); welcome.id="welcome"; root.append(top, welcome, panels, settings);
   const context = { conversation: { id: "chat" }, bot: { id: "grokbot" }, state: { meetings: { debug_fake: true } } };
-  let registration, poll, token, status = "recording", delayed;
+  let registration, poll, token, status = "recording", delayed, conversationVoice = false;
   const calls = [], requests = [], notices = [], events = [], storage = new Map();
   const bridge = async body => {
     calls.push(body); token = body.token;
@@ -32,7 +32,7 @@ function fixture() {
   };
   const document = { createElement: tag => new Element(tag), createTextNode: text => Object.assign(new Element("text"),{textContent:text}), getElementById: id => id === "welcome" ? welcome : panels, querySelector: () => top };
   runInNewContext(readFileSync(new URL("../../ui/panels/meetings.js",import.meta.url),"utf8"),{
-    document, window: {GrokbotPanels:host,webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener(){},dispatchEvent(event){events.push(event.type);}},
+    document, window: {GrokbotPanels:host,EzerbotVoiceMode:{active:()=>conversationVoice},webkit:{messageHandlers:{ezerbotVoice:{postMessage:bridge}}},addEventListener(){},dispatchEvent(event){events.push(event.type);}},
     Event:class {constructor(type){this.type=type;}},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     setTimeout(fn) {poll=fn;},clearTimeout(){poll=null;},confirm(){throw new Error("Native confirm is unavailable in WKWebView");},
   });
@@ -40,6 +40,7 @@ function fixture() {
   const id = name => descendants(root).find(el=>el.id === name);
   const text = name => descendants(root).find(el=>el.textContent === name);
   return { root,context,registration,calls,requests,notices,events,host,id,text,set status(value){status=value;},
+    setVoiceMode(value) {conversationVoice=value;registration.onState(context.state,context);},
     async decision(action, accepted) { const pending=action(); await Promise.resolve(); assert.equal(id("meeting-confirmation").open,true); id(accepted ? "meeting-confirmation-accept" : "meeting-confirmation-cancel").onclick(); await pending; },
     async start() { id("meeting-start").onclick(); id("meeting-consent").checked=true; id("meeting-consent").onchange(); await id("meeting-begin").onclick(); },
     hold() { delayed={}; }, release() {delayed.resolve({status:"recording",token});}, async poll() {await poll?.();},
@@ -116,6 +117,12 @@ test("dismissing a restarted capture preserves its conversation when notes are p
   const f=fixture(); f.host.draft=()=>"Notes à conserver";
   f.registration.onState({meetings:{interrupted:[{id:"meeting_old",title:"Réunion interrompue",conversation_id:"chat"}]}},f.context);
   await f.text("Fermer").onclick(); assert.equal(f.requests.find(r=>r.path==="/api/meetings/discard").body.preserve_conversation,true);
+});
+
+test("the merged conversation voice mode cannot overlap meeting capture",async()=>{
+  const f=fixture();f.setVoiceMode(true);assert.equal(f.id("meeting-start").disabled,true);
+  await f.start();assert.equal(f.requests.length,0);assert.match(f.notices.at(-1),/Quittez le mode voix/);
+  f.setVoiceMode(false);assert.equal(f.id("meeting-start").disabled,false);
 });
 
 test("restart warning has its own fluid row, never the narrow recorder grid",()=>{

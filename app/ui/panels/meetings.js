@@ -11,6 +11,7 @@
     no_microphone: "Aucun microphone disponible. Branchez un microphone puis recommencez.",
     failed: "Aucune parole reconnue ou transcription échouée. Réessayez la transcription sur ce Mac, ou supprimez cette capture.",
     busy: "Une dictée ou une réunion est déjà en cours. Arrêtez-la avant de commencer.",
+    microphone_busy: "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.",
     unavailable: "L’enregistrement de réunion est disponible dans l’application Mac Ezerbot.",
     consent_required: "Confirmez le consentement de toutes les personnes avant d’enregistrer.",
   };
@@ -18,7 +19,7 @@
   let dialog, title, consent, begin, dialogError, confirmation, confirmationTitle, confirmationText, confirmationAccept, finishConfirmation;
   let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false, lastActive = false;
   const active = () => ["authorizing", "recording", "paused", "transcribing", "saving"].includes(phase);
-  const emptyCapture = () => ["mic_denied", "speech_denied", "no_microphone", "offline_unavailable", "busy", "meeting_busy", "unavailable", "consent_required", "no_audio"].includes(phase);
+  const emptyCapture = () => ["mic_denied", "speech_denied", "no_microphone", "offline_unavailable", "busy", "meeting_busy", "microphone_busy", "unavailable", "consent_required", "no_audio"].includes(phase);
   // A shared signal also updates dictation immediately, not at the next state poll.
   panels.meetingActive = active;
   function confirmDelete(heading, description, label) {
@@ -45,8 +46,8 @@
     bar.dataset.phase = phase;
     const tone = phase === "offline_unavailable" || (phase === "ready" && pending?.too_long) ? "warning" : ["mic_denied", "speech_denied", "no_microphone", "failed", "no_audio", "save_failed"].includes(phase) ? "danger" : "";
     if (tone) bar.dataset.tone = tone; else delete bar.dataset.tone;
-    startButton.disabled = !!session || Boolean(panels.voiceActive?.()) || context?.conversation?.kind === "task";
-    startButton.title = panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
+    startButton.disabled = !!session || Boolean(panels.voiceActive?.() || window.EzerbotVoiceMode?.active()) || context?.conversation?.kind === "task";
+    startButton.title = window.EzerbotVoiceMode?.active() ? "Indisponible pendant le mode voix" : panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
     phaseLabel.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours",paused:"Réunion en pause",transcribing:"Transcription sur ce Mac…",ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : "Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
     meetingName.textContent = session?.title || ""; meetingName.title = session?.title || "";
     meetingName.hidden = !session?.title;
@@ -107,13 +108,14 @@
     if (!emptyCapture() && !await confirmDelete("Supprimer la capture ?", "L’audio et la transcription de cette capture seront supprimés. Une conversation créée uniquement pour elle sera retirée si elle est toujours vide.", "Supprimer la capture")) return;
     clearTimeout(timer); ++generation;
     try {
-      if (!["busy", "meeting_busy"].includes(phase)) await bridge("cancel");
+      if (!["busy", "meeting_busy", "microphone_busy"].includes(phase)) await bridge("cancel");
       await panels.api("/api/meetings/discard", { id: session.id, preserve_conversation: hasDraft(session.conversation_id) });
       session = pending = null; phase = "idle"; render(); await panels.refresh();
     } catch (error) { panels.notify(error.message); render(); }
   }
   async function start() {
     if (session || !consent.checked) return;
+    if (window.EzerbotVoiceMode?.active()) { panels.notify("Quittez le mode voix avant d’enregistrer une réunion."); return; }
     if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
     try {
@@ -212,6 +214,7 @@
         document.getElementById("welcome").before(emptyView);
         window.addEventListener("beforeunload", () => { clearTimeout(timer); if (session) bridge("cancel").catch(() => {}); });
         window.addEventListener("grokbot:voice-change", render);
+        window.addEventListener("grokbot:voice-mode-change", render);
         render();
       },
       blocked: () => active(),

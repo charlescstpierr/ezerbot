@@ -7,6 +7,8 @@
 int main(void) {
     @autoreleasepool {
         EzerbotVoice *voice = [[EzerbotVoice alloc] init];
+        for (NSString *status in @[@"authorizing",@"recording",@"paused",@"transcribing",@"listening"]) assert([EzerbotVoice captureStatusActive:status]);
+        for (NSString *status in @[@"idle",@"ready",@"failed",@"mic_denied"]) assert(![EzerbotVoice captureStatusActive:status]);
         __block NSDictionary *result;
         void (^reply)(NSDictionary *) = ^(NSDictionary *value) { result = value; };
         [voice command:@{@"command":@"start",@"token":@"one",@"language":@"fr"} reply:reply];

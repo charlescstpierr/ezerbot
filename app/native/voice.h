@@ -30,11 +30,15 @@
 @property(nonatomic, strong) SFSpeechRecognizer *recognizer;
 @property(nonatomic, strong) SFSpeechRecognitionTask *recognitionTask;
 #endif
++ (BOOL)captureStatusActive:(NSString *)status;
 - (void)command:(NSDictionary *)body reply:(void (^)(NSDictionary *))reply;
 - (void)cancel;
 @end
 
 @implementation EzerbotVoice
++ (BOOL)captureStatusActive:(NSString *)status {
+    return [@[@"authorizing",@"recording",@"paused",@"transcribing",@"listening"] containsObject:status ?: @""];
+}
 - (NSDictionary *)snapshot {
     return @{ @"status":self.status ?: @"idle", @"token":self.token ?: @"",
         @"language":self.language ?: @"fr", @"transcript":self.transcript ?: @"",

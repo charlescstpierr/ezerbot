@@ -41,7 +41,7 @@ function fixture() {
     document:{createElement:tag=>new Element(tag),getElementById:()=>send,querySelector:()=>controls,addEventListener(name,fn){if(name==="keydown")keydown=fn;}},
     crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
-  return {root,calls,sends,follows,panel,get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {root,calls,sends,follows,panel,setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -114,6 +114,13 @@ test("compact toolbar and state animation retain their accessibility CSS contrac
   assert.match(css,/\.voice-session-label \{ display: none;/);
   assert.match(css,/background: var\(--accent-ink\)/);
   assert.match(css,/@media \(prefers-reduced-motion: reduce\).*animation: none !important/);
+});
+
+test("meeting ownership disables conversation voice without cancelling the meeting",async()=>{
+  const f=fixture();const toggle=cls(f.root,"voice-session-toggle");f.setMeetingActive(true);
+  assert.equal(toggle.disabled,true);assert.match(toggle.title,/réunion/);await toggle.onclick();
+  assert.equal(f.calls.filter(c=>c.command==="start").length,0);
+  f.setMeetingActive(false);assert.equal(toggle.disabled,false);await toggle.onclick();assert.equal(f.panel.wantsPolling(),true);
 });
 
 test("permission denial and transcription errors stop safely and give French recovery",async()=>{

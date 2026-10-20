@@ -364,7 +364,7 @@
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     (void)webView; (void)navigation;
     self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
-    [self.voice cancel];
+    [self.voice cancel]; [self.voiceSession cancel];
     self.window.title = @"Ezerbot"; self.window.titleVisibility = NSWindowTitleHidden;
 }
 
@@ -402,6 +402,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
     if ([message.name isEqual:@"ezerbotVoice"]) {
+        if ([command isEqual:@"start"] && [EzerbotVoice captureStatusActive:self.voiceSession.status]) { reply(@{@"status":@"microphone_busy"}); return; }
         [self.voice command:body reply:^(NSDictionary *result) {
             BOOL recording = self.voice.meeting && [@[@"authorizing",@"recording",@"paused",@"transcribing"] containsObject:self.voice.status];
             self.window.title = recording ? @"● Réunion · Ezerbot" : @"Ezerbot";
@@ -409,7 +410,10 @@
             reply(result);
         }]; return;
     }
-    if ([message.name isEqual:@"ezerbotVoiceSession"]) { [self.voiceSession command:body reply:reply]; return; }
+    if ([message.name isEqual:@"ezerbotVoiceSession"]) {
+        if ([command isEqual:@"start"] && [EzerbotVoice captureStatusActive:self.voice.status]) { reply(@{@"status":@"microphone_busy"}); return; }
+        [self.voiceSession command:body reply:reply]; return;
+    }
     if ([command isEqual:@"screenSettings"]) {
         NSDictionary *panes = @{@"accessibility":@"Privacy_Accessibility", @"recording":@"Privacy_ScreenCapture", @"input":@"Privacy_ListenEvent"};
         NSString *pane = [body[@"pane"] isKindOfClass:NSString.class] ? panes[body[@"pane"]] : nil;

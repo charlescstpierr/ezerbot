@@ -22,6 +22,8 @@
   let inputHeld = false, followResumedReply = false;
   let voicesLoaded = false, settingsDirty = false;
   const active = () => Boolean(token);
+  let lastActive = false;
+  errors.microphone_busy = "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.";
   window.EzerbotVoiceMode = { active, stopSpeech, mountToggle(container) { if (button) container.prepend(button); } };
   async function bridge(command, extra = {}) {
     const body = {command, token:command === "settings" ? settingsToken : token, ...extra};
@@ -32,9 +34,9 @@
   }
   function render() {
     if (!button) return;
-    button.disabled = !active() && (!ctx?.connected || ctx?.conversation?.kind === "task");
+    button.disabled = !active() && (Boolean(panels.meetingActive?.()) || !ctx?.connected || ctx?.conversation?.kind === "task");
     button.setAttribute("aria-pressed", String(active()));
-    button.title = button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
+    button.title = panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
     label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
     bar.dataset.phase = phase;
@@ -47,6 +49,7 @@
     leave.textContent = active() ? "Quitter" : "Fermer";
     systemSettings.hidden = !["mic_denied","speech_denied","offline_unavailable"].includes(phase);
     window.EzerbotDictation?.refresh();
+    if (active() !== lastActive) { lastActive = active(); window.dispatchEvent?.(new Event("grokbot:voice-mode-change")); }
   }
   function exit(clear = true) {
     clearTimeout(timer); epoch++;
@@ -85,6 +88,7 @@
   async function start() {
     if (active()) { exit(); return; }
     if (button.disabled) return;
+    if (panels.meetingActive?.()) { panels.notify(errors.microphone_busy); return; }
     window.EzerbotDictation?.cancel();
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
@@ -234,6 +238,7 @@
         },true);
         window.addEventListener("beforeunload", () => exit());
         window.addEventListener("pagehide", () => exit());
+        window.addEventListener("grokbot:meeting-change", render);
         render();
       },
       discard() { if (active()) exit(); },

@@ -164,7 +164,21 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
     assert_eq!(status["plan"], "plus");
     let models = status["models"].as_array().unwrap();
     assert_eq!(models.len(), 7);
-    assert_eq!(models[0]["slug"], "gpt-6.1-sol");
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra"
+        ]
+    );
     assert!(models.iter().all(|model| !matches!(
         model["slug"].as_str(),
         Some("gpt-5.5" | "gpt-5.3-codex-spark")
@@ -577,7 +591,8 @@ fn unsupported_model_refusal_proposes_switching_without_retry_or_signout() {
             .unwrap_err();
         assert!(failure
             .message
-            .contains("Choisissez un autre modèle dans le sélecteur"));
+            .contains("bouton « Modèle » sous la zone de message"));
+        assert!(failure.message.contains(retired));
         assert_eq!(failure.kind, "other");
         assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before + 1);
         assert!(f.provider.connected());
@@ -585,14 +600,19 @@ fn unsupported_model_refusal_proposes_switching_without_retry_or_signout() {
     for body in [
         json!({"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}),
         json!({"error":{"type":"invalid_request_error","message":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}}),
+        json!({"detail":"This model is not supported."}),
     ] {
         let before = f.server.seen.lock().unwrap().bodies.len();
+        let identifies_model = body.to_string().contains("gpt-5.5");
         f.reply(ScriptedResponse::json(400, body));
         let message = f.raw().unwrap_err();
         assert!(
-            message.contains("Choisissez un autre modèle dans le sélecteur"),
+            message.contains("bouton « Modèle » sous la zone de message"),
             "{message}"
         );
+        assert!(message.contains("puis cliquez sur Relancer"));
+        assert!(!message.contains("en haut"));
+        assert_eq!(message.contains("gpt-5.5"), identifies_model);
         assert!(!message.contains("Reconnectez-vous"));
         assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before + 1);
         assert!(f.provider.connected());

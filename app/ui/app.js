@@ -46,7 +46,6 @@
       ? "https://chatgpt.com/codex/settings/usage"
       : "https://chatgpt.com/settings/usage";
   }
-  const effortNames = { none: "Aucun", minimal: "Minimal", low: "Léger", medium: "Équilibré", high: "Élevé", xhigh: "Très élevé", max: "Maximum", ultra: "Ultra" };
   const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   const pendingStates = new Set(["queued", "dispatching", "unknown"]);
 
@@ -311,7 +310,6 @@
   function botName(id) { const bot = botById(id); return bot ? `${bot.name}${bot.deleted ? " (supprimé)" : ""}` : "Bot inconnu"; }
   function provider() { return state.provider || { connected: false, signin: "idle", models: [] }; }
   function streamingMessage(conversation = currentConversation()) { return conversation?.messages.find((message) => window.GrokbotChat.isPendingReply(message, conversation.kind === "group")); }
-  function effortName(effort) { return effort ? `${effort} · ${effortNames[effort] || effort}` : "Par défaut"; }
 
   function icon(name, className = "icon") {
     const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -879,6 +877,7 @@
     const button = element("button", "tool-pill");
     button.type = "button";
     button.dataset.picker = kind;
+    button.title = `${label} : ${value}`;
     button.disabled = !enabled;
     button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-expanded", String(pickerKind === kind));
@@ -916,13 +915,16 @@
     const selected = models.find((item) => item.slug === model);
     const title = { model: "Modèle", effort: "Effort de réflexion", speed: "Vitesse" }[pickerKind];
     const options = pickerKind === "model" ? models.map((item) => option(item.name, item.description, item.slug === model, { model: item.slug }))
-      : pickerKind === "effort" ? (selected?.efforts || []).map((level) => option(effortName(level.effort), level.description, level.effort === effort, { effort: level.effort }))
+      : pickerKind === "effort" ? (selected?.efforts || []).map((level) => option(level.effort, level.description, level.effort === effort, { effort: level.effort }))
       : [option("Standard", "", !fast, { fast: false }), ...(selected?.tiers || []).slice(0, 1).map((tier) => option(tier.name, tier.description, Boolean(fast), { fast: true }))];
     const foot = element("div", "picker-foot");
     const link = element("a", "usage-link", "Gérer l’utilisation");
     link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
-    foot.append(element("span", "", provider().backend === "codex" ? "Quota Codex utilisé" : "Partage d’abonnement ChatGPT"), link);
+    const scrollHint = element("small", "picker-scroll-hint", "Liste défilante ↕");
+    scrollHint.hidden = true;
+    foot.append(scrollHint, element("span", "", provider().backend === "codex" ? "Quota Codex utilisé" : "Partage d’abonnement ChatGPT"), link);
     picker.replaceChildren(element("h4", "", title), ...options, foot);
+    scrollHint.hidden = !(picker.scrollHeight > picker.clientHeight);
   }
 
   function renderProvider() {
@@ -945,7 +947,7 @@
     if (current.connected) {
       tools.replaceChildren(
         pill("model", "Modèle", selected?.name || (current.models_ready ? "Aucun modèle" : "Chargement…"), Boolean(current.models?.length)),
-        pill("effort", "Effort", selected?.efforts.length ? effortName(effort) : "Par défaut", Boolean(selected?.efforts.length)),
+        pill("effort", "Effort", selected?.efforts.length ? (effort || selected.default_effort || "Par défaut") : "Par défaut", Boolean(selected?.efforts.length)),
         // Speed is offered only by models that list a service tier.
         ...(selected?.tiers.length ? [pill("speed", "Vitesse", fast ? selected.tiers[0].name : "Standard")] : []),
       );
@@ -1354,6 +1356,7 @@
     else if (pickerKind && !$("picker").contains(event.target)) { closePicker(); renderProvider(); }
     if (event.target.closest("[data-provider-signin]")) signIn();
   });
+  window.addEventListener("resize", () => { if (pickerKind) renderPicker(); });
   $("plan-acknowledge").addEventListener("click", async () => { $("plan-dialog").close(); await providerAction("/api/provider/welcomed"); });
   $("sidebar-toggle").addEventListener("click", () => {
     const open = document.body.classList.toggle("sidebar-open");

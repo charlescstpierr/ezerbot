@@ -4,7 +4,7 @@ const { runInNewContext } = require("node:vm");
 const { test } = require("node:test");
 
 const source = readFileSync(__dirname + "/app.js", "utf8");
-const urls = source.slice(source.indexOf("  function usageUrl()"), source.indexOf("  const effortNames"));
+const urls = source.slice(source.indexOf("  function usageUrl()"), source.indexOf("  const systemTheme"));
 const rendering = source.slice(source.indexOf("  function renderPicker()"), source.indexOf("  async function providerAction("));
 
 function mount(backend, connected = false) {
@@ -47,7 +47,7 @@ function mount(backend, connected = false) {
   const context = {
     document, state, element, $: (id) => nodes.get(id), provider: () => state.provider,
     currentBot: () => ({ name: "Ezerbot" }), pill: () => element("button"), option: () => element("button"),
-    effortName: () => "Équilibré", signIn() {}, signOut() {}, providerAction() {}, refresh() {},
+    signIn() {}, signOut() {}, providerAction() {}, refresh() {},
     pickerKind: connected ? "model" : null,
     closePicker() { context.pickerKind = null; nodes.get("picker").hidden = true; },
   };
@@ -104,24 +104,31 @@ test("effort picker displays actual wire levels and submits the selected value",
   context.icon = () => context.element("svg");
   context.notify = (message) => assert.fail(message);
   context.api = async (path, body) => { calls.push({ path, body }); return { preferences: body }; };
-  const names = source.slice(source.indexOf("  const effortNames"), source.indexOf("\n", source.indexOf("  const effortNames")));
-  const naming = source.slice(source.indexOf("  function effortName("), source.indexOf("\n\n  function icon("));
   const pickerControls = source.slice(source.indexOf("  function pill("), source.indexOf("  function renderPicker("));
-  runInNewContext(names + naming + pickerControls, context);
-  state.provider.models = [{ slug: "gpt-6.1-sol", name: "GPT-6.1 Sol", tiers: [], efforts: ["low", "medium", "high", "xhigh", "max"].map((effort) => ({ effort, description: effort })) }];
+  runInNewContext(pickerControls, context);
+  const descriptions = ["Léger", "Équilibré", "Élevé", "Très élevé", "Maximum"];
+  state.provider.models = [{ slug: "gpt-6.1-sol", name: "GPT-6.1 Sol", tiers: [], efforts: ["low", "medium", "high", "xhigh", "max"].map((effort, i) => ({ effort, description: descriptions[i] })) }];
   state.preferences = { model: "gpt-6.1-sol", effort: "medium" };
   context.pickerKind = "effort";
+  nodes.get("picker").scrollHeight = 400;
+  nodes.get("picker").clientHeight = 300;
   context.renderProvider();
-  assert.match(nodes.get("composer-tools").textContent, /medium · Équilibré/);
+  assert.equal(nodes.get("picker").querySelector(".picker-scroll-hint").hidden, false);
+  nodes.get("picker").clientHeight = 500;
+  context.renderProvider();
+  assert.equal(nodes.get("picker").querySelector(".picker-scroll-hint").hidden, true);
+  assert.equal(nodes.get("composer-tools").querySelectorAll("b")[1].textContent, "medium");
+  assert.equal(nodes.get("composer-tools").querySelectorAll("button")[0].title, "Modèle : GPT-6.1 Sol");
   const options = nodes.get("picker").querySelectorAll("button");
-  assert.deepEqual(options.map((option) => option.textContent.split(" · ")[0]), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(options.map((option) => option.children[0].text), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(options.map((option) => option.querySelector("small").textContent), descriptions);
   assert.equal(options[1].attributes["aria-checked"], "true");
   await options[3].listeners.click();
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "/api/preferences");
   assert.equal(calls[0].body.effort, "xhigh");
   assert.equal(state.preferences.effort, "xhigh");
-  assert.match(nodes.get("composer-tools").textContent, /xhigh · Très élevé/);
+  assert.equal(nodes.get("composer-tools").querySelectorAll("b")[1].textContent, "xhigh");
   assert.doesNotMatch(nodes.get("composer-tools").textContent, /Par défaut/);
 });
 

@@ -211,12 +211,12 @@ fn supports_no_reasoning(model: &str) -> bool {
 pub(super) fn models() -> Vec<Model> {
     [
         (DEFAULT_MODEL, "GPT-6.1 Sol"),
+        ("gpt-6-sol", "GPT-6 Sol"),
+        ("gpt-6-luna", "GPT-6 Luna"),
+        ("gpt-6-astra", "GPT-6 Astra"),
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
         ("gpt-5.6-luna", "GPT-5.6 Luna"),
         ("gpt-5.6-terra", "GPT-5.6 Terra"),
-        ("gpt-6-astra", "GPT-6 Astra"),
-        ("gpt-6-luna", "GPT-6 Luna"),
-        ("gpt-6-sol", "GPT-6 Sol"),
     ]
     .into_iter()
     .map(|(id, name)| Model {
@@ -229,8 +229,8 @@ pub(super) fn models() -> Vec<Model> {
             .chain([
                 ("low", "Léger"),
                 ("medium", "Équilibré"),
-                ("high", "Approfondi"),
-                ("xhigh", "Très approfondi"),
+                ("high", "Élevé"),
+                ("xhigh", "Très élevé"),
                 ("max", "Maximum"),
             ])
             .map(|(effort, description)| Effort {

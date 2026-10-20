@@ -123,6 +123,7 @@
   function followPointer(event) {
     if (event.pointerType === "touch" || document.hidden || reducedMotion.matches || !["idle", "happy"].includes(mood)) return;
     const hero = document.querySelector("[data-mascot=hero]");
+    if (!hero) return;
     const box = hero.getBoundingClientRect();
     const anchor = box.width ? box : document.querySelector("[data-mascot=sidebar]").getBoundingClientRect();
     if (!anchor.width) return;
@@ -169,7 +170,7 @@
     document.documentElement.removeEventListener("pointerleave", resetLook);
     document.removeEventListener("visibilitychange", syncMotion);
     reducedMotion.removeEventListener("change", syncMotion);
-    document.querySelector("[data-mascot=hero]").removeEventListener("click", wave);
+    document.querySelector("[data-mascot=hero]")?.removeEventListener("click", wave);
     window.removeEventListener("pagehide", onPageHide);
     window.removeEventListener("pageshow", syncMotion);
     document.documentElement.dataset.mascotPaused = "true";
@@ -180,7 +181,7 @@
   document.documentElement.addEventListener("pointerleave", resetLook);
   document.addEventListener("visibilitychange", syncMotion);
   reducedMotion.addEventListener("change", syncMotion);
-  document.querySelector("[data-mascot=hero]").addEventListener("click", wave);
+  document.querySelector("[data-mascot=hero]")?.addEventListener("click", wave);
   window.addEventListener("pagehide", onPageHide);
   window.addEventListener("pageshow", syncMotion);
   window.GrokbotMascot = { create, setShape, shapes, setContext, celebrate, destroy };

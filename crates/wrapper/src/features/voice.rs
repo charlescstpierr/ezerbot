@@ -32,6 +32,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         transcript TEXT NOT NULL, language TEXT NOT NULL, duration_ms INTEGER NOT NULL,
         audio BLOB NOT NULL, created_at INTEGER NOT NULL);",
     )?;
+    super::voice_session::migrate(conn)?;
     Ok(())
 }
 
@@ -179,7 +180,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         Ok(rows)
     })()
     .unwrap_or_default();
-    json!({"max_seconds":MAX_SECONDS,"drafts":drafts,"debug_fake":cfg!(debug_assertions)})
+    json!({"max_seconds":MAX_SECONDS,"drafts":drafts,"debug_fake":cfg!(debug_assertions),"settings":super::voice_session::settings(ctx.connection).unwrap_or_else(|_| json!({"voice":"","speed":1.0}))})
 }
 
 pub fn routes(
@@ -192,7 +193,14 @@ pub fn routes(
     if method == "POST" && path == "/api/voice/debug" {
         return Some(app.debug_voice.command(body).map(ApiResponse::Json));
     }
+    #[cfg(debug_assertions)]
+    if method == "POST" && path == "/api/voice/session/debug" {
+        return Some(app.debug_voice_session.command(body).map(ApiResponse::Json));
+    }
     match (method, path) {
+        ("POST", "/api/voice/settings") => {
+            Some(super::voice_session::save(&app.connection, body).map(ApiResponse::Json))
+        }
         ("POST", "/api/voice/memos") => Some((|| {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

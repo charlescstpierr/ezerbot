@@ -786,6 +786,8 @@ pub struct App {
     provider: Provider,
     #[cfg(debug_assertions)]
     debug_voice: features::voice::DebugVoice,
+    #[cfg(debug_assertions)]
+    debug_voice_session: features::voice_session::DebugSession,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
 }
@@ -889,6 +891,8 @@ impl App {
             provider,
             #[cfg(debug_assertions)]
             debug_voice: features::voice::DebugVoice::default(),
+            #[cfg(debug_assertions)]
+            debug_voice_session: features::voice_session::DebugSession::default(),
             deep_link_seen: BTreeMap::new(),
         })
     }

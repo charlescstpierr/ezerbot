@@ -89,7 +89,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>Grokbot</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Ezerbot utilise le microphone uniquement pour votre dictée ou mémo vocal, après votre clic.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Ezerbot utilise le microphone uniquement pour votre dictée, mémo ou conversation vocale, après votre clic.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Ezerbot transcrit votre voix sur ce Mac, sans envoyer l’audio à un serveur.</string>
   <key>NSAccessibilityUsageDescription</key><string>Ezerbot contrôle la souris et le clavier uniquement pendant une session que vous autorisez.</string>
   <key>NSScreenCaptureUsageDescription</key><string>Ezerbot partage des captures avec le modèle uniquement pendant une session que vous autorisez.</string>

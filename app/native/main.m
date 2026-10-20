@@ -3,6 +3,7 @@
 #import <WebKit/WebKit.h>
 #import "notifications.h"
 #import "voice.h"
+#import "voice-session.h"
 #import "screen.h"
 #import <errno.h>
 #import <poll.h>
@@ -21,6 +22,7 @@
 @property(nonatomic) BOOL terminating;
 @property(nonatomic, strong) EzerbotNotifier *notifier;
 @property(nonatomic, strong) EzerbotVoice *voice;
+@property(nonatomic, strong) EzerbotVoiceSession *voiceSession;
 @property(nonatomic, copy) NSString *visibleConversationID;
 @property(nonatomic) BOOL conversationVisible;
 @property(nonatomic, copy) NSString *pendingNotificationID;
@@ -36,6 +38,7 @@
     (void)notification;
     self.notifier = [[EzerbotNotifier alloc] init];
     self.voice = [[EzerbotVoice alloc] init];
+    self.voiceSession = [[EzerbotVoiceSession alloc] init];
 #if defined(EZERBOT_RELEASE)
     [UNUserNotificationCenter currentNotificationCenter].delegate = self;
 #endif
@@ -141,6 +144,7 @@
 
 - (void)showStatus:(NSString *)title detail:(NSString *)detail failed:(BOOL)failed {
     [self.voice cancel];
+    [self.voiceSession cancel];
     self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
     self.webView.navigationDelegate = nil;
     self.webView.UIDelegate = nil;
@@ -315,6 +319,7 @@
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoice"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoiceSession"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
@@ -395,6 +400,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
     if ([message.name isEqual:@"ezerbotVoice"]) { [self.voice command:body reply:reply]; return; }
+    if ([message.name isEqual:@"ezerbotVoiceSession"]) { [self.voiceSession command:body reply:reply]; return; }
     if ([command isEqual:@"screenSettings"]) {
         NSDictionary *panes = @{@"accessibility":@"Privacy_Accessibility", @"recording":@"Privacy_ScreenCapture", @"input":@"Privacy_ListenEvent"};
         NSString *pane = [body[@"pane"] isKindOfClass:NSString.class] ? panes[body[@"pane"]] : nil;
@@ -587,6 +593,7 @@
 
 - (void)stopBackend {
     [self.voice cancel];
+    [self.voiceSession cancel];
     NSTask *task = self.backendTask;
     self.backendTask = nil;
     task.terminationHandler = nil;

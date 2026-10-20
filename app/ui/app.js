@@ -186,6 +186,24 @@
     get state() { return state; },
     get connected() { return connected; },
     api, refresh, notify, createBotMascot, botSummary,
+    async sendVoice(text, conversationId) {
+      const conversation = currentConversation();
+      if (!connected || busy || conversation?.id !== conversationId || conversation.kind === "task") throw new Error("Ouvrez une conversation disponible pour envoyer la transcription.");
+      if (!text.trim()) throw new Error("Aucune parole reconnue. Réessayez.");
+      const messageId = crypto.randomUUID();
+      busy = true; submissionActivity = "send";
+      approvalFollow.arm(conversation.id, conversation.messages, true);
+      conversation.messages.push({id:messageId,role:"user",body:text,state:"queued",created_at:new Date().toISOString()});
+      render(true);
+      try {
+        const response = await api("/api/send", {conversation_id:conversationId,message_id:messageId,body:text});
+        upsertConversation(response.conversation); render(true); schedulePoll();
+        return messageId;
+      } catch (error) {
+        try { await refresh(); } catch { showConnectionError(error); }
+        throw new Error("Envoi vocal non confirmé. Vérifiez le fil avant de réessayer. " + error.message);
+      } finally { busy = false; submissionActivity = null; updateComposer(); schedulePoll(); }
+    },
     composerChanged() { updateComposer(); schedulePoll(); },
   };
 
@@ -1020,6 +1038,7 @@
     if (!conversation) return;
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     try {
+      if (path === "/api/stop") await window.EzerbotVoiceMode?.stopSpeech();
       const response = await api(path, { conversation_id: conversation.id, message_id: messageId });
       upsertConversation(response.conversation);
       render(currentConversation()?.id === conversation.id && pinned && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);

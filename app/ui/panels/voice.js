@@ -21,6 +21,7 @@
   // Send/remove receipts, not a stale polling snapshot, relinquish ownership.
   const localMemos = new Map();
   const live = () => ["authorizing", "recording", "transcribing", "saving"].includes(phase);
+  window.EzerbotDictation = { active: live, cancel() { reset(); changed(); } };
   const tones = { mic_denied: "danger", speech_denied: "danger", no_microphone: "danger", failed: "danger", upload_failed: "danger", offline_unavailable: "warning", limited: "warning" };
   const language = () => document.documentElement.lang || "fr";
   async function bridge(command, extra = {}) {
@@ -40,7 +41,7 @@
     mic.setAttribute("aria-label", recording ? "Arrêter la dictée" : "Démarrer la dictée");
     mic.title = recording ? "Arrêter · Échap" : "Dicter un message";
     mic.setAttribute("aria-pressed", String(recording));
-    mic.disabled = (live() && !recording) || context?.conversation?.kind === "task";
+    mic.disabled = (live() && !recording) || context?.conversation?.kind === "task" || Boolean(window.EzerbotVoiceMode?.active());
     memoMode.disabled = live();
     region.hidden = phase === "idle" && !memoItems.length;
     if (tones[phase]) region.dataset.tone = tones[phase]; else delete region.dataset.tone;
@@ -93,7 +94,7 @@
     } catch { /* Draft is already handed off. */ }
   }
   async function start() {
-    if (live()) return;
+    if (live() || window.EzerbotVoiceMode?.active()) return;
     reset();
     try {
       session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked };

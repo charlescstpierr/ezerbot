@@ -198,8 +198,8 @@ function Dots() {
 function SignInCard({ message, actions }) {
   const view = signInCardState({ message, ...actions });
   return (
-    <div className="gb-pending gb-problem" role="alert">
-      <TriangleAlert />
+    <div className={`gb-pending${view.alert ? " gb-problem" : " gb-connected"}`} role={view.alert ? "alert" : "status"}>
+      {view.alert ? <TriangleAlert /> : <Check />}
       <div className="gb-pending-copy"><strong>{view.title}</strong><p>{view.copy}</p></div>
       <div className="gb-problem-actions">
         {view.showSignIn && <button type="button" className="chatgpt-button" disabled={view.signInDisabled} title={view.signInDisabled ? "Moteur local indisponible" : view.signInLabel} onClick={actions.onSignIn}>{view.signInLabel}</button>}
@@ -210,7 +210,7 @@ function SignInCard({ message, actions }) {
 }
 
 function ReplyProblem({ message, actions }) {
-  const { signin, advice, retry, retryDisabled, retryTitle } = replyProblemState(message, actions);
+  const { signin, advice, error, retry, retryDisabled, retryTitle } = replyProblemState(message, actions);
   if (signin) return <SignInCard message={message} actions={actions} />;
   const limit = message.error_kind === "limit";
   return (
@@ -218,7 +218,7 @@ function ReplyProblem({ message, actions }) {
       <TriangleAlert />
       <div className="gb-pending-copy">
         <strong>{limit ? "Limite d’utilisation atteinte" : "La réponse n’a pas abouti"}</strong>
-        <p>{message.error}</p>
+        <p>{error}</p>
       </div>
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
       {(limit || retry) && <div className="gb-problem-actions">
@@ -300,7 +300,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = true, engineConnected = true, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;

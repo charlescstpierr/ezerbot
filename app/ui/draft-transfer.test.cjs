@@ -520,6 +520,22 @@ test("the bot menu keeps focus across refresh, moves with the keyboard, and retu
   assert.equal(app.document.activeElement, trigger);
 });
 
+test("a disabled composer bot focuses the conversation title when the editor is not editable", async () => {
+  const app = boot();
+  await ready(app);
+  const menu = app.document.getElementById("bot-menu");
+  const trigger = app.document.getElementById("composer-bot");
+  const title = app.document.getElementById("conversation-title");
+  app.composer().editor.isEditable = false;
+  trigger.click();
+  assert.equal(app.document.activeElement?.getAttribute("aria-checked"), "true");
+  trigger.disabled = true;
+  app.document.activeElement.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
+  assert.equal(menu.hidden, true);
+  assert.equal(app.document.activeElement === title, true);
+  assert.equal(title.tabIndex, -1);
+});
+
 test("a disabled composer bot returns menu focus to the editor", async () => {
   const app = boot();
   await ready(app);

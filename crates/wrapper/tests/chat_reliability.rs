@@ -178,7 +178,7 @@ impl Fake {
                     }
                     let body: Value=serde_json::from_slice(&bytes).unwrap(); b.lock().unwrap().push(body.clone());
                     let instructions=body["instructions"].as_str().unwrap_or("");
-                    let internal=instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
+                    let internal=instructions.starts_with("Test de connexion.") || instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
                     let fault=if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
                     if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); holds.fetch_add(1, Ordering::SeqCst); return; }
                     if matches!(fault, Fault::DripHeader) { drip(&mut socket, &s); return; }
@@ -692,6 +692,34 @@ fn background_memory_and_title_do_not_block_a_second_turn() {
             .any(|message| message["id"] == "reply-second" && message["state"] == "echoed")
     });
     assert!(start.elapsed() < Duration::from_secs(6));
+}
+
+#[test]
+fn a_connection_probe_does_not_consume_the_queued_chat_fault() {
+    let mut f = Fixture::new(true);
+    f.fake.queue.lock().unwrap().push_back(Fault::Refusal);
+    post(&mut f.app, "/api/provider/test", json!({}));
+    until(|| {
+        let state = f.provider.status()["connection_test"]["state"].clone();
+        state != "running" && state != "idle"
+    });
+    assert_eq!(
+        f.provider.status()["connection_test"]["state"],
+        "ok",
+        "probe took the queued chat fault: {}",
+        f.provider.status()["connection_test"]
+    );
+    post(
+        &mut f.app,
+        "/api/send",
+        json!({"conversation_id":f.chat,"message_id":"question","body":"Question après la sonde"}),
+    );
+    let failed = f.settled();
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert!(
+        failed["error"].as_str().unwrap_or("").contains("refus"),
+        "the queued refusal did not reach the chat: {failed}"
+    );
 }
 
 #[test]

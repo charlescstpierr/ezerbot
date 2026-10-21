@@ -205,7 +205,11 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .provider-card h3 { display: flex; align-items: center; gap: 7px; }
 .provider-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .provider-card p.provider-error { margin-top: 6px; color: var(--danger-text); }
+.provider-card p.provider-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--ok); font-weight: 600; }
+.provider-card p.provider-legacy-note { margin-top: 12px; }
 .provider-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.provider-actions-legacy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider-actions-legacy > * { min-width: 0; justify-content: center; text-align: center; white-space: normal; }
 .plan-dialog h2 { margin-bottom: 12px; }
 a.secondary-button { text-decoration: none; }
 .composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 11px; }
@@ -288,7 +292,8 @@ a.secondary-button { text-decoration: none; }
 .primary-button { background: var(--accent); color: var(--accent-on); font-weight: 600; transition: filter .15s; }
 .primary-button:hover { filter: brightness(1.08); }
 .secondary-button { border: 1px solid var(--line); color: var(--muted); }
-.secondary-button:hover { background: var(--soft); }
+.secondary-button:hover:not(:disabled) { background: var(--soft); }
+.secondary-button:disabled { opacity: .5; cursor: default; }
 .danger-button { background: var(--danger); color: #fff; transition: filter .15s; }
 .danger-button:hover { filter: brightness(1.1); }
 .small-dialog { width: min(430px, calc(100% - 32px)); }

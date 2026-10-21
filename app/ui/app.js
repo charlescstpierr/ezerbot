@@ -995,7 +995,12 @@
     if (current.connected && isCodex) copy.append(element("p", "", "Cette session est propre à Ezerbot. La déconnexion l’efface sur ce Mac uniquement."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
     const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
+    const probe = current.connection_test || {};
+    const test = action(probe.state === "running" ? "Test en cours…" : "Tester la connexion", "secondary-button", () => providerAction("/api/provider/test"));
+    test.disabled = !current.connected || probe.state === "running";
+    test.title = !current.connected ? "Connectez-vous via Codex pour tester la connexion." : "Envoyer une petite requête de vérification à ChatGPT";
     if (current.connected) {
+      actions.append(test);
       const link = element("a", "secondary-button", "Gérer l’utilisation");
       link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
       actions.append(link, action("Se déconnecter", "secondary-button", signOut));
@@ -1008,15 +1013,14 @@
       actions.append(action(isCodex ? "Se connecter via Codex" : "Continuer avec ChatGPT", "chatgpt-button", signIn));
     }
     if (current.backend === "sharing") {
-      copy.append(element("p", "", "Vous utilisez l’ancienne connexion. Pour utiliser votre quota Codex, connectez votre compte ChatGPT via Codex. Votre historique est conservé."));
+      copy.append(element("p", "provider-legacy-note", "Vous utilisez l’ancienne connexion. Pour utiliser votre quota Codex, connectez votre compte ChatGPT via Codex. Votre historique est conservé."));
+      actions.classList.add("provider-actions-legacy");
       actions.append(action("Passer à Codex", "secondary-button", signInCodex));
     }
-    const probe = current.connection_test || {};
-    const test = action(probe.state === "running" ? "Test en cours…" : "Tester la connexion", "secondary-button", () => providerAction("/api/provider/test"));
-    test.disabled = probe.state === "running";
-    actions.append(test);
-    if (probe.message) {
-      const result = element("p", probe.state === "failed" ? "provider-error" : "", probe.message);
+    if (!current.connected) actions.append(test);
+    if (probe.message && probe.state !== "running" && current.connected) {
+      const result = element("p", probe.state === "failed" ? "provider-error" : probe.state === "ok" ? "provider-success" : "", probe.message);
+      if (probe.state === "ok") result.prepend(element("span", "status-dot"));
       result.setAttribute("role", "status"); copy.append(result);
     }
     card.append(copy, actions);

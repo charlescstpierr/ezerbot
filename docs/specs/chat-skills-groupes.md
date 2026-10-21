@@ -28,7 +28,7 @@ Les humains dans un groupe, la publication de skill à une équipe, l’expirati
 
 ## Décisions
 
-Grill du 21 octobre 2026. R5, R6, R9, R10 et R11 sont copiés. Aucune n’est rouverte.
+Grill du 21 octobre 2026. R5, R6, R9, R10 et R11 sont copiés. Aucune n’est rouverte. La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences.
 
 1. **La réaction est une bascule.** Le sélecteur pose un emoji sur le message et le retire si on le rechoisit. L’affichage est immédiat. La réaction est encore là après un redémarrage. Copier reste dans le menu.
 2. **Renvoyer et Supprimer ne visent qu’un envoi qui n’est pas parti.** L’état affiché est « Échec de l’envoi » ou « Pas encore livré ». Renvoyer rejoue le même message, pièces jointes comprises, une fois. Supprimer le retire, sans confirmation. Un message livré n’a ni Renvoyer, ni Supprimer, ni édition.
@@ -129,6 +129,22 @@ Chaque tranche commence par un test rouge, puis le code qui le rend vert. Le jug
 - **Bandeau fermé pour tout le monde.** L’état est par groupe et par session. Le parcours 7 ouvre un second groupe.
 - **Valeur de secret dans la liste.** La réponse du panneau ne contient pas la valeur. Le test compare la liste, le fil et l’export. Le trousseau verrouillé suit la règle déjà prise : pas de repli fichier pour un secret de compte quand le trousseau est actif.
 - **Formulaire périmé accepté.** Le test de redémarrage écrit zéro secret. L’absence de TTL à trente minutes est l’autre moitié : une demande seulement vieille doit encore passer, sinon on invente l’expiration écartée.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, extraction asar en lecture seule. `grokbot-rea.md` et `tickets-parite.md` §3. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
+
+- **Réaction.** [P] `ReactToGrokBotMessageRequest` (R11). Le fichier de ce symbole n’est pas nommé dans l’extrait. [I] le placer dans `electron-main/proto.cjs` parce que d’autres RPC y sont serait une inférence de voisinage. Elle n’est pas retenue.
+- **Renvoyer et Supprimer.** [P] R11 : ces actions n’existent que sur un envoi échoué, la suppression est sans confirmation, un message déjà livré ne se supprime pas. Aucun nom de fonction pour Renvoyer ou Supprimer n’est cité. [I] les libellés « Échec de l’envoi » et « Pas encore livré » sont ceux de T17, pas des chaînes extraites.
+- **⌘F.** [P] `sand.findInChat` (R11). Fichier non nommé. [I] le champ, le nombre de résultats et suivant/précédent ne sont pas des symboles cités. Seul le nom du raccourci l’est.
+- **Notation.** [P] RPC `voteGrokBotFeedback` (UP, DOWN, SUBMIT, REVERT, catégories, commentaire). UI « Good result », « Bad result », « How can we improve? » dans `renderer/assets/chunk-view-*.js` (R6). L’appel est serveur. Le stockage sur ce Mac est le choix Ezerbot. [I] les quatre libellés français sont ceux de T18. L’extrait dit « catégories » sans en donner les noms.
+- **Sous-fil.** [P] `CreateGrokBotThreadFromMessageRequest` (R11). Fichier non nommé. [I] « le bot reçoit le message parent » n’est pas un champ cité. T19 le pose comme contexte du sous-fil.
+- **⌘⇧W.** [P] `sand.openSkills` dans `renderer/assets/index.eager-app-*.js` (R9). [I] « y compris depuis le champ de saisie » est la précision de T20. L’extrait dit que le raccourci ouvre le panneau, pas où est le focus.
+- **Annexes de skill.** Aucun symbole d’annexe ni de fichier compagnon de `SKILL.md` dans `grokbot-rea.md` ni dans R9. [I] l’import du dossier, l’annexe lue et la version restaurée reprennent le scénario SKL-3. Seul le raccourci est une chaîne du client.
+- **Humains dans le groupe.** [P] `createGroup.humanMemberUserIds`, membres d’équipe à la création seulement, au plus 19 humains, et au plus 3 bots dans ce cas (R5). Fichier non nommé. Les écarter est le choix Ezerbot.
+- **Bandeau de coût.** [P] identifiants de chaînes `+Fl1hq` et `f9covu` (R5). [I] l’extrait ne cite pas le texte décodé de ces ids. Les deux phrases françaises sont celles fixées dans T21 à partir de ces ids.
+- **Nom, description, avatar du groupe.** Aucun symbole dans l’extrait. [I] repris du scénario MB-3. L’éditeur `chunk-agent-avatar-editor-*.js` et l’IPC `generateAgentAvatarImage` (grokbot-rea §d) concernent l’avatar du bot, pas celui du groupe.
+- **Secrets.** [P] `listGrokBotSecrets`, `putGrokBotSecret`, `deleteGrokBotSecret`, chaîne « No secrets yet » (R10). Fichiers non nommés. [P] pas de TTL côté client. [P] le seul refus de ce genre est `user-form/stale`. « Aucun secret » et « Ce formulaire n’a pas été accepté. » sont les libellés français de T22 pour ces deux constats. [I] « bot redémarré ou demande remplacée » est la lecture de `user-form/stale` retenue par T22. L’extrait n’en donne pas les causes.
 
 ## Tranches
 

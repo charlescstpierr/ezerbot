@@ -26,6 +26,8 @@ Charles prépare une fois, hors de l’app, le client Google « application de b
 
 ## Décisions
 
+La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences. Le `client_id` public embarqué et le PKCE sur le Mac sont le choix Ezerbot de R2, pas le courtier serveur de Grok.
+
 1. **Gmail se connecte sans client à saisir.** La carte n’a ni identifiant ni secret. Connecter lance le courtier déjà livré, avec le `client_id` public, PKCE, et un retour sur `127.0.0.1`. Aucun `client_secret` n’est lu, envoyé ou stocké. Sans `client_id`, la carte explique que le client Google d’Ezerbot n’est pas configuré. Les portées Gmail sont celles lues chez Grok Bot : `gmail.readonly`, `gmail.compose`, `gmail.modify`. Les jetons vont au trousseau. Si le trousseau refuse l’écriture, ils ne suivent pas le repli fichier : la connexion échoue, la carte le dit, rien n’est conservé. « Résume mes 5 derniers courriels » lit cinq objets réels, sans carte d’approbation. Le jeton n’est pas dans le fil.
 2. **Un nouveau courriel est un événement normalisé.** L’identifiant du message, l’expéditeur, l’objet, la date et le texte. Le même identifiant ne produit qu’une livraison. [#59](https://github.com/charlescstpierr/ezerbot/issues/59) consomme cet événement. Cette spec ne crée pas la routine.
 3. **L’envoi Gmail est une carte brouillon.** De, À, Cc, Objet, Corps, modifiables. Envoyer une fois, Annuler, pas de « Toujours ». Zéro envoi avant Envoyer, un après, zéro après Annuler, zéro au second clic sur la même carte. Ce qui part est le texte validé, sous le compte de Charles. Les états difficiles sont Refusé, Trop de messages, Envoi non confirmé. Dans ces trois cas, le courriel n’est pas considéré envoyé, ou la carte dit que l’accusé manque. Cette tranche débloque [#59](https://github.com/charlescstpierr/ezerbot/issues/59).
@@ -108,6 +110,20 @@ Le juge a le client Google d’Ezerbot et le client Slack préparés, les `clien
 - **Deux specs de connecteurs.** `docs/specs/connecteurs.md` dit que ces services restent au parcours actuel. Cette page est le lot suivant, pas une correction du parcours GitHub. Le jour où les deux sont sur main, ce fichier gagne pour Gmail, Calendar, Drive et Slack. Notion reste à l’autre fichier.
 - **Le contrat de routine bouge.** #59 et #60 consomment les événements décrits ici. Si un champ manque, on l’ajoute dans ce fichier, pas dans la routine.
 - **Compte ambigu.** Avec deux comptes Google, une lecture sans question enverrait le mauvais. Le test de la tranche multi-comptes exige la question.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, `grokbot-rea.md` §c et `tickets-parite.md` R2. Chemins relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence.
+
+- **Pas de client Google dans le binaire.** [P] aucun `*.apps.googleusercontent.com`. [P] le `client_id` est lu dans `/.well-known/oauth-protected-resource`, champ `cursor_client_id`, pour les URL `^/rest-mcp/([^/]+)/mcp`. [P] document `https://cursor.com/oauth/mcp-client.json`. [I] les client_id sont détenus côté serveur et les jetons restent sur le backend (`api.cursor.com`, `connectors-gateway.grok.com`). Embarquer un client public est le choix Ezerbot, le même geste que la GitHub App de #44.
+- **Loopback.** [P] callback `http://localhost:8787/callback`, ports `18787`, `28787`, `31787`, forcé en `127.0.0.1`. Grok a aussi des callbacks hébergés et un deep link. Ce lot ne copie que le loopback.
+- **Portées Gmail.** [P] `provider:"google-workspace"`, `clientRegistration:"static"`, `access_type:"offline"`, `prompt:"select_account consent"`, portées `gmail.readonly`, `gmail.compose`, `gmail.modify`.
+- **Slack.** [P] repli embarqué `slack_mcp_client_id` (valeur masquée) dans `electron-main/main-app.cjs`, à côté de `shopify_mcp_client_id`. Le client Slack d’Ezerbot est un `client_id` public de build. [I] l’aligner sur ce repli ne copie pas la valeur masquée.
+- **Carte courriel.** [P] `GrokBotEmailDraft` (`from`, `to`, `cc`, `subject`, `body`) dans `electron-main/proto.cjs`. [P] `SendGrokBotDraftRequest` (champ `email`) et `DiscardGrokBotDraftRequest`. [P] carte `email-draft` dans `renderer/assets/index.eager-app-BBYQQe1M.js`. [P] états `pending`, `sending`, `refused`, `rate_limited`, `unconfirmed` dans `renderer/assets/chunk-draft-send-error-*`. Refusé, Trop de messages et Envoi non confirmé sont les libellés français de `refused`, `rate_limited`, `unconfirmed`. [P] la chaîne « Always allow » existe. Retirer « Toujours » est la politique de publication de #47, pas une absence chez Grok.
+- **Carte Slack.** [P] `GrokBotSlackDraft` (`workspace`, `target`, `thread`, `body`). [P] `SendGrokBotDraftRequest` champ `slack`. [P] carte `slack-draft` dans le même renderer.
+- **Lecture sans carte.** [P] `McpArgs` porte `smart_mode_approval` et `skip_approval`. [I] en déduire que toute lecture Gmail part sans carte irait au-delà de ces champs. La classe « lecture sans carte » est celle de `docs/specs/connecteurs.md`, appliquée aux outils de lecture de ce lot.
+- **Agenda et Drive.** [P] hôtes `calendarmcp.googleapis.com` → `googlecalendar`, `drivemcp.googleapis.com` → `googledrive`, `gmailmcp.googleapis.com` → `gmail`. [P] rea §b : le déclencheur calendrier est absent de l’union des routines. Il n’existe que pour la récurrence des réunions. [I] le contrat créé, modifié, annulé, commence, avec fuseau, est celui de `docs/specs/routines.md` (#60), pas un symbole de routine Grok.
+- **Plusieurs comptes.** [P] « Add another account » dans `renderer/assets/index.eager-common-BH0hmUYG.js`. [P] `accountKey`, `accountEmail`, `singleAccount` dans `electron-main/main-app.cjs`. [P] `DeleteMcpOAuthAccountRequest` (`server_id`, `account_key`) et `RenameMcpOAuthAccountRequest` dans `electron-main/proto.cjs`. Certains connecteurs ont `singleAccount:!0`. [I] Gmail n’est pas nommé dans cette liste. T16 le traite comme multi-comptes, sur le modèle de #49.
 
 ## Tranches
 

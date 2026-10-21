@@ -153,6 +153,9 @@ test("voice mode and voice memo icons differ and keep accessible names", async (
   const memoPaths = pathsOf(memo);
   assert.equal(modePaths.some(isBarWave), false, `mode voix is still a bar wave: ${modePaths.join(" | ")}`);
   assert.equal(memoPaths.some(isBarWave), false, `mémo vocal is still a bar wave: ${memoPaths.join(" | ")}`);
+  const bars = memoPaths.flatMap((path) => path.split(/(?=[Mm])/)).filter((part) => /^[Mm][\d\s.,+-]*[Vv][\d\s.,+-]*$/.test(part));
+  assert.equal(bars.length, 3, `le mémo vocal doit montrer trois barres d'onde dans la bulle, pas ${bars.length}`);
+  assert.ok(memoPaths.some((path) => /[aA]/.test(path)), "la bulle du mémo vocal reste le contour");
   assert.match(session, /setAttribute\("aria-label","Mode voix"\)/);
   assert.match(session, /voice-session-label","Mode voix"/);
   assert.match(voice, /setAttribute\("aria-label", "Mémo vocal"\)/);
@@ -162,7 +165,7 @@ test("voice mode and voice memo icons differ and keep accessible names", async (
   assert.equal(overlap.error, undefined, overlap.error);
   assert.ok(overlap.modeInk > 40, `mode voix icon is empty (${overlap.modeInk})`);
   assert.ok(overlap.memoInk > 40, `mémo vocal icon is empty (${overlap.memoInk})`);
-  assert.ok(overlap.iou < 0.35, `icons still overlap (IoU ${overlap.iou.toFixed(2)}, ink ${overlap.modeInk}/${overlap.memoInk})`);
+  assert.ok(overlap.iou < 0.3, `icons still overlap (IoU ${overlap.iou.toFixed(2)}, ink ${overlap.modeInk}/${overlap.memoInk})`);
 });
 
 function paintIcon(markup, size) {

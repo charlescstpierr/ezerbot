@@ -746,8 +746,10 @@ fn title_socket_obeys_the_twelve_second_cap_not_the_session_stall() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        released >= 4 && started.elapsed() < Duration::from_secs(14),
-        "title sockets still open after {:?} ({released} released, base {base}); the 12s cap never reached the worker",
+        released >= 4
+            && started.elapsed() >= Duration::from_secs(6)
+            && started.elapsed() < Duration::from_secs(14),
+        "title sockets closed outside the 10s cap after {:?} ({released} released, base {base})",
         started.elapsed()
     );
 }

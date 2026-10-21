@@ -91,6 +91,7 @@ pub mod generated;
 pub mod iphone;
 pub mod local;
 pub mod mcp;
+pub mod meetings;
 pub mod memory;
 pub mod memory_auto;
 pub mod multibot;
@@ -101,6 +102,7 @@ pub mod screen;
 pub mod skills;
 pub mod storage;
 pub mod voice;
+pub mod voice_session;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
 struct Feature {
@@ -145,6 +147,7 @@ registry!(
     iphone,
     local,
     voice,
+    meetings,
     screen
 );
 

@@ -121,6 +121,7 @@ pub fn body_limit(path: &str) -> usize {
         // retain the same 20 MiB limit as images.
         "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/voice/memos" => features::voice::MAX_WAV_BYTES.div_ceil(3) * 4 + 128 * 1024,
+        "/api/meetings/finalize" => features::meetings::MAX_WAV_BYTES.div_ceil(3) * 4 + 256 * 1024,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
         // 2 × 20 rules × 1,000 Unicode characters, including JSON escapes.
         "/api/approvals/reviewer" => 256 * 1024,
@@ -786,6 +787,8 @@ pub struct App {
     provider: Provider,
     #[cfg(debug_assertions)]
     debug_voice: features::voice::DebugVoice,
+    #[cfg(debug_assertions)]
+    debug_voice_session: features::voice_session::DebugSession,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
 }
@@ -889,6 +892,8 @@ impl App {
             provider,
             #[cfg(debug_assertions)]
             debug_voice: features::voice::DebugVoice::default(),
+            #[cfg(debug_assertions)]
+            debug_voice_session: features::voice_session::DebugSession::default(),
             deep_link_seen: BTreeMap::new(),
         })
     }

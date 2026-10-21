@@ -989,7 +989,7 @@ pub fn link_attachments(
     // enclosing send transaction, so an invalid reference never leaves a send.
     let (docs, images): (Vec<_>, Vec<_>) = unique
         .iter()
-        .filter(|id| !id.starts_with("voice_"))
+        .filter(|id| !id.starts_with("voice_") && !id.starts_with("meeting_"))
         .cloned()
         .partition(|id| id.starts_with("document_"));
     let documents = docs
@@ -1040,6 +1040,11 @@ fn message_attachments(
             .map(document_dto),
     );
     result.extend(super::voice::for_message(
+        ctx.connection,
+        conversation,
+        message,
+    )?);
+    result.extend(super::meetings::attachment(
         ctx.connection,
         conversation,
         message,
@@ -1214,7 +1219,11 @@ pub(super) fn document_text(
     message: &str,
 ) -> Result<String, ApiError> {
     let docs = documents::for_message(ctx.connection, conversation, message)?;
-    let voice = super::voice::model_text(ctx.connection, conversation, message)?;
+    let voice = format!(
+        "{}{}",
+        super::voice::model_text(ctx.connection, conversation, message)?,
+        super::meetings::model_text(ctx.connection, conversation, message)?
+    );
     if docs.is_empty() {
         return Ok(voice);
     }

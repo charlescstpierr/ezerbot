@@ -115,6 +115,18 @@
 .gb-card-slot { min-width: 0; margin-left: calc(var(--gb-avatar-width) + 12px - 17px); }
 .gb-card-slot > .gb-message { padding-inline: 16px; }
 .gb-card-slot:empty { display: none; }
+.gb-meeting h3 { margin: 5px 0; font-size: 16px; }
+.gb-meeting-summary { font-size: 13px; line-height: 1.7; margin: 14px 0; }
+.gb-meeting-summary h2 { font-size: 15px; margin: 14px 0 6px; }
+.gb-meeting > header .gb-engine-label { margin-left: 0; }
+.gb-meeting-transcript { margin-top: 16px; font-size: 12px; }
+.gb-meeting-transcript summary { cursor: pointer; color: var(--muted); }
+.gb-meeting-transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 12px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font: inherit; line-height: 1.7; }
+.gb-meeting-audio { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.gb-meeting-audio > p { flex-basis: 100%; }
+.gb-meeting-audio audio { width: min(100%, 310px); height: 34px; }
+.gb-meeting-error { color: var(--danger-text); font-size: 12px; }
+.gb-meeting-partial { padding: 8px 10px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 11px; line-height: 1.6; }
 .gb-turn-heading { margin-bottom: -14px; }
 .gb-turn-heading .gb-meta { margin-bottom: 0; }
 .gb-meta { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 7px; }

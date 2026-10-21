@@ -9,11 +9,13 @@ import { pendingReply } from "./thread-order.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
 import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { createDeepLinkQueue } from "./deep-links.js";
+import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
 
 const roots = new WeakMap();
 
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {
+  createVoiceReader, voiceNeedsAction,
   createDeepLinkQueue,
   teachPrompt: TEACH_PROMPT,
   isTeachMessage,

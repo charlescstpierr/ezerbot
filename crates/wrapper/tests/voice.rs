@@ -251,6 +251,192 @@ fn transcript_reaches_fake_model_as_user_data_never_audio() {
 }
 
 #[test]
+fn conversation_voice_uses_the_durable_send_and_fake_model_then_records_synthesis() {
+    let mut f = Fixture::new();
+    std::fs::write(f.dir.join("workspace.chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+    f.provider.refresh_models();
+    wait("voice model ready", || {
+        f.provider.status()["models_ready"] == true
+    });
+    let conversation = f.conversation();
+    let route = "/api/voice/session/debug";
+    f.post(route, json!({"command":"start","token":"live"}));
+    let input = f.post(route, json!({"command":"feed","token":"live","text":"Bonjour, discutons de la réunion.","final_result":true}));
+    f.post("/api/send",json!({"conversation_id":conversation,"message_id":"live-voice","body":input["final_text"]}));
+    let mut reply = String::new();
+    wait("voice reply complete", || {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let messages = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == conversation)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap();
+        if let Some(message) = messages
+            .iter()
+            .find(|m| m["id"] == "reply-live-voice" && m["state"] == "echoed")
+        {
+            reply = message["body"].as_str().unwrap().into();
+            true
+        } else {
+            false
+        }
+    });
+    let spoken = f.post(route,json!({"command":"speak","token":"live","text":reply,"voice":"fake-fr-CA","speed":1.0,"barge":1}));
+    assert_eq!(spoken["recorded_speech"], json!([reply]));
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    assert!(bodies
+        .iter()
+        .any(|b| b.to_string().contains("Bonjour, discutons de la réunion.")));
+    assert!(!serde_json::to_string(&bodies)
+        .unwrap()
+        .contains(&STANDARD.encode(WAV)));
+    f.post(route, json!({"command":"cancel","token":"live"}));
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state
+        .to_string()
+        .contains("Bonjour, discutons de la réunion."));
+    assert!(f
+        .denied(route, json!({"command":"status","token":"live"}))
+        .contains("plus actif"));
+}
+
+#[test]
+fn voice_settings_validate_and_survive_restart_without_resuming_audio() {
+    let mut f = Fixture::new();
+    assert_eq!(
+        f.app.api("GET", "/api/state", b"").unwrap()["voice"]["settings"]["speed"],
+        1.0
+    );
+    f.post(
+        "/api/voice/settings",
+        json!({"voice":"fake-fr-CA","speed":0.8}),
+    );
+    for body in [
+        json!({"voice":"fr","speed":2}),
+        json!({"voice":"bad\nvoice","speed":1}),
+        json!({"voice":"fr","speed":1,"command":"run"}),
+    ] {
+        assert_eq!(
+            f.app
+                .api(
+                    "POST",
+                    "/api/voice/settings",
+                    &serde_json::to_vec(&body).unwrap()
+                )
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+    f.post(
+        "/api/voice/session/debug",
+        json!({"command":"start","token":"restart"}),
+    );
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["voice"]["settings"],
+        json!({"voice":"fake-fr-CA","speed":0.8})
+    );
+    assert!(f
+        .denied(
+            "/api/voice/session/debug",
+            json!({"command":"status","token":"restart"})
+        )
+        .contains("plus actif"));
+}
+
+#[test]
+fn conversation_voice_fake_transcript_speech_pause_barge_denial_and_error() {
+    let mut f = Fixture::new();
+    let route = "/api/voice/session/debug";
+    assert_eq!(
+        f.post(
+            route,
+            json!({"command":"start","token":"voice","scenario":"denied"})
+        )["status"],
+        "mic_denied"
+    );
+    assert_eq!(
+        f.post(route, json!({"command":"start","token":"voice"}))["status"],
+        "listening"
+    );
+    assert_eq!(
+        f.post(
+            route,
+            json!({"command":"feed","token":"voice","text":"Bonjour"})
+        )["transcript"],
+        "Bonjour"
+    );
+    let result = f.post(
+        route,
+        json!({"command":"feed","token":"voice","text":"Bonjour Ezerbot.","final_result":true}),
+    );
+    assert_eq!(result["final_text"], "Bonjour Ezerbot.");
+    assert_eq!(result["utterance_id"], 1);
+    let conversation = f.conversation();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"spoken","body":result["final_text"]}),
+    );
+    f.post(route,json!({"command":"speak","token":"voice","text":"Bonjour à vous.","voice":"fake-fr-CA","speed":0.8,"barge":2}));
+    assert_eq!(
+        f.post(route, json!({"command":"pause","token":"voice"}))["speaking"],
+        false
+    );
+    assert_eq!(
+        f.post(route, json!({"command":"resume","token":"voice"}))["speaking"],
+        true
+    );
+    let barged = f.post(
+        route,
+        json!({"command":"feed","token":"voice","text":"Attends"}),
+    );
+    assert_eq!(barged["speaking"], false);
+    let stale = f.post(
+        route,
+        json!({"command":"speak","token":"voice","text":"Phrase arrivée trop tard.","barge":2}),
+    );
+    assert_eq!(stale["barged"], 3);
+    let status = f.post(route, json!({"command":"status","token":"voice"}));
+    assert_eq!(status["recorded_speech"], json!(["Bonjour à vous."]));
+    assert!(f
+        .denied(
+            route,
+            json!({"command":"speak","token":"voice","text":"Non","voice":"en-US"})
+        )
+        .contains("française"));
+    assert!(f
+        .denied(
+            route,
+            json!({"command":"speak","token":"voice","text":"x".repeat(1501)})
+        )
+        .contains("française"));
+    assert_eq!(
+        f.post(route, json!({"command":"fail","token":"voice"}))["status"],
+        "failed"
+    );
+    assert_eq!(
+        f.post(route, json!({"command":"status","token":"voice"}))["status"],
+        "failed"
+    );
+    assert_eq!(
+        f.post(route, json!({"command":"cancel","token":"voice"}))["speaking"],
+        false
+    );
+    assert!(f
+        .denied(
+            route,
+            json!({"command":"speak","token":"voice","text":"Plus rien"})
+        )
+        .contains("plus actif"));
+}
+
+#[test]
 fn fake_audio_denial_error_retry_cancel_stale_and_duration_cap() {
     let mut f = Fixture::new();
     for (scenario, status) in [

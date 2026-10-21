@@ -189,6 +189,27 @@
     get state() { return state; },
     get connected() { return connected; },
     api, refresh, notify, createBotMascot, botSummary,
+    followVoiceReply(conversationId) {
+      if (window.EzerbotVoiceMode?.active() && currentConversation()?.id === conversationId) render(true);
+    },
+    async sendVoice(text, conversationId) {
+      const conversation = currentConversation();
+      if (!connected || busy || conversation?.id !== conversationId || conversation.kind === "task") throw new Error("Ouvrez une conversation disponible pour envoyer la transcription.");
+      if (!text.trim()) throw new Error("Aucune parole reconnue. Réessayez.");
+      const messageId = crypto.randomUUID();
+      busy = true; submissionActivity = "send";
+      approvalFollow.arm(conversation.id, conversation.messages, true);
+      conversation.messages.push({id:messageId,role:"user",body:text,state:"queued",created_at:new Date().toISOString()});
+      render(true);
+      try {
+        const response = await api("/api/send", {conversation_id:conversationId,message_id:messageId,body:text});
+        upsertConversation(response.conversation); render(true); schedulePoll();
+        return messageId;
+      } catch (error) {
+        try { await refresh(); } catch { showConnectionError(error); }
+        throw new Error("Envoi vocal non confirmé. Vérifiez le fil avant de réessayer. " + error.message);
+      } finally { busy = false; submissionActivity = null; updateComposer(); schedulePoll(); }
+    },
     composerChanged() { updateComposer(); schedulePoll(); },
   };
 
@@ -498,7 +519,9 @@
     }
     const tooLong = new TextEncoder().encode(ui.input.value.trim()).length > 16 * 1024;
     const hasAttachments = Boolean(sendExtras().attachments?.length);
-    const attachmentsBlocked = [...panels.values()].some((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
+    const blockingPanel = [...panels.values()].find((panel) => Boolean(panelCall(panel, panel.composer?.blocked)));
+    const attachmentsBlocked = Boolean(blockingPanel);
+    const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
     const live = !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
     const noMembers = group && !currentConversation().member_ids?.length;
@@ -508,8 +531,8 @@
     ui.send.setAttribute("aria-label", live ? ui.send.title : busy ? "Envoi en cours" : "Envoyer le message");
     ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
     ui.input.setInvalid(tooLong);
-    ui.hint.dataset.alert = String(Boolean(pending || tooLong));
-    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
+    ui.hint.dataset.alert = String(Boolean(pending || tooLong || blockedReason));
+    ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : typeof blockedReason === "string" ? blockedReason : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
     $("new-chat").disabled = busy;
     ui.menuButton.disabled = busy || !currentConversation();
     deepLinks.setReady(deepLinksBootReady && connected && !busy);
@@ -519,7 +542,7 @@
     learn.disabled = busy || !connected || pending || noMembers || Boolean(streamingMessage())
       || !currentConversation()?.messages.some((message) => message.role === "user" && ["accepted", "echoed"].includes(message.state));
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
-      activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && Boolean(ui.input.value.trim()) });
+      activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
   }
 
   function selectConversation(id, focus = false) {
@@ -1025,6 +1048,7 @@
     if (!conversation) return;
     const pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90;
     try {
+      if (path === "/api/stop") await window.EzerbotVoiceMode?.stopSpeech();
       const response = await api(path, { conversation_id: conversation.id, message_id: messageId });
       upsertConversation(response.conversation);
       render(currentConversation()?.id === conversation.id && pinned && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 90);

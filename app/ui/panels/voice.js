@@ -11,6 +11,8 @@
     unavailable: "La dictée est disponible dans l’application Mac Ezerbot.",
     upload_failed: "Le mémo n’a pas pu être conservé. Réessayez l’enregistrement local du mémo.",
     busy: "Une autre dictée est déjà en cours. Arrêtez-la avant de recommencer.",
+    meeting_busy: "Une réunion est en cours. Arrêtez-la avant de dicter.",
+    microphone_busy: "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.",
   };
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;
@@ -21,6 +23,7 @@
   // Send/remove receipts, not a stale polling snapshot, relinquish ownership.
   const localMemos = new Map();
   const live = () => ["authorizing", "recording", "transcribing", "saving"].includes(phase);
+  window.EzerbotDictation = { active: live, refresh: render, cancel() { reset(); changed(); } };
   const tones = { mic_denied: "danger", speech_denied: "danger", no_microphone: "danger", failed: "danger", upload_failed: "danger", offline_unavailable: "warning", limited: "warning" };
   const language = () => document.documentElement.lang || "fr";
   async function bridge(command, extra = {}) {
@@ -32,16 +35,21 @@
     if (context?.state?.voice?.debug_fake) return panels.api("/api/voice/debug", body);
     return { status: "unavailable" };
   }
+  panels.voiceActive = live;
+  let lastVoiceActive = false;
   function changed() { render(); panels.composerChanged(); }
   function render() {
     if (!mic) return;
     const recording = phase === "recording";
-    mic.innerHTML = recording ? '<svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>' : '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>'; 
-    mic.setAttribute("aria-label", recording ? "Arrêter la dictée" : "Démarrer la dictée");
-    mic.title = recording ? "Arrêter · Échap" : "Dicter un message";
+    const voiceActive = Boolean(window.EzerbotVoiceMode?.active());
+    const meetingActive = Boolean(panels.meetingActive?.());
+    mic.innerHTML = recording ? '<svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>' : '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
+    mic.setAttribute("aria-label", voiceActive ? "Dictée indisponible pendant le mode voix" : meetingActive ? "Dictée indisponible pendant la réunion" : recording ? "Arrêter la dictée" : "Démarrer la dictée");
+    mic.title = voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : recording ? "Arrêter · Échap" : "Dicter un message";
     mic.setAttribute("aria-pressed", String(recording));
-    mic.disabled = (live() && !recording) || context?.conversation?.kind === "task";
-    memoMode.disabled = live();
+    mic.disabled = voiceActive || meetingActive || (live() && !recording) || context?.conversation?.kind === "task";
+    memoMode.disabled = voiceActive || meetingActive || live();
+    memoMode.title = voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : "Joindre le mémo vocal au message";
     region.hidden = phase === "idle" && !memoItems.length;
     if (tones[phase]) region.dataset.tone = tones[phase]; else delete region.dataset.tone;
     row.hidden = phase === "idle";
@@ -67,6 +75,9 @@
       chip.append(name, audio, remove); list.append(chip);
     }
     for (const el of existing.values()) el.remove();
+    if (live() !== lastVoiceActive) {
+      lastVoiceActive = live(); window.dispatchEvent?.(new Event("grokbot:voice-change"));
+    }
   }
   function reset() {
     clearTimeout(timeout); revision++; processing = false; pendingMemo = null;
@@ -93,7 +104,8 @@
     } catch { /* Draft is already handed off. */ }
   }
   async function start() {
-    if (live()) return;
+    if (live() || window.EzerbotVoiceMode?.active()) return;
+    if (panels.meetingActive?.()) { panels.notify(errors.meeting_busy); return; }
     reset();
     try {
       session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked };
@@ -173,7 +185,8 @@
         label.append(memoMode, document.createTextNode("Mémo vocal"));
         mic = node("button", "icon-button voice-mic"); mic.id = "voice-microphone"; mic.type = "button";
         mic.onclick = () => phase === "recording" ? stop() : start();
-        control.append(label, mic); document.getElementById("send-button").before(control);
+        control.append(label, mic); window.EzerbotVoiceMode?.mountToggle?.(control);
+        document.getElementById("send-button").before(control);
         region = node("section", "voice-region"); region.setAttribute("aria-label", "Dictée et mémos vocaux");
         row = node("div", "voice-status-row"); statusText = node("span", "voice-status"); statusText.setAttribute("role", "status");
         // Styled bar, not <meter>: the native gauge ignores the accent color.
@@ -191,6 +204,7 @@
         list = node("div", "voice-memo-list"); region.append(row, list); container.append(region);
         document.addEventListener("keydown", (event) => { if (event.key === "Escape" && phase === "recording") { event.preventDefault(); event.stopImmediatePropagation(); stop(); } }, true);
         window.addEventListener("beforeunload", reset);
+        window.addEventListener("grokbot:meeting-change", render);
         render();
       },
       blocked: () => live(),

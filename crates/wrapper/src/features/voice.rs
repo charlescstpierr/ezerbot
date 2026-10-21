@@ -32,23 +32,32 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         transcript TEXT NOT NULL, language TEXT NOT NULL, duration_ms INTEGER NOT NULL,
         audio BLOB NOT NULL, created_at INTEGER NOT NULL);",
     )?;
+    super::voice_session::migrate(conn)?;
     Ok(())
 }
 
 /// Accept only bounded mono PCM16 WAV, not arbitrary bytes labelled audio/wav.
 /// Both the native recorder and debug fixture use this format.
 pub fn wav_duration(bytes: &[u8]) -> Result<u32, ApiError> {
+    wav_duration_bounded(bytes, MAX_SECONDS)
+}
+
+/// Shared PCM validator for dictation and segmented, on-device meeting capture.
+pub(super) fn wav_duration_bounded(bytes: &[u8], max_seconds: u32) -> Result<u32, ApiError> {
+    let too_long = || {
+        ApiError::new(
+            400,
+            format!("Enregistrement trop long : la limite est de {max_seconds} secondes."),
+        )
+    };
     let invalid = || {
         ApiError::new(
             400,
             "Enregistrement illisible. Réessayez avec le microphone.",
         )
     };
-    if bytes.len() > MAX_WAV_BYTES {
-        return Err(ApiError::new(
-            400,
-            "Enregistrement trop long : la limite est de 60 secondes.",
-        ));
+    if bytes.len() > (max_seconds as usize + 1) * 32_000 + 4096 {
+        return Err(too_long());
     }
     if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(invalid());
@@ -103,13 +112,13 @@ pub fn wav_duration(bytes: &[u8]) -> Result<u32, ApiError> {
     if cursor != bytes.len() || format.is_none() {
         return Err(invalid());
     }
-    if len > MAX_CAPTURE_SECONDS as usize * 32_000 {
-        return Err(ApiError::new(
-            400,
-            "Enregistrement trop long : la limite est de 60 secondes.",
-        ));
+    if len > (max_seconds as usize + 1) * 32_000 {
+        return Err(too_long());
     }
-    Ok(((len as u32 * 1000) / 32_000).min(MAX_SECONDS * 1000))
+    // PCM16 mono at 16 kHz is exactly 32 bytes per millisecond. Divide
+    // before narrowing: multiplying a valid 10-minute recording by 1000
+    // overflows u32 after only 134 seconds.
+    Ok(((len / 32) as u32).min(max_seconds * 1000))
 }
 
 fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -179,7 +188,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         Ok(rows)
     })()
     .unwrap_or_default();
-    json!({"max_seconds":MAX_SECONDS,"drafts":drafts,"debug_fake":cfg!(debug_assertions)})
+    json!({"max_seconds":MAX_SECONDS,"drafts":drafts,"debug_fake":cfg!(debug_assertions),"settings":super::voice_session::settings(ctx.connection).unwrap_or_else(|_| json!({"voice":"","speed":1.0}))})
 }
 
 pub fn routes(
@@ -192,7 +201,14 @@ pub fn routes(
     if method == "POST" && path == "/api/voice/debug" {
         return Some(app.debug_voice.command(body).map(ApiResponse::Json));
     }
+    #[cfg(debug_assertions)]
+    if method == "POST" && path == "/api/voice/session/debug" {
+        return Some(app.debug_voice_session.command(body).map(ApiResponse::Json));
+    }
     match (method, path) {
+        ("POST", "/api/voice/settings") => {
+            Some(super::voice_session::save(&app.connection, body).map(ApiResponse::Json))
+        }
         ("POST", "/api/voice/memos") => Some((|| {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -308,6 +324,8 @@ pub(crate) struct DebugVoice {
     scenario: String,
     started: u64,
     attempts: u32,
+    meeting: bool,
+    accumulated: u64,
 }
 #[cfg(debug_assertions)]
 impl DebugVoice {
@@ -322,15 +340,37 @@ impl DebugVoice {
             scenario: Option<String>,
             #[serde(default)]
             language: Option<String>,
+            #[serde(default)]
+            purpose: Option<String>,
+            #[serde(default)]
+            consent: bool,
         }
         let command: Command = parse(body)?;
         if let Some(scenario) = command.scenario {
             self.scenario = scenario;
         }
         if command.command == "start" {
-            if matches!(self.status.as_str(), "recording" | "transcribing") {
-                return Err(ApiError::new(409, "Une dictée est déjà en cours."));
+            if matches!(
+                self.status.as_str(),
+                "recording" | "transcribing" | "paused"
+            ) {
+                return Err(ApiError::new(
+                    409,
+                    if self.meeting {
+                        "Une réunion est en cours. Arrêtez-la avant de dicter."
+                    } else {
+                        "Une dictée est déjà en cours."
+                    },
+                ));
             }
+            self.meeting = command.purpose.as_deref() == Some("meeting");
+            if self.meeting && !command.consent {
+                return Err(ApiError::new(
+                    403,
+                    "Confirmez le consentement avant d’enregistrer la réunion.",
+                ));
+            }
+            self.accumulated = 0;
             self.token = command.token;
             self.started = crate::now();
             self.attempts = 0;
@@ -349,7 +389,18 @@ impl DebugVoice {
         } else {
             match command.command.as_str() {
                 "cancel" => self.status = "idle".into(),
+                "pause" if self.meeting && self.status == "recording" => {
+                    self.accumulated += crate::now().saturating_sub(self.started);
+                    self.status = "paused".into();
+                }
+                "resume" if self.meeting && self.status == "paused" => {
+                    self.started = crate::now();
+                    self.status = "recording".into();
+                }
                 "stop" | "retry" => {
+                    if self.status == "recording" {
+                        self.accumulated += crate::now().saturating_sub(self.started);
+                    }
                     self.attempts += 1;
                     self.status = if self.scenario == "failed" && self.attempts == 1 {
                         "failed"
@@ -362,20 +413,49 @@ impl DebugVoice {
                 _ => return Err(ApiError::new(400, "Commande vocale inconnue.")),
             }
         }
-        let elapsed = crate::now().saturating_sub(self.started);
-        if self.status == "recording"
-            && (elapsed >= MAX_SECONDS as u64 * 1000 || self.scenario == "too_long")
-        {
+        let cap = if self.meeting {
+            super::meetings::MAX_SECONDS
+        } else {
+            MAX_SECONDS
+        } as u64
+            * 1000;
+        let elapsed = self.accumulated
+            + if self.status == "recording" {
+                crate::now().saturating_sub(self.started)
+            } else {
+                0
+            };
+        if self.status == "recording" && (elapsed >= cap || self.scenario == "too_long") {
             self.status = "ready".into();
         }
         let ready = self.status == "ready";
         let fixture = include_bytes!("../../tests/fixtures/voice.wav");
+        let segmented = self.meeting
+            && ready
+            && matches!(self.scenario.as_str(), "partial" | "partial_persistent");
+        let partial = segmented && (self.attempts < 2 || self.scenario == "partial_persistent");
+        let mut audio = fixture.to_vec();
+        if segmented {
+            audio.resize(44 + 121 * 32_000, 0);
+            let length = audio.len();
+            audio[4..8].copy_from_slice(&((length - 8) as u32).to_le_bytes());
+            audio[40..44].copy_from_slice(&((length - 44) as u32).to_le_bytes());
+        }
+        let transcript = if !ready {
+            ""
+        } else if partial {
+            "Décision : préparer la rencontre.\n[Passage non transcrit de 1:00 à 2:00]\nAction : Alice prépare la démo."
+        } else if segmented {
+            "Décision : préparer la rencontre.\nPassage récupéré : rendez-vous jeudi.\nAction : Alice prépare la démo."
+        } else {
+            "Bonjour, voici mon mémo vocal pour préparer la réunion de demain."
+        };
         Ok(
             json!({"status":if self.status.is_empty() {"idle"} else {&self.status},"token":self.token,
-            "elapsed_ms":elapsed.min(60_000),"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
-            "transcript":if ready {"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."} else {""},
-            "data":if ready {STANDARD.encode(fixture)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
-            "too_long":ready && (elapsed >= 60_000 || self.scenario == "too_long"),"fake":true}),
+            "elapsed_ms":if segmented {121_000} else if self.scenario == "too_long" {cap} else {elapsed.min(cap)},"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
+            "transcript":transcript,"partial":partial,"missing_segments":if partial {1} else {0},
+            "data":if ready && self.scenario != "no_audio" {STANDARD.encode(&audio)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
+            "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }
 }

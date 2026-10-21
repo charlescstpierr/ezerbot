@@ -1,12 +1,12 @@
 # Images et documents
 
-Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. La génération vidéo est hors périmètre. Aucune implémentation de ce lot n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
+Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. La vidéo, génération comme lecture, est hors périmètre. Le lot garde les images, les documents et la bibliothèque par bot. Aucune implémentation n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
 
 ## Contexte
 
-Charles utilise Ezerbot, l’app Mac, pour faire produire à un bot des images et des documents, puis les revoir dans la conversation. Le tableau de parité laisse quatre écarts ouverts : la génération d’images est absente (IMG-2) ; il n’y a ni vidéo ni galerie (IMG-3) ; le PDF généré est en Courier et refuse les emoji (DOC-2) ; aucun bot n’a de bibliothèque de fichiers (DOC-3).
+Charles utilise Ezerbot, l’app Mac, pour faire produire à un bot des images et des documents, puis les revoir dans la conversation. Le tableau de parité laisse ces écarts ouverts : la génération d’images est absente (IMG-2) ; il n’y a pas de galerie (IMG-3, pour sa part images) ; le PDF généré est en Courier et refuse les emoji (DOC-2) ; aucun bot n’a de bibliothèque de fichiers (DOC-3).
 
-Aujourd’hui, le bot peut déjà créer un fichier local (PDF, DOCX, PPTX, Markdown, CSV, XLSX, SVG) et l’afficher comme une carte dans la conversation. Le PDF est une police standard Courier encodée en WinAnsi : le français passe, un emoji fait échouer la génération. Le DOCX met en forme les titres et les puces en Arial, sans tableau et sans les couleurs de l’app. L’aperçu dans la conversation est une vignette ; l’agrandissement actuel est une fenêtre bornée, et l’ouverture se fait hors de l’app. Les images que Charles joint sont montrées ; aucune image n’est produite par le bot. Une pièce audio peut déjà se lire dans la conversation. Aucune vidéo ne se lit, et aucune vidéo ne se génère.
+Aujourd’hui, le bot peut déjà créer un fichier local (PDF, DOCX, PPTX, Markdown, CSV, XLSX, SVG) et l’afficher comme une carte dans la conversation. Le PDF est une police standard Courier encodée en WinAnsi : le français passe, un emoji fait échouer la génération. Le DOCX met en forme les titres et les puces en Arial, sans tableau et sans les couleurs de l’app. L’aperçu dans la conversation est une vignette ; l’agrandissement actuel est une fenêtre bornée, et l’ouverture se fait hors de l’app. Les images que Charles joint sont montrées ; aucune image n’est produite par le bot. Une pièce audio peut déjà se lire dans la conversation.
 
 Le fournisseur a deux sessions distinctes, toutes deux au nom du compte que Charles a connecté dans Ezerbot :
 
@@ -32,16 +32,6 @@ Preuves, lues le 21 octobre 2026 :
 
 **Ce que Charles fournit pour les images.** Rien, tant que la session sélectionnée est Codex et que la route Images accepte le compte. Si cette route refuse le compte (plan, droit ou rejet du client), la voie de repli est une clé d’API OpenAI collée une fois dans le trousseau du Mac, le même coffre que les secrets déjà gardés par l’app. Charles la crée dans les clés d’API de `platform.openai.com`. Elle est facturée sur le compte API, à part de l’abonnement ChatGPT. Il ne la fournit pas à l’avance.
 
-### Vidéo : aucune génération disponible
-
-La génération vidéo est hors périmètre. Le lot garde seulement le fait de joindre une vidéo et de la lire dans la conversation. Charles n’a rien à fournir pour cela. Ni le jeton Codex ni une clé d’API OpenAI n’ouvrent une génération vidéo.
-
-Sources lues le 21 octobre 2026 :
-
-- Guide officiel de génération vidéo, [developers.openai.com/api/docs/guides/video-generation](https://developers.openai.com/api/docs/guides/video-generation) : les modèles de génération vidéo et l’API Videos ont été arrêtés le 24 septembre 2026. Aucune API de remplacement n’est disponible. Le guide est conservé comme archive.
-- Page [Deprecations](https://developers.openai.com/api/docs/deprecations), avis du 24 mars 2026 : retrait le 24 septembre 2026 de l’API Videos et de ses modèles. La colonne « Recommended replacement » est vide.
-- Journal de l’API, [changelog](https://developers.openai.com/api/docs/changelog), section October 2026 jusqu’au 20 octobre : aucune nouvelle API ni aucun nouveau modèle de génération vidéo. Les dernières entrées qui touchent `v1/videos` datent de mars 2026.
-
 ## Décisions
 
 1. **Le bot génère l’image sans bouton.** Quand Charles décrit une image à créer ou à modifier, le modèle appelle un outil local, comme il appelle déjà la création de document. L’outil parle à la route Images Codex (`images/generations` pour créer, `images/edits` pour modifier) avec le jeton et l’identifiant de compte de la session Codex, modèle demandé `gpt-image-2`. Le PNG revient dans la bulle du bot. Il n’y a pas de bouton dédié dans le composeur.
@@ -51,8 +41,7 @@ Sources lues le 21 octobre 2026 :
 5. **Les documents générés deviennent des pages lisibles.** PDF et DOCX utilisent une vraie police proportionnelle, gardent les emoji visibles, traitent les titres comme des titres et les tableaux comme des tableaux, et portent les couleurs d’accent déjà choisies dans l’app. L’aperçu plein écran se fait dans Ezerbot. La page reste claire : l’accent colore le bandeau ou le titre, le texte reste encre foncée. Le thème sombre de l’app ne renverse pas la page.
 6. **L’accent suivi est celui de l’app.** L’accent par défaut est le chartreuse de l’interface, `rgb(230 255 61)`, encre `#0f1012`, accent profond `#5b6b00`. Si Charles choisit un autre accent (orange, ambre, menthe, cyan, magenta, vermillon, violet, blanc), les documents générés ensuite prennent cet accent. Un document déjà produit ne change pas.
 7. **La bibliothèque est une, avec deux rôles.** Elle appartient au bot. Les fichiers de contexte sont relus, de façon bornée, à chaque conversation de ce bot. Les fichiers générés (images et documents) y sont rangés et retrouvables ; ils ne sont pas recopiés en entier dans chaque prompt. La recherche, au besoin, couvre les deux rôles et reste locale, sur le modèle du rappel de mémoire : lexicale, sans embeddings, limitée au bot.
-8. **Une vidéo jointe se lit dans la bulle.** Charles joint une vidéo comme il joint une image. La bulle montre un lecteur (lecture, pause, sans démarrage sonore automatique). Le bot ne génère pas de vidéo.
-9. **Les octets restent sur le Mac.** Images, documents et fichiers de bibliothèque vivent dans la base locale, comme les documents générés aujourd’hui. Le prompt et les images envoyés à OpenAI partent parce que c’est le générateur. Aucun galerie en ligne n’est ajoutée. Le téléchargement est le passage vers le disque, et il demande un accord.
+8. **Les octets restent sur le Mac.** Images, documents et fichiers de bibliothèque vivent dans la base locale, comme les documents générés aujourd’hui. Le prompt et les images envoyés à OpenAI partent parce que c’est le générateur. Aucun galerie en ligne n’est ajoutée. Le téléchargement est le passage vers le disque, et il demande un accord.
 
 ## Récits
 
@@ -88,8 +77,6 @@ Sources lues le 21 octobre 2026 :
 30. En tant que Charles, je veux que la recherche reste sur ce Mac et sur ce bot, afin qu’un fait d’un autre bot ne ressorte pas.
 31. En tant que Charles, je veux que l’image ou le document que le bot vient de créer se range tout seul dans la bibliothèque, afin de le retrouver plus tard.
 32. En tant que Charles, je veux que les fichiers générés ne soient pas relus en entier à chaque tour, afin que le contexte reste celui des fichiers que j’ai désignés comme contexte.
-33. En tant que Charles, je veux joindre une courte vidéo et la lire dans la bulle, afin de la revoir dans le fil.
-34. En tant que Charles, je veux que la vidéo ne démarre pas toute seule avec le son, afin de ne pas être surpris en ouvrant le fil.
 
 ## Décisions d’implémentation
 
@@ -103,7 +90,6 @@ Sources lues le 21 octobre 2026 :
 - PDF et DOCX acceptent le même contenu structuré : titres Markdown (`#`, `##`, `###`) et tableau Markdown. L’emoji n’est plus une erreur. La police du PDF n’est plus Courier. Sur Mac, le dessin passe par l’API PDF du système, afin qu’Aperçu et l’aperçu in-app montrent le glyphe emoji sans embarquer une police Apple dans le dépôt. Le DOCX continue d’embarquer des caractères Unicode ; il gagne le tableau et l’accent.
 - Les couleurs du modèle sont l’accent courant de l’app au moment de la génération, plus l’encre foncée pour le corps. Elles sont copiées dans le fichier. Changer l’accent plus tard ne réécrit pas les fichiers.
 - La bibliothèque a deux rôles, `contexte` et `généré`. Seul `contexte` est injecté, borné, dans chaque conversation du bot, avec un décompte du reste et l’invitation à chercher, sur le modèle du rappel de mémoire. `généré` est rangé à la création (image ou document) et ressort par la recherche ou par la galerie. La recherche est lexicale, locale, insensible aux accents français, limitée au bot, avec un budget de résultat. Elle ne fait pas d’appel réseau.
-- La vidéo jointe réutilise le chemin des pièces jointes et le lecteur déjà utilisé pour un mémo audio : un élément de lecture dans la bulle, sans lecture automatique sonore. Les formats promis sont ceux qu’un WebView macOS lit de façon fiable à partir d’un fichier local (MP4 H.264/AAC). Un autre conteneur échoue avec un message français, sans conversion silencieuse.
 - Les plafonds déjà en place pour les pièces jointes et les documents générés s’appliquent. Ce lot n’en invente pas de plus larges.
 - Aucun secret de connexion n’entre dans le contexte, la mémoire, ni l’export de conversation.
 
@@ -132,12 +118,11 @@ Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est se
 9. **Contexte.** Déposer un fichier de contexte sur le bot A contenant un mot rare. Ouvrir une conversation neuve avec A et demander ce mot : la réponse s’en sert. La même demande au bot B ne le connaît pas.
 10. **Recherche.** Avec assez de fichiers de contexte pour dépasser le budget injecté, demander un fait présent seulement dans un fichier non injecté en entier. Le bot le retrouve. Un fait privé d’un autre bot ne ressort pas.
 11. **Rangement.** L’image du parcours 1 et le PDF du parcours 6 figurent dans la bibliothèque du bot, rôle généré. Une conversation neuve ne réinjecte pas leur contenu intégral ; elle peut les retrouver par une question de recherche.
-12. **Vidéo jointe.** Joindre un MP4 court. La bulle montre un lecteur. La lecture et la pause fonctionnent. Le son ne part pas tout seul à l’affichage du message. Un fichier qui n’est pas une vidéo lisible affiche une erreur française, sans lecteur vide.
 
 ## Hors-périmètre
 
 - Réécrire PPTX, XLSX, CSV, Markdown et SVG. Ils continuent de se générer comme aujourd’hui et ne doivent pas régresser. Ils ne reçoivent pas le modèle couleur dans ce lot.
-- Générer une vidéo. Le guide officiel de génération vidéo et la page Deprecations constatent l’arrêt de l’API Videos le 24 septembre 2026, sans API de remplacement. Le compte de Charles ne peut pas en produire. Joindre une vidéo et la lire dans la conversation reste dans le lot.
+- La vidéo, en entier. Charles la laisse de côté pour l’instant : ni génération, ni lecture d’une vidéo jointe, ni lecteur dans la bulle. Les issues ouvertes pour cela sont fermées. La galerie d’images, elle, reste dans le lot.
 - Un bouton « générer une image », un éditeur de dessin, des calques, ou un choix manuel de taille et de qualité. `quality` et `size` restent `auto`.
 - Prétendre que le poids `gpt-image-2` a bien été celui qui a dessiné, lorsque la route ne le confirme pas.
 - Embarquer une police Apple dans le dépôt ou dans un fichier redistribué.
@@ -156,7 +141,6 @@ Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est se
 - **Emoji et PDF hors de ce Mac.** L’API PDF du système montre l’emoji dans Aperçu et dans l’app. Un lecteur Linux du fichier peut ne pas dessiner l’emoji couleur. Les tests hors Mac vérifient que la génération accepte l’emoji et que la police n’est plus Courier ; le glyphe est jugé sur Mac.
 - **Couleur d’accent peu lisible.** L’accent « blanc » ou un accent clair sur page claire disparaîtrait. Le bandeau utilise l’accent profond quand l’accent clair ne contraste pas avec le fond de page. Le juge le vérifie avec l’accent par défaut et avec le violet.
 - **Taille des images dans la base.** Les PNG s’accumulent par bot. Les plafonds existants s’appliquent ; un dépassement échoue en français avant d’écrire. Ce lot ne migre pas l’historique.
-- **Lecture vidéo.** Un conteneur que le WebView macOS ne lit pas affiche une erreur française. Aucune conversion cachée.
 - **Clé d’API.** Elle est un secret de facturation. Elle reste dans le trousseau, absente des prompts, des journaux, de la mémoire et des exports. Les tests utilisent un coffre jetable, comme les tests de trousseau déjà présents.
 
 ## Tranches
@@ -172,6 +156,5 @@ Carte : [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/
 7. [Fichiers de contexte lus à chaque conversation](https://github.com/charlescstpierr/ezerbot/issues/35). Aucun bloquant.
 8. [Recherche dans la bibliothèque du bot](https://github.com/charlescstpierr/ezerbot/issues/42). Bloquée par 35.
 9. [Ranger images et documents générés dans la bibliothèque](https://github.com/charlescstpierr/ezerbot/issues/43). Bloquée par 40 et 35.
-10. [Lire une vidéo jointe dans la bulle](https://github.com/charlescstpierr/ezerbot/issues/36). Aucun bloquant.
 
-La génération vidéo est hors périmètre. L’issue [Génération vidéo](https://github.com/charlescstpierr/ezerbot/issues/37) est fermée pour cette raison.
+La vidéo est hors périmètre. [Lecture d’une vidéo jointe hors périmètre](https://github.com/charlescstpierr/ezerbot/issues/36) et [Génération vidéo hors périmètre](https://github.com/charlescstpierr/ezerbot/issues/37) sont fermées. Aucune tranche vidéo ne reste ouverte.

@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 mod push;
 pub const PORT: u16 = 47863;
+/// Sentence the iPhone client compares verbatim. Server copies must use this.
+pub const ACCESS_DISABLED: &str = "L’accès iPhone est désactivé sur le Mac.";
 const LIFE: u64 = 120_000;
 empty_hooks!(
     tools,
@@ -165,7 +167,7 @@ pub fn remote(
     headers: &[(String, String)],
 ) -> Result<ApiResponse, ApiError> {
     if !enabled(app) {
-        return Err(bad(403, "L’accès iPhone est désactivé sur le Mac."));
+        return Err(bad(403, ACCESS_DISABLED));
     }
     if path == "/api/iphone/claim" && method == "POST" {
         return claim(app, body).map(ApiResponse::Json);

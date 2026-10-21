@@ -74,7 +74,7 @@ fn error(status: u16, message: &str) -> ApiError {
 /// tiny_http filters Connection from Response::add_header. For disabled access,
 /// write the fixed denial explicitly so browsers/proxies retire their connection.
 fn remote_disabled(request: Request) -> std::io::Result<()> {
-    let body = json!({"error":"L’accès iPhone est désactivé sur le Mac."}).to_string();
+    let body = json!({"error": grokbot_wrapper::features::iphone::ACCESS_DISABLED}).to_string();
     let mut writer = request.into_writer();
     write!(writer, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n\r\n{}", body.len(), body)?;
     writer.flush()
@@ -122,7 +122,10 @@ fn payload(
     if remote {
         grokbot_wrapper::features::iphone::validate_headers(&method, &headers)?;
         if !grokbot_wrapper::features::iphone::enabled(app) {
-            return Err(error(403, "L’accès iPhone est désactivé sur le Mac."));
+            return Err(error(
+                403,
+                grokbot_wrapper::features::iphone::ACCESS_DISABLED,
+            ));
         }
     } else {
         validate_headers_for_path(port, &method, &path, &headers)?;

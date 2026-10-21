@@ -11,6 +11,8 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 
 const MAX_CONTENT: usize = 100_000;
 const MAX_LINES: usize = 1800;
+const MAX_TABLE_COLS: usize = 50;
+const MAX_TABLE_ROWS: usize = 1000;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -122,16 +124,16 @@ pub fn generate(request: &Request) -> Result<Generated> {
     let bytes = match format {
         "md" => request.content.as_bytes().to_vec(),
         "pdf" => {
-            let (bytes, n) = pdf(&normalized, &lines)?;
+            let (bytes, n) = pdf(&normalized)?;
             pages = n;
-            if document_rich(&normalized) {
-                rich = Some(blocks_preview("pdf", &blocks(&normalized)));
+            if document_rich(&normalized)? {
+                rich = Some(blocks_preview("pdf", &blocks(&normalized)?));
             }
             bytes
         }
         "docx" => {
-            if document_rich(&normalized) {
-                rich = Some(blocks_preview("docx", &blocks(&normalized)));
+            if document_rich(&normalized)? {
+                rich = Some(blocks_preview("docx", &blocks(&normalized)?));
             }
             docx(&normalized)?
         }
@@ -357,9 +359,11 @@ impl Slide {
             .collect()
     }
 }
-fn document_rich(content: &str) -> bool {
-    content.contains(pdf_font::PARTY)
-        || blocks(content).iter().any(|b| matches!(b, Block::Table(_)))
+fn document_rich(content: &str) -> Result<bool> {
+    Ok(content.contains(pdf_font::PARTY)
+        || blocks(content)?
+            .iter()
+            .any(|b| matches!(b, Block::Table(_))))
 }
 fn row_cells(line: &str) -> Option<Vec<String>> {
     let t = line.trim();
@@ -368,39 +372,71 @@ fn row_cells(line: &str) -> Option<Vec<String>> {
     }
     let t = t.strip_prefix('|').unwrap_or(t);
     let t = t.strip_suffix('|').unwrap_or(t);
-    Some(t.split('|').map(|c| c.trim().to_string()).collect())
+    // A tab is four spaces, same as `wrap`, before any glyph is measured.
+    Some(
+        t.split('|')
+            .map(|c| c.trim().replace('\t', "    "))
+            .collect(),
+    )
 }
-fn is_separator(cells: &[String]) -> bool {
-    !cells.is_empty()
-        && cells.iter().all(|c| {
-            let t = c.trim().trim_matches(':');
-            t.len() >= 3 && t.chars().all(|ch| ch == '-')
-        })
+fn column_count(line: &str) -> usize {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').count()
 }
-fn table_len(lines: &[&str], i: usize) -> Option<usize> {
-    let header = row_cells(lines[i])?;
-    if is_separator(&header) {
+fn is_separator_line(line: &str) -> bool {
+    let t = line.trim();
+    if !t.contains('|') {
+        return false;
+    }
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut any = false;
+    for cell in t.split('|') {
+        let cell = cell.trim().trim_matches(':');
+        if cell.len() < 3 || !cell.bytes().all(|byte| byte == b'-') {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+fn table_span(lines: &[&str], i: usize) -> Option<usize> {
+    if !lines[i].contains('|') || is_separator_line(lines[i]) {
         return None;
     }
-    let separator = row_cells(lines.get(i + 1)?)?;
-    if !is_separator(&separator) {
+    let separator = lines.get(i + 1)?;
+    if !is_separator_line(separator) {
         return None;
     }
     let mut n = 2;
-    while let Some(cells) = lines.get(i + n).and_then(|line| row_cells(line)) {
-        if cells.is_empty() || is_separator(&cells) {
+    while let Some(line) = lines.get(i + n) {
+        if !line.contains('|') || is_separator_line(line) {
             break;
         }
         n += 1;
     }
     Some(n)
 }
-fn blocks(content: &str) -> Vec<Block> {
+fn table_too_big() -> Error {
+    invalid("Le tableau doit contenir 1 à 1 000 lignes et 1 à 50 colonnes.")
+}
+fn blocks(content: &str) -> Result<Vec<Block>> {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut out = Vec::new();
     while i < lines.len() {
-        if let Some(n) = table_len(&lines, i) {
+        if let Some(n) = table_span(&lines, i) {
+            // Refuse before `row_cells` or `resize` reserves a String per cell.
+            if n - 1 > MAX_TABLE_ROWS {
+                return Err(table_too_big());
+            }
+            for line in lines.iter().take(i + n).skip(i) {
+                if column_count(line) > MAX_TABLE_COLS {
+                    return Err(table_too_big());
+                }
+            }
             let mut rows = vec![row_cells(lines[i]).unwrap_or_default()];
             for line in lines.iter().take(i + n).skip(i + 2) {
                 rows.push(row_cells(line).unwrap_or_default());
@@ -419,7 +455,7 @@ fn blocks(content: &str) -> Vec<Block> {
     if out.is_empty() {
         out.push(Block::Text(String::new()));
     }
-    out
+    Ok(out)
 }
 fn blocks_preview(format: &str, blocks: &[Block]) -> String {
     let slide = format == "pptx";
@@ -595,12 +631,29 @@ impl Painter {
     fn ops(&mut self) -> &mut Vec<u8> {
         self.pages.last_mut().unwrap()
     }
+    fn new_page(&mut self) {
+        self.pages.push(b"0.090 0.125 0.200 rg\n".to_vec());
+        self.y = PAGE_TOP;
+    }
     fn ensure(&mut self, height: f32) {
         if self.y - height < PAGE_BOTTOM && self.y < PAGE_TOP - 0.5 {
-            self.pages.push(b"0.090 0.125 0.200 rg\n".to_vec());
-            self.y = PAGE_TOP;
+            self.new_page();
         }
     }
+}
+/// Lines of a table row that keep every baseline and the cell box on the page.
+fn table_lines_that_fit(y: f32) -> usize {
+    let mut take = 0usize;
+    loop {
+        let next = take + 1;
+        let row_h = (8.0 + next as f32 * 13.0).max(16.0);
+        let baseline = y - 12.0 - take as f32 * 13.0;
+        if baseline < PAGE_BOTTOM || y - row_h < PAGE_BOTTOM {
+            break;
+        }
+        take = next;
+    }
+    take
 }
 fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
     let cols = rows.first().map(Vec::len).unwrap_or(1).max(1);
@@ -620,43 +673,64 @@ fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
     let widths: Vec<f32> = pref.iter().map(|w| w * scale + extra).collect();
     for (r, row) in rows.iter().enumerate() {
         let mut cell_lines = Vec::new();
-        let mut row_h = 16.0f32;
         for (c, cell) in row.iter().enumerate() {
-            let lines = wrap_width(cell, (widths[c] - 8.0).max(12.0), 10.0)?;
-            row_h = row_h.max(8.0 + lines.len() as f32 * 13.0);
-            cell_lines.push(lines);
+            cell_lines.push(wrap_width(cell, (widths[c] - 8.0).max(12.0), 10.0)?);
         }
-        page.ensure(row_h);
-        let bottom = page.y - row_h;
-        let mut x = PAGE_LEFT;
-        for (c, lines) in cell_lines.iter().enumerate() {
-            let w = widths[c];
-            if r == 0 {
+        while cell_lines.len() < cols {
+            cell_lines.push(vec![String::new()]);
+        }
+        let mut offsets = vec![0usize; cols];
+        loop {
+            let remaining = (0..cols)
+                .map(|c| cell_lines[c].len().saturating_sub(offsets[c]))
+                .max()
+                .unwrap_or(0);
+            if remaining == 0 {
+                break;
+            }
+            let mut fit = table_lines_that_fit(page.y);
+            if fit == 0 {
+                if page.y < PAGE_TOP - 0.5 {
+                    page.new_page();
+                    continue;
+                }
+                fit = 1;
+            }
+            let take = remaining.min(fit);
+            let row_h = (8.0 + take as f32 * 13.0).max(16.0);
+            let bottom = page.y - row_h;
+            let mut x = PAGE_LEFT;
+            for c in 0..cols {
+                let w = widths[c];
+                if r == 0 {
+                    page.ops().extend(
+                        format!("0.945 0.961 0.976 rg {x:.2} {bottom:.2} {w:.2} {row_h:.2} re f\n")
+                            .as_bytes(),
+                    );
+                }
                 page.ops().extend(
-                    format!("0.945 0.961 0.976 rg {x:.2} {bottom:.2} {w:.2} {row_h:.2} re f\n")
+                    format!("0.796 0.835 0.882 RG {x:.2} {bottom:.2} {w:.2} {row_h:.2} re S\n")
                         .as_bytes(),
                 );
+                page.ops().extend(b"0.090 0.125 0.200 rg\n");
+                let end = (offsets[c] + take).min(cell_lines[c].len());
+                let mut baseline = page.y - 12.0;
+                for line in &cell_lines[c][offsets[c]..end] {
+                    draw_line(page.ops(), line, x + 4.0, baseline, 10.0)?;
+                    baseline -= 13.0;
+                }
+                offsets[c] = end;
+                x += w;
             }
-            page.ops().extend(
-                format!("0.796 0.835 0.882 RG {x:.2} {bottom:.2} {w:.2} {row_h:.2} re S\n")
-                    .as_bytes(),
-            );
-            page.ops().extend(b"0.090 0.125 0.200 rg\n");
-            let mut baseline = page.y - 12.0;
-            for line in lines {
-                draw_line(page.ops(), line, x + 4.0, baseline, 10.0)?;
-                baseline -= 13.0;
-            }
-            x += w;
+            page.y = bottom;
         }
-        page.y = bottom;
     }
     page.y -= 8.0;
     Ok(())
 }
 fn paint_rich(content: &str) -> Result<Vec<Vec<u8>>> {
     let mut page = Painter::new();
-    for block in blocks(content) {
+    for block in blocks(content)? {
         match block {
             Block::Text(line) => {
                 for visual in wrap_width(&line, CONTENT_W, 12.0)? {
@@ -671,13 +745,20 @@ fn paint_rich(content: &str) -> Result<Vec<Vec<u8>>> {
     }
     Ok(page.pages)
 }
-fn pdf(content: &str, lines: &[String]) -> Result<(Vec<u8>, usize)> {
-    if document_rich(content) {
+fn pdf(content: &str) -> Result<(Vec<u8>, usize)> {
+    if document_rich(content)? {
         let pages = paint_rich(content)?;
         let n = pages.len();
         return Ok((assemble(&pages, content.contains(pdf_font::PARTY))?, n));
     }
-    let chunks: Vec<_> = lines.chunks(48).collect();
+    let mut visual = Vec::new();
+    for line in content.lines() {
+        visual.extend(wrap_width(line, CONTENT_W, 12.0)?);
+    }
+    if visual.is_empty() {
+        visual.push(String::new());
+    }
+    let chunks: Vec<_> = visual.chunks(48).collect();
     let mut contents = Vec::new();
     for chunk in &chunks {
         let mut stream = b"BT /F1 12 Tf 15 TL 42 786 Td\n".to_vec();
@@ -872,7 +953,7 @@ fn docx_table(rows: &[Vec<String>]) -> String {
     format!("<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/><w:tblBorders>{borders}</w:tblBorders></w:tblPr>{body}</w:tbl>")
 }
 fn docx(content: &str) -> Result<Vec<u8>> {
-    let body = blocks(content)
+    let body = blocks(content)?
         .iter()
         .map(|block| match block {
             Block::Text(line) => docx_paragraph(line),
@@ -970,13 +1051,20 @@ fn slides(content: &str) -> Result<Vec<Slide>> {
     if raw.len() > 50 || raw.iter().any(|s| s.trim().is_empty()) {
         return Err(invalid("La présentation doit contenir 1 à 50 diapositives non vides, séparées par une ligne --- ."));
     }
-    raw.iter().map(|source| slide_from(source)).collect()
+    let mut deck = Vec::new();
+    for source in &raw {
+        deck.extend(slide_from(source)?);
+    }
+    if deck.len() > 50 {
+        return Err(invalid("La présentation doit contenir 1 à 50 diapositives non vides, séparées par une ligne --- ."));
+    }
+    Ok(deck)
 }
-fn slide_from(source: &str) -> Result<Slide> {
+fn slide_from(source: &str) -> Result<Vec<Slide>> {
     let mut items = Vec::new();
     let mut text_lines = 0;
     let mut first = true;
-    for block in blocks(source) {
+    for block in blocks(source)? {
         match block {
             Block::Text(line) => {
                 let width = if first { 50 } else { 80 };
@@ -994,7 +1082,142 @@ fn slide_from(source: &str) -> Result<Slide> {
             "Une diapositive dépasse 16 lignes. Répartissez son contenu avec une ligne --- .",
         ));
     }
-    Ok(Slide { items })
+    Ok(paginate_slide(items))
+}
+const SLIDE_BOTTOM: i64 = 6_858_000;
+const SLIDE_ORIGIN: i64 = 400_000;
+const TEXT_LINE_EMU: i64 = 360_000;
+const TEXT_PAD_EMU: i64 = 200_000;
+const TEXT_ALONE_EMU: i64 = 6_000_000;
+const TABLE_ROW_EMU: i64 = 400_000;
+const TABLE_GAP_EMU: i64 = 60_000;
+fn line_units(items: &[Item]) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Line(_) => 1,
+            Item::Table(rows) => rows.len(),
+        })
+        .sum()
+}
+fn frame_bottom(items: &[Item]) -> i64 {
+    let mut y = SLIDE_ORIGIN;
+    let mut pending = 0usize;
+    let mut parts = false;
+    let mut bottom = SLIDE_ORIGIN;
+    for item in items {
+        match item {
+            Item::Line(_) => pending += 1,
+            Item::Table(rows) => {
+                if pending > 0 {
+                    let h = TEXT_LINE_EMU * pending as i64 + TEXT_PAD_EMU;
+                    bottom = bottom.max(y + h);
+                    y += h;
+                    pending = 0;
+                }
+                let h = TABLE_ROW_EMU * rows.len() as i64;
+                bottom = bottom.max(y + h);
+                y += h + TABLE_GAP_EMU;
+                parts = true;
+            }
+        }
+    }
+    if pending > 0 {
+        let h = if parts {
+            TEXT_LINE_EMU * pending as i64 + TEXT_PAD_EMU
+        } else {
+            TEXT_ALONE_EMU
+        };
+        bottom = bottom.max(y + h);
+    }
+    bottom
+}
+fn y_before_next_table(items: &[Item]) -> i64 {
+    let mut y = SLIDE_ORIGIN;
+    let mut pending = 0i64;
+    for item in items {
+        match item {
+            Item::Line(_) => pending += 1,
+            Item::Table(rows) => {
+                if pending > 0 {
+                    y += TEXT_LINE_EMU * pending + TEXT_PAD_EMU;
+                    pending = 0;
+                }
+                y += TABLE_ROW_EMU * rows.len() as i64 + TABLE_GAP_EMU;
+            }
+        }
+    }
+    if pending > 0 {
+        y += TEXT_LINE_EMU * pending + TEXT_PAD_EMU;
+    }
+    y
+}
+fn table_rows_that_fit(current: &[Item], available: usize) -> usize {
+    let used = line_units(current);
+    if used >= 16 || available == 0 {
+        return 0;
+    }
+    let y = y_before_next_table(current);
+    if y >= SLIDE_BOTTOM {
+        return 0;
+    }
+    let by_emu = ((SLIDE_BOTTOM - y) / TABLE_ROW_EMU) as usize;
+    (16 - used).min(by_emu).min(available)
+}
+fn paginate_slide(items: Vec<Item>) -> Vec<Slide> {
+    let mut slides = Vec::new();
+    let mut current = Vec::new();
+    for item in items {
+        match item {
+            Item::Line(line) => {
+                current.push(Item::Line(line));
+                if line_units(&current) > 16 || frame_bottom(&current) > SLIDE_BOTTOM {
+                    let Some(Item::Line(line)) = current.pop() else {
+                        continue;
+                    };
+                    if !current.is_empty() {
+                        slides.push(Slide {
+                            items: std::mem::take(&mut current),
+                        });
+                    }
+                    current.push(Item::Line(line));
+                }
+            }
+            Item::Table(rows) => {
+                let mut start = 0;
+                while start < rows.len() {
+                    let fit = table_rows_that_fit(&current, rows.len() - start);
+                    if fit == 0 {
+                        if current.is_empty() {
+                            current.push(Item::Table(vec![rows[start].clone()]));
+                            start += 1;
+                        } else {
+                            slides.push(Slide {
+                                items: std::mem::take(&mut current),
+                            });
+                        }
+                        continue;
+                    }
+                    current.push(Item::Table(rows[start..start + fit].to_vec()));
+                    start += fit;
+                    if start < rows.len() {
+                        slides.push(Slide {
+                            items: std::mem::take(&mut current),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        slides.push(Slide { items: current });
+    }
+    if slides.is_empty() {
+        slides.push(Slide {
+            items: vec![Item::Line(String::new())],
+        });
+    }
+    slides
 }
 const GROUP:&str="<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>";
 fn text_shape(lines: &[String], y: i64, h: i64, id: i32, title: bool) -> String {
@@ -1015,7 +1238,7 @@ fn table_shape(rows: &[Vec<String>], y: i64, id: i32) -> (String, i64) {
     let cols = rows.first().map(Vec::len).unwrap_or(1).max(1);
     let width = 11_192_000i64;
     let col_w = width / cols as i64;
-    let row_h = 400_000i64;
+    let row_h = TABLE_ROW_EMU;
     let height = row_h * rows.len() as i64;
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{col_w}\"/>"))
@@ -1044,7 +1267,7 @@ fn table_shape(rows: &[Vec<String>], y: i64, id: i32) -> (String, i64) {
 }
 fn slide_tree(slide: &Slide) -> String {
     let mut parts = Vec::new();
-    let mut y = 400_000i64;
+    let mut y = SLIDE_ORIGIN;
     let mut id = 2i32;
     let mut pending = Vec::new();
     let mut title = true;
@@ -1053,7 +1276,7 @@ fn slide_tree(slide: &Slide) -> String {
             Item::Line(line) => pending.push(line.clone()),
             Item::Table(rows) => {
                 if !pending.is_empty() {
-                    let h = 360_000 * pending.len() as i64 + 200_000;
+                    let h = TEXT_LINE_EMU * pending.len() as i64 + TEXT_PAD_EMU;
                     parts.push(text_shape(&pending, y, h, id, title));
                     y += h;
                     id += 1;
@@ -1062,16 +1285,16 @@ fn slide_tree(slide: &Slide) -> String {
                 }
                 let (frame, h) = table_shape(rows, y, id);
                 parts.push(frame);
-                y += h + 60_000;
+                y += h + TABLE_GAP_EMU;
                 id += 1;
             }
         }
     }
     if !pending.is_empty() {
         let h = if parts.is_empty() {
-            6_000_000
+            TEXT_ALONE_EMU
         } else {
-            360_000 * pending.len() as i64 + 200_000
+            TEXT_LINE_EMU * pending.len() as i64 + TEXT_PAD_EMU
         };
         parts.push(text_shape(&pending, y, h, id, title));
     }
@@ -2088,6 +2311,234 @@ mod tests {
         assert!(
             slide.split("<a:tc>").any(|cell| cell.contains(&long)),
             "la cellule ne doit pas être coupée"
+        );
+    }
+
+    fn dejavu_width(text: &str, size: f32) -> f32 {
+        let face = pdf_font::face();
+        text.chars()
+            .map(|c| {
+                let b = pdf_font::encode(c).expect("glyphe") as usize;
+                face.widths[b] as f32 * size / 1000.0
+            })
+            .sum()
+    }
+
+    fn shape_bottoms(xml: &str) -> Vec<i64> {
+        let mut bottoms = Vec::new();
+        let mut rest = xml;
+        while let Some(i) = rest.find("<a:xfrm>") {
+            rest = &rest[i + 8..];
+            let Some(end) = rest.find("</a:xfrm>") else {
+                break;
+            };
+            let xfrm = &rest[..end];
+            rest = &rest[end..];
+            let Some(y) = attr_i64(xfrm, "y=\"") else {
+                continue;
+            };
+            let Some(cy) = attr_i64(xfrm, "cy=\"") else {
+                continue;
+            };
+            bottoms.push(y + cy);
+        }
+        bottoms
+    }
+
+    fn attr_i64(xml: &str, key: &str) -> Option<i64> {
+        let start = xml.find(key)? + key.len();
+        let end = xml[start..].find('"')? + start;
+        xml[start..end].parse().ok()
+    }
+
+    fn pdf_baselines(bytes: &[u8]) -> Vec<f32> {
+        let mut out = Vec::new();
+        for stream in content_streams(bytes) {
+            let text = String::from_utf8_lossy(&stream);
+            let mut rest = text.as_ref();
+            while let Some(i) = rest.find(" Tm ") {
+                let y = rest[..i]
+                    .split_whitespace()
+                    .next_back()
+                    .and_then(|token| token.parse::<f32>().ok());
+                if let Some(y) = y {
+                    out.push(y);
+                }
+                rest = &rest[i + 4..];
+            }
+        }
+        out
+    }
+
+    fn md_cells(cell: &str, cols: usize) -> String {
+        format!("|{}|", vec![cell; cols].join("|"))
+    }
+
+    /// A header of ~63k bars must be refused before `blocks` pads every row.
+    #[test]
+    fn markdown_table_bounds_columns_and_rows_before_aligning() {
+        let wide = md_cells("x", 51);
+        let Err(Error::InvalidInput(message)) = generate(&Request {
+            name: "Large".into(),
+            format: "pdf".into(),
+            content: format!("{wide}\n| --- |\n| x |\n"),
+        }) else {
+            panic!("51 colonnes doivent être refusées");
+        };
+        assert!(
+            message.contains("50") && message.contains("1 000"),
+            "{message}"
+        );
+
+        let mut bomb = "|".repeat(63_000);
+        bomb.push('\n');
+        bomb.push_str("| --- |\n");
+        for _ in 0..400 {
+            bomb.push_str("|x|\n");
+        }
+        let Err(Error::InvalidInput(message)) = generate(&Request {
+            name: "Bombe".into(),
+            format: "docx".into(),
+            content: bomb,
+        }) else {
+            panic!("63 000 barres ne doivent pas être alignées");
+        };
+        assert!(message.contains("50"), "{message}");
+
+        let mut tall = String::from("| A |\n| --- |\n");
+        for _ in 0..1000 {
+            tall.push_str("| x |\n");
+        }
+        let Err(Error::InvalidInput(message)) = generate(&Request {
+            name: "Haut".into(),
+            format: "pptx".into(),
+            content: tall,
+        }) else {
+            panic!("1 001 lignes doivent être refusées");
+        };
+        assert!(message.contains("1 000"), "{message}");
+
+        let fit = format!(
+            "{}\n{}\n{}\n",
+            md_cells("x", 50),
+            md_cells("---", 50),
+            md_cells("x", 50)
+        );
+        let pdf = generate(&Request {
+            name: "Cinquante".into(),
+            format: "pdf".into(),
+            content: fit,
+        })
+        .unwrap_or_else(|e| panic!("50 colonnes restent acceptées : {e:?}"));
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
+        assert!(pdf_shown(&pdf.bytes).contains('x'));
+
+        let mut rows = String::from("| A |\n| --- |\n");
+        for _ in 0..999 {
+            rows.push_str("| x |\n");
+        }
+        generate(&Request {
+            name: "Mille".into(),
+            format: "pdf".into(),
+            content: rows,
+        })
+        .unwrap_or_else(|e| panic!("1 000 lignes restent acceptées : {e:?}"));
+    }
+
+    #[test]
+    fn plain_pdf_wraps_by_dejavu_width() {
+        let wide = "W".repeat(70);
+        let overflow = 42.0 + dejavu_width(&wide, 12.0);
+        assert!(
+            overflow > 595.0,
+            "70 W en DejaVu 12 pt doivent dépasser la page : {overflow}"
+        );
+        let pdf = generate(&Request {
+            name: "Large".into(),
+            format: "pdf".into(),
+            content: wide,
+        })
+        .unwrap();
+        let shown = pdf_shown(&pdf.bytes);
+        let lines: Vec<&str> = shown.lines().filter(|line| line.contains('W')).collect();
+        assert!(lines.len() > 1, "la ligne doit être coupée : {lines:?}");
+        assert_eq!(lines.concat().chars().filter(|c| *c == 'W').count(), 70);
+        for line in lines {
+            let end = 42.0 + dejavu_width(line, 12.0);
+            assert!(end <= 595.0, "la ligne dépasse 595 pt ({end}) : {line}");
+        }
+    }
+
+    #[test]
+    fn pdf_table_row_taller_than_a_page_keeps_baselines_in_the_margin() {
+        let cell = "W".repeat(4_000);
+        let pdf = generate(&Request {
+            name: "Rang".into(),
+            format: "pdf".into(),
+            content: format!("| Nom |\n| --- |\n| {cell} |\n"),
+        })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let baselines = pdf_baselines(&pdf.bytes);
+        assert!(!baselines.is_empty(), "aucun texte positionné");
+        for y in &baselines {
+            assert!(*y >= 42.0, "baseline sous la marge : {y}");
+        }
+        assert!(
+            pdf.pages > 1,
+            "le rang doit être réparti sur plusieurs pages"
+        );
+        assert_eq!(
+            pdf_shown(&pdf.bytes).chars().filter(|c| *c == 'W').count(),
+            4_000
+        );
+    }
+
+    #[test]
+    fn pptx_table_rows_stay_inside_the_slide() {
+        let mut content = String::from("Titre\n| A | B |\n| --- | --- |\n");
+        for i in 0..17 {
+            content.push_str(&format!("| r{i} | x |\n"));
+        }
+        let deck = generate(&Request {
+            name: "Diapo".into(),
+            format: "pptx".into(),
+            content,
+        })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(deck.pages >= 2, "les rangs en trop changent de diapositive");
+        let mut seen = vec![false; 17];
+        for n in 1..=deck.pages {
+            let xml = office_part(&deck.bytes, &format!("ppt/slides/slide{n}.xml"));
+            assert!(xml.contains("<a:tbl>"), "diapositive {n}");
+            let bottoms = shape_bottoms(&xml);
+            assert!(!bottoms.is_empty(), "{xml}");
+            for bottom in bottoms {
+                assert!(
+                    bottom <= 6_858_000,
+                    "cadre à {bottom} EMU, au-delà de 6 858 000"
+                );
+            }
+            for (i, flag) in seen.iter_mut().enumerate() {
+                if xml.contains(&format!(">r{i}<")) {
+                    *flag = true;
+                }
+            }
+        }
+        assert!(seen.iter().all(|flag| *flag), "rangs perdus : {seen:?}");
+    }
+
+    #[test]
+    fn pdf_table_cell_expands_an_internal_tab() {
+        let pdf = generate(&Request {
+            name: "Tab".into(),
+            format: "pdf".into(),
+            content: "| Nom |\n| --- |\n| a\tb |\n".into(),
+        })
+        .unwrap_or_else(|e| panic!("une tabulation dans une cellule doit passer : {e:?}"));
+        let shown = pdf_shown(&pdf.bytes);
+        assert!(
+            shown.contains("a    b"),
+            "la tabulation doit valoir quatre espaces : {shown}"
         );
     }
 

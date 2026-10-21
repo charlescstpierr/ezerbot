@@ -557,18 +557,43 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .bot-preview-mascot { width: 96px; height: 84px; }
   .connection-banner { gap: 8px; padding: 9px 15px; font-size: 10px; }
 }
-/* À partir de 480, le bouton garde de quoi ellipser le nom moyen sans manger « GPT-6.1 Sol ». */
+/* À partir de 480, le bouton garde de quoi ellipser le nom moyen sans manger « GPT-6.1 Sol ». Avec Vitesse sur la même rangée, le plancher de 45 px pousse le chevron hors du bouton. */
 @media (min-width: 480px) and (max-width: 760px) {
   .composer-model:not(:has([data-picker="speed"])) .composer-bot { min-width: 148px; }
+  .composer-model:has([data-picker="speed"]) .composer-bot-name { min-width: 0; }
+}
+/* Jusqu'à 500, le bouton ne mange pas la largeur gagnée : elle revient à Effort, qui tombait à 0 px. */
+@media (min-width: 480px) and (max-width: 500px) {
+  .composer-area:has([data-picker="effort"]):not(:has([data-picker="speed"])) { width: calc(100% - 4px); }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) { padding-left: 6px; padding-right: 6px; }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) .attachment-choose { width: 22px; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) .composer-bot { flex: 0 0 148px; max-width: 148px; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) .composer-tools { flex: 1 1 auto; min-width: 0; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 1 auto; min-width: max-content; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 0 auto; min-width: max-content; }
 }
 /* Sous 480, trois pastilles ne tiennent plus à côté du bot : Vitesse passe à la ligne au lieu d'écraser le bouton. */
 @media (max-width: 479px) {
+  /* La voix reste en haut : sinon, centrée contre deux lignes, elle couvre la pastille Vitesse. */
+  .composer-bottom:has([data-picker="speed"]) { align-items: flex-start; }
+  .composer-model:has([data-picker="speed"]) [data-picker="speed"] { min-width: 0; max-width: 100%; }
+  .composer-model:has([data-picker="speed"]) [data-picker="speed"] b { flex: 0 1 auto; min-width: 0; }
+  /* La barre étroite laissait l'effort à 0 px. On l'élargit pour garder le mot, sans toucher au plancher du modèle à 500 px. */
+  .composer-area:not(:has([data-picker="speed"])) { width: calc(100% - 4px); }
+  .composer:not(:has([data-picker="speed"])) { padding-left: 6px; padding-right: 6px; }
+  .composer:not(:has([data-picker="speed"])) .attachment-choose { width: 22px; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 1 auto; min-width: max-content; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 0 auto; min-width: max-content; }
   .composer-model:has([data-picker="speed"]) { flex-wrap: wrap; }
   .composer-model:has([data-picker="speed"]) .composer-tools {
     flex: 1 0 100%;
     min-width: 0;
   }
   .composer-model:has([data-picker="speed"]) .composer-bot { min-width: 0; }
+}
+/* De 761 à 785 le plancher de 120 px remet le titre sous Notifications dès que le badge Local et le menu sont là. Le banc de test n'a pas ce badge : son titre garde 120 px. */
+@media (min-width: 761px) and (max-width: 785px) {
+  .topbar:has(.mode-badge) h1 { min-width: 0; }
 }
 @media (max-width: 370px) {
   .welcome h2 { font-size: 26px; }

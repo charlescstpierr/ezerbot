@@ -28,7 +28,7 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation", header = "bench" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
@@ -52,17 +52,25 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
     </defs>
   </svg>
   <aside class="sidebar"></aside>
   <main class="main-panel">
     <header class="topbar">
-      <div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">${title}</h1></div>
+      ${header === "app" ? `<div class="topbar-title"><button class="icon-button sidebar-toggle" type="button" aria-label="Ouvrir les conversations"><svg class="icon"><use href="#i-menu"/></svg></button><button class="workspace-label" type="button" disabled>Espace personnel</button><span class="breadcrumb-separator" aria-hidden="true">/</span><h1 id="conversation-title">${title}</h1></div>
+      <div class="topbar-actions">
+        <button class="tool-pill notifications-button" type="button">Notifications</button>
+        <button class="tool-pill" type="button">Créer un groupe</button>
+        <span class="mode-badge"><span class="status-dot"></span><span>Local</span></span>
+        <button class="icon-button" type="button" disabled aria-label="Actions de la conversation"><svg class="icon"><use href="#i-more"/></svg></button>
+      </div>` : `<div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
         <button class="tool-pill" type="button">Membres</button>
-      </div>
+      </div>`}
     </header>
     ${welcomeBlock}
     <div class="composer-dock"><div class="composer-area"><form class="composer" id="composer-form">
@@ -138,6 +146,14 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       const modelButtonBox = modelButton ? boxOf(modelButton) : null;
       const effortButtonBox = effortButton ? boxOf(effortButton) : null;
       const speedBox = speedButton ? boxOf(speedButton) : null;
+      const headsetBox = boxOf(document.querySelector(".voice-session-toggle"));
+      const overlap = (a, b) => {
+        if (!a || !b) return { width: 0, height: 0 };
+        return {
+          width: Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)),
+          height: Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)),
+        };
+      };
       const toolsBox = boxOf(document.querySelector(".composer-tools"));
       return {
         theme,
@@ -158,7 +174,9 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         effortTop: effortButtonBox ? effortButtonBox.top : null,
         modelGap: modelButtonBox ? voice.left - modelButtonBox.right : null,
         effortGap: effortButtonBox ? voice.left - effortButtonBox.right : null,
-        headsetLeft: boxOf(document.querySelector(".voice-session-toggle")).left,
+        headsetLeft: headsetBox.left,
+        headsetBox,
+        speedHeadset: overlap(speedBox, headsetBox),
         voiceTop: voice.top,
         pillLabel: document.querySelector(".composer-tools .tool-pill small")
           ? getComputedStyle(document.querySelector(".composer-tools .tool-pill small")).display
@@ -204,6 +222,10 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         titleBox: boxOf(document.getElementById("conversation-title")),
         actionsBox: boxOf(document.querySelector(".topbar-actions")),
         titleClear: boxOf(document.getElementById("conversation-title")).right <= boxOf(document.querySelector(".topbar-actions")).left + 0.5,
+        notificationsLeft: document.querySelector(".notifications-button") ? boxOf(document.querySelector(".notifications-button")).left : null,
+        titleGap: document.querySelector(".notifications-button")
+          ? boxOf(document.querySelector(".notifications-button")).left - boxOf(document.getElementById("conversation-title")).right
+          : null,
         workspaceText: document.querySelector(".workspace-label")?.textContent || "",
         workspaceClient: document.querySelector(".workspace-label")?.clientWidth || 0,
         workspaceScroll: document.querySelector(".workspace-label")?.scrollWidth || 0,
@@ -919,6 +941,65 @@ test("a long name with speed stays clear of the headset below 400px", { timeout:
       assert.ok(theme.botBox.right <= theme.headsetLeft + 0.5, where);
       assert.ok(theme.nameBox.right <= theme.headsetLeft + 0.5, where);
       assert.ok(theme.speedTop >= theme.voiceTop + 16, where);
+    }
+  }
+});
+
+test("with Codex Spark High and speed, the chevron stays inside the bot from 480 to 500", { timeout: 180000 }, async () => {
+  for (let width = 480; width <= 500; width += 1) {
+    const report = await measure(width, 780, "Ezerbot", { model: CODEX_SPARK_WIDE, effort: DEFAULT_EFFORT, speed: "Standard" });
+    for (const theme of report.themes) {
+      const over = theme.chevronBox.right - theme.botBox.right;
+      const where = `${width} ${theme.theme} over=${over} name=${theme.nameClient}/${theme.nameScroll} bot=${theme.pieces.bot} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop} chevron=${JSON.stringify(theme.chevronBox)} botBox=${JSON.stringify(theme.botBox)}`;
+      assert.equal(theme.chevronInside, true, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.ok(Math.abs(theme.speedTop - theme.voiceTop) <= 2, where);
+      assert.ok(over <= 0.5, where);
+    }
+  }
+});
+
+test("from 360 to 371 the speed pill does not cover the headset", { timeout: 120000 }, async () => {
+  for (let width = 360; width <= 371; width += 1) {
+    const report = await measure(width, 780, "Ezerbot", { model: CODEX_SPARK_WIDE, effort: DEFAULT_EFFORT, speed: "Standard" });
+    for (const theme of report.themes) {
+      const where = `${width} ${theme.theme} overlap=${theme.speedHeadset.width}×${theme.speedHeadset.height} speedGap=${theme.speedGap} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop} headset=${JSON.stringify(theme.headsetBox)} effort=${theme.effortClient}/${theme.effortScroll}`;
+      assert.equal(theme.speedHeadset.height, 0, where);
+      assert.ok(theme.speedTop >= theme.headsetBox.bottom - 0.5, where);
+      assert.ok(theme.speedGap >= -0.5, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.chevronInside, true, where);
+    }
+  }
+});
+
+test("the real header keeps the title clear of Notifications from 761 to 785", { timeout: 180000 }, async () => {
+  for (const title of ["Nouvelle conversation", "Créer un groupe"]) {
+    for (let width = 761; width <= 785; width += 1) {
+      const report = await measure(width, 780, "Ezerbot", { header: "app", title, speed: "" });
+      for (const theme of report.themes) {
+        const where = `${width} « ${title} » ${theme.theme} titleGap=${theme.titleGap} title=${theme.titleClient}/${theme.titleScroll} min=${theme.titleMinWidth} ws=${theme.workspaceClient} titleBox=${JSON.stringify(theme.titleBox)} actions=${JSON.stringify(theme.actionsBox)}`;
+        assert.equal(theme.titleText, title, where);
+        assert.equal(theme.workspaceText, "Espace personnel", where);
+        assert.ok(theme.titleGap >= -0.5, where);
+        assert.equal(theme.titleClear, true, where);
+      }
+    }
+  }
+});
+
+test("effort text stays visible from 360 to 500 without speed", { timeout: 180000 }, async () => {
+  const widths = sweep(360, 500, 10, [371, 480, 500]);
+  for (const width of widths) {
+    for (const model of ["GPT-6.1 Sol", CODEX_SPARK_WIDE]) {
+      const report = await measure(width, 780, "Ezerbot", { model, effort: DEFAULT_EFFORT, speed: "" });
+      for (const theme of report.themes) {
+        const where = `${width} ${model} ${theme.theme} effort=${theme.effortClient}/${theme.effortScroll} modelGap=${theme.modelGap} effortGap=${theme.effortGap}`;
+        assert.equal(theme.effortFits, true, where);
+        assert.ok(theme.effortClient >= 40, where);
+        assert.ok(theme.effortGap >= 0, where);
+        assert.ok(theme.modelGap >= 0, where);
+      }
     }
   }
 });

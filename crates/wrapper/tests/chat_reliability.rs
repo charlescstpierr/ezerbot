@@ -43,6 +43,8 @@ struct Fake {
     base: String,
     stop: Arc<AtomicBool>,
     queue: Arc<Mutex<VecDeque<Fault>>>,
+    /// One-shot fault for the connection probe. It does not come from the chat queue.
+    probe: Arc<Mutex<Option<Fault>>>,
     seen: Arc<Mutex<Vec<Value>>>,
     refresh: Arc<Mutex<Option<Fault>>>,
     side_hang: Arc<AtomicBool>,
@@ -109,6 +111,7 @@ impl Fake {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let probe = Arc::new(Mutex::new(None));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let refresh = Arc::new(Mutex::new(None));
         let side_hang = Arc::new(AtomicBool::new(false));
@@ -118,9 +121,10 @@ impl Fake {
         let partial_released = Arc::new(AtomicBool::new(false));
         let partial_finished = Arc::new(AtomicBool::new(false));
         let holds_finished = Arc::new(AtomicUsize::new(0));
-        let (s, q, b, r, side, late, finished, holds) = (
+        let (s, q, p, b, r, side, late, finished, holds) = (
             stop.clone(),
             queue.clone(),
+            probe.clone(),
             seen.clone(),
             refresh.clone(),
             side_hang.clone(),
@@ -135,9 +139,10 @@ impl Fake {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                let (s, q, b, r, side, late, finished, holds) = (
+                let (s, q, p, b, r, side, late, finished, holds) = (
                     s.clone(),
                     q.clone(),
+                    p.clone(),
                     b.clone(),
                     r.clone(),
                     side.clone(),
@@ -178,8 +183,11 @@ impl Fake {
                     }
                     let body: Value=serde_json::from_slice(&bytes).unwrap(); b.lock().unwrap().push(body.clone());
                     let instructions=body["instructions"].as_str().unwrap_or("");
-                    let internal=instructions.starts_with("Test de connexion.") || instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
-                    let fault=if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
+                    let probe_call = instructions.starts_with("Test de connexion.");
+                    let internal=probe_call || instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
+                    let fault=if probe_call {
+                        p.lock().unwrap().take().unwrap_or(if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy })
+                    } else if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
                     if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); holds.fetch_add(1, Ordering::SeqCst); return; }
                     if matches!(fault, Fault::DripHeader) { drip(&mut socket, &s); return; }
                     if let Fault::Http(code)=fault { let body=json!({"error":{"code":"fake_error","message":"Erreur factice précise"}}).to_string(); let _=write!(socket,"HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
@@ -238,6 +246,7 @@ impl Fake {
             partial_released,
             partial_finished,
             holds_finished,
+            probe,
             thread: Some(thread),
         }
     }
@@ -952,7 +961,7 @@ fn a_hanging_pre_description_never_blocks_the_main_reply() {
 #[test]
 fn connection_test_is_bounded_and_reports_precise_error_then_ok() {
     let mut f = Fixture::new(true);
-    f.fake.queue.lock().unwrap().push_back(Fault::Http(503));
+    *f.fake.probe.lock().unwrap() = Some(Fault::Http(503));
     post(&mut f.app, "/api/provider/test", json!({}));
     until(|| f.provider.status()["connection_test"]["state"] == "failed");
     assert!(f.provider.status()["connection_test"]["message"]
@@ -989,7 +998,7 @@ fn sharing_connection_probe_does_not_impose_a_sixteen_token_reasoning_limit() {
 #[test]
 fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
     let mut f = Fixture::new(true);
-    f.fake.queue.lock().unwrap().push_back(Fault::Incomplete);
+    *f.fake.probe.lock().unwrap() = Some(Fault::Incomplete);
     post(&mut f.app, "/api/provider/test", json!({}));
     until(|| f.provider.status()["connection_test"]["state"] == "ok");
     assert_eq!(
@@ -1001,7 +1010,7 @@ fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
 #[test]
 fn signing_out_fences_an_inflight_connection_test_result() {
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
-    f.fake.queue.lock().unwrap().push_back(Fault::Partial);
+    *f.fake.probe.lock().unwrap() = Some(Fault::Partial);
     post(&mut f.app, "/api/provider/test", json!({}));
     until(|| !f.fake.seen.lock().unwrap().is_empty());
     assert_eq!(f.provider.status()["connection_test"]["state"], "running");

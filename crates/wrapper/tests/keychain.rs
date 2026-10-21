@@ -473,9 +473,13 @@ fn invalid_debug_override_never_falls_through_to_login_and_french_notice_is_visi
     let host = f.launch(&f.home.join("missing.keychain-db"));
     let state = host.state();
     assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
-    assert!(state["forms"]["storage"]["notice"]
-        .as_str()
-        .unwrap()
-        .contains("non chiffré"));
+    assert_eq!(
+        state["forms"]["storage"]["label"],
+        "Trousseau macOS indisponible"
+    );
+    let notice = state["forms"]["storage"]["notice"].as_str().unwrap();
+    assert!(notice.contains("ne sont pas enregistrés"));
+    assert!(!notice.contains("fichier de secours"));
+    assert!(!notice.contains("non chiffré"));
     assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
 }

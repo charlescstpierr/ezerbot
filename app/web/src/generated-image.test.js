@@ -55,17 +55,19 @@ test("safety failure is a french sentence", () => {
   assert.doesNotMatch(markup, /approbation/);
 });
 
-test("missing key shows the connect card", () => {
+test("missing session shows the ChatGPT sign-in card", () => {
   const markup = html(React.createElement(GeneratedImage, {
     message: {
       id: "m4",
-      body: "Connecte ton compte OpenAI",
-      payload: { call, outcome: { status: "failed", reason: "Connecte ton compte OpenAI" } },
+      body: "Connectez votre compte ChatGPT",
+      payload: { call, outcome: { status: "failed", reason: "Connectez votre compte ChatGPT" } },
     },
   }));
-  assert.match(markup, /<h3>Connecte ton compte OpenAI<\/h3>/);
-  assert.match(markup, />Connecter</);
+  assert.match(markup, /<h3>Connectez votre compte ChatGPT<\/h3>/);
+  assert.match(markup, />Se connecter à ChatGPT</);
   assert.match(markup, /data-action="provider.signin"/);
-  assert.doesNotMatch(markup, /data-provider-signin/);
+  assert.match(markup, /data-provider-signin/);
+  assert.doesNotMatch(markup, /Connecte ton compte OpenAI/);
+  assert.doesNotMatch(markup, /clé/);
   assert.doesNotMatch(markup, /<img/);
 });

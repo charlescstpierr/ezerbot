@@ -15,7 +15,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
+use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
 
 struct Fixture {
     root: PathBuf,
@@ -34,7 +34,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("workspace.chatgpt-auth.json"),json!({"host_id":"test","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":now()/1000+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+        support::write_codex_session(&root.join("workspace.codex-auth.json"), "routines-bg");
         let fake = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let mut f = Self {
             database: root.join("workspace.sqlite"),
@@ -456,8 +456,8 @@ fn moved_binary_can_repair_and_uninstall_but_another_workspace_cannot() {
     }
     fs::rename(&old, &saved).unwrap();
     fs::copy(
-        f.root.join("workspace.chatgpt-auth.json"),
-        f.root.join("moved.chatgpt-auth.json"),
+        f.root.join("workspace.codex-auth.json"),
+        f.root.join("moved.codex-auth.json"),
     )
     .unwrap();
     f.database = saved;

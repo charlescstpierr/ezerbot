@@ -34,7 +34,7 @@ export function Card({ message, busy, onAction }) {
       <p className="text-sm"><code>{request.kind?.name}</code></p>
       <p className="my-2 text-sm">{request.kind?.purpose}</p>
       <p className="mb-3 text-xs text-muted-foreground">La valeur reste sur ce Mac (trousseau macOS ou fichier local, selon Paramètres), jamais dans un message. Le bot ne reçoit qu’une référence au secret.</p>
-      {storage?.backend === "file_fallback" && <p className="gb-secret-storage-warning mb-3 rounded-md border p-2 text-xs" role="status"><strong>Trousseau indisponible.</strong> Les nouveaux secrets sont enregistrés dans un fichier de secours non chiffré. Vérifiez le stockage dans Paramètres.</p>}
+      {storage?.backend === "file_fallback" && <p className="gb-secret-storage-warning mb-3 rounded-md border p-2 text-xs" role="status"><strong>Trousseau indisponible.</strong> Les nouveaux secrets ne sont pas enregistrés. Les secrets déjà dans le trousseau restent en place. Déverrouillez le trousseau macOS, puis vérifiez le stockage dans Paramètres.</p>}
       {pending && <form className="space-y-3" onSubmit={submit} autoComplete="off">
         <fieldset className="space-y-3" disabled={disabled}>
           <label className="block space-y-1 text-sm"><span>Valeur de {request.kind?.name}</span><input className={inputClass} id={`${message.id}-secret-value`} ref={field} type="password" autoComplete="off" spellCheck={false} autoCapitalize="none" required aria-describedby={`${message.id}-secret-help`} onChange={() => setValidation("")} /></label>

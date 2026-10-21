@@ -1,5 +1,6 @@
-//! Sessions indépendantes : quota Codex (protocole pi openai-codex) et partage
-//! d’abonnement « Sign in with ChatGPT ». Aucun identifiant d’un autre logiciel n’est lu.
+//! Compte ChatGPT par OAuth Codex, avec une session propre à Ezerbot.
+//! Aucun identifiant d’un autre logiciel n’est lu. L'ancien protocole /v1
+//! n'est accessible que par injection explicite de serveurs de test locaux.
 mod codex;
 mod connection;
 mod reliable;
@@ -88,14 +89,17 @@ impl Failure {
 
     fn signin() -> Self {
         Self {
-            message: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.".into(),
+            message:
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT."
+                    .into(),
             kind: "signin",
         }
     }
 
     fn expired() -> Self {
         Self {
-            message: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.".into(),
+            message: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT."
+                .into(),
             kind: "signin_expired",
         }
     }
@@ -240,6 +244,10 @@ struct Inner {
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Lectures encore ouvertes, pour les compter dès l'annulation.
+    live_reads: Mutex<HashMap<String, Arc<Mutex<reliable::Settled>>>>,
+    #[cfg(test)]
+    paused_turns: Mutex<std::collections::HashSet<String>>,
     interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
@@ -510,6 +518,9 @@ impl Session {
                     cancel: None,
                 }),
                 runs: Mutex::new(HashMap::new()),
+                live_reads: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                paused_turns: Mutex::new(std::collections::HashSet::new()),
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
@@ -1043,6 +1054,12 @@ impl Session {
         credentials.saved_at = seconds();
         self.write(&credentials)
             .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
+        crate::upstream::turn(
+            self.inner.file.parent().unwrap_or(Path::new(".")),
+            "oauth",
+            200,
+            "token_refresh_saved",
+        );
         Ok(tokens.access_token)
     }
 
@@ -1103,9 +1120,13 @@ impl Session {
             catalog.loading = true;
         }
         let provider = self.clone();
+        let generation = self.inner.probe_generation.load(Ordering::SeqCst);
         thread::spawn(move || {
             let models = provider.fetch_models();
             let mut catalog = lock(&provider.inner.catalog);
+            if provider.inner.probe_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             catalog.loading = false;
             if let Ok(models) = models {
                 catalog.models = models;
@@ -1116,7 +1137,7 @@ impl Session {
 
     fn fetch_models(&self) -> Result<Vec<Model>, Failure> {
         if self.inner.codex {
-            return Ok(codex::models());
+            return self.fetch_codex_models();
         }
         let token = self.bearer(false)?;
         let body: Value = agent()

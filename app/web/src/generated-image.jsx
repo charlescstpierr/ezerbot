@@ -1,5 +1,5 @@
 export const IMAGE_INDICATOR = "Génération d’une image…";
-export const IMAGE_CONNECT = "Connecte ton compte OpenAI";
+export const IMAGE_CONNECT = "Connectez votre compte ChatGPT";
 
 function imageAttachment(message) {
   return (message.attachments || []).find((item) => typeof item?.url === "string" && String(item.mime_type || "").startsWith("image/"));
@@ -12,8 +12,7 @@ export function GeneratedImage({ message, onAction }) {
   if (failed && (reason === IMAGE_CONNECT || message.body === IMAGE_CONNECT)) {
     return <article className="gb-message gb-engine-card gb-generated-image-card" data-message-id={message.id} data-card-kind="tool" data-image-state="connect">
       <h3>{IMAGE_CONNECT}</h3>
-      <p className="gb-image-status">La clé du compte sert à générer l’image. Elle reste dans le trousseau.</p>
-      <button type="button" className="gb-retry gb-retry-primary" data-action="provider.signin" onClick={() => onAction?.("provider.signin")}>Connecter</button>
+      <button type="button" className="gb-retry gb-retry-primary" data-action="provider.signin" data-provider-signin onClick={(event) => { event.stopPropagation(); onAction?.("provider.signin"); }}>Se connecter à ChatGPT</button>
     </article>;
   }
   if (outcome?.status === "done") {

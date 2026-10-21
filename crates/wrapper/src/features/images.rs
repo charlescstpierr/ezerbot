@@ -1,12 +1,11 @@
-//! Image generation for a drawing request. The OpenAI key stays in the account
-//! vault and is sent only to the allowed image host. T1 does not validate the
+//! Image generation for a drawing request. The call uses the current ChatGPT
+//! session bearer and never an account-vault secret. T1 does not validate the
 //! closed aspect-ratio list or accept reference images.
 
 use super::Context;
 use crate::provider::error_parts;
 use grokbot_attachments::staging::{self, MAX_IMAGE_BYTES};
 use grokbot_engine::contracts::{ToolCall, ToolOutcome, ToolSpec};
-use grokbot_forms::vault::Vault;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::io::Read;
@@ -16,7 +15,7 @@ use url::Url;
 
 pub const TOOL: &str = "generate_image";
 pub const INDICATOR: &str = "Génération d’une image…";
-pub const CONNECT: &str = "Connecte ton compte OpenAI";
+pub const CONNECT: &str = "Connectez votre compte ChatGPT";
 const SAFETY: &str = "La génération de cette image a été refusée pour des raisons de sécurité.";
 const RESTRICTED: &str = "Ce modèle d’image est restreint pour ce compte.";
 const MISSING: &str = "Décrivez l’image à générer.";
@@ -24,7 +23,7 @@ const FAILED: &str = "La génération de l’image a échoué.";
 const UNUSABLE: &str = "L’image reçue n’est pas utilisable.";
 const TOO_BIG: &str = "L’image générée dépasse 20 Mo et n’a pas été conservée.";
 const UNAVAILABLE: &str = "Le service d’images est indisponible.";
-const SECRET: &str = "OPENAI_API_KEY";
+const MODEL: &str = "gpt-image-1.5";
 const IMAGE_HOST: &str = "https://api.openai.com/v1/images/generations";
 /// Base64 of a 20 MiB image, plus a small JSON envelope.
 const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 1024 * 1024;
@@ -81,6 +80,16 @@ pub(crate) fn image_endpoint(api: &str) -> Result<String, ()> {
     }
 }
 
+/// Images API sizes. 1:1 and an unknown ratio use the square size. T1 does not
+/// reject an unknown ratio before the call.
+pub(crate) fn image_size(aspect: &str) -> &'static str {
+    match aspect {
+        "16:9" | "4:3" => "1536x1024",
+        "9:16" | "3:4" => "1024x1536",
+        _ => "1024x1024",
+    }
+}
+
 pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     let description = call.arguments["description"]
         .as_str()
@@ -94,15 +103,18 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
         .as_str()
         .filter(|value| !value.is_empty())
         .unwrap_or("1:1");
+    let size = image_size(aspect);
     let Ok(endpoint) = image_endpoint(&ctx.provider.image_api_base()) else {
         return failed(UNAVAILABLE);
     };
-    let key = match load_key(ctx) {
-        Ok(Some(key)) => key,
-        Ok(None) => return failed(CONNECT),
-        Err(()) => return failed(UNAVAILABLE),
+    let key = match ctx.provider.session_bearer() {
+        Ok(token) => token,
+        Err(failure) if failure.kind == "signin" || failure.kind == "signin_expired" => {
+            return failed(CONNECT);
+        }
+        Err(_) => return failed(UNAVAILABLE),
     };
-    let (status, result) = post(&endpoint, &key, &description, aspect);
+    let (status, result) = post(&endpoint, &key, &description, size);
     let run_id = ctx.run_id.unwrap_or(TOOL);
     crate::upstream::turn(
         ctx.db_path.parent().unwrap_or(Path::new(".")),
@@ -146,32 +158,11 @@ pub fn present(
     }
 }
 
-/// Drop the image key stored in the account vault. A key that was never stored
-/// is left untouched, and sign-out does not create a vault file. A deletion
-/// that cannot be confirmed is returned so sign-out is not reported as done
-/// while the secret remains.
-pub fn forget_account_key(db: &Path) -> Result<(), crate::ApiError> {
-    let path = db.with_extension("secrets.json");
-    if !path.is_file() {
-        return Ok(());
-    }
-    let vault = Vault::open_app(&path)?;
-    vault.remove(SECRET)?;
-    Ok(())
-}
-
-/// The image key is the account vault secret. Auth files (`*.chatgpt-auth.json`,
-/// `*.codex-auth.json`) are never read and their bearer is never sent.
-fn load_key(ctx: &Context<'_>) -> Result<Option<String>, ()> {
-    let vault = Vault::open_app(&ctx.db_path.with_extension("secrets.json")).map_err(|_| ())?;
-    vault.get(SECRET).map_err(|_| ())
-}
-
 fn post(
     endpoint: &str,
     key: &str,
     description: &str,
-    aspect: &str,
+    size: &str,
 ) -> (u16, Result<Vec<u8>, &'static str>) {
     #[cfg(test)]
     {
@@ -191,9 +182,9 @@ fn post(
         .post(endpoint)
         .set("Authorization", &format!("Bearer {key}"))
         .send_json(json!({
-            "model": "gpt-image",
+            "model": MODEL,
             "prompt": description,
-            "aspect_ratio": aspect,
+            "size": size,
             "n": 1,
         }));
     let response = match response {
@@ -218,7 +209,7 @@ fn post(
 fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
     let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     if !(200..300).contains(&status) || value.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(phrase(&error_parts(&value).0));
+        return Err(phrase(status, &error_parts(&value).0));
     }
     let Some(encoded) = value["data"]
         .get(0)
@@ -238,12 +229,14 @@ fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
-fn phrase(code: &str) -> &'static str {
-    match code {
-        "content_safety_blocked" => SAFETY,
-        "model_restricted" => RESTRICTED,
-        _ => FAILED,
+fn phrase(status: u16, code: &str) -> &'static str {
+    if code == "content_safety_blocked" {
+        return SAFETY;
     }
+    if (400..500).contains(&status) {
+        return RESTRICTED;
+    }
+    FAILED
 }
 
 fn store(ctx: &Context<'_>, call: &ToolCall, bytes: &[u8], aspect: &str) -> ToolOutcome {
@@ -349,7 +342,7 @@ mod tests {
         POST_KEY.with(|slot| slot.borrow().clone())
     }
 
-    const VAULT_KEY: &str = "vault-image-key-9f3c1a7e";
+    const VAULT_KEY: &str = "vault-bot-secret-9f3c1a7e";
     const CHAT_TOKEN: &str = "chatgpt-auth-bearer-not-image";
     const CODEX_TOKEN: &str = "codex-auth-bearer-not-image";
 
@@ -361,7 +354,7 @@ mod tests {
     }
 
     impl Outside {
-        fn open(with_vault_key: bool) -> Self {
+        fn open(with_session: bool) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "ezerbot-image-key-{}-{}",
                 std::process::id(),
@@ -377,6 +370,21 @@ mod tests {
                 .unwrap()
                 .as_secs()
                 + 3600;
+            if with_session {
+                std::fs::write(
+                    db.with_extension("codex-auth.json"),
+                    json!({
+                        "host_id": "test-host",
+                        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+                        "account_id": "ezerbot-only",
+                        "access_token": CODEX_TOKEN,
+                        "refresh_token": "codex-refresh-token",
+                        "expires_at": expires
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
             std::fs::write(
                 db.with_extension("chatgpt-auth.json"),
                 json!({
@@ -390,27 +398,10 @@ mod tests {
                 .to_string(),
             )
             .unwrap();
-            std::fs::write(
-                db.with_extension("codex-auth.json"),
-                json!({
-                    "host_id": "test-host",
-                    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
-                    "account_id": "ezerbot-only",
-                    "access_token": CODEX_TOKEN,
-                    "refresh_token": "codex-refresh-token",
-                    "expires_at": expires
-                })
-                .to_string(),
-            )
-            .unwrap();
-            if with_vault_key {
-                Vault::open(&db.with_extension("secrets.json"))
-                    .unwrap()
-                    .set(SECRET, "Compte OpenAI pour générer des images", VAULT_KEY)
-                    .unwrap();
-            } else {
-                Vault::open(&db.with_extension("secrets.json")).unwrap();
-            }
+            grokbot_forms::vault::Vault::open(&db.with_extension("secrets.json"))
+                .unwrap()
+                .set("BOT_PHARE", "Secret d’un bot", VAULT_KEY)
+                .unwrap();
             let provider = Provider::with_endpoints(&db, Endpoints::default(), false);
             provider.select_backend("codex").unwrap();
             Self {
@@ -453,63 +444,38 @@ mod tests {
     }
 
     #[test]
-    fn image_key_outside_loopback_is_read_from_the_account_vault() {
+    fn session_bearer_is_sent_and_a_vault_secret_stays_put() {
         reset_posts();
         let present = Outside::open(true);
+        let before = std::fs::read(present.db.with_extension("secrets.json")).unwrap();
         execute(&present.ctx(), &draw());
-        assert_eq!(post_count(), 1, "la clé du trousseau n’a pas été utilisée");
-        assert_eq!(post_key(), VAULT_KEY);
+        assert_eq!(post_count(), 1, "le jeton de session n’a pas été utilisé");
+        assert_eq!(post_key(), CODEX_TOKEN);
+        assert_ne!(post_key(), VAULT_KEY);
+        assert_ne!(post_key(), CHAT_TOKEN);
+        assert_eq!(
+            std::fs::read(present.db.with_extension("secrets.json")).unwrap(),
+            before
+        );
         let stored = secrets_text(&present.db);
         assert!(!stored.contains(CHAT_TOKEN));
         assert!(!stored.contains(CODEX_TOKEN));
 
         reset_posts();
         let absent = Outside::open(false);
+        let before = std::fs::read(absent.db.with_extension("secrets.json")).unwrap();
         let outcome = execute(&absent.ctx(), &draw());
-        assert_eq!(
-            post_count(),
-            0,
-            "le jeton d’auth a été envoyé au fournisseur"
-        );
+        assert_eq!(post_count(), 0, "un appel part sans session");
         match outcome {
             ToolOutcome::Failed { reason } => assert_eq!(reason, CONNECT),
             other => panic!("résultat inattendu: {other:?}"),
         }
+        assert_eq!(
+            std::fs::read(absent.db.with_extension("secrets.json")).unwrap(),
+            before
+        );
         let stored = secrets_text(&absent.db);
-        assert!(
-            !stored.contains(CHAT_TOKEN),
-            "jeton chatgpt écrit hors du trousseau"
-        );
-        assert!(
-            !stored.contains(CODEX_TOKEN),
-            "jeton codex écrit hors du trousseau"
-        );
-    }
-
-    #[test]
-    fn refused_keychain_write_does_not_store_the_image_key_or_call_the_provider() {
-        reset_posts();
-        let outside = Outside::open(false);
-        let path = outside.db.with_extension("secrets.json");
-        let before = std::fs::read(&path).unwrap();
-        let error = Vault::open_refusing_keychain(&path)
-            .unwrap()
-            .set(SECRET, "Compte OpenAI pour générer des images", VAULT_KEY)
-            .unwrap_err();
-        assert!(!error.to_string().contains(VAULT_KEY));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        let outcome = execute(&outside.ctx(), &draw());
-        assert_eq!(
-            post_count(),
-            0,
-            "fournisseur appelé après un refus du trousseau"
-        );
-        match outcome {
-            ToolOutcome::Failed { reason } => assert_eq!(reason, CONNECT),
-            other => panic!("résultat inattendu: {other:?}"),
-        }
-        let stored = secrets_text(&outside.db);
-        assert!(!stored.contains(VAULT_KEY));
+        assert!(stored.contains(VAULT_KEY));
         assert!(!stored.contains(CHAT_TOKEN));
         assert!(!stored.contains(CODEX_TOKEN));
     }
@@ -542,11 +508,27 @@ mod tests {
     }
 
     #[test]
+    fn known_ratios_become_accepted_sizes() {
+        assert_eq!(image_size("1:1"), "1024x1024");
+        assert_eq!(image_size(""), "1024x1024");
+        assert_eq!(image_size("2:1"), "1024x1024");
+        assert_eq!(image_size("16:9"), "1536x1024");
+        assert_eq!(image_size("4:3"), "1536x1024");
+        assert_eq!(image_size("9:16"), "1024x1536");
+        assert_eq!(image_size("3:4"), "1024x1536");
+    }
+
+    #[test]
     fn provider_errors_become_french_and_a_url_is_not_fetched() {
         let safety = br#"{"error":{"code":"content_safety_blocked","message":"blocked"}}"#;
         assert_eq!(interpret(400, safety).unwrap_err(), SAFETY);
         let restricted = br#"{"error":{"code":"model_restricted","message":"restricted"}}"#;
         assert_eq!(interpret(400, restricted).unwrap_err(), RESTRICTED);
+        let refused = br#"{"error":{"code":"insufficient_quota","message":"nope"}}"#;
+        assert_eq!(interpret(403, refused).unwrap_err(), RESTRICTED);
+        let down = br#"{"error":{"code":"server_error","message":"down"}}"#;
+        assert_eq!(interpret(503, down).unwrap_err(), FAILED);
+        assert_eq!(interpret(0, b"").unwrap_err(), FAILED);
         let remote = br#"{"data":[{"url":"https://evil.example/secret.png"}]}"#;
         assert_eq!(interpret(200, remote).unwrap_err(), UNUSABLE);
         let garbage = br#"{"data":[{"b64_json":"bm90IGFuIGltYWdl"}]}"#;

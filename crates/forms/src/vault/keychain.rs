@@ -86,7 +86,7 @@ fn states() -> MutexGuard<'static, BTreeMap<PathBuf, State>> {
 }
 pub(super) fn status(path: &Path) -> StorageStatus {
     if states().get(path).is_some_and(|s| s.failed) {
-        StorageStatus { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Ezerbot continue avec un fichier local lisible seulement par votre compte macOS, mais non chiffré. Les secrets déjà transférés restent dans le trousseau et peuvent être indisponibles. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage pour reprendre le transfert.") }
+        StorageStatus { backend: "file_fallback", label: "Trousseau macOS indisponible", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Les nouveaux secrets ne sont pas enregistrés. Les secrets déjà présents dans le trousseau restent en place. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage.") }
     } else {
         StorageStatus {
             backend: "keychain",

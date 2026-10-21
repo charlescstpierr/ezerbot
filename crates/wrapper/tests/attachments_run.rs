@@ -912,41 +912,47 @@ impl ToolHeavyApi {
                     let mut raw = String::new();
                     request.as_reader().read_to_string(&mut raw).unwrap();
                     let body: Value = serde_json::from_str(&raw).unwrap();
-                    let summary = body["instructions"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .contains("Maximum summary length:");
-                    seen.lock().unwrap().bodies.push(body);
-                    if summary {
+                    let instructions = body["instructions"].as_str().unwrap_or_default();
+                    if instructions.starts_with("Test de connexion.") {
+                        // The service probe is not one of the six tool rounds.
                         ScriptedResponse::events(&[
-                            json!({"type": "response.output_text.delta", "delta": "Previous tool exchanges summarized; the image description is retained if available."}),
-                            json!({"type": "response.completed"}),
+                            json!({"type":"response.output_text.delta","delta":"OK"}),
+                            json!({"type":"response.completed"}),
                         ])
                     } else {
-                        calls += 1;
-                        if calls <= 5 {
+                        let summary = instructions.contains("Maximum summary length:");
+                        seen.lock().unwrap().bodies.push(body);
+                        if summary {
                             ScriptedResponse::events(&[
-                                json!({"type": "response.output_item.done", "item": {
-                                    "id": format!("fc-heavy-{calls}"), "type": "function_call", "status": "completed",
-                                    "call_id": format!("heavy-{calls}"), "name": "list_skills",
-                                    "arguments": json!({"query": "x".repeat(9_000), "limit": 1}).to_string(),
-                                }}),
-                                json!({"type": "response.completed"}),
-                            ])
-                        } else if suspend && calls == 6 {
-                            ScriptedResponse::events(&[
-                                json!({"type": "response.output_item.done", "item": {
-                                    "id": "fc-form", "type": "function_call", "status": "completed",
-                                    "call_id": "confirm-result", "name": "request_form",
-                                    "arguments": json!({"fields": [{"name": "answer", "label": "Answer", "field_type": {"kind": "text"}, "required": true}]}).to_string(),
-                                }}),
+                                json!({"type": "response.output_text.delta", "delta": "Previous tool exchanges summarized; the image description is retained if available."}),
                                 json!({"type": "response.completed"}),
                             ])
                         } else {
-                            ScriptedResponse::events(&[
-                                json!({"type": "response.output_text.delta", "delta": "Finished after five tools."}),
-                                json!({"type": "response.completed"}),
-                            ])
+                            calls += 1;
+                            if calls <= 5 {
+                                ScriptedResponse::events(&[
+                                    json!({"type": "response.output_item.done", "item": {
+                                        "id": format!("fc-heavy-{calls}"), "type": "function_call", "status": "completed",
+                                        "call_id": format!("heavy-{calls}"), "name": "list_skills",
+                                        "arguments": json!({"query": "x".repeat(9_000), "limit": 1}).to_string(),
+                                    }}),
+                                    json!({"type": "response.completed"}),
+                                ])
+                            } else if suspend && calls == 6 {
+                                ScriptedResponse::events(&[
+                                    json!({"type": "response.output_item.done", "item": {
+                                        "id": "fc-form", "type": "function_call", "status": "completed",
+                                        "call_id": "confirm-result", "name": "request_form",
+                                        "arguments": json!({"fields": [{"name": "answer", "label": "Answer", "field_type": {"kind": "text"}, "required": true}]}).to_string(),
+                                    }}),
+                                    json!({"type": "response.completed"}),
+                                ])
+                            } else {
+                                ScriptedResponse::events(&[
+                                    json!({"type": "response.output_text.delta", "delta": "Finished after five tools."}),
+                                    json!({"type": "response.completed"}),
+                                ])
+                            }
                         }
                     }
                 };

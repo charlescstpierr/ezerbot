@@ -17,9 +17,9 @@ use std::{
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 
-const KEY: &str = "ezerbot-image-key-9f3c1a7e-loop";
+const SECRET: &str = "ezerbot-bot-secret-9f3c1a7e-loop";
 const INDICATOR: &str = "Génération d’une image…";
-const CONNECT: &str = "Connecte ton compte OpenAI";
+const RESTRICTED: &str = "Ce modèle d’image est restreint pour ce compte.";
 const PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
 
@@ -40,7 +40,7 @@ fn now() -> u64 {
 }
 
 impl Fixture {
-    fn open(with_key: bool) -> Self {
+    fn open() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "ezerbot-image-{}-{}",
@@ -67,16 +67,15 @@ impl Fixture {
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
         let mut app = App::open_with(&path, provider.clone()).unwrap();
         wait("models", || provider.status()["models_ready"] == true);
-        if with_key {
-            Vault::open(&path.with_extension("secrets.json"))
-                .unwrap()
-                .set(
-                    "OPENAI_API_KEY",
-                    "Compte OpenAI pour générer des images",
-                    KEY,
-                )
-                .unwrap();
-        }
+        let vault = Vault::open(&path.with_extension("secrets.json")).unwrap();
+        vault.set("BOT_PHARE", "Secret d’un bot", SECRET).unwrap();
+        vault
+            .set(
+                "OPENAI_API_KEY",
+                "Secret nommé comme une ancienne clé",
+                "ezerbot-named-secret-9f3c1a7e-loop",
+            )
+            .unwrap();
         let chat = app
             .api(
                 "POST",
@@ -183,19 +182,22 @@ fn assert_key_hidden(fixture: &mut Fixture) {
         .api("GET", "/api/state", b"")
         .unwrap()
         .to_string();
-    assert!(!state.contains(KEY), "clé présente dans l’état exporté");
+    assert!(
+        !state.contains(SECRET),
+        "secret présent dans l’état exporté"
+    );
     let bodies = fixture.server.seen.lock().unwrap().bodies.clone();
     for body in bodies {
         assert!(
-            !body.to_string().contains(KEY),
-            "clé présente dans le contexte du modèle"
+            !body.to_string().contains(SECRET),
+            "secret présent dans le contexte du modèle"
         );
     }
     let calls = fixture.server.seen.lock().unwrap().image_calls.clone();
     for call in calls {
         assert!(
-            !call.to_string().contains(KEY),
-            "clé présente dans le corps d’image"
+            !call.to_string().contains(SECRET),
+            "secret présent dans le corps d’image"
         );
     }
     scan_tree(&fixture.root);
@@ -203,8 +205,8 @@ fn assert_key_hidden(fixture: &mut Fixture) {
     if log.is_file() {
         let text = std::fs::read(&log).unwrap();
         assert!(
-            !String::from_utf8_lossy(&text).contains(KEY),
-            "clé présente dans le journal"
+            !String::from_utf8_lossy(&text).contains(SECRET),
+            "secret présent dans le journal"
         );
     }
 }
@@ -220,8 +222,8 @@ fn scan_tree(root: &Path) {
         }
         let bytes = std::fs::read(&entry).unwrap_or_default();
         assert!(
-            !String::from_utf8_lossy(&bytes).contains(KEY),
-            "clé présente hors du trousseau"
+            !String::from_utf8_lossy(&bytes).contains(SECRET),
+            "secret présent hors du coffre"
         );
     }
 }
@@ -247,7 +249,7 @@ fn walkdir_files(root: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn drawing_replaces_the_indicator_with_one_image() {
-    let mut fixture = Fixture::open(true);
+    let mut fixture = Fixture::open();
     let gate = fixture.hold_image();
     fixture.script_image(200, json!({"data":[{"b64_json":PNG_B64}]}));
     fixture.ask(
@@ -291,13 +293,14 @@ fn drawing_replaces_the_indicator_with_one_image() {
         ApiResponse::Json(_) => panic!("image non binaire"),
     }
     let call = fixture.server.seen.lock().unwrap().image_calls[0].clone();
-    assert_eq!(call["model"], "gpt-image");
+    assert_eq!(call["model"], "gpt-image-1.5");
     assert_eq!(call["prompt"], "un phare au crépuscule");
-    assert_eq!(call["aspect_ratio"], "1:1");
+    assert_eq!(call["size"], "1024x1024");
+    assert!(call.get("aspect_ratio").is_none());
     assert_eq!(call["n"], 1);
     let authorization = fixture.server.seen.lock().unwrap().image_authorization[0].clone();
     assert!(
-        authorization == format!("Bearer {KEY}"),
+        authorization == "Bearer fake-access",
         "en-tête d’autorisation inattendu"
     );
     fixture.until("réponse non terminée", |fixture| {
@@ -317,7 +320,7 @@ fn drawing_replaces_the_indicator_with_one_image() {
 
 #[test]
 fn safety_refusal_is_one_french_sentence() {
-    let mut fixture = Fixture::open(true);
+    let mut fixture = Fixture::open();
     fixture.script_image(
         400,
         json!({"error":{"code":"content_safety_blocked","message":"blocked"}}),
@@ -344,7 +347,7 @@ fn safety_refusal_is_one_french_sentence() {
 
 #[test]
 fn restricted_model_is_a_different_french_sentence() {
-    let mut fixture = Fixture::open(true);
+    let mut fixture = Fixture::open();
     fixture.script_image(
         400,
         json!({"error":{"code":"model_restricted","message":"restricted"}}),
@@ -365,85 +368,112 @@ fn restricted_model_is_a_different_french_sentence() {
 }
 
 #[test]
-fn missing_key_shows_the_connect_card_without_a_call() {
-    let mut fixture = Fixture::open(false);
+fn wide_frame_is_sent_as_a_supported_size() {
+    let mut fixture = Fixture::open();
     fixture.ask(
-        "sans-cle",
-        json!({"description":"un phare au crépuscule"}),
-        "Dessine un phare au crépuscule",
+        "large",
+        json!({"description":"un phare large","aspect_ratio":"16:9"}),
+        "Dessine un phare en large",
     );
-    fixture.until("carte de connexion absente", |fixture| {
-        fixture.tool()["body"] == CONNECT
+    fixture.until("appel image large absent", |fixture| {
+        fixture.image_calls() == 1
     });
-    assert_eq!(fixture.image_calls(), 0);
-    assert!(fixture.tool()["attachments"].as_array().unwrap().is_empty());
-    assert!(fixture
-        .messages()
-        .iter()
-        .all(|message| message["kind"] != "approval"));
+    let call = fixture.server.seen.lock().unwrap().image_calls[0].clone();
+    assert_eq!(call["model"], "gpt-image-1.5");
+    assert_eq!(call["size"], "1536x1024");
+    assert_eq!(call["prompt"], "un phare large");
+    assert!(call.get("aspect_ratio").is_none());
+    assert_eq!(call["n"], 1);
     assert_eq!(
-        fixture
-            .db()
-            .query_row("SELECT COUNT(*) FROM forms_requests", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
+        fixture.server.seen.lock().unwrap().image_authorization[0],
+        "Bearer fake-access"
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(fixture.image_calls(), 0);
+    fixture.until("réponse large non terminée", |fixture| {
+        fixture.provider.status()["titling"] == false
+            && fixture
+                .db()
+                .query_row(
+                    "SELECT COUNT(*) FROM engine_runs WHERE status NOT IN ('finished','failed','cancelled')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 0
+    });
 }
 
 #[test]
-fn signout_forgets_the_image_key() {
-    let mut fixture = Fixture::open(true);
+fn host_refusal_is_one_restricted_sentence() {
+    let mut fixture = Fixture::open();
+    fixture.script_image(
+        403,
+        json!({"error":{"code":"insufficient_quota","message":"nope"}}),
+    );
+    fixture.ask(
+        "refus-hote",
+        json!({"description":"un phare"}),
+        "Dessine un phare",
+    );
+    fixture.until("refus d’hôte absent", |fixture| {
+        fixture.tool()["body"] == RESTRICTED && fixture.image_calls() == 1
+    });
+    assert!(fixture.tool()["attachments"].as_array().unwrap().is_empty());
+    assert!(!fixture.tool()["body"]
+        .as_str()
+        .unwrap_or("")
+        .contains("nope"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(fixture.image_calls(), 1);
+}
+
+#[test]
+fn signout_removes_only_the_session() {
+    let mut fixture = Fixture::open();
+    let path = fixture.path.with_extension("secrets.json");
+    let before = std::fs::read(&path).unwrap();
     fixture
         .app
         .api("POST", "/api/provider/signout", b"{}")
         .unwrap();
     assert!(!fixture.provider.connected());
-    assert!(Vault::open(&fixture.path.with_extension("secrets.json"))
-        .unwrap()
-        .get("OPENAI_API_KEY")
-        .unwrap()
-        .is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let vault = Vault::open(&path).unwrap();
+    assert_eq!(vault.get("BOT_PHARE").unwrap().as_deref(), Some(SECRET));
+    assert_eq!(
+        vault.get("OPENAI_API_KEY").unwrap().as_deref(),
+        Some("ezerbot-named-secret-9f3c1a7e-loop")
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn signout_does_not_confirm_when_the_image_key_cannot_be_deleted() {
+fn signout_leaves_a_symlinked_vault_untouched() {
     use std::os::unix::fs::symlink;
-    let mut fixture = Fixture::open(true);
+    let mut fixture = Fixture::open();
     let path = fixture.path.with_extension("secrets.json");
-    let stash = fixture.root.join("data/image-key-stash.json");
+    let stash = fixture.root.join("data/vault-stash.json");
     let before = std::fs::read(&path).unwrap();
-    assert!(String::from_utf8_lossy(&before).contains(KEY));
+    assert!(String::from_utf8_lossy(&before).contains(SECRET));
     std::fs::rename(&path, &stash).unwrap();
     symlink(&stash, &path).unwrap();
-    let error = fixture
+    fixture
         .app
         .api("POST", "/api/provider/signout", b"{}")
-        .unwrap_err();
-    assert!(
-        !error.message.contains(KEY),
-        "la clé est dans l’erreur de déconnexion"
-    );
-    assert!(
-        fixture.provider.connected(),
-        "déconnexion confirmée alors que la suppression de la clé ne l’est pas"
-    );
+        .unwrap();
+    assert!(!fixture.provider.connected());
     assert!(
         std::fs::symlink_metadata(&path)
             .unwrap()
             .file_type()
             .is_symlink(),
-        "le coffre a été réécrit en clair"
+        "le coffre a été réécrit"
     );
     assert_eq!(std::fs::read(&stash).unwrap(), before);
 }
 
 #[test]
 fn describing_an_attached_image_does_not_generate_one() {
-    let mut fixture = Fixture::open(true);
+    let mut fixture = Fixture::open();
     let bytes = png();
     let image = fixture.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
         .as_str()

@@ -196,9 +196,9 @@ impl Session {
             let _ = result; // Receiver is the sole persistence owner; never log content/errors here.
         });
         let _abandon = Abandon {
-            flag: abandoned,
+            flag: abandoned.clone(),
             inner: self.inner.clone(),
-            settled,
+            settled: settled.clone(),
         };
         log(0, "started");
         let started = Instant::now();
@@ -209,7 +209,29 @@ impl Session {
         let mut previous_notice = String::new();
         loop {
             if cancel.load(Ordering::SeqCst) {
+                // ureq cannot abort the read it is already inside. Interrupted
+                // keeps only the checkpoint taken when this call returns, so
+                // leaving now would drop the rest of that interval. Count the
+                // socket immediately: admission must see it while we wait.
+                abandoned.store(true, Ordering::SeqCst);
+                {
+                    let mut guard = lock(&settled);
+                    if !guard.worker_done && !guard.counted {
+                        guard.counted = true;
+                        self.inner.closing.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 log(http, "cancelled");
+                loop {
+                    if lock(&settled).worker_done {
+                        break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(25)) {
+                        Ok(_) => {}
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
                 if tool_notice {
                     metadata(Some(&previous_notice), None)?;
                 }
@@ -301,5 +323,190 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod elapsed_interval {
+    use crate::{App, Endpoints, Provider};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const BLOCKED_READ: Duration = Duration::from_millis(800);
+
+    /// Portable stand-in for the macOS routine pass: cancel while ureq is blocked
+    /// in the response read, then require that checkpoint to keep the interval.
+    #[test]
+    fn interrupt_checkpoints_the_blocked_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = started.clone();
+        thread::spawn(move || {
+            for _ in 0..24 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
+                let flag = flag.clone();
+                thread::spawn(move || respond(&mut socket, &flag));
+            }
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-elapsed-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        let base = format!("http://{address}");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "elapsed",
+                "account_id": "elapsed",
+                "client_id": "elapsed",
+                "access_token": token(),
+                "refresh_token": "elapsed-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let provider = Provider::with_backends(&db, endpoints.clone(), endpoints, false);
+        let mut app = App::open_with(&db, provider.clone()).unwrap();
+        let ready = Instant::now();
+        while app.api("GET", "/api/state", b"").unwrap()["provider"]["models_ready"] != true {
+            assert!(
+                ready.elapsed() < Duration::from_secs(10),
+                "codex catalogue did not load"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let chat = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        app.api(
+            "POST",
+            "/api/send",
+            serde_json::json!({
+                "conversation_id": chat,
+                "message_id": "question",
+                "body": "Bilan de test"
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let marked = Instant::now();
+        while !started.load(Ordering::SeqCst) {
+            assert!(
+                marked.elapsed() < Duration::from_secs(10),
+                "the blocked read never started"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let blocked = Instant::now();
+        provider.interrupt_runs();
+        while provider.has_run_workers() {
+            assert!(
+                blocked.elapsed() < Duration::from_secs(10),
+                "the interrupted worker did not finish"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        let (status, elapsed): (String, i64) = conn
+            .query_row(
+                "SELECT status, json_extract(usage,'$.elapsed_ms') FROM engine_runs WHERE trigger_kind='user_message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert!(
+            elapsed >= 700 && blocked.elapsed() >= Duration::from_millis(700),
+            "elapsed interval lost: {elapsed}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn respond(socket: &mut std::net::TcpStream, started: &AtomicBool) {
+        socket.set_nonblocking(false).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+        let mut length = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        let mut body = vec![0; length];
+        if length > 0 && reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        let instructions = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value["instructions"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let user_turn = path.contains("/responses")
+            && !instructions.contains("titre")
+            && !instructions.starts_with("Extraction");
+        if user_turn {
+            started.store(true, Ordering::SeqCst);
+            thread::sleep(BLOCKED_READ);
+        }
+        let payload = if path.contains("/responses") {
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Bilan.\"}\n\ndata: {\"type\":\"response.completed\"}\n\n".to_owned()
+        } else {
+            "{}".to_owned()
+        };
+        let content = if path.contains("/responses") {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let _ = write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: {content}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+    }
+
+    fn token() -> String {
+        format!(
+            "e30.{}.sig",
+            URL_SAFE_NO_PAD.encode(
+                serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":"elapsed"}})
+                    .to_string()
+            )
+        )
     }
 }

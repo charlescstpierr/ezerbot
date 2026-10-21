@@ -10,6 +10,23 @@ pub struct Provider {
     selection_file: PathBuf,
 }
 
+/// Small streamed probe. No output cap: a reasoning model would spend 16 tokens
+/// before any visible answer and look disconnected. Minimal effort is sent only
+/// when this model advertises it.
+fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
+    let mut body = json!({
+        "model": model,
+        "input": [{"role": "user", "content": "Réponds seulement OK."}],
+        "instructions": "Test de connexion. Réponds seulement OK.",
+        "store": false,
+        "stream": true
+    });
+    if efforts.iter().any(|effort| effort.effort == "minimal") {
+        body["reasoning"] = json!({"effort": "minimal"});
+    }
+    body
+}
+
 impl Provider {
     pub fn new(db: &Path) -> Self {
         Self::with_backends(db, Endpoints::default(), Endpoints::codex(), true)
@@ -128,6 +145,8 @@ impl Provider {
     pub fn status(&self) -> Value {
         let mut value = self.session().status();
         value["titling"] = json!(self.sharing.inner.titling.load(Ordering::SeqCst) > 0);
+        value["simulation"] = json!(self.simulation_allowed());
+        value["connection_test"] = lock(&self.session().inner.probe).clone();
         value["connections"] =
             json!({"codex":self.codex.connected(), "sharing":self.sharing.connected()});
         value
@@ -139,6 +158,106 @@ impl Provider {
             return json!({"status":"unsupported"});
         }
         self.codex.quota_status(refresh)
+    }
+    pub(crate) fn simulation_allowed(&self) -> bool {
+        cfg!(debug_assertions) && self.sharing.inner.simulation.load(Ordering::SeqCst)
+    }
+    /// Debug-only local fake control; never changes production deadlines.
+    #[cfg(debug_assertions)]
+    pub fn configure_fake_chat(&self, timeout: Duration, simulation: bool) {
+        self.configure_fake_deadlines(timeout, timeout, timeout * 5);
+        for session in [&self.sharing, &self.codex] {
+            if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
+                session.inner.simulation.store(simulation, Ordering::SeqCst);
+            }
+        }
+    }
+    /// Loopback only. A test can keep the production overall deadline while
+    /// shortening the read timeout that ureq must actually apply.
+    #[cfg(debug_assertions)]
+    pub fn configure_fake_deadlines(&self, first: Duration, stall: Duration, total: Duration) {
+        for session in [&self.sharing, &self.codex] {
+            if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
+                *lock(&session.inner.deadlines) = super::reliable::Deadlines {
+                    first,
+                    stall,
+                    total,
+                };
+            }
+        }
+    }
+    pub(crate) fn test_connection(&self) {
+        let session = self.session();
+        if !session.connected() {
+            *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez-vous via Codex ci-dessus."});
+            return;
+        }
+        let generation = {
+            let mut probe = lock(&session.inner.probe);
+            if probe["state"] == "running" {
+                return;
+            }
+            *probe = json!({"state":"running"});
+            session.inner.probe_generation.load(Ordering::SeqCst)
+        };
+        thread::spawn(move || {
+            let mut failure = None;
+            let mut responded = false;
+            let mut capped = false;
+            let models = session.models();
+            let chosen = models.first();
+            let model = chosen.map(|model| model.slug.clone()).unwrap_or_else(|| {
+                if session.inner.codex {
+                    "gpt-5.5"
+                } else {
+                    "gpt-5"
+                }
+                .into()
+            });
+            let efforts = chosen
+                .map(|model| model.efforts.clone())
+                .unwrap_or_default();
+            let result = session.reliable_stream(
+                connection_probe_body(&model, &efforts),
+                &AtomicBool::new(false),
+                Some("connection-test"),
+                &mut |_, error| {
+                    if let Some(error) = error {
+                        failure = Some(error.message.clone());
+                    }
+                    Ok(())
+                },
+                &mut |event| {
+                    match &event {
+                        grokbot_engine::contracts::ModelEvent::Completed => responded = true,
+                        grokbot_engine::contracts::ModelEvent::Incomplete { reason }
+                            if reason == "max_output_tokens" =>
+                        {
+                            // A reasoning model that spends the cap still proves the service answers.
+                            responded = true;
+                            capped = true;
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            );
+            if capped {
+                failure = None;
+            }
+            if !session.connected() {
+                failure = Some(Failure::signin().message);
+            }
+            let mut probe = lock(&session.inner.probe);
+            if session.inner.probe_generation.load(Ordering::SeqCst) != generation {
+                return; // A previous account's result must never label a new session.
+            }
+            *probe = if responded && result.is_ok() && failure.is_none() {
+                json!({"state":"ok","message":"OK — ChatGPT répond."})
+            } else {
+                json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
+            };
+        });
     }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()
@@ -175,14 +294,13 @@ impl Provider {
     pub fn responses(&self, body: Value) -> Result<ureq::Response, Failure> {
         self.session().responses(body)
     }
-    pub(super) fn responses_with_options(
-        &self,
-        body: Value,
-        fallback: bool,
-        notices: &mut Vec<String>,
-    ) -> Result<ureq::Response, Failure> {
+    pub(crate) fn responses_background(&self, body: Value) -> Result<ureq::Response, Failure> {
+        self.session().responses_background(body)
+    }
+    pub(crate) fn background_ready(&self) -> bool {
         self.session()
-            .responses_with_options(body, fallback, notices)
+            .read()
+            .is_some_and(|c| c.expires_at > seconds() + REFRESH_MARGIN)
     }
     pub(crate) fn diagnostics(&self, response: &ureq::Response) -> crate::upstream::Diagnostics {
         self.sharing.diagnostics(response)
@@ -197,16 +315,33 @@ impl Provider {
     pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
         self.session().review(body)
     }
+    pub(super) fn stream_canonical(
+        &self,
+        request: &grokbot_engine::contracts::ModelRequest,
+        emit: &mut dyn FnMut(
+            grokbot_engine::contracts::ModelEvent,
+        ) -> grokbot_engine::contracts::Result<()>,
+    ) -> grokbot_engine::contracts::Result<()> {
+        self.session().reliable_stream(
+            crate::gateway::request_body(request)?,
+            &AtomicBool::new(false),
+            None,
+            &mut |_, _| Ok(()),
+            emit,
+        )
+    }
     pub(crate) fn stream_run(
         &self,
         request: &grokbot_engine::contracts::ModelRequest,
         cancel: &AtomicBool,
+        turn: Option<&str>,
         metadata: &mut MetadataSink<'_>,
         emit: &mut dyn FnMut(
             grokbot_engine::contracts::ModelEvent,
         ) -> grokbot_engine::contracts::Result<()>,
     ) -> grokbot_engine::contracts::Result<()> {
-        self.session().stream_run(request, cancel, metadata, emit)
+        self.session()
+            .stream_run(request, cancel, turn, metadata, emit)
     }
     pub(crate) fn mcp(&self) -> &crate::mcp::Manager {
         self.sharing.mcp()
@@ -272,5 +407,39 @@ mod tests {
         assert!(provider.accepts_images("gpt-5.5"));
         assert_eq!(provider.image_description_model("gpt-5.5"), "gpt-5.5");
         assert_eq!(provider.retired_model_replacement("gpt-5.5"), None);
+    }
+
+    #[test]
+    fn probe_requests_minimal_reasoning_only_when_the_model_lists_it() {
+        let bare = connection_probe_body("gpt-5", &[]);
+        assert!(bare.get("max_output_tokens").is_none());
+        assert!(bare.get("reasoning").is_none());
+        assert_eq!(
+            bare["instructions"],
+            "Test de connexion. Réponds seulement OK."
+        );
+        let listed = connection_probe_body(
+            "gpt-5",
+            &[
+                Effort {
+                    effort: "minimal".into(),
+                    description: "Court".into(),
+                },
+                Effort {
+                    effort: "high".into(),
+                    description: "Long".into(),
+                },
+            ],
+        );
+        assert_eq!(listed["reasoning"]["effort"], "minimal");
+        assert!(listed.get("max_output_tokens").is_none());
+        let other = connection_probe_body(
+            "gpt-5.5",
+            &[Effort {
+                effort: "low".into(),
+                description: "Léger".into(),
+            }],
+        );
+        assert!(other.get("reasoning").is_none());
     }
 }

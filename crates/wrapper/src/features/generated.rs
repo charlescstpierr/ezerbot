@@ -10,6 +10,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -19,8 +21,6 @@ use std::{
         Arc,
     },
 };
-#[cfg(target_os = "macos")]
-use std::process::Command;
 
 empty_hooks!(state, tick, context, entry, on_run_event, link_attachments);
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

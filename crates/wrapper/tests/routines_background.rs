@@ -1,7 +1,6 @@
 //! Binary-level tests: every launchctl call is recorded below a throwaway HOME.
 //! No test invokes launchctl or touches the user's LaunchAgents directory.
-//! Installation still asks /usr/bin/plutil to read the agent plist, so these
-//! tests run on macOS only.
+//! Installation still asks /usr/bin/plutil to read the agent plist, which exists only on macOS.
 #![cfg(target_os = "macos")]
 mod support;
 use serde_json::{json, Value};

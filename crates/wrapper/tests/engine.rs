@@ -125,7 +125,9 @@ impl Fixture {
         ureq::get(&format!(
             "{}?code=fake-restored&state={}&client_id={CLIENT}",
             query["redirect_uri"], query["state"],
-        )).call().unwrap();
+        ))
+        .call()
+        .unwrap();
         wait("catalogue restored", || {
             self.provider.status()["models_ready"] == true
         });
@@ -1295,16 +1297,16 @@ fn deleted_conversation_does_not_restart_provider_work_and_still_allows_stop() {
 }
 
 #[test]
-fn incomplete_reply_keeps_visible_text_french_notice_and_durable_usage() {
+fn incomplete_reply_keeps_visible_text_retryable_french_error_and_durable_usage() {
     let mut f = Fixture::new(true);
     let c = f.conversation();
     f.events(vec![json!({"type":"response.output_text.delta","delta":"Partial answer"}),json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12340,"output_tokens":100,"input_tokens_details":{"cached_tokens":11008}}}})]);
     f.send(&c, "incomplete", "Answer");
     let reply = f.done(&c, "incomplete");
-    assert_eq!(reply["state"], "echoed");
+    assert_eq!(reply["state"], "failed");
     assert_eq!(reply["body"], "Partial answer");
-    assert!(reply["notice"].as_str().unwrap().contains("avant la fin"));
-    assert!(reply.get("error").is_none());
+    assert!(reply["error"].as_str().unwrap().contains("avant la fin"));
+    assert_eq!(reply["error_kind"], "incomplete");
     assert_eq!(
         reply["payload"]["usage"],
         json!({"input_tokens":12340,"output_tokens":100,"cached_input_tokens":11008})

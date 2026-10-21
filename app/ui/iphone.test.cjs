@@ -190,6 +190,8 @@ function phoneShell() {
       createApprovalFollow: () => ({ arm() {}, bind() {}, cancel() {}, observe: () => null }),
       isPendingReply: () => false,
       searchableMessageText: message => message.body || '',
+      connectionMessages: (messages) => messages,
+      composerConnectionState: ({ offline = false, live = false, busy = false }) => ({ offline, live: live && !offline, busy: busy && !offline, mode: live && !offline ? "stop" : "send", icon: live && !offline ? "#i-stop" : "#i-send", title: offline ? "Moteur local indisponible" : "Envoyer le message", label: "Envoyer le message" }),
       renderThread: (_node, options) => { thread = options.messages; },
       revealPendingApproval() {},
       teachPrompt: '',

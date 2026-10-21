@@ -1308,7 +1308,10 @@ mod tests {
                 // Text extraction uses PDFKit. Off macOS, still prove a real PDF was produced.
                 assert!(result.bytes.starts_with(b"%PDF-"), "{format}");
                 assert!(
-                    result.bytes.windows(b") Tj T*".len()).any(|window| window == b") Tj T*"),
+                    result
+                        .bytes
+                        .windows(b") Tj T*".len())
+                        .any(|window| window == b") Tj T*"),
                     "{format}"
                 );
             } else {

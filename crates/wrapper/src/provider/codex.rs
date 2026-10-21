@@ -117,6 +117,7 @@ impl Session {
         self.write(&credentials).map_err(|_| {
             Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
         })?;
+        self.reset_probe();
         self.inner.local_revoked.store(false, Ordering::SeqCst);
         *lock(&self.inner.catalog) = Catalog::default();
         self.reset_quota();
@@ -129,7 +130,14 @@ impl Session {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::signin());
         }
-        let mut request = agent()
+        let limits = *lock(&self.inner.deadlines);
+        // ureq 2.12.1 applies `.timeout()` on every body read and ignores
+        // `.timeout_read()`. The session loop already enforces `limits.total`.
+        let mut request = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_write(Duration::from_secs(15))
+            .timeout_read(limits.stall)
+            .build()
             .post(&format!("{}/responses", self.inner.endpoints.api))
             .set("Authorization", &format!("Bearer {token}"));
         if self.inner.codex {

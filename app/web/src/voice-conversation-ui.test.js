@@ -108,10 +108,12 @@ test("Escape interrupts audio, switching conversations cancels capture, and late
   assert.equal(f.source.status,"idle");assert.equal(f.panel.wantsPolling(),false);
   assert.equal(cls(f.root,"voice-session-bar").hidden,true);
 });
-test("compact toolbar and state animation retain their accessibility CSS contracts",()=>{
+test("composer voice control stays an icon with a hidden label at every width",()=>{
   const css=readFileSync(new URL("../../ui/panels/voice-conversation.css",import.meta.url),"utf8");
-  assert.match(css,/@media \(max-width: 900px\)[\s\S]*?\.voice-session-toggle \{ width: 32px; height: 32px;/);
-  assert.match(css,/\.voice-session-label \{ display: none;/);
+  assert.match(css,/\.voice-session-toggle \{[^}]*width: 32px; height: 32px;/);
+  assert.match(css,/\.voice-session-icon \{[^}]*display:\s*flex/);
+  assert.match(css,/\.voice-session-label \{[^}]*overflow:\s*hidden/);
+  assert.doesNotMatch(css,/@media \(max-width: 900px\)[\s\S]*\.voice-session-label \{ display: none;/);
   assert.match(css,/background: var\(--accent-ink\)/);
   assert.match(css,/@media \(prefers-reduced-motion: reduce\).*animation: none !important/);
 });

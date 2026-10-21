@@ -182,7 +182,7 @@
       mount(container, ctx) {
         context = ctx;
         control = node("div", "voice-controls");
-        const label = node("label", "voice-mode"); memoMode = node("input"); memoMode.type = "checkbox";
+        const label = node("label", "voice-mode"); label.title = "Mémo vocal"; label.setAttribute("aria-label", "Mémo vocal"); memoMode = node("input"); memoMode.type = "checkbox"; memoMode.setAttribute("aria-label", "Mémo vocal");
         label.append(memoMode, document.createTextNode("Mémo vocal"));
         mic = node("button", "icon-button voice-mic"); mic.id = "voice-microphone"; mic.type = "button";
         mic.onclick = () => phase === "recording" ? stop() : start();

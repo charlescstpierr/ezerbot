@@ -1305,9 +1305,12 @@ mod tests {
             if format == "svg" {
                 assert!(result.preview.contains("Cœur"));
             } else if format == "pdf" && !cfg!(target_os = "macos") {
-                // Reading the generated PDF goes through PDFKit. The bytes are
-                // still produced everywhere; only macOS can round-trip the text.
-                assert!(result.bytes.starts_with(b"%PDF-"));
+                // Text extraction uses PDFKit. Off macOS, still prove a real PDF was produced.
+                assert!(result.bytes.starts_with(b"%PDF-"), "{format}");
+                assert!(
+                    result.bytes.windows(b") Tj T*".len()).any(|window| window == b") Tj T*"),
+                    "{format}"
+                );
             } else {
                 let doc = documents::prepare(&conn, &result.name, &result.bytes)
                     .unwrap_or_else(|e| panic!("{format}: {e:?}"));
@@ -1357,17 +1360,18 @@ mod tests {
             content: "E\u{301}te\u{301} — coût : 1\u{202f}250 €".into(),
         })
         .unwrap();
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        documents::migrate(&conn).unwrap();
-        if cfg!(target_os = "macos") {
+        assert!(decomposed.bytes.starts_with(b"%PDF-"));
+        // PDFKit is what proves the composed accent round-trips as readable text.
+        #[cfg(target_os = "macos")]
+        {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            documents::migrate(&conn).unwrap();
             assert!(
                 documents::prepare(&conn, &decomposed.name, &decomposed.bytes)
                     .unwrap()
                     .text
                     .contains("Été")
             );
-        } else {
-            assert!(decomposed.bytes.starts_with(b"%PDF-"));
         }
     }
     fn well_formed(svg: &str) {

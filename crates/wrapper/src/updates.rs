@@ -19,6 +19,11 @@ pub const RELAUNCH_EXIT_CODE: i32 = 86;
 pub const REPO_URL: &str = "https://github.com/charlescstpierr/ezerbot.git";
 pub const GITHUB_COMMIT_URL: &str =
     "https://api.github.com/repos/charlescstpierr/ezerbot/commits/main";
+/// Dépôt git local (`file://` ou chemin absolu) à la place de GitHub.
+/// Réservé à une copie isolée : aucun jeton n’est lu.
+pub const UPDATE_REPO_ENV: &str = "EZERBOT_UPDATE_REPO";
+/// `hold` : armer le redémarrage sans quitter le processus, pour l’observer.
+pub const UPDATE_RELAUNCH_ENV: &str = "EZERBOT_UPDATE_RELAUNCH";
 
 const LOG_LIMIT: usize = 8_000;
 
@@ -134,7 +139,20 @@ impl std::error::Error for UpdateError {}
 pub struct ApplyInput<'a> {
     pub paths: &'a UpdatePaths,
     pub remote: &'a CommitRef,
+    /// Commit installé. Présent, un `main` qui a avancé est adopté ;
+    /// un `main` qui n’est plus une mise à jour est refusé.
+    pub installed: Option<&'a CommitRef>,
+    /// Dépôt explicite. Sinon, [`configured_repo`] (variable d’environnement ou GitHub).
+    pub repo: Option<&'a str>,
     pub fault: Fault,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refresh {
+    /// `main` est encore une mise à jour. C’est ce commit qu’il faut construire.
+    Ready(CommitRef),
+    /// `main` ne propose plus rien de plus récent.
+    Current,
 }
 
 pub fn installed_version() -> &'static str {
@@ -299,20 +317,95 @@ pub fn resolve_remote(
     }
 }
 
+pub fn repo_from_setting(value: Option<&str>) -> Result<String, UpdateError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(REPO_URL.to_string());
+    };
+    local_repo_url(value)
+}
+
+pub fn configured_repo() -> Result<String, UpdateError> {
+    repo_from_setting(std::env::var(UPDATE_REPO_ENV).ok().as_deref())
+}
+
+fn local_repo_url(value: &str) -> Result<String, UpdateError> {
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character == '\0' || character == '@')
+    {
+        return Err(UpdateError::message(
+            "EZERBOT_UPDATE_REPO attend un dépôt local (chemin absolu ou file://).",
+        ));
+    }
+    let path = if let Some(rest) = value.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !rest.starts_with('/') {
+            return Err(UpdateError::message(
+                "EZERBOT_UPDATE_REPO attend un dépôt local (chemin absolu ou file://).",
+            ));
+        }
+        rest.to_string()
+    } else if value.starts_with('/') {
+        value.to_string()
+    } else {
+        return Err(UpdateError::message(
+            "EZERBOT_UPDATE_REPO attend un dépôt local (chemin absolu ou file://). Aucun identifiant GitHub n’est utilisé.",
+        ));
+    };
+    Ok(format!("file://{path}"))
+}
+
 pub fn fetch_remote(runner: &mut dyn CommandRunner) -> Result<CommitRef, UpdateError> {
+    fetch_from(runner, &configured_repo()?)
+}
+
+pub fn fetch_from(runner: &mut dyn CommandRunner, repo: &str) -> Result<CommitRef, UpdateError> {
+    let repo = if repo == REPO_URL {
+        REPO_URL.to_string()
+    } else {
+        local_repo_url(repo)?
+    };
+    if repo != REPO_URL {
+        return fetch_local(runner, &repo);
+    }
     let github = github_commit_body();
     if let Ok(body) = github {
         return parse_github_commit(&body);
     }
+    let output = ls_remote(runner, &repo)?;
+    resolve_remote(
+        Err(UpdateError::message("API GitHub indisponible.")),
+        Some(&output),
+    )
+}
+
+/// Relit `main` juste avant l’installation. Un échec réseau laisse l’appelant
+/// garder le commit déjà annoncé : le clone adoptera ensuite la pointe réelle.
+pub fn refresh_target(
+    installed: &CommitRef,
+    runner: &mut dyn CommandRunner,
+) -> Result<Refresh, UpdateError> {
+    match availability(installed, &fetch_remote(runner)?)? {
+        Availability::UpToDate => Ok(Refresh::Current),
+        Availability::Available(commit) => Ok(Refresh::Ready(commit)),
+    }
+}
+
+fn fetch_local(runner: &mut dyn CommandRunner, repo: &str) -> Result<CommitRef, UpdateError> {
+    let stdout = ls_remote(runner, repo)?;
+    let sha = parse_ls_remote(&stdout)?;
+    Ok(CommitRef {
+        sha,
+        unix: local_commit_unix(runner, repo),
+    })
+}
+
+fn ls_remote(runner: &mut dyn CommandRunner, repo: &str) -> Result<String, UpdateError> {
     let output = runner.run(&CommandRequest {
         program: "git".into(),
-        args: vec![
-            "ls-remote".into(),
-            REPO_URL.into(),
-            "refs/heads/main".into(),
-        ],
+        args: vec!["ls-remote".into(), repo.into(), "refs/heads/main".into()],
         cwd: std::env::temp_dir(),
-        env: Vec::new(),
+        env: git_env(),
     })?;
     if output.status != 0 {
         return Err(UpdateError::with_log(
@@ -320,10 +413,53 @@ pub fn fetch_remote(runner: &mut dyn CommandRunner) -> Result<CommitRef, UpdateE
             command_log(&output),
         ));
     }
-    resolve_remote(
-        Err(UpdateError::message("API GitHub indisponible.")),
-        Some(&output.stdout),
-    )
+    Ok(output.stdout)
+}
+
+fn local_commit_unix(runner: &mut dyn CommandRunner, repo: &str) -> Option<i64> {
+    let path = repo.strip_prefix("file://")?;
+    let output = runner
+        .run(&CommandRequest {
+            program: "git".into(),
+            args: vec![
+                "-C".into(),
+                path.into(),
+                "log".into(),
+                "-1".into(),
+                "--format=%ct".into(),
+                "refs/heads/main".into(),
+            ],
+            cwd: std::env::temp_dir(),
+            env: git_env(),
+        })
+        .ok()?;
+    if output.status != 0 {
+        return None;
+    }
+    output.stdout.trim().parse().ok()
+}
+
+fn git_env() -> Vec<(String, String)> {
+    vec![("GIT_TERMINAL_PROMPT".into(), "0".into())]
+}
+
+pub fn reconcile_checked_out(
+    installed: &CommitRef,
+    requested: &CommitRef,
+    head: &CommitRef,
+) -> Result<CommitRef, UpdateError> {
+    if same_commit(&requested.sha, &head.sha)? {
+        return Ok(CommitRef {
+            sha: canonical_sha(&requested.sha)?,
+            unix: requested.unix.or(head.unix),
+        });
+    }
+    match availability(installed, head)? {
+        Availability::Available(commit) => Ok(commit),
+        Availability::UpToDate => Err(UpdateError::message(
+            "La branche main ne propose plus de mise à jour. L’application actuelle est restée en place.",
+        )),
+    }
 }
 
 pub fn validate_paths(paths: &UpdatePaths) -> Result<(), UpdateError> {
@@ -389,14 +525,18 @@ pub fn apply(
     authorize(&input.paths.work_dir, input.paths)?;
     authorize(&input.paths.backup_dir, input.paths)?;
     let _ = canonical_sha(&input.remote.sha)?;
+    let repo = match input.repo {
+        Some(value) => repo_from_setting(Some(value))?,
+        None => configured_repo()?,
+    };
     on_progress(Phase::Telechargement);
-    sync_main(input.paths, input.remote, runner)?;
+    let target = sync_main(input.paths, input.remote, input.installed, &repo, runner)?;
     on_progress(Phase::Compilation);
-    compile(input.paths, input.remote, runner)?;
+    compile(input.paths, &target, runner)?;
     let built = input.paths.work_dir.join("app/build/Ezerbot.app");
-    verify_bundle(&built, input.remote, input.paths)?;
+    verify_bundle(&built, &target, input.paths)?;
     on_progress(Phase::Installation);
-    install_bundle(&built, input.remote, input.paths, input.fault)?;
+    install_bundle(&built, &target, input.paths, input.fault)?;
     on_progress(Phase::Redemarrage);
     Ok(())
 }
@@ -404,8 +544,10 @@ pub fn apply(
 fn sync_main(
     paths: &UpdatePaths,
     remote: &CommitRef,
+    installed: Option<&CommitRef>,
+    repo: &str,
     runner: &mut dyn CommandRunner,
-) -> Result<(), UpdateError> {
+) -> Result<CommitRef, UpdateError> {
     let parent = paths
         .work_dir
         .parent()
@@ -420,6 +562,21 @@ fn sync_main(
             vec![
                 "-C".into(),
                 path_arg(&paths.work_dir),
+                "remote".into(),
+                "set-url".into(),
+                "origin".into(),
+                repo.into(),
+            ],
+            &paths.work_dir,
+            git_env(),
+        )?;
+        run(
+            runner,
+            paths,
+            "git",
+            vec![
+                "-C".into(),
+                path_arg(&paths.work_dir),
                 "fetch".into(),
                 "--depth".into(),
                 "1".into(),
@@ -427,7 +584,7 @@ fn sync_main(
                 "main".into(),
             ],
             &paths.work_dir,
-            Vec::new(),
+            git_env(),
         )?;
         run(
             runner,
@@ -442,7 +599,7 @@ fn sync_main(
                 "FETCH_HEAD".into(),
             ],
             &paths.work_dir,
-            Vec::new(),
+            git_env(),
         )?;
     } else if path_occupied(&paths.work_dir)? {
         return Err(UpdateError::message(
@@ -460,11 +617,11 @@ fn sync_main(
                 "--branch".into(),
                 "main".into(),
                 "--single-branch".into(),
-                REPO_URL.into(),
+                repo.into(),
                 path_arg(&paths.work_dir),
             ],
             parent,
-            Vec::new(),
+            git_env(),
         )?;
     }
     let head = run(
@@ -478,15 +635,54 @@ fn sync_main(
             "HEAD".into(),
         ],
         &paths.work_dir,
-        Vec::new(),
+        git_env(),
     )?;
-    if head.status != 0 || !same_commit(head.stdout.trim(), &remote.sha).unwrap_or(false) {
+    if head.status != 0 {
         return Err(UpdateError::with_log(
             "Le dépôt de travail ne correspond pas au commit de main. L’application actuelle est restée en place.",
             command_log(&head),
         ));
     }
-    Ok(())
+    let sha = canonical_sha(head.stdout.trim())?;
+    if same_commit(&sha, &remote.sha)? {
+        return Ok(CommitRef {
+            sha: canonical_sha(&remote.sha)?,
+            unix: remote.unix,
+        });
+    }
+    let Some(installed) = installed else {
+        return Err(UpdateError::with_log(
+            "Le dépôt de travail ne correspond pas au commit de main. L’application actuelle est restée en place.",
+            command_log(&head),
+        ));
+    };
+    let unix = commit_unix(runner, paths)?;
+    reconcile_checked_out(installed, remote, &CommitRef { sha, unix })
+}
+
+fn commit_unix(
+    runner: &mut dyn CommandRunner,
+    paths: &UpdatePaths,
+) -> Result<Option<i64>, UpdateError> {
+    let output = run(
+        runner,
+        paths,
+        "git",
+        vec![
+            "-C".into(),
+            path_arg(&paths.work_dir),
+            "log".into(),
+            "-1".into(),
+            "--format=%ct".into(),
+            "HEAD".into(),
+        ],
+        &paths.work_dir,
+        git_env(),
+    )?;
+    if output.status != 0 {
+        return Ok(None);
+    }
+    Ok(output.stdout.trim().parse().ok())
 }
 
 fn compile(
@@ -1083,6 +1279,7 @@ mod tests {
         build_status: i32,
         log: String,
         calls: Vec<CommandRequest>,
+        head_unix: Option<i64>,
     }
 
     impl CommandRunner for Scripted {
@@ -1108,6 +1305,16 @@ mod tests {
                 return Ok(CommandOutput {
                     status: 0,
                     stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            if git("log") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: self
+                        .head_unix
+                        .map(|value| format!("{value}\n"))
+                        .unwrap_or_default(),
                     stderr: String::new(),
                 });
             }
@@ -1145,6 +1352,17 @@ mod tests {
             build_status,
             log: log.into(),
             calls: Vec::new(),
+            head_unix: None,
+        }
+    }
+
+    fn applying<'a>(paths: &'a UpdatePaths, remote: &'a CommitRef, fault: Fault) -> ApplyInput<'a> {
+        ApplyInput {
+            paths,
+            remote,
+            installed: None,
+            repo: None,
+            fault,
         }
     }
 
@@ -1301,13 +1519,11 @@ mod tests {
         let mut runner = scripted(&paths, remote.clone(), 0, "");
         let mut phases = Vec::new();
         let error = apply(
-            &ApplyInput {
-                paths: &paths,
-                remote: &remote,
-                fault: Fault::None,
-            },
+            &applying(&paths, &remote, Fault::None),
             &mut runner,
-            &mut |phase| phases.push(phase),
+            &mut |phase| {
+                phases.push(phase);
+            },
         )
         .unwrap_err();
         assert!(error.message.contains("développement"));
@@ -1334,11 +1550,7 @@ mod tests {
         );
         let mut phases = Vec::new();
         let error = apply(
-            &ApplyInput {
-                paths: &fixture.paths,
-                remote: &remote,
-                fault: Fault::None,
-            },
+            &applying(&fixture.paths, &remote, Fault::None),
             &mut runner,
             &mut |phase| phases.push(phase),
         )
@@ -1376,11 +1588,7 @@ mod tests {
         let mut runner = scripted(&fixture.paths, remote.clone(), 0, "");
         let mut phases = Vec::new();
         apply(
-            &ApplyInput {
-                paths: &fixture.paths,
-                remote: &remote,
-                fault: Fault::None,
-            },
+            &applying(&fixture.paths, &remote, Fault::None),
             &mut runner,
             &mut |phase| phases.push(phase),
         )
@@ -1428,11 +1636,7 @@ mod tests {
         let remote = commit(&hex_sha('b'), Some(200));
         let mut runner = scripted(&fixture.paths, remote.clone(), 0, "");
         let error = apply(
-            &ApplyInput {
-                paths: &fixture.paths,
-                remote: &remote,
-                fault: Fault::FinalRename,
-            },
+            &applying(&fixture.paths, &remote, Fault::FinalRename),
             &mut runner,
             &mut |_| {},
         )
@@ -1465,13 +1669,11 @@ mod tests {
         let mut runner = scripted(&paths, remote.clone(), 0, "");
         let mut phases = Vec::new();
         let error = apply(
-            &ApplyInput {
-                paths: &paths,
-                remote: &remote,
-                fault: Fault::None,
-            },
+            &applying(&paths, &remote, Fault::None),
             &mut runner,
-            &mut |phase| phases.push(phase),
+            &mut |phase| {
+                phases.push(phase);
+            },
         )
         .unwrap_err();
         assert!(error.message.contains("développement"), "{}", error.message);
@@ -1497,11 +1699,7 @@ mod tests {
         let remote = commit(&hex_sha('b'), Some(200));
         let mut runner = scripted(&fixture.paths, remote.clone(), 0, "");
         apply(
-            &ApplyInput {
-                paths: &fixture.paths,
-                remote: &remote,
-                fault: Fault::None,
-            },
+            &applying(&fixture.paths, &remote, Fault::None),
             &mut runner,
             &mut |_| {},
         )
@@ -1525,5 +1723,228 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn depot_local_accepte_seulement_un_chemin_ou_file() {
+        assert_eq!(repo_from_setting(None).unwrap(), REPO_URL);
+        assert_eq!(repo_from_setting(Some("  ")).unwrap(), REPO_URL);
+        assert_eq!(
+            repo_from_setting(Some("file:///tmp/ezerbot-fictif")).unwrap(),
+            "file:///tmp/ezerbot-fictif"
+        );
+        assert_eq!(
+            repo_from_setting(Some("/tmp/ezerbot-fictif")).unwrap(),
+            "file:///tmp/ezerbot-fictif"
+        );
+        assert_eq!(
+            repo_from_setting(Some("file://localhost/tmp/ezerbot-fictif")).unwrap(),
+            "file:///tmp/ezerbot-fictif"
+        );
+        assert!(repo_from_setting(Some("https://github.com/autre/depot.git")).is_err());
+        assert!(repo_from_setting(Some("git@github.com:charlescstpierr/ezerbot.git")).is_err());
+        assert!(repo_from_setting(Some("depot-relatif")).is_err());
+    }
+
+    #[test]
+    fn main_qui_avance_est_adopte_et_un_retour_arriere_est_refuse() {
+        let installed = commit(&hex_sha('a'), Some(100));
+        let advertised = commit(&hex_sha('b'), Some(200));
+        let advanced = commit(&hex_sha('c'), Some(300));
+        assert_eq!(
+            reconcile_checked_out(&installed, &advertised, &advanced)
+                .unwrap()
+                .sha,
+            advanced.sha
+        );
+        assert_eq!(
+            reconcile_checked_out(&installed, &advanced, &advanced)
+                .unwrap()
+                .sha,
+            advanced.sha
+        );
+        let rolled = commit(&hex_sha('d'), Some(50));
+        let error = reconcile_checked_out(&installed, &advertised, &rolled).unwrap_err();
+        assert!(
+            error.message.contains("ne propose plus"),
+            "{}",
+            error.message
+        );
+
+        let fixture = layout("avance", false);
+        let mut runner = scripted(&fixture.paths, advanced.clone(), 0, "");
+        runner.head_unix = Some(300);
+        let mut phases = Vec::new();
+        apply(
+            &ApplyInput {
+                paths: &fixture.paths,
+                remote: &advertised,
+                installed: Some(&installed),
+                repo: Some("file:///tmp/ezerbot-fictif"),
+                fault: Fault::None,
+            },
+            &mut runner,
+            &mut |phase| phases.push(phase),
+        )
+        .unwrap();
+        let plist = fs::read_to_string(fixture.paths.bundle.join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains(&advanced.sha), "{plist}");
+        assert!(phases.contains(&Phase::Redemarrage));
+        assert!(runner.calls.iter().any(|call| {
+            call.args
+                .iter()
+                .any(|arg| arg == "file:///tmp/ezerbot-fictif")
+        }));
+        assert!(runner
+            .calls
+            .iter()
+            .all(|call| { call.args.iter().all(|arg| !arg.contains("github.com")) }));
+
+        let before = fs::read(fixture.paths.bundle.join("Contents/MacOS/Ezerbot")).unwrap();
+        let mut backward = scripted(&fixture.paths, rolled.clone(), 0, "");
+        backward.head_unix = Some(50);
+        let error = apply(
+            &ApplyInput {
+                paths: &fixture.paths,
+                remote: &advertised,
+                installed: Some(&installed),
+                repo: None,
+                fault: Fault::None,
+            },
+            &mut backward,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("ne propose plus"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            fs::read(fixture.paths.bundle.join("Contents/MacOS/Ezerbot")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn depot_file_local_installe_sans_github() {
+        let fixture = layout("fichier", false);
+        let source = fixture.root.join("source");
+        fs::create_dir_all(source.join("tools")).unwrap();
+        fs::write(
+            source.join("tools/build-app.sh"),
+            r#"#!/bin/bash
+set -euo pipefail
+dest="app/build/Ezerbot.app/Contents/MacOS"
+mkdir -p "$dest"
+printf 'nouvelle-version\n' > "$dest/Ezerbot"
+printf 'wrapper\n' > "$dest/grokbot-wrapper"
+cat > "app/build/Ezerbot.app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>Ezerbot</string>
+  <key>EzerbotGitCommit</key><string>${EZERBOT_GIT_COMMIT}</string>
+</dict></plist>
+EOF
+"#,
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Ezerbot")
+                .env("GIT_AUTHOR_EMAIL", "ezerbot@example.com")
+                .env("GIT_COMMITTER_NAME", "Ezerbot")
+                .env("GIT_COMMITTER_EMAIL", "ezerbot@example.com")
+                .status()
+                .expect("git");
+            assert!(status.success(), "{args:?} a échoué");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["add", "tools/build-app.sh"]);
+        git(&[
+            "-c",
+            "user.name=Ezerbot",
+            "-c",
+            "user.email=ezerbot@example.com",
+            "commit",
+            "-m",
+            "annonce",
+        ]);
+        let first = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(first.status.success());
+        let advertised = String::from_utf8(first.stdout).unwrap();
+        fs::write(source.join("tools/note.txt"), "plus récent\n").unwrap();
+        git(&["add", "tools/note.txt"]);
+        git(&[
+            "-c",
+            "user.name=Ezerbot",
+            "-c",
+            "user.email=ezerbot@example.com",
+            "commit",
+            "-m",
+            "avance",
+        ]);
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        let head_sha = String::from_utf8(head.stdout).unwrap().trim().to_string();
+        assert_ne!(head_sha, advertised.trim());
+        let url = format!("file://{}", source.display());
+        let fetched = fetch_from(&mut SystemRunner, &url).unwrap();
+        assert_eq!(fetched.sha, head_sha);
+        assert!(fetched.unix.is_some());
+        let installed = commit(&hex_sha('1'), Some(1));
+        let requested = commit(advertised.trim(), None);
+        let mut phases = Vec::new();
+        apply(
+            &ApplyInput {
+                paths: &fixture.paths,
+                remote: &requested,
+                installed: Some(&installed),
+                repo: Some(&url),
+                fault: Fault::None,
+            },
+            &mut SystemRunner,
+            &mut |phase| phases.push(phase),
+        )
+        .unwrap();
+        let plist = fs::read_to_string(fixture.paths.bundle.join("Contents/Info.plist")).unwrap();
+        assert!(plist.contains(&head_sha), "{plist}");
+        assert_eq!(
+            phases,
+            vec![
+                Phase::Telechargement,
+                Phase::Compilation,
+                Phase::Installation,
+                Phase::Redemarrage,
+            ]
+        );
+        let origin = std::process::Command::new("git")
+            .args([
+                "-C",
+                &path_arg(&fixture.paths.work_dir),
+                "remote",
+                "get-url",
+                "origin",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        let origin = String::from_utf8(origin.stdout).unwrap();
+        assert!(origin.contains(&url), "{origin}");
+        assert!(!origin.contains("github.com"), "{origin}");
     }
 }

@@ -29,7 +29,20 @@
     compilation: "Compilation…",
     installation: "Installation…",
     redemarrage: "Redémarrage…",
+    attente: "Après l’enregistrement",
   };
+  let holdSent = false;
+
+  function captureActive() {
+    return Boolean(panels.meetingActive?.() || panels.voiceActive?.() || window.EzerbotVoiceMode?.active?.());
+  }
+
+  function syncHold() {
+    const active = captureActive();
+    if (active === holdSent) return;
+    holdSent = active;
+    panels.api("/api/updates/hold", { active }).catch(() => { holdSent = !active; });
+  }
 
   function installedLabel(data) {
     const versionText = data?.version || "";
@@ -48,7 +61,10 @@
     const account = document.getElementById("settings-button");
     const host = account?.parentElement;
     if (!host) return;
-    corner = button("", "update-corner", () => run("/api/updates/apply"));
+    corner = button("", "update-corner", () => {
+      if (corner.disabled) return undefined;
+      return run("/api/updates/apply");
+    });
     corner.hidden = true;
     const mark = node("span", "update-corner-mark");
     mark.setAttribute("aria-hidden", "true");
@@ -62,16 +78,19 @@
     latest = data;
     const available = Boolean(data.available);
     const running = Boolean(data.running);
-    const busy = progressing(data);
+    const waiting = data.phase === "attente" || (data.phase === "redemarrage" && captureActive());
+    const busy = progressing(data) || waiting;
     ensureCorner();
+    syncHold();
     if (corner) {
       corner.hidden = !(available || busy);
       corner.disabled = busy;
-      flag(corner, "is-running", busy);
-      const label = busy ? progressLabel[data.phase] : "Mettre à jour";
+      flag(corner, "is-running", busy && !waiting);
+      const label = waiting ? progressLabel.attente : busy ? progressLabel[data.phase] : "Mettre à jour";
       cornerLabel.textContent = label;
       corner.setAttribute("aria-label", label);
-      if (data.phase === "erreur" && data.message) corner.setAttribute("title", data.message);
+      if (waiting && data.message) corner.setAttribute("title", data.message);
+      else if (data.phase === "erreur" && data.message) corner.setAttribute("title", data.message);
       else corner.setAttribute("title", "");
     }
     if (!section) {
@@ -131,4 +150,9 @@
       ensureCorner();
     },
   });
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("grokbot:meeting-change", syncHold);
+    window.addEventListener("grokbot:voice-change", syncHold);
+    window.addEventListener("grokbot:voice-mode-change", syncHold);
+  }
 })();

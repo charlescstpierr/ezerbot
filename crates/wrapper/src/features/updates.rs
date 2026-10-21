@@ -1,12 +1,15 @@
 //! Réglages « Mises à jour » : recherche de `main` et remplacement de l’application.
 use super::Context;
 use crate::updates::{
-    self, ApplyInput, Availability, CommitRef, Fault, Phase, SystemRunner, UpdateError,
+    self, ApplyInput, Availability, CommitRef, Fault, Phase, Refresh, SystemRunner, UpdateError,
 };
 use crate::{ApiError, ApiResponse, App};
+use rusqlite::Connection;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Once};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, Once};
 use std::thread;
 use std::time::Duration;
 
@@ -28,6 +31,7 @@ struct Job {
     message: String,
     log: String,
     running: bool,
+    relaunch_ready: bool,
 }
 
 static JOB: Mutex<Job> = Mutex::new(Job {
@@ -38,7 +42,33 @@ static JOB: Mutex<Job> = Mutex::new(Job {
     message: String::new(),
     log: String::new(),
     running: false,
+    relaunch_ready: false,
 });
+static DATABASE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+static HOLD: AtomicBool = AtomicBool::new(false);
+static RESTART: Mutex<Restart> = Mutex::new(Restart {
+    pending: false,
+    clear: 0,
+    armed: false,
+});
+
+struct Restart {
+    pending: bool,
+    clear: u8,
+    armed: bool,
+}
+
+pub fn remember_database(path: &Path) {
+    *database_lock() = Some(path.to_path_buf());
+}
+
+fn database_lock() -> MutexGuard<'static, Option<std::path::PathBuf>> {
+    DATABASE.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn restart_lock() -> MutexGuard<'static, Restart> {
+    RESTART.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 static REVISION: AtomicU64 = AtomicU64::new(0);
 static QUIET: Once = Once::new();
 
@@ -60,13 +90,24 @@ pub fn state(_: &Context<'_>) -> Value {
     snapshot()
 }
 
-pub fn tick(_: &Context<'_>) {
-    if !quiet_enabled() {
+pub fn tick(ctx: &Context<'_>) {
+    if quiet_enabled() {
+        QUIET.call_once(|| {
+            let _ = begin_check(true);
+        });
+    }
+    let blocked = capture_blocked(ctx.connection);
+    let Ok(mut restart) = RESTART.try_lock() else {
+        return;
+    };
+    if !restart.pending {
         return;
     }
-    QUIET.call_once(|| {
-        let _ = begin_check(true);
-    });
+    let exit_now = observe(&mut restart, blocked);
+    drop(restart);
+    if exit_now {
+        relaunch_process();
+    }
 }
 
 fn quiet_enabled() -> bool {
@@ -74,10 +115,10 @@ fn quiet_enabled() -> bool {
 }
 
 pub fn routes(
-    _app: &mut App,
+    app: &mut App,
     method: &str,
     path: &str,
-    _body: &[u8],
+    body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
     if !path.starts_with("/api/updates") {
         return None;
@@ -86,6 +127,7 @@ pub fn routes(
         ("GET", "/api/updates") => Ok(ApiResponse::Json(snapshot())),
         ("POST", "/api/updates/check") => begin_check(false).map(ApiResponse::Json),
         ("POST", "/api/updates/apply") => begin_apply().map(ApiResponse::Json),
+        ("POST", "/api/updates/hold") => note_hold(app, body).map(ApiResponse::Json),
         _ => Err(ApiError::new(
             404,
             "Cette action de mise à jour n’existe pas.",
@@ -105,6 +147,7 @@ fn begin_check(quiet: bool) -> Result<Value, ApiError> {
         job.phase = "recherche";
         job.log.clear();
         job.message = "Recherche des mises à jour…".into();
+        job.relaunch_ready = false;
     });
     thread::spawn(move || {
         let installed = updates::installed_commit();
@@ -119,6 +162,7 @@ fn begin_check(quiet: bool) -> Result<Value, ApiError> {
                 job.remote_unix = remote.unix;
                 job.message = "Ezerbot est à jour.".into();
                 job.log.clear();
+                job.relaunch_ready = false;
             }),
             Ok((Availability::Available(remote), _)) => {
                 let short = updates::short_commit(&remote.sha);
@@ -130,11 +174,13 @@ fn begin_check(quiet: bool) -> Result<Value, ApiError> {
                     job.remote_unix = remote.unix;
                     job.message = format!("Une mise à jour est disponible ({short}).");
                     job.log.clear();
+                    job.relaunch_ready = false;
                 });
             }
             Err(error) => publish(|job| {
                 job.running = false;
                 job.available = false;
+                job.relaunch_ready = false;
                 if quiet {
                     job.phase = "idle";
                     job.message.clear();
@@ -174,16 +220,35 @@ fn begin_apply() -> Result<Value, ApiError> {
     });
     thread::spawn(move || {
         let mut runner = SystemRunner;
+        let installed = updates::installed_commit();
+        let remote = match updates::refresh_target(&installed, &mut runner) {
+            Ok(Refresh::Current) => {
+                publish(|job| {
+                    job.running = false;
+                    job.available = false;
+                    job.phase = "a_jour";
+                    job.message = "Ezerbot est à jour.".into();
+                    job.log.clear();
+                    job.relaunch_ready = false;
+                });
+                return;
+            }
+            Ok(Refresh::Ready(commit)) => commit,
+            Err(_) => remote,
+        };
         let mut on_progress = |phase: Phase| {
             publish(|job| {
                 job.phase = phase.id();
                 job.message = phase.label().into();
+                job.relaunch_ready = false;
             });
         };
         match updates::apply(
             &ApplyInput {
                 paths: &paths,
                 remote: &remote,
+                installed: Some(&installed),
+                repo: None,
                 fault: Fault::None,
             },
             &mut runner,
@@ -196,6 +261,7 @@ fn begin_apply() -> Result<Value, ApiError> {
                 job.phase = "erreur";
                 job.message = error.message;
                 job.log = error.log;
+                job.relaunch_ready = false;
             }),
         }
     });
@@ -203,16 +269,125 @@ fn begin_apply() -> Result<Value, ApiError> {
 }
 
 fn finish_success() {
+    let blocked = capture_blocked_saved();
+    let mut restart = restart_lock();
+    let exit_now = observe(&mut restart, blocked);
+    drop(restart);
+    if exit_now {
+        relaunch_process();
+    }
+}
+
+/// Deux observations sans capture avant de quitter : une réunion démarrée
+/// pendant ce délai annule le redémarrage.
+fn observe(restart: &mut Restart, blocked: bool) -> bool {
+    if blocked {
+        restart.clear = 0;
+        restart.pending = true;
+        restart.armed = false;
+        publish(|job| {
+            job.running = true;
+            job.available = true;
+            job.phase = "attente";
+            job.message = "Le redémarrage suivra la fin de l’enregistrement.".into();
+            job.relaunch_ready = false;
+        });
+        return false;
+    }
+    restart.clear = restart.clear.saturating_add(1);
+    restart.pending = true;
+    if restart.clear < 2 {
+        publish(|job| {
+            job.running = true;
+            job.phase = Phase::Redemarrage.id();
+            job.message = Phase::Redemarrage.label().into();
+            job.relaunch_ready = false;
+        });
+        return false;
+    }
+    restart.pending = false;
+    restart.armed = true;
     publish(|job| {
         job.running = true;
         job.phase = Phase::Redemarrage.id();
         job.message = Phase::Redemarrage.label().into();
+        job.relaunch_ready = true;
     });
-    if cfg!(test) {
+    true
+}
+
+fn relaunch_process() {
+    if cfg!(test) || std::env::var(updates::UPDATE_RELAUNCH_ENV).ok().as_deref() == Some("hold") {
         return;
     }
-    thread::sleep(Duration::from_millis(400));
+    thread::sleep(Duration::from_millis(200));
+    if capture_blocked_saved() {
+        let mut restart = restart_lock();
+        restart.armed = false;
+        restart.pending = true;
+        restart.clear = 0;
+        publish(|job| {
+            job.running = true;
+            job.available = true;
+            job.phase = "attente";
+            job.message = "Le redémarrage suivra la fin de l’enregistrement.".into();
+            job.relaunch_ready = false;
+        });
+        return;
+    }
     std::process::exit(updates::RELAUNCH_EXIT_CODE);
+}
+
+fn note_hold(app: &App, body: &[u8]) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Hold {
+        active: bool,
+    }
+    let input: Hold = crate::parse(body)?;
+    HOLD.store(input.active, Ordering::SeqCst);
+    let blocked = input.active || unsaved_meeting(&app.connection);
+    let exit_now = {
+        let mut restart = restart_lock();
+        if !restart.pending {
+            false
+        } else {
+            observe(&mut restart, blocked)
+        }
+    };
+    if exit_now {
+        relaunch_process();
+    }
+    Ok(snapshot())
+}
+
+pub fn unsaved_meeting(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE status='recording')",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or(true)
+}
+
+fn capture_blocked(conn: &Connection) -> bool {
+    HOLD.load(Ordering::SeqCst) || unsaved_meeting(conn)
+}
+
+fn capture_blocked_saved() -> bool {
+    if HOLD.load(Ordering::SeqCst) {
+        return true;
+    }
+    let Some(path) = database_lock().clone() else {
+        return false;
+    };
+    match Connection::open(path) {
+        Ok(conn) => {
+            let _ = conn.busy_timeout(Duration::from_secs(3));
+            unsaved_meeting(&conn)
+        }
+        Err(_) => true,
+    }
 }
 
 fn into_api(error: UpdateError) -> ApiError {
@@ -237,6 +412,13 @@ fn snapshot() -> Value {
         "message": job.message,
         "log": job.log,
         "running": job.running,
+        "relaunch": if job.phase == "attente" {
+            json!("attente")
+        } else if job.relaunch_ready {
+            json!("pret")
+        } else {
+            Value::Null
+        },
     })
 }
 
@@ -245,5 +427,142 @@ fn optional_sha(sha: &str) -> Value {
         Value::Null
     } else {
         Value::String(sha.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn reset(restart: &mut Restart) {
+        restart.pending = false;
+        restart.clear = 0;
+        restart.armed = false;
+        HOLD.store(false, Ordering::SeqCst);
+        publish(|job| {
+            job.phase = "idle";
+            job.available = false;
+            job.running = false;
+            job.message.clear();
+            job.log.clear();
+            job.relaunch_ready = false;
+        });
+    }
+
+    #[test]
+    fn le_redemarrage_attend_la_fin_de_la_reunion() {
+        let root = std::env::temp_dir().join(format!("ezerbot-maj-reunion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = crate::App::open(&root.join("workspace.sqlite")).unwrap();
+        {
+            let mut restart = restart_lock();
+            reset(&mut restart);
+        }
+        let held = app
+            .api("POST", "/api/updates/hold", br#"{"active":true}"#)
+            .unwrap();
+        assert_eq!(held["phase"], "idle");
+        assert!(HOLD.load(Ordering::SeqCst));
+        app.api("POST", "/api/updates/hold", br#"{"active":false}"#)
+            .unwrap();
+        assert!(!HOLD.load(Ordering::SeqCst));
+
+        let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
+            ["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let id = app
+            .api(
+                "POST",
+                "/api/meetings/start",
+                &serde_json::to_vec(&json!({
+                    "conversation_id": conversation,
+                    "title": "Point équipe",
+                    "consent": true
+                }))
+                .unwrap(),
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut restart = restart_lock();
+        assert!(unsaved_meeting(app.feature_context().connection));
+        assert!(!observe(&mut restart, true));
+        assert!(!restart.armed);
+        let waiting = snapshot();
+        assert_eq!(waiting["phase"], "attente");
+        assert_eq!(waiting["relaunch"], "attente");
+        assert_eq!(
+            waiting["message"],
+            "Le redémarrage suivra la fin de l’enregistrement."
+        );
+        assert!(!observe(
+            &mut restart,
+            unsaved_meeting(app.feature_context().connection)
+        ));
+        assert!(!restart.armed);
+
+        app.api(
+            "POST",
+            "/api/meetings/discard",
+            &serde_json::to_vec(&json!({"id": id})).unwrap(),
+        )
+        .unwrap();
+        assert!(!unsaved_meeting(app.feature_context().connection));
+        assert!(!observe(&mut restart, false));
+        assert!(!restart.armed);
+        assert_eq!(snapshot()["phase"], "redemarrage");
+        assert!(observe(&mut restart, false));
+        assert!(restart.armed);
+        assert_eq!(snapshot()["relaunch"], "pret");
+
+        // Une capture qui commence dans l’intervalle annule le départ.
+        reset(&mut restart);
+        let id = app
+            .api(
+                "POST",
+                "/api/meetings/start",
+                &serde_json::to_vec(&json!({
+                    "conversation_id": conversation,
+                    "title": "Suite",
+                    "consent": true
+                }))
+                .unwrap(),
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!observe(&mut restart, false));
+        assert!(!observe(
+            &mut restart,
+            unsaved_meeting(app.feature_context().connection)
+        ));
+        assert!(!restart.armed);
+        assert_eq!(snapshot()["phase"], "attente");
+        app.feature_context()
+            .connection
+            .execute(
+                "UPDATE wrapper_meetings SET status='interrupted' WHERE id=?1",
+                [&id],
+            )
+            .unwrap();
+        assert!(!unsaved_meeting(app.feature_context().connection));
+        assert!(!observe(&mut restart, false));
+        assert!(observe(&mut restart, false));
+        assert!(restart.armed);
+
+        reset(&mut restart);
+        HOLD.store(true, Ordering::SeqCst);
+        assert!(!observe(&mut restart, true));
+        assert!(!restart.armed);
+        assert_eq!(snapshot()["relaunch"], "attente");
+        reset(&mut restart);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

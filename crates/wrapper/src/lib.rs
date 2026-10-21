@@ -893,6 +893,7 @@ impl App {
             // Keep the app usable; the Stockage panel exposes the actionable error.
             eprintln!("Nettoyage automatique interrompu : {error}");
         }
+        features::updates::remember_database(path);
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,

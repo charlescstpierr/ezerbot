@@ -156,3 +156,52 @@ test("le bouton de barre reste caché tant qu’aucune mise à jour n’est disp
   assert.equal(corner.hidden, true);
   assert.equal(ui.panels.panel.wantsPolling(), false);
 });
+
+test("le redémarrage attend discrètement une réunion ou un enregistrement", async () => {
+  const calls = [];
+  const ui = harness(async (path, body) => {
+    calls.push({ path, body });
+    return {
+      ...installed,
+      available: true,
+      running: true,
+      phase: "attente",
+      message: "Le redémarrage suivra la fin de l’enregistrement.",
+      relaunch: "attente",
+    };
+  });
+  ui.panels.meetingActive = () => true;
+  ui.panels.panel.onState({
+    updates: {
+      ...installed,
+      available: true,
+      running: true,
+      phase: "redemarrage",
+      message: "Redémarrage…",
+    },
+  });
+  const corner = cornerOf(ui);
+  assert.equal(corner.hidden, false);
+  assert.equal(labelOf(corner), "Après l’enregistrement");
+  assert.equal(corner.attributes["aria-label"], "Après l’enregistrement");
+  assert.equal(corner.disabled, true);
+  assert.equal(corner.className.includes("is-running"), false);
+  assert.equal(calls.some((call) => call.path === "/api/updates/hold" && call.body?.active === true), true);
+  await corner.listeners.click();
+  assert.equal(calls.some((call) => call.path === "/api/updates/apply"), false);
+
+  ui.panels.meetingActive = () => false;
+  ui.panels.panel.onState({
+    updates: {
+      ...installed,
+      available: true,
+      running: true,
+      phase: "attente",
+      message: "Le redémarrage suivra la fin de l’enregistrement.",
+    },
+  });
+  assert.equal(labelOf(corner), "Après l’enregistrement");
+  assert.equal(corner.attributes.title, "Le redémarrage suivra la fin de l’enregistrement.");
+  assert.match(ui.section.textContent, /fin de l’enregistrement/);
+  assert.equal(ui.panels.panel.wantsPolling(), true);
+});

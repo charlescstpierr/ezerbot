@@ -26,7 +26,7 @@ function signInCopy({ providerConnected, expired, group, isTask }) {
       : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.";
 }
 
-export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = true }) {
+export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = false }) {
   const expired = message.error_kind === "signin_expired";
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {

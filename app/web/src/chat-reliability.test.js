@@ -113,13 +113,23 @@ test("a connected account card is a status, not a red alert", () => {
   assert.match(source, /\{view\.alert \? <TriangleAlert \/> : <Check \/>\}/);
 });
 
+test("a sign-in card treats the local engine as down until the shell reports it", () => {
+  const card = signInCardState({ message: { error_kind: "signin" }, providerConnected: true });
+  assert.equal(card.retryDisabled, true);
+  assert.equal(card.signInDisabled, true);
+  assert.equal(card.retryTitle, "Moteur local indisponible");
+  const ready = signInCardState({ message: { error_kind: "signin" }, providerConnected: true, engineConnected: true });
+  assert.equal(ready.retryDisabled, false);
+  assert.equal(ready.signInDisabled, false);
+});
+
 test("direct retries are enabled only after both account and local engine are available", () => {
   const message = { error_kind: "signin" };
   const missing = signInCardState({ message });
   assert.equal(missing.title, "Connectez votre compte ChatGPT");
   assert.equal(missing.showRetry, true);
   assert.equal(missing.retryDisabled, true);
-  const ready = signInCardState({ message, providerConnected: true });
+  const ready = signInCardState({ message, providerConnected: true, engineConnected: true });
   assert.equal(ready.retryDisabled, false);
   assert.equal(ready.title, "Compte ChatGPT connecté");
   assert.equal(ready.showSignIn, false);

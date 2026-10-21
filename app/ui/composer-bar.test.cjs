@@ -131,10 +131,13 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       const modelButton = document.querySelector('[data-picker="model"]');
       const effortButton = document.querySelector('[data-picker="effort"]');
       const effortLabel = document.querySelector('[data-picker="effort"] b');
+      const speedButton = document.querySelector('[data-picker="speed"]');
       const speedLabel = document.querySelector('[data-picker="speed"] b');
       const modelBox = modelLabel ? boxOf(modelLabel) : { width: 0 };
       const modelButtonBox = modelButton ? boxOf(modelButton) : null;
       const effortButtonBox = effortButton ? boxOf(effortButton) : null;
+      const speedBox = speedButton ? boxOf(speedButton) : null;
+      const toolsBox = boxOf(document.querySelector(".composer-tools"));
       return {
         theme,
         viewport: [innerWidth, innerHeight],
@@ -146,7 +149,9 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         nameFits: name.scrollWidth <= name.clientWidth + 1,
         nameEllipsed: name.scrollWidth > name.clientWidth + 1,
         clear: nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5,
-        toolsClear: document.querySelector(".composer-tools").getBoundingClientRect().right <= voice.left + 0.5,
+        toolsClear: toolsBox.right <= voice.left + 0.5,
+        toolsGap: voice.left - toolsBox.right,
+        speedGap: speedBox ? voice.left - speedBox.right : null,
         nameInside: contained(nameBox, botBox),
         chevronInside: contained(chevronBox, botBox),
         modelLabelWidth: modelBox.width,
@@ -452,6 +457,27 @@ test("the connection card and suggestions stay visible at 820×560", async () =>
     assert.equal(theme.welcome.banner, true, where);
     assert.equal(theme.welcome.suggestions.length, 4, where);
     assert.equal(theme.welcome.suggestions.every(Boolean), true, where);
+  }
+});
+
+test("a medium name keeps the speed pill at least 6px clear of the voice controls", async () => {
+  const frames = [[820, 560], [960, 780], [1140, 780]];
+  for (const model of [DEFAULT_MODEL, TERRA_MODEL]) {
+    for (const [width, height] of frames) {
+      const report = await measure(width, height, MEDIUM_NAME, { model, effort: DEFAULT_EFFORT, speed: "Standard" });
+      for (const theme of report.themes) {
+        const where = `${MEDIUM_NAME} / ${model} / Effort+Vitesse at ${width}×${height} ${theme.theme} viewport=${theme.viewport} speedGap=${theme.speedGap} toolsGap=${theme.toolsGap} composer=${theme.composerWidth} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} effort=${theme.effortClient}/${theme.effortScroll} speed=${theme.speedClient}/${theme.speedScroll} ${JSON.stringify(theme.pieces)}`;
+        assert.equal(theme.name, MEDIUM_NAME, where);
+        assert.equal(theme.modelText, model, where);
+        assert.equal(theme.viewport[0], width, where);
+        assert.ok(theme.speedGap >= 6, where);
+        assert.equal(theme.modelFits, true, where);
+        assert.equal(theme.effortFits, true, where);
+        assert.equal(theme.speedFits, true, where);
+        assert.equal(theme.chevronInside, true, where);
+        assert.equal(theme.nameInside, true, where);
+      }
+    }
   }
 });
 

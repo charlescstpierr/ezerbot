@@ -192,6 +192,14 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
 .composer .composer-tools { flex: 1 1 auto; flex-wrap: nowrap; }
+/* Au-dessus du téléphone, les pastilles ne se compriment pas : le conteneur garde leur largeur, sinon Vitesse déborde sur les commandes vocales. */
+@media (min-width: 761px) {
+  .composer .composer-tools { flex: 0 0 auto; min-width: max-content; }
+}
+/* À 1140, Modèle + Effort + Vitesse avec leurs libellés poussent le chevron hors du bouton. Le nom du modèle se suffit. */
+@media (min-width: 1101px) {
+  .composer-model:has([data-picker="speed"]) [data-picker="model"] small { display: none; }
+}
 .composer [data-picker="model"] { flex: 0 0 auto; max-width: 220px; }
 .composer-tools [data-picker="effort"] b,
 .composer-tools [data-picker="speed"] b { flex: 0 0 auto; min-width: 40px; }

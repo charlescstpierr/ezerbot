@@ -24,14 +24,15 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 async function fixture() {
   const initial = { fact_id: "fact-one", bot_id: "bot", text: "Je préfère le thé vert.", scope: "private", learned_at: 1, provenance: { source: "automatic" } };
-  let current = initial, registration, refreshes = 0, refreshFailure = false, memoryData = {};
-  const requests = [], root = new Element("div");
+  let current = initial, registration, refreshes = 0, refreshFailure = false, memoryData = {}, factsList = null;
+  const requests = [], bodies = [], root = new Element("div");
   const state = { bots: [{ id: "bot", name: "Ezerbot" }], provider: { connected: true, models_ready: true }, memory_auto: { available: true, revision: 1 }, conversations: [{ messages: [{ kind: "memory_auto", payload: { ...initial, active: true } }] }] };
   const panels = {
     state, register(value) { registration = value; }, notify() {},
     async api(path, body) {
       requests.push(path);
-      if (path === "/api/memory") return { facts: current ? [current] : [], ...memoryData };
+      bodies.push({ path, body });
+      if (path === "/api/memory") return { facts: factsList || (current ? [current] : []), ...memoryData };
       if (path === "/api/memory/forget") { current = null; return { forgotten: [body.fact_id] }; }
       if (path === "/api/memory/correct") { current = { ...current, fact_id: "fact-two", text: body.text }; return { fact: current }; }
       if (path === "/api/memory/promote") { current.scope = "team"; return { created: [current.fact_id], already_in_team: [], kept_private_count: 0, shared_count: 1 }; }
@@ -53,7 +54,7 @@ async function fixture() {
   const cleanup = registration.botSection(state.bots[0], root);
   await flush();
   refreshes = 0; // Initial revision reconciliation is not an action refresh.
-  return { root, state, panels, registration, requests, cleanup, failRefresh: () => { refreshFailure = true; }, setCurrent: (fact) => { current = fact; }, setMemoryData: (data) => { memoryData = data; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
+  return { root, state, panels, registration, requests, bodies, cleanup, failRefresh: () => { refreshFailure = true; }, setCurrent: (fact) => { current = fact; }, setFacts: (facts) => { factsList = facts; }, setMemoryData: (data) => { memoryData = data; }, refreshes: () => refreshes, card: () => state.conversations[0].messages[0] };
 }
 
 test("forgetting through the real panel refreshes the thread into an inactive, text-free receipt", async () => {
@@ -121,6 +122,36 @@ test("panel searches accent-insensitively, filters scope/source and warns at sat
     source.value = "automatic"; source.listeners.change(); assert.match(byClass(f.root, "memory-list").textContent, /Projet Boréal/);
     const all = byClass(f.root, "memory-select-all").children[0]; all.checked = true; all.listeners.change();
     assert.ok(button(f.root, "Partager la sélection (1)"));
+  } finally { f.cleanup(); }
+});
+
+test("sharing the selection sends only facts visible through the active filter", async () => {
+  const f = await fixture();
+  try {
+    const atlas = { fact_id: "atlas", bot_id: "bot", text: "Projet Atlas", scope: "private", learned_at: 2, provenance: { source: "user_stated" } };
+    const boreal = { fact_id: "boreal", bot_id: "bot", text: "Projet Boréal", scope: "private", learned_at: 1, provenance: { source: "automatic" } };
+    f.setFacts([atlas, boreal]);
+    f.setMemoryData({ sharing_classes: { atlas: "work", boreal: "work" } });
+    button(f.root, "Actualiser").listeners.click();
+    await flush();
+    const all = byClass(f.root, "memory-select-all").children[0];
+    all.checked = true;
+    all.listeners.change();
+    const search = walk(f.root).find((el) => el.type === "search");
+    search.value = "atlas";
+    search.listeners.input();
+    const share = walk(f.root).find((el) => el.tagName === "button" && el.textContent.startsWith("Partager la sélection"));
+    assert.equal(share.textContent, "Partager la sélection (1)");
+    share.listeners.click();
+    await flush();
+    const sent = f.bodies.filter((call) => call.path === "/api/memory/promote");
+    assert.deepEqual(sent.map((call) => [...call.body.fact_ids]), [["atlas"]]);
+    search.value = "";
+    search.listeners.input();
+    assert.equal(
+      walk(f.root).find((el) => el.tagName === "button" && el.textContent.startsWith("Partager la sélection")).textContent,
+      "Partager la sélection (1)",
+    );
   } finally { f.cleanup(); }
 });
 

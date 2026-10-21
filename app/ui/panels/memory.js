@@ -166,13 +166,18 @@
       // Already-shared facts must not replay a cached receipt as a new sharing.
       function available() { return facts.filter((fact) => fact.scope !== "team" && !fact.sensitive && !processed.has(fact.fact_id)); }
       function defaultSelection() { return visible().filter((f) => available().includes(f) && sharingClasses[f.fact_id] === "work"); }
+      function visibleSelected() {
+        const shown = new Set(visible().map((fact) => fact.fact_id));
+        return [...selected].filter((id) => shown.has(id));
+      }
       function updateSelection() {
         const eligible = defaultSelection();
+        const count = visibleSelected().length;
         all.disabled = !loaded || !eligible.length || bot.deleted;
         all.checked = eligible.length > 0 && eligible.every((fact) => selected.has(fact.fact_id));
         all.indeterminate = selected.size > 0 && !all.checked;
-        promote.disabled = !loaded || !selected.size || bot.deleted;
-        promote.textContent = `Partager la sélection (${selected.size})`;
+        promote.disabled = !loaded || !count || bot.deleted;
+        promote.textContent = `Partager la sélection (${count})`;
       }
       all.addEventListener("change", () => {
         for (const fact of defaultSelection()) {
@@ -350,8 +355,8 @@
         }
       }
       async function share() {
-        if (!alive || busy || !selected.size) return;
-        const ids = [...selected];
+        const ids = visibleSelected();
+        if (!alive || busy || !ids.length) return;
         busy = true;
         closeEditor();
         status.textContent = "Partage en cours…";

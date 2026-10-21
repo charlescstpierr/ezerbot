@@ -4,20 +4,21 @@ use crate::facts::{self, Fact};
 use grokbot_engine::contracts::Result;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
+use unicode_normalization::UnicodeNormalization;
 
 pub fn normalize(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| match c {
-            'é' | 'è' | 'ê' | 'ë' => 'e',
-            'à' | 'â' | 'ä' => 'a',
-            'î' | 'ï' => 'i',
-            'ô' | 'ö' => 'o',
-            'ù' | 'û' | 'ü' => 'u',
-            'ç' => 'c',
-            c => c,
-        })
-        .collect()
+    let mut folded = String::new();
+    for c in text.to_lowercase().nfd() {
+        if ('\u{0300}'..='\u{036f}').contains(&c) {
+            continue;
+        }
+        match c {
+            'œ' => folded.push_str("oe"),
+            'æ' => folded.push_str("ae"),
+            other => folded.push(other),
+        }
+    }
+    folded
 }
 
 pub fn search(conn: &Connection, bot: &str, query: &str, limit: usize) -> Result<Vec<Fact>> {
@@ -172,5 +173,30 @@ mod tests {
         f.sensitive = true;
         f.text = "Projet Atlas".into();
         assert_eq!(sharing_class(&f), "personal");
+    }
+    #[test]
+    fn recall_matches_decomposed_accents_and_ligatures() {
+        let conn = database();
+        let mut ligature = fact(1, "a");
+        ligature.text = "Le projet œuvre de cartographie.".into();
+        facts::remember(&conn, &ligature).unwrap();
+        assert_eq!(
+            search(&conn, "a", "oeuvre", 5).unwrap()[0].fact_id,
+            ligature.fact_id
+        );
+        let mut ash = fact(2, "a");
+        ash.text = "Curriculum vitæ du projet.".into();
+        facts::remember(&conn, &ash).unwrap();
+        assert_eq!(
+            search(&conn, "a", "vitae", 5).unwrap()[0].fact_id,
+            ash.fact_id
+        );
+        let mut decomposed = fact(3, "a");
+        decomposed.text = "Il pre\u{0301}fe\u{0300}re le rust.".into();
+        facts::remember(&conn, &decomposed).unwrap();
+        assert_eq!(
+            search(&conn, "a", "prefere", 5).unwrap()[0].fact_id,
+            decomposed.fact_id
+        );
     }
 }

@@ -241,3 +241,16 @@ test("automatic memory with no visible reply keeps its durable fallback position
   const receipt = { id: "memory", kind: "memory_auto", payload: { memory_run_id: "empty-run" } };
   assert.deepEqual(orderThread([user, receipt]), [user, receipt]);
 });
+
+test("a late share card stays after its own reply and ahead of the next turn", () => {
+  const nextUser = { ...user, id: "next" };
+  const nextReply = { ...reply("echoed", [{ body: "Second." }]), id: "second", payload: { run_id: "second-run", parts: [{ body: "Second." }] } };
+  const share = { id: "share", kind: "memory_share", payload: { memory_run_id: "run" } };
+  const result = orderThread([user, reply("echoed", [{ body: "First." }]), nextUser, nextReply, share]);
+  assert.deepEqual(result.map((m) => m.id), ["question", "reply-question", "share", "next", "second"]);
+});
+
+test("a share card without a run anchor keeps its durable position", () => {
+  const share = { id: "share", kind: "memory_share", payload: {} };
+  assert.deepEqual(orderThread([user, share]).map((m) => m.id), ["question", "share"]);
+});

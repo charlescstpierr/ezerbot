@@ -739,7 +739,13 @@ fn extract(conn: &Connection, provider: &Provider, path: &Path, id: &str) -> Res
             crate::now(),
         )?;
     }
-    super::memory::offer(&tx, &run.bot_id, &run.conversation_id, &learned)?;
+    super::memory::offer(
+        &tx,
+        &run.bot_id,
+        &run.conversation_id,
+        &learned,
+        Some(&run.run_id),
+    )?;
     tx.commit()?;
     Ok(())
 }

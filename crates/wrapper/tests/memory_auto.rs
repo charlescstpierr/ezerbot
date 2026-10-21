@@ -1138,12 +1138,39 @@ fn punctuated_everyone_is_stripped_without_rewriting_addresses_or_longer_names()
     }
     let calls = f.calls();
     assert_eq!(calls.len(), 3);
-    assert!(calls.iter().all(|call| !call["input"].to_string().contains("@everyone")));
-    f.send(&c, "address", "Écrivez à x@everyone.com au sujet du projet.");
+    assert!(calls
+        .iter()
+        .all(|call| !call["input"].to_string().contains("@everyone")));
+    f.send(
+        &c,
+        "address",
+        "Écrivez à x@everyone.com au sujet du projet.",
+    );
     f.settle();
     f.send(&c, "longer", "@everyoneElse Je préfère le thé vert.");
     f.settle();
     assert_eq!(f.calls().len(), 3);
+}
+
+#[test]
+fn share_card_keeps_journal_time_and_the_run_that_offered_it() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let text = "Je travaille sur le projet Boréal.";
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "plain", &format!("@everyone {text}"));
+    f.settle();
+    let messages = f.messages(&c);
+    let offer = messages
+        .iter()
+        .find(|m| m["kind"] == "memory_share")
+        .unwrap();
+    let reply = messages.iter().find(|m| m["id"] == "reply-plain").unwrap();
+    assert!(offer["created_at"].as_u64().unwrap() > 0);
+    assert_eq!(
+        offer["payload"]["memory_run_id"],
+        reply["payload"]["run_id"]
+    );
 }
 
 #[test]

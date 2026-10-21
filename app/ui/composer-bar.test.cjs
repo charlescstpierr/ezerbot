@@ -1007,6 +1007,40 @@ test("effort text stays visible from 360 to 600 without speed", { timeout: 30000
   }
 });
 
+test("from 360 to 911 the name yields before the model, with and without speed", { timeout: 600000 }, async () => {
+  const widths = sweep(360, 911, 10, [761, 764, 819, 820, 910, 911]);
+  const names = ["Ezerbot", MEDIUM_NAME, LONG_NAME];
+  for (const width of widths) {
+    for (const model of MODELS) {
+      for (const name of names) {
+        for (const speed of ["", "Standard"]) {
+          const report = await measure(width, 780, name, { model, effort: DEFAULT_EFFORT, speed });
+          for (const theme of report.themes) {
+            const sameRow = Boolean(speed) && Math.abs(theme.speedTop - theme.voiceTop) <= 2;
+            const where = `${width} ${speed ? "speed" : "no-speed"} ${model} / ${name} ${theme.theme} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} effort=${theme.effortClient}/${theme.effortScroll} speedGap=${theme.speedGap} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop} bot=${theme.pieces.bot}`;
+            assert.ok(theme.nameClient >= 40, where);
+            assert.equal(theme.nameInside, true, where);
+            assert.equal(theme.chevronInside, true, where);
+            assert.ok(theme.modelClient >= 40, where);
+            assert.equal(theme.effortFits, true, where);
+            assert.ok(theme.effortClient >= 40, where);
+            if (!speed) {
+              assert.ok(theme.modelGap >= 0, where);
+              assert.ok(theme.effortGap >= 0, where);
+            } else if (sameRow) {
+              assert.ok(theme.speedGap >= 6, where);
+              assert.equal(theme.speedFits, true, where);
+            } else {
+              assert.equal(theme.speedHeadset.height, 0, where);
+              assert.ok(theme.speedTop >= theme.voiceTop + 16, where);
+            }
+          }
+        }
+      }
+    }
+  }
+});
+
 test("Ezerbot stays visible from 761 to 764 beside the wide model and speed", { timeout: 120000 }, async () => {
   for (let width = 761; width <= 764; width += 1) {
     const report = await measure(width, 780, "Ezerbot", { model: CODEX_SPARK_WIDE, effort: DEFAULT_EFFORT, speed: "Standard" });

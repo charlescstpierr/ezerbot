@@ -28,7 +28,7 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false, title = "Nouvelle conversation" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
@@ -57,7 +57,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
   <aside class="sidebar"></aside>
   <main class="main-panel">
     <header class="topbar">
-      <div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">Nouvelle conversation</h1></div>
+      <div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">${title}</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
@@ -153,6 +153,8 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         toolsClear: toolsBox.right <= voice.left + 0.5,
         toolsGap: voice.left - toolsBox.right,
         speedGap: speedBox ? voice.left - speedBox.right : null,
+        speedTop: speedBox ? speedBox.top : null,
+        voiceTop: voice.top,
         nameInside: contained(nameBox, botBox),
         chevronInside: contained(chevronBox, botBox),
         modelLabelWidth: modelBox.width,
@@ -174,15 +176,28 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
           const banner = document.getElementById("plan-banner");
           if (!scroll || !banner) return null;
           const parent = boxOf(scroll);
+          const suggestions = [...document.querySelectorAll(".suggestion")];
+          const last = suggestions.at(-1);
+          const composer = document.querySelector(".composer");
+          const lastBox = last ? boxOf(last) : null;
+          const composerBox = composer ? boxOf(composer) : null;
           return {
             banner: contained(boxOf(banner), parent),
-            suggestions: [...document.querySelectorAll(".suggestion")].map((node) => contained(boxOf(node), parent)),
+            suggestions: suggestions.map((node) => contained(boxOf(node), parent)),
+            below: lastBox && composerBox ? composerBox.top - lastBox.bottom : null,
+            above: boxOf(document.getElementById("welcome")).top - parent.top,
           };
         })(),
         titleText: document.getElementById("conversation-title").textContent,
         titleClient: document.getElementById("conversation-title").clientWidth,
         titleScroll: document.getElementById("conversation-title").scrollWidth,
         titleFits: document.getElementById("conversation-title").scrollWidth <= document.getElementById("conversation-title").clientWidth + 1,
+        titleBox: boxOf(document.getElementById("conversation-title")),
+        actionsBox: boxOf(document.querySelector(".topbar-actions")),
+        titleClear: boxOf(document.getElementById("conversation-title")).right <= boxOf(document.querySelector(".topbar-actions")).left + 0.5,
+        workspaceText: document.querySelector(".workspace-label")?.textContent || "",
+        workspaceClient: document.querySelector(".workspace-label")?.clientWidth || 0,
+        workspaceScroll: document.querySelector(".workspace-label")?.scrollWidth || 0,
         headerHeights: [...document.querySelectorAll(".topbar-actions .tool-pill")].map((node) => ({
           text: node.textContent,
           height: node.getBoundingClientRect().height,
@@ -696,6 +711,103 @@ test("pills yield before a short bot name at 500px", async () => {
     assert.equal(theme.toolsClear, true, where);
     assert.equal(theme.modelFits, true, where);
     assert.ok(theme.modelLabelWidth >= 40, where);
+  }
+});
+
+const THREAD_TITLE = "Préparer la revue de lancement avec l'équipe";
+const CODEX_SPARK = "Codex Spark";
+// « Codex Spark » tient encore dans le bouton avec Noto (Linux). Le plancher de
+// 137 px pousse le nom dehors dès que le modèle est un peu plus large, ce que
+// « Codex Spark » fait déjà sur macOS. Le libellé suivant reproduit ce débordement ici.
+const CODEX_SPARK_WIDE = "Codex Spark High";
+
+test("a thread title stays clear of Notifications at 820px and the workspace keeps 56px", async () => {
+  const report = await measure(820, 560, MEDIUM_NAME, {
+    workspace: MEDIUM_NAME,
+    title: THREAD_TITLE,
+    model: CODEX_SPARK,
+    effort: DEFAULT_EFFORT,
+  });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} viewport=${theme.viewport} title=${theme.titleClient}/${theme.titleScroll} clear=${theme.titleClear} ws=${theme.workspaceClient}/${theme.workspaceScroll} titleBox=${JSON.stringify(theme.titleBox)} actions=${JSON.stringify(theme.actionsBox)}`;
+    assert.equal(theme.titleText, THREAD_TITLE, where);
+    assert.equal(theme.workspaceText, MEDIUM_NAME, where);
+    assert.equal(theme.titleClear, true, where);
+    assert.ok(theme.titleClient >= 120, where);
+    assert.ok(theme.workspaceClient >= 56, where);
+  }
+});
+
+test("a bot name stays inside its button at 820px when the model has no speed pill", async () => {
+  for (const model of [CODEX_SPARK, CODEX_SPARK_WIDE]) {
+    const report = await measure(820, 560, MEDIUM_NAME, { model, effort: DEFAULT_EFFORT, speed: "" });
+    for (const theme of report.themes) {
+      const where = `${model} ${theme.theme} viewport=${theme.viewport} name=${theme.nameClient}/${theme.nameScroll} bot=${theme.pieces.bot} nameBox=${JSON.stringify(theme.nameBox)} botBox=${JSON.stringify(theme.botBox)} chevron=${JSON.stringify(theme.chevronBox)}`;
+      assert.equal(theme.speedGap, null, where);
+      assert.equal(theme.modelText, model, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.chevronInside, true, where);
+    }
+  }
+});
+
+test("the header yields and a model without speed does not force a 137px bot name", () => {
+  const css = readFileSync(`${UI}/styles.css`, "utf8");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  const body = (selector) => rules.find(([, found]) => found.trim() === selector)?.[2] || "";
+  assert.match(body(".topbar h1"), /flex:\s*0 1 auto/);
+  assert.match(body(".topbar h1"), /min-width:\s*min\(120px,\s*100%\)/);
+  assert.match(body(".workspace-label"), /flex:\s*0 1 auto/);
+  assert.match(body(".workspace-label"), /min-width:\s*56px/);
+  assert.doesNotMatch(css, /min-width:\s*137px/);
+});
+
+test("speed stays on the composer row and at least 6px clear of the voice controls at 500 and 600px", async () => {
+  for (const width of [500, 600]) {
+    const report = await measure(width, 780, MEDIUM_NAME, { model: CODEX_SPARK, effort: DEFAULT_EFFORT, speed: "Standard" });
+    for (const theme of report.themes) {
+      const where = `${width} ${theme.theme} viewport=${theme.viewport} speedGap=${theme.speedGap} toolsGap=${theme.toolsGap} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} speed=${theme.speedClient}/${theme.speedScroll} ${JSON.stringify(theme.pieces)}`;
+      assert.equal(theme.speedFits, true, where);
+      assert.equal(theme.effortFits, true, where);
+      assert.equal(theme.toolsClear, true, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.chevronInside, true, where);
+      assert.ok(Math.abs(theme.speedTop - theme.voiceTop) <= 1, where);
+      assert.ok(theme.speedGap >= 6, where);
+    }
+  }
+});
+
+test("a long bot name at 960 and 1140 is at least as wide as at 910 without a speed pill", async () => {
+  const widths = [910, 960, 1140];
+  const reports = new Map();
+  for (const width of widths) {
+    reports.set(width, await measure(width, 780, LONG_NAME, { model: CODEX_SPARK, effort: DEFAULT_EFFORT, speed: "" }));
+  }
+  for (const theme of ["dark", "light"]) {
+    const at = (width) => reports.get(width).themes.find((item) => item.theme === theme);
+    const base = at(910);
+    assert.equal(base.speedGap, null, `${theme} 910 still has a speed pill`);
+    for (const width of [960, 1140]) {
+      const actual = at(width);
+      const where = `${theme} 910=${base.nameClient}/${base.nameScroll} ${width}=${actual.nameClient}/${actual.nameScroll} viewport=${actual.viewport} pieces=${JSON.stringify(actual.pieces)}`;
+      assert.equal(actual.speedGap, null, where);
+      assert.equal(actual.nameInside, true, where);
+      assert.equal(actual.chevronInside, true, where);
+      assert.ok(actual.nameClient + 0.5 >= base.nameClient, where);
+    }
+  }
+});
+
+test("suggestions sit against the composer at 820×560 instead of leaving a void", async () => {
+  const report = await measure(820, 560, "Ezerbot", { pills: false, welcome: true });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} viewport=${theme.viewport} below=${theme.welcome.below} above=${theme.welcome.above} banner=${theme.welcome.banner} suggestions=${JSON.stringify(theme.welcome.suggestions)}`;
+    assert.equal(theme.welcome.banner, true, where);
+    assert.equal(theme.welcome.suggestions.length, 4, where);
+    assert.equal(theme.welcome.suggestions.every(Boolean), true, where);
+    assert.ok(theme.welcome.below <= 32, where);
+    assert.ok(theme.welcome.above > theme.welcome.below, where);
   }
 });
 

@@ -5,6 +5,7 @@
 #import "voice.h"
 #import "voice-session.h"
 #import "screen.h"
+#import "floating.h"
 #import "demonstration.h"
 #import <errno.h>
 #import <poll.h>
@@ -24,6 +25,8 @@
 @property(nonatomic, strong) EzerbotNotifier *notifier;
 @property(nonatomic, strong) EzerbotVoice *voice;
 @property(nonatomic, strong) EzerbotVoiceSession *voiceSession;
+@property(nonatomic, strong) EzerbotFloating *floating;
+@property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, copy) NSString *visibleConversationID;
 @property(nonatomic) BOOL conversationVisible;
 @property(nonatomic, copy) NSString *pendingNotificationID;
@@ -43,6 +46,7 @@
 #if defined(EZERBOT_RELEASE)
     [UNUserNotificationCenter currentNotificationCenter].delegate = self;
 #endif
+    self.floating = [[EzerbotFloating alloc] init];
     [self createMenus];
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1140, 780)
                                             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -123,6 +127,8 @@
     NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"Fichier" action:nil keyEquivalent:@""];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"Fichier"];
     [fileMenu addItemWithTitle:@"Fermer la fenêtre" action:@selector(performClose:) keyEquivalent:@"w"];
+    NSMenuItem *floating = [fileMenu addItemWithTitle:@"Ouvrir le panneau flottant" action:@selector(showFloating:) keyEquivalent:@""];
+    floating.target = self;
     NSMenuItem *reload = [fileMenu addItemWithTitle:@"Recharger" action:@selector(reloadPage:) keyEquivalent:@"r"];
     reload.target = self;
     fileItem.submenu = fileMenu;
@@ -141,6 +147,30 @@
     editItem.submenu = editMenu;
     [mainMenu addItem:editItem];
     NSApp.mainMenu = mainMenu;
+    self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    self.statusItem.button.title = @"Ezerbot";
+    self.statusItem.button.toolTip = @"Panneau flottant d’Ezerbot";
+    NSMenu *statusMenu = [[NSMenu alloc] initWithTitle:@"Ezerbot"];
+    NSMenuItem *openPanel = [statusMenu addItemWithTitle:@"Ouvrir le panneau flottant" action:@selector(showFloating:) keyEquivalent:@""];
+    openPanel.target = self;
+    NSMenuItem *openMain = [statusMenu addItemWithTitle:@"Ouvrir Ezerbot" action:@selector(showMain:) keyEquivalent:@""];
+    openMain.target = self;
+    [statusMenu addItem:[NSMenuItem separatorItem]];
+    [statusMenu addItemWithTitle:@"Quitter Ezerbot" action:@selector(terminate:) keyEquivalent:@""];
+    self.statusItem.menu = statusMenu;
+}
+
+- (void)showFloating:(id)sender { (void)sender; [self.floating show]; }
+- (void)showMain:(id)sender {
+    (void)sender; [self.window deminiaturize:nil]; [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender == self.window) { [sender orderOut:nil]; return NO; }
+    return YES;
+}
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)application hasVisibleWindows:(BOOL)visible {
+    (void)application; (void)visible; [self showMain:nil]; return YES;
 }
 
 - (void)showStatus:(NSString *)title detail:(NSString *)detail failed:(BOOL)failed {
@@ -316,12 +346,26 @@
 
 - (void)openWorkspace:(NSURL *)url {
     self.backendURL = url;
+    self.floating.backendURL = url;
+    self.floating.mainWindow = self.window;
+    self.floating.geometryPath = [self.supportPath stringByAppendingPathComponent:@"floating-panel.plist"];
+    __weak GrokbotApplication *weakSelf = self;
+    self.floating.openConversation = ^(NSString *identifier, void (^reply)(BOOL, NSString *)) {
+        GrokbotApplication *shell = weakSelf;
+        if (!shell || ![shell isWorkspaceURL:shell.webView.URL]) { reply(NO,@"La fenêtre principale n’est pas prête."); return; }
+        [shell.webView callAsyncJavaScript:@"return await window.EzerbotFloatingMain.openConversation(id)"
+            arguments:@{@"id":identifier} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
+                if (!error && [result boolValue]) { [shell showMain:nil]; reply(YES,nil); }
+                else reply(NO,@"Ce fil n’est plus disponible ou un envoi est en cours dans Ezerbot.");
+            }];
+    };
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotNotifications"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoice"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoiceSession"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotFloating"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -364,6 +408,7 @@
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
     (void)webView; (void)navigation;
+    [self.floating close];
     self.deepLinksReady = NO; self.deepLinksFlushing = NO; ++self.deepLinksEpoch;
     [self.voice cancel]; [self.voiceSession cancel];
     self.window.title = @"Ezerbot"; self.window.titleVisibility = NSWindowTitleHidden;
@@ -385,6 +430,13 @@
     }
     NSDictionary *body = message.body;
     NSString *command = body[@"command"];
+    if ([message.name isEqual:@"ezerbotFloating"]) {
+        if ([command isEqual:@"show"]) { [self.floating show]; replyHandler(@YES,nil); return; }
+        if ([command isEqual:@"configure"] && [body[@"shortcut"] isKindOfClass:NSString.class]) {
+            replyHandler([self.floating configure:body[@"shortcut"]],nil); return;
+        }
+        replyHandler(nil,@"Commande du panneau inconnue."); return;
+    }
     if ([message.name isEqualToString:@"ezerbotDeepLinks"]) {
         if ([command isEqual:@"ready"]) {
             self.deepLinksReady = YES;
@@ -608,6 +660,8 @@
 - (void)stopBackend {
     [self.voice cancel];
     [self.voiceSession cancel];
+    [self.floating invalidate];
+    self.floating.backendURL = nil;
     NSTask *task = self.backendTask;
     self.backendTask = nil;
     task.terminationHandler = nil;
@@ -624,7 +678,7 @@
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     (void)sender;
-    return YES;
+    return NO;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {

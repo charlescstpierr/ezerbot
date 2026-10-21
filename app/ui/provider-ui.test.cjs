@@ -59,7 +59,7 @@ function mount(backend, connected = false, extra = {}) {
   const context = {
     document, state, element, $: (id) => nodes.get(id), provider: () => state.provider,
     currentBot: () => ({ name: "Ezerbot" }), pill: () => element("button"), option: () => element("button"),
-    signIn() {}, signInCodex() {}, signOut() {}, providerAction() {}, refresh() {},
+    signIn() {}, signOut() {}, providerAction() {}, refresh() {},
     pickerKind: connected ? "model" : null,
     closePicker() { context.pickerKind = null; nodes.get("picker").hidden = true; },
   };
@@ -95,7 +95,13 @@ test("a closed picker does not retain stale text or usage links from the previou
 
 test("conversation action links track the selected backend instead of capturing the initial URL", () => {
   let backend = "codex";
-  const context = { provider: () => ({ backend }), threadMascot: () => () => {}, cardAction() {} };
+  let signedIn = 0;
+  const context = {
+    provider: () => ({ backend }),
+    threadMascot: () => () => {},
+    cardAction() {},
+    signIn() { signedIn += 1; },
+  };
   const actions = source.slice(source.indexOf("  const thread = {"), source.indexOf("  function render(followLatest"));
   runInNewContext(urls + actions + "\nglobalThis.actions = thread;", context);
   assert.equal({ ...context.actions }.usageUrl, "https://chatgpt.com/codex/settings/usage");
@@ -103,6 +109,9 @@ test("conversation action links track the selected backend instead of capturing 
   assert.equal({ ...context.actions }.usageUrl, "https://chatgpt.com/codex/settings/usage");
   backend = "codex";
   assert.equal({ ...context.actions }.usageUrl, "https://chatgpt.com/codex/settings/usage");
+  context.actions.onSignIn();
+  assert.equal(signedIn, 1);
+  assert.doesNotMatch(source, /signInCodex/);
 });
 
 test("effort picker displays actual wire levels and submits the selected value", async () => {

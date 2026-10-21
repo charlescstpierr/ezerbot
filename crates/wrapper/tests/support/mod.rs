@@ -16,6 +16,36 @@ const SIGNING_KEY: &[u8] = include_bytes!("../fixtures/test-signing-key.pem");
 const JWKS: &str = include_str!("../fixtures/test-jwks.json");
 pub const CLIENT: &str = "oaiapp_test";
 
+/// Session file the production binary reads. The access value is an unsigned
+/// test marker (header `{}`), never a live ChatGPT token.
+pub fn write_codex_session(path: &std::path::Path, account_id: &str) {
+    use base64::Engine;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = format!(
+        "e30.{}.e30",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id": account_id}}).to_string()
+        )
+    );
+    std::fs::write(
+        path,
+        json!({
+            "host_id": "test-host",
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "account_id": account_id,
+            "access_token": token,
+            "refresh_token": "refresh-test",
+            "expires_at": now + 3600,
+            "welcomed": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 #[derive(Default)]
 pub struct Seen {
     pub nonce: String,
@@ -449,10 +479,12 @@ impl FakeOpenAi {
                 } else {
                     gate
                 };
-                let request_id = seen
-                    .request_id
-                    .clone()
-                    .filter(|_| request.url() == "/v1/responses");
+                let request_id = seen.request_id.clone().filter(|_| {
+                    matches!(
+                        request.url(),
+                        "/v1/responses" | "/backend-api/codex/responses"
+                    )
+                });
                 drop(seen);
                 if let Some(gate) = probe_gate {
                     while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {

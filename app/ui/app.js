@@ -943,7 +943,7 @@
     createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
-    onSignIn: () => signInCodex(),
+    onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
     get usageUrl() { return usageUrl(); },
     async onCopy(text) {

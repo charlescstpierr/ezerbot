@@ -177,7 +177,11 @@ impl Provider {
     pub fn configure_fake_deadlines(&self, first: Duration, stall: Duration, total: Duration) {
         let session = &self.primary;
         if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
-            *lock(&session.inner.deadlines) = super::reliable::Deadlines { first, stall, total };
+            *lock(&session.inner.deadlines) = super::reliable::Deadlines {
+                first,
+                stall,
+                total,
+            };
         }
     }
     pub(crate) fn test_connection(&self) {

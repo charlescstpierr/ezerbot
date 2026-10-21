@@ -89,15 +89,17 @@ impl Failure {
 
     fn signin() -> Self {
         Self {
-            message: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT."
-                .into(),
+            message:
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT."
+                    .into(),
             kind: "signin",
         }
     }
 
     fn expired() -> Self {
         Self {
-            message: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT.".into(),
+            message: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT."
+                .into(),
             kind: "signin_expired",
         }
     }

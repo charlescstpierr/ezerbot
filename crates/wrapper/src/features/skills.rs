@@ -347,7 +347,7 @@ fn owned_skill(conn: &Connection, bot: &str, skill: &str) -> Result<(), ApiError
     }
 }
 
-fn manual_content(
+pub(super) fn manual_content(
     name: String,
     description: String,
     body: String,

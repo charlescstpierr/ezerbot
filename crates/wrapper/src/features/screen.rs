@@ -25,7 +25,7 @@ const STOPPED: &str =
     "Session arrêtée ou expirée. Accordez une nouvelle session depuis Écran du Mac.";
 // A drawn fixture, never a screen capture. Also used by the debug native helper.
 #[cfg(debug_assertions)]
-fn fixture() -> String {
+pub(super) fn fixture() -> String {
     use base64::Engine;
     format!(
         "data:image/png;base64,{}",
@@ -59,6 +59,9 @@ struct Lease {
 fn leases() -> &'static Mutex<HashMap<PathBuf, Arc<Lease>>> {
     static LEASES: OnceLock<Mutex<HashMap<PathBuf, Arc<Lease>>>> = OnceLock::new();
     LEASES.get_or_init(Mutex::default)
+}
+pub(super) fn active() -> bool {
+    leases().lock().unwrap().values().any(|l| l.live())
 }
 fn current(path: &Path) -> Option<Arc<Lease>> {
     leases().lock().ok()?.get(path).cloned()
@@ -357,6 +360,12 @@ pub fn routes(
                         "Choisissez un fil direct existant et un bot activé dans Paramètres.",
                     ));
                 }
+                if super::demonstrations::active() {
+                    return Err(ApiError::new(
+                        409,
+                        "Une démonstration est en cours. Arrêtez-la avant d’accorder le contrôle.",
+                    ));
+                }
                 let mut all = leases()
                     .lock()
                     .map_err(|_| ApiError::new(409, "Session indisponible."))?;
@@ -625,6 +634,10 @@ pub fn hydrate(conn: &rusqlite::Connection, run_id: &str, input: &mut Vec<Histor
 #[cfg(not(debug_assertions))]
 #[path = "screen_native.rs"]
 mod native;
+
+// Screen control and Teach model the same exclusive Mac in unit fixtures.
+#[cfg(all(test, debug_assertions))]
+pub(super) static TEST_MAC: Mutex<()> = Mutex::new(());
 
 #[cfg(all(test, debug_assertions))]
 #[path = "screen_tests.rs"]

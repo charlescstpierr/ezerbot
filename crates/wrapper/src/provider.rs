@@ -232,6 +232,7 @@ struct Inner {
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
     catalog: Mutex<Catalog>,
+    quota: Mutex<codex::UsageCache>,
     mcp: crate::mcp::Manager,
 }
 
@@ -487,6 +488,7 @@ impl Session {
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
+                quota: Mutex::new(codex::UsageCache::default()),
                 mcp: crate::mcp::Manager::default(),
             }),
         }
@@ -1016,6 +1018,7 @@ impl Session {
     pub fn signout(&self) -> Result<bool, Failure> {
         self.cancel_signin();
         self.inner.local_revoked.store(true, Ordering::SeqCst);
+        self.reset_quota();
         // The engine route durably stops only provider-consuming runs. A blanket
         // signal here could cancel an already-suspended form during owner release.
         let _guard = lock(&self.inner.credentials);

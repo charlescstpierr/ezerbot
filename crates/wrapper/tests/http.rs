@@ -368,6 +368,8 @@ fn body_limit_by_route() {
     assert_eq!(body_limit("/api/attachments"), 20 * 1024 * 1024);
     assert_eq!(body_limit("/api/skills/import"), 16 * 1024 * 1024);
     assert_eq!(body_limit("/api/approvals/reviewer"), 256 * 1024);
+    assert_eq!(body_limit("/api/templates/create"), 8 * 1024 * 1024);
+    assert_eq!(body_limit("/api/templates/decode"), 8 * 1024 * 1024);
     for path in [
         "/api/send",
         "/api/attachments/one",
@@ -382,6 +384,8 @@ fn body_limit_by_route() {
         ("/api/skills/import", "16 Mio"),
         ("/api/send", "64 Ko"),
         ("/api/approvals/reviewer", "256 Ko"),
+        ("/api/templates/create", "8 Mio"),
+        ("/api/templates/decode", "8 Mio"),
     ] {
         let error = too_large(path);
         assert_eq!(error.status, 413);
@@ -395,6 +399,8 @@ fn body_limit_by_route() {
         ("/api/attachments", "image/png"),
         ("/api/skills/import", "application/json"),
         ("/api/approvals/reviewer", "application/json"),
+        ("/api/templates/create", "application/json"),
+        ("/api/templates/decode", "application/json"),
     ] {
         assert!(accepted_by_host(host.post(path, mime, &body)), "{path}");
     }

@@ -231,6 +231,7 @@ struct Inner {
     closing: AtomicUsize,
     simulation: AtomicBool,
     probe: Mutex<Value>,
+    probe_generation: AtomicUsize,
     local_revoked: AtomicBool,
     file: PathBuf,
     endpoints: Endpoints,
@@ -489,6 +490,7 @@ impl Session {
                         && std::env::var_os("GROKBOT_DISABLE_SIMULATION").is_none(),
                 ),
                 probe: Mutex::new(json!({"state":"idle"})),
+                probe_generation: AtomicUsize::new(0),
                 local_revoked: AtomicBool::new(false),
                 file,
                 endpoints,
@@ -904,6 +906,7 @@ impl Session {
         self.write(&credentials)
             .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
         if granted {
+            self.reset_probe();
             self.inner.local_revoked.store(false, Ordering::SeqCst);
             Ok(())
         } else {
@@ -1033,9 +1036,16 @@ impl Session {
         Ok(tokens.access_token)
     }
 
+    fn reset_probe(&self) {
+        let mut probe = lock(&self.inner.probe);
+        self.inner.probe_generation.fetch_add(1, Ordering::SeqCst);
+        *probe = json!({"state":"idle"});
+    }
+
     /// Révoque la session renouvelable puis efface les jetons. Rend `false` si OpenAI n'a pas confirmé.
     pub fn signout(&self) -> Result<bool, Failure> {
         self.cancel_signin();
+        self.reset_probe();
         self.inner.local_revoked.store(true, Ordering::SeqCst);
         // The engine route durably stops only provider-consuming runs. A blanket
         // signal here could cancel an already-suspended form during owner release.

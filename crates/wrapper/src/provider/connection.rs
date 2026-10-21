@@ -160,13 +160,14 @@ impl Provider {
             *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez-vous via Codex ci-dessus."});
             return;
         }
-        {
+        let generation = {
             let mut probe = lock(&session.inner.probe);
             if probe["state"] == "running" {
                 return;
             }
             *probe = json!({"state":"running"});
-        }
+            session.inner.probe_generation.load(Ordering::SeqCst)
+        };
         thread::spawn(move || {
             let mut failure = None;
             let mut responded = false;
@@ -215,7 +216,11 @@ impl Provider {
             if !session.connected() {
                 failure = Some(Failure::signin().message);
             }
-            *lock(&session.inner.probe) = if responded && result.is_ok() && failure.is_none() {
+            let mut probe = lock(&session.inner.probe);
+            if session.inner.probe_generation.load(Ordering::SeqCst) != generation {
+                return; // A previous account's result must never label a new session.
+            }
+            *probe = if responded && result.is_ok() && failure.is_none() {
                 json!({"state":"ok","message":"OK — ChatGPT répond."})
             } else {
                 json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})

@@ -670,6 +670,9 @@ fn connection_test_is_bounded_and_reports_precise_error_then_ok() {
     assert!(bodies.iter().all(|b| b.get("prompt_cache_key").is_none()
         && b.get("tools").is_none()
         && b.get("max_output_tokens").is_none()));
+    drop(bodies);
+    f.provider.signout().unwrap();
+    assert_eq!(f.provider.status()["connection_test"]["state"], "idle");
 }
 
 #[test]
@@ -698,6 +701,25 @@ fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
         f.provider.status()["connection_test"]["message"],
         "OK — ChatGPT répond."
     );
+}
+
+#[test]
+fn signing_out_fences_an_inflight_connection_test_result() {
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    f.fake.queue.lock().unwrap().push_back(Fault::Partial);
+    post(&mut f.app, "/api/provider/test", json!({}));
+    until(|| !f.fake.seen.lock().unwrap().is_empty());
+    assert_eq!(f.provider.status()["connection_test"]["state"], "running");
+    f.provider.signout().unwrap();
+    f.fake.partial_released.store(true, Ordering::SeqCst);
+    until(|| f.fake.partial_finished.load(Ordering::SeqCst));
+    // Wait for the receiver to consume the terminal event, not just the fake writer.
+    until(|| {
+        std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log"))
+            .unwrap_or_default()
+            .contains("code=completed")
+    });
+    assert_eq!(f.provider.status()["connection_test"]["state"], "idle");
 }
 
 #[test]

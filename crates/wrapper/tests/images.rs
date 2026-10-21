@@ -394,6 +394,54 @@ fn missing_key_shows_the_connect_card_without_a_call() {
 }
 
 #[test]
+fn signout_forgets_the_image_key() {
+    let mut fixture = Fixture::open(true);
+    fixture
+        .app
+        .api("POST", "/api/provider/signout", b"{}")
+        .unwrap();
+    assert!(!fixture.provider.connected());
+    assert!(Vault::open(&fixture.path.with_extension("secrets.json"))
+        .unwrap()
+        .get("OPENAI_API_KEY")
+        .unwrap()
+        .is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn signout_does_not_confirm_when_the_image_key_cannot_be_deleted() {
+    use std::os::unix::fs::symlink;
+    let mut fixture = Fixture::open(true);
+    let path = fixture.path.with_extension("secrets.json");
+    let stash = fixture.root.join("data/image-key-stash.json");
+    let before = std::fs::read(&path).unwrap();
+    assert!(String::from_utf8_lossy(&before).contains(KEY));
+    std::fs::rename(&path, &stash).unwrap();
+    symlink(&stash, &path).unwrap();
+    let error = fixture
+        .app
+        .api("POST", "/api/provider/signout", b"{}")
+        .unwrap_err();
+    assert!(
+        !error.message.contains(KEY),
+        "la clé est dans l’erreur de déconnexion"
+    );
+    assert!(
+        fixture.provider.connected(),
+        "déconnexion confirmée alors que la suppression de la clé ne l’est pas"
+    );
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "le coffre a été réécrit en clair"
+    );
+    assert_eq!(std::fs::read(&stash).unwrap(), before);
+}
+
+#[test]
 fn describing_an_attached_image_does_not_generate_one() {
     let mut fixture = Fixture::open(true);
     let bytes = png();

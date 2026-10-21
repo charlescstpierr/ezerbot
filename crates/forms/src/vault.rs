@@ -58,6 +58,10 @@ pub struct Vault {
     #[cfg(target_os = "macos")]
     keychain: Option<keychain::Target>,
     signature_notice: Option<&'static str>,
+    /// Test double of an active keychain that refuses mutations. Production
+    /// hosts leave this false; macOS uses `keychain` instead.
+    #[cfg(debug_assertions)]
+    refuse_keychain: bool,
 }
 #[cfg(target_os = "macos")]
 mod keychain;
@@ -97,6 +101,8 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: None,
             signature_notice: None,
+            #[cfg(debug_assertions)]
+            refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
         vault.cleanup_temporaries()?;
@@ -129,6 +135,15 @@ impl Vault {
             }
             _ => (),
         }
+        Ok(vault)
+    }
+    /// Active keychain that refuses writes and deletions. Debug tests only:
+    /// nothing is stored in the plaintext file.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn open_refusing_keychain(path: &Path) -> Result<Self> {
+        let mut vault = Self::open(path)?;
+        vault.refuse_keychain = true;
         Ok(vault)
     }
     pub fn storage_status(&self) -> StorageStatus {
@@ -168,6 +183,13 @@ impl Vault {
                 value: value.to_owned(),
             },
         );
+        #[cfg(debug_assertions)]
+        if self.refuse_keychain {
+            let mut file = self.read_file()?;
+            commit_keychain_secret(&mut file, &name, secrets.get(&name).unwrap(), false)?;
+            self.write(&file)?;
+            return Ok(SecretRef { name });
+        }
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
             keychain::set(self, target, &name, secrets.get(&name).unwrap())?;
@@ -200,6 +222,12 @@ impl Vault {
         let name = canonical_secret_name(name)?;
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
+        #[cfg(debug_assertions)]
+        if self.refuse_keychain {
+            return Err(invalid(
+                "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
+            ));
+        }
         #[cfg(target_os = "macos")]
         if let Some(target) = &self.keychain {
             return keychain::remove(self, target, &name);
@@ -349,6 +377,24 @@ impl Vault {
         }
         result
     }
+}
+
+/// Record a verified keychain write by dropping the plaintext copy. A refusal
+/// leaves the file untouched and returns an error: no plaintext fallback.
+#[cfg(any(debug_assertions, target_os = "macos"))]
+fn commit_keychain_secret(
+    file: &mut Secrets,
+    name: &str,
+    _secret: &StoredSecret,
+    accepted: bool,
+) -> Result<()> {
+    if !accepted {
+        return Err(invalid(
+            "Le trousseau macOS est indisponible ou son accès a été refusé.",
+        ));
+    }
+    file.remove(name);
+    Ok(())
 }
 
 fn checked_file(path: &Path, writable: bool) -> Result<File> {
@@ -526,6 +572,44 @@ mod tests {
             fs::metadata(lock_path).unwrap().permissions().mode() & 0o7777,
             VAULT_FILE_MODE
         );
+    }
+
+    #[test]
+    fn active_keychain_refusal_does_not_store_plaintext() {
+        let test = TestVault::new();
+        let path = test.vault.path().to_owned();
+        let before = fs::read(&path).unwrap();
+        let vault = Vault::open_refusing_keychain(&path).unwrap();
+        let error = vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap_err();
+        assert!(!error.to_string().contains("image-key-secret-9931"));
+        assert!(!format!("{error:?}").contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(Vault::open(&path)
+            .unwrap()
+            .get("OPENAI_API_KEY")
+            .unwrap()
+            .is_none());
+        test.vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap();
+        let seeded = fs::read(&path).unwrap();
+        let deletion = Vault::open_refusing_keychain(&path)
+            .unwrap()
+            .remove("OPENAI_API_KEY")
+            .unwrap_err();
+        assert!(deletion.to_string().contains("Suppression non confirmée"));
+        assert!(!deletion.to_string().contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), seeded);
     }
 
     #[test]

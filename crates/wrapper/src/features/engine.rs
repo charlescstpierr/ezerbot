@@ -537,6 +537,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/provider/signout" => {
             let _: Empty = parse(body)?;
+            super::images::forget_account_key(&app.db_path)?;
             super::demonstrations::account_changed(&app.feature_context())?;
             for status in [
                 RunStatus::Queued,
@@ -558,7 +559,6 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 .provider
                 .signout()
                 .map_err(|f| ApiError::new(500, f.message))?;
-            super::images::forget_account_key(&app.db_path);
             Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
         }
         "/api/stop" | "/api/regenerate" => {

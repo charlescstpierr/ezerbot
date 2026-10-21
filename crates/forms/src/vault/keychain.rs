@@ -1,7 +1,8 @@
 //! PS09/A47–A49 establishes OS-encrypted local persistence, not a Keychain
 //! schema. Reconstruction: generic passwords, one item per name, service scoped
 //! to the canonical workspace path. Native calls never contain shell arguments,
-//! logs or OS error descriptions. All UI interaction is disabled (fail to file).
+//! logs or OS error descriptions. All UI interaction is disabled. A refused
+//! write fails closed and is not copied into the plaintext companion file.
 use super::*;
 use security_framework::{
     item::{update_item, ItemClass, ItemSearchOptions, ItemUpdateOptions, Limit},
@@ -262,20 +263,16 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
     let mut file = vault.read_file()?;
-    match target
+    let accepted = target
         .connect(&vault.path)
         .and_then(|backend| backend.put_verified(name, secret))
-    {
-        Ok(()) => {
-            file.remove(name);
-            vault.write(&file)?;
-        }
-        Err(_) => {
-            state.failed = true;
-            file.insert(name.into(), secret.clone());
-            vault.write(&file)?;
-        }
+        .is_ok();
+    if let Err(error) = super::commit_keychain_secret(&mut file, name, secret, accepted) {
+        state.failed = true;
+        return Err(error);
     }
+    vault.write(&file)?;
+    state.failed = false;
     state.cached.insert(name.into(), secret.clone());
     Ok(())
 }

@@ -25,7 +25,6 @@ const UNUSABLE: &str = "L’image reçue n’est pas utilisable.";
 const TOO_BIG: &str = "L’image générée dépasse 20 Mo et n’a pas été conservée.";
 const UNAVAILABLE: &str = "Le service d’images est indisponible.";
 const SECRET: &str = "OPENAI_API_KEY";
-const PURPOSE: &str = "Compte OpenAI pour générer des images";
 const IMAGE_HOST: &str = "https://api.openai.com/v1/images/generations";
 /// Base64 of a 20 MiB image, plus a small JSON envelope.
 const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 1024 * 1024;
@@ -53,24 +52,6 @@ pub fn tools() -> Vec<ToolSpec> {
 
 pub fn is_external(name: &str) -> bool {
     name == TOOL
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KeySource {
-    Vault,
-    Account,
-    Missing,
-}
-
-/// Vault wins. The loopback provider never treats the chat bearer as an image key.
-pub(crate) fn select_key(loopback: bool, vault_present: bool, account_present: bool) -> KeySource {
-    if vault_present {
-        KeySource::Vault
-    } else if loopback || !account_present {
-        KeySource::Missing
-    } else {
-        KeySource::Account
-    }
 }
 
 /// Only the loopback test host or the production image host. ChatGPT’s chat
@@ -116,7 +97,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     let Ok(endpoint) = image_endpoint(&ctx.provider.image_api_base()) else {
         return failed(UNAVAILABLE);
     };
-    let key = match load_key(ctx, endpoint.starts_with("http://127.0.0.1:")) {
+    let key = match load_key(ctx) {
         Ok(Some(key)) => key,
         Ok(None) => return failed(CONNECT),
         Err(()) => return failed(UNAVAILABLE),
@@ -165,31 +146,25 @@ pub fn present(
     }
 }
 
-/// Drop the image key copied from the connected account. A key that was never
-/// stored is left untouched, and sign-out does not create a vault file.
-pub fn forget_account_key(db: &Path) {
+/// Drop the image key stored in the account vault. A key that was never stored
+/// is left untouched, and sign-out does not create a vault file. A deletion
+/// that cannot be confirmed is returned so sign-out is not reported as done
+/// while the secret remains.
+pub fn forget_account_key(db: &Path) -> Result<(), crate::ApiError> {
     let path = db.with_extension("secrets.json");
     if !path.is_file() {
-        return;
+        return Ok(());
     }
-    if let Ok(vault) = Vault::open_app(&path) {
-        let _ = vault.remove(SECRET);
-    }
+    let vault = Vault::open_app(&path)?;
+    vault.remove(SECRET)?;
+    Ok(())
 }
 
-fn load_key(ctx: &Context<'_>, loopback: bool) -> Result<Option<String>, ()> {
+/// The image key is the account vault secret. Auth files (`*.chatgpt-auth.json`,
+/// `*.codex-auth.json`) are never read and their bearer is never sent.
+fn load_key(ctx: &Context<'_>) -> Result<Option<String>, ()> {
     let vault = Vault::open_app(&ctx.db_path.with_extension("secrets.json")).map_err(|_| ())?;
-    let stored = vault.get(SECRET).map_err(|_| ())?;
-    let account = ctx.provider.account_access_token();
-    match select_key(loopback, stored.is_some(), account.is_some()) {
-        KeySource::Vault => Ok(stored),
-        KeySource::Missing => Ok(None),
-        KeySource::Account => {
-            let token = account.ok_or(())?;
-            vault.set(SECRET, PURPOSE, &token).map_err(|_| ())?;
-            Ok(Some(token))
-        }
-    }
+    vault.get(SECRET).map_err(|_| ())
 }
 
 fn post(
@@ -198,6 +173,13 @@ fn post(
     description: &str,
     aspect: &str,
 ) -> (u16, Result<Vec<u8>, &'static str>) {
+    #[cfg(test)]
+    {
+        tests::note_post(key);
+        if tests::block_post() {
+            return (0, Err(FAILED));
+        }
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(60))
@@ -329,6 +311,208 @@ fn failed(reason: &str) -> ToolOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::Context;
+    use crate::{Endpoints, Provider};
+    use grokbot_engine::contracts::{ToolCall, ToolOutcome};
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::cell::{Cell, RefCell};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    thread_local! {
+        static BLOCK_POST: Cell<bool> = const { Cell::new(false) };
+        static POST_COUNT: Cell<u32> = const { Cell::new(0) };
+        static POST_KEY: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    pub(super) fn note_post(key: &str) {
+        POST_COUNT.with(|count| count.set(count.get() + 1));
+        POST_KEY.with(|slot| *slot.borrow_mut() = key.to_owned());
+    }
+
+    pub(super) fn block_post() -> bool {
+        BLOCK_POST.with(|block| block.get())
+    }
+
+    fn reset_posts() {
+        BLOCK_POST.with(|block| block.set(true));
+        POST_COUNT.with(|count| count.set(0));
+        POST_KEY.with(|slot| slot.borrow_mut().clear());
+    }
+
+    fn post_count() -> u32 {
+        POST_COUNT.with(|count| count.get())
+    }
+
+    fn post_key() -> String {
+        POST_KEY.with(|slot| slot.borrow().clone())
+    }
+
+    const VAULT_KEY: &str = "vault-image-key-9f3c1a7e";
+    const CHAT_TOKEN: &str = "chatgpt-auth-bearer-not-image";
+    const CODEX_TOKEN: &str = "codex-auth-bearer-not-image";
+
+    struct Outside {
+        root: PathBuf,
+        db: PathBuf,
+        provider: Provider,
+        connection: Connection,
+    }
+
+    impl Outside {
+        fn open(with_vault_key: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "ezerbot-image-key-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let db = root.join("workspace.sqlite");
+            let expires = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600;
+            std::fs::write(
+                db.with_extension("chatgpt-auth.json"),
+                json!({
+                    "host_id": "test-host",
+                    "client_id": "oaiapp_test",
+                    "access_token": CHAT_TOKEN,
+                    "refresh_token": "chatgpt-refresh-token",
+                    "expires_at": expires,
+                    "scopes": "chatgpt.tokens.use.direct"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                db.with_extension("codex-auth.json"),
+                json!({
+                    "host_id": "test-host",
+                    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+                    "account_id": "ezerbot-only",
+                    "access_token": CODEX_TOKEN,
+                    "refresh_token": "codex-refresh-token",
+                    "expires_at": expires
+                })
+                .to_string(),
+            )
+            .unwrap();
+            if with_vault_key {
+                Vault::open(&db.with_extension("secrets.json"))
+                    .unwrap()
+                    .set(SECRET, "Compte OpenAI pour générer des images", VAULT_KEY)
+                    .unwrap();
+            } else {
+                Vault::open(&db.with_extension("secrets.json")).unwrap();
+            }
+            let provider = Provider::with_endpoints(&db, Endpoints::default(), false);
+            provider.select_backend("codex").unwrap();
+            Self {
+                root,
+                db,
+                provider,
+                connection: Connection::open_in_memory().unwrap(),
+            }
+        }
+
+        fn ctx(&self) -> Context<'_> {
+            Context {
+                connection: &self.connection,
+                provider: &self.provider,
+                db_path: &self.db,
+                now_ms: 0,
+                bot_id: None,
+                conversation_id: None,
+                run_id: None,
+            }
+        }
+    }
+
+    impl Drop for Outside {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn secrets_text(db: &Path) -> String {
+        std::fs::read_to_string(db.with_extension("secrets.json")).unwrap_or_default()
+    }
+
+    fn draw() -> ToolCall {
+        ToolCall {
+            call_id: "dehors".into(),
+            name: TOOL.into(),
+            arguments: json!({"description": "un phare au crépuscule"}),
+        }
+    }
+
+    #[test]
+    fn image_key_outside_loopback_is_read_from_the_account_vault() {
+        reset_posts();
+        let present = Outside::open(true);
+        execute(&present.ctx(), &draw());
+        assert_eq!(post_count(), 1, "la clé du trousseau n’a pas été utilisée");
+        assert_eq!(post_key(), VAULT_KEY);
+        let stored = secrets_text(&present.db);
+        assert!(!stored.contains(CHAT_TOKEN));
+        assert!(!stored.contains(CODEX_TOKEN));
+
+        reset_posts();
+        let absent = Outside::open(false);
+        let outcome = execute(&absent.ctx(), &draw());
+        assert_eq!(
+            post_count(),
+            0,
+            "le jeton d’auth a été envoyé au fournisseur"
+        );
+        match outcome {
+            ToolOutcome::Failed { reason } => assert_eq!(reason, CONNECT),
+            other => panic!("résultat inattendu: {other:?}"),
+        }
+        let stored = secrets_text(&absent.db);
+        assert!(
+            !stored.contains(CHAT_TOKEN),
+            "jeton chatgpt écrit hors du trousseau"
+        );
+        assert!(
+            !stored.contains(CODEX_TOKEN),
+            "jeton codex écrit hors du trousseau"
+        );
+    }
+
+    #[test]
+    fn refused_keychain_write_does_not_store_the_image_key_or_call_the_provider() {
+        reset_posts();
+        let outside = Outside::open(false);
+        let path = outside.db.with_extension("secrets.json");
+        let before = std::fs::read(&path).unwrap();
+        let error = Vault::open_refusing_keychain(&path)
+            .unwrap()
+            .set(SECRET, "Compte OpenAI pour générer des images", VAULT_KEY)
+            .unwrap_err();
+        assert!(!error.to_string().contains(VAULT_KEY));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let outcome = execute(&outside.ctx(), &draw());
+        assert_eq!(
+            post_count(),
+            0,
+            "fournisseur appelé après un refus du trousseau"
+        );
+        match outcome {
+            ToolOutcome::Failed { reason } => assert_eq!(reason, CONNECT),
+            other => panic!("résultat inattendu: {other:?}"),
+        }
+        let stored = secrets_text(&outside.db);
+        assert!(!stored.contains(VAULT_KEY));
+        assert!(!stored.contains(CHAT_TOKEN));
+        assert!(!stored.contains(CODEX_TOKEN));
+    }
 
     #[test]
     fn endpoint_accepts_only_loopback_and_the_production_image_host() {
@@ -355,15 +539,6 @@ mod tests {
         ] {
             assert!(image_endpoint(rejected).is_err(), "{rejected}");
         }
-    }
-
-    #[test]
-    fn key_source_keeps_the_chat_bearer_off_the_loopback() {
-        assert_eq!(select_key(true, true, true), KeySource::Vault);
-        assert_eq!(select_key(true, false, true), KeySource::Missing);
-        assert_eq!(select_key(false, false, true), KeySource::Account);
-        assert_eq!(select_key(false, true, false), KeySource::Vault);
-        assert_eq!(select_key(false, false, false), KeySource::Missing);
     }
 
     #[test]

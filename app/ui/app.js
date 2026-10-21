@@ -711,14 +711,30 @@
     list.classList.toggle("has-more", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
   }
 
+  function composerCanFocus() {
+    const editor = $("composer-input")?.querySelector(".gb-editor")?.editor;
+    return editor?.isEditable !== false;
+  }
+
+  function focusComposerOrTitle() {
+    if (composerCanFocus()) {
+      ui.input?.focus();
+      return;
+    }
+    const title = $("conversation-title");
+    if (!title) return;
+    title.tabIndex = -1;
+    title.focus();
+  }
+
   function closeBotMenu(options = {}) {
     const menu = $("bot-menu");
     const wasOpen = !menu.hidden;
     const hadFocus = menu.contains(document.activeElement);
     // Move focus before hiding, so removing the focused item cannot leave focus on body.
-    // A disabled trigger cannot take focus: return it to the editor instead.
+    // A disabled trigger cannot take focus: return it to the editor, or to the title when the editor is inert.
     if (wasOpen && (hadFocus || options.restoreFocus)) {
-      if ($("composer-bot").disabled) ui.input?.focus();
+      if ($("composer-bot").disabled) focusComposerOrTitle();
       else $("composer-bot").focus();
     }
     menu.hidden = true;

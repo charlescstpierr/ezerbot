@@ -179,6 +179,43 @@ test("la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page
   assert.equal(requests.some((call) => String(call.path).includes("share") || String(call.path).includes("publish")), false);
 });
 
+function nestedDocument(depth) {
+  let view = { type: "text", text: "profond" };
+  for (let level = 0; level < depth; level += 1) {
+    view = { type: "element", tag: "div", children: [view] };
+  }
+  return { states: [], view };
+}
+
+function canvasOf(main) {
+  return descendants(main).find((el) => el.classes.includes("page-canvas"));
+}
+
+test("une Page de 64 niveaux s’affiche encore", async () => {
+  const page = { id: "page_cap", title: "Profonde", filename: "profonde.page.tsx", status: "ready", diagnostic: null, preview: "profond", document: nestedDocument(64) };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /profond/);
+  assert.equal(canvasOf(main).children.length > 0, true);
+});
+
+test("une Page de 65 niveaux est refusée avant de peindre le DOM", async () => {
+  const page = { id: "page_over", title: "Profonde", filename: "profonde.page.tsx", status: "ready", diagnostic: null, preview: "profond", document: nestedDocument(65) };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /imbrication trop profonde/);
+  assert.equal(canvasOf(main).children.length, 0);
+});
+
+test("une Page déjà enregistrée plus profonde que 64 niveaux est refusée sans construire le DOM", async () => {
+  const page = { id: "page_deep", title: "Profonde", filename: "profonde.page.tsx", status: "ready", diagnostic: null, preview: "profond", document: nestedDocument(9000) };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /imbrication trop profonde/);
+  assert.equal(canvasOf(main).children.length, 0);
+  assert.equal(descendants(main).some((el) => el.tagName === "div" && el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
 test("une compilation cassée montre la ligne et le caractère, pas une Page vide réussie", async () => {
   const page = { id: "page_broken", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "error", diagnostic: "ligne 6, caractère 7 : balise « td » non fermée", preview: "", document: null };
   const { panels, main, sidebar } = harness(page);

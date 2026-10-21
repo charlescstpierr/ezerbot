@@ -110,6 +110,8 @@
     return pages.find((page) => page.conversation_id === conversationId) || null;
   }
 
+  const maxDepth = 64;
+
   function place(parent, child) {
     if (Array.isArray(child)) {
       for (const item of child) place(parent, item);
@@ -118,8 +120,25 @@
     if (child) parent.append(child);
   }
 
-  function render(spec, row, rowIndex) {
+  function nests(spec) {
+    return !!spec && (spec.type === "element" || spec.type === "map");
+  }
+
+  function pastCap(spec, depth) {
+    if (!spec || typeof spec !== "object") return false;
+    if (spec.type === "map") return pastCap(spec.node, depth);
+    if (spec.type !== "element") return false;
+    const children = Array.isArray(spec.children) ? spec.children : [];
+    for (const child of children) {
+      if (nests(child) && depth >= maxDepth) return true;
+      if (pastCap(child, nests(child) ? depth + 1 : depth)) return true;
+    }
+    return false;
+  }
+
+  function render(spec, row, rowIndex, depth) {
     if (!spec || typeof spec !== "object") return null;
+    if (nests(spec) && depth > maxDepth) return null;
     if (spec.type === "text") return document.createTextNode(spec.text == null ? "" : String(spec.text));
     if (spec.type === "state") {
       const value = viewState[spec.name];
@@ -131,7 +150,7 @@
     }
     if (spec.type === "map") {
       const items = Array.isArray(spec.items) ? spec.items : [];
-      return items.map((item, index) => render(spec.node, item, index));
+      return items.map((item, index) => render(spec.node, item, index, depth));
     }
     if (spec.type !== "element" || !allowed.has(spec.tag)) return null;
     const el = document.createElement(spec.tag);
@@ -152,7 +171,10 @@
         if (index != null && choices[index] && choices[index].focus) choices[index].focus();
       });
     }
-    for (const child of spec.children || []) place(el, render(child, row, rowIndex));
+    for (const child of spec.children || []) {
+      if (nests(child) && depth >= maxDepth) return null;
+      place(el, render(child, row, rowIndex, nests(child) ? depth + 1 : depth));
+    }
     return el;
   }
 
@@ -164,10 +186,16 @@
       shell.canvas.replaceChildren();
       return;
     }
+    if (pastCap(page.document.view, 1)) {
+      shell.diagnostic.hidden = false;
+      shell.diagnostic.textContent = "imbrication trop profonde";
+      shell.canvas.replaceChildren();
+      return;
+    }
     shell.diagnostic.hidden = true;
     shell.diagnostic.textContent = "";
     shell.canvas.replaceChildren();
-    place(shell.canvas, render(page.document.view, null, null));
+    place(shell.canvas, render(page.document.view, null, null, 1));
   }
 
   function remember(page) {

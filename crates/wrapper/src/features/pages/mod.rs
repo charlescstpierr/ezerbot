@@ -265,6 +265,7 @@ struct PageRecord {
     conversation_id: String,
     title: String,
     filename: String,
+    source: String,
     status: String,
     diagnostic: Option<String>,
     document: Option<String>,
@@ -274,7 +275,7 @@ struct PageRecord {
 fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
     let record = conn
         .query_row(
-            "SELECT id, bot_id, conversation_id, title, filename, status, diagnostic, document, preview
+            "SELECT id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview
              FROM bot_pages WHERE id = ?1",
             [id],
             |row| {
@@ -284,10 +285,11 @@ fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
                     conversation_id: row.get(2)?,
                     title: row.get(3)?,
                     filename: row.get(4)?,
-                    status: row.get(5)?,
-                    diagnostic: row.get(6)?,
-                    document: row.get(7)?,
-                    preview: row.get(8)?,
+                    source: row.get(5)?,
+                    status: row.get(6)?,
+                    diagnostic: row.get(7)?,
+                    document: row.get(8)?,
+                    preview: row.get(9)?,
                 })
             },
         )
@@ -297,22 +299,62 @@ fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
             }
             other => other.into(),
         })?;
-    let document = match record.document {
-        Some(text) => serde_json::from_str(&text)
-            .map_err(|_| ApiError::new(500, "Le document de la Page est illisible."))?,
-        None => Value::Null,
-    };
+    let (status, diagnostic, document) = present_document(&record)?;
     Ok(json!({
         "id": record.id,
         "bot_id": record.bot_id,
         "conversation_id": record.conversation_id,
         "title": record.title,
         "filename": record.filename,
-        "status": record.status,
-        "diagnostic": record.diagnostic,
+        "status": status,
+        "diagnostic": diagnostic,
         "preview": record.preview,
         "document": document
     }))
+}
+
+fn recursion_limit(error: &serde_json::Error) -> bool {
+    // serde_json classifies this ceiling as a syntax error, not data.
+    error.is_syntax() && error.to_string().contains("recursion limit exceeded")
+}
+
+/// Page-side render of a saved document. A tree past the cap, including one
+/// already stored, is refused before it is walked or sent to the DOM builder.
+fn present_document(record: &PageRecord) -> Result<(String, Option<String>, Value), ApiError> {
+    let refused = (
+        "error".to_string(),
+        Some("imbrication trop profonde".to_string()),
+        Value::Null,
+    );
+    if record.status != "ready" {
+        return Ok((
+            record.status.clone(),
+            record.diagnostic.clone(),
+            Value::Null,
+        ));
+    }
+    if let Some(text) = record.document.as_deref() {
+        if compile::stored_document_too_deep(text) {
+            return Ok(refused);
+        }
+        match serde_json::from_str::<Value>(text) {
+            Ok(value) if !compile::exceeds_depth(&value) => {
+                return Ok(("ready".to_string(), record.diagnostic.clone(), value));
+            }
+            Ok(_) => return Ok(refused),
+            Err(error) if recursion_limit(&error) => {}
+            Err(_) => {
+                return Err(ApiError::new(500, "Le document de la Page est illisible."));
+            }
+        }
+    }
+    match compile::compile(&record.source) {
+        Ok(page) if !compile::exceeds_depth(&page.document) => {
+            Ok(("ready".to_string(), None, page.document))
+        }
+        Ok(_) => Ok(refused),
+        Err(error) => Ok(("error".to_string(), Some(error.text()), Value::Null)),
+    }
 }
 
 fn valid_page_id(id: &str) -> bool {
@@ -384,10 +426,172 @@ fn pages_dir(ctx: &Context<'_>, bot: &str) -> Result<PathBuf, ApiError> {
 
 fn write_source(directory: &Path, filename: &str, source: &str) -> Result<(), ApiError> {
     let failed = || ApiError::new(500, "La Page n’a pas pu être écrite sur ce Mac.");
+    let refused = || {
+        ApiError::new(
+            400,
+            "La Page ne peut pas être écrite en dehors de son dossier.",
+        )
+    };
+    let root = directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(failed)?;
+    fs::create_dir_all(root).map_err(|_| failed())?;
+    let root = root.canonicalize().map_err(|_| failed())?;
+    // An existing symlink on data/pages/<bot> is resolved before any write.
+    // The file is refused when that target leaves data/pages.
+    if fs::symlink_metadata(directory).is_ok() {
+        let actual = directory.canonicalize().map_err(|_| failed())?;
+        if !actual.starts_with(&root) {
+            return Err(refused());
+        }
+    }
     fs::create_dir_all(directory).map_err(|_| failed())?;
     let directory = directory.canonicalize().map_err(|_| failed())?;
+    if !directory.starts_with(&root) {
+        return Err(refused());
+    }
     let temporary = directory.join(format!(".{filename}.tmp"));
+    let output = directory.join(filename);
+    if !temporary.starts_with(&directory) || !output.starts_with(&directory) {
+        return Err(refused());
+    }
+    if fs::symlink_metadata(&temporary).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(refused());
+    }
     fs::write(&temporary, source).map_err(|_| failed())?;
-    fs::rename(&temporary, directory.join(filename)).map_err(|_| failed())?;
+    fs::rename(&temporary, &output).map_err(|_| failed())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-pages-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn write_refuses_a_bot_directory_symlink_that_leaves_pages() {
+        let root = Temp(scratch("symlink"));
+        let pages = root.0.join("data/pages");
+        let outside = root.0.join("outside");
+        fs::create_dir_all(&pages).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("sentinel.txt"), "rester").unwrap();
+        let bot = pages.join("grokbot");
+        symlink(&outside, &bot).unwrap();
+
+        let error = write_source(&bot, "forfaits.page.tsx", "contenu secret").unwrap_err();
+        assert!(error.message.contains("en dehors"), "{}", error.message);
+        assert!(!outside.join("forfaits.page.tsx").exists());
+        assert!(!outside.join(".forfaits.page.tsx.tmp").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "rester"
+        );
+        let entries: Vec<_> = fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("sentinel.txt")]);
+    }
+
+    #[test]
+    fn write_keeps_a_real_directory_and_an_internal_symlink() {
+        let root = Temp(scratch("internal"));
+        let pages = root.0.join("data/pages");
+        let real = pages.join("reel");
+        fs::create_dir_all(&real).unwrap();
+        let alias = pages.join("alias");
+        symlink(&real, &alias).unwrap();
+
+        write_source(&real, "direct.page.tsx", "direct").unwrap();
+        write_source(&alias, "lien.page.tsx", "lien").unwrap();
+        assert_eq!(
+            fs::read_to_string(real.join("direct.page.tsx")).unwrap(),
+            "direct"
+        );
+        assert_eq!(
+            fs::read_to_string(real.join("lien.page.tsx")).unwrap(),
+            "lien"
+        );
+        assert!(!pages.join("direct.page.tsx").exists());
+    }
+
+    fn deep_document(depth: usize) -> String {
+        let mut view = r#"{"type":"text","text":"fin"}"#.to_string();
+        for _ in 0..depth {
+            view = format!(r#"{{"type":"element","tag":"div","children":[{view}]}}"#);
+        }
+        format!(r#"{{"states":[],"view":{view}}}"#)
+    }
+
+    fn insert_page(conn: &Connection, id: &str, source: &str, document: &str) {
+        conn.execute(
+            "INSERT INTO bot_pages (
+                id, bot_id, conversation_id, title, filename, source, status, diagnostic, document, preview, created_at, updated_at
+             ) VALUES (?1, 'grokbot', 'fil', 'Profonde', 'profonde.page.tsx', ?2, 'ready', NULL, ?3, 'fin', 1, 1)",
+            params![id, source, document],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn capped_page_reloads_when_serde_cannot_parse_the_stored_json() {
+        let mut open = String::new();
+        let mut close = String::new();
+        for _ in 0..64 {
+            open.push_str("<div>");
+            close.push_str("</div>");
+        }
+        let source = format!("export default function Page(){{return ({open}ok{close});}}");
+        let compiled = compile::compile(&source).unwrap();
+        let stored = serde_json::to_string(&compiled.document).unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&stored).is_err(),
+            "64 éléments dépassent la récursion serde_json"
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        insert_page(&conn, "page_cap", &source, &stored);
+        let page = load(&conn, "page_cap").unwrap();
+        assert_eq!(page["status"], "ready", "{page}");
+        assert_eq!(page["document"]["view"]["tag"], "div");
+    }
+
+    #[test]
+    fn already_saved_deep_document_is_refused_without_crashing() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let source = "export default function Page(){return (<p>court</p>);}\n";
+        insert_page(&conn, "page_deep", source, &deep_document(9_000));
+        let page = load(&conn, "page_deep")
+            .expect("un document profond déjà enregistré reste lisible comme refus");
+        assert!(page["document"].is_null(), "{page}");
+        let diagnostic = page["diagnostic"].as_str().unwrap_or("");
+        assert!(
+            diagnostic.contains("imbrication trop profonde"),
+            "{diagnostic}"
+        );
+        assert_eq!(page["status"], "error");
+    }
 }

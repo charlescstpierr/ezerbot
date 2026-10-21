@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { cycleFind, findCountLabel, findInRendered, findInThread, highlightOccurrence } from "./thread-find.js";
+import { cycleFind, findCountLabel, findInRendered, findInThread, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { createRatingTable, ratingLabels } from "./thread-rating.js";
 
 const rare = "xyloglotte";
@@ -31,14 +31,19 @@ test("Fermer n’écrit rien, l’envoi est dans l’export, et le module ne par
   };
   const table = createRatingTable(storage, { now: () => "2026-10-21T12:00:00.000Z", createId: () => "note-1" });
   assert.deepEqual(table.list(), []);
-  const good = table.recordGood({ conversationId: "conv-1", messageId: "m-bot" });
+  const good = table.recordGood({ conversationId: "conv-1", messageId: "m-bot", runId: "run-avant" });
   assert.equal(good.vote, "bon");
-  const sent = table.recordBad({ conversationId: "conv-1", messageId: "m-bot", motif: "pas-demande", details: "Il invente une date." });
+  assert.equal(good.message_id, "m-bot");
+  assert.equal(good.run_id, "run-avant");
+  const sent = table.recordBad({ conversationId: "conv-1", messageId: "m-bot", runId: "run-avant", motif: "pas-demande", details: "Il invente une date." });
   assert.equal(sent.motif, ratingLabels.reasons[0].label);
   assert.equal(sent.details, "Il invente une date.");
+  assert.equal(sent.run_id, "run-avant");
   const exported = table.exportDocument();
   assert.equal(exported.notations.length, 2);
   assert.equal(exported.notations[1].motif, "Pas ce que j’ai demandé");
+  assert.equal(exported.notations[1].run_id, "run-avant");
+  assert.equal(exported.notations[1].message_id, "m-bot");
   assert.equal(JSON.stringify(exported).includes("voteGrokBotFeedback"), false);
   const source = readFileSync(new URL("./thread-rating.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /fetch\s*\(/);
@@ -224,6 +229,25 @@ test("le surlignage retrouve café NFD et İ dans le texte affiché", () => {
   assert.equal(capital.textContent, "İ");
   assert.equal(istanbul.querySelector("[data-find-body]").textContent, "İstanbul");
   assert.equal(istanbul.querySelector("time").textContent, "İl y a une heure");
+});
+
+test("un rafraîchissement du fil ne recentre plus l’occurrence déjà affichée", () => {
+  const hit = { query: "xyloglotte", messageId: "m-bot", indexInMessage: 1 };
+  const opened = shouldRecenterFind(null, hit);
+  assert.equal(opened.recenter, true);
+  const refresh = shouldRecenterFind(opened.identity, { ...hit });
+  assert.equal(refresh.recenter, false);
+  const next = shouldRecenterFind(refresh.identity, { ...hit, indexInMessage: 0 });
+  assert.equal(next.recenter, true);
+  const message = shouldRecenterFind(next.identity, { query: "xyloglotte", messageId: "m-user", indexInMessage: 0 });
+  assert.equal(message.recenter, true);
+  const query = shouldRecenterFind(message.identity, { query: "autre", messageId: "m-user", indexInMessage: 0 });
+  assert.equal(query.recenter, true);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  const effect = source.slice(source.indexOf("useLayoutEffect(() => {"), source.indexOf("Tooltip.Provider"));
+  assert.match(effect, /shouldRecenterFind\(findAnchor\.current, find\)/);
+  assert.doesNotMatch(effect, /if \(mark\) mark\.scrollIntoView/);
+  assert.match(effect, /if \(mark && recenter\) mark\.scrollIntoView/);
 });
 
 test("une réponse terminée propose Bon résultat et Mauvais résultat, pas pendant l’écriture", () => {

@@ -56,9 +56,11 @@
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
-  const ratings = window.GrokbotChat.createRatingTable
-    ? window.GrokbotChat.createRatingTable(localStorage)
-    : { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
+  function openRatings() {
+    try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
+    catch { return null; }
+  }
+  const ratings = openRatings() || { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0 };
   let followAfterLayout = null;
@@ -1537,7 +1539,7 @@
   function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
-    ratings.recordGood({ conversationId: conversation.id, messageId: message.id });
+    ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null });
     notify("Bon résultat enregistré.");
   }
 
@@ -1545,7 +1547,7 @@
     const conversation = currentConversation();
     const dialog = $("rating-dialog");
     if (!conversation || !message?.id || !dialog?.showModal) return;
-    pendingRating = { conversationId: conversation.id, messageId: message.id };
+    pendingRating = { conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null };
     $("rating-form")?.reset?.();
     dialog.showModal();
   }
@@ -1719,6 +1721,7 @@
     ratings.recordBad({
       conversationId: pendingRating.conversationId,
       messageId: pendingRating.messageId,
+      runId: pendingRating.runId,
       motif: selected?.value || "",
       details: $("rating-details")?.value || "",
     });

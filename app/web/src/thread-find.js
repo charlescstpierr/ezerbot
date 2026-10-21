@@ -148,6 +148,13 @@ export function findInRendered(root, query) {
   return matches;
 }
 
+export function shouldRecenterFind(previous, find) {
+  const identity = find?.query && find.messageId
+    ? `${find.query}\0${find.messageId}\0${find.indexInMessage || 0}`
+    : "";
+  return { identity, recenter: identity !== previous };
+}
+
 export function cycleFind(index, count, direction) {
   if (!count) return 0;
   return (index + direction + count) % count;

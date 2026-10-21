@@ -35,23 +35,25 @@ export function createRatingTable(storage, { now = () => new Date().toISOString(
   };
   return {
     list() { return readRows(storage); },
-    recordGood({ conversationId, messageId }) {
+    recordGood({ conversationId, messageId, runId }) {
       return append({
         id: createId(),
         conversation_id: conversationId,
         message_id: messageId,
+        run_id: runId || null,
         vote: "bon",
         motif: null,
         details: "",
         created_at: now(),
       });
     },
-    recordBad({ conversationId, messageId, motif, details }) {
+    recordBad({ conversationId, messageId, runId, motif, details }) {
       const reason = ratingLabels.reasons.find((item) => item.id === motif);
       return append({
         id: createId(),
         conversation_id: conversationId,
         message_id: messageId,
+        run_id: runId || null,
         vote: "mauvais",
         motif: reason?.label || null,
         details: String(details || ""),

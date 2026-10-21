@@ -10,7 +10,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
-import { clearFindMarks, highlightOccurrence } from "./thread-find.js";
+import { clearFindMarks, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
@@ -314,8 +314,11 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
   const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
+  const findAnchor = useRef(null);
   useLayoutEffect(() => {
     const root = threadRoot.current;
+    const { identity, recenter } = shouldRecenterFind(findAnchor.current, find);
+    findAnchor.current = identity;
     let attempts = 0;
     let frame = 0;
     const apply = () => {
@@ -327,8 +330,8 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
     };
     const reveal = () => {
       const mark = apply();
-      if (mark) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
-      else if (find?.query && attempts < 8) {
+      if (mark && recenter) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
+      else if (!mark && find?.query && attempts < 8) {
         attempts += 1;
         frame = requestAnimationFrame(reveal);
       }

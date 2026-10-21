@@ -158,7 +158,7 @@ function register(byId, node, id) {
   return node;
 }
 
-async function boot() {
+async function boot({ storageThrows = false } = {}) {
   const findMod = await import("../web/src/thread-find.js").catch(() => null);
   const ratingMod = await import("../web/src/thread-rating.js").catch(() => null);
   const teach = await import("../web/src/teach.js");
@@ -169,6 +169,7 @@ async function boot() {
   const assistant = {
     id: "m-bot", role: "assistant", state: "echoed", created_at: "2026-10-21T12:00:01.000Z",
     body: `Oui, ${RARE} revient, et encore ${RARE}.`,
+    payload: { run_id: "run-avant" },
   };
   const state = {
     state_revision: 1,
@@ -316,6 +317,9 @@ async function boot() {
     ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     Node: Element,
   });
+  if (storageThrows) {
+    Object.defineProperty(context, "localStorage", { configurable: true, get() { throw new Error("SecurityError"); } });
+  }
   vm.runInContext(fs.readFileSync(`${__dirname}/app.js`, "utf8"), context);
   for (let attempt = 0; attempt < 20 && document.getElementById("conversation-title").textContent !== "Mot rare"; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -382,6 +386,7 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   assert.equal(app.notations().length, 1);
   assert.equal(app.notations()[0].vote, "bon");
   assert.equal(app.notations()[0].message_id, "m-bot");
+  assert.equal(app.notations()[0].run_id, "run-avant");
 
   app.threadProps.onRateBad(app.assistant);
   app.document.getElementById("rating-details").value = DETAILS;
@@ -407,13 +412,23 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   assert.equal(exported.notations[1].motif, MOTIF);
   assert.equal(exported.notations[1].details, DETAILS);
   assert.equal(exported.notations[1].message_id, "m-bot");
+  assert.equal(exported.notations[1].run_id, "run-avant");
   assert.equal(JSON.stringify(exported).includes("voteGrokBotFeedback"), false);
 
   app.document.getElementById("export-button").click();
   const conversation = JSON.parse(await app.blobs.at(-1).text());
   assert.equal(conversation.notations[1].motif, MOTIF);
+  assert.equal(conversation.notations[1].run_id, "run-avant");
   assert.equal(conversation.messages.some((message) => JSON.stringify(message).includes(MOTIF)), false);
 
   const ratingCalls = app.calls.filter((call) => /notation|feedback|vote|rating/i.test(`${call.path}\n${call.body}`) || String(call.body).includes(MOTIF) || String(call.body).includes(DETAILS));
   assert.deepEqual(ratingCalls, []);
+});
+
+test("un stockage qui jette laisse démarrer le shell et désactive la notation", async () => {
+  const app = await boot({ storageThrows: true });
+  assert.ok(app.document.listeners.keydown?.length >= 1);
+  assert.ok(app.document.getElementById("new-chat").listeners.click?.length >= 1);
+  assert.equal(app.document.getElementById("conversation-title").textContent, "Nouvelle conversation");
+  assert.doesNotThrow(() => app.document.getElementById("export-ratings-button").click());
 });

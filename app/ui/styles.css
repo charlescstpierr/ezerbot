@@ -247,11 +247,12 @@ a.secondary-button { text-decoration: none; }
 .composer-model { display: flex; align-items: center; gap: 2px; min-width: 0; margin-left: -6px; }
 .composer-bot { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 32px; padding: 0 8px 0 6px; border-radius: 8px; color: var(--text); font-size: 12px; font-weight: 550; transition: background .15s; }
 .composer-bot:hover:enabled, .composer-bot[aria-expanded="true"] { background: var(--soft); }
+.composer-bot:focus-visible { outline-offset: -2px; }
 .composer-bot:disabled { cursor: default; }
 .composer-bot:disabled .composer-chevron { display: none; }
 .composer-bot-name { flex: 0 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer .composer-bot-name { min-width: 45px; }
-.composer-chevron { width: 13px; height: 13px; color: var(--subtle); }
+.composer-chevron { flex: 0 0 auto; width: 13px; height: 13px; color: var(--subtle); }
 .composer-mascot { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; }
 .send-button { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--canvas); transition: background .15s, opacity .15s; }
 .send-button:hover:enabled { opacity: .85; }
@@ -488,6 +489,10 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
 @media (min-width: 761px) {
   .composer .composer-bot-name { min-width: 0; }
 }
+/* Au-dessus de 1100 les libellés Modèle / Effort / Vitesse reviennent et tronquent le nom, entier à 910 et 960. */
+@media (min-width: 1101px) {
+  .composer-model:has([data-picker="speed"]) .tool-pill small { display: none; }
+}
 @media (max-width: 760px) {
   body { display: block; background: var(--canvas); }
   .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 278px; margin: 0; transform: translateX(-100%); transition: transform .2s; padding-top: 25px; border-radius: 0 10px 10px 0; }
@@ -502,7 +507,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .topbar { height: 59px; padding: 0 16px 0 9px; gap: 10px; }
   .topbar-title { gap: 8px; }
   .workspace-label, .breadcrumb-separator { display: none; }
-  .topbar h1 { font-size: 11px; }
+  .topbar h1 { font-size: 11px; min-width: 0; }
   .topbar-actions { gap: 7px; }
   .mode-badge { padding: 4px 7px; font-size: 9px; }
   .popover { top: 50px; right: 13px; }
@@ -533,6 +538,13 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer { padding: 13px 10px 9px 14px; border-radius: 16px; }
   /* Vitesse reste dans la rangée : son conteneur garde la largeur des pastilles. Le nom cède, et la barre s'élargit juste assez pour que le chevron reste dans le bouton. */
   .composer-model:has([data-picker="speed"]) .composer-tools { flex: 0 0 auto; min-width: max-content; }
+  /* Sans Vitesse, le nom et l'effort cèdent avant Modèle. 80 px gardent « Ezerbot » et le chevron ; les pastilles ne passent plus sous les commandes vocales. */
+  .composer-model:not(:has([data-picker="speed"])) .composer-bot { flex: 1 1 0; min-width: 80px; }
+  .composer-model:not(:has([data-picker="speed"])) .composer-tools { flex: 0 1 auto; min-width: 14px; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="model"] { flex: 0 1 auto; min-width: 0; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 20 auto; min-width: 0; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="model"] b,
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 1 auto; min-width: 0; }
   .composer-area:has([data-picker="speed"]) { width: calc(100% - 4px); }
   .composer:has([data-picker="speed"]) { padding-left: 6px; padding-right: 6px; }
   .composer:has([data-picker="speed"]) .attachment-choose { width: 22px; }
@@ -545,6 +557,10 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .bot-preview-mascot { width: 96px; height: 84px; }
   .connection-banner { gap: 8px; padding: 9px 15px; font-size: 10px; }
 }
+/* À partir de 480, le bouton garde de quoi ellipser le nom moyen sans manger « GPT-6.1 Sol ». */
+@media (min-width: 480px) and (max-width: 760px) {
+  .composer-model:not(:has([data-picker="speed"])) .composer-bot { min-width: 148px; }
+}
 /* Sous 480, trois pastilles ne tiennent plus à côté du bot : Vitesse passe à la ligne au lieu d'écraser le bouton. */
 @media (max-width: 479px) {
   .composer-model:has([data-picker="speed"]) { flex-wrap: wrap; }
@@ -552,13 +568,15 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
     flex: 1 0 100%;
     min-width: 0;
   }
-  .composer-model:has([data-picker="speed"]) .composer-bot { min-width: min-content; }
+  .composer-model:has([data-picker="speed"]) .composer-bot { min-width: 0; }
 }
 @media (max-width: 370px) {
   .welcome h2 { font-size: 26px; }
   .welcome { width: calc(100% - 30px); }
   .suggestion { padding: 10px 8px; gap: 6px; }
   .suggestion-icon { width: 16px; }
+  /* Le plancher de 45 px laisse le chevron sortir du bouton quand le modèle est large. */
+  .composer .composer-model .composer-bot-name { min-width: 0; }
 }
 @media (max-height: 650px) and (max-width: 760px) {
   .welcome { padding-top: 12px; }

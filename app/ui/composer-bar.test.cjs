@@ -154,7 +154,16 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         toolsGap: voice.left - toolsBox.right,
         speedGap: speedBox ? voice.left - speedBox.right : null,
         speedTop: speedBox ? speedBox.top : null,
+        modelTop: modelButtonBox ? modelButtonBox.top : null,
+        effortTop: effortButtonBox ? effortButtonBox.top : null,
+        modelGap: modelButtonBox ? voice.left - modelButtonBox.right : null,
+        effortGap: effortButtonBox ? voice.left - effortButtonBox.right : null,
+        headsetLeft: boxOf(document.querySelector(".voice-session-toggle")).left,
         voiceTop: voice.top,
+        pillLabel: document.querySelector(".composer-tools .tool-pill small")
+          ? getComputedStyle(document.querySelector(".composer-tools .tool-pill small")).display
+          : "",
+        titleMinWidth: getComputedStyle(document.getElementById("conversation-title")).minWidth,
         nameInside: contained(nameBox, botBox),
         chevronInside: contained(chevronBox, botBox),
         modelLabelWidth: modelBox.width,
@@ -845,12 +854,78 @@ test("layout holds at every 10px from 360 to 1140", { timeout: 300000 }, async (
       const header = at(headerReports, width);
       const headerWhere = `${theme} ${width} clear=${header.titleClear} title=${header.titleClient}/${header.titleScroll} ws=${header.workspaceClient}/${header.workspaceScroll} titleBox=${JSON.stringify(header.titleBox)} actions=${JSON.stringify(header.actionsBox)}`;
       assert.equal(header.titleClear, true, headerWhere);
+      if (width <= 760) assert.equal(header.titleMinWidth, "0px", headerWhere);
       if (width >= 761) {
         assert.ok(header.titleClient >= 120, headerWhere);
         assert.ok(header.workspaceClient >= 56, headerWhere);
       }
     }
   }
+});
+
+const MODELS = ["GPT-6.1 Sol", CODEX_SPARK, CODEX_SPARK_WIDE];
+const BOTS = ["Ezerbot", MEDIUM_NAME, LONG_NAME];
+
+test("without speed, model and effort stay on the voice row at 360, 430, 480 and 520", { timeout: 300000 }, async () => {
+  const widths = [360, 370, 430, 480, 520];
+  for (const width of widths) {
+    for (const model of MODELS) {
+      for (const bot of BOTS) {
+        const report = await measure(width, 780, bot, { model, effort: DEFAULT_EFFORT, speed: "" });
+        for (const theme of report.themes) {
+          const where = `${width} ${model} / ${bot} ${theme.theme} viewport=${theme.viewport} modelGap=${theme.modelGap} effortGap=${theme.effortGap} toolsGap=${theme.toolsGap} modelTop=${theme.modelTop} effortTop=${theme.effortTop} voiceTop=${theme.voiceTop} name=${theme.nameClient}/${theme.nameScroll} pieces=${JSON.stringify(theme.pieces)} nameBox=${JSON.stringify(theme.nameBox)} botBox=${JSON.stringify(theme.botBox)} chevron=${JSON.stringify(theme.chevronBox)}`;
+          assert.equal(theme.speedGap, null, where);
+          assert.equal(theme.nameInside, true, where);
+          assert.equal(theme.chevronInside, true, where);
+          assert.ok(Math.abs(theme.modelTop - theme.voiceTop) <= 2, where);
+          assert.ok(Math.abs(theme.effortTop - theme.voiceTop) <= 2, where);
+          assert.ok(theme.modelGap >= 0, where);
+          assert.ok(theme.effortGap >= 0, where);
+          if (bot === "Ezerbot") assert.equal(theme.nameFits, true, where);
+        }
+      }
+    }
+  }
+});
+
+test("from 1101 to 1440 the medium name stays whole with speed across three models and three bots", { timeout: 300000 }, async () => {
+  const widths = sweep(1101, 1440, 40, [1140, 1440]);
+  for (const width of widths) {
+    for (const model of MODELS) {
+      for (const bot of BOTS) {
+        const report = await measure(width, 780, bot, { model, effort: DEFAULT_EFFORT, speed: "Standard" });
+        for (const theme of report.themes) {
+          const where = `${width} ${model} / ${bot} ${theme.theme} viewport=${theme.viewport} name=${theme.nameClient}/${theme.nameScroll} pill=${theme.pillLabel} speedGap=${theme.speedGap} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop} bot=${theme.pieces.bot}`;
+          assert.equal(theme.pillLabel, "none", where);
+          assert.equal(theme.nameInside, true, where);
+          assert.equal(theme.chevronInside, true, where);
+          assert.ok(Math.abs(theme.speedTop - theme.voiceTop) <= 2, where);
+          assert.ok(theme.speedGap >= 6, where);
+          if (bot === "Ezerbot" || bot === MEDIUM_NAME) assert.equal(theme.nameFits, true, where);
+        }
+      }
+    }
+  }
+});
+
+test("a long name with speed stays clear of the headset below 400px", { timeout: 120000 }, async () => {
+  for (const width of [360, 390]) {
+    const report = await measure(width, 780, LONG_NAME, { model: CODEX_SPARK, effort: DEFAULT_EFFORT, speed: "Standard" });
+    for (const theme of report.themes) {
+      const nameOver = theme.nameBox.right - theme.headsetLeft;
+      const where = `${width} ${theme.theme} viewport=${theme.viewport} headset=${theme.headsetLeft} nameOver=${nameOver} bot=${theme.pieces.bot} name=${theme.nameClient}/${theme.nameScroll} nameBox=${JSON.stringify(theme.nameBox)} botBox=${JSON.stringify(theme.botBox)} chevron=${JSON.stringify(theme.chevronBox)} speedTop=${theme.speedTop} voiceTop=${theme.voiceTop}`;
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.chevronInside, true, where);
+      assert.ok(theme.botBox.right <= theme.headsetLeft + 0.5, where);
+      assert.ok(theme.nameBox.right <= theme.headsetLeft + 0.5, where);
+      assert.ok(theme.speedTop >= theme.voiceTop + 16, where);
+    }
+  }
+});
+
+test("the bot button focus ring sits inside the control", () => {
+  const css = readFileSync(`${UI}/styles.css`, "utf8");
+  assert.match(css, /\.composer-bot:focus-visible\s*\{[^}]*outline-offset:\s*-2px/);
 });
 
 test("suggestions sit against the composer at 820×560 instead of leaving a void", async () => {

@@ -266,7 +266,7 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
                 "/api/send",
                 json!({"conversation_id":id,"message_id":"m1","body":"prompt confidentiel"}),
             );
-            wait("erreur durable", || reply(&mut app)["error_kind"] == kind);
+            wait("erreur durable", || durable_limit(&reply(&mut app), kind));
             let error = reply(&mut app);
             assert_eq!(
                 fixture
@@ -446,7 +446,7 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
         "/api/send",
         json!({"conversation_id":id,"message_id":"m1","body":"Bonjour"}),
     );
-    wait("limite", || reply(&mut app)["error_kind"] == "limit");
+    wait("limite", || durable_limit(&reply(&mut app), "limit"));
     let error = reply(&mut app)["error"].clone();
     drop(app);
     let mut app = fixture.app();
@@ -455,4 +455,17 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
     assert_eq!(state(&mut app)["provider"]["email"], "quota@example.test");
     post(&mut app, "/api/provider/signout", json!({}));
     assert!(state(&mut app)["provider"]["email"].is_null());
+}
+
+fn durable_limit(reply: &Value, kind: &str) -> bool {
+    reply["state"] == "failed" && reply["error_kind"] == kind
+}
+
+#[test]
+fn durable_limit_ignores_an_error_kind_while_the_reply_is_still_streaming() {
+    let streaming = json!({"state":"streaming","error_kind":"limit"});
+    assert!(!durable_limit(&streaming, "limit"));
+    let settled = json!({"state":"failed","error_kind":"limit"});
+    assert!(durable_limit(&settled, "limit"));
+    assert!(!durable_limit(&settled, "other"));
 }

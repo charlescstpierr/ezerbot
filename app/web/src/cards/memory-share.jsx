@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
+import { reconcileShareSelection } from "../memory-share-selection.js";
 
 export const kind = "memory_share";
 export function Card({ message, onAction }) {
   const facts = message.payload?.facts || [];
-  const signature = JSON.stringify(facts.map((f) => [f.fact_id, f.shared]));
-  const [selected, setSelected] = useState(new Set());
+  const signature = JSON.stringify(facts.map((f) => [f.fact_id, f.shared, f.sensitive]));
+  const [selection, setSelection] = useState(() => reconcileShareSelection(null, message));
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState("");
   const [error, setError] = useState("");
-  useEffect(() => { setSelected(new Set(facts.filter((f) => f.class === "work" && !f.sensitive && !f.shared).map((f) => f.fact_id))); }, [signature]);
+  useEffect(() => {
+    setSelection((previous) => reconcileShareSelection(previous, message));
+  }, [message.id, signature]);
+  const selected = selection.selected;
   async function share() {
     setBusy(true); setError("");
     try {
@@ -16,7 +20,7 @@ export function Card({ message, onAction }) {
       await onAction("share", { fact_ids: [...selected], onConfirmed: (report) => { result = report; } });
       if (!result || typeof result.shared_count !== "number") throw new Error("Partage non confirmé. Actualisez avant de réessayer.");
       setReceipt(`${result.shared_count} souvenir${result.shared_count > 1 ? "s" : ""} partagé${result.shared_count > 1 ? "s" : ""}. Les autres restent privés.`);
-      setSelected(new Set());
+      setSelection((previous) => ({ ...previous, selected: new Set() }));
     } catch (failure) { setError(failure.message || "Partage non confirmé."); }
     finally { setBusy(false); }
   }
@@ -26,7 +30,7 @@ export function Card({ message, onAction }) {
     {facts.length === 0 && <p className="memory-note">Ces souvenirs ont été oubliés ou remplacés.</p>}
     <fieldset disabled={busy} className="memory-controls">
       {facts.map((fact) => <label className="memory-share-choice" key={fact.fact_id}>
-        <input type="checkbox" checked={fact.shared || selected.has(fact.fact_id)} disabled={fact.sensitive || fact.shared} onChange={(e) => setSelected((old) => { const next = new Set(old); if (e.target.checked) next.add(fact.fact_id); else next.delete(fact.fact_id); return next; })} />
+        <input type="checkbox" checked={fact.shared || selected.has(fact.fact_id)} disabled={fact.sensitive || fact.shared} onChange={(e) => setSelection((old) => { const next = new Set(old.selected); if (e.target.checked) next.add(fact.fact_id); else next.delete(fact.fact_id); return { ...old, selected: next }; })} />
         <span>{fact.text}<small>{fact.shared ? "Déjà en équipe" : fact.sensitive ? "Sensible · reste privé" : fact.class === "work" ? "Travail" : fact.class === "personal" ? "Personnel · privé par défaut" : "À vérifier · privé par défaut"}</small></span>
       </label>)}
       <button type="button" className="gb-retry gb-retry-primary" disabled={busy || !selected.size} onClick={share}>{busy ? "Partage…" : `Partager la sélection (${selected.size})`}</button>

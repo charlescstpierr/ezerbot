@@ -96,6 +96,11 @@ fn send(tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
     tx.send(value)
         .map_err(|_| Error::InvalidInput("transport abandoned".into()))
 }
+fn admission_refused(live: usize, closing: usize) -> bool {
+    // `transports` counts workers still alive. A closing tally that outlived
+    // the last of them must not refuse the next turn.
+    live > 0 && closing >= 4
+}
 fn terminal_event(value: &Wire) -> bool {
     matches!(
         value,
@@ -130,7 +135,10 @@ impl Session {
         }
         // Live turns, titles and compaction stay admitted. Only sockets already
         // abandoned — and still blocked in a read — can pile up.
-        if self.inner.closing.load(Ordering::SeqCst) >= 4 {
+        if admission_refused(
+            self.inner.transports.load(Ordering::SeqCst),
+            self.inner.closing.load(Ordering::SeqCst),
+        ) {
             let failure = Failure::other(
                 "Les connexions précédentes se ferment encore. Réessayez dans une minute.",
             );
@@ -547,6 +555,17 @@ mod elapsed_interval {
             "HTTP/1.1 200 OK\r\nContent-Type: {content}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         );
+    }
+
+    #[test]
+    fn a_stale_closing_tally_does_not_block_when_no_worker_remains() {
+        assert!(super::admission_refused(4, 4));
+        assert!(
+            !super::admission_refused(0, 7),
+            "closing outlived every transport"
+        );
+        assert!(!super::admission_refused(3, 3));
+        assert!(!super::admission_refused(0, 0));
     }
 
     #[test]

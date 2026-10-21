@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { HumanInputCard } from "./form.jsx";
 import { skillDiff, skillDiffStats } from "../skill-proposal.js";
+import { savedDemonstrationText } from "../demonstration-presentation.js";
 
 // Rendered only by the existing approval card; not a separate permission system.
 export function SkillProposal({ message, input, disabled, expired }) {
@@ -57,6 +58,7 @@ export function SkillProposal({ message, input, disabled, expired }) {
       {settled ? <details className="gb-skill-saved-preview" key="settled" onToggle={(event) => { if (event.currentTarget.open) void loadPreview(); }}><summary>{saved ? "Voir le contenu enregistré" : "Voir la proposition"}</summary><div className="mt-3">{hasContent ? preview : loadError
         ? <div><p className="gb-skill-error" role="alert">{loadError}</p><button type="button" className="gb-retry" disabled={loading} onClick={() => void loadPreview()}>Réessayer</button></div>
         : <p className="text-xs text-muted-foreground" role="status">Chargement du contenu…</p>}</div></details> : preview || <p className="text-xs text-muted-foreground" role="status">Votre accord est reçu. L’enregistrement est en cours…</p>}
+      {display.demonstration && <div className="text-xs text-muted-foreground space-y-2"><p>{saved ? savedDemonstrationText(display.demonstration) : settled ? "L’enregistrement de la démonstration a été supprimé." : <>Apprise depuis votre démonstration. {display.demonstration.keep_images ? "Les captures seront conservées localement si vous enregistrez." : "Seul le lien vers la synthèse sera conservé, sans les captures."} Ignorer supprime l’enregistrement.</>}</p>{(!settled || saved) && <button type="button" className="gb-retry" onClick={() => window.EzerbotDemonstration?.showSummary(display.demonstration.id)}>Voir la synthèse de démonstration</button>}</div>}
       {pending && <><p className="text-xs text-muted-foreground">Rien n’est enregistré sans votre clic. Chaque version demande votre accord.</p><fieldset className="flex flex-wrap gap-2" disabled={disabled}>
         <button type="button" className="gb-retry gb-retry-primary" onClick={() => act("forms.decide", { decision: "allow_once" })}>Enregistrer</button>
         <button type="button" className="gb-retry" onClick={() => act("forms.decide", { decision: "deny" })}>Ignorer</button>

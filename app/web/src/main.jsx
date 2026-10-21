@@ -10,12 +10,14 @@ import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } fr
 import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { createDeepLinkQueue } from "./deep-links.js";
 import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
+import { demonstrationSummaryView } from "./demonstration-presentation.js";
 
 const roots = new WeakMap();
 
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {
   createVoiceReader, voiceNeedsAction,
+  demonstrationSummaryView,
   createDeepLinkQueue,
   teachPrompt: TEACH_PROMPT,
   isTeachMessage,

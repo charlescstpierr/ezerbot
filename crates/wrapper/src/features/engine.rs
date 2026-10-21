@@ -2015,14 +2015,37 @@ impl RunGatewayCall<'_> {
                 && matches!(run.trigger, Trigger::Delegation { .. })
             {
                 let sources = super::delegation::material_sources(self.connection, &run)?;
-                let (images, documents) = super::attachments::selected_material(
+                let mut urls = self.image_urls.lock().unwrap_or_else(|e| e.into_inner());
+                let (mut images, documents) = super::attachments::selected_material(
                     &ctx,
                     &sources,
                     &request.model,
                     sending_bytes,
-                    &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+                    &mut urls,
                 )
                 .map_err(engine_error)?;
+                if let Some((conversation, ids)) =
+                    super::delegation::delegation_image_selection(self.connection, &run)?
+                {
+                    for image in super::attachments::images_for_selected(
+                        &ctx,
+                        &conversation,
+                        &ids,
+                        &request.model,
+                        sending_bytes,
+                        &mut urls,
+                    )
+                    .map_err(engine_error)?
+                    {
+                        if !images
+                            .iter()
+                            .any(|existing| existing.attachment_id == image.attachment_id)
+                        {
+                            images.push(image);
+                        }
+                    }
+                }
+                drop(urls);
                 sending.images = images;
                 sending.text.push_str(&documents);
             } else {

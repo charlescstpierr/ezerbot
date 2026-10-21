@@ -764,6 +764,123 @@ fn five_concurrent_chats_are_not_mistaken_for_abandoned_connections() {
 }
 
 #[test]
+fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(2));
+    let mut held = vec![];
+    for n in 0..4 {
+        let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let message = format!("hold-{n}");
+        f.fake.queue.lock().unwrap().push_back(Fault::Partial);
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":message,"body":"Question en attente"}),
+        );
+        held.push((chat, message));
+    }
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        held.iter().all(|(chat, message)| {
+            state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == *chat)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == format!("reply-{message}") && m["body"] == "Début conservé.")
+        })
+    });
+    for (chat, message) in &held {
+        post(
+            &mut f.app,
+            "/api/stop",
+            json!({"conversation_id":chat,"message_id":message}),
+        );
+    }
+    let log_path = f.db.parent().unwrap().join("logs/engine.log");
+    until(|| {
+        std::fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .matches("code=cancelled")
+            .count()
+            >= 4
+    });
+    let blocked = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let started = Instant::now();
+    post(
+        &mut f.app,
+        "/api/send",
+        json!({"conversation_id":blocked,"message_id":"blocked","body":"Doit attendre la fermeture"}),
+    );
+    let mut refusal = Value::Null;
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        refusal = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == blocked)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "reply-blocked")
+            .cloned()
+            .unwrap_or(Value::Null);
+        !refusal.is_null() && refusal["state"] != "streaming"
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "refusal must not wait for a network deadline: {refusal}"
+    );
+    assert_eq!(refusal["state"], "failed", "{refusal}");
+    assert_eq!(
+        refusal["error"],
+        "Les connexions précédentes se ferment encore. Réessayez dans quelques instants."
+    );
+    f.fake.partial_released.store(true, Ordering::SeqCst);
+    // The abandoned read ends on the next byte or the 2s stall deadline.
+    std::thread::sleep(Duration::from_secs(3));
+    let resumed = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+    post(
+        &mut f.app,
+        "/api/send",
+        json!({"conversation_id":resumed,"message_id":"after","body":"Nouvelle question"}),
+    );
+    let mut reply = Value::Null;
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        reply = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == resumed)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "reply-after")
+            .cloned()
+            .unwrap_or(Value::Null);
+        !reply.is_null() && reply["state"] != "streaming"
+    });
+    assert_eq!(reply["state"], "echoed", "{reply}");
+}
+
+#[test]
 fn connection_test_without_an_account_explains_the_required_action_without_network() {
     let mut f = Fixture::new(false);
     let result = post(&mut f.app, "/api/provider/test", json!({}));

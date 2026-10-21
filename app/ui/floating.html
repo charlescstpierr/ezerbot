@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="fr" data-theme="dark" data-accent="citron">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panneau Ezerbot</title>
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/mascot.css"><link rel="stylesheet" href="/chat.css">
+  <script defer src="/mascot.js"></script><script defer src="/chat.js"></script>
+</head>
+<body class="floating-body">
+  <main id="floating-root" aria-label="Panneau flottant du bot"></main>
+  <template id="mascot-template">
+    <span class="mascot" data-mood="idle" aria-hidden="true">
+      <svg viewBox="0 0 320 280" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><radialGradient id="mascot-pearl"><stop stop-color="#565c6a"/><stop offset="1" stop-color="#23262e"/></radialGradient></defs>
+        <g class="mascot-float"><g class="mascot-squish">
+          <path class="mascot-shell" fill="url(#mascot-pearl)"/>
+          <path class="mascot-sheen" fill="none"/>
+          <path class="mascot-highlight" stroke="white" stroke-opacity=".22" stroke-width="2.4" stroke-linecap="round"/>
+          <g class="mascot-gaze"><g class="mascot-blink">
+            <rect class="mascot-eye mascot-eye-left" x="147" y="116" width="23" height="44" rx="11.5" transform="rotate(-22 158.5 138)"/>
+            <rect class="mascot-eye mascot-eye-right" x="207" y="99" width="20" height="39" rx="10" transform="rotate(-22 217 118.5)"/>
+          </g></g>
+        </g></g>
+      </svg>
+    </span>
+  </template>
+</body>
+</html>

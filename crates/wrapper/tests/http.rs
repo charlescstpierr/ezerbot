@@ -186,6 +186,36 @@ fn accepted_by_host(status: u16) -> bool {
 }
 
 #[test]
+fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
+    let host = Host::new();
+    let page = ureq::get(&format!("{}/floating", host.url)).call().unwrap();
+    assert!(page
+        .header("Content-Security-Policy")
+        .unwrap()
+        .contains("frame-ancestors 'none'"));
+    let html = page.into_string().unwrap();
+    assert!(html.contains("floating-root") && html.contains("/chat.js"));
+    assert!(!html.contains("src=\"/app.js\""));
+    let body = br#"{"shortcut":"disabled"}"#;
+    let refusal = ureq::post(&format!("{}/api/floating/settings", host.url))
+        .set("Origin", "https://example.invalid")
+        .set("X-Grokbot-Request", "local")
+        .set("Content-Type", "application/json")
+        .send_bytes(body);
+    assert_eq!(status(refusal), 403);
+    assert_eq!(
+        host.post("/api/floating/settings", "application/json", body),
+        200
+    );
+    let settings: Value = ureq::get(&format!("{}/api/floating", host.url))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(settings["shortcut"], "disabled");
+}
+
+#[test]
 fn voice_audio_supports_webkit_byte_ranges() {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let host = Host::new();
@@ -338,6 +368,8 @@ fn body_limit_by_route() {
     assert_eq!(body_limit("/api/attachments"), 20 * 1024 * 1024);
     assert_eq!(body_limit("/api/skills/import"), 16 * 1024 * 1024);
     assert_eq!(body_limit("/api/approvals/reviewer"), 256 * 1024);
+    assert_eq!(body_limit("/api/templates/create"), 8 * 1024 * 1024);
+    assert_eq!(body_limit("/api/templates/decode"), 8 * 1024 * 1024);
     for path in [
         "/api/send",
         "/api/attachments/one",
@@ -352,6 +384,8 @@ fn body_limit_by_route() {
         ("/api/skills/import", "16 Mio"),
         ("/api/send", "64 Ko"),
         ("/api/approvals/reviewer", "256 Ko"),
+        ("/api/templates/create", "8 Mio"),
+        ("/api/templates/decode", "8 Mio"),
     ] {
         let error = too_large(path);
         assert_eq!(error.status, 413);
@@ -365,6 +399,8 @@ fn body_limit_by_route() {
         ("/api/attachments", "image/png"),
         ("/api/skills/import", "application/json"),
         ("/api/approvals/reviewer", "application/json"),
+        ("/api/templates/create", "application/json"),
+        ("/api/templates/decode", "application/json"),
     ] {
         assert!(accepted_by_host(host.post(path, mime, &body)), "{path}");
     }

@@ -30,6 +30,7 @@ ureq = { version = "2", features = ["json"] }
 jsonwebtoken = "9"
 sha2 = "0.10"
 base64 = "0.22"
+flate2 = "1"
 getrandom = "0.2"
 # Already locked via jsonwebtoken: RFC 8291 encryption and VAPID ES256.
 ring = "0.17"

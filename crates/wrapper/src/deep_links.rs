@@ -27,12 +27,32 @@ pub const SETTINGS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Destination {
-    Bot { id: String },
-    Conversation { id: String, agent: Option<String> },
-    Routine { id: String, agent: String },
-    Skill { id: String, agent: String },
-    Settings { id: String },
-    Compose { text: String, agent: Option<String> },
+    Bot {
+        id: String,
+    },
+    Conversation {
+        id: String,
+        agent: Option<String>,
+    },
+    Routine {
+        id: String,
+        agent: String,
+    },
+    Skill {
+        id: String,
+        agent: String,
+    },
+    Settings {
+        id: String,
+    },
+    Compose {
+        text: String,
+        agent: Option<String>,
+    },
+    BotTemplate {
+        id: Option<String>,
+        data: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -97,6 +117,7 @@ pub fn parse_link(raw: &str) -> Result<Link, ApiError> {
         "v1/agent" | "v1/settings" => &["id"],
         "v1/thread" | "v1/routine" | "v1/skill" => &["id", "agent"],
         "v1/open" => &["text", "agent"],
+        "v1/bot-template" => &["id", "data"],
         _ => return Err(invalid()),
     };
     if fields.keys().any(|key| !allowed.contains(key)) {
@@ -148,6 +169,20 @@ pub fn parse_link(raw: &str) -> Result<Link, ApiError> {
                 return Err(invalid());
             }
             Destination::Compose { text, agent }
+        }
+        // A catalogue template by ID, or a shared bot whose code fits in 2048 bytes.
+        "v1/bot-template" => {
+            let id = fields.get("id").cloned();
+            let data = fields.get("data").cloned();
+            match (&id, &data) {
+                (Some(id), None) => atom(id)?,
+                (None, Some(data))
+                    if data
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')) => {}
+                _ => return Err(invalid()),
+            }
+            Destination::BotTemplate { id, data }
         }
         _ => unreachable!(),
     };
@@ -204,7 +239,14 @@ impl App {
                     return Err(inaccessible());
                 }
             }
-            Destination::Compose { agent: None, .. } | Destination::Settings { .. } => {}
+            Destination::BotTemplate { id: Some(id), .. } => {
+                if !crate::features::templates::exists(id) {
+                    return Err(inaccessible());
+                }
+            }
+            Destination::Compose { agent: None, .. }
+            | Destination::Settings { .. }
+            | Destination::BotTemplate { id: None, .. } => {}
         }
         Ok(link)
     }

@@ -354,6 +354,64 @@ fn write_preview_pins_parent_symlink_destination_and_marks_app_data_per_folder()
 }
 
 #[test]
+fn floating_panel_shell_request_still_waits_for_main_conversation_approval_and_honors_denial() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let args = f.shell("touch panneau-jamais-execute");
+    f.script(vec![json!({"type":"response.output_item.done","item":{"id":"fc-panel","type":"function_call","status":"completed","call_id":"panel-approval","name":"run_shell","arguments":args.to_string()}}),json!({"type":"response.completed"})]);
+    f.post("/api/floating/send",json!({"conversation_id":f.chat,"message_id":"panel-approval","body":"Commande proposée depuis le panneau"}));
+    let request = f.request("panel-approval");
+    assert_eq!(request.route.target_conversation_id, f.chat);
+    assert!(!f.root().join("panneau-jamais-execute").exists());
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == f.chat)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["kind"] == "approval"));
+    f.decide(&request, json!("deny"));
+    f.finish("panel-approval");
+    assert!(!f.root().join("panneau-jamais-execute").exists());
+}
+
+#[test]
+fn floating_panel_provider_failure_is_visible_in_the_shared_transcript() {
+    let mut f = Fixture::new();
+    f.server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::json(
+            500,
+            json!({"error":{"message":"Échec simulé"}}),
+        ));
+    f.post("/api/floating/send",json!({"conversation_id":f.chat,"message_id":"panel-error","body":"Test d’erreur du panneau"}));
+    f.finish("panel-error");
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == f.chat)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    assert!(messages
+        .iter()
+        .any(|m| m["role"] == "assistant" && m["state"] == "failed"));
+    assert_eq!(
+        messages.iter().filter(|m| m["id"] == "panel-error").count(),
+        1
+    );
+}
+
+#[test]
 fn shell_off_by_default_then_denial_and_allow_once_after_restart() {
     let mut f = Fixture::new();
     let args = f.shell("printf bonjour; printf erreur >&2; exit 7");

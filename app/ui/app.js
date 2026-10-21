@@ -136,7 +136,7 @@
       } catch (error) {
         // Memory receipts show actionable refusals inline (for example while a
         // related reply is running), rather than losing the reason in a toast.
-        if (message.kind === "memory_auto") throw error;
+        if (message.kind === "memory_auto" || message.kind === "memory_share") throw error;
         panelError(panel.id, error); notify(error.message); return false;
       }
     }
@@ -182,6 +182,13 @@
       }
       return true;
     },
+    async focusConversation(id) {
+      if (busy) return false;
+      // Native panel navigation shares deep-link editor/draft protection and
+      // closes overlays before revealing the complete conversation.
+      await navigateLink({ kind: "conversation", id });
+      return true;
+    },
     draft: () => ui.input?.value || "",
     draftDocument: () => ui.input?.document,
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
@@ -210,6 +217,21 @@
       } finally { busy = false; submissionActivity = null; updateComposer(); schedulePoll(); }
     },
     composerChanged() { updateComposer(); schedulePoll(); },
+    selectBot(id, text) {
+      const bot = botById(id);
+      if (busy || !bot || bot.deleted) return false;
+      if (stagedOnEmptyThread()) {
+        notify(`Retirez les pièces jointes pour changer de bot, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`);
+        return false;
+      }
+      chosenBotId = id;
+      writePreference("grokbot.bot", id);
+      leaveEmptyThread();
+      if (currentConversation()) selectConversation(null, true);
+      if (typeof text === "string") { setComposerText(text); saveDraft(); }
+      render();
+      return true;
+    },
   };
 
   function previousLinkDrafts() {
@@ -266,6 +288,8 @@
       if (kind === "skill") openBotDialog(bot);
       const panel = panels.get(kind === "skill" ? "skills" : "routines");
       if (!panel?.openLink || await panel.openLink({ id, agent }) === false) throw new Error("La cible de ce lien est introuvable ou inaccessible sur ce Mac.");
+    } else if (kind === "bot_template") {
+      if (await panels.get("templates")?.openLink?.(destination) !== true) throw new Error("Ce modèle de bot est introuvable ou son lien est abîmé.");
     } else if (kind === "compose") {
       if (agent && (!botById(agent) || botById(agent).deleted)) throw new Error("Ce bot est introuvable ou inaccessible sur ce Mac.");
       if (stagedOnEmptyThread() || sendExtras().attachments?.length) throw new Error("Retirez les pièces jointes en cours ou envoyez-les vous-même avant de rouvrir ce lien. Rien n’a été envoyé.");

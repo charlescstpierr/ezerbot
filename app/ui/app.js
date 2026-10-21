@@ -518,13 +518,15 @@
     const attachmentsBlocked = Boolean(blockingPanel);
     const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
-    const live = !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
+    const control = window.GrokbotChat.composerConnectionState({ offline: connectionStatus === "offline", busy, group,
+      live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
+    const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = taskFinished || (live ? ((group || task) && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
-    ui.send.dataset.mode = live ? "stop" : "send";
-    ui.send.title = live ? group ? "Arrêter les tours" : "Arrêter la réponse" : "Envoyer le message";
-    ui.send.setAttribute("aria-label", live ? ui.send.title : busy ? "Envoi en cours" : "Envoyer le message");
-    ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
+    ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
+    ui.send.dataset.mode = control.mode;
+    ui.send.title = control.title;
+    ui.send.setAttribute("aria-label", control.label);
+    ui.send.querySelector("use").setAttribute("href", control.icon);
     ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong || blockedReason));
     ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : typeof blockedReason === "string" ? blockedReason : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
@@ -537,7 +539,7 @@
     learn.disabled = busy || !connected || pending || noMembers || Boolean(streamingMessage())
       || !currentConversation()?.messages.some((message) => message.role === "user" && ["accepted", "echoed"].includes(message.state));
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
-      activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
+      activity: taskFinished || control.offline ? null : submissionActivity, pending: taskFinished || control.offline ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
   }
 
   function selectConversation(id, focus = false) {

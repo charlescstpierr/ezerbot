@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pendingReply } from "./thread-order.js";
-import { connectionMessages } from "./connection-view.js";
+import { connectionMessages, composerConnectionState } from "./connection-view.js";
 
 test("an authoritative terminal snapshot releases loading without a final stream event", () => {
   const live = [{ role: "assistant", state: "streaming", body: "Début" }];
@@ -38,4 +38,17 @@ test("offline recovery preserves saved questions, sign-in cards, human waits and
   assert.equal(offline[0].body, "Question conservée");
   assert.equal(offline[1].error_kind, "signin");
   assert.equal(offline[2].payload.status, "pending");
+});
+
+test("an offline composer is an idle send arrow and recovers its real control on reconnect", () => {
+  const live = { live: true, busy: true, group: false };
+  const offline = composerConnectionState({ ...live, offline: true });
+  assert.equal(offline.mode, "send");
+  assert.equal(offline.icon, "#i-send");
+  assert.equal(offline.live, false);
+  assert.equal(offline.busy, false);
+  assert.equal(offline.title, "Moteur local indisponible");
+  assert.equal(composerConnectionState(live).mode, "stop");
+  assert.equal(composerConnectionState({ live: true, group: true }).title, "Arrêter les tours");
+  assert.equal(composerConnectionState({ busy: true }).label, "Envoi en cours");
 });

@@ -493,11 +493,8 @@
   }
   function restoreDraftDocument() {
     try {
-      const text = readPreference(draftKey(), null);
-      // A rich document without its text twin is an orphan from an earlier transfer.
-      if (text === null) { removePreference(`${draftKey()}.document`); return; }
       const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
-      if (document && text === ui.input.value) ui.input.document = document;
+      if (document && readPreference(draftKey(), "") === ui.input.value) ui.input.document = document;
     } catch { /* Plain text remains usable when an older draft has no rich document. */ }
   }
 
@@ -665,32 +662,23 @@
     list.classList.toggle("has-more", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
   }
 
-  function closeBotMenu(options = {}) {
-    const menu = $("bot-menu");
-    const wasOpen = !menu.hidden;
-    const hadFocus = menu.contains(document.activeElement);
-    // Focus the trigger before hiding, so removing the focused item cannot leave focus on body.
-    if (wasOpen && (hadFocus || options.restoreFocus) && !$("composer-bot").disabled) $("composer-bot").focus();
-    menu.hidden = true;
-    menu.replaceChildren();
+  function closeBotMenu() {
+    $("bot-menu").hidden = true;
+    $("bot-menu").replaceChildren();
     $("composer-bot").setAttribute("aria-expanded", "false");
   }
 
   function renderBotMenu() {
     const menu = $("bot-menu");
     if (menu.hidden) return;
-    // Un rafraîchissement remplace les boutons : garder l'option focalisée et le défilement.
-    const focusedKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
-    const scrollTop = menu.querySelector(".bot-menu-list")?.scrollTop || 0;
     const chosen = currentBot();
     const options = liveBots().map((bot) => {
       const button = element("button");
       button.type = "button";
-      button.dataset.menuKey = `bot:${bot.id}`;
       button.setAttribute("role", "menuitemradio");
       button.setAttribute("aria-checked", String(bot.id === chosen?.id));
-      const copy = element("span", "bot-menu-copy");
-      copy.append(element("span", "bot-menu-name", bot.name), element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
+      const copy = element("span", "", bot.name);
+      copy.append(element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
       button.append(botAvatar(bot), copy, icon("check"));
       button.addEventListener("click", () => chooseBot(bot));
       return button;
@@ -698,7 +686,6 @@
     const action = (glyph, label, run) => {
       const button = element("button", "bot-menu-action");
       button.type = "button";
-      button.dataset.menuKey = `action:${glyph}`;
       button.setAttribute("role", "menuitem");
       button.append(icon(glyph), element("span", "", label));
       button.addEventListener("click", () => { closeBotMenu(); run(); });
@@ -708,8 +695,6 @@
     const list = element("div", "bot-menu-list");
     list.append(...options);
     menu.replaceChildren(element("h4", "", "Avec qui ?"), list, element("div", "menu-divider"), ...actions, action("plus", "Nouveau bot", () => openBotDialog(null)));
-    list.scrollTop = scrollTop;
-    if (focusedKey) [...menu.querySelectorAll("button")].find((button) => button.dataset.menuKey === focusedKey)?.focus({ preventScroll: true });
     $("composer-bot").setAttribute("aria-expanded", "true");
   }
 
@@ -1249,7 +1234,6 @@
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
-      removePreference(`${previousDraftKey}.document`);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
@@ -1547,16 +1531,6 @@
     checked?.scrollIntoView({ block: "nearest" });
     checked?.focus({ preventScroll: true });
   });
-  $("bot-menu").addEventListener("keydown", (event) => {
-    const items = [...$("bot-menu").querySelectorAll("button")];
-    const index = items.indexOf(document.activeElement);
-    const last = items.length - 1;
-    const target = { ArrowDown: index >= last ? 0 : index + 1, ArrowUp: index <= 0 ? last : index - 1, Home: 0, End: last }[event.key];
-    if (target === undefined || !items.length) return;
-    event.preventDefault();
-    items[target].focus({ preventScroll: true });
-    items[target].scrollIntoView({ block: "nearest", inline: "nearest" });
-  });
   $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);
   $("bot-delete-button").addEventListener("click", () => $("bot-delete-dialog").showModal());
@@ -1589,11 +1563,7 @@
     finally { $("reconnect-button").disabled = false; }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      const returnToBot = !$("bot-menu").hidden;
-      closeMenu(); closeSidebar(); closeBotMenu({ restoreFocus: returnToBot });
-      if (pickerKind) { closePicker(); renderProvider(); }
-    }
+    if (event.key === "Escape") { closeMenu(); closeSidebar(); closeBotMenu(); if (pickerKind) { closePicker(); renderProvider(); } }
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     const dialogOpen = Boolean(document.querySelector("dialog[open]"));
     if (event.key.toLowerCase() === "n" && !dialogOpen) { event.preventDefault(); newConversation(); }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pendingReply } from "./thread-order.js";
-import { connectionMessages, composerConnectionState, signInCardState, replyProblemState } from "./connection-view.js";
+import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 test("an authoritative terminal snapshot releases loading without a final stream event", () => {
   const live = [{ role: "assistant", state: "streaming", body: "Début" }];
@@ -95,4 +95,16 @@ test("deduplicating group advice does not accidentally enable forbidden regenera
   const offline = replyProblemState({ error_kind: "local_connection" }, { isGroup: true, engineConnected: false });
   assert.equal(offline.retry, true);
   assert.equal(offline.retryDisabled, true);
+});
+
+test("a pending tool has a single visible progress state, never after failure or completion", () => {
+  const notice = "Préparation d’un outil par OpenAI… Aucune action n’a encore été exécutée.";
+  assert.equal(preparingTool({ state: "streaming", notice }), true);
+  for (const state of ["failed", "echoed", "stopped"]) {
+    assert.equal(preparingTool({ state, notice }), false);
+    assert.equal(visibleNotice({ state, notice }), null);
+  }
+  assert.equal(visibleNotice({ state: "streaming", notice }), notice);
+  assert.equal(visibleNotice({ state: "stopped", notice: "Autre information" }), "Autre information");
+  assert.equal(preparingTool({ state: "streaming" }), false);
 });

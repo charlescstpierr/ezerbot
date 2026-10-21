@@ -43,3 +43,11 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
   return { signin, advice, retry: local || (!group && !isTask && message.error_kind !== "context_budget"), retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
+
+export function visibleNotice(message) {
+  return message.state !== "streaming" && message.notice?.startsWith("Préparation d’un outil") ? null : message.notice;
+}
+
+export function preparingTool(message) {
+  return message.state === "streaming" && Boolean(visibleNotice(message)?.startsWith("Préparation d’un outil"));
+}

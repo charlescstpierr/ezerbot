@@ -1,6 +1,6 @@
 # Images et documents
 
-Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. Aucune implémentation de ce lot n’est commencée. Les tranches sont des issues enfants de la carte « Images et documents ».
+Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. Aucune implémentation de ce lot n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
 
 ## Contexte
 
@@ -163,18 +163,18 @@ Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est se
 
 ## Tranches
 
-Chaque tranche traverse l’outil, la persistance, la bulle et le test. Le détail et les critères vivent dans l’issue. L’ordre de dépendance :
+Carte : [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31). Chaque tranche traverse l’outil, la persistance, la bulle et le test. Le détail et les critères vivent dans l’issue. Les blocages sont aussi des dépendances natives sur le suivi.
 
-1. Générer une image et l’afficher dans la bulle. Aucun bloquant. Première tranche à prendre.
-2. Agrandir et télécharger cette image. Bloquée par 1.
-3. Modifier l’image en conversant. Bloquée par 1.
-4. Galerie des images du bot. Bloquée par 1.
-5. PDF lisible en plein écran, aux couleurs de Charles. Aucun bloquant.
-6. DOCX au même modèle. Bloquée par 5.
-7. Fichiers de contexte lus à chaque conversation. Aucun bloquant.
-8. Recherche dans la bibliothèque. Bloquée par 7.
-9. Ranger images et documents générés dans la bibliothèque. Bloquée par 4 et 7.
-10. Lire une vidéo jointe dans la bulle. Aucun bloquant.
-11. Choisir le remplaçant de Sora. Question pour Charles, pas une tranche à coder. Rien d’autre n’en dépend tant qu’il n’a pas nommé un fournisseur et une clé.
+1. [Générer une image et l’afficher dans la bulle](https://github.com/charlescstpierr/ezerbot/issues/33). Aucun bloquant. Première tranche à prendre.
+2. [Agrandir et télécharger l’image de la bulle](https://github.com/charlescstpierr/ezerbot/issues/38). Bloquée par 33.
+3. [Modifier une image en conversant](https://github.com/charlescstpierr/ezerbot/issues/39). Bloquée par 33.
+4. [Galerie des images du bot](https://github.com/charlescstpierr/ezerbot/issues/40). Bloquée par 33.
+5. [PDF lisible en plein écran, aux couleurs de Charles](https://github.com/charlescstpierr/ezerbot/issues/34). Aucun bloquant.
+6. [DOCX au même modèle que le PDF](https://github.com/charlescstpierr/ezerbot/issues/41). Bloquée par 34.
+7. [Fichiers de contexte lus à chaque conversation](https://github.com/charlescstpierr/ezerbot/issues/35). Aucun bloquant.
+8. [Recherche dans la bibliothèque du bot](https://github.com/charlescstpierr/ezerbot/issues/42). Bloquée par 35.
+9. [Ranger images et documents générés dans la bibliothèque](https://github.com/charlescstpierr/ezerbot/issues/43). Bloquée par 40 et 35.
+10. [Lire une vidéo jointe dans la bulle](https://github.com/charlescstpierr/ezerbot/issues/36). Aucun bloquant.
+11. [Choisir le remplaçant de Sora](https://github.com/charlescstpierr/ezerbot/issues/37). Question pour Charles, pas une tranche à coder. Rien d’autre n’en dépend tant qu’il n’a pas nommé un fournisseur et une clé.
 
 La génération vidéo elle-même n’est pas découpée : elle reste dans le brouillard jusqu’à la réponse de Charles.

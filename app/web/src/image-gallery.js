@@ -108,9 +108,34 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+export function galleryFailureText(error, fallback) {
+  if (!error || error.name === "AbortError") return "";
+  const message = typeof error.message === "string" ? error.message.trim() : "";
+  if (message === "Image introuvable." || message === "Image illisible." || message === "L’image n’a pas pu être enregistrée." || message === "L’image n’a pas pu être copiée.") return message;
+  return fallback;
+}
+
 export async function saveGalleryImage(image, io = {}) {
   const { bytes, type } = await loadImageBytes(image, io);
   const name = imageFilename(image, type);
+  // WKWebView drops a hidden blob: download (shouldPerformDownload stays false,
+  // blob:null/… fails the origin check) and the click resolves with no panel
+  // and no error. The shell opens NSSavePanel, then writes the bytes.
+  if (io.native?.postMessage) {
+    let result;
+    try {
+      result = await io.native.postMessage({ command: "save", mime: type, name, data: bytesToBase64(bytes) });
+    } catch (error) {
+      if (error?.name === "AbortError") return null;
+      throw new Error(galleryFailureText(error, "L’image n’a pas pu être enregistrée."));
+    }
+    if (result?.cancelled) return null;
+    if (!result || result.ok === false) {
+      const message = typeof result?.error === "string" ? result.error.trim() : "";
+      throw new Error(message || "L’image n’a pas pu être enregistrée.");
+    }
+    return result.name || name;
+  }
   if (typeof io.showSaveFilePicker === "function") {
     const handle = await io.showSaveFilePicker({
       suggestedName: name,
@@ -132,7 +157,9 @@ export async function saveGalleryImage(image, io = {}) {
   const link = doc.createElement("a");
   link.href = url;
   link.download = name;
-  link.hidden = true;
+  // hidden / display:none makes WKWebView ignore the download attribute.
+  link.style.position = "fixed";
+  link.style.left = "-10000px";
   doc.body.append(link);
   link.click();
   link.remove();

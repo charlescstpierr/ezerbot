@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
-import { copyGalleryImage, galleryImages, galleryKey, saveGalleryImage } from "./image-gallery.js";
+import { copyGalleryImage, galleryFailureText, galleryImages, galleryKey, saveGalleryImage } from "./image-gallery.js";
 
 function galleryIO() {
   return {
@@ -10,12 +10,6 @@ function galleryIO() {
     native: globalThis.webkit?.messageHandlers?.ezerbotImages,
     clipboard: globalThis.navigator?.clipboard,
   };
-}
-
-function failureText(error, fallback) {
-  if (!error || error.name === "AbortError") return "";
-  if (error.message === "Image introuvable.") return error.message;
-  return fallback;
 }
 
 function ImageViewer({ images, index, onIndex, onClose }) {
@@ -40,7 +34,7 @@ function ImageViewer({ images, index, onIndex, onClose }) {
       const result = await action();
       if (result) setNotice(result);
     } catch (caught) {
-      const text = failureText(caught, fallback);
+      const text = galleryFailureText(caught, fallback);
       if (text) setError(text);
     } finally { setPending(false); }
   }
@@ -68,8 +62,8 @@ function ImageViewer({ images, index, onIndex, onClose }) {
       </div>
       <figcaption className="gb-image-caption">{image.caption}</figcaption>
       <div className="gb-image-actions">
-        <button type="button" className="gb-image-action" disabled={pending} onClick={() => run(() => saveGalleryImage(image, galleryIO()), "L’image n’a pas pu être enregistrée.")}>Enregistrer l’image…</button>
-        <button type="button" className="gb-image-action" disabled={pending} onClick={() => run(async () => { await copyGalleryImage(image, galleryIO()); return "Image copiée."; }, "L’image n’a pas pu être copiée.")}>Copier l’image</button>
+        <button type="button" className="gb-image-action" aria-label="Enregistrer l’image…" disabled={pending} onClick={() => run(() => saveGalleryImage(image, galleryIO()), "L’image n’a pas pu être enregistrée.")}>Enregistrer l’image…</button>
+        <button type="button" className="gb-image-action" aria-label="Copier l’image" disabled={pending} onClick={() => run(async () => { await copyGalleryImage(image, galleryIO()); return "Image copiée."; }, "L’image n’a pas pu être copiée.")}>Copier l’image</button>
       </div>
       {notice && <p className="gb-image-notice" role="status">{notice}</p>}
       {error && <p className="gb-image-error" role="alert">{error}</p>}

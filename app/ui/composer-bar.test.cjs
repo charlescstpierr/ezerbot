@@ -799,6 +799,60 @@ test("a long bot name at 960 and 1140 is at least as wide as at 910 without a sp
   }
 });
 
+function sweep(start, end, step, extra = []) {
+  const widths = new Set(extra);
+  for (let width = start; width <= end; width += step) widths.add(width);
+  return [...widths].sort((a, b) => a - b);
+}
+
+test("layout holds at every 10px from 360 to 1140", { timeout: 300000 }, async () => {
+  const widths = sweep(360, 1140, 10, [390, 417, 479, 480, 760, 761, 910, 911, 1100, 1101]);
+  const names = new Map();
+  for (const width of widths) {
+    if (width < 900) continue;
+    names.set(width, await measure(width, 780, LONG_NAME, { model: CODEX_SPARK, effort: DEFAULT_EFFORT, speed: "" }));
+  }
+  const speedReports = new Map();
+  const headerReports = new Map();
+  for (const width of widths) {
+    speedReports.set(width, await measure(width, 780, MEDIUM_NAME, { model: CODEX_SPARK, effort: DEFAULT_EFFORT, speed: "Standard" }));
+    headerReports.set(width, await measure(width, 780, MEDIUM_NAME, {
+      workspace: MEDIUM_NAME,
+      title: THREAD_TITLE,
+      model: CODEX_SPARK,
+      effort: DEFAULT_EFFORT,
+    }));
+  }
+  for (const theme of ["dark", "light"]) {
+    const at = (reports, width) => reports.get(width).themes.find((item) => item.theme === theme);
+    const base = at(names, 910);
+    for (const width of widths) {
+      if (width >= 911) {
+        const actual = at(names, width);
+        const where = `${theme} name 910=${base.nameClient} ${width}=${actual.nameClient}/${actual.nameScroll} viewport=${actual.viewport}`;
+        assert.equal(actual.nameInside, true, where);
+        assert.equal(actual.chevronInside, true, where);
+        assert.ok(actual.nameClient + 0.5 >= base.nameClient, where);
+      }
+      const speed = at(speedReports, width);
+      const speedWhere = `${theme} ${width} speedGap=${speed.speedGap} speedTop=${speed.speedTop} voiceTop=${speed.voiceTop} bot=${speed.pieces.bot} name=${speed.nameClient}/${speed.nameScroll} nameBox=${JSON.stringify(speed.nameBox)} botBox=${JSON.stringify(speed.botBox)} chevron=${JSON.stringify(speed.chevronBox)}`;
+      assert.equal(speed.nameInside, true, speedWhere);
+      assert.equal(speed.chevronInside, true, speedWhere);
+      assert.ok(speed.pieces.bot >= 45, speedWhere);
+      if (width < 480) {
+        assert.ok(speed.speedTop >= speed.voiceTop + 16, speedWhere);
+      }
+      const header = at(headerReports, width);
+      const headerWhere = `${theme} ${width} clear=${header.titleClear} title=${header.titleClient}/${header.titleScroll} ws=${header.workspaceClient}/${header.workspaceScroll} titleBox=${JSON.stringify(header.titleBox)} actions=${JSON.stringify(header.actionsBox)}`;
+      assert.equal(header.titleClear, true, headerWhere);
+      if (width >= 761) {
+        assert.ok(header.titleClient >= 120, headerWhere);
+        assert.ok(header.workspaceClient >= 56, headerWhere);
+      }
+    }
+  }
+});
+
 test("suggestions sit against the composer at 820×560 instead of leaving a void", async () => {
   const report = await measure(820, 560, "Ezerbot", { pills: false, welcome: true });
   for (const theme of report.themes) {

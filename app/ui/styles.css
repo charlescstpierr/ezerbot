@@ -450,7 +450,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   body { grid-template-columns: 244px minmax(0, 1fr); }
   .sidebar { padding-left: 13px; padding-right: 13px; }
   .new-chat kbd { display: none; }
-  .topbar { padding: 0 22px; }
+  .topbar { padding: 0 16px; gap: 12px; }
   .welcome, .composer-area { width: calc(100% - 44px); }
   .suggestion { padding-left: 10px; padding-right: 10px; }
   .suggestion strong { font-size: 9px; }
@@ -469,13 +469,24 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-bottom { gap: 6px; }
   .composer .attachment-choose { width: 26px; }
 }
-/* Au-dessus de 910, la mascotte, les icônes et les libellés Modèle / Effort reviennent et mangent plus que la largeur gagnée : le nom redevient plus court qu'à 910. On garde le compositeur compact. */
+/* Au-dessus de 910, la mascotte et les icônes reviendraient et mangeraient plus que la largeur gagnée. On garde le compositeur compact. */
 @media (min-width: 911px) {
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
   .composer .tool-pill { padding: 0 5px; }
   .composer-bottom { gap: 6px; }
   .composer .attachment-choose { width: 26px; }
+}
+/* De 911 à 1100, la règle 1100 repasse le compositeur à calc(100% - 44px) et le padding 0 5px : le nom devient plus court qu'à 910, où la zone est calc(100% - 28px) et le padding 0 2px. */
+@media (min-width: 911px) and (max-width: 1100px) {
+  .composer-area { width: calc(100% - 28px); }
+  .composer-tools { gap: 2px; }
+  .composer-tools .tool-pill { gap: 2px; }
+  .composer .tool-pill { padding: 0 2px; }
+}
+/* Après la règle de base à 45 px : au-dessus du téléphone le nom cède pour garder le chevron dans le bouton. */
+@media (min-width: 761px) {
+  .composer .composer-bot-name { min-width: 0; }
 }
 @media (max-width: 760px) {
   body { display: block; background: var(--canvas); }
@@ -533,6 +544,15 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .bot-preview { top: -23px; }
   .bot-preview-mascot { width: 96px; height: 84px; }
   .connection-banner { gap: 8px; padding: 9px 15px; font-size: 10px; }
+}
+/* Sous 480, trois pastilles ne tiennent plus à côté du bot : Vitesse passe à la ligne au lieu d'écraser le bouton. */
+@media (max-width: 479px) {
+  .composer-model:has([data-picker="speed"]) { flex-wrap: wrap; }
+  .composer-model:has([data-picker="speed"]) .composer-tools {
+    flex: 1 0 100%;
+    min-width: 0;
+  }
+  .composer-model:has([data-picker="speed"]) .composer-bot { min-width: min-content; }
 }
 @media (max-width: 370px) {
   .welcome h2 { font-size: 26px; }

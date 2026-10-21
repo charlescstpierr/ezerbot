@@ -233,3 +233,8 @@ textarea.text-input,
 select.text-input {
   color: var(--text);
 }
+input.text-input:disabled,
+textarea.text-input:disabled {
+  opacity: .5;
+  cursor: default;
+}

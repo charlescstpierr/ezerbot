@@ -57,6 +57,10 @@ function page() {
       <textarea class="text-input" id="bot-description">Relit vos textes et propose des tournures plus claires.</textarea>
       <label class="form-label bot-field" for="bot-instructions">Personnalité <small>Comment il parle et se comporte. Privé.</small></label>
       <textarea class="text-input" id="bot-instructions">Tu parles avec douceur, tu tutoies, tu réponds en trois phrases maximum.</textarea>
+      <label class="form-label bot-field" for="skill-name">Nom de la skill</label>
+      <input class="text-input" id="skill-name" value="Relire un texte" disabled>
+      <label class="form-label bot-field" for="routine-notes">Notes de la routine</label>
+      <textarea class="text-input" id="routine-notes" disabled>Tous les matins, résume les messages.</textarea>
     </form>
   </div>
   <pre id="qa-result"></pre>
@@ -112,6 +116,11 @@ function page() {
             fontSize: style.fontSize,
             ratio: Math.round(ratio * 100) / 100,
           };
+        }),
+        disabled: ["skill-name", "routine-notes"].map((id) => {
+          const node = document.getElementById(id);
+          const style = getComputedStyle(node);
+          return { id, opacity: Number(style.opacity), cursor: style.cursor };
         }),
       };
     };
@@ -176,6 +185,16 @@ test("typed text in the bot form stays WCAG AA on both themes", async () => {
         field.ratio >= AA,
         `${theme.theme} #${field.id} contraste ${field.ratio}:1 (seuil AA ${AA}:1) encre ${field.color} sur ${field.background}`,
       );
+    }
+  }
+});
+
+test("disabled text inputs and textareas read as inactive in both themes", async () => {
+  const report = await measure();
+  for (const theme of report.themes) {
+    assert.deepEqual(theme.disabled.map((field) => field.id), ["skill-name", "routine-notes"]);
+    for (const field of theme.disabled) {
+      assert.ok(field.opacity < 1, `${theme.theme} #${field.id} opacité ${field.opacity} (curseur ${field.cursor})`);
     }
   }
 });

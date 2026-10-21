@@ -354,6 +354,7 @@ impl Provider {
     }
     pub(crate) fn interrupt_runs(&self) {
         self.sharing.interrupt_runs();
+        self.session().account_all_live();
     }
     pub(crate) fn has_run_workers(&self) -> bool {
         self.sharing.has_run_workers()
@@ -363,6 +364,16 @@ impl Provider {
     }
     pub(crate) fn cancel_run(&self, id: &str) {
         self.sharing.cancel_run(id);
+        // Le drapeau vit sur la session partage ; le socket, sur la session qui streame.
+        self.session().account_live_cancel(id);
+    }
+    #[cfg(test)]
+    pub(crate) fn pause_turn(&self, id: &str) {
+        self.session().pause_turn(id);
+    }
+    #[cfg(test)]
+    pub(crate) fn resume_turns(&self) {
+        self.session().resume_turns();
     }
     pub(crate) fn title_started(&self) {
         self.sharing.title_started();

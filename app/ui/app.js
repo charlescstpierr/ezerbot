@@ -669,8 +669,12 @@
     const menu = $("bot-menu");
     const wasOpen = !menu.hidden;
     const hadFocus = menu.contains(document.activeElement);
-    // Focus the trigger before hiding, so removing the focused item cannot leave focus on body.
-    if (wasOpen && (hadFocus || options.restoreFocus) && !$("composer-bot").disabled) $("composer-bot").focus();
+    // Move focus before hiding, so removing the focused item cannot leave focus on body.
+    // A disabled trigger cannot take focus: return it to the editor instead.
+    if (wasOpen && (hadFocus || options.restoreFocus)) {
+      if ($("composer-bot").disabled) ui.input?.focus();
+      else $("composer-bot").focus();
+    }
     menu.hidden = true;
     menu.replaceChildren();
     $("composer-bot").setAttribute("aria-expanded", "false");

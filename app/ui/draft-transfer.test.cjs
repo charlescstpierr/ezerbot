@@ -348,9 +348,9 @@ function boot() {
           get document() { return model.doc; },
           set document(doc) { model.doc = doc || docOf(""); },
           appendText(text) { api.value = `${api.value}${api.value ? "\n" : ""}${text}`; },
-          setReadOnly() {}, setPlaceholder() {}, setInvalid() {}, focus() {},
+          setReadOnly() {}, setPlaceholder() {}, setInvalid() {}, focus() { editor.focus(); },
         };
-        composer = { api, onInput: options.onInput, editor: editor.editor };
+        composer = { api, onInput: options.onInput, editor: editor.editor, element: editor };
         return api;
       },
     },
@@ -508,6 +508,20 @@ test("the bot menu keeps focus across refresh, moves with the keyboard, and retu
   app.document.activeElement.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
   assert.equal(menu.hidden, true);
   assert.equal(app.document.activeElement, trigger);
+});
+
+test("a disabled composer bot returns menu focus to the editor", async () => {
+  const app = boot();
+  await ready(app);
+  const menu = app.document.getElementById("bot-menu");
+  const trigger = app.document.getElementById("composer-bot");
+  const editor = app.composer().element;
+  trigger.click();
+  assert.equal(app.document.activeElement?.getAttribute("aria-checked"), "true");
+  trigger.disabled = true;
+  app.document.activeElement.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
+  assert.equal(menu.hidden, true);
+  assert.equal(app.document.activeElement === editor, true);
 });
 
 test("short composer names stay whole and a maximal name ellipsizes only when the bar is full", async () => {

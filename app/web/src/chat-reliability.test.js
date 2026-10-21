@@ -64,6 +64,42 @@ test("a group sign-in card never promises a retry, even after account changes", 
   }
 });
 
+function cssDeclarations(block) {
+  return Object.fromEntries([...block.matchAll(/(-{0,2}[-\w]+)\s*:\s*([^;]+);/g)].map(([, name, value]) => [name, value.trim()]));
+}
+
+function painted(vars, ...blocks) {
+  const style = Object.assign({}, ...blocks);
+  const resolve = (value) => value?.replace(/var\((--[-\w]+)\)/g, (_, name) => vars[name]);
+  const border = resolve(style.border);
+  return {
+    background: resolve(style.background),
+    color: resolve(style.color),
+    borderColor: resolve(style["border-color"]) || border?.match(/solid\s+(\S+)/)?.[1],
+  };
+}
+
+test("a connected account card paints a neutral surface instead of the warning amber", () => {
+  const styles = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
+  const chat = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
+  const vars = cssDeclarations(styles.match(/:root\s*\{([^}]+)\}/)[1]);
+  const pending = cssDeclarations(chat.match(/\.gb-pending\s*\{([^}]+)\}/)[1]);
+  const connected = cssDeclarations(chat.match(/\.gb-pending\.gb-connected\s*\{([^}]+)\}/)?.[1] || "");
+  const retry = cssDeclarations(chat.match(/\.gb-retry\s*\{([^}]+)\}/)[1]);
+  const connectedRetry = cssDeclarations(chat.match(/\.gb-pending\.gb-connected \.gb-retry\s*\{([^}]+)\}/)?.[1] || "");
+  const card = painted(vars, pending, connected);
+  const button = painted(vars, retry, connectedRetry);
+  assert.equal(card.background, vars["--soft"]);
+  assert.equal(card.color, vars["--text"]);
+  assert.equal(card.borderColor, vars["--line"]);
+  assert.notEqual(card.background, vars["--warning-bg"]);
+  assert.notEqual(card.color, vars["--warning-text"]);
+  assert.equal(button.color, vars["--text"]);
+  assert.notEqual(button.color, vars["--warning-text"]);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /view\.alert \? " gb-problem" : " gb-connected"/);
+});
+
 test("a connected account card is a status, not a red alert", () => {
   const connected = signInCardState({ message: { error_kind: "signin" }, providerConnected: true });
   assert.equal(connected.title, "Compte ChatGPT connecté");
@@ -73,7 +109,7 @@ test("a connected account card is a status, not a red alert", () => {
   assert.equal(signInCardState({ message: { error_kind: "signin" } }).alert, true);
   assert.equal(signInCardState({ message: { error_kind: "signin_expired" } }).alert, true);
   const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
-  assert.match(source, /className=\{`gb-pending\$\{view\.alert \? " gb-problem" : ""\}`\}/);
+  assert.match(source, /className=\{`gb-pending\$\{view\.alert \? " gb-problem" : " gb-connected"\}`\}/);
   assert.match(source, /\{view\.alert \? <TriangleAlert \/> : <Check \/>\}/);
 });
 

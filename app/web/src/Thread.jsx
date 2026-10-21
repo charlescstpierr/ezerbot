@@ -198,7 +198,7 @@ function Dots() {
 function SignInCard({ message, actions }) {
   const view = signInCardState({ message, ...actions });
   return (
-    <div className={`gb-pending${view.alert ? " gb-problem" : ""}`} role={view.alert ? "alert" : "status"}>
+    <div className={`gb-pending${view.alert ? " gb-problem" : " gb-connected"}`} role={view.alert ? "alert" : "status"}>
       {view.alert ? <TriangleAlert /> : <Check />}
       <div className="gb-pending-copy"><strong>{view.title}</strong><p>{view.copy}</p></div>
       <div className="gb-problem-actions">

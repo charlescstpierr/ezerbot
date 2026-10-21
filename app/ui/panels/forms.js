@@ -29,7 +29,7 @@
       storageWarning.className = "storage-warning-marker";
       storageWarning.textContent = "!";
       storageWarning.setAttribute("role", "img");
-      storageWarning.setAttribute("aria-label", "Attention : les nouveaux secrets sont enregistrés dans un fichier de secours non chiffré. Vérifiez le stockage dans Paramètres.");
+      storageWarning.setAttribute("aria-label", "Attention : le trousseau macOS a refusé l’enregistrement. Les nouveaux secrets ne sont pas enregistrés. Vérifiez le stockage dans Paramètres.");
       button.append(storageWarning);
     }
     storageWarning.hidden = next?.backend !== "file_fallback";
@@ -208,7 +208,7 @@
       notice.className = `storage-notice${information ? " storage-info" : ""}`;
       notice.setAttribute("role", information ? "status" : "alert");
       const title = document.createElement("strong");
-      title.textContent = information ? "Activation du trousseau en attente" : "Secrets non chiffrés pour le moment.";
+      title.textContent = information ? "Activation du trousseau en attente" : "Le trousseau macOS est indisponible.";
       const detail = document.createElement("span");
       detail.textContent = state.forms.storage.notice;
       notice.append(title, detail);
@@ -227,8 +227,8 @@
         try {
           await panels.refresh();
           storageFeedback = panels.state.forms?.storage?.backend === "keychain"
-            ? "Trousseau macOS rétabli : les secrets du fichier de secours y ont été transférés."
-            : "Le trousseau est toujours inaccessible. Les nouveaux secrets restent dans le fichier de secours.";
+            ? "Trousseau macOS rétabli."
+            : "Le trousseau est toujours inaccessible. Les nouveaux secrets ne sont pas enregistrés.";
         } catch { storageFeedback = "Le stockage ne peut pas être vérifié pour le moment. Réessayez lorsque le moteur local est disponible."; }
         finally { storageCheckBusy = false; renderRules(panels.state); }
       });

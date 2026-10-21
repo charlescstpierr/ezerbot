@@ -156,11 +156,11 @@ test("storage warning is a dedicated alert in a separated block and marks Param�
   const notice = byClass(block, "storage-notice");
   assert.equal(notice.attributes.role, "alert");
   assert.equal(notice.children[0].tagName, "strong");
-  assert.match(notice.textContent, /^Secrets non chiffrés pour le moment\./);
+  assert.match(notice.textContent, /^Le trousseau macOS est indisponible\./);
   assert.ok(f.root.children.indexOf(block) < f.root.children.findIndex(e => e.textContent === "Autorisations permanentes"));
   const marker = byClass(f.settingsButton, "storage-warning-marker");
   assert.equal(marker.hidden, false);
-  assert.match(marker.attributes["aria-label"], /non chiffré/);
+  assert.match(marker.attributes["aria-label"], /ne sont pas enregistrés/);
   updateStorage(f, { backend: "keychain", label: "Trousseau macOS" });
   assert.equal(marker.hidden, true);
   assert.equal(byClass(f.root, "storage-notice"), undefined);
@@ -183,7 +183,7 @@ test("storage check confirms refusal and recovery inside the modal, persisting t
   assert.match(byClass(f.root, "storage-feedback").textContent, /^Le trousseau est toujours inaccessible/);
   f.panels.refresh = async () => updateStorage(f, { backend: "keychain", label: "Trousseau macOS" });
   await button(f.root, "Vérifier le stockage").listeners.click();
-  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli.*transférés/);
+  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli\.$/);
   assert.equal(byClass(f.root, "storage-feedback").attributes.role, "status");
   assert.equal(button(f.root, "Vérifier le stockage"), undefined);
   f.registration.onState(f.panels.state);
@@ -333,7 +333,7 @@ test("secret cards warn about current fallback only while the form is still open
     try {
       const pending = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("pending") }));
       assert.equal(pending.includes("gb-secret-storage-warning"), backend === "file_fallback");
-      if (backend === "file_fallback") assert.ok(pending.includes("Les nouveaux secrets sont enregistrés dans un fichier de secours non chiffré"));
+      if (backend === "file_fallback") assert.ok(pending.includes("Les nouveaux secrets ne sont pas enregistrés"));
       assert.ok(pending.includes("selon Paramètres"));
       assert.ok(!pending.includes("envoyée au coffre local"));
       const resolved = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("resolved") }));

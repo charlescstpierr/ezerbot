@@ -506,18 +506,33 @@ fn secret_value_absent_from_state_export_and_events() {
     assert!(encoded.contains("API_TOKEN"));
     let vault = forms::vault(&f.app.feature_context()).unwrap();
     assert_eq!(vault.path(), f.directory.join("app.secrets.json"));
-    assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "API_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some(secret)
+    );
     let retry = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":"other-token-value"}));
     assert_eq!(
         retry["receipt"]["resolution_id"],
         first["receipt"]["resolution_id"]
     );
-    assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "API_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some(secret)
+    );
     assert!(f.app.api("GET", "/api/secrets", b"").unwrap()["secrets"][0]
         .get("value")
         .is_none());
     assert_eq!(
-        f.post("/api/secrets/delete", json!({"name":"api_token"})),
+        f.post(
+            "/api/secrets/delete",
+            json!({"name":"api_token","bot_id":"grokbot"})
+        ),
         json!({"secrets":[]})
     );
     let stale = post_result(
@@ -530,7 +545,7 @@ fn secret_value_absent_from_state_export_and_events() {
     assert_eq!(stale.message, "Ce formulaire n’a pas été accepté.");
     assert!(forms::vault(&f.app.feature_context())
         .unwrap()
-        .get("API_TOKEN")
+        .get_for_bot("grokbot", "API_TOKEN")
         .unwrap()
         .is_none());
     for name in ["app.sqlite", "app.sqlite-wal"] {
@@ -624,7 +639,13 @@ fn conversation_secret_card_records_the_name_and_rejects_another_submission() {
     assert!(listed["secrets"][0].get("value").is_none());
     assert!(!listed.to_string().contains(VALUE));
     let vault = forms::vault(&f.app.feature_context()).unwrap();
-    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
 
     let replay = f.post(
         "/api/forms/submit",
@@ -634,7 +655,13 @@ fn conversation_secret_card_records_the_name_and_rejects_another_submission() {
         replay["receipt"]["resolution_id"],
         first["receipt"]["resolution_id"]
     );
-    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
 
     let resolutions = f.count("forms_resolutions");
     let stale = post_result(
@@ -646,7 +673,13 @@ fn conversation_secret_card_records_the_name_and_rejects_another_submission() {
     assert_eq!(stale.status, 409);
     assert_eq!(stale.message, STALE);
     assert_eq!(f.count("forms_resolutions"), resolutions);
-    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
     assert!(!bytes_contain(vault.path(), OTHER));
     for name in ["app.sqlite", "app.sqlite-wal"] {
         assert!(!bytes_contain(&f.directory.join(name), VALUE));
@@ -1295,7 +1328,13 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
     );
     assert!(!added.to_string().contains(PANEL));
     let vault = forms::vault(&f.app.feature_context()).unwrap();
-    assert_eq!(vault.get("CLE_PANNEAU").unwrap().as_deref(), Some(PANEL));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "CLE_PANNEAU")
+            .unwrap()
+            .as_deref(),
+        Some(PANEL)
+    );
     let file = std::fs::read_to_string(vault.path()).unwrap_or_default();
     match vault.storage_status().backend {
         "keychain" => assert!(
@@ -1334,7 +1373,7 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
     assert_eq!(removed["secrets"], json!([]));
     assert!(forms::vault(&f.app.feature_context())
         .unwrap()
-        .get("CLE_PANNEAU")
+        .get_for_bot("grokbot", "CLE_PANNEAU")
         .unwrap()
         .is_none());
 
@@ -1372,7 +1411,7 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
     assert_eq!(
         forms::vault(&f.app.feature_context())
             .unwrap()
-            .get("JETON_ANCIEN")
+            .get_for_bot("grokbot", "JETON_ANCIEN")
             .unwrap()
             .as_deref(),
         Some(OLD)
@@ -1409,7 +1448,7 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
     assert_eq!(f.count("forms_resolutions"), resolutions);
     assert!(forms::vault(&f.app.feature_context())
         .unwrap()
-        .get("JETON_REMPLACE")
+        .get_for_bot("grokbot", "JETON_REMPLACE")
         .unwrap()
         .is_none());
     assert!(!f
@@ -1430,8 +1469,17 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
     assert_eq!(restarted.message, STALE);
     assert_eq!(f.count("forms_resolutions"), resolutions);
     let vault = forms::vault(&f.app.feature_context()).unwrap();
-    assert!(vault.get("JETON_COURANT").unwrap().is_none());
-    assert_eq!(vault.get("JETON_ANCIEN").unwrap().as_deref(), Some(OLD));
+    assert!(vault
+        .get_for_bot("grokbot", "JETON_COURANT")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "JETON_ANCIEN")
+            .unwrap()
+            .as_deref(),
+        Some(OLD)
+    );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
     assert!(!state.to_string().contains(RESTARTED));
     assert!(!state.to_string().contains(REPLACED));

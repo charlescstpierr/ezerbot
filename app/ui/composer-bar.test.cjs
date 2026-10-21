@@ -256,6 +256,34 @@ function measure(width, height, name, options) {
   });
 }
 
+function forcedComposerWidth(width) {
+  const source = readFileSync(join(UI, "../../tools/verify-app.py"), "utf8");
+  const start = source.indexOf("const applyFrame = (width) => {");
+  assert.notEqual(start, -1, "applyFrame");
+  const snippet = source.slice(start, source.indexOf("style.textContent", start));
+  const value = (name) => {
+    const found = snippet.match(new RegExp(`const ${name} = ([^;]+);`));
+    assert.ok(found, name);
+    return found[1];
+  };
+  return new Function("width", `const sidebar = ${value("sidebar")}; const main = ${value("main")}; const area = ${value("area")}; return area;`)(width);
+}
+
+test("applyFrame matches the measured composer width", async () => {
+  const frames = [[820, 560], [1140, 780]];
+  for (const [width, height] of frames) {
+    const report = await measure(width, height, "Ezerbot", { pills: false });
+    const forced = forcedComposerWidth(width);
+    for (const theme of report.themes) {
+      const where = `${theme.theme} ${width} applyFrame=${forced} composer=${theme.composerWidth} area=${theme.areaWidth} viewport=${theme.viewport}`;
+      assert.equal(theme.viewport[0], width, where);
+      assert.ok(Math.abs(theme.composerWidth - theme.areaWidth) <= 0.5, where);
+      assert.ok(Math.abs(forced - theme.composerWidth) <= 0.5, where);
+      if (width === 820) assert.ok(Math.abs(theme.composerWidth - 530) <= 0.5, where);
+    }
+  }
+});
+
 test("composer rules do not restate a min-width of zero", () => {
   const css = readFileSync(`${UI}/styles.css`, "utf8");
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];

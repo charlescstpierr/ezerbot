@@ -191,13 +191,14 @@ def verify_ui_regressions():
     return inside && iconInside && noHorizontalScroll && menuBox.right <= innerWidth + 0.5
       && actionText.startsWith('Modifier ') && actionText.includes(longName);
   };
-  // Largeur réelle du composeur à 1140×780 (720 px) et à 820×560 (~516 px).
+  // Largeur réelle du composeur : 720 px à 1140×780, 530 px à 820×560.
+  // Le panneau a une bordure de 2 px. Entre 761 et 910, la zone retire 28 px, pas 44.
   const applyFrame = (width) => {
     let style = document.getElementById('qa-menu-frame');
     if (!style) { style = document.createElement('style'); style.id = 'qa-menu-frame'; document.head.append(style); }
     const sidebar = width <= 1100 ? 244 : 270;
     const main = width - sidebar - 16;
-    const area = width <= 1100 ? main - 44 : Math.min(720, main - 54);
+    const area = width > 1100 ? Math.min(720, main - 2 - 54) : width <= 910 && width >= 761 ? main - 2 - 28 : width <= 760 ? main - 44 : main - 2 - 44;
     style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
   };
   const setTheme = theme => { document.documentElement.dataset.theme = theme; };

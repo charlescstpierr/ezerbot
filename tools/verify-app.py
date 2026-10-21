@@ -191,13 +191,14 @@ def verify_ui_regressions():
     return inside && iconInside && noHorizontalScroll && menuBox.right <= innerWidth + 0.5
       && actionText.startsWith('Modifier ') && actionText.includes(longName);
   };
-  // Largeur réelle du composeur à 1140×780 (720 px) et à 820×560 (~516 px).
+  // Largeur réelle du composeur : 720 px à 1140×780, 530 px à 820×560.
+  // Le panneau a une bordure de 2 px. Entre 761 et 910, la zone retire 28 px, pas 44.
   const applyFrame = (width) => {
     let style = document.getElementById('qa-menu-frame');
     if (!style) { style = document.createElement('style'); style.id = 'qa-menu-frame'; document.head.append(style); }
     const sidebar = width <= 1100 ? 244 : 270;
     const main = width - sidebar - 16;
-    const area = width <= 1100 ? main - 44 : Math.min(720, main - 54);
+    const area = width > 1100 ? Math.min(720, main - 2 - 54) : width <= 910 && width >= 761 ? main - 2 - 28 : width <= 760 ? main - 44 : main - 2 - 44;
     style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
   };
   const setTheme = theme => { document.documentElement.dataset.theme = theme; };
@@ -250,7 +251,8 @@ def verify_ui_regressions():
       tools.append(button);
     }
   };
-  for (const [width, height] of [[1140, 780], [820, 560]]) {
+  window.__qaRunFrame = async (width, height) => {
+    if (innerWidth !== width || innerHeight !== height) throw new Error(`viewport is ${innerWidth}×${innerHeight}, expected ${width}×${height}`);
     applyFrame(width);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     for (const theme of ['dark', 'light']) {
@@ -279,7 +281,8 @@ def verify_ui_regressions():
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
     }
-  }
+  };
+  window.__qaFinish = async () => {
   document.getElementById('qa-menu-frame')?.remove();
   setTheme('dark');
   openMenu();
@@ -456,7 +459,15 @@ def verify_ui_regressions():
   document.querySelector('.attachment-remove').click(); choose('Rédacteur');
   check('explicit image removal permits changing the bot', !document.querySelector('.attachment-chip') && chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
   return {scope:'Real app.js, bundled Tiptap editor and isolated simulated wrapper', checks};
+  };
+  return true;
 }''')
+                for width, height in ((1140, 780), (820, 560)):
+                    chrome('resize', str(width), str(height))
+                    frame = chrome('eval', f'async () => {{ await window.__qaRunFrame({width}, {height}); return true; }}')
+                    if not re.search(r'^result: ', frame, re.MULTILINE):
+                        raise AssertionError(frame)
+                result = chrome('eval', 'async () => window.__qaFinish()')
                 value = re.search(r'^result: (.+)$', result, re.MULTILINE)
                 if not value:
                     raise AssertionError(result)

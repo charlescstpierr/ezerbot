@@ -1,7 +1,7 @@
 // Run with: node --test app/ui/composer-bar.test.cjs
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
-const { mkdtempSync, writeFileSync } = require("node:fs");
+const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
@@ -40,7 +40,7 @@ function page(name) {
             <span class="composer-bot-name" id="composer-bot-name">${name}</span>
             <svg class="icon composer-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
           </button>
-          <span class="composer-tools" id="composer-tools"><span class="composer-local">Local</span></span>
+          <span class="composer-tools" id="composer-tools"><button class="tool-pill" type="button"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button></span>
         </span>
         <div class="voice-controls">
           <button class="voice-session-toggle" type="button" aria-label="Mode voix" title="Mode voix · parler et écouter les réponses sur ce Mac">
@@ -89,9 +89,12 @@ function page(name) {
         plus: icon("#composer-model .attachment-choose:not(.meeting-start) .icon"),
         chevron: icon(".composer-chevron"),
         name: name.textContent,
+        nameClient: name.clientWidth,
+        nameScroll: name.scrollWidth,
         nameFits: name.scrollWidth <= name.clientWidth + 1,
         nameEllipsed: name.scrollWidth > name.clientWidth + 1,
         clear: nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5,
+        toolsClear: document.querySelector(".composer-tools").getBoundingClientRect().right <= voice.left + 0.5,
       };
     };
     const report = { frames: FRAMES_PLACEHOLDER, themes: ["dark", "light"].map(measure) };
@@ -144,6 +147,45 @@ function measure(width, height, name) {
     });
   });
 }
+
+test("voice composer controls keep a name when they are icon-only", () => {
+  const voice = readFileSync(`${UI}/panels/voice.js`, "utf8");
+  const session = readFileSync(`${UI}/panels/voice-conversation.js`, "utf8");
+  const voiceCss = readFileSync(`${UI}/panels/voice.css`, "utf8");
+  const sessionCss = readFileSync(`${UI}/panels/voice-conversation.css`, "utf8");
+  assert.match(voice, /aria-label", "Mémo vocal"/);
+  assert.match(voice, /label\.title = "Mémo vocal"/);
+  assert.match(session, /aria-label","Mode voix"/);
+  assert.match(session, /Mode voix · parler et écouter les réponses sur ce Mac/);
+  const memo = voiceCss.match(/\.voice-mode \{([^}]*)\}/);
+  assert.ok(memo, "the memo control has a base rule");
+  assert.match(memo[1], /font-size:\s*0/);
+  assert.match(sessionCss, /\.voice-session-icon \{[^}]*display:\s*flex/);
+  assert.match(sessionCss, /\.voice-session-label \{[^}]*overflow:\s*hidden/);
+  assert.doesNotMatch(voiceCss, /@media \(max-width: 1100px\)[^{]*\{[^}]*\.voice-mode/);
+});
+
+const MEDIUM_NAME = "Coach sportif du matin";
+const LONG_NAME = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN";
+
+test("a medium composer name stays whole and a 40-character name ellipsizes clear of the voice controls", async () => {
+  for (const [width, height] of FRAMES) {
+    const medium = await measure(width, height, MEDIUM_NAME);
+    const long = await measure(width, height, LONG_NAME);
+    for (const theme of medium.themes) {
+      assert.equal(theme.name, MEDIUM_NAME);
+      assert.equal(theme.nameFits, true, `medium name truncated at ${width}×${height} ${theme.theme}`);
+      assert.equal(theme.clear, true, `medium name overlaps controls at ${width}×${height} ${theme.theme}`);
+      assert.equal(theme.toolsClear, true, `model tools overlap voice controls at ${width}×${height} ${theme.theme}`);
+    }
+    for (const theme of long.themes) {
+      assert.equal(theme.name, LONG_NAME);
+      assert.equal(theme.nameEllipsed, true, `40-character name is not ellipsed at ${width}×${height} ${theme.theme}`);
+      assert.equal(theme.clear, true, `40-character name overlaps voice controls or Send at ${width}×${height} ${theme.theme}`);
+      assert.equal(theme.toolsClear, true, `model tools overlap voice controls at ${width}×${height} ${theme.theme}`);
+    }
+  }
+});
 
 test("attach plus and composer chevron are present and painted at both frames", async () => {
   for (const [width, height] of FRAMES) {

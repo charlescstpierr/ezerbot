@@ -162,7 +162,9 @@ def verify_ui_regressions():
   // Composer bot menu: a 40-character name stays inside at both welcome sizes and themes.
   // Focus survives a refresh, arrows/Home/End move, and Escape returns to the trigger.
   const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
+  const mediumName = 'Coach sportif du matin';
   await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
+  await api('/api/bots', {id:'qa-coach', name:mediumName, color:'orange', shape:'goutte', description:'', instructions:''});
   await window.GrokbotPanels.refresh();
   choose(longName);
   const menuFits = () => {
@@ -211,8 +213,31 @@ def verify_ui_regressions():
     const nameBox = label.getBoundingClientRect();
     const voice = document.querySelector('.voice-controls')?.getBoundingClientRect();
     const send = $('send-button').getBoundingClientRect();
+    const tools = document.querySelector('.composer-tools')?.getBoundingClientRect();
     if (!voice || voice.width === 0) throw new Error('voice controls missing');
-    return nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5;
+    const toolsClear = !tools || tools.width === 0 || tools.right <= voice.left + 0.5;
+    return nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5 && toolsClear;
+  };
+  const crowdTools = () => {
+    const tools = $('composer-tools');
+    tools.replaceChildren();
+    for (const [label, value] of [['Modèle', 'GPT-6 Sol'], ['Effort', 'Moyen']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'tool-pill';
+      const small = document.createElement('small');
+      small.textContent = label;
+      const name = document.createElement('b');
+      name.textContent = value;
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('class', 'icon');
+      icon.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+      use.setAttribute('href', '#i-chevron');
+      icon.append(use);
+      button.append(small, name, icon);
+      tools.append(button);
+    }
   };
   for (const [width, height] of [[1140, 780], [820, 560]]) {
     applyFrame(width);
@@ -228,10 +253,15 @@ def verify_ui_regressions():
       choose('Rédacteur');
       const writerName = $('composer-bot-name');
       check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1 && clearOfControls(writerName));
+      choose(mediumName);
+      crowdTools();
+      const mediumLabel = $('composer-bot-name');
+      check(`composer shows the full medium name at ${width}×${height} ${theme}`, mediumLabel.textContent === mediumName && mediumLabel.scrollWidth <= mediumLabel.clientWidth + 1 && clearOfControls(mediumLabel));
       choose(longName);
+      crowdTools();
       const longLabel = $('composer-bot-name');
       check(`maximal composer name stays left of the voice controls and send button at ${width}×${height} ${theme}`, longLabel.textContent === longName && clearOfControls(longLabel));
-      if (width <= 820) check(`maximal composer name ellipsizes when the bar is full at ${width}×${height} ${theme}`, longLabel.scrollWidth > longLabel.clientWidth + 1);
+      check(`maximal composer name ellipsizes when the bar is full at ${width}×${height} ${theme}`, longLabel.scrollWidth > longLabel.clientWidth + 1);
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
     }

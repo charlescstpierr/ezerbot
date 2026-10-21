@@ -184,12 +184,13 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .tool-pill .icon { width: 12px; height: 12px; color: var(--subtle); }
 .tool-pill:hover:enabled, .tool-pill[aria-expanded="true"] { box-shadow: inset 0 0 0 1px var(--accent-ink); }
 /* Dans la barre d'écriture, les menus Modèle / Effort restent sans fond, comme dans Codex. */
-.composer .tool-pill { height: 32px; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
+.composer .tool-pill { height: 32px; min-width: 0; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
 .composer .tool-pill small { font-size: 11px; }
-.composer .tool-pill .icon { width: 13px; height: 13px; }
+.composer .tool-pill b { min-width: 0; }
+.composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 0 0 auto; flex-wrap: nowrap; }
-.composer .composer-bot { flex: 0 1 auto; min-width: 0; }
+.composer .composer-tools { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
+.composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
 .picker::-webkit-scrollbar { width: 8px; }
@@ -235,7 +236,7 @@ a.secondary-button { text-decoration: none; }
 .composer-bot:hover:enabled, .composer-bot[aria-expanded="true"] { background: var(--soft); }
 .composer-bot:disabled { cursor: default; }
 .composer-bot:disabled .composer-chevron { display: none; }
-.composer-bot-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-bot-name { flex: 0 1 auto; min-width: 23ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-chevron { width: 13px; height: 13px; color: var(--subtle); }
 .composer-mascot { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; }
 .send-button { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--canvas); transition: background .15s, opacity .15s; }

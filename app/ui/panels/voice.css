@@ -1,6 +1,7 @@
 .voice-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
 /* Mémo vocal : la case reste la commande, présentée comme un bouton bascule à onde sonore. */
-.voice-mode { position: relative; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 9px; border-radius: 8px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
+/* Icône seule dans le compositeur : le libellé reste dans aria-label, title et le texte, pour laisser le nom du bot. */
+.voice-mode { position: relative; display: flex; align-items: center; justify-content: center; gap: 0; width: 32px; height: 32px; padding: 0; border-radius: 8px; font-size: 0; color: var(--muted); cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
 .voice-mode::before { content: ""; width: 16px; height: 16px; flex: 0 0 auto; background: currentColor; -webkit-mask: var(--voice-wave) center / contain no-repeat; mask: var(--voice-wave) center / contain no-repeat; --voice-wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2'/%3E%3C/svg%3E"); }
 .voice-mode input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
 .voice-mode:hover { background: var(--soft); color: var(--text); }
@@ -28,8 +29,6 @@
   .voice-controls { gap: 0; }
   .voice-region { margin-left: 10px; margin-right: 10px; }
 }
-/* Fenêtre étroite : l'onde seule, le libellé reste lu par les lecteurs d'écran. */
-@media (max-width: 1100px) { .voice-mode { gap: 0; padding: 0 8px; font-size: 0; } }
 @media (max-height: 640px) {
   .voice-region { padding: 6px 10px; margin-bottom: 6px; }
   .voice-memo-chip { flex-direction: row; align-items: center; padding: 4px 26px 4px 0; }

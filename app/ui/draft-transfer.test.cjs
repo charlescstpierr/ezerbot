@@ -533,7 +533,8 @@ test("short composer names stay whole and a maximal name ellipsizes only when th
   assert.match(composerBot[2], /min-width:\s*0/);
   const composerName = rules.find(([, selector]) => selector.trim() === ".composer-bot-name");
   assert.ok(composerName, "the composer name has its own rule");
-  assert.match(composerName[2], /min-width:\s*23ch/, "a medium name keeps a floor before the ellipsis");
+  assert.match(composerName[2], /min-width:\s*0/, "the name shrinks inside the bot button");
+  assert.match(composerName[2], /text-align:\s*left/);
   assert.match(composerName[2], /overflow:\s*hidden/);
   assert.match(composerName[2], /text-overflow:\s*ellipsis/);
   assert.match(composerName[2], /white-space:\s*nowrap/);

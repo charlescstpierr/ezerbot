@@ -209,6 +209,16 @@ def verify_ui_regressions():
       && Number.parseFloat(style.opacity) > 0 && style.stroke !== 'none' && (Number.parseFloat(style.strokeWidth) || 0) > 0;
   };
   const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
+  const insideBot = (node) => {
+    const bot = $('composer-bot').getBoundingClientRect();
+    const box = node.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && box.left >= bot.left - 0.5 && box.right <= bot.right + 0.5
+      && box.top >= bot.top - 0.5 && box.bottom <= bot.bottom + 0.5;
+  };
+  const modelReadable = () => {
+    const label = document.querySelector('[data-picker="model"] b');
+    return !!label && label.getBoundingClientRect().width >= 40;
+  };
   const clearOfControls = (label) => {
     const nameBox = label.getBoundingClientRect();
     const voice = document.querySelector('.voice-controls')?.getBoundingClientRect();
@@ -221,10 +231,11 @@ def verify_ui_regressions():
   const crowdTools = () => {
     const tools = $('composer-tools');
     tools.replaceChildren();
-    for (const [label, value] of [['Modèle', 'GPT-6 Sol'], ['Effort', 'Moyen']]) {
+    for (const [label, value, picker] of [['Modèle', 'GPT-6 Sol', 'model'], ['Effort', 'Moyen', 'effort']]) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tool-pill';
+      button.dataset.picker = picker;
       const small = document.createElement('small');
       small.textContent = label;
       const name = document.createElement('b');
@@ -250,6 +261,7 @@ def verify_ui_regressions():
       choose('Ezerbot');
       const ezerbotName = $('composer-bot-name');
       check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1 && clearOfControls(ezerbotName));
+      check(`bot name and chevron stay inside the button at ${width}×${height} ${theme}`, insideBot(ezerbotName) && insideBot(document.querySelector('#composer-bot .composer-chevron')) && modelReadable());
       choose('Rédacteur');
       const writerName = $('composer-bot-name');
       check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1 && clearOfControls(writerName));
@@ -257,10 +269,12 @@ def verify_ui_regressions():
       crowdTools();
       const mediumLabel = $('composer-bot-name');
       check(`composer shows the full medium name at ${width}×${height} ${theme}`, mediumLabel.textContent === mediumName && mediumLabel.scrollWidth <= mediumLabel.clientWidth + 1 && clearOfControls(mediumLabel));
+      check(`crowded bot name, chevron and model stay usable at ${width}×${height} ${theme}`, insideBot(mediumLabel) && insideBot(document.querySelector('#composer-bot .composer-chevron')) && modelReadable());
       choose(longName);
       crowdTools();
       const longLabel = $('composer-bot-name');
       check(`maximal composer name stays left of the voice controls and send button at ${width}×${height} ${theme}`, longLabel.textContent === longName && clearOfControls(longLabel));
+      check(`maximal name and chevron stay inside the bot button at ${width}×${height} ${theme}`, insideBot(longLabel) && insideBot(document.querySelector('#composer-bot .composer-chevron')) && modelReadable());
       check(`maximal composer name ellipsizes when the bar is full at ${width}×${height} ${theme}`, longLabel.scrollWidth > longLabel.clientWidth + 1);
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());

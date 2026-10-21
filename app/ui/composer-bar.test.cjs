@@ -40,7 +40,7 @@ function page(name) {
             <span class="composer-bot-name" id="composer-bot-name">${name}</span>
             <svg class="icon composer-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
           </button>
-          <span class="composer-tools" id="composer-tools"><button class="tool-pill" type="button"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button></span>
+          <span class="composer-tools" id="composer-tools"><button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button></span>
         </span>
         <div class="voice-controls">
           <button class="voice-session-toggle" type="button" aria-label="Mode voix" title="Mode voix · parler et écouter les réponses sur ce Mac">
@@ -77,12 +77,23 @@ function page(name) {
     const visible = (info) => info.present && info.width >= 8 && info.height >= 8
       && info.display !== "none" && info.visibility !== "hidden" && info.opacity > 0
       && info.stroke !== "none" && info.strokeWidth > 0 && info.color !== "rgba(0, 0, 0, 0)";
+    const boxOf = (node) => {
+      const box = node.getBoundingClientRect();
+      return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+    };
+    const contained = (child, parent) => child.width > 0 && child.height > 0
+      && child.left >= parent.left - 0.5 && child.right <= parent.right + 0.5
+      && child.top >= parent.top - 0.5 && child.bottom <= parent.bottom + 0.5;
     const measure = (theme) => {
       document.documentElement.dataset.theme = theme;
       const name = document.getElementById("composer-bot-name");
       const voice = document.querySelector(".voice-controls").getBoundingClientRect();
       const send = document.getElementById("send-button").getBoundingClientRect();
-      const nameBox = name.getBoundingClientRect();
+      const nameBox = boxOf(name);
+      const botBox = boxOf(document.getElementById("composer-bot"));
+      const chevronBox = boxOf(document.querySelector("#composer-bot .composer-chevron"));
+      const modelLabel = document.querySelector('[data-picker="model"] b');
+      const modelBox = modelLabel ? boxOf(modelLabel) : { width: 0 };
       return {
         theme,
         viewport: [innerWidth, innerHeight],
@@ -95,6 +106,12 @@ function page(name) {
         nameEllipsed: name.scrollWidth > name.clientWidth + 1,
         clear: nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5,
         toolsClear: document.querySelector(".composer-tools").getBoundingClientRect().right <= voice.left + 0.5,
+        nameInside: contained(nameBox, botBox),
+        chevronInside: contained(chevronBox, botBox),
+        modelLabelWidth: modelBox.width,
+        nameBox,
+        chevronBox,
+        botBox,
       };
     };
     const report = { frames: FRAMES_PLACEHOLDER, themes: ["dark", "light"].map(measure) };
@@ -183,6 +200,19 @@ test("a medium composer name stays whole and a 40-character name ellipsizes clea
       assert.equal(theme.nameEllipsed, true, `40-character name is not ellipsed at ${width}×${height} ${theme.theme}`);
       assert.equal(theme.clear, true, `40-character name overlaps voice controls or Send at ${width}×${height} ${theme.theme}`);
       assert.equal(theme.toolsClear, true, `model tools overlap voice controls at ${width}×${height} ${theme.theme}`);
+    }
+  }
+});
+
+test("the bot name and chevron stay inside the bot button and the model label stays readable", async () => {
+  for (const label of ["Ezerbot", MEDIUM_NAME, LONG_NAME]) {
+    for (const [width, height] of FRAMES) {
+      const report = await measure(width, height, label);
+      for (const theme of report.themes) {
+        assert.equal(theme.nameInside, true, `name leaves #composer-bot at ${width}×${height} ${theme.theme} (${label}): ${JSON.stringify({ name: theme.nameBox, bot: theme.botBox })}`);
+        assert.equal(theme.chevronInside, true, `chevron leaves #composer-bot at ${width}×${height} ${theme.theme} (${label}): ${JSON.stringify({ chevron: theme.chevronBox, bot: theme.botBox })}`);
+        assert.ok(theme.modelLabelWidth >= 40, `model label is ${theme.modelLabelWidth}px at ${width}×${height} ${theme.theme} (${label})`);
+      }
     }
   }
 });

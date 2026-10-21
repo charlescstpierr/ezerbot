@@ -189,7 +189,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
+.composer .composer-tools { flex: 0 0 auto; min-width: 0; flex-wrap: nowrap; }
+.composer [data-picker="model"] { max-width: 150px; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
@@ -236,7 +237,7 @@ a.secondary-button { text-decoration: none; }
 .composer-bot:hover:enabled, .composer-bot[aria-expanded="true"] { background: var(--soft); }
 .composer-bot:disabled { cursor: default; }
 .composer-bot:disabled .composer-chevron { display: none; }
-.composer-bot-name { flex: 0 1 auto; min-width: 23ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-bot-name { flex: 0 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-chevron { width: 13px; height: 13px; color: var(--subtle); }
 .composer-mascot { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; }
 .send-button { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--canvas); transition: background .15s, opacity .15s; }
@@ -447,6 +448,10 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .suggestion { flex-direction: row; align-items: center; gap: 10px; padding: 11px; }
   .suggestion strong { font-size: 10px; }
   .suggestion small { font-size: 9px; }
+  .composer-area { width: calc(100% - 28px); }
+  .composer .composer-mascot,
+  .composer .tool-pill > .icon { display: none; }
+  .tool-pill { padding: 0 5px; }
 }
 @media (max-width: 760px) {
   body { display: block; background: var(--canvas); }

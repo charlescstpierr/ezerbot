@@ -13,3 +13,4 @@ serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 getrandom.workspace = true
+unicode-normalization = "0.1.26"

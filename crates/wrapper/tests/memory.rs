@@ -2,7 +2,7 @@
 use grokbot_engine::contracts::{ContextSource, ToolCall, ToolOutcome};
 use grokbot_memory::facts::{self, FactStatus, Source};
 use grokbot_wrapper::{features, App};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -298,6 +298,132 @@ fn context_is_bounded_newest_first_with_complete_unicode_records() {
 }
 
 #[test]
+fn recall_budget_skips_a_fact_that_does_not_fit_without_dropping_a_later_short_one() {
+    let db = Database::new();
+    let app = db.open();
+    let short = remember(&app, "grokbot", "budgetclef court", false);
+    let longs: Vec<_> = (0..6)
+        .map(|index| {
+            remember(
+                &app,
+                "grokbot",
+                &format!("budgetclef {index} {}", "x".repeat(1880)),
+                false,
+            )
+        })
+        .collect();
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 1 WHERE fact_id = ?1",
+        [short["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    for (index, fact) in longs.iter().enumerate() {
+        conn.execute(
+            "UPDATE memory_facts SET learned_at = ?1 WHERE fact_id = ?2",
+            params![(index as i64 + 1) * 10, fact["fact_id"].as_str().unwrap()],
+        )
+        .unwrap();
+    }
+    let result = done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query": "budgetclef", "limit": 20}),
+        )
+        .unwrap(),
+    );
+    let ids: Vec<_> = result["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fact| fact["fact_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(ids.contains(&short["fact_id"].as_str().unwrap().to_owned()));
+    assert!(ids.contains(&longs[5]["fact_id"].as_str().unwrap().to_owned()));
+    assert!(!ids.contains(&longs[0]["fact_id"].as_str().unwrap().to_owned()));
+}
+
+#[test]
+fn context_preview_skips_an_oversized_record_and_keeps_a_later_short_one() {
+    let db = Database::new();
+    let mut app = db.open();
+    let conv = conversation(&mut app, "grokbot");
+    let short = remember(&app, "grokbot", "Fait court encore visible", false);
+    let marker = "ENORME";
+    let huge_text = format!(
+        "{marker}{}",
+        "x".repeat(facts::MAX_FACT_CHARS - marker.chars().count())
+    );
+    let record = serde_json::json!({
+        "fact_id": "fact_00000000000000000000000000000000",
+        "bot_id": "grokbot",
+        "scope": "private",
+        "text": huge_text,
+    })
+    .to_string();
+    assert!(record.chars().count() + 1 > features::memory::CONTEXT_CHARS);
+    let huge = remember(&app, "grokbot", &huge_text, false);
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 1 WHERE fact_id = ?1",
+        [short["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 2 WHERE fact_id = ?1",
+        [huge["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    let text = memory_text(&app, &conv);
+    assert!(text.chars().count() <= features::memory::CONTEXT_CHARS);
+    assert!(text.contains("Fait court encore visible"));
+    assert!(!text.contains(marker));
+}
+
+#[test]
+fn context_preview_skips_a_near_budget_record_and_keeps_a_later_short_one() {
+    let db = Database::new();
+    let mut app = db.open();
+    let conv = conversation(&mut app, "grokbot");
+    let short = remember(&app, "grokbot", "Fait court encore visible", false);
+    let marker = "MOYEN";
+    let wide_text = format!("{marker}{}", "y".repeat(1_900 - marker.chars().count()));
+    assert_eq!(wide_text.chars().count(), 1_900);
+    let record = serde_json::json!({
+        "fact_id": "fact_00000000000000000000000000000000",
+        "bot_id": "grokbot",
+        "scope": "private",
+        "text": wide_text,
+    })
+    .to_string();
+    let cost = record.chars().count() + 1;
+    // The line itself fits in an empty preview. With the header it does not,
+    // so stopping at the first miss drops the older short fact.
+    assert!(cost <= features::memory::CONTEXT_CHARS);
+    assert!(231 + cost > features::memory::CONTEXT_CHARS);
+    let wide = remember(&app, "grokbot", &wide_text, false);
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 1 WHERE fact_id = ?1",
+        [short["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 2 WHERE fact_id = ?1",
+        [wide["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    let text = memory_text(&app, &conv);
+    assert!(text.chars().count() <= features::memory::CONTEXT_CHARS);
+    assert!(
+        text.contains("Fait court encore visible"),
+        "le fait court suivant a disparu"
+    );
+    assert!(!text.contains(marker));
+}
+
+#[test]
 fn failed_correct_rolls_back_route_and_tool_even_when_failed_outcome_is_committed() {
     let db = Database::new();
     let mut app = db.open();
@@ -498,7 +624,7 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
         post(&mut app, "/api/memory", json!({"bot_id": "grokbot"}))["facts"],
         json!([])
     );
-    assert_eq!(features::memory::tools().len(), 3);
+    assert_eq!(features::memory::tools().len(), 4);
     for spec in features::memory::tools() {
         assert!(!spec.description.is_empty());
         assert!(!spec.requires_approval);
@@ -508,6 +634,102 @@ fn route_and_tool_inputs_cannot_override_trusted_identity() {
             spec.schema["required"].as_array().unwrap().len()
         );
     }
+}
+
+#[test]
+fn five_hundred_facts_recalled_outside_prompt_with_scoped_search_and_status() {
+    let db = Database::new();
+    let mut app = db.open();
+    add_bot(&mut app);
+    let conv = conversation(&mut app, "grokbot");
+    let old = remember(
+        &app,
+        "grokbot",
+        "Le projet Boréal utilise le port 4317.",
+        false,
+    );
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute("UPDATE memory_facts SET learned_at=1", [])
+        .unwrap();
+    for i in 1..500 {
+        let mut f = facts::Fact {
+            fact_id: String::new(),
+            bot_id: "grokbot".into(),
+            scope: facts::Scope::Private,
+            text: format!(
+                "Le projet récent {i} est en développement et dispose de sa propre documentation."
+            ),
+            provenance: facts::Provenance {
+                conversation_id: None,
+                entry_id: None,
+                source: Source::UserStated,
+            },
+            learned_at: i + 1,
+            status: FactStatus::Active,
+            sensitive: false,
+        };
+        // Direct writes avoid 500 unrelated model tool events in this fixture.
+        f.fact_id.clear();
+        facts::remember(&conn, &f).unwrap();
+    }
+    let prompt = memory_text(&app, &conv);
+    assert!(!prompt.contains("port 4317"));
+    assert!(prompt.contains("recall_memory"));
+    let result = done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query":"port Boreal","limit":5}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(result["facts"][0]["text"], old["text"]);
+    assert_eq!(result["facts"][0]["fact_id"], old["fact_id"]);
+    assert!(done(
+        app.invoke_tool(
+            "other",
+            "recall_memory",
+            json!({"query":"Boreal","limit":5})
+        )
+        .unwrap()
+    )["facts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let listed = post(&mut app, "/api/memory", json!({"bot_id":"grokbot"}));
+    assert_eq!(listed["automatic"]["saturated"], true);
+    assert_eq!(listed["profile"]["total"], 500);
+    assert_eq!(
+        listed["sharing_classes"][old["fact_id"].as_str().unwrap()],
+        "work"
+    );
+    for args in [
+        json!({"query":"Boreal","limit":0}),
+        json!({"query":"Boreal","limit":21}),
+        json!({"query":" ","limit":1}),
+        json!({"query":"Boreal","limit":1,"bot_id":"other"}),
+    ] {
+        assert!(matches!(
+            app.invoke_tool("grokbot", "recall_memory", args).unwrap(),
+            ToolOutcome::Failed { .. }
+        ));
+    }
+    post(
+        &mut app,
+        "/api/memory/forget",
+        json!({"bot_id":"grokbot","fact_id":old["fact_id"]}),
+    );
+    assert!(done(
+        app.invoke_tool(
+            "grokbot",
+            "recall_memory",
+            json!({"query":"Boreal","limit":5})
+        )
+        .unwrap()
+    )["facts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

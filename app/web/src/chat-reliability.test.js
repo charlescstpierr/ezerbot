@@ -128,6 +128,13 @@ test("a pending tool has a single visible progress state, never after failure or
   assert.equal(preparingTool({ state: "streaming" }), false);
 });
 
+test("the thread stays disconnected until the shell reports both connections", () => {
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  const signature = source.match(/export function Thread\((\{[^}]*\})/)[1];
+  assert.match(signature, /providerConnected = false/);
+  assert.match(signature, /engineConnected = false/);
+});
+
 test("a disabled secondary button is dimmed and does not look actionable", () => {
   const css = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
   const rule = css.match(/\.secondary-button:disabled\s*\{[^}]*\}/);

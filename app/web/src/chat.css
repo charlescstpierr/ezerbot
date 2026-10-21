@@ -188,6 +188,9 @@
 .gb-dots i:nth-child(3) { animation-delay: .3s; }
 
 .gb-pending { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; width: min(560px, 100%); margin-top: 8px; padding: 12px 14px; border: 1px solid var(--warning-line); border-radius: 10px; background: var(--warning-bg); color: var(--warning-text); }
+.gb-pending.gb-connected { border-color: var(--line); background: var(--soft); color: var(--text); }
+.gb-pending.gb-connected > .lucide { color: var(--text); }
+.gb-pending.gb-connected .gb-retry { border-color: var(--line); background: var(--pane); color: var(--text); }
 .gb-pending > .lucide { width: 17px; height: 17px; }
 .gb-pending-copy { flex: 1 1 220px; min-width: 0; }
 .gb-pending strong { display: block; font-size: 12px; font-weight: 600; margin-bottom: 3px; }

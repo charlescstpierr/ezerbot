@@ -403,7 +403,7 @@ impl Drop for Abandon {
     fn drop(&mut self) {
         self.flag.store(true, Ordering::SeqCst);
         let mut settled = lock(&self.settled);
-        if !settled.worker_done {
+        if !settled.worker_done && !settled.counted {
             settled.counted = true;
             self.inner.closing.fetch_add(1, Ordering::SeqCst);
         }
@@ -1050,6 +1050,28 @@ mod elapsed_interval {
             socket,
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
+        );
+    }
+
+    #[test]
+    fn abandon_drop_does_not_count_a_socket_twice() {
+        let inner = std::sync::Arc::new(sample_inner());
+        inner.closing.store(1, Ordering::SeqCst);
+        let settled = std::sync::Arc::new(super::super::Mutex::new(super::Settled {
+            worker_done: false,
+            counted: true,
+        }));
+        {
+            let _abandon = super::Abandon {
+                flag: std::sync::Arc::new(AtomicBool::new(false)),
+                inner: inner.clone(),
+                settled,
+            };
+        }
+        assert_eq!(
+            inner.closing.load(Ordering::SeqCst),
+            1,
+            "drop counted a socket that was already closing"
         );
     }
 

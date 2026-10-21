@@ -360,7 +360,7 @@ def verify_ui_regressions():
   };
   await stageImage(); choose('Rédacteur');
   check('pending image upload already pins the displayed bot', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && Boolean(document.querySelector('.attachment-chip')));
-  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Ezerbot'));
+  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez les pièces jointes') && $('toast').textContent.includes('Ezerbot'));
   allowUpload();
   await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
   window.fetch = originalFetch;
@@ -370,7 +370,7 @@ def verify_ui_regressions():
   document.querySelector('.add-bot').click(); $('bot-name').value = 'Bot image'; $('bot-form').requestSubmit();
   await until(() => !$('bot-dialog').open);
   check('creating a bot also retains staged image and current recipient', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
-  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez l’image jointe'));
+  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez les pièces jointes'));
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
   const imageState = await saved();

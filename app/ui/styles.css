@@ -378,7 +378,7 @@ a.secondary-button { text-decoration: none; }
 @media (max-height: 720px) {
   .bot-preview { position: sticky; top: -27px; z-index: 2; flex-direction: row; gap: 12px; padding: 8px 14px; margin-bottom: 14px; text-align: left; }
   .bot-preview-mascot { width: 56px; height: 49px; flex: 0 0 auto; }
-  .bot-preview-name { margin-top: 0; }
+  .bot-preview-name { margin-top: 0; min-width: 0; flex: 1; }
   .bot-preview-description { display: none; }
 }
 .bot-field { margin-top: 18px; }

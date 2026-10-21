@@ -1382,8 +1382,13 @@ fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
     f.finish("seed");
     let run_id = f.run("seed").run_id.clone();
     let marker = f.root().join("orphan.done");
+    let token = "ezerbot-shell-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", &format!("sleep 30; touch {}", marker.display())])
+        .args([
+            "-c",
+            &format!("sleep 30; touch {}", marker.display()),
+            token,
+        ])
         .current_dir(f.root())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1392,6 +1397,8 @@ fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
         .spawn()
         .unwrap();
     let pgid = child.id();
+    let started =
+        grokbot_wrapper::features::local::shell_leader_started(pgid).expect("identité du chef");
     f.db()
         .execute(
             "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,'crash','null',NULL)",
@@ -1400,8 +1407,8 @@ fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
         .unwrap();
     f.db()
         .execute(
-            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid) VALUES (?1,'crash','en cours',NULL,?2)",
-            params![run_id, pgid],
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid,leader,started) VALUES (?1,'crash','en cours',NULL,?2,?3,?4)",
+            params![run_id, pgid, token, started],
         )
         .unwrap();
     grokbot_wrapper::features::local::startup(&f.db()).unwrap();
@@ -1455,6 +1462,87 @@ fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
             .as_slice(),
     );
     assert_eq!(stop.unwrap_err().status, 409);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn reused_pgid_of_another_group_survives_restart() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("seed", "run_shell", f.shell("echo seed"));
+    let request = f.request("seed");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("seed");
+    let run_id = f.run("seed").run_id.clone();
+    let marker = f.root().join("reused.done");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("sleep 30; touch {}", marker.display()),
+            "unrelated-group",
+        ])
+        .current_dir(f.root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = child.id();
+    let started = grokbot_wrapper::features::local::shell_leader_started(pgid)
+        .expect("identité du groupe réutilisé");
+    f.db()
+        .execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,'reuse','null',NULL)",
+            [&run_id],
+        )
+        .unwrap();
+    // The row still names this pid, with the real start time of whoever holds
+    // it now, but the watchdog token belongs to a group that already exited.
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid,leader,started) VALUES (?1,'reuse','en cours',NULL,?2,?3,?4)",
+            params![
+                run_id,
+                pgid,
+                "ezerbot-shell-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                started
+            ],
+        )
+        .unwrap();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "un groupe réutilisé a été tué"
+    );
+    assert!(process_alive(pgid));
+    assert!(!marker.exists());
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='reuse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM engine_external_tools WHERE call_id='reuse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
+    assert_eq!(outcome["output"]["status"], "arrêtée");
+    assert!(outcome["output"]["exit_code"].is_null());
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .status();
+    let _ = child.wait();
     assert!(!marker.exists());
 }
 

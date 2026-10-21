@@ -32,19 +32,25 @@ empty_hooks!(tick, call_tool, entry, on_run_event, link_attachments);
 pub fn migrate(conn: &rusqlite::Connection) -> Result<(), ApiError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_local_bots(bot_id TEXT PRIMARY KEY, shell INTEGER NOT NULL DEFAULT 0, files INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS wrapper_local_folders(path TEXT PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pgid INTEGER, PRIMARY KEY (run_id, call_id));")?;
-    let has_pgid: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_shell_tasks') WHERE name = 'pgid')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_pgid {
-        conn.execute(
-            "ALTER TABLE wrapper_shell_tasks ADD COLUMN pgid INTEGER",
-            [],
+        CREATE TABLE IF NOT EXISTS wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pgid INTEGER, leader TEXT, started TEXT, PRIMARY KEY (run_id, call_id));")?;
+    for (name, definition) in [("pgid", "INTEGER"), ("leader", "TEXT"), ("started", "TEXT")] {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_shell_tasks') WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
         )?;
+        if !present {
+            conn.execute(
+                &format!("ALTER TABLE wrapper_shell_tasks ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
     }
     Ok(())
+}
+#[doc(hidden)]
+pub fn shell_leader_started(pid: u32) -> Option<String> {
+    super::shell_tasks::leader_started(pid)
 }
 pub fn startup(conn: &rusqlite::Connection) -> Result<(), ApiError> {
     super::shell_tasks::startup(conn)
@@ -799,13 +805,15 @@ fn shell(
             self.1.store(true, Ordering::SeqCst);
         }
     }
+    // $0 is the leader token. Restart kills this group only while that
+    // argument and the recorded start time still belong to this pid.
+    let leader = super::shell_tasks::leader_token();
     let watchdog = Command::new("/bin/sh")
-        .args([
-            "-c",
-            // The parent alone owns the pipe writer (CLOEXEC). EOF also works
-            // after SIGKILL, without PID polling or a sleep/fork loop.
-            "read -r _; /bin/kill -KILL -- -$$",
-        ])
+        .arg("-c")
+        // The parent alone owns the pipe writer (CLOEXEC). EOF also works
+        // after SIGKILL, without PID polling or a sleep/fork loop.
+        .arg("read -r _; /bin/kill -KILL -- -$$")
+        .arg(&leader)
         .current_dir(&cwd)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -932,7 +940,10 @@ fn shell(
         }
         let call_id = call.call_id.clone();
         let pgid = group.0.id();
-        if let Err(error) = super::shell_tasks::insert(ctx.connection, &run_id, &call_id, pgid) {
+        let started = super::shell_tasks::leader_started(pgid).unwrap_or_default();
+        if let Err(error) =
+            super::shell_tasks::insert(ctx.connection, &run_id, &call_id, pgid, &leader, &started)
+        {
             finished.store(true, Ordering::SeqCst);
             drop(group);
             let _ = child.wait();

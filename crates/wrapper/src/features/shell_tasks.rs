@@ -71,15 +71,35 @@ fn key(db: &Path, run_id: &str, call_id: &str) -> String {
     format!("{}\n{run_id}\n{call_id}", db.display())
 }
 
+pub(crate) fn leader_token() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("le système fournit de l'aléa");
+    let mut token = String::from("ezerbot-shell-");
+    for byte in bytes {
+        token.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+        token.push(char::from(b"0123456789abcdef"[(byte & 0xf) as usize]));
+    }
+    token
+}
+
+fn valid_leader(token: &str) -> bool {
+    let Some(hex) = token.strip_prefix("ezerbot-shell-") else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(crate) fn insert(
     conn: &Connection,
     run_id: &str,
     call_id: &str,
     pgid: u32,
+    leader: &str,
+    started: &str,
 ) -> Result<(), ApiError> {
     conn.execute(
-        "INSERT INTO wrapper_shell_tasks(run_id, call_id, status, exit_code, pgid) VALUES (?1, ?2, 'en cours', NULL, ?3)",
-        params![run_id, call_id, i64::from(pgid)],
+        "INSERT INTO wrapper_shell_tasks(run_id, call_id, status, exit_code, pgid, leader, started) VALUES (?1, ?2, 'en cours', NULL, ?3, ?4, ?5)",
+        params![run_id, call_id, i64::from(pgid), leader, started],
     )?;
     Ok(())
 }
@@ -299,20 +319,156 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
     Ok(())
 }
 
+pub(crate) fn leader_started(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let fields = proc_stat_fields(pid)?;
+        // Field 22 of /proc/pid/stat: start ticks since boot. A reused pid
+        // gets a new value. Index 19 is that field once comm is removed.
+        fields.get(19).cloned()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let text = text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_fields(pid: u32) -> Option<Vec<String>> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let end = stat.rfind(')')?;
+    Some(
+        stat[end + 1..]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn process_group_id(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        // After comm: state, ppid, pgrp.
+        proc_stat_fields(pid)?.get(2)?.parse().ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "pgid="])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout)
+            .ok()?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+}
+
+fn arguments(pid: u32) -> Option<Vec<Vec<u8>>> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<Vec<u8>> = raw
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        if args.is_empty() {
+            None
+        } else {
+            Some(args)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-ww", "-o", "args="])
+            .env("COLUMNS", "10000")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        let args: Vec<Vec<u8>> = text
+            .split_whitespace()
+            .map(|arg| arg.as_bytes().to_vec())
+            .collect();
+        if args.is_empty() {
+            None
+        } else {
+            Some(args)
+        }
+    }
+}
+
+/// The stored pgid is only ours while that pid still leads the group, still
+/// carries the watchdog token, and still has the start time we recorded.
+fn proven_leader(pgid: u32, leader: &str, started: &str) -> bool {
+    if started.is_empty() || !valid_leader(leader) {
+        return false;
+    }
+    if process_group_id(pgid) != Some(pgid) {
+        return false;
+    }
+    if leader_started(pgid).as_deref() != Some(started) {
+        return false;
+    }
+    arguments(pgid).is_some_and(|args| args.iter().any(|arg| arg == leader.as_bytes()))
+}
+
 pub(crate) fn startup(conn: &Connection) -> Result<(), ApiError> {
-    // The in-memory registry died with the host. Kill groups that were still
-    // starting, then mark those tasks interrupted. A NULL journal outcome is
-    // that crash window, not a running card.
+    // The in-memory registry died with the host. A stored pgid may already
+    // belong to someone else: kill only a leader we can still prove is ours,
+    // then mark every interrupted task Arrêtée.
     let mut statement = conn.prepare(
-        "SELECT pgid FROM wrapper_shell_tasks WHERE status='en cours' AND pgid IS NOT NULL AND pgid > 0",
+        "SELECT pgid, leader, started FROM wrapper_shell_tasks WHERE status='en cours' AND pgid IS NOT NULL AND pgid > 0",
     )?;
-    let pgids = statement
-        .query_map([], |row| row.get::<_, i64>(0))?
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    for pgid in pgids {
+    for (pgid, leader, started) in rows {
+        let Some(leader) = leader.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(started) = started.filter(|value| !value.is_empty()) else {
+            continue;
+        };
         if let Ok(pgid) = u32::try_from(pgid) {
-            kill_group(pgid);
+            if proven_leader(pgid, &leader, &started) {
+                kill_group(pgid);
+            }
         }
     }
     mark_stopped(conn, None)

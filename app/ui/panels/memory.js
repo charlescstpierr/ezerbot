@@ -175,7 +175,7 @@
         const count = visibleSelected().length;
         all.disabled = !loaded || !eligible.length || bot.deleted;
         all.checked = eligible.length > 0 && eligible.every((fact) => selected.has(fact.fact_id));
-        all.indeterminate = selected.size > 0 && !all.checked;
+        all.indeterminate = count > 0 && !all.checked;
         promote.disabled = !loaded || !count || bot.deleted;
         promote.textContent = `Partager la sélection (${count})`;
       }

@@ -152,6 +152,13 @@ test("sharing the selection sends only facts visible through the active filter",
       walk(f.root).find((el) => el.tagName === "button" && el.textContent.startsWith("Partager la sélection")).textContent,
       "Partager la sélection (1)",
     );
+    search.value = "atlas";
+    search.listeners.input();
+    const visibleChoice = byClass(f.root, "memory-fact-choice").children[0];
+    visibleChoice.checked = false;
+    visibleChoice.listeners.change();
+    assert.equal(all.checked, false);
+    assert.equal(all.indeterminate, false);
   } finally { f.cleanup(); }
 });
 

@@ -382,6 +382,48 @@ fn context_preview_skips_an_oversized_record_and_keeps_a_later_short_one() {
 }
 
 #[test]
+fn context_preview_skips_a_near_budget_record_and_keeps_a_later_short_one() {
+    let db = Database::new();
+    let mut app = db.open();
+    let conv = conversation(&mut app, "grokbot");
+    let short = remember(&app, "grokbot", "Fait court encore visible", false);
+    let marker = "MOYEN";
+    let wide_text = format!("{marker}{}", "y".repeat(1_900 - marker.chars().count()));
+    assert_eq!(wide_text.chars().count(), 1_900);
+    let record = serde_json::json!({
+        "fact_id": "fact_00000000000000000000000000000000",
+        "bot_id": "grokbot",
+        "scope": "private",
+        "text": wide_text,
+    })
+    .to_string();
+    let cost = record.chars().count() + 1;
+    // The line itself fits in an empty preview. With the header it does not,
+    // so stopping at the first miss drops the older short fact.
+    assert!(cost <= features::memory::CONTEXT_CHARS);
+    assert!(231 + cost > features::memory::CONTEXT_CHARS);
+    let wide = remember(&app, "grokbot", &wide_text, false);
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 1 WHERE fact_id = ?1",
+        [short["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memory_facts SET learned_at = 2 WHERE fact_id = ?1",
+        [wide["fact_id"].as_str().unwrap()],
+    )
+    .unwrap();
+    let text = memory_text(&app, &conv);
+    assert!(text.chars().count() <= features::memory::CONTEXT_CHARS);
+    assert!(
+        text.contains("Fait court encore visible"),
+        "le fait court suivant a disparu"
+    );
+    assert!(!text.contains(marker));
+}
+
+#[test]
 fn failed_correct_rolls_back_route_and_tool_even_when_failed_outcome_is_committed() {
     let db = Database::new();
     let mut app = db.open();

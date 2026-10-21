@@ -1,4 +1,5 @@
 import { Streamdown } from "streamdown";
+import { formatMeetingDuration } from "../meeting-presentation.js";
 
 export const kind = "meeting";
 export function Card({ message, onAction }) {
@@ -7,7 +8,8 @@ export function Card({ message, onAction }) {
   const retry = ["failed", "stopped"].includes(meeting.summary_state);
   return <article className="gb-message gb-engine-card gb-meeting" data-message-id={message.id} data-card-kind="meeting">
     <header><span className="gb-engine-label">Réunion · Capture consentie</span><h3>{meeting.title || "Réunion"}</h3></header>
-    <p className="gb-engine-note">Microphone · {Math.ceil((meeting.duration_ms || 0) / 1000)} s · Transcription sur ce Mac</p>
+    <p className="gb-engine-note">Microphone · {formatMeetingDuration(meeting.duration_ms)} · Transcription sur ce Mac</p>
+    {meeting.missing_segments > 0 && <p className="gb-meeting-partial" role="note">Transcription partielle · {meeting.missing_segments} passage{meeting.missing_segments > 1 ? "s" : ""} non transcrit{meeting.missing_segments > 1 ? "s" : ""}. Les passages manquants sont signalés dans la transcription.</p>}
     {message.body ? <div className="gb-meeting-summary"><Streamdown isAnimating={streaming}>{message.body}</Streamdown></div>
       : <p className="gb-engine-note">{streaming ? "Le bot prépare le résumé, les décisions et les actions…" : "Transcription conservée. Le résumé n’a pas encore été produit."}</p>}
     {meeting.summary_error && <p className="gb-meeting-error" role="alert">{meeting.summary_error}</p>}

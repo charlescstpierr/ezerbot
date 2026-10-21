@@ -115,7 +115,10 @@ pub(super) fn wav_duration_bounded(bytes: &[u8], max_seconds: u32) -> Result<u32
     if len > (max_seconds as usize + 1) * 32_000 {
         return Err(too_long());
     }
-    Ok(((len as u32 * 1000) / 32_000).min(max_seconds * 1000))
+    // PCM16 mono at 16 kHz is exactly 32 bytes per millisecond. Divide
+    // before narrowing: multiplying a valid 10-minute recording by 1000
+    // overflows u32 after only 134 seconds.
+    Ok(((len / 32) as u32).min(max_seconds * 1000))
 }
 
 fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -427,11 +430,31 @@ impl DebugVoice {
         }
         let ready = self.status == "ready";
         let fixture = include_bytes!("../../tests/fixtures/voice.wav");
+        let segmented = self.meeting
+            && ready
+            && matches!(self.scenario.as_str(), "partial" | "partial_persistent");
+        let partial = segmented && (self.attempts < 2 || self.scenario == "partial_persistent");
+        let mut audio = fixture.to_vec();
+        if segmented {
+            audio.resize(44 + 121 * 32_000, 0);
+            let length = audio.len();
+            audio[4..8].copy_from_slice(&((length - 8) as u32).to_le_bytes());
+            audio[40..44].copy_from_slice(&((length - 44) as u32).to_le_bytes());
+        }
+        let transcript = if !ready {
+            ""
+        } else if partial {
+            "Décision : préparer la rencontre.\n[Passage non transcrit de 1:00 à 2:00]\nAction : Alice prépare la démo."
+        } else if segmented {
+            "Décision : préparer la rencontre.\nPassage récupéré : rendez-vous jeudi.\nAction : Alice prépare la démo."
+        } else {
+            "Bonjour, voici mon mémo vocal pour préparer la réunion de demain."
+        };
         Ok(
             json!({"status":if self.status.is_empty() {"idle"} else {&self.status},"token":self.token,
-            "elapsed_ms":if self.scenario == "too_long" {cap} else {elapsed.min(cap)},"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
-            "transcript":if ready {"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."} else {""},
-            "data":if ready && self.scenario != "no_audio" {STANDARD.encode(fixture)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
+            "elapsed_ms":if segmented {121_000} else if self.scenario == "too_long" {cap} else {elapsed.min(cap)},"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
+            "transcript":transcript,"partial":partial,"missing_segments":if partial {1} else {0},
+            "data":if ready && self.scenario != "no_audio" {STANDARD.encode(&audio)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
             "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }

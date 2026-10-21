@@ -17,7 +17,8 @@
   };
   let context, startButton, bar, info, phaseLabel, meetingName, sourceLabel, clock, pause, stop, discard, retry, review, keep, save, retention, interrupted, notice, openThread, settings, emptyView, emptyHeading, emptyDescription;
   let dialog, title, consent, begin, dialogError, confirmation, confirmationTitle, confirmationText, confirmationAccept, finishConfirmation;
-  let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false, lastActive = false;
+  let session = null, phase = "idle", pending = null, generation = 0, timer, requestBusy = false, lastActive = false, unfinished = [];
+  const hasUnfinished = () => unfinished.some(item => item.id !== session?.id);
   const active = () => ["authorizing", "recording", "paused", "transcribing", "saving"].includes(phase);
   const emptyCapture = () => ["mic_denied", "speech_denied", "no_microphone", "offline_unavailable", "busy", "meeting_busy", "microphone_busy", "unavailable", "consent_required", "no_audio"].includes(phase);
   // A shared signal also updates dictation immediately, not at the next state poll.
@@ -32,8 +33,8 @@
       confirmation.showModal();
     });
   }
-  const bridge = (command) => {
-    const body = { command, token: session?.id || "", purpose: "meeting", consent: true, language: "fr" };
+  const bridge = (command, token = session?.id || "") => {
+    const body = { command, token, purpose: "meeting", consent: true, language: "fr" };
     const native = window.webkit?.messageHandlers?.ezerbotVoice;
     if (native) return native.postMessage(body);
     // Debug-only fixture/transcriber shared with dictation. Never getUserMedia.
@@ -44,11 +45,11 @@
     if (!bar) return;
     bar.hidden = phase === "idle";
     bar.dataset.phase = phase;
-    const tone = phase === "offline_unavailable" || (phase === "ready" && pending?.too_long) ? "warning" : ["mic_denied", "speech_denied", "no_microphone", "failed", "no_audio", "save_failed"].includes(phase) ? "danger" : "";
+    const tone = phase === "offline_unavailable" || (phase === "ready" && (pending?.too_long || pending?.partial)) ? "warning" : ["mic_denied", "speech_denied", "no_microphone", "failed", "no_audio", "save_failed"].includes(phase) ? "danger" : "";
     if (tone) bar.dataset.tone = tone; else delete bar.dataset.tone;
-    startButton.disabled = !!session || Boolean(panels.voiceActive?.() || window.EzerbotVoiceMode?.active()) || context?.conversation?.kind === "task";
-    startButton.title = window.EzerbotVoiceMode?.active() ? "Indisponible pendant le mode voix" : panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
-    phaseLabel.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours",paused:"Réunion en pause",transcribing:"Transcription sur ce Mac…",ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : "Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
+    startButton.disabled = !!session || hasUnfinished() || Boolean(panels.voiceActive?.() || window.EzerbotVoiceMode?.active()) || context?.conversation?.kind === "task";
+    startButton.title = hasUnfinished() ? "Fermez l’avertissement de capture interrompue avant de recommencer" : window.EzerbotVoiceMode?.active() ? "Indisponible pendant le mode voix" : panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
+    phaseLabel.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours",paused:"Réunion en pause",transcribing:"Transcription sur ce Mac…",ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : pending?.partial ? "Transcription partielle · Capture arrêtée" : "Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
     meetingName.textContent = session?.title || ""; meetingName.title = session?.title || "";
     meetingName.hidden = !session?.title;
     sourceLabel.hidden = !["recording", "paused", "transcribing"].includes(phase);
@@ -64,12 +65,14 @@
     discard.textContent = emptyCapture() ? "Fermer" : "Supprimer";
     discard.setAttribute("aria-label", emptyCapture() ? "Fermer la capture" : "Supprimer la capture");
     discard.title = emptyCapture() ? "Fermer" : "Supprimer la capture";
-    retry.hidden = phase !== "failed";
+    retry.hidden = phase !== "failed" && !(phase === "ready" && pending?.partial);
+    retry.textContent = phase === "ready" ? "Réessayer les passages" : "Réessayer la transcription";
+    retry.title = "Réessayer uniquement les passages non transcrits, sans refaire les passages déjà reconnus";
     settings.hidden = !["mic_denied", "speech_denied", "offline_unavailable"].includes(phase);
     openThread.hidden = !session || context?.conversation?.id === session.conversation_id;
     notice.hidden = !["authorizing", "recording", "paused"].includes(phase);
     review.hidden = !["ready", "save_failed"].includes(phase);
-    clock.hidden = !["recording", "paused", "transcribing"].includes(phase) && !(phase === "ready" && pending?.too_long);
+    clock.hidden = !["recording", "paused", "transcribing"].includes(phase) && !(phase === "ready" && (pending?.too_long || pending?.partial));
     if (active() !== lastActive) {
       lastActive = active(); window.dispatchEvent(new Event("grokbot:meeting-change"));
     }
@@ -83,7 +86,8 @@
       pending = result;
       if (!result.data) { phase = "no_audio"; errors.no_audio = "Aucun audio enregistré. Vérifiez le microphone, puis recommencez."; }
       else if (!result.transcript?.trim()) phase = "failed";
-      review.querySelector(".meeting-cap").textContent = result.too_long ? "La capture s’est arrêtée automatiquement. Vous pouvez conserver la transcription." : "Audio supprimé par défaut ; rétention de l’audio gardé dans Paramètres.";
+      const missing = result.missing_segments || 1;
+      review.querySelector(".meeting-cap").textContent = result.partial ? `${missing} passage${missing > 1 ? "s" : ""} non transcrit${missing > 1 ? "s" : ""} ; les autres passages sont conservables.` : result.too_long ? "La capture s’est arrêtée automatiquement. Vous pouvez conserver la transcription." : "Audio supprimé par défaut ; rétention de l’audio gardé dans Paramètres.";
       review.querySelector("pre").textContent = result.transcript || "";
     }
     render();
@@ -99,7 +103,7 @@
     requestBusy = true; clearTimeout(timer); const rev = ++generation;
     if (name === "stop" || name === "retry") { phase = "transcribing"; render(); }
     try { await accept(await bridge(name), rev); }
-    catch (error) { phase = "failed"; render(); panels.notify(error.message); }
+    catch (error) { phase = pending?.partial ? "ready" : "failed"; render(); panels.notify(error.message); }
     finally { requestBusy = false; }
   }
   const hasDraft = (conversation) => context?.conversation?.id === conversation ? !!panels.draft().trim() : !!localStorage.getItem(`grokbot.draft.${conversation}`)?.trim();
@@ -115,6 +119,7 @@
   }
   async function start() {
     if (session || !consent.checked) return;
+    if (hasUnfinished()) { panels.notify("Fermez l’avertissement de capture interrompue pour la supprimer, puis recommencez."); return; }
     if (window.EzerbotVoiceMode?.active()) { panels.notify("Quittez le mode voix avant d’enregistrer une réunion."); return; }
     if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
@@ -142,7 +147,7 @@
     phase = "saving"; render();
     try {
       const id = session.id, conversation = session.conversation_id;
-      await panels.api("/api/meetings/finalize", { id, data: pending.data, transcript: pending.transcript, keep_audio: keep.checked });
+      await panels.api("/api/meetings/finalize", { id, data: pending.data, transcript: pending.transcript, keep_audio: keep.checked, missing_segments: pending.missing_segments || 0 });
       await bridge("cancel"); // Wipes temporary audio regardless of retention choice.
       session = pending = null; phase = "idle"; ++generation; render();
       await panels.refresh(); panels.openConversation(conversation, id);
@@ -223,12 +228,13 @@
     },
     onState(state, ctx) {
       context = ctx;
+      unfinished = state.meetings?.interrupted || [];
       if (retention) retention.value = String(state.meetings?.audio_days || 7);
       if (interrupted) {
         interrupted.replaceChildren();
-        for (const item of state.meetings?.interrupted || []) {
+        for (const item of unfinished) {
           if (session?.id === item.id) continue;
-          const warning = node("div", "meeting-row meeting-interrupted-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue au redémarrage. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await panels.api("/api/meetings/discard", { id: item.id, preserve_conversation: hasDraft(item.conversation_id) }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
+          const warning = node("div", "meeting-row meeting-interrupted-row"); warning.append(node("span", "", `« ${item.title} » : capture interrompue (application rechargée ou redémarrée). Fermez cet avertissement pour supprimer la capture inachevée et recommencer. Aucun enregistrement ne reprend automatiquement.`), button("Fermer", async () => { try { await bridge("cancel", item.id).catch(() => {}); await panels.api("/api/meetings/discard", { id: item.id, preserve_conversation: hasDraft(item.conversation_id) }); await panels.refresh(); } catch (error) { panels.notify(error.message); } })); interrupted.append(warning);
         }
         interrupted.hidden = !interrupted.children.length;
       }

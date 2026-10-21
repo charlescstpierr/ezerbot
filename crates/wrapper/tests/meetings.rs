@@ -10,6 +10,14 @@ use std::{
 };
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 const WAV: &[u8] = include_bytes!("fixtures/voice.wav");
+fn synthetic_wav(seconds: usize) -> Vec<u8> {
+    let mut audio = WAV[..44].to_vec();
+    audio.resize(44 + seconds * 32_000, 0);
+    let length = audio.len();
+    audio[4..8].copy_from_slice(&((length - 8) as u32).to_le_bytes());
+    audio[40..44].copy_from_slice(&((length - 44) as u32).to_le_bytes());
+    audio
+}
 struct Fixture {
     app: App,
     provider: Provider,
@@ -109,7 +117,7 @@ fn consent_denial_single_capture_discard_and_interrupted_restart() {
             "/api/meetings/start",
             json!({"conversation_id":c,"title":"Autre","consent":true})
         )
-        .contains("déjà en cours"));
+        .contains("Fermez l’avertissement"));
     f.reopen();
     assert_eq!(f.state()["meetings"]["interrupted"][0]["id"], id);
     assert!(f
@@ -483,4 +491,110 @@ fn dictation_during_meeting_is_refused_with_the_correct_french_reason() {
         "/api/voice/debug",
         json!({"command":"cancel","token":"meeting"}),
     );
+}
+
+#[test]
+fn accepted_long_meetings_have_exact_duration_and_persist_without_overflow() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    for seconds in [135, 200, 300, 600] {
+        let id = f.start(&c);
+        let meeting=f.post("/api/meetings/finalize",json!({"id":id,"data":STANDARD.encode(synthetic_wav(seconds)),"transcript":"Décisions et actions de la réunion longue.","keep_audio":false}));
+        assert_eq!(meeting["duration_ms"], seconds * 1000);
+        assert!(f.app.api("GET", "/api/ping", b"").is_ok());
+        f.reopen();
+        assert_eq!(f.card(&id)["payload"]["duration_ms"], seconds * 1000);
+    }
+}
+
+#[test]
+fn deleting_an_active_meeting_conversation_is_refused_and_does_not_lose_capture() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let id = f.start(&c);
+    assert!(f
+        .error("/api/conversations/delete", json!({"id":c}))
+        .contains("Arrêtez ou supprimez la réunion"));
+    assert_eq!(
+        f.state()["meetings"]["interrupted"][0]["status"],
+        "recording"
+    );
+    f.finish(&id, false);
+    assert_eq!(f.card(&id)["kind"], "meeting");
+    f.post("/api/conversations/delete", json!({"id":c}));
+    f.reopen();
+    assert!(f.state()["conversations"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn reloaded_open_capture_has_a_clear_recovery_path_without_restarting_the_wrapper() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let id = f.start(&c);
+    assert_eq!(
+        f.state()["meetings"]["interrupted"][0]["status"],
+        "recording"
+    );
+    let error = f.error(
+        "/api/meetings/start",
+        json!({"conversation_id":c,"title":"Nouvelle","consent":true}),
+    );
+    assert!(
+        error.contains("capture précédente") && error.contains("Fermez l’avertissement"),
+        "{error}"
+    );
+    f.post("/api/meetings/discard", json!({"id":id}));
+    let next = f.start(&c);
+    assert_ne!(next, id);
+}
+
+#[test]
+fn partial_transcript_quality_survives_restart_and_reaches_model_as_data() {
+    let mut f = Fixture::new();
+    f.connect();
+    let c = f.conversation();
+    let id = f.start(&c);
+    let audio = synthetic_wav(121);
+    let transcript =
+        "Décision conservée.\n[Passage non transcrit de 1:00 à 2:00]\nAction conservée.";
+    f.post("/api/meetings/finalize",json!({"id":id,"data":STANDARD.encode(&audio),"transcript":transcript,"keep_audio":false,"missing_segments":1}));
+    f.reopen();
+    let card = f.card(&id);
+    assert_eq!(card["payload"]["missing_segments"], 1);
+    assert_eq!(card["payload"]["transcript"], transcript);
+    f.post("/api/meetings/summarize", json!({"id":id}));
+    wait("partial summary", || {
+        f.card(&id)["payload"]["summary_state"] == "echoed"
+    });
+    let requests = f.server.seen.lock().unwrap().bodies.clone();
+    let body = requests
+        .iter()
+        .find(|b| b.to_string().contains("untrusted-meeting"))
+        .unwrap()
+        .to_string();
+    assert!(body.contains("Passage non transcrit"));
+    assert!(body.contains("indique cette limite"));
+    assert!(!body.contains(&STANDARD.encode(&audio)));
+}
+
+#[test]
+fn debug_partial_transcription_can_retry_missing_passages_without_changing_audio() {
+    let mut f = Fixture::new();
+    let c = f.conversation();
+    let id = f.start(&c);
+    f.post("/api/voice/debug",json!({"command":"start","token":id,"purpose":"meeting","consent":true,"scenario":"partial"}));
+    let partial = f.post("/api/voice/debug", json!({"command":"stop","token":id}));
+    assert_eq!(partial["partial"], true);
+    assert_eq!(partial["missing_segments"], 1);
+    assert!(partial["transcript"].as_str().unwrap().contains("Action"));
+    let retried = f.post("/api/voice/debug", json!({"command":"retry","token":id}));
+    assert_eq!(retried["partial"], false);
+    assert_eq!(retried["data"], partial["data"]);
+    assert!(retried["transcript"]
+        .as_str()
+        .unwrap()
+        .contains("Passage récupéré"));
+    let meeting=f.post("/api/meetings/finalize",json!({"id":id,"data":retried["data"],"transcript":retried["transcript"],"missing_segments":0,"keep_audio":false}));
+    assert_eq!(meeting["duration_ms"], 121000);
+    assert_eq!(meeting["missing_segments"], 0);
 }

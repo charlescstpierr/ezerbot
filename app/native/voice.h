@@ -1,6 +1,7 @@
 // Microphone and Speech are deliberately unreachable outside EZERBOT_RELEASE.
 // The WebView bridge accepts main-frame, loopback-origin commands only (main.m).
 #import <Cocoa/Cocoa.h>
+#import "meeting-transcription.h"
 #if defined(EZERBOT_RELEASE)
 #import <AVFoundation/AVFoundation.h>
 #import <Speech/Speech.h>
@@ -22,17 +23,22 @@
 @property(nonatomic) BOOL meeting;
 @property(nonatomic) NSUInteger maxSeconds;
 @property(nonatomic) double pausedElapsed;
-@property(nonatomic) NSUInteger segmentOffset;
-@property(nonatomic, strong) NSData *pcm;
+@property(nonatomic, strong) EzerbotMeetingTranscription *transcriptionPlan;
 @property(nonatomic, strong) NSURL *segmentURL;
 #if defined(EZERBOT_RELEASE)
 @property(nonatomic, strong) AVAudioRecorder *recorder;
 @property(nonatomic, strong) SFSpeechRecognizer *recognizer;
 @property(nonatomic, strong) SFSpeechRecognitionTask *recognitionTask;
+#else
+@property(nonatomic, copy) NSArray<NSString *> *fakeSegmentTexts;
+@property(nonatomic, copy) NSIndexSet *fakeSegmentFailures;
+@property(nonatomic, copy) NSIndexSet *fakeSegmentTimeouts;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *fakeRecognizedSegments;
 #endif
 + (BOOL)captureStatusActive:(NSString *)status;
 - (void)command:(NSDictionary *)body reply:(void (^)(NSDictionary *))reply;
 - (void)cancel;
+- (void)transcribe;
 @end
 
 @implementation EzerbotVoice
@@ -43,12 +49,14 @@
     return @{ @"status":self.status ?: @"idle", @"token":self.token ?: @"",
         @"language":self.language ?: @"fr", @"transcript":self.transcript ?: @"",
         @"elapsed_ms":@(self.elapsed * 1000), @"level":@(self.level), @"too_long":@(self.tooLong),
+        @"missing_segments":@(self.transcriptionPlan.missingCount),
+        @"partial":@((BOOL)(self.transcriptionPlan.hasText && self.transcriptionPlan.missingCount > 0)),
         @"data":[self.status isEqual:@"ready"] ? ([self.audio base64EncodedStringWithOptions:0] ?: @"") : @"" };
 }
 - (void)removeTemporaryAudio {
     if (self.recordingURL) [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
     if (self.segmentURL) [[NSFileManager defaultManager] removeItemAtURL:self.segmentURL error:nil];
-    self.recordingURL = nil; self.segmentURL = nil; self.pcm = nil;
+    self.recordingURL = nil; self.segmentURL = nil;
 }
 - (void)cancel {
     ++self.generation;
@@ -59,51 +67,68 @@
     self.recognizer = nil;
 #endif
     [self removeTemporaryAudio];
-    self.audio = nil; self.transcript = nil; self.status = @"idle"; self.level = 0;
+    self.audio = nil; self.transcriptionPlan = nil; self.transcript = nil; self.status = @"idle"; self.level = 0;
 }
 - (void)transcribe {
     if (!self.audio.length) { self.status = @"failed"; return; }
-    self.status = @"transcribing";
-    self.transcript = @""; self.segmentOffset = 0;
+    self.status = @"transcribing"; self.transcript = @"";
+    if (self.meeting) {
+        self.transcriptionPlan = [[EzerbotMeetingTranscription alloc] initWithAudio:self.audio];
+        if (!self.transcriptionPlan) { self.status = @"failed"; return; }
+#if !defined(EZERBOT_RELEASE)
+        self.fakeRecognizedSegments = [NSMutableArray array];
+#endif
+    }
     [self transcribeSegment];
 }
+- (void)completeMeetingSegment:(NSString *)text {
+    // Both Speech errors and deadlines use this path. Previous successful text
+    // survives, the missing passage is marked, and the next segment is attempted.
+    ++self.generation;
+#if defined(EZERBOT_RELEASE)
+    [self.recognitionTask cancel]; self.recognitionTask = nil;
+#endif
+    [self.transcriptionPlan completeWithText:text];
+    self.transcript = self.transcriptionPlan.transcript;
+    [self transcribeSegment];
+}
+- (void)segmentTimedOut {
+    if (![self.status isEqual:@"transcribing"]) return;
+    if (self.meeting) { [self completeMeetingSegment:nil]; return; }
+    ++self.generation;
+#if defined(EZERBOT_RELEASE)
+    [self.recognitionTask cancel]; self.recognitionTask = nil;
+#endif
+    self.status = @"failed";
+}
 - (void)transcribeSegment {
+    NSData *segment = nil;
+    if (self.meeting) {
+        segment = [self.transcriptionPlan nextAudio];
+        if (!segment) {
+            self.transcript = self.transcriptionPlan.transcript;
+            self.status = self.transcriptionPlan.hasText ? @"ready" : @"failed";
+            [self removeTemporaryAudio]; // Retry uses the in-memory progress ledger.
+            return;
+        }
+    }
     NSUInteger generation = self.generation;
 #if defined(EZERBOT_RELEASE)
-    // No server fallback: unsupported/missing French assets are an explicit error.
-    if (!self.recognizer.supportsOnDeviceRecognition) { self.status = @"offline_unavailable"; return; }
+    // Strictly on-device, never fall back to a server.
+    if (!self.recognizer.supportsOnDeviceRecognition) {
+        if (self.meeting) { [self completeMeetingSegment:nil]; return; }
+        self.status = @"offline_unavailable"; return;
+    }
     NSURL *source = self.recordingURL;
     if (self.meeting) {
-        // AVAudioRecorder emits mono PCM16 WAV. Locate the data chunk rather
-        // than assuming Apple's header is the canonical 44 bytes.
-        if (!self.pcm) {
-            const uint8_t *bytes = self.audio.bytes;
-            for (NSUInteger p = 12; p + 8 <= self.audio.length;) {
-                uint32_t count = 0; memcpy(&count, bytes + p + 4, 4);
-                if (count > self.audio.length - p - 8) break;
-                if (!memcmp(bytes + p, "data", 4)) { self.pcm = [self.audio subdataWithRange:NSMakeRange(p+8,count)]; break; }
-                p += 8 + count + count % 2;
-            }
-        }
-        if (!self.pcm.length || self.segmentOffset >= self.pcm.length) { self.status = @"failed"; return; }
-        NSUInteger count = MIN((NSUInteger)60*32000, self.pcm.length-self.segmentOffset);
-        NSMutableData *wav = [NSMutableData dataWithLength:44];
-        uint8_t *header = wav.mutableBytes;
-        memcpy(header,"RIFF",4); uint32_t size=(uint32_t)count+36; memcpy(header+4,&size,4);
-        memcpy(header+8,"WAVEfmt ",8); uint32_t fmt=16,rate=16000,byteRate=32000; uint16_t one=1,two=2,bits=16;
-        memcpy(header+16,&fmt,4); memcpy(header+20,&one,2); memcpy(header+22,&one,2); memcpy(header+24,&rate,4);
-        memcpy(header+28,&byteRate,4); memcpy(header+32,&two,2); memcpy(header+34,&bits,2); memcpy(header+36,"data",4);
-        uint32_t length=(uint32_t)count; memcpy(header+40,&length,4);
-        [wav appendData:[self.pcm subdataWithRange:NSMakeRange(self.segmentOffset,count)]];
         if (self.segmentURL) [[NSFileManager defaultManager] removeItemAtURL:self.segmentURL error:nil];
         self.segmentURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ezerbot-meeting-%@.wav",NSUUID.UUID.UUIDString]]];
-        if (![wav writeToURL:self.segmentURL options:NSDataWritingAtomic error:nil]) { self.status = @"failed"; return; }
+        if (![segment writeToURL:self.segmentURL options:NSDataWritingAtomic error:nil]) { [self completeMeetingSegment:nil]; return; }
         [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:self.segmentURL.path error:nil];
-        self.segmentOffset += count; source = self.segmentURL;
+        source = self.segmentURL;
     }
     SFSpeechURLRecognitionRequest *request = [[SFSpeechURLRecognitionRequest alloc] initWithURL:source];
-    request.requiresOnDeviceRecognition = YES;
-    request.shouldReportPartialResults = NO;
+    request.requiresOnDeviceRecognition = YES; request.shouldReportPartialResults = NO;
     __weak EzerbotVoice *weakSelf = self;
     self.recognitionTask = [self.recognizer recognitionTaskWithRequest:request resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -111,27 +136,28 @@
             if (!owner || owner.generation != generation || ![owner.status isEqual:@"transcribing"]) return;
             if (result.isFinal) {
                 NSString *text = [result.bestTranscription.formattedString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                owner.transcript = [owner.transcript stringByAppendingFormat:@"%@%@",owner.transcript.length ? @"\n" : @"",text];
-                if (owner.meeting && owner.segmentOffset < owner.pcm.length) {
-                    ++owner.generation; [owner transcribeSegment];
-                } else {
-                    owner.status = owner.transcript.length ? @"ready" : @"failed";
-                    if (owner.meeting && [owner.status isEqual:@"ready"]) [owner removeTemporaryAudio];
-                }
-            } else if (error) { owner.status = @"failed"; }
+                if (owner.meeting) [owner completeMeetingSegment:text];
+                else { owner.transcript = text; owner.status = text.length ? @"ready" : @"failed"; }
+            } else if (error) {
+                if (owner.meeting) [owner completeMeetingSegment:nil]; else owner.status = @"failed";
+            }
         });
     }];
-    // REA transcription deadline: 60 seconds. Timeout retains the WAV for retry.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         EzerbotVoice *owner = weakSelf;
-        if (owner && owner.generation == generation && [owner.status isEqual:@"transcribing"]) {
-            ++owner.generation; [owner.recognitionTask cancel]; owner.recognitionTask = nil; owner.status = @"failed";
-        }
+        if (owner && owner.generation == generation) [owner segmentTimedOut];
     });
 #else
     (void)generation;
-    self.transcript = @"Bonjour, voici mon mémo vocal pour préparer la réunion de demain.";
-    self.status = @"ready";
+    if (self.meeting) {
+        NSUInteger index = self.transcriptionPlan.currentIndex;
+        [self.fakeRecognizedSegments addObject:@(index)];
+        if ([self.fakeSegmentTimeouts containsIndex:index]) [self segmentTimedOut];
+        else if ([self.fakeSegmentFailures containsIndex:index]) [self completeMeetingSegment:nil];
+        else [self completeMeetingSegment:index < self.fakeSegmentTexts.count ? self.fakeSegmentTexts[index] : @"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."];
+    } else {
+        self.transcript = @"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."; self.status = @"ready";
+    }
 #endif
 }
 - (void)stop {
@@ -234,10 +260,17 @@
     else if ([command isEqual:@"resume"] && self.meeting && [self.status isEqual:@"paused"]) {
         self.started = [NSDate dateWithTimeIntervalSinceNow:-self.pausedElapsed]; self.status = @"recording";
 #if defined(EZERBOT_RELEASE)
-        [self.recorder recordForDuration:MAX(0.1,self.maxSeconds-self.pausedElapsed)];
+        // Resume the same recording; the elapsed-time watchdog still enforces
+        // the total cap independently of AVAudioRecorder's duration semantics.
+        if (![self.recorder record]) { [self stop]; }
 #endif
     }
-    else if ([command isEqual:@"retry"] && [self.status isEqual:@"failed"]) { ++self.generation; [self transcribe]; }
+    else if ([command isEqual:@"retry"] && ([self.status isEqual:@"failed"] || (self.meeting && [self.status isEqual:@"ready"] && self.transcriptionPlan.missingCount))) {
+        ++self.generation;
+        if (self.meeting && self.transcriptionPlan) {
+            [self.transcriptionPlan retryMissing]; self.status = @"transcribing"; [self transcribeSegment];
+        } else [self transcribe];
+    }
     else if ([command isEqual:@"settings"]) {
 #if defined(EZERBOT_RELEASE)
         NSString *pane = [self.status isEqual:@"speech_denied"] ? @"Privacy_SpeechRecognition" : @"Privacy_Microphone";

@@ -126,6 +126,7 @@
 .gb-meeting-audio > p { flex-basis: 100%; }
 .gb-meeting-audio audio { width: min(100%, 310px); height: 34px; }
 .gb-meeting-error { color: var(--danger-text); font-size: 12px; }
+.gb-meeting-partial { padding: 8px 10px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 11px; line-height: 1.6; }
 .gb-turn-heading { margin-bottom: -14px; }
 .gb-turn-heading .gb-meta { margin-bottom: 0; }
 .gb-meta { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 7px; }

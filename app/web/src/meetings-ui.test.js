@@ -18,13 +18,14 @@ const descendants = el => [el, ...el.children.flatMap(descendants)];
 function fixture() {
   const root = new Element("div"), top = new Element("header"), panels = new Element("div"), settings = new Element("div"), welcome = new Element("div"); welcome.id="welcome"; root.append(top, welcome, panels, settings);
   const context = { conversation: { id: "chat" }, bot: { id: "grokbot" }, state: { meetings: { debug_fake: true } } };
-  let registration, poll, token, status = "recording", delayed, conversationVoice = false;
+  let registration, poll, token, status = "recording", delayed, conversationVoice = false, partial = false, retryError = false;
   const calls = [], requests = [], notices = [], events = [], storage = new Map();
   const bridge = async body => {
     calls.push(body); token = body.token;
+    if (body.command === "retry" && retryError) throw new Error("Réessai local indisponible");
     if (body.command === "status" && delayed) return new Promise(resolve => { delayed.resolve = resolve; });
     return { token, status: ({start:status,stop:status === "failed" ? "failed" : "ready",cancel:"idle",pause:"paused",resume:"recording",retry:"ready"})[body.command] || status,
-      transcript: "Décision : jeudi. Alice prépare la démo.", data: status === "no_audio" ? "" : "UklGRg==", elapsed_ms: status === "too_long" ? 600000 : 4200, too_long: status === "too_long" };
+      transcript: partial ? "Décision : jeudi.\n[Passage non transcrit de 1:00 à 2:00]\nAlice prépare la démo." : "Décision : jeudi. Alice prépare la démo.", partial, missing_segments: partial ? 1 : 0, data: status === "no_audio" ? "" : "UklGRg==", elapsed_ms: status === "too_long" ? 600000 : 4200, too_long: status === "too_long" };
   };
   const host = { register(panel) { registration = panel; }, composerChanged() {}, notify(message) { notices.push(message); }, draft: () => "", draftDocument: () => ({}),
     async refresh() {}, openConversation(id) { context.conversation = {id}; registration.onState(context.state, context); return true; },
@@ -39,7 +40,7 @@ function fixture() {
   registration.settingsSection(settings); registration.composer.mount(root,context); registration.onState(context.state,context);
   const id = name => descendants(root).find(el=>el.id === name);
   const text = name => descendants(root).find(el=>el.textContent === name);
-  return { root,context,registration,calls,requests,notices,events,host,id,text,set status(value){status=value;},
+  return { root,context,registration,calls,requests,notices,events,host,id,text,set status(value){status=value;},set partial(value){partial=value;},set retryError(value){retryError=value;},
     setVoiceMode(value) {conversationVoice=value;registration.onState(context.state,context);},
     async decision(action, accepted) { const pending=action(); await Promise.resolve(); assert.equal(id("meeting-confirmation").open,true); id(accepted ? "meeting-confirmation-accept" : "meeting-confirmation-cancel").onclick(); await pending; },
     async start() { id("meeting-start").onclick(); id("meeting-consent").checked=true; id("meeting-consent").onchange(); await id("meeting-begin").onclick(); },
@@ -123,6 +124,31 @@ test("the merged conversation voice mode cannot overlap meeting capture",async()
   const f=fixture();f.setVoiceMode(true);assert.equal(f.id("meeting-start").disabled,true);
   await f.start();assert.equal(f.requests.length,0);assert.match(f.notices.at(-1),/Quittez le mode voix/);
   f.setVoiceMode(false);assert.equal(f.id("meeting-start").disabled,false);
+});
+
+test("partial text remains reviewable and saveable even when retry is temporarily unavailable",async()=>{
+  const f=fixture();f.partial=true;await f.start();await f.text("Arrêter").onclick();
+  assert.equal(f.id("meeting-recording").dataset.tone,"warning");assert.equal(f.text("Réessayer les passages").hidden,false);
+  assert.match(f.root.querySelector(".meeting-cap").textContent,/1 passage non transcrit/);
+  f.retryError=true;await f.text("Réessayer les passages").onclick();
+  assert.equal(f.id("meeting-recording").dataset.phase,"ready");assert.match(f.root.querySelector(".meeting-review").querySelector("pre").textContent,/Décision/);
+  await f.id("meeting-save").onclick();const saved=f.requests.find(r=>r.path==="/api/meetings/finalize");
+  assert.equal(saved.body.missing_segments,1);assert.match(saved.body.transcript,/Passage non transcrit/);
+});
+
+test("successful missing-passage retry clears the partial warning",async()=>{
+  const f=fixture();f.partial=true;await f.start();await f.text("Arrêter").onclick();
+  f.partial=false;await f.text("Réessayer les passages").onclick();await f.id("meeting-save").onclick();
+  assert.equal(f.requests.find(r=>r.path==="/api/meetings/finalize").body.missing_segments,0);
+});
+
+test("a reloaded capture directs cleanup first, cancels its stale adapter, then permits a fresh capture",async()=>{
+  const f=fixture();f.registration.onState({meetings:{interrupted:[{id:"old",title:"Revue",conversation_id:"chat",status:"recording"}]}},f.context);
+  assert.equal(f.id("meeting-start").disabled,true);assert.match(f.id("meeting-start").title,/Fermez l’avertissement/);
+  assert.match(f.root.querySelector(".meeting-interrupted").children[0].children[0].textContent,/rechargée ou redémarrée/);
+  await f.text("Fermer").onclick();assert.ok(f.calls.some(c=>c.command==="cancel"&&c.token==="old"));
+  f.registration.onState({meetings:{interrupted:[]}},f.context);assert.equal(f.id("meeting-start").disabled,false);
+  await f.start();assert.ok(f.requests.some(r=>r.path==="/api/meetings/start"));
 });
 
 test("restart warning has its own fluid row, never the narrow recorder grid",()=>{

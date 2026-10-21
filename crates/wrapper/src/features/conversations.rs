@@ -175,6 +175,10 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             if !exists {
                 return Err(ApiError::new(404, "Conversation introuvable."));
             }
+            let capturing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_meetings WHERE conversation_id=?1 AND status='recording')", [&input.id], |r| r.get(0))?;
+            if capturing {
+                return Err(ApiError::new(409, "Arrêtez ou supprimez la réunion en cours avant de supprimer cette conversation."));
+            }
             tx.execute("UPDATE wrapper_conversations SET deleted = 1, updated_at = ?3 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, now()])?;
             super::storage::discard_conversation_draft(&tx, &input.id)?;
             tx.execute("UPDATE wrapper_meetings SET audio=NULL,expires_at=NULL,status=CASE WHEN status='recording' THEN 'interrupted' ELSE status END WHERE conversation_id=?1", [&input.id])?;

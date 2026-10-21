@@ -4,7 +4,35 @@
 //! the socket on its next read/deadline (it has no socket-abort API).
 use super::*;
 use grokbot_engine::contracts::{Error, ModelEvent, Result};
+use std::cell::RefCell;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+
+struct Flight {
+    deadlines: Deadlines,
+}
+thread_local! {
+    static FLIGHT: RefCell<Option<Flight>> = const { RefCell::new(None) };
+}
+struct FlightGuard;
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        FLIGHT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+fn begin_flight(deadlines: Deadlines) -> FlightGuard {
+    FLIGHT.with(|slot| *slot.borrow_mut() = Some(Flight { deadlines }));
+    FlightGuard
+}
+/// Deadlines for the request running on this worker. Titles install a shorter
+/// cap here; every other caller keeps the session deadlines.
+pub(super) fn flight_deadlines(fallback: Deadlines) -> Deadlines {
+    FLIGHT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|flight| flight.deadlines)
+            .unwrap_or(fallback)
+    })
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Deadlines {
@@ -119,6 +147,9 @@ impl Session {
                 inner: session.inner.clone(),
                 settled: worker_settled,
             };
+            // request() reads this cap. The caller loop alone would leave the
+            // socket on the session stall (60s) after a title already gave up.
+            let _flight = begin_flight(limits);
             let abandoned = worker_abandoned;
             let mut notices = Vec::new();
             let result = (|| -> Result<()> {

@@ -4,7 +4,7 @@ use grokbot_wrapper::{App, Endpoints, Provider};
 use serde_json::{json, Value};
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
@@ -43,6 +43,7 @@ struct Fake {
     summaries: Arc<AtomicUsize>,
     partial_released: Arc<AtomicBool>,
     partial_finished: Arc<AtomicBool>,
+    holds_finished: Arc<AtomicUsize>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 fn event(stream: &mut TcpStream, value: Value) {
@@ -50,11 +51,22 @@ fn event(stream: &mut TcpStream, value: Value) {
     let _ = stream.flush();
 }
 fn hold(stream: &mut TcpStream, stop: &AtomicBool, keepalive: bool) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut buf = [0u8; 1];
     while !stop.load(Ordering::SeqCst) {
-        if keepalive && stream.write_all(b": ping\n\n").is_err() {
+        if keepalive && (stream.write_all(b": ping\n\n").is_err() || stream.flush().is_err()) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        match stream.peek(&mut buf) {
+            Ok(0) => break,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {}
+            Err(_) => break,
+            Ok(_) => std::thread::sleep(Duration::from_millis(30)),
+        }
     }
 }
 fn token() -> String {
@@ -80,7 +92,8 @@ impl Fake {
         let (summary_slow, summary_count) = (slow_summary.clone(), summaries.clone());
         let partial_released = Arc::new(AtomicBool::new(false));
         let partial_finished = Arc::new(AtomicBool::new(false));
-        let (s, q, b, r, side, late, finished) = (
+        let holds_finished = Arc::new(AtomicUsize::new(0));
+        let (s, q, b, r, side, late, finished, holds) = (
             stop.clone(),
             queue.clone(),
             seen.clone(),
@@ -88,6 +101,7 @@ impl Fake {
             side_hang.clone(),
             partial_released.clone(),
             partial_finished.clone(),
+            holds_finished.clone(),
         );
         let thread = std::thread::spawn(move || {
             let mut workers = vec![];
@@ -96,7 +110,7 @@ impl Fake {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                let (s, q, b, r, side, late, finished) = (
+                let (s, q, b, r, side, late, finished, holds) = (
                     s.clone(),
                     q.clone(),
                     b.clone(),
@@ -104,6 +118,7 @@ impl Fake {
                     side.clone(),
                     late.clone(),
                     finished.clone(),
+                    holds.clone(),
                 );
                 let (summary_slow, summary_count) = (summary_slow.clone(), summary_count.clone());
                 workers.push(std::thread::spawn(move || {
@@ -140,7 +155,7 @@ impl Fake {
                     let instructions=body["instructions"].as_str().unwrap_or("");
                     let internal=instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
                     let fault=if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
-                    if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); return; }
+                    if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); holds.fetch_add(1, Ordering::SeqCst); return; }
                     if let Fault::Http(code)=fault { let body=json!({"error":{"code":"fake_error","message":"Erreur factice précise"}}).to_string(); let _=write!(socket,"HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
                     let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); let _=socket.flush();
                     if instructions.starts_with("Summarize the supplied conversation") {
@@ -156,7 +171,7 @@ impl Fake {
                         }
                     }
                     match fault {
-                        Fault::Silent => hold(&mut socket,&s,false),
+                        Fault::Silent => { hold(&mut socket,&s,false); holds.fetch_add(1, Ordering::SeqCst); }
                         Fault::Partial | Fault::Drop => {
                             event(&mut socket,json!({"type":"response.output_text.delta","delta":"Début conservé."}));
                             if matches!(fault,Fault::Partial) {
@@ -168,7 +183,7 @@ impl Fake {
                                 }
                             }
                         },
-                        Fault::Keepalive => hold(&mut socket,&s,true),
+                        Fault::Keepalive => { hold(&mut socket,&s,true); holds.fetch_add(1, Ordering::SeqCst); }
                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
                         Fault::ToolStall => { event(&mut socket,json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc","call_id":"waiting","name":"local_exec"}})); hold(&mut socket,&s,true); },
                         Fault::ToolApproval => { event(&mut socket,json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"ask","name":"run_shell","arguments":"{\"command\":\"echo faux\",\"cwd\":\"/tmp\",\"timeout_ms\":1000,\"output_limit\":1024}"}})); event(&mut socket,json!({"type":"response.completed"})); },
@@ -194,6 +209,7 @@ impl Fake {
             summaries,
             partial_released,
             partial_finished,
+            holds_finished,
             thread: Some(thread),
         }
     }
@@ -648,6 +664,64 @@ fn background_memory_and_title_do_not_block_a_second_turn() {
             .any(|message| message["id"] == "reply-second" && message["state"] == "echoed")
     });
     assert!(start.elapsed() < Duration::from_secs(6));
+}
+
+#[test]
+fn title_socket_obeys_the_twelve_second_cap_not_the_session_stall() {
+    // The session stall is 30s. A title is capped at 12s only if that cap
+    // reaches the worker's read, not merely the caller wait.
+    let mut f = Fixture::with_deadlines(
+        true,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_secs(120),
+    );
+    f.fake.side_hang.store(true, Ordering::SeqCst);
+    let mut chats = Vec::new();
+    for n in 0..4 {
+        let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":format!("title-cap-{n}"),"body":format!("Sujet distinct {n}")}),
+        );
+        chats.push(chat);
+    }
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        chats.iter().all(|chat| {
+            state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == *chat)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["role"] == "assistant" && m["state"] == "echoed")
+        })
+    });
+    let base = f.fake.holds_finished.load(Ordering::SeqCst);
+    let started = Instant::now();
+    let mut released = 0;
+    while started.elapsed() < Duration::from_secs(16) && released < 4 {
+        released = f
+            .fake
+            .holds_finished
+            .load(Ordering::SeqCst)
+            .saturating_sub(base);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        released >= 4 && started.elapsed() < Duration::from_secs(14),
+        "title sockets still open after {:?} ({released} released, base {base}); the 12s cap never reached the worker",
+        started.elapsed()
+    );
 }
 #[test]
 fn a_hanging_pre_description_never_blocks_the_main_reply() {

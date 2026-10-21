@@ -130,9 +130,11 @@ impl Session {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::signin());
         }
-        let limits = *lock(&self.inner.deadlines);
+        let limits = super::reliable::flight_deadlines(*lock(&self.inner.deadlines));
         // ureq 2.12.1 applies `.timeout()` on every body read and ignores
         // `.timeout_read()`. The session loop already enforces `limits.total`.
+        // Do not set that global deadline: a silent socket would block until
+        // it, and Stop would wait on it.
         let mut request = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
             .timeout_write(Duration::from_secs(15))

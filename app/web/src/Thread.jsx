@@ -156,7 +156,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
       <Mascot create={createMascot} />
       <div className="gb-content">
         <header className="gb-meta"><strong>Consigne de {botName}</strong><Timestamp value={message.created_at} /></header>
-        {message.body && <p className="gb-instruction-text">{message.body}</p>}
+        {message.body && <p className="gb-instruction-text" data-find-body>{message.body}</p>}
         <MessageAttachments message={message} align="start" />
       </div>
     </article>
@@ -177,7 +177,7 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
     <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
       {followUp && <span className="gb-followup-label">Suivi</span>}
-      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
+      {message.body && <div className="gb-bubble" data-find-body>{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
         ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
         : part.text)}</div>}
       <MessageAttachments message={message} />
@@ -273,9 +273,11 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>}
         {message.body
           ? (
-            <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
-              {message.body}
-            </Streamdown>
+            <div data-find-body>
+              <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
+                {message.body}
+              </Streamdown>
+            </div>
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}

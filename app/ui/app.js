@@ -1004,9 +1004,7 @@
     ui.welcome.hidden = hasMessages;
     ui.messages.hidden = !hasMessages;
     const visibleMessages = window.GrokbotChat.connectionMessages(conversation?.messages || [], connected);
-    const matches = findState.open && window.GrokbotChat.findInThread
-      ? window.GrokbotChat.findInThread(visibleMessages, findState.query, window.GrokbotChat.searchableMessageText)
-      : [];
+    const matches = findState.open ? currentFindMatches(visibleMessages) : [];
     if (findState.index >= matches.length) findState.index = 0;
     const activeMatch = matches[findState.index] || null;
     window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: findState.open && activeMatch ? { query: findState.query.trim(), messageId: activeMatch.messageId, indexInMessage: activeMatch.indexInMessage } : null, onRateGood: rateGood, onRateBad: rateBad, ...thread });
@@ -1484,6 +1482,14 @@
     closeMenu();
   }
 
+  function currentFindMatches(visibleMessages = window.GrokbotChat.connectionMessages(currentConversation()?.messages || [], connected)) {
+    const rendered = window.GrokbotChat.findInRendered?.(ui.messages, findState.query);
+    if (rendered) return rendered;
+    return window.GrokbotChat.findInThread
+      ? window.GrokbotChat.findInThread(visibleMessages, findState.query, window.GrokbotChat.searchableMessageText)
+      : [];
+  }
+
   function paintFind(matches) {
     const bar = $("find-bar");
     if (!bar) return;
@@ -1522,9 +1528,7 @@
 
   function stepFind(direction) {
     if (!window.GrokbotChat.cycleFind || !window.GrokbotChat.findInThread) return;
-    const conversation = currentConversation();
-    const visible = window.GrokbotChat.connectionMessages(conversation?.messages || [], connected);
-    const matches = window.GrokbotChat.findInThread(visible, findState.query, window.GrokbotChat.searchableMessageText);
+    const matches = currentFindMatches();
     if (!matches.length) return;
     findState.index = window.GrokbotChat.cycleFind(findState.index, matches.length, direction);
     render();

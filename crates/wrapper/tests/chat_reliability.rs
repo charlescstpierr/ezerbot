@@ -667,9 +667,52 @@ fn connection_test_is_bounded_and_reports_precise_error_then_ok() {
     post(&mut f.app, "/api/provider/test", json!({}));
     until(|| f.provider.status()["connection_test"]["state"] == "ok");
     let bodies = f.fake.seen.lock().unwrap();
-    assert!(bodies
-        .iter()
-        .all(|b| b.get("prompt_cache_key").is_none() && b.get("tools").is_none()));
+    assert!(bodies.iter().all(|b| b.get("prompt_cache_key").is_none()
+        && b.get("tools").is_none()
+        && b.get("max_output_tokens").is_none()));
+}
+
+#[test]
+fn sharing_connection_probe_does_not_impose_a_sixteen_token_reasoning_limit() {
+    let mut f = Fixture::new(false);
+    std::fs::write(f.db.with_extension("chatgpt-auth.json"), json!({"host_id":"fake-only","client_id":"fake","access_token":"fake-sharing","refresh_token":"fake-refresh","expires_at":4102444800u64,"scopes":"chatgpt.tokens.use.direct","welcomed":true}).to_string()).unwrap();
+    f.provider = Provider::with_endpoints(&f.db, f.fake.endpoints(), false);
+    f.provider
+        .configure_fake_chat(Duration::from_secs(10), false);
+    f.app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    post(&mut f.app, "/api/provider/test", json!({}));
+    until(|| f.provider.status()["connection_test"]["state"] == "ok");
+    let requests = f.fake.seen.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("max_output_tokens").is_none());
+    assert!(requests[0].get("reasoning").is_none());
+}
+
+#[test]
+fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
+    let mut f = Fixture::new(true);
+    f.fake.queue.lock().unwrap().push_back(Fault::Incomplete);
+    post(&mut f.app, "/api/provider/test", json!({}));
+    until(|| f.provider.status()["connection_test"]["state"] == "ok");
+    assert_eq!(
+        f.provider.status()["connection_test"]["message"],
+        "OK — ChatGPT répond."
+    );
+}
+
+#[test]
+fn connection_test_without_an_account_explains_the_required_action_without_network() {
+    let mut f = Fixture::new(false);
+    let result = post(&mut f.app, "/api/provider/test", json!({}));
+    assert_eq!(
+        result["provider"]["connection_test"]["state"],
+        "unavailable"
+    );
+    assert_eq!(
+        result["provider"]["connection_test"]["message"],
+        "Aucun compte connecté. Connectez-vous via Codex ci-dessus."
+    );
+    assert!(f.fake.seen.lock().unwrap().is_empty());
 }
 
 #[test]

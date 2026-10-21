@@ -49,7 +49,11 @@ export function presentedFailureText(error, { retry = true, replacement = "Envoy
     "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.",
     "OpenAI n’a envoyé aucun événement à temps. Réessayez.",
   );
-  if (!retry && /Réessayez\.\s*$/.test(text)) return text.replace(/Réessayez\.\s*$/, replacement);
+  if (!retry) {
+    const phrase = replacement.replace(/\.\s*$/, "");
+    text = text.replace(/Réessayez\.(?=\s*$)/, `${phrase}.`);
+    text = text.replace(/Réessayez(?=\s)/, phrase);
+  }
   return text;
 }
 

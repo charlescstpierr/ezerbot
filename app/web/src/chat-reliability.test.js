@@ -176,6 +176,23 @@ test("a group failure does not tell the reader to retry when no retry button is 
   assert.ok(!source.includes("<p>{message.error}</p>"));
 });
 
+test("group copy rewrites every retry instruction, including a delay or a shorter request", () => {
+  const cases = [
+    ["Les connexions précédentes se ferment encore. Réessayez dans une minute.", "Les connexions précédentes se ferment encore. Envoyez un nouveau message dans une minute."],
+    ["La réponse d’OpenAI dépasse la taille autorisée. Réessayez avec une demande plus courte.", "La réponse d’OpenAI dépasse la taille autorisée. Envoyez un nouveau message avec une demande plus courte."],
+  ];
+  for (const [error, expected] of cases) {
+    const view = replyProblemState({ error_kind: "other", error }, { isGroup: true });
+    assert.equal(view.retry, false);
+    assert.equal(view.error, expected);
+    assert.doesNotMatch(view.error, /Réessayez/);
+    assert.equal(view.advice, null);
+  }
+  const direct = replyProblemState({ error_kind: "other", error: cases[0][0] });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, cases[0][0]);
+});
+
 test("pings without an event are not described as a session renewal", () => {
   const raw = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
   const direct = replyProblemState({ error_kind: "other", error: raw });

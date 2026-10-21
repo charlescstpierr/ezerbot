@@ -15,6 +15,7 @@
   --warning-text: #7a5a00;
   --warning-line: #7a5a0030;
   --ok: #1f9d55;
+  --ok-text: #157a41;
   --danger: #d93a26;
   --danger-text: #c42d1a;
   --scrim: #0f101266;
@@ -48,6 +49,7 @@
   --warning-text: #f0c869;
   --warning-line: #f0c86930;
   --ok: #35c58a;
+  --ok-text: #35c58a;
   --danger-text: #ff7a68;
   --scrim: #000000a6;
   --accent-ink: var(--accent);
@@ -113,6 +115,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .conversation-item > .icon { width: 14px; height: 14px; color: var(--sidebar-muted); }
 .conversation-item.active > .icon { color: var(--accent-ink); }
 .conversation-item .conversation-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.conversation-item .conversation-copy { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 1px; }
+.conversation-item .conversation-copy .conversation-name { flex: none; width: 100%; }
+.conversation-item .conversation-description { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sidebar-muted); font-size: 10px; line-height: 1.3; }
+.group-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; flex: 0 0 auto; border: 1.5px solid var(--bot-color, var(--line)); background: var(--pane); color: var(--text); font-size: 10px; font-weight: 650; line-height: 1; }
 .conversation-item .favorite-indicator { width: 11px; height: 11px; color: var(--accent-ink); fill: rgb(var(--accent-rgb) / .25); }
 .conversation-item .pending-indicator { width: 5px; height: 5px; border-radius: 50%; background: var(--warning-text); flex: 0 0 auto; }
 .sidebar-bottom { flex: 0 0 auto; padding: 10px 1px 0; }
@@ -132,10 +138,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .main-panel { min-width: 0; display: flex; flex-direction: column; height: calc(100dvh - 16px); margin: 8px; position: relative; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .topbar { height: 63px; flex: 0 0 auto; padding: 0 27px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); position: relative; }
 .topbar-title { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.workspace-label { color: var(--subtle); font-size: 10px; white-space: nowrap; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background .15s, color .15s; }
+.workspace-label { flex: 0 1 auto; min-width: 56px; overflow: hidden; text-overflow: ellipsis; color: var(--subtle); font-size: 10px; white-space: nowrap; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background .15s, color .15s; }
 .workspace-label:hover:not(:disabled) { background: var(--soft); color: var(--text); }
 .breadcrumb-separator { color: var(--line); font-weight: 300; font-size: 17px; }
-.topbar h1 { font-size: 11px; margin: 0; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: 0; }
+.topbar h1 { flex: 0 1 auto; font-size: 11px; margin: 0; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: min(120px, 100%); }
 .topbar-actions { display: flex; align-items: center; gap: 11px; flex: 0 0 auto; }
 .mode-badge { font-size: 9px; color: var(--muted); display: flex; align-items: center; gap: 5px; background: var(--soft); border-radius: 6px; padding: 5px 9px; }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
@@ -175,7 +181,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer-input { min-height: 24px; }
 .composer { position: relative; }
 .composer-tools { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
-.composer-tools [data-picker="effort"], .composer-tools [data-picker="speed"] { flex-shrink: 0; }
+.composer-tools [data-picker="effort"], .composer-tools [data-picker="speed"] { flex: 0 1 auto; min-width: max-content; }
 .composer-local { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--subtle); font-size: 11px; font-weight: 400; }
 .composer-local::before { content: ""; width: 6px; height: 6px; border-radius: 50%; box-shadow: inset 0 0 0 1.2px var(--subtle); }
 .tool-pill { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 190px; padding: 5px 8px; border-radius: 7px; background: var(--soft); color: var(--text); font-size: 11px; white-space: nowrap; transition: box-shadow .15s; }
@@ -184,14 +190,19 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .tool-pill .icon { width: 12px; height: 12px; color: var(--subtle); }
 .tool-pill:hover:enabled, .tool-pill[aria-expanded="true"] { box-shadow: inset 0 0 0 1px var(--accent-ink); }
 /* Dans la barre d'écriture, les menus Modèle / Effort restent sans fond, comme dans Codex. */
-.composer .tool-pill { height: 32px; min-width: 0; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
+.composer .tool-pill { height: 32px; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
 .composer .tool-pill small { font-size: 11px; }
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 0 0 auto; min-width: 0; flex-wrap: nowrap; }
-.composer [data-picker="model"] { max-width: 220px; }
-.composer [data-picker="model"] b { min-width: 0; }
+.composer .composer-tools { flex: 1 1 auto; flex-wrap: nowrap; }
+/* Au-dessus du téléphone, les pastilles ne se compriment pas : le conteneur garde leur largeur, sinon Vitesse déborde sur les commandes vocales. */
+@media (min-width: 761px) {
+  .composer .composer-tools { flex: 0 0 auto; min-width: max-content; }
+}
+.composer [data-picker="model"] { flex: 0 0 auto; max-width: 220px; }
+.composer-tools [data-picker="effort"] b,
+.composer-tools [data-picker="speed"] b { flex: 0 0 auto; min-width: 40px; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
@@ -229,7 +240,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .provider-card h3 { display: flex; align-items: center; gap: 7px; }
 .provider-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .provider-card p.provider-error { margin-top: 6px; color: var(--danger-text); }
-.provider-card p.provider-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--ok); font-weight: 600; }
+.provider-card p.provider-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--ok-text); font-weight: 600; }
 .provider-card p.provider-legacy-note { margin-top: 12px; }
 .provider-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .provider-actions-legacy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -240,10 +251,12 @@ a.secondary-button { text-decoration: none; }
 .composer-model { display: flex; align-items: center; gap: 2px; min-width: 0; margin-left: -6px; }
 .composer-bot { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 32px; padding: 0 8px 0 6px; border-radius: 8px; color: var(--text); font-size: 12px; font-weight: 550; transition: background .15s; }
 .composer-bot:hover:enabled, .composer-bot[aria-expanded="true"] { background: var(--soft); }
+.composer-bot:focus-visible { outline-offset: -2px; }
 .composer-bot:disabled { cursor: default; }
 .composer-bot:disabled .composer-chevron { display: none; }
 .composer-bot-name { flex: 0 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-chevron { width: 13px; height: 13px; color: var(--subtle); }
+.composer .composer-bot-name { min-width: 45px; }
+.composer-chevron { flex: 0 0 auto; width: 13px; height: 13px; color: var(--subtle); }
 .composer-mascot { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; }
 .send-button { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--canvas); transition: background .15s, opacity .15s; }
 .send-button:hover:enabled { opacity: .85; }
@@ -377,8 +390,8 @@ a.secondary-button { text-decoration: none; }
 .draft-restore { color: var(--accent-ink); text-decoration: underline; font: inherit; font-size: 10px; line-height: 1.2; padding: 0; white-space: nowrap; flex: 0 0 auto; }
 @media (max-width: 910px) {
   .composer-bottom { gap: 8px; }
-  .composer-tools { gap: 4px; }
-  .composer-tools .tool-pill { gap: 3px; padding-inline: 5px; }
+  .composer-tools { gap: 2px; }
+  .composer-tools .tool-pill { gap: 2px; padding-inline: 3px; }
   .composer-caption:has(#restore-link-draft:not([hidden])) > #composer-hint:not([data-alert="true"]) { display: none; }
 }
 #bot-form > .dialog-footer { flex-wrap: wrap; }
@@ -442,7 +455,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   body { grid-template-columns: 244px minmax(0, 1fr); }
   .sidebar { padding-left: 13px; padding-right: 13px; }
   .new-chat kbd { display: none; }
-  .topbar { padding: 0 22px; }
+  .topbar { padding: 0 16px; gap: 12px; }
   .welcome, .composer-area { width: calc(100% - 44px); }
   .suggestion { padding-left: 10px; padding-right: 10px; }
   .suggestion strong { font-size: 9px; }
@@ -457,9 +470,32 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-area { width: calc(100% - 28px); }
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
+  .composer .tool-pill { padding: 0 2px; }
+  .composer-bottom { gap: 6px; }
+  .composer .attachment-choose { width: 26px; }
+}
+/* Au-dessus de 910, la mascotte et les icônes reviendraient et mangeraient plus que la largeur gagnée. On garde le compositeur compact. */
+@media (min-width: 911px) {
+  .composer .composer-mascot,
+  .composer .tool-pill > .icon { display: none; }
   .composer .tool-pill { padding: 0 5px; }
   .composer-bottom { gap: 6px; }
   .composer .attachment-choose { width: 26px; }
+}
+/* De 911 à 1100, la règle 1100 repasse le compositeur à calc(100% - 44px) et le padding 0 5px : le nom devient plus court qu'à 910, où la zone est calc(100% - 28px) et le padding 0 2px. */
+@media (min-width: 911px) and (max-width: 1100px) {
+  .composer-area { width: calc(100% - 28px); }
+  .composer-tools { gap: 2px; }
+  .composer-tools .tool-pill { gap: 2px; }
+  .composer .tool-pill { padding: 0 2px; }
+}
+/* Après la règle de base à 45 px : au-dessus du téléphone le nom peut descendre sous 45 px pour garder le chevron dans le bouton. */
+@media (min-width: 761px) {
+  .composer .composer-bot-name { min-width: 0; }
+}
+/* Au-dessus de 1100 les libellés Modèle / Effort / Vitesse reviennent et tronquent le nom, entier à 910 et 960. */
+@media (min-width: 1101px) {
+  .composer-model:has([data-picker="speed"]) .tool-pill small { display: none; }
 }
 @media (max-width: 760px) {
   body { display: block; background: var(--canvas); }
@@ -475,7 +511,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .topbar { height: 59px; padding: 0 16px 0 9px; gap: 10px; }
   .topbar-title { gap: 8px; }
   .workspace-label, .breadcrumb-separator { display: none; }
-  .topbar h1 { font-size: 11px; }
+  .topbar h1 { font-size: 11px; min-width: 0; }
   .topbar-actions { gap: 7px; }
   .mode-badge { padding: 4px 7px; font-size: 9px; }
   .popover { top: 50px; right: 13px; }
@@ -496,13 +532,26 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-model { flex: 1 1 auto; min-width: 0; }
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
-  .composer .tool-pill { padding: 0 5px; }
+  .composer .tool-pill { padding: 0 3px; }
   /* Le bouton du bot cède seulement quand le nom dépasse ; le plus reste compact. */
   .composer .composer-bot { flex-shrink: 1; max-width: none; }
+  .composer .composer-model .composer-bot-name { min-width: 45px; }
   .composer .attachment-choose { width: 26px; }
   .composer-tools [data-picker="effort"],
-  .composer-tools [data-picker="speed"] { flex-shrink: 1; }
+  .composer-tools [data-picker="speed"] { flex: 0 1 auto; min-width: max-content; }
   .composer { padding: 13px 10px 9px 14px; border-radius: 16px; }
+  /* Vitesse reste dans la rangée : son conteneur garde la largeur des pastilles. Le nom cède, et la barre s'élargit juste assez pour que le chevron reste dans le bouton. */
+  .composer-model:has([data-picker="speed"]) .composer-tools { flex: 0 0 auto; min-width: max-content; }
+  /* Sans Vitesse, le nom et l'effort cèdent avant Modèle. 80 px gardent « Ezerbot » et le chevron ; les pastilles ne passent plus sous les commandes vocales. */
+  .composer-model:not(:has([data-picker="speed"])) .composer-bot { flex: 1 1 0; min-width: 80px; }
+  .composer-model:not(:has([data-picker="speed"])) .composer-tools { flex: 0 1 auto; min-width: 14px; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="model"] { flex: 0 1 auto; min-width: 0; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 20 auto; min-width: 0; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="model"] b,
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 1 auto; min-width: 0; }
+  .composer-area:has([data-picker="speed"]) { width: calc(100% - 4px); }
+  .composer:has([data-picker="speed"]) { padding-left: 6px; padding-right: 6px; }
+  .composer:has([data-picker="speed"]) .attachment-choose { width: 22px; }
   .composer-caption { padding-top: 9px; justify-content: center; font-size: 8px; }
   .composer-caption > #composer-hint { display: none; }
   .composer-caption > #composer-hint[data-alert="true"] { display: block; }
@@ -512,15 +561,87 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .bot-preview-mascot { width: 96px; height: 84px; }
   .connection-banner { gap: 8px; padding: 9px 15px; font-size: 10px; }
 }
+/* À partir de 480, le bouton garde de quoi ellipser le nom moyen sans manger « GPT-6.1 Sol ». Avec Vitesse sur la même rangée, le plancher de 45 px pousse le chevron hors du bouton. */
+@media (min-width: 480px) and (max-width: 760px) {
+  .composer-model:not(:has([data-picker="speed"])) .composer-bot { min-width: 148px; }
+}
+/* Le nom cède le premier, jusqu'à 40 px. Ensuite seulement, le modèle cède, sans passer sous 40 px. Vitesse et Effort gardent leur mot, donc la pastille reste à 6 px de la voix. */
+.composer-model:has([data-picker="speed"]) .composer-bot { flex: 1 100 auto; min-width: 74px; }
+.composer-model:has([data-picker="speed"]) .composer-bot-name { flex: 1 1 auto; min-width: 40px; }
+.composer-model:has([data-picker="speed"]) .composer-tools { flex: 0 1 auto; min-width: 0; }
+.composer-model:has([data-picker="speed"]) [data-picker="model"] { flex: 1 1 46px; min-width: 46px; max-width: 220px; overflow: hidden; }
+.composer-model:has([data-picker="speed"]) [data-picker="model"] b { flex: 1 1 auto; min-width: 40px; }
+.composer-model:has([data-picker="speed"]) [data-picker="effort"],
+.composer-model:has([data-picker="speed"]) [data-picker="speed"] { flex: 0 0 auto; min-width: max-content; }
+/* Effort garde son mot de 360 à 600, sans marche à 500. Le modèle garde 40 px : il ne tombe plus à 9 px pour laisser toute la place à Effort. */
+@media (max-width: 600px) {
+  .composer-area:has([data-picker="effort"]):not(:has([data-picker="speed"])) { width: calc(100% - 4px); }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) { padding-left: 6px; padding-right: 6px; }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) .attachment-choose { width: 22px; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) .composer-tools { flex: 1 1 auto; min-width: 0; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="model"] { flex: 1 1 auto; min-width: 46px; overflow: hidden; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="model"] b { flex: 1 1 auto; min-width: 40px; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 0 auto; min-width: max-content; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 0 auto; min-width: max-content; }
+}
+/* À 360 la rangée est pleine : le bouton lâche son plancher de 80 px, juste assez pour le nom et le chevron, et la barre se resserre. */
+@media (max-width: 400px) {
+  .composer-area:has([data-picker="effort"]):not(:has([data-picker="speed"])) { width: 100%; }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) { padding-left: 2px; padding-right: 2px; }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) .composer-bottom { gap: 4px; }
+  .composer:has([data-picker="effort"]):not(:has([data-picker="speed"])) .attachment-choose { width: 18px; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) { gap: 0; }
+  .composer-model:has([data-picker="effort"]):not(:has([data-picker="speed"])) .composer-bot { flex: 0 1 72px; min-width: 72px; padding-left: 4px; padding-right: 4px; gap: 4px; }
+}
+/* Sous 480, trois pastilles ne tiennent plus à côté du bot : Vitesse passe à la ligne au lieu d'écraser le bouton. */
+@media (max-width: 479px) {
+  /* La voix reste en haut : sinon, centrée contre deux lignes, elle couvre la pastille Vitesse. */
+  .composer-bottom:has([data-picker="speed"]) { align-items: flex-start; }
+  .composer-model:has([data-picker="speed"]) [data-picker="speed"] { min-width: 0; max-width: 100%; }
+  .composer-model:has([data-picker="speed"]) [data-picker="speed"] b { flex: 0 1 auto; min-width: 0; }
+  /* La barre étroite laissait l'effort à 0 px. On l'élargit pour garder le mot, sans toucher au plancher du modèle à 500 px. */
+  .composer-area:not(:has([data-picker="speed"])) { width: calc(100% - 4px); }
+  .composer:not(:has([data-picker="speed"])) { padding-left: 6px; padding-right: 6px; }
+  .composer:not(:has([data-picker="speed"])) .attachment-choose { width: 22px; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] { flex: 0 1 auto; min-width: max-content; }
+  .composer-model:not(:has([data-picker="speed"])) [data-picker="effort"] b { flex: 0 0 auto; min-width: max-content; }
+  .composer-model:has([data-picker="speed"]) { flex-wrap: wrap; }
+  .composer-model:has([data-picker="speed"]) .composer-tools {
+    flex: 1 0 100%;
+    min-width: 0;
+  }
+  .composer-model:has([data-picker="speed"]) .composer-bot { min-width: 0; }
+}
+/* De 761 à 785 le plancher de 120 px remet le titre sous Notifications dès que le badge Local et le menu sont là. Le banc de test n'a pas ce badge : son titre garde 120 px. */
+@media (min-width: 761px) and (max-width: 785px) {
+  .topbar:has(.mode-badge) h1 { min-width: 0; }
+}
 @media (max-width: 370px) {
   .welcome h2 { font-size: 26px; }
   .welcome { width: calc(100% - 30px); }
   .suggestion { padding: 10px 8px; gap: 6px; }
   .suggestion-icon { width: 16px; }
+  /* Le plancher de 45 px laisse le chevron sortir du bouton quand le modèle est large. */
+  .composer .composer-model .composer-bot-name { min-width: 0; }
 }
 @media (max-height: 650px) and (max-width: 760px) {
   .welcome { padding-top: 12px; }
   .mascot-stage { height: 118px; }
   .mascot-greeting { width: 132px; height: 116px; }
+}
+@media (max-height: 560px) and (min-width: 761px) {
+  .chat-scroll::before { content: ""; flex: 1 1 auto; min-height: 0; }
+  /* Le bloc descend, mais la ligne flex dépasse le scrollport de 6 px : le remplissage bas garde les suggestions dedans. */
+  .welcome { margin-top: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 12px; }
+  .plan-banner { flex-wrap: nowrap; align-items: center; margin-bottom: 6px; padding: 6px 8px; }
+  .plan-banner > span { flex: 1 1 auto; min-width: 0; }
+  .mascot-stage { height: 40px; margin-bottom: 0; }
+  .mascot-greeting { width: 46px; height: 40px; }
+  .welcome-eyebrow { margin-bottom: 1px; }
+  .welcome h2 { font-size: 20px; margin-bottom: 1px; }
+  .welcome-description { margin-bottom: 6px; font-size: 11px; line-height: 1.35; }
+  .suggestion { padding: 5px 8px; gap: 2px; }
+  .suggestion strong { margin-bottom: 0; }
+  .suggestion-grid { gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

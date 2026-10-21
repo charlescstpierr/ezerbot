@@ -60,8 +60,10 @@
   // authoritative on the server; preserve serial partial success.
   // Budget SERIALIZED JSON, not raw bytes (skills-wrapper review r1 #6).
   function normalizedParts(path) {
+    const raw = String(path);
+    if (raw.startsWith("/") || raw.startsWith("\\")) return null;
     const parts = [];
-    for (const part of String(path).replaceAll("\\", "/").split("/")) {
+    for (const part of raw.replaceAll("\\", "/").split("/")) {
       if (!part || part === ".") continue;
       if (part === "..") {
         if (!parts.length) return null;
@@ -157,8 +159,14 @@
         const dir = parentDir(job.rows[i].path);
         const indexes = grouped.has(i) ? folders.get(dir) : [i];
         const prepared = [];
+        const primary = indexes[0];
+        const folder = indexes.length > 1 && grouped.has(primary);
         for (const index of indexes) {
           queued.add(index);
+          if (folder && index !== primary && job.rows[primary].status === "skipped") {
+            Object.assign(job.rows[index], { status: "skipped", reason: job.rows[primary].reason });
+            continue;
+          }
           const item = await prepare(index);
           if (item) prepared.push({ index, ...item });
         }
@@ -385,7 +393,7 @@
       for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
       job.mutating = true; changed();
       try {
-        let conversation = (panels.state.conversations || []).find((item) => item.bot_id === bot.id && !item.deleted && item.kind !== "task");
+        let conversation = (panels.state.conversations || []).find((item) => item.bot_id === bot.id && !item.deleted && item.kind !== "task" && item.kind !== "routine");
         if (!conversation) {
           const created = await panels.api("/api/conversations", { bot_id: bot.id });
           conversation = created.conversation;
@@ -393,14 +401,21 @@
         const versions = await panels.api(`/api/skills/versions?bot_id=${encodeURIComponent(bot.id)}&skill_id=${encodeURIComponent(skill.skill_id)}`);
         const latest = (versions.versions || []).slice().sort((a, b) => b.version - a.version).find((item) => !item.deleted);
         const annexes = (latest?.content?.files || []).map((file) => file.content).filter((content) => content);
+        const messageId = crypto.randomUUID();
         const sent = await panels.api("/api/send", {
           conversation_id: conversation.id,
-          message_id: crypto.randomUUID(),
+          message_id: messageId,
           body: `Lance la skill « ${displayName(skill)} ».`,
           apply_skill_id: skill.skill_id,
         });
-        const reply = [...(sent.conversation?.messages ?? [])].reverse().find((message) => message.role === "assistant")?.body ?? "";
-        job.points.annex = annexes.some((annex) => replyFollowsAnnex(reply, annex));
+        job.pendingLaunch = {
+          conversationId: conversation.id,
+          messageId,
+          annexes,
+          snapshot: sent.conversation?.messages ?? [],
+        };
+        job.points.annex = false;
+        evaluateLaunch();
         // A just-created thread is absent from state until refresh. Opening
         // first leaves the welcome screen up and hides the annex reply.
         await refresh();
@@ -459,8 +474,34 @@
       if (!current || fields.disabled) return;
       await mutate("/api/skills/delete", { bot_id: bot.id, skill_id: current.skill_id, expected_version: current.version }, "Skill supprimée.");
     }
+    function replyStillPending(message, conversation) {
+      const group = Boolean(conversation && (conversation.kind === "group" || Array.isArray(conversation.bot_ids)));
+      if (typeof window.GrokbotChat?.isPendingReply === "function") return window.GrokbotChat.isPendingReply(message, group);
+      return message?.state === "streaming" || (group && ["queued", "running"].includes(message?.payload?.turn_status));
+    }
+    function evaluateLaunch() {
+      const pending = job.pendingLaunch;
+      if (!pending) return;
+      const live = (panels.state.conversations || []).find((item) => item.id === pending.conversationId);
+      const liveMessages = live?.messages;
+      const messages = Array.isArray(liveMessages) && liveMessages.some((message) => message.id === pending.messageId)
+        ? liveMessages
+        : (pending.snapshot || []);
+      const start = messages.findIndex((message) => message.id === pending.messageId);
+      if (start < 0) {
+        job.points.annex = false;
+        return;
+      }
+      const reply = [...messages.slice(start + 1)].reverse().find((message) => message.role === "assistant");
+      if (!reply || replyStillPending(reply, live)) {
+        job.points.annex = false;
+        return;
+      }
+      job.points.annex = pending.annexes.some((annex) => replyFollowsAnnex(reply.body ?? "", annex));
+    }
     function render() {
       if (!alive) return;
+      evaluateLaunch();
       const locked = job.running || job.mutating;
       const recording = panels.state.demonstrations?.session;
       demonstrate.textContent = recording?.status === "recording" && recording.bot_id === bot.id ? "Démonstration en cours…" : "Montrer au bot";

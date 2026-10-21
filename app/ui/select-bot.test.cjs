@@ -213,7 +213,6 @@ function boot({ attachments = false, draft = "Brouillon du fil" } = {}) {
     addEventListener() {},
     GrokbotMascot: { shapes: {}, setShape() {}, setContext() {}, celebrate() {}, create: () => new Element("span", document) },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
-    addEventListener() {},
   };
   const context = vm.createContext({
     window, document, console, URL, Blob, TextEncoder, innerHeight: 800,
@@ -305,4 +304,11 @@ test("shift meta W from the composer opens skills", async () => {
   const html = fs.readFileSync(`${__dirname}/index.html`, "utf8");
   assert.match(html, /Ouvrir les skills/);
   assert.match(html, /⌘ ⇧ W/);
+});
+
+test("the window double declares addEventListener once", () => {
+  const source = fs.readFileSync(__filename, "utf8");
+  const windowBlock = source.slice(source.indexOf("const window = {"), source.indexOf("const context = vm.createContext"));
+  const declarations = windowBlock.match(/^\s*addEventListener\(\) \{\},$/gm) || [];
+  assert.equal(declarations.length, 1, windowBlock);
 });

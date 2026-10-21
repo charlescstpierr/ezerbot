@@ -66,6 +66,12 @@ struct ConnectionChoice {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectionTest {
+    #[serde(default)]
+    refresh: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
@@ -481,8 +487,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.conversation_response(&input.conversation_id)
         }
         "/api/provider/test" => {
-            let _: Empty = parse(body)?;
-            app.provider.test_connection();
+            let input: ConnectionTest = parse(body)?;
+            app.provider.test_connection_with_refresh(input.refresh);
             Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/select" => {
@@ -653,6 +659,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .checked_add(1)
                     .ok_or_else(|| ApiError::new(409, "Trop de relances."))?;
                 stop_run(&app.feature_context(), &old, TurnEnd::Superseded)?;
+                // A failed check is only the badge. Relaunch it in the background;
+                // the regenerated turn must not wait for that result.
+                if live && app.provider.status()["connection_test"]["state"] != "ok" {
+                    app.provider.test_connection();
+                }
                 app.start_message(&input.conversation_id, &input.message_id, next)?;
             }
             app.conversation_response(&input.conversation_id)
@@ -1273,6 +1284,13 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 bot_id: Some(store::required(&conn, &id)?.bot_id),
                 host_mcp: id.starts_with("mcp-host-"),
             };
+            // The probe updates the badge on its own thread. It must not delay
+            // this turn: the user's message is the OpenAI call. A slow or failed
+            // check leaves send, state and stop free, and the question already
+            // on its way. A real upstream refusal stays a retryable thread error.
+            if live && cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let gateway = RunGateway {
                 path: &path,
                 provider: &provider,
@@ -1352,32 +1370,7 @@ fn fail_host(
         if run.status == RunStatus::Interrupted {
             model::resume(conn, id)?;
         }
-        let events = store::events(conn, id, 0)?;
-        let settled: HashSet<_> = events
-            .iter()
-            .filter(|e| e.kind == RunEventKind::ToolResult)
-            .filter_map(|e| e.payload["call_id"].as_str())
-            .collect();
-        for event in &events {
-            if event.kind == RunEventKind::ToolCall {
-                if let Some(call) = event.payload["call_id"].as_str() {
-                    if !settled.contains(call) {
-                        let admitted:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",params![id,call],|r|r.get(0))?;
-                        let reason = if admitted {
-                            "Résultat d’appel externe non confirmé ; son effet est incertain."
-                        } else {
-                            "local service unavailable"
-                        };
-                        store::append_event(
-                            conn,
-                            id,
-                            RunEventKind::ToolResult,
-                            &json!({"call_id":call,"outcome":{"status":"failed","reason":reason}}),
-                        )?;
-                    }
-                }
-            }
-        }
+        run_loop::append_unsettled_results(conn, id, "local service unavailable")?;
         run = store::required(conn, id)?;
         run.status = RunStatus::Failed;
         run.turn_end = None;
@@ -2007,14 +2000,37 @@ impl RunGatewayCall<'_> {
                 && matches!(run.trigger, Trigger::Delegation { .. })
             {
                 let sources = super::delegation::material_sources(self.connection, &run)?;
-                let (images, documents) = super::attachments::selected_material(
+                let mut urls = self.image_urls.lock().unwrap_or_else(|e| e.into_inner());
+                let (mut images, documents) = super::attachments::selected_material(
                     &ctx,
                     &sources,
                     &request.model,
                     sending_bytes,
-                    &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+                    &mut urls,
                 )
                 .map_err(engine_error)?;
+                if let Some((conversation, ids)) =
+                    super::delegation::delegation_image_selection(self.connection, &run)?
+                {
+                    for image in super::attachments::images_for_selected(
+                        &ctx,
+                        &conversation,
+                        &ids,
+                        &request.model,
+                        sending_bytes,
+                        &mut urls,
+                    )
+                    .map_err(engine_error)?
+                    {
+                        if !images
+                            .iter()
+                            .any(|existing| existing.attachment_id == image.attachment_id)
+                        {
+                            images.push(image);
+                        }
+                    }
+                }
+                drop(urls);
                 sending.images = images;
                 sending.text.push_str(&documents);
             } else {
@@ -3312,6 +3328,92 @@ mod projection_tests {
             let _ = self.app.connection.execute_batch("ROLLBACK");
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn host_failure_reports_the_journaled_outcome_instead_of_a_down_service() {
+        let dir = std::env::temp_dir().join(format!(
+            "grokbot-host-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = App::open(&dir.join("workspace.sqlite")).unwrap();
+        let reason = "Action non exécutée : arrêt ou limite de temps avant le démarrage.";
+        grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
+            for (id, tool) in [("known", true), ("unknown-local", true), ("plain", false)] {
+                let run = Run {
+                    run_id: id.into(),
+                    bot_id: DEFAULT_BOT.id.into(),
+                    conversation_id: "host".into(),
+                    trigger: Trigger::UserMessage {
+                        message_id: id.into(),
+                        attempt: 0,
+                    },
+                    kind: RunKind::Chat,
+                    status: RunStatus::Queued,
+                    task_status: None,
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1,
+                };
+                model::start(conn, &run)?;
+                model::set_running_at(conn, id, 2)?;
+                store::append_event(
+                    conn,
+                    id,
+                    RunEventKind::ToolCall,
+                    &json!({"call_id":"call","name":"run_shell","arguments":{}}),
+                )?;
+                if tool && id == "known" {
+                    conn.execute(
+                        "INSERT INTO engine_external_tools(run_id,call_id,outcome) VALUES (?1,'call',?2)",
+                        rusqlite::params![id, serde_json::to_string(&ToolOutcome::Failed { reason: reason.into() })?],
+                    )?;
+                } else if tool {
+                    conn.execute(
+                        "INSERT INTO engine_external_tools(run_id,call_id) VALUES (?1,'call')",
+                        [id],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut services = Services {
+            path: &app.db_path,
+            provider: &app.provider,
+            connection: &app.connection,
+            cancel: Arc::new(AtomicBool::new(false)),
+            bot_id: None,
+            host_mcp: false,
+        };
+        for id in ["known", "unknown-local", "plain"] {
+            fail_host(&app.connection, &mut services, id).unwrap();
+        }
+        let reason_of = |id: &str| {
+            store::events(&app.connection, id, 0)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == RunEventKind::ToolResult)
+                .unwrap()
+                .payload["outcome"]["reason"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(reason_of("known"), reason);
+        assert!(reason_of("unknown-local").contains("effet peut"));
+        assert!(!reason_of("unknown-local").contains("local service unavailable"));
+        assert!(reason_of("plain").starts_with("not executed:"));
+        assert_eq!(
+            store::required(&app.connection, "known").unwrap().status,
+            RunStatus::Failed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

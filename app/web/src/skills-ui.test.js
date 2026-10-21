@@ -328,6 +328,126 @@ test("launching a skill reveals the reply once the new conversation is loaded", 
   assert.equal(requests.find((call) => call.path === "/api/send").body.apply_skill_id, "skill_internal_123");
 });
 
+test("an absolute path is not uploaded", async () => {
+  const requests = [];
+  const { root } = mount({
+    api(path, body) {
+      if (path === "/api/skills/import") requests.push(body.files.map((file) => file.path));
+      return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
+    },
+  });
+  const input = descendants(root).find((el) => el.name === "skills-directory");
+  input.files = [
+    textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+    textFile("/etc/secret.md", "hors racine"),
+    textFile("\\windows\\secret.md", "hors racine"),
+  ];
+  input.listeners.change();
+  await flushImport();
+  const sent = requests.flat();
+  assert.ok(sent.includes("dossier/SKILL.md"));
+  assert.equal(sent.includes("/etc/secret.md"), false);
+  assert.equal(sent.includes("\\windows\\secret.md"), false);
+  const refused = descendants(root).filter((el) => el.dataset.status === "skipped");
+  assert.equal(refused.length, 2);
+  assert.match(refused[0].textContent, /chemin/);
+});
+
+test("companions stay local when SKILL.md cannot be prepared", async () => {
+  const requests = [];
+  const { root } = mount({
+    api(path, body) {
+      if (path === "/api/skills/import") requests.push(body.files.map((file) => file.path));
+      return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
+    },
+  });
+  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const skill = textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps");
+  skill.arrayBuffer = async () => { throw new Error("read"); };
+  const oversized = textFile("autre/SKILL.md", "---\nname: Large\n---\nCorps");
+  oversized.size = 8 * 1024 * 1024 + 1;
+  input.files = [skill, textFile("dossier/modele.md", "annexe"), oversized, textFile("autre/modele.md", "annexe large")];
+  input.listeners.change();
+  await flushImport();
+  const sent = requests.flat();
+  assert.equal(sent.includes("dossier/SKILL.md"), false);
+  assert.equal(sent.includes("dossier/modele.md"), false);
+  assert.equal(sent.includes("autre/SKILL.md"), false);
+  assert.equal(sent.includes("autre/modele.md"), false);
+});
+
+const annexPhrase = "Réponds exactement : Le modèle annexe est suivi.";
+const launchState = (conversations) => ({
+  skills: { by_bot: { bot: [{ skill_id: "skill_internal_123", version: 1, name: "modele", display_name: "Modèle", description: "Suit le modèle.", file_count: 1 }] } },
+  demonstrations: { links: [] },
+  conversations,
+});
+const launchApi = (path, body) => {
+  if (path === "/api/conversations") return { conversation: { id: "conv-new", bot_id: "bot", kind: "chat", messages: [] } };
+  if (path === "/api/send") return { conversation: { id: body.conversation_id, messages: [{ id: body.message_id, role: "user", body: body.body }, { id: "reply", role: "assistant", body: "Le modèle annexe est suivi." }] } };
+  if (String(path).startsWith("/api/skills/versions")) {
+    return { versions: [{ version: 1, deleted: false, content: { files: [{ path: "modele.md", content: annexPhrase }] } }] };
+  }
+  return { versions: [] };
+};
+
+test("a routine is not reused and a group still receives the launch", async () => {
+  const { root, requests } = mount({
+    state: launchState([
+      { id: "routine-1", bot_id: "bot", kind: "routine" },
+      { id: "group-1", bot_id: "bot", kind: "group" },
+    ]),
+    api: launchApi,
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Lancer").listeners.click();
+  await flushImport();
+  const send = requests.find((call) => call.path === "/api/send");
+  assert.equal(send.body.conversation_id, "group-1");
+  assert.equal(requests.some((call) => call.path === "/api/conversations"), false);
+});
+
+test("only a routine means a new chat is created", async () => {
+  const { root, requests } = mount({
+    state: launchState([{ id: "routine-1", bot_id: "bot", kind: "routine" }]),
+    api: launchApi,
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Lancer").listeners.click();
+  await flushImport();
+  assert.equal(requests.find((call) => call.path === "/api/send").body.conversation_id, "conv-new");
+  assert.equal(requests.some((call) => call.path === "/api/conversations"), true);
+});
+
+test("the usable-annex point waits for the final reply", async () => {
+  const phrase = "Le modèle annexe est suivi.";
+  const streaming = [
+    { id: "old", role: "assistant", body: phrase },
+    { id: "msg-lance", role: "user", body: "Lance" },
+    { id: "reply", role: "assistant", state: "streaming", body: phrase },
+  ];
+  const { root, panels, registration } = mount({
+    state: launchState([{ id: "conv-1", bot_id: "bot", kind: "chat", messages: [] }]),
+    api(path, body) {
+      if (path === "/api/send") return { conversation: { id: body.conversation_id, messages: streaming } };
+      return launchApi(path, body);
+    },
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Lancer").listeners.click();
+  await flushImport();
+  assert.equal(descendants(root).find((el) => el.dataset.point === "annex").dataset.done, "false");
+  panels.state.conversations = [{
+    id: "conv-1",
+    bot_id: "bot",
+    kind: "chat",
+    messages: [
+      { id: "old", role: "assistant", body: phrase },
+      { id: "msg-lance", role: "user", body: "Lance" },
+      { id: "reply", role: "assistant", state: "complete", body: phrase },
+    ],
+  }];
+  registration.onState();
+  assert.equal(descendants(root).find((el) => el.dataset.point === "annex").dataset.done, "true");
+});
+
 test("a skill folder stays in one import request when the batch is nearly full", async () => {
   const requests = [];
   const { root } = mount({

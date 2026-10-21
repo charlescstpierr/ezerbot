@@ -143,6 +143,62 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
 /// (`with_tx`) across this call: capacity and digest checks are read-then-write.
 /// We never begin/commit/roll back. If SQLite loses that transaction, abort with
 /// an error rather than reporting rolled-back successes or writing in autocommit.
+type DirectoryWalk = (Vec<ImportFile>, Vec<(String, String)>);
+
+/// Read a skill folder without following links. A symlink is reported and its
+/// target is never opened, even when that target sits outside the folder.
+pub fn read_directory(root: &std::path::Path) -> std::io::Result<DirectoryWalk> {
+    let meta = std::fs::symlink_metadata(root)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "symlink",
+        ));
+    }
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut Vec<ImportFile>,
+        skipped: &mut Vec<(String, String)>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            if files.len() + skipped.len() >= 1000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "too-many-files",
+                ));
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if meta.file_type().is_symlink() {
+                skipped.push((relative, "symlink".into()));
+                continue;
+            }
+            if meta.is_dir() {
+                walk(root, &path, files, skipped)?;
+                continue;
+            }
+            if meta.is_file() {
+                files.push(ImportFile {
+                    path: relative,
+                    bytes: std::fs::read(&path)?,
+                });
+            }
+        }
+        Ok(())
+    }
+    walk(root, root, &mut files, &mut skipped)?;
+    Ok((files, skipped))
+}
+
 pub fn import_batch(
     conn: &Connection,
     bot_id: &str,
@@ -207,7 +263,12 @@ pub fn valid_companion_path(path: &str) -> bool {
 }
 
 fn normalized_parts(path: &str) -> Option<Vec<String>> {
-    if path.contains(['\\', ':']) || path.chars().any(char::is_control) {
+    // A leading slash is an absolute path, not an empty segment to skip.
+    if path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains(['\\', ':'])
+        || path.chars().any(char::is_control)
+    {
         return None;
     }
     let mut parts = Vec::new();
@@ -356,7 +417,7 @@ fn chosen_annexes(
         }
         if attached
             .iter()
-            .any(|file: &SkillFile| file.path.eq_ignore_ascii_case(&name))
+            .any(|file: &SkillFile| file.path.to_lowercase() == name.to_lowercase())
         {
             decisions.push((index, Err("duplicate-path".into())));
             continue;
@@ -463,25 +524,24 @@ fn import_skill_folder(
             ImportStatus::Skipped { reason }
         }
         Ok((imported, front_name)) => {
-            let digest = imported.digest.clone();
             let (attached, decisions) = chosen_annexes(&imported.content, files, &folder.annexes);
             let mut content = imported.content;
             if siblings {
                 content.files = attached;
             }
-            let digest_pos = known.iter().position(|skill| skill.digest == digest);
-            let reusable = if digest_pos.is_some() {
-                None
-            } else {
-                named_reuse(known, planned, &content, front_name.as_deref())
-            };
-            let existing_index = digest_pos.or(reusable);
-            if let Some(index) = existing_index {
+            let reusable = named_reuse(known, planned, &content, front_name.as_deref());
+            if let Some(index) = reusable {
                 content.name.clone_from(&known[index].content.name);
                 if !siblings {
                     content.files.clone_from(&known[index].content.files);
                 }
             }
+            // Digest covers the body and the annexes that will actually be stored.
+            // A folder claimed earlier in this batch is already in `planned`, so a
+            // second bundle with the same title is not reused over it.
+            let digest = library::content_digest(&content.body, &content.files);
+            let digest_pos = known.iter().position(|skill| skill.digest == digest);
+            let existing_index = digest_pos.or(reusable);
             let files_match = existing_index
                 .is_some_and(|index| same_files(&content.files, &known[index].content.files));
             let status = if let Some(index) = digest_pos.filter(|_| files_match) {
@@ -587,50 +647,46 @@ fn import_standalone(
             reason: error.to_string(),
         },
         Ok((imported, front_name)) => {
-            if let Some(skill) = known.iter().find(|skill| skill.digest == imported.digest) {
+            let reusable = named_reuse(known, planned, &imported.content, front_name.as_deref());
+            let existing = reusable.map(|index| known[index].clone());
+            let mut content = imported.content;
+            if let Some(existing) = &existing {
+                // Pre-fix uploads retain their lookup key and stable ID.
+                content.name.clone_from(&existing.content.name);
+                content.files.clone_from(&existing.content.files);
+            }
+            let digest = library::content_digest(&content.body, &content.files);
+            if let Some(skill) = known.iter().find(|skill| skill.digest == digest) {
                 planned.insert(skill.content.name.clone());
                 ImportStatus::Duplicate {
                     skill_id: skill.skill_id.clone(),
                 }
-            } else {
-                let reusable =
-                    named_reuse(known, planned, &imported.content, front_name.as_deref());
+            } else if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
                 // Only final names claim reuse; suffixes and failed/refused
                 // writes must not reserve their requested base name.
-                if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
-                    ImportStatus::Skipped {
-                        reason: "too-many-skills".into(),
-                    }
-                } else {
-                    let existing = reusable.map(|index| known[index].clone());
-                    let mut content = imported.content;
-                    if let Some(existing) = &existing {
-                        // Pre-fix uploads retain their lookup key and stable ID.
-                        content.name.clone_from(&existing.content.name);
-                        content.files.clone_from(&existing.content.files);
-                    }
-                    if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
-                        ImportStatus::Skipped {
-                            reason: "combined-too-large".into(),
+                ImportStatus::Skipped {
+                    reason: "too-many-skills".into(),
+                }
+            } else if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
+                ImportStatus::Skipped {
+                    reason: "combined-too-large".into(),
+                }
+            } else {
+                match write(existing.as_ref(), &content) {
+                    Ok(skill) => {
+                        planned.insert(skill.content.name.clone());
+                        let status = ImportStatus::Written {
+                            skill_id: skill.skill_id.clone(),
+                        };
+                        match reusable {
+                            Some(index) => known[index] = skill,
+                            None => known.push(skill),
                         }
-                    } else {
-                        match write(existing.as_ref(), &content) {
-                            Ok(skill) => {
-                                planned.insert(skill.content.name.clone());
-                                let status = ImportStatus::Written {
-                                    skill_id: skill.skill_id.clone(),
-                                };
-                                match reusable {
-                                    Some(index) => known[index] = skill,
-                                    None => known.push(skill),
-                                }
-                                status
-                            }
-                            Err(error) => ImportStatus::Skipped {
-                                reason: format!("write-failed: {error}"),
-                            },
-                        }
+                        status
                     }
+                    Err(error) => ImportStatus::Skipped {
+                        reason: format!("write-failed: {error}"),
+                    },
                 }
             }
         }
@@ -1948,5 +2004,164 @@ mod tests {
         assert!(frontmatter("---\nname: a\n---\r").is_none());
         let imported = convert(&file("a.md", "---\n\n---\nbody")).unwrap();
         assert_eq!(imported.content.body, "---\nname: a\n\norigin: upload\nupload-extension: .md\nupload-name: 'a.md'\n---\n\nbody");
+    }
+
+    #[test]
+    fn an_absolute_path_is_refused_and_unicode_names_dedupe() {
+        let conn = database();
+        let report = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+                file("/etc/secret.md", "hors racine"),
+                file("dossier/ÉTÉ.md", "première"),
+                file("dossier/été.md", "doublon unicode"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            matches!(status_of(&report, "/etc/secret.md"), ImportStatus::Skipped { reason } if reason == "invalid-path"),
+            "{:?}",
+            status_of(&report, "/etc/secret.md")
+        );
+        assert!(matches!(
+            status_of(&report, "dossier/été.md"),
+            ImportStatus::Skipped { reason } if reason == "duplicate-path"
+        ));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].content.files.len(), 1);
+        assert_eq!(saved[0].content.files[0].path, "ÉTÉ.md");
+        assert!(!saved[0].content.body.contains("hors racine"));
+    }
+
+    #[test]
+    fn the_same_body_with_different_annexes_keeps_both_folders() {
+        let conn = database();
+        let body = "---\nname: Modèle\n---\nCorps";
+        let report = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("un/SKILL.md", body),
+                file("un/modele.md", "annexe un"),
+                file("deux/SKILL.md", body),
+                file("deux/modele.md", "annexe deux"),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            status_of(&report, "un/SKILL.md"),
+            ImportStatus::Written { .. }
+        ));
+        assert!(matches!(
+            status_of(&report, "deux/SKILL.md"),
+            ImportStatus::Written { .. }
+        ));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(
+            saved.len(),
+            2,
+            "le second dossier ne doit pas écraser le premier"
+        );
+        let texts: Vec<_> = saved
+            .iter()
+            .map(|skill| skill.content.files[0].content.clone())
+            .collect();
+        assert!(texts.contains(&"annexe un".to_owned()));
+        assert!(texts.contains(&"annexe deux".to_owned()));
+        assert_ne!(saved[0].digest, saved[1].digest);
+
+        let again = import_batch(
+            &conn,
+            "bot",
+            &[file("un/SKILL.md", body), file("un/modele.md", "annexe un")],
+        )
+        .unwrap();
+        assert!(matches!(
+            status_of(&again, "un/SKILL.md"),
+            ImportStatus::Duplicate { .. }
+        ));
+        assert_eq!(library::list(&conn, "bot").unwrap().len(), 2);
+
+        let alone = import_batch(&conn, "bot", &[file("un/SKILL.md", body)]).unwrap();
+        assert!(
+            matches!(
+                status_of(&alone, "un/SKILL.md"),
+                ImportStatus::Duplicate { .. }
+            ),
+            "réimporter le corps seul conserve les annexes déjà stockées"
+        );
+
+        let changed = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("un/SKILL.md", body),
+                file("un/modele.md", "annexe changée"),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            status_of(&changed, "un/SKILL.md"),
+            ImportStatus::Written { .. }
+        ));
+        let after = library::list(&conn, "bot").unwrap();
+        assert_eq!(after.len(), 2);
+        let contents: Vec<_> = after
+            .iter()
+            .flat_map(|skill| skill.content.files.iter().map(|file| file.content.as_str()))
+            .collect();
+        assert!(contents.contains(&"annexe changée"));
+        assert!(contents.contains(&"annexe deux"));
+    }
+
+    #[test]
+    fn a_real_symlink_is_not_followed() {
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(format!("grokbot-skill-link-{stamp}"));
+        let outside = std::env::temp_dir().join(format!("grokbot-skill-outside-{stamp}"));
+        let folder = root.join("dossier");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.md");
+        std::fs::write(&secret, "secret hors dossier").unwrap();
+        std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+        std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+        std::os::unix::fs::symlink(&secret, folder.join("lien.md")).unwrap();
+        let (files, skipped) = read_directory(&root).unwrap();
+        assert!(
+            skipped
+                .iter()
+                .any(|(path, reason)| path == "dossier/lien.md" && reason == "symlink"),
+            "{skipped:?}"
+        );
+        assert!(files
+            .iter()
+            .all(|file| !file.bytes.windows(6).any(|bytes| bytes == b"secret")));
+        let conn = database();
+        let report = import_batch(&conn, "bot", &files).unwrap();
+        assert!(matches!(
+            status_of(&report, "dossier/modele.md"),
+            ImportStatus::Annex { .. }
+        ));
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].content.files[0].content, "annexe interne");
+        assert!(saved[0]
+            .content
+            .files
+            .iter()
+            .all(|file| !file.content.contains("secret")));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

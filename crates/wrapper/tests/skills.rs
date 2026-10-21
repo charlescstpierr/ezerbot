@@ -358,6 +358,149 @@ fn a_long_body_does_not_push_the_annex_out_of_the_reply() {
 }
 
 #[test]
+fn a_long_display_name_keeps_the_annex_inside_the_fence() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let name = "N".repeat(20_000);
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content": format!("---\nname: {name}\n---\n{}", "x".repeat(20_000))},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let sent = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-titre",
+            "body": "Lance la skill.",
+            "apply_skill_id": id
+        }),
+    );
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert_eq!(reply["body"], "Le modèle annexe est suivi.");
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .expect("le titre long ne doit pas chasser l'annexe");
+    assert!(applied.text.contains(annex));
+    assert!(applied.text.contains("corps tronqué"));
+    assert!(!applied.text.contains(&name));
+    assert!(!applied.text.contains(&"x".repeat(20_000)));
+}
+
+#[test]
+fn a_group_launch_injects_the_annex_and_stays_inside_its_conversation() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    create_bot(&mut app);
+    let group = post(
+        &mut app,
+        "/api/conversations",
+        json!({"bot_ids":["grokbot", "other"], "title":"Groupe"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": group,
+            "message_id": "lance-groupe",
+            "body": "Lance la skill dans le groupe.",
+            "apply_skill_id": id
+        }),
+    );
+    for _ in 0..8 {
+        app.tick(0);
+    }
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == group)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    assert!(
+        messages.iter().any(|message| message["role"] == "assistant"
+            && message["body"] == "Le modèle annexe est suivi."),
+        "le tour de groupe doit suivre l'annexe, messages={messages:?}"
+    );
+
+    let elsewhere = conversation(&mut app, "grokbot");
+    let third = conversation(&mut app, "grokbot");
+    let plain = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": elsewhere,
+            "message_id": "lance-groupe",
+            "body": "bonjour"
+        }),
+    );
+    assert!(plain["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("Bien reçu"));
+    assert!(!app
+        .context_preview(&elsewhere)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains("skill_appliquee")));
+
+    let other = add(&mut app, "grokbot", "Autre", "Un autre corps.");
+    request(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": third,
+            "message_id": "lance-groupe",
+            "body": "Autre skill, même identifiant de message.",
+            "apply_skill_id": other["skill_id"]
+        }),
+    )
+    .expect("le même message_id dans une autre conversation ne doit pas répondre 409");
+    assert!(!app
+        .context_preview(&third)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains(annex)));
+}
+
+#[test]
 fn accented_titles_survive_import_edit_history_and_restart() {
     let db = Database::new();
     let mut app = db.open();

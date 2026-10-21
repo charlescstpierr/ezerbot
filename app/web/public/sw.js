@@ -8,7 +8,17 @@ self.addEventListener("activate", event => { event.waitUntil(caches.keys().then(
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || event.request.method !== "GET" || !ASSETS.includes(url.pathname) || (url.search && url.pathname !== "/")) return;
-  event.respondWith(fetch(event.request).then(response => { if (response.ok) { const copy = response.clone(); event.waitUntil(caches.open(CACHE).then(cache => cache.put(url.pathname, copy))); } return response; }).catch(() => caches.match(url.pathname)));
+  event.respondWith(fetch(event.request).then(response => {
+    if (response.ok) {
+      const copy = response.clone();
+      event.waitUntil(caches.open(CACHE).then(cache => cache.put(url.pathname, copy)));
+      return response;
+    }
+    // A disabled listener answers 403 no-store. Reopen the installed shell from
+    // cache and never store the denial. An empty cache keeps that 403, including
+    // /iphone.js — the server refusal itself stays unchanged.
+    return caches.match(url.pathname).then(cached => cached || response);
+  }).catch(() => caches.match(url.pathname)));
 });
 self.addEventListener("push", event => {
   let data; try { data = event.data.json(); } catch { return; }

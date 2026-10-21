@@ -9,16 +9,21 @@ function worker() {
   const self = { location: { origin: 'https://mac.qa.ts.net' }, addEventListener: (name, handler) => events.set(name, handler),
     registration: { showNotification: async (title, options) => notices.push({ title, options }) },
     clients: { matchAll: async () => [], openWindow: async url => opened.push(url), claim: async () => {} }, skipWaiting: async () => {} };
-  const cache = { addAll: async assets => writes.push(...assets), put: async request => writes.push(request.url) };
-  const caches = { open: async () => cache, keys: async () => [], delete: async () => true, match: async request => ({ offline: request }) };
-  let offline = false;
-  const context = { self, caches, URL, fetch: async () => { if (offline) throw new Error('offline'); return { ok: true, clone: () => ({}) }; } };
+  let shellCached = true;
+  const cache = { addAll: async assets => writes.push(...assets), put: async request => writes.push(typeof request === 'string' ? request : request.url) };
+  const caches = { open: async () => cache, keys: async () => [], delete: async () => true, match: async request => shellCached ? { offline: request } : undefined };
+  let offline = false, denied = false;
+  const context = { self, caches, URL, fetch: async () => {
+    if (offline) throw new Error('offline');
+    if (denied) return { ok: false, status: 403, clone() { throw new Error('un 403 ne doit pas être mis en cache'); } };
+    return { ok: true, clone: () => ({}) };
+  } };
   vm.runInNewContext(fs.readFileSync(path.join(root, 'sw.js'), 'utf8'), context);
   async function fire(name, fields = {}) { const waits = []; let response;
     events.get(name)({ ...fields, waitUntil: promise => waits.push(promise), respondWith: promise => { response = promise; } });
     if (response) response = await response; await Promise.all(waits); return response;
   }
-  return { fire, notices, opened, writes, offline: () => { offline = true; } };
+  return { fire, notices, opened, writes, offline: () => { offline = true; }, deny: () => { denied = true; }, emptyCache: () => { shellCached = false; } };
 }
 test('PWA installs only public shell and never intercepts private API or media', async () => {
   const w = worker(); await w.fire('install'); assert.ok(w.writes.includes('/'));
@@ -30,6 +35,20 @@ test('PWA installs only public shell and never intercepts private API or media',
   assert.equal(cached.offline, '/');
   const fromPush = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/?notification=reply%3Aa' } });
   assert.equal(fromPush.offline, '/');
+});
+test('GET / returning 403 renders the cached shell and never stores the denial', async () => {
+  const w = worker();
+  w.deny();
+  const cached = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/' } });
+  assert.equal(cached.offline, '/');
+  assert.equal(w.writes.includes('/'), false);
+  w.emptyCache();
+  const denied = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/' } });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.status, 403);
+  const script = await w.fire('fetch', { request: { method: 'GET', url: 'https://mac.qa.ts.net/iphone.js' } });
+  assert.equal(script.status, 403);
+  assert.deepEqual(w.writes, []);
 });
 test('push displays generic text and click opens an encoded same-origin destination', async () => {
   const w = worker(); await w.fire('push', { data: { json: () => ({ title: 'Autorisation demandée', id: 'input:a/b' }) } });

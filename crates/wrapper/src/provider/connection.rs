@@ -132,6 +132,14 @@ impl Provider {
             json!({"codex":self.codex.connected(), "sharing":self.sharing.connected()});
         value
     }
+    /// Quota of the selected Ezerbot-owned Codex session only. No credentials
+    /// from the CLI, pi, or another application's keychain are consulted.
+    pub fn codex_usage(&self, refresh: bool) -> Value {
+        if !*lock(&self.selected) {
+            return json!({"status":"unsupported"});
+        }
+        self.codex.quota_status(refresh)
+    }
     pub fn start_signin(&self) -> Result<String, Failure> {
         self.session().start_signin()
     }

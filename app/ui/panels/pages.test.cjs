@@ -144,7 +144,15 @@ function harness(page) {
     window: { GrokbotPanels: panels },
     document,
   });
-  return { panels, requests, main, chat, sidebar, current: () => current };
+  return {
+    panels,
+    requests,
+    main,
+    chat,
+    sidebar,
+    current: () => current,
+    use(next) { current = next; },
+  };
 }
 
 test("la Page s’affiche à côté du fil, se renomme, s’ouvre en pleine page, et ne propose pas de partage", async () => {
@@ -214,6 +222,52 @@ test("une Page déjà enregistrée plus profonde que 64 niveaux est refusée san
   assert.match(main.textContent, /imbrication trop profonde/);
   assert.equal(canvasOf(main).children.length, 0);
   assert.equal(descendants(main).some((el) => el.tagName === "div" && el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
+test("un useState se réinitialise quand la source change et garde le clic si la version est la même", async () => {
+  const broken = {
+    id: "page_ready",
+    title: "Trois forfaits",
+    filename: "forfaits.page.tsx",
+    status: "error",
+    diagnostic: "ligne 6, caractère 7 : balise « td » non fermée",
+    preview: "",
+    document: null,
+    source_version: "casse",
+  };
+  const ready = {
+    id: "page_ready",
+    title: "Trois forfaits",
+    filename: "forfaits.page.tsx",
+    status: "ready",
+    diagnostic: null,
+    preview: "Offre choisie : Essentiel",
+    source_version: "corrige",
+    document: {
+      states: [{ name: "offre", initial: "Essentiel" }],
+      view: {
+        type: "element",
+        tag: "article",
+        children: [
+          { type: "element", tag: "p", children: [{ type: "text", text: "Offre choisie : " }, { type: "state", name: "offre" }] },
+          { type: "element", tag: "button", click: { state: "offre", value: "Confort" }, children: [{ type: "text", text: "Choisir" }] },
+        ],
+      },
+    },
+  };
+  const { panels, main, use } = harness(broken);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /ligne 6, caractère 7/);
+  use(ready);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /Offre choisie : Essentiel/);
+  buttons(main).find((button) => button.textContent === "Choisir").click();
+  assert.match(main.textContent, /Offre choisie : Confort/);
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /Offre choisie : Confort/);
+  use({ ...ready, source_version: "encore" });
+  await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+  assert.match(main.textContent, /Offre choisie : Essentiel/);
 });
 
 test("une compilation cassée montre la ligne et le caractère, pas une Page vide réussie", async () => {

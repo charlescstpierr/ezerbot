@@ -7,7 +7,7 @@
   let shell = null;
   let selectedId = null;
   let pinnedId = null;
-  let loadedId = null;
+  let loadedKey = null;
   let detail = null;
   let viewState = {};
   let full = false;
@@ -198,9 +198,16 @@
     place(shell.canvas, render(page.document.view, null, null, 1));
   }
 
+  function sourceKey(page) {
+    const id = page && page.id ? page.id : "";
+    const version = page && page.source_version ? page.source_version : "";
+    return `${id}:${version}`;
+  }
+
   function remember(page) {
-    if (loadedId !== page.id) {
-      loadedId = page.id;
+    const key = sourceKey(page);
+    if (loadedKey !== key) {
+      loadedKey = key;
       viewState = {};
       const states = page.document && page.document.states;
       if (Array.isArray(states)) {
@@ -255,7 +262,7 @@
   function hideStage() {
     selectedId = null;
     detail = null;
-    loadedId = null;
+    loadedKey = null;
     full = false;
     shell.stage.hidden = true;
     shell.canvas.replaceChildren();

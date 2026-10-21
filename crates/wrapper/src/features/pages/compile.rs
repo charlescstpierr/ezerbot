@@ -664,7 +664,8 @@ fn collect_indexes(node: &Node, indexes: &mut Vec<usize>) {
                 .for_each(|child| collect_indexes(child, indexes));
         }
         Node::Field { index } => indexes.push(*index),
-        Node::Map { node, .. } => collect_indexes(node, indexes),
+        // A nested map is validated against its own rows while it is parsed.
+        Node::Map { .. } => {}
         Node::Text(_) | Node::State(_) => {}
     }
 }
@@ -1038,6 +1039,33 @@ mod tests {
 "#;
         let page = compile(source).expect("une ligne à deux colonnes");
         assert!(page.preview.contains('A'), "{}", page.preview);
+    }
+
+    #[test]
+    fn nested_maps_keep_each_list_s_own_columns() {
+        let source = r#"export default function Page() {
+  const lignes = [["A"]];
+  const details = [["B", "C"]];
+  return (
+    <div>
+      {lignes.map((ligne) => (
+        <div>
+          <span>{ligne[0]}</span>
+          {details.map((detail) => (
+            <span>{detail[1]}</span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+"#;
+        let page = compile(source).expect("deux listes imbriquées valides");
+        assert!(
+            page.preview.contains('A') && page.preview.contains('C'),
+            "{}",
+            page.preview
+        );
     }
 
     fn chain(depth: usize) -> Node {

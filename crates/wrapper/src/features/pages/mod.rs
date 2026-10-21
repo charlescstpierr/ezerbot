@@ -14,8 +14,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 empty_hooks!(tick, entry, on_run_event, link_attachments);
@@ -120,7 +122,7 @@ fn persist(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         .map(|page| page.preview.clone())
         .unwrap_or_default();
     if args.source.len() <= SOURCE_LIMIT {
-        write_source(&pages_dir(ctx, bot)?, &filename, &args.source)?;
+        write_source(data_dir(ctx), bot, &filename, &args.source)?;
     }
     ctx.connection.execute(
         "INSERT INTO bot_pages (
@@ -309,6 +311,7 @@ fn load(conn: &Connection, id: &str) -> Result<Value, ApiError> {
         "status": status,
         "diagnostic": diagnostic,
         "preview": record.preview,
+        "source_version": format!("{:x}", Sha256::digest(record.source.as_bytes())),
         "document": document
     }))
 }
@@ -415,52 +418,101 @@ fn page_bot(id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn pages_dir(ctx: &Context<'_>, bot: &str) -> Result<PathBuf, ApiError> {
-    let data = ctx
-        .db_path
+fn data_dir<'a>(ctx: &Context<'a>) -> &'a Path {
+    ctx.db_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    Ok(data.join("pages").join(bot))
+        .unwrap_or(Path::new("."))
 }
 
-fn write_source(directory: &Path, filename: &str, source: &str) -> Result<(), ApiError> {
-    let failed = || ApiError::new(500, "La Page n’a pas pu être écrite sur ce Mac.");
-    let refused = || {
-        ApiError::new(
-            400,
-            "La Page ne peut pas être écrite en dehors de son dossier.",
-        )
-    };
-    let root = directory
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(failed)?;
-    fs::create_dir_all(root).map_err(|_| failed())?;
-    let root = root.canonicalize().map_err(|_| failed())?;
-    // An existing symlink on data/pages/<bot> is resolved before any write.
-    // The file is refused when that target leaves data/pages.
-    if fs::symlink_metadata(directory).is_ok() {
-        let actual = directory.canonicalize().map_err(|_| failed())?;
-        if !actual.starts_with(&root) {
-            return Err(refused());
+fn outside() -> ApiError {
+    ApiError::new(
+        400,
+        "La Page ne peut pas être écrite en dehors de son dossier.",
+    )
+}
+
+fn unwritten() -> ApiError {
+    ApiError::new(500, "La Page n’a pas pu être écrite sur ce Mac.")
+}
+
+fn single_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+}
+
+/// `parent` is already canonical. Any symlink at this component is refused,
+/// including one whose target stays inside the data folder.
+fn anchored_dir(parent: &Path, name: &str) -> Result<PathBuf, ApiError> {
+    if !single_component(name) {
+        return Err(outside());
+    }
+    let path = parent.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => return Err(outside()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = fs::create_dir(&path) {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(unwritten());
+                }
+            }
         }
+        Err(_) => return Err(unwritten()),
     }
-    fs::create_dir_all(directory).map_err(|_| failed())?;
-    let directory = directory.canonicalize().map_err(|_| failed())?;
-    if !directory.starts_with(&root) {
-        return Err(refused());
+    let meta = fs::symlink_metadata(&path).map_err(|_| unwritten())?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(outside());
     }
-    let temporary = directory.join(format!(".{filename}.tmp"));
+    let resolved = path.canonicalize().map_err(|_| unwritten())?;
+    let same_parent = resolved.parent() == Some(parent);
+    let same_name = resolved.file_name() == Some(std::ffi::OsStr::new(name));
+    if !same_parent || !same_name {
+        return Err(outside());
+    }
+    Ok(resolved)
+}
+
+fn page_directory(data: &Path, bot: &str) -> Result<PathBuf, ApiError> {
+    let pages = anchored_dir(data, "pages")?;
+    anchored_dir(&pages, bot)
+}
+
+fn write_source(data: &Path, bot: &str, filename: &str, source: &str) -> Result<(), ApiError> {
+    let data = data.canonicalize().map_err(|_| unwritten())?;
+    page_directory(&data, bot)?;
+    if !single_component(filename) || filename.contains("..") {
+        return Err(outside());
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    // Read pages and the bot directory again immediately before the exclusive create.
+    let directory = page_directory(&data, bot)?;
+    let temporary = directory.join(format!(".{filename}.{}.{nanos}.tmp", std::process::id()));
     let output = directory.join(filename);
-    if !temporary.starts_with(&directory) || !output.starts_with(&directory) {
-        return Err(refused());
+    if temporary.parent() != Some(directory.as_path())
+        || output.parent() != Some(directory.as_path())
+    {
+        return Err(outside());
     }
-    if fs::symlink_metadata(&temporary).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err(refused());
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| unwritten())?;
+    let wrote = file
+        .write_all(source.as_bytes())
+        .and_then(|_| file.sync_all());
+    drop(file);
+    if wrote.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(unwritten());
     }
-    fs::write(&temporary, source).map_err(|_| failed())?;
-    fs::rename(&temporary, &output).map_err(|_| failed())?;
+    if fs::rename(&temporary, &output).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(unwritten());
+    }
     Ok(())
 }
 
@@ -500,7 +552,13 @@ mod tests {
         let bot = pages.join("grokbot");
         symlink(&outside, &bot).unwrap();
 
-        let error = write_source(&bot, "forfaits.page.tsx", "contenu secret").unwrap_err();
+        let error = write_source(
+            &root.0.join("data"),
+            "grokbot",
+            "forfaits.page.tsx",
+            "contenu secret",
+        )
+        .unwrap_err();
         assert!(error.message.contains("en dehors"), "{}", error.message);
         assert!(!outside.join("forfaits.page.tsx").exists());
         assert!(!outside.join(".forfaits.page.tsx.tmp").exists());
@@ -516,25 +574,72 @@ mod tests {
     }
 
     #[test]
-    fn write_keeps_a_real_directory_and_an_internal_symlink() {
+    fn write_refuses_a_pages_symlink_outside_the_canonical_data_folder() {
+        let root = Temp(scratch("pages-link"));
+        let data = root.0.join("data");
+        let outside = root.0.join("outside");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("sentinel.txt"), "rester").unwrap();
+        symlink(&outside, data.join("pages")).unwrap();
+
+        let error =
+            write_source(&data, "grokbot", "forfaits.page.tsx", "contenu secret").unwrap_err();
+        assert!(error.message.contains("en dehors"), "{}", error.message);
+        assert!(fs::symlink_metadata(data.join("pages"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!outside.join("grokbot").exists());
+        assert!(!outside.join("forfaits.page.tsx").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "rester"
+        );
+        let entries: Vec<_> = fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("sentinel.txt")]);
+    }
+
+    #[test]
+    fn write_refuses_a_symlink_whose_target_stays_inside_pages() {
         let root = Temp(scratch("internal"));
-        let pages = root.0.join("data/pages");
+        let data = root.0.join("data");
+        let pages = data.join("pages");
         let real = pages.join("reel");
         fs::create_dir_all(&real).unwrap();
-        let alias = pages.join("alias");
-        symlink(&real, &alias).unwrap();
+        symlink(&real, pages.join("alias")).unwrap();
 
-        write_source(&real, "direct.page.tsx", "direct").unwrap();
-        write_source(&alias, "lien.page.tsx", "lien").unwrap();
+        let error = write_source(&data, "alias", "lien.page.tsx", "lien").unwrap_err();
+        assert!(error.message.contains("en dehors"), "{}", error.message);
+        assert!(!real.join("lien.page.tsx").exists());
+        write_source(&data, "reel", "direct.page.tsx", "direct").unwrap();
         assert_eq!(
             fs::read_to_string(real.join("direct.page.tsx")).unwrap(),
             "direct"
         );
+    }
+
+    #[test]
+    fn write_leaves_an_existing_temp_hard_link_untouched() {
+        let root = Temp(scratch("hardlink"));
+        let data = root.0.join("data");
+        let bot = data.join("pages").join("grokbot");
+        fs::create_dir_all(&bot).unwrap();
+        let secret = root.0.join("secret.txt");
+        fs::write(&secret, "SECRET").unwrap();
+        let planted = bot.join(".forfaits.page.tsx.tmp");
+        fs::hard_link(&secret, &planted).unwrap();
+
+        write_source(&data, "grokbot", "forfaits.page.tsx", "contenu secret").unwrap();
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "SECRET");
+        assert_eq!(fs::read_to_string(&planted).unwrap(), "SECRET");
         assert_eq!(
-            fs::read_to_string(real.join("lien.page.tsx")).unwrap(),
-            "lien"
+            fs::read_to_string(bot.join("forfaits.page.tsx")).unwrap(),
+            "contenu secret"
         );
-        assert!(!pages.join("direct.page.tsx").exists());
     }
 
     fn deep_document(depth: usize) -> String {

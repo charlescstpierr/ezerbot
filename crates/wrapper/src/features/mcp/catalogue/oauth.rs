@@ -214,6 +214,7 @@ pub(super) fn begin(
     let path = ctx.db_path.to_path_buf();
     let provider = ctx.provider.clone();
     let server = server.clone();
+    #[cfg(target_os = "macos")]
     let authorization_url = url.to_string();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), ApiError> {

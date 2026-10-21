@@ -28,9 +28,9 @@
     el.addEventListener("click", action);
     return el;
   };
-  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "combined-too-large": "Le contenu et les annexes conservées dépassent ensemble 256 000 caractères",  "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
+  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "combined-too-large": "Le contenu et les annexes conservées dépassent ensemble 256 000 caractères", "too-many-annexes": "Une skill accepte au plus 20 fichiers texte annexes.", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
   function session(botId) {
-    if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "" });
+    if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "", points: { import: false, annex: false, restore: false, shortcut: false } });
     return sessions.get(botId);
   }
   function changed() { for (const render of mounts) render(); }
@@ -49,6 +49,25 @@
   // extensions before reading. Conversion, UTF-8/binary checks and naming remain
   // authoritative on the server; preserve serial partial success.
   // Budget SERIALIZED JSON, not raw bytes (skills-wrapper review r1 #6).
+  const pathParts = (path) => String(path).replaceAll("\\", "/").split("/").filter((part) => part && part !== ".");
+  const parentDir = (path) => { const parts = pathParts(path); return parts.length < 2 ? "" : parts.slice(0, -1).join("/"); };
+  const baseName = (path) => { const parts = pathParts(path); return parts[parts.length - 1] || path; };
+  function skillFolders(files) {
+    const members = new Map();
+    files.forEach((file, index) => {
+      const path = file.webkitRelativePath || file.name;
+      const dir = parentDir(path);
+      if (dir && baseName(path) === "SKILL.md" && !members.has(dir)) members.set(dir, [index]);
+    });
+    files.forEach((file, index) => {
+      const path = file.webkitRelativePath || file.name;
+      const dir = parentDir(path);
+      const group = dir && members.get(dir);
+      if (!group || group[0] === index || baseName(path) === "SKILL.md") return;
+      group.push(index);
+    });
+    return members;
+  }
   async function importFiles(botId, files) {
     const job = session(botId);
     if (!files.length || job.running || job.mutating) return;
@@ -61,6 +80,8 @@
     const written = new Map();
     const overhead = encoder.encode(JSON.stringify({ bot_id: botId, files: [] })).length;
     let size = overhead;
+    const folders = skillFolders(files);
+    const grouped = new Set([...folders.values()].flat());
     async function flush() {
       if (!batch.length) return;
       batchNumber++;
@@ -69,9 +90,10 @@
         if (!Array.isArray(report) || report.length !== positions.length) throw new Error("Rapport incomplet du moteur local.");
         report.forEach((item, i) => {
           const status = item.status?.status;
-          if (!["written", "skipped", "duplicate"].includes(status)) throw new Error("Statut d’import inconnu.");
+          if (!["written", "skipped", "duplicate", "annex"].includes(status)) throw new Error("Statut d’import inconnu.");
           const row = job.rows[positions[i]], skillId = item.status.skill_id;
           Object.assign(row, { status, reason: item.status.reason, skillId });
+          if (status === "annex") job.points.import = true;
           if (status === "written") {
             const previous = written.get(skillId);
             if (previous && previous.batch < batchNumber) row.reason = `Mise à jour de la skill écrite par « ${previous.path} » (paquet séparé)`;
@@ -87,22 +109,42 @@
       batch = []; positions = []; size = overhead;
       changed();
     }
+    async function prepare(index) {
+      const row = job.rows[index], file = files[index];
+      if (!supportedText(row.path)) { Object.assign(row, { status: "skipped", reason: "unsupported" }); return null; }
+      // No file this large can fit a batch, even before base64 expansion.
+      if (file.size > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); return null; }
+      let upload;
+      try { upload = { path: row.path, base64: await base64(file) }; }
+      catch { Object.assign(row, { status: "skipped", reason: "Lecture du fichier impossible" }); return null; }
+      const bytes = encoder.encode(JSON.stringify(upload)).length;
+      if (overhead + bytes > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); return null; }
+      return { upload, bytes };
+    }
+    const groupCost = (prepared, existing) => prepared.reduce((sum, item, index) => sum + item.bytes + ((existing || index) ? 1 : 0), 0);
     try {
+      const queued = new Set();
       for (let i = 0; i < files.length; i++) {
+        if (interrupted || queued.has(i)) continue;
+        const dir = parentDir(job.rows[i].path);
+        const indexes = grouped.has(i) ? folders.get(dir) : [i];
+        const prepared = [];
+        for (const index of indexes) {
+          queued.add(index);
+          const item = await prepare(index);
+          if (item) prepared.push({ index, ...item });
+        }
+        if (!prepared.length || interrupted) continue;
+        if (batch.length && (batch.length + prepared.length > 1000 || size + groupCost(prepared, batch.length) > BATCH_BYTES)) await flush();
         if (interrupted) break;
-        const row = job.rows[i], file = files[i];
-        if (!supportedText(row.path)) { Object.assign(row, { status: "skipped", reason: "unsupported" }); continue; }
-        // No file this large can fit a batch, even before base64 expansion.
-        if (file.size > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); continue; }
-        let upload;
-        try { upload = { path: row.path, base64: await base64(file) }; }
-        catch { Object.assign(row, { status: "skipped", reason: "Lecture du fichier impossible" }); continue; }
-        const bytes = encoder.encode(JSON.stringify(upload)).length;
-        if (overhead + bytes > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); continue; }
-        if (batch.length >= 1000 || size + bytes + (batch.length ? 1 : 0) > BATCH_BYTES) await flush();
-        if (interrupted) break;
-        size += bytes + (batch.length ? 1 : 0);
-        batch.push(upload); positions.push(i);
+        if (prepared.length > 1000 || overhead + groupCost(prepared, 0) > BATCH_BYTES) {
+          for (const item of prepared) Object.assign(job.rows[item.index], { status: "skipped", reason: "too-large" });
+          continue;
+        }
+        for (const item of prepared) {
+          size += item.bytes + (batch.length ? 1 : 0);
+          batch.push(item.upload); positions.push(item.index);
+        }
       }
       if (!interrupted) await flush();
       for (const row of job.rows) if (row.status === "pending") row.status = "not_sent";
@@ -134,7 +176,18 @@
     progress.setAttribute("role", "status");
     const reportRows = node("ol", "skills-report-rows");
     report.append(reportTitle, reportRows);
-    section.append(node("p", "skills-note", "Textes UTF-8 : txt, md, markdown, csv, json, yaml, yml. 256 000 caractères par skill, annexes comprises · 250 skills par bot."), actions, list, progress, report);
+    const scenario = node("div", "skills-scenario");
+    const scenarioScore = node("p", "skills-scenario-score", "Scénario SKL-3 · 0/4");
+    const scenarioList = node("ul", "skills-scenario-points");
+    const pointNodes = new Map([["import", "Import du dossier"], ["annex", "Annexe utilisable"], ["restore", "Version précédente restaurable"], ["shortcut", "Raccourci ⌘⇧W"]].map(([key, label]) => {
+      const item = node("li", "", label);
+      item.dataset.point = key;
+      item.dataset.done = "false";
+      scenarioList.append(item);
+      return [key, item];
+    }));
+    scenario.append(scenarioScore, scenarioList);
+    section.append(node("p", "skills-note", "Textes UTF-8 : txt, md, markdown, csv, json, yaml, yml. 256 000 caractères par skill, annexes comprises · 250 skills par bot."), scenario, actions, list, progress, report);
     const fileInput = node("input", "skills-file-input");
     fileInput.type = "file"; fileInput.multiple = true;
     fileInput.accept = EXTENSIONS.map((extension) => `.${extension}`).join(",");
@@ -189,7 +242,7 @@
     const select = node("select", "text-input"); select.name = "skill-version";
     select.setAttribute("aria-label", "Version à consulter");
     const preview = node("div", "skills-history-content");
-    history.append(node("summary", "", "Historique des versions (lecture seule)"), select, preview);
+    history.append(node("summary", "", "Historique des versions"), select, preview);
     const confirmation = node("div", "skills-confirmation"); confirmation.hidden = true;
     confirmation.append(node("p", "skills-note", "Supprimer cette skill ? Elle ne sera plus proposée au bot. Les versions déjà épinglées restent conservées."), button("Confirmer la suppression", () => void remove(), "danger-button"), button("Garder la skill", () => { confirmation.hidden = true; }));
     const footer = node("div", "dialog-footer");
@@ -223,6 +276,9 @@
         files.setAttribute("aria-label", `Fichiers annexes de la version ${version.version}`);
         files.append(node("h3", "", `Fichiers annexes · ${content.files.length}`), ...content.files.map(fileDetails));
         preview.append(files);
+      }
+      if (current && String(version.version) !== String(current.version) && !version.deleted) {
+        preview.append(button("Restaurer cette version", () => void restoreVersion(version.version)));
       }
     }
     select.addEventListener("change", showVersion);
@@ -270,6 +326,60 @@
           populate(all[0], all); error.textContent = ""; fields.disabled = false; focusName();
         } catch (failure) { if (active(request)) error.textContent = failure.message; }
       } else { fields.disabled = false; focusName(); }
+    }
+    async function restoreVersion(version) {
+      if (!current || fields.disabled || job.running || job.mutating) return;
+      const request = token;
+      job.mutating = true; fields.disabled = true; error.textContent = ""; changed();
+      try {
+        await panels.api("/api/skills/restore", { bot_id: bot.id, skill_id: current.skill_id, expected_version: current.version, version: Number(version) });
+        if (!active(request)) return;
+        const response = await panels.api(`/api/skills/versions?bot_id=${encodeURIComponent(bot.id)}&skill_id=${encodeURIComponent(current.skill_id)}`);
+        if (!active(request)) return;
+        const all = response.versions.slice().sort((a, b) => b.version - a.version);
+        if (!all.length || all[0].deleted) throw new Error("Cette skill a été supprimée. Rouvrez la liste.");
+        populate(all[0], all);
+        job.points.restore = true;
+        error.textContent = "";
+        panels.notify(`Version ${version} restaurée, annexes comprises.`);
+        await refresh();
+      } catch (failure) {
+        if (active(request)) error.textContent = `Action refusée : ${reason(failure.message)}`;
+        await refresh();
+      } finally {
+        job.mutating = false;
+        if (active(request)) { fields.disabled = false; }
+        changed();
+      }
+    }
+    async function launchSkill(skill) {
+      if (job.running || job.mutating) return;
+      for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+      job.mutating = true; changed();
+      try {
+        let conversation = (panels.state.conversations || []).find((item) => item.bot_id === bot.id && !item.deleted && item.kind !== "task");
+        if (!conversation) {
+          const created = await panels.api("/api/conversations", { bot_id: bot.id });
+          conversation = created.conversation;
+        }
+        await panels.api("/api/send", {
+          conversation_id: conversation.id,
+          message_id: crypto.randomUUID(),
+          body: `Lance la skill « ${displayName(skill)} ».`,
+          apply_skill_id: skill.skill_id,
+        });
+        job.points.annex = true;
+        // A just-created thread is absent from state until refresh. Opening
+        // first leaves the welcome screen up and hides the annex reply.
+        await refresh();
+        panels.openConversation?.(conversation.id);
+        panels.notify(`Skill « ${displayName(skill)} » lancée.`);
+      } catch (failure) {
+        panels.notify(reason(failure.message));
+      } finally {
+        job.mutating = false;
+        changed();
+      }
     }
     async function mutate(path, payload, success) {
       if (job.running || job.mutating) return;
@@ -341,12 +451,16 @@
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;
+          const launch = button("Lancer", () => void launchSkill(skill));
+          launch.disabled = locked;
+          launch.setAttribute("aria-label", `Lancer : ${displayName(skill)}`);
           const rowActions = node("div", "skills-row-actions"); rowActions.append(edit);
           const demonstration = panels.state.demonstrations?.links?.find(link => link.skill_id === skill.skill_id);
           if (demonstration) {
             const view = button("Voir la démonstration", () => window.EzerbotDemonstration?.showSummary(demonstration.id));
             view.setAttribute("aria-label", `Voir la démonstration : ${displayName(skill)}`); rowActions.append(view);
           }
+          rowActions.append(launch);
           row.append(copy, rowActions); list.append(row);
         }
       }
@@ -367,11 +481,14 @@
       };
       progress.textContent = job.message;
       report.hidden = !job.rows.length;
+      const done = ["import", "annex", "restore", "shortcut"].filter((key) => job.points[key]).length;
+      scenarioScore.textContent = `Scénario SKL-3 · ${done}/4`;
+      for (const [key, item] of pointNodes) item.dataset.done = job.points[key] ? "true" : "false";
       reportTitle.textContent = `Rapport : ${countLabel("written", "écrite")} · ${countLabel("duplicate", "doublon")} · ${countLabel("skipped", "refusée")} · ${countLabel("unknown", "incertaine")} · ${countLabel("not_sent", "non envoyée")} · ${countLabel("pending", "en attente", "en attente")}`;
       const nextReport = JSON.stringify(job.rows);
       if (nextReport !== reportSignature) {
         reportSignature = nextReport;
-        const labels = { written: "Écrite", duplicate: "Déjà importée", skipped: "Refusée", unknown: "Résultat incertain", not_sent: "Non envoyée", pending: "En attente" };
+        const labels = { written: "Écrite", duplicate: "Déjà importée", annex: "Annexe conservée", skipped: "Refusée", unknown: "Résultat incertain", not_sent: "Non envoyée", pending: "En attente" };
         reportRows.replaceChildren(...job.rows.map((item) => {
           const row = node("li");
           row.dataset.status = item.status;
@@ -385,6 +502,11 @@
     return () => { alive = false; token++; mounts.delete(render); linkEditors.delete(bot.id); dialog.close(); dialog.remove(); };
   }
   panels.register({ id: "skills", botSection, onState: changed,
+    noteShortcut(botId) {
+      const job = session(botId);
+      job.points.shortcut = true;
+      changed();
+    },
     openLink({ id, agent }) {
       const open = linkEditors.get(agent);
       if (!open || session(agent).running || session(agent).mutating) return false;

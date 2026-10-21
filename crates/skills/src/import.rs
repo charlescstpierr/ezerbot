@@ -7,12 +7,16 @@
 //! reports are local choices (Grok applies its remaining-slot cap to updates too).
 //! `convert` is pure. Writes are serial and failures do not roll back earlier
 //! successes (SR04, A19). The caller owns transactions and HTTP batch limits.
-use crate::library::{self, Origin, Skill, SkillContent};
+//! A `SKILL.md` keeps the text files that share its directory: those siblings are
+//! companion files, not extra skills. Nested files stay independent. Importing
+//! `SKILL.md` alone keeps the companions already stored; a folder that includes
+//! siblings replaces them, even when every sibling is invalid.
+use crate::library::{self, Origin, Skill, SkillContent, SkillFile};
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// JavaScript string length (UTF-16 code units), not UTF-8 bytes or scalar values.
 pub const MAX_SKILL_CHARACTERS: usize = 256_000;
@@ -38,6 +42,7 @@ pub enum ImportStatus {
     Written { skill_id: String },
     Skipped { reason: String },
     Duplicate { skill_id: String },
+    Annex { skill_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +177,150 @@ fn persist_files(
     }
 }
 
+const MAX_ANNEXES: usize = 20;
+type AnnexDecision = std::result::Result<(), String>;
+
+struct SkillFolder {
+    skills: Vec<usize>,
+    annexes: Vec<usize>,
+}
+
+fn path_parts(path: &str) -> Vec<String> {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(str::to_owned)
+        .collect()
+}
+
+fn parent_dir(path: &str) -> Option<String> {
+    let parts = path_parts(path);
+    if parts.len() < 2 {
+        None
+    } else {
+        Some(parts[..parts.len() - 1].join("/"))
+    }
+}
+
+fn skill_folders(files: &[ImportFile]) -> HashMap<String, SkillFolder> {
+    let mut folders: HashMap<String, SkillFolder> = HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        let parts = path_parts(&file.path);
+        if parts.last().map(String::as_str) == Some("SKILL.md") {
+            if let Some(dir) = parent_dir(&file.path) {
+                folders
+                    .entry(dir)
+                    .or_insert_with(|| SkillFolder {
+                        skills: Vec::new(),
+                        annexes: Vec::new(),
+                    })
+                    .skills
+                    .push(index);
+            }
+        }
+    }
+    for (index, file) in files.iter().enumerate() {
+        let Some(dir) = parent_dir(&file.path) else {
+            continue;
+        };
+        let Some(folder) = folders.get_mut(&dir) else {
+            continue;
+        };
+        if parts_are_skill_md(&file.path) || folder.skills.is_empty() {
+            continue;
+        }
+        folder.annexes.push(index);
+    }
+    folders
+}
+
+fn parts_are_skill_md(path: &str) -> bool {
+    path_parts(path).last().map(String::as_str) == Some("SKILL.md")
+}
+
+fn annex_text(file: &ImportFile) -> Result<String> {
+    let file_name = path_parts(&file.path)
+        .last()
+        .cloned()
+        .ok_or_else(|| invalid("empty-path"))?;
+    let dot = file_name
+        .rfind('.')
+        .filter(|&index| index > 0)
+        .ok_or_else(|| invalid("unsupported"))?;
+    let extension = file_name[dot..].to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        ".txt" | ".md" | ".markdown" | ".csv" | ".json" | ".yaml" | ".yml"
+    ) || file.bytes.iter().take(8192).any(|&byte| byte == 0)
+    {
+        return Err(invalid("unsupported"));
+    }
+    let text = std::str::from_utf8(&file.bytes).map_err(|_| invalid("unsupported"))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.trim_matches(js_space).is_empty() {
+        return Err(invalid("empty"));
+    }
+    if text.encode_utf16().count() > MAX_SKILL_CHARACTERS {
+        return Err(invalid("too-large"));
+    }
+    Ok(text.to_owned())
+}
+
+fn same_files(left: &[SkillFile], right: &[SkillFile]) -> bool {
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|a, b| a.path.cmp(&b.path).then(a.content.cmp(&b.content)));
+    right.sort_by(|a, b| a.path.cmp(&b.path).then(a.content.cmp(&b.content)));
+    left == right
+}
+
+fn chosen_annexes(
+    skill: &SkillContent,
+    files: &[ImportFile],
+    annexes: &[usize],
+) -> (Vec<SkillFile>, Vec<(usize, AnnexDecision)>) {
+    let mut order: Vec<(usize, String)> = annexes
+        .iter()
+        .copied()
+        .map(|index| (index, path_parts(&files[index].path).join("/")))
+        .collect();
+    order.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let mut attached = Vec::new();
+    let mut decisions = Vec::new();
+    for (index, _) in order {
+        let name = path_parts(&files[index].path)
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        if attached.iter().any(|file: &SkillFile| file.path == name) {
+            decisions.push((index, Err("duplicate-path".into())));
+            continue;
+        }
+        match annex_text(&files[index]) {
+            Err(error) => decisions.push((index, Err(error.to_string()))),
+            Ok(text) => {
+                if attached.len() >= MAX_ANNEXES {
+                    decisions.push((index, Err("too-many-annexes".into())));
+                    continue;
+                }
+                let mut trial = skill.clone();
+                trial.files.clone_from(&attached);
+                trial.files.push(SkillFile {
+                    path: name,
+                    content: text,
+                });
+                if library::content_characters(&trial) > MAX_SKILL_CHARACTERS {
+                    decisions.push((index, Err("combined-too-large".into())));
+                    continue;
+                }
+                attached.push(trial.files.pop().expect("annex just pushed"));
+                decisions.push((index, Ok(())));
+            }
+        }
+    }
+    (attached, decisions)
+}
+
 fn import_files(
     files: &[ImportFile],
     mut known: Vec<Skill>,
@@ -179,87 +328,242 @@ fn import_files(
 ) -> Vec<ImportItem> {
     known.retain(|skill| !skill.deleted);
     let mut planned = HashSet::new();
-    files
-        .iter()
-        .map(|file| {
-            let status = match convert_parts(file) {
-                Err(error) => ImportStatus::Skipped {
-                    reason: error.to_string(),
-                },
-                Ok((imported, front_name)) => {
-                    if let Some(skill) = known.iter().find(|skill| skill.digest == imported.digest)
-                    {
+    let folders = skill_folders(files);
+    let mut done = HashSet::new();
+    let mut report = vec![None; files.len()];
+    for index in 0..files.len() {
+        if report[index].is_some() {
+            continue;
+        }
+        if let Some(dir) = parent_dir(&files[index].path) {
+            if let Some(folder) = folders.get(&dir) {
+                let primary = folder.skills[0];
+                if !done.contains(&dir) && (index == primary || folder.annexes.contains(&index)) {
+                    import_skill_folder(
+                        folder,
+                        files,
+                        &mut known,
+                        &mut planned,
+                        &mut report,
+                        &mut write,
+                    );
+                    done.insert(dir);
+                    continue;
+                }
+            }
+        }
+        report[index] = Some(import_standalone(
+            &files[index],
+            &mut known,
+            &mut planned,
+            &mut write,
+        ));
+    }
+    report
+        .into_iter()
+        .map(|item| item.expect("every import file is reported"))
+        .collect()
+}
+
+fn import_skill_folder(
+    folder: &SkillFolder,
+    files: &[ImportFile],
+    known: &mut Vec<Skill>,
+    planned: &mut HashSet<String>,
+    report: &mut [Option<ImportItem>],
+    write: &mut impl FnMut(Option<&Skill>, &SkillContent) -> Result<Skill>,
+) {
+    let skill_index = folder.skills[0];
+    let siblings = !folder.annexes.is_empty();
+    let status = match convert_parts(&files[skill_index]) {
+        Err(error) => {
+            let reason = error.to_string();
+            for index in &folder.annexes {
+                let annex_reason = annex_text(&files[*index])
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| reason.clone());
+                report[*index] = Some(skipped_item(&files[*index].path, annex_reason));
+            }
+            ImportStatus::Skipped { reason }
+        }
+        Ok((imported, front_name)) => {
+            let digest = imported.digest.clone();
+            let (attached, decisions) = chosen_annexes(&imported.content, files, &folder.annexes);
+            let mut content = imported.content;
+            if siblings {
+                content.files = attached;
+            }
+            let digest_pos = known.iter().position(|skill| skill.digest == digest);
+            let reusable = if digest_pos.is_some() {
+                None
+            } else {
+                named_reuse(known, planned, &content, front_name.as_deref())
+            };
+            let existing_index = digest_pos.or(reusable);
+            if let Some(index) = existing_index {
+                content.name.clone_from(&known[index].content.name);
+                if !siblings {
+                    content.files.clone_from(&known[index].content.files);
+                }
+            }
+            let files_match = existing_index
+                .is_some_and(|index| same_files(&content.files, &known[index].content.files));
+            let status = if let Some(index) = digest_pos.filter(|_| files_match) {
+                planned.insert(known[index].content.name.clone());
+                ImportStatus::Duplicate {
+                    skill_id: known[index].skill_id.clone(),
+                }
+            } else if existing_index.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
+                ImportStatus::Skipped {
+                    reason: "too-many-skills".into(),
+                }
+            } else if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
+                ImportStatus::Skipped {
+                    reason: "combined-too-large".into(),
+                }
+            } else {
+                let existing = existing_index.map(|index| known[index].clone());
+                match write(existing.as_ref(), &content) {
+                    Ok(skill) => {
                         planned.insert(skill.content.name.clone());
-                        ImportStatus::Duplicate {
+                        let status = ImportStatus::Written {
                             skill_id: skill.skill_id.clone(),
+                        };
+                        match existing_index {
+                            Some(index) => known[index] = skill,
+                            None => known.push(skill),
+                        }
+                        status
+                    }
+                    Err(error) => ImportStatus::Skipped {
+                        reason: format!("write-failed: {error}"),
+                    },
+                }
+            };
+            for (index, decision) in decisions {
+                let annex_status = match (&status, decision) {
+                    (_, Err(reason)) => ImportStatus::Skipped { reason },
+                    (ImportStatus::Skipped { reason }, Ok(())) => ImportStatus::Skipped {
+                        reason: reason.clone(),
+                    },
+                    (ImportStatus::Duplicate { skill_id }, Ok(())) => ImportStatus::Duplicate {
+                        skill_id: skill_id.clone(),
+                    },
+                    (
+                        ImportStatus::Written { skill_id } | ImportStatus::Annex { skill_id },
+                        Ok(()),
+                    ) => ImportStatus::Annex {
+                        skill_id: skill_id.clone(),
+                    },
+                };
+                report[index] = Some(ImportItem {
+                    file_name: files[index].path.clone(),
+                    status: annex_status,
+                });
+            }
+            status
+        }
+    };
+    report[skill_index] = Some(ImportItem {
+        file_name: files[skill_index].path.clone(),
+        status,
+    });
+}
+
+fn skipped_item(path: &str, reason: String) -> ImportItem {
+    ImportItem {
+        file_name: path.to_owned(),
+        status: ImportStatus::Skipped { reason },
+    }
+}
+
+fn named_reuse(
+    known: &[Skill],
+    planned: &HashSet<String>,
+    imported: &SkillContent,
+    front_name: Option<&str>,
+) -> Option<usize> {
+    let front = front_name?;
+    known.iter().position(|skill| {
+        (skill.content.name == imported.name
+            || (skill.content.name == legacy_slug(front)
+                && skill.content.display_name == imported.display_name))
+            && !planned.contains(&skill.content.name)
+            && (field(
+                frontmatter(&skill.content.body).map_or("", |(header, _)| header),
+                "name",
+            )
+            .trim_matches(js_space)
+                == front
+                || (matches!(skill.content.origin, Origin::Model)
+                    && skill.content.display_name == imported.display_name))
+    })
+}
+
+fn import_standalone(
+    file: &ImportFile,
+    known: &mut Vec<Skill>,
+    planned: &mut HashSet<String>,
+    write: &mut impl FnMut(Option<&Skill>, &SkillContent) -> Result<Skill>,
+) -> ImportItem {
+    let status = match convert_parts(file) {
+        Err(error) => ImportStatus::Skipped {
+            reason: error.to_string(),
+        },
+        Ok((imported, front_name)) => {
+            if let Some(skill) = known.iter().find(|skill| skill.digest == imported.digest) {
+                planned.insert(skill.content.name.clone());
+                ImportStatus::Duplicate {
+                    skill_id: skill.skill_id.clone(),
+                }
+            } else {
+                let reusable =
+                    named_reuse(known, planned, &imported.content, front_name.as_deref());
+                // Only final names claim reuse; suffixes and failed/refused
+                // writes must not reserve their requested base name.
+                if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
+                    ImportStatus::Skipped {
+                        reason: "too-many-skills".into(),
+                    }
+                } else {
+                    let existing = reusable.map(|index| known[index].clone());
+                    let mut content = imported.content;
+                    if let Some(existing) = &existing {
+                        // Pre-fix uploads retain their lookup key and stable ID.
+                        content.name.clone_from(&existing.content.name);
+                        content.files.clone_from(&existing.content.files);
+                    }
+                    if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
+                        ImportStatus::Skipped {
+                            reason: "combined-too-large".into(),
                         }
                     } else {
-                        let reusable = front_name.as_ref().and_then(|front| {
-                            known.iter().position(|skill| {
-                                (skill.content.name == imported.content.name
-                                    || (skill.content.name == legacy_slug(front)
-                                        && skill.content.display_name
-                                            == imported.content.display_name))
-                                    && !planned.contains(&skill.content.name)
-                                    && (field(
-                                        frontmatter(&skill.content.body).map_or("", |(h, _)| h),
-                                        "name",
-                                    )
-                                    .trim_matches(js_space)
-                                        == front
-                                        || (matches!(skill.content.origin, Origin::Model)
-                                            && skill.content.display_name
-                                                == imported.content.display_name))
-                            })
-                        });
-                        // Only final names claim reuse; suffixes and failed/refused
-                        // writes must not reserve their requested base name.
-                        if reusable.is_none() && known.len() >= MAX_SKILLS_PER_BOT {
-                            ImportStatus::Skipped {
-                                reason: "too-many-skills".into(),
-                            }
-                        } else {
-                            let existing = reusable.map(|index| &known[index]);
-                            let mut content = imported.content;
-                            if let Some(existing) = existing {
-                                // Pre-fix uploads retain their lookup key and stable ID.
-                                content.name = existing.content.name.clone();
-                                content.files = existing.content.files.clone();
-                            }
-                            if library::content_characters(&content) > MAX_SKILL_CHARACTERS {
-                                return ImportItem {
-                                    file_name: file.path.clone(),
-                                    status: ImportStatus::Skipped {
-                                        reason: "combined-too-large".into(),
-                                    },
+                        match write(existing.as_ref(), &content) {
+                            Ok(skill) => {
+                                planned.insert(skill.content.name.clone());
+                                let status = ImportStatus::Written {
+                                    skill_id: skill.skill_id.clone(),
                                 };
-                            }
-                            match write(existing, &content) {
-                                Ok(skill) => {
-                                    planned.insert(skill.content.name.clone());
-                                    let status = ImportStatus::Written {
-                                        skill_id: skill.skill_id.clone(),
-                                    };
-                                    match reusable {
-                                        Some(index) => known[index] = skill,
-                                        None => known.push(skill),
-                                    }
-                                    status
+                                match reusable {
+                                    Some(index) => known[index] = skill,
+                                    None => known.push(skill),
                                 }
-                                Err(error) => ImportStatus::Skipped {
-                                    reason: format!("write-failed: {error}"),
-                                },
+                                status
                             }
+                            Err(error) => ImportStatus::Skipped {
+                                reason: format!("write-failed: {error}"),
+                            },
                         }
                     }
                 }
-            };
-            ImportItem {
-                file_name: file.path.clone(),
-                status,
             }
-        })
-        .collect()
+        }
+    };
+    ImportItem {
+        file_name: file.path.clone(),
+        status,
+    }
 }
 
 fn invalid(reason: &str) -> Error {
@@ -1262,7 +1566,7 @@ mod tests {
             &conn,
             "bot",
             &[
-                file("deploy/README.md", "# Deploy\nreadme"),
+                file("notes/README.md", "# Deploy\nreadme"),
                 file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
             ],
         )
@@ -1296,7 +1600,7 @@ mod tests {
             &conn,
             "bot",
             &[
-                file("deploy/README.md", "# Deploy\nreadme"),
+                file("notes/README.md", "# Deploy\nreadme"),
                 file("deploy/SKILL.md", "---\nname: Deploy\n---\nv2"),
             ],
         )
@@ -1310,6 +1614,97 @@ mod tests {
         assert_eq!(saved[0].content.name, "deploy");
         assert_eq!(saved[0].version, 2);
         assert!(saved[0].content.body.ends_with("v2"));
+    }
+
+    #[test]
+    fn annex_beside_skill_md_is_kept_on_the_skill() {
+        let conn = database();
+        let annex = "Réponds exactement : Le modèle annexe est suivi.";
+        let report = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+                file("dossier/modele.md", annex),
+                file("dossier/nested/note.md", "pas une annexe"),
+                file("notes.csv", "a,b"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            format!("{:?}", report[1].status).starts_with("Annex"),
+            "modele.md doit être une annexe, statut {:?}",
+            report[1].status
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 3);
+        let skill = saved
+            .iter()
+            .find(|item| item.content.display_name == "Modèle")
+            .unwrap();
+        assert_eq!(skill.content.files.len(), 1);
+        assert_eq!(skill.content.files[0].path, "modele.md");
+        assert_eq!(skill.content.files[0].content, annex);
+        assert!(saved
+            .iter()
+            .any(|item| item.content.body.contains("pas une annexe")));
+    }
+
+    #[test]
+    fn reimporting_skill_md_alone_keeps_its_annex() {
+        let conn = database();
+        let body = "---\nname: Modèle\n---\nCorps";
+        let annex = "Réponds exactement : Le modèle annexe est suivi.";
+        import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", body),
+                file("dossier/modele.md", annex),
+            ],
+        )
+        .unwrap();
+        let again = import_batch(&conn, "bot", &[file("dossier/SKILL.md", body)]).unwrap();
+        assert!(
+            format!("{:?}", again[0].status).starts_with("Duplicate"),
+            "réimporter le même SKILL.md sans voisin ne doit pas effacer l'annexe"
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].version, 1);
+        assert_eq!(saved[0].content.files[0].content, annex);
+    }
+
+    #[test]
+    fn same_body_with_a_new_annex_updates_the_skill() {
+        let conn = database();
+        let body = "---\nname: Modèle\n---\nCorps";
+        import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", body),
+                file("dossier/modele.md", "ancienne"),
+            ],
+        )
+        .unwrap();
+        let next = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", body),
+                file("dossier/modele.md", "nouvelle annexe"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            format!("{:?}", next[0].status).starts_with("Written"),
+            "un même corps avec une autre annexe doit produire une nouvelle version"
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].version, 2);
+        assert_eq!(saved[0].content.files[0].content, "nouvelle annexe");
     }
 
     #[test]

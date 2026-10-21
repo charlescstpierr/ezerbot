@@ -161,10 +161,13 @@ function boot({ attachments = false, draft = "Brouillon du fil" } = {}) {
     getElementById: (id) => byId[id] || null,
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
     querySelectorAll(selector) { return collect([this.body, this.documentElement], selector); },
-    addEventListener() {},
+    addEventListener(type, listener, options) {
+      const capture = options === true || Boolean(options && options.capture);
+      (this._listeners ||= []).push({ type, listener, capture });
+    },
   };
   document.body = new Element("body", document);
-  const ids = ["conversation-list", "search", "send-button", "welcome", "messages", "chat-scroll", "conversation-title", "conversation-menu", "conversation-menu-button", "composer-hint", "connection-banner", "connection-message", "toast", "welcome-description", "bot-extensions", "settings-extensions", "bot-dialog", "composer-attachments", "link-error-message", "link-error-dialog", "settings-dialog", "provider-section", "settings-appearance", "settings-bots", "settings-shortcuts", "new-chat", "restore-link-draft", "learn-skill-button", "bot-chips", "bot-list", "bot-dialog-title", "bot-save", "bot-name", "bot-description", "bot-instructions", "bot-delete-button", "bot-copy-link", "bot-colors", "bot-shapes", "account-name", "account-avatar", "workspace-label", "edit-bot-button", "favorite-button", "picker", "mode-badge-text", "plan-banner", "composer-tools", "mode-note", "plan-dialog", "plan-title", "composer-input", "composer-form", "plan-acknowledge", "sidebar-toggle", "sidebar-close", "sidebar-scrim", "settings-button", "simulate-loss", "rename-button", "rename-input", "rename-dialog", "rename-form", "copy-link-button", "export-button", "bot-form", "bot-delete-dialog", "confirm-bot-delete", "delete-button", "delete-dialog", "confirm-delete", "reconnect-button", "home-link", "favorites-filter", "bot-preview-mascot", "sidebar-bot-list", "composer-bot", "bot-menu", "composer-bot-name"];
+  const ids = ["conversation-list", "search", "send-button", "welcome", "messages", "chat-scroll", "conversation-title", "conversation-menu", "conversation-menu-button", "composer-hint", "connection-banner", "connection-message", "toast", "welcome-description", "bot-extensions", "settings-extensions", "bot-dialog", "composer-attachments", "link-error-message", "link-error-dialog", "settings-dialog", "provider-section", "settings-appearance", "settings-bots", "settings-shortcuts", "new-chat", "restore-link-draft", "learn-skill-button", "bot-chips", "bot-list", "bot-dialog-title", "bot-save", "bot-name", "bot-description", "bot-instructions", "bot-delete-button", "bot-copy-link", "bot-colors", "bot-shapes", "account-name", "account-avatar", "workspace-label", "edit-bot-button", "favorite-button", "picker", "mode-badge-text", "plan-banner", "composer-tools", "mode-note", "plan-dialog", "plan-title", "composer-input", "composer-form", "plan-acknowledge", "sidebar-toggle", "sidebar-close", "sidebar-scrim", "settings-button", "simulate-loss", "rename-button", "rename-input", "rename-dialog", "rename-form", "copy-link-button", "export-button", "bot-form", "bot-delete-dialog", "confirm-bot-delete", "delete-button", "delete-dialog", "confirm-delete", "reconnect-button", "home-link", "favorites-filter", "bot-preview", "bot-preview-name", "bot-preview-description", "bot-preview-mascot", "sidebar-bot-list", "composer-bot", "bot-menu", "composer-bot-name"];
   for (const id of ids) {
     const node = new Element("div", document);
     node.id = id;
@@ -224,7 +227,25 @@ function boot({ attachments = false, draft = "Brouillon du fil" } = {}) {
     Node: Element,
   });
   vm.runInContext(fs.readFileSync(`${__dirname}/app.js`, "utf8"), context);
-  return { panels: window.GrokbotPanels, input, storage, toast: byId.toast, tick: () => new Promise((resolve) => process.nextTick(resolve)) };
+  return { panels: window.GrokbotPanels, input, storage, toast: byId.toast, document, tick: () => new Promise((resolve) => process.nextTick(resolve)) };
+}
+
+function dispatchKey(document, target, init) {
+  const event = {
+    key: init.key,
+    metaKey: Boolean(init.metaKey),
+    ctrlKey: Boolean(init.ctrlKey),
+    altKey: Boolean(init.altKey),
+    shiftKey: Boolean(init.shiftKey),
+    target,
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.stopped = true; },
+  };
+  const listeners = document._listeners || [];
+  for (const entry of listeners) if (entry.type === "keydown" && entry.capture) entry.listener(event);
+  if (!event.stopped) for (const entry of listeners) if (entry.type === "keydown" && !entry.capture) entry.listener(event);
+  return event;
 }
 
 test("selectBot refuses staged attachments on an empty thread", async () => {
@@ -251,4 +272,37 @@ test("selectBot leaves an empty thread before opening the new bot", async () => 
   await kept.tick();
   assert.equal(kept.panels.selectBot("bot-b"), true);
   assert.equal(kept.input.value, "Brouillon du fil");
+});
+
+test("shift meta W from the composer opens skills", async () => {
+  const { panels, document, tick } = boot();
+  await tick();
+  let noted = null;
+  assert.equal(panels.register({
+    id: "skills",
+    botSection(_bot, container) {
+      const title = document.createElement("h3");
+      title.tabIndex = -1;
+      title.textContent = "Skills";
+      container.append(title);
+    },
+    noteShortcut(botId) { noted = botId; },
+  }), true);
+  const input = document.getElementById("composer-input");
+  const opened = dispatchKey(document, input, { key: "W", metaKey: true, shiftKey: true });
+  assert.equal(opened.defaultPrevented, true);
+  assert.equal(document.getElementById("bot-dialog").open, true);
+  assert.equal(noted, "bot-a");
+  document.getElementById("bot-dialog").close();
+  noted = null;
+  const ctrl = dispatchKey(document, input, { key: "W", ctrlKey: true, shiftKey: true });
+  assert.equal(ctrl.defaultPrevented, true);
+  assert.equal(noted, "bot-a");
+  document.getElementById("bot-dialog").close();
+  const plain = dispatchKey(document, input, { key: "w", metaKey: true });
+  assert.equal(plain.defaultPrevented, false);
+  assert.equal(document.getElementById("bot-dialog").open, false);
+  const html = fs.readFileSync(`${__dirname}/index.html`, "utf8");
+  assert.match(html, /Ouvrir les skills/);
+  assert.match(html, /⌘ ⇧ W/);
 });

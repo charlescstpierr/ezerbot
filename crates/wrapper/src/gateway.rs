@@ -409,8 +409,30 @@ impl ModelGateway for SimulatedGateway {
             .find(|entry| entry.role == Role::User)
             .map_or("", |entry| entry.text.as_str());
         emit(ModelEvent::TextDelta {
-            text: crate::demo_reply(prompt).into(),
+            text: simulated_text(request, prompt),
         })?;
         emit(ModelEvent::Completed)
+    }
+}
+
+fn simulated_text(request: &ModelRequest, prompt: &str) -> String {
+    if request.instructions.contains("skill_appliquee") {
+        if let Some(phrase) = exact_skill_phrase(&request.instructions) {
+            return phrase;
+        }
+    }
+    crate::demo_reply(prompt).to_owned()
+}
+
+fn exact_skill_phrase(instructions: &str) -> Option<String> {
+    let key = "Réponds exactement : ";
+    let start = instructions.rfind(key)? + key.len();
+    let rest = &instructions[start..];
+    let end = rest.find(['\\', '"', '\n', '\r']).unwrap_or(rest.len());
+    let phrase = rest[..end].trim();
+    if phrase.is_empty() {
+        None
+    } else {
+        Some(phrase.to_owned())
     }
 }

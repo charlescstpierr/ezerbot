@@ -137,6 +137,8 @@ fn import_reports_per_file_and_survives_restart() {
             {"path":"deploy/SKILL.md", "content":"---\nname: Deploy\n---\nSecond body"}
         ]}),
     );
+    assert_eq!(report_status(&updated, 0), "annex");
+    assert_eq!(updated["report"][0]["status"]["skill_id"], id);
     assert_eq!(updated["report"][1]["status"]["skill_id"], id);
     let versions = post(
         &mut app,
@@ -149,7 +151,162 @@ fn import_reports_per_file_and_survives_restart() {
         .as_str()
         .unwrap()
         .ends_with("Second body"));
+    assert_eq!(
+        versions["versions"][1]["content"]["files"][0]["path"],
+        "README.md"
+    );
+    assert_eq!(
+        versions["versions"][1]["content"]["files"][0]["content"],
+        "# Deploy\nreadme"
+    );
+    assert_eq!(listing(&mut app, "grokbot").len(), 2);
+}
+
+#[test]
+fn folder_import_keeps_modele_as_an_annex() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\ndescription: Suit le modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex},
+            {"path":"dossier/nested/note.md", "content":"Ceci n'est pas une annexe."},
+            {"path":"notes.csv", "content":"a,b\n1,2"}
+        ]}),
+    );
+    assert_eq!(
+        report_status(&report, 1),
+        "annex",
+        "modele.md doit être une annexe, pas une skill séparée"
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    assert_eq!(report["report"][1]["status"]["skill_id"], id);
+    assert_eq!(report_status(&report, 2), "written");
+    assert_eq!(report_status(&report, 3), "written");
+    assert_ne!(report["report"][2]["status"]["skill_id"], id);
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id": id}),
+    );
+    let files = versions["versions"][0]["content"]["files"]
+        .as_array()
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "modele.md");
+    assert_eq!(files[0]["content"], annex);
     assert_eq!(listing(&mut app, "grokbot").len(), 3);
+}
+
+#[test]
+fn restoring_a_version_brings_back_its_annex() {
+    let db = Database::new();
+    let mut app = db.open();
+    let old_annex = "Réponds exactement : Ancienne consigne.";
+    let new_annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let first = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nPremier corps"},
+            {"path":"dossier/modele.md", "content": old_annex}
+        ]}),
+    );
+    let id = first["report"][0]["status"]["skill_id"].clone();
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nSecond corps"},
+            {"path":"dossier/modele.md", "content": new_annex}
+        ]}),
+    );
+    let restored = request(
+        &mut app,
+        "/api/skills/restore",
+        json!({"bot_id":"grokbot", "skill_id": id, "expected_version": 2, "version": 1}),
+    )
+    .expect("la restauration doit ramener le corps et l'annexe de la version 1");
+    assert_eq!(restored["skill"]["version"], 3);
+    assert!(restored["skill"]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Premier corps"));
+    assert_eq!(
+        restored["skill"]["content"]["files"][0]["path"],
+        "modele.md"
+    );
+    assert_eq!(
+        restored["skill"]["content"]["files"][0]["content"],
+        old_annex
+    );
+}
+
+#[test]
+fn applied_skill_puts_the_annex_in_context_and_the_reply_follows_it() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\ndescription: Suit le modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let plain = post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": conversation, "message_id": "sans-skill", "body": "bonjour"}),
+    );
+    assert!(plain["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("Bien reçu"));
+    assert!(!app
+        .context_preview(&conversation)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains("skill_appliquee") || block.text.contains(annex)));
+    let sent = request(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-skill",
+            "body": "Lance la skill « Modèle ».",
+            "apply_skill_id": id
+        }),
+    )
+    .expect("l'envoi qui applique la skill doit aboutir");
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant" && message["id"] != "reply-sans-skill")
+        .unwrap();
+    assert_eq!(reply["body"], "Le modèle annexe est suivi.");
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .expect("le contexte de la réponse doit contenir l'annexe appliquée");
+    assert!(applied.text.contains("modele.md"));
+    assert!(applied.text.contains(annex));
+    assert!(preview
+        .iter()
+        .any(|block| { block.source == ContextSource::SkillIndex && !block.text.contains(annex) }));
 }
 
 #[test]

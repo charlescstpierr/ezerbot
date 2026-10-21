@@ -841,6 +841,15 @@
     $("bot-name").focus();
   }
 
+  function openSkillsPanel() {
+    const candidate = currentBot();
+    const bot = candidate && !candidate.deleted ? candidate : chosenBot();
+    if (!bot || bot.deleted) return;
+    if (!$("bot-dialog").open || editingBotId !== bot.id) openBotDialog(bot);
+    document.querySelector('[data-panel="skills"] h3')?.focus();
+    panels.get("skills")?.noteShortcut?.(bot.id);
+  }
+
   function botFormValues() {
     return {
       name: $("bot-name").value.trim(),
@@ -1703,6 +1712,13 @@
       ui.search.select();
     }
   });
+  document.addEventListener("keydown", (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || !event.shiftKey || event.key.toLowerCase() !== "w") return;
+    if (document.querySelector("dialog[open]")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openSkillsPanel();
+  }, true);
 
   applyTheme(themeChoice);
   applyAccent(accentChoice);

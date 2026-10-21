@@ -382,6 +382,28 @@ test("running local cards publish their committed phase and a visible stop affor
   assert.match(html, /gb-local-stop/);assert.match(html, /Annuler l’exécution/);
 });
 
+test("interrupted tool cards are stopped, not left running or waiting", () => {
+  const local = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "stopped", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "run_shell", arguments: {command:"sleep 20",cwd:"/tmp"} },
+  } } }));
+  assert.doesNotMatch(local, /En cours/);
+  assert.doesNotMatch(local, /Annuler l’exécution/);
+  assert.match(local, /Arrêtée/);
+  const generic = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "generic", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+  } } }));
+  assert.doesNotMatch(generic, /Résultat en attente/);
+  assert.match(generic, /Non exécuté/);
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, GrokbotEngine: { version: () => 1, run: () => ({ status: "interrupted" }) } };
+  try {
+    const live = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "live", kind: "tool", payload: {
+      run_id: "run", run_status: "running", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+    } } }));
+    assert.doesNotMatch(live, /Résultat en attente/);
+    assert.match(live, /Non exécuté/);
+  } finally { delete globalThis.window; }
+});
+
 test("generic approval retains its code identifier instead of a local-action label", () => {
   const html = card("pending", "ask", {}, false, "test_generic_tool");
   assert.match(html, /Outil : <code>test_generic_tool<\/code>/);

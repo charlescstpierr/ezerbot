@@ -28,6 +28,8 @@ test("document action status distinguishes running, refusal, expiry and success"
   }
   assert.equal(documentToolView({ call: action, outcome: { status: "done", output: {} } }).tone, "success");
   assert.equal(documentToolView({ call: action, run_status: "running" }, { status: "ended" }).label, "En cours…");
+  assert.equal(documentToolView({ call: action, run_status: "interrupted" }).label, "Arrêtée");
+  assert.notEqual(documentToolView({ call: action, run_status: "interrupted" }).state, "running");
 });
 test("document approvals describe Finder without opening and warn about broad authority", () => {
   assert.match(documentApprovalEffect("reveal"), /sans l’ouvrir/);

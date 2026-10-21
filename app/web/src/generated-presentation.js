@@ -13,7 +13,8 @@ export function documentToolView(payload, run) {
   const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approval_status, status) : null;
   const creating = call.name === "create_document";
   const title = creating ? (failure ? "Échec de la création du document" : "Création du document") : documentActionLabel(call.arguments?.action);
-  const label = failure?.label || (outcome?.status === "done" ? "Terminé" : status === "awaiting_approval" ? "Accord requis" : status === "running" ? "En cours…" : "En attente");
+  const stopped = ["interrupted", "cancelled", "failed", "finished", "ended"].includes(status);
+  const label = failure?.label || (outcome?.status === "done" ? "Terminé" : status === "awaiting_approval" ? "Accord requis" : status === "running" ? "En cours…" : stopped ? "Arrêtée" : "En attente");
   // Keep model-oriented syntax out of the main error banner, but available for diagnosis.
   let summary = failure?.message;
   if (creating && failure) {

@@ -9,9 +9,9 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
-use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
+use support::{wait, FakeOpenAi, ScriptedResponse, Seen};
 
 struct Host {
     child: Child,
@@ -28,11 +28,7 @@ impl Host {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        std::fs::write(root.join("workspace.chatgpt-auth.json"),json!({"host_id":"test","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+        support::write_codex_session(&root.join("workspace.codex-auth.json"), "local-shutdown");
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let (child, url) = Self::launch(&root, &server);
         let host = Self {

@@ -186,6 +186,27 @@ test("changing picker kind resets scroll without resetting a same-kind refresh",
   assert.equal(picker.scrollTop, 0);
 });
 
+function signInControls(root) {
+  return root.querySelectorAll("button").filter((button) => button.className.split(/\s+/).includes("chatgpt-button") || /via Codex|Sign in with ChatGPT/.test(button.textContent));
+}
+
+test("Réglages shows exactly one ChatGPT sign-in control and no second connection option", () => {
+  for (const backend of ["codex", "sharing"]) {
+    const signedOut = mount(backend, false);
+    const section = signedOut.nodes.get("provider-section");
+    const controls = signInControls(section);
+    assert.equal(controls.length, 1);
+    assert.equal(controls[0].textContent, "Se connecter");
+    assert.equal(section.querySelectorAll("input").length, 0);
+    assert.doesNotMatch(section.textContent, /via Codex|Sign in with ChatGPT/);
+    const signedIn = mount(backend, true);
+    const connected = signedIn.nodes.get("provider-section");
+    assert.equal(signInControls(connected).length, 0);
+    assert.match(connected.textContent, /Se déconnecter/);
+    assert.doesNotMatch(connected.textContent, /via Codex|Sign in with ChatGPT/);
+  }
+});
+
 test("no second connection choice returns after polling stale backend state", () => {
   const { context, nodes, state } = mount("codex");
   state.provider.backend = "sharing";

@@ -6,6 +6,7 @@
 #import "voice-session.h"
 #import "screen.h"
 #import "floating.h"
+#import "demonstration.h"
 #import <errno.h>
 #import <poll.h>
 #import <signal.h>
@@ -691,6 +692,7 @@
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc > 1 && strcmp(argv[1], "--demonstration-helper") == 0) return EZDemoMain(argc, argv);
         if (argc > 1 && (strcmp(argv[1], "--screen-helper") == 0 || strcmp(argv[1], "--screen-permissions") == 0)) return EZScreenMain(argc, argv);
         if (argc == 3 && strcmp(argv[1], "--notify-background") == 0) {
             // Same signed app identity and privacy-safe notifier as the WebView;

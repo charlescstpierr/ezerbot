@@ -11,6 +11,7 @@ import { createApprovalFollow, revealPendingApproval } from "./approval-follow.j
 import { createDeepLinkQueue } from "./deep-links.js";
 import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
 import { mountFloating } from "./floating.jsx";
+import { demonstrationSummaryView } from "./demonstration-presentation.js";
 
 const roots = new WeakMap();
 if (document.getElementById("floating-root")) mountFloating(document.getElementById("floating-root"));
@@ -18,6 +19,7 @@ if (document.getElementById("floating-root")) mountFloating(document.getElementB
 // The shell (app.js) owns state and transport; this bundle draws the thread and the message field.
 window.GrokbotChat = {
   createVoiceReader, voiceNeedsAction,
+  demonstrationSummaryView,
   createDeepLinkQueue,
   teachPrompt: TEACH_PROMPT,
   isTeachMessage,

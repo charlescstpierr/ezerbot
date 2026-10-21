@@ -1636,8 +1636,8 @@
       const description = $("rename-description").value.trim();
       if (!description) { $("rename-description").focus(); return; }
       changes.description = description;
-      const mark = ($("rename-mark").value || "").trim();
-      if (mark) changes.avatar = { color: renameAvatarColor, mark };
+      const mark = ($("rename-mark").value || "").trim() || Array.from(title)[0] || "G";
+      changes.avatar = { color: renameAvatarColor, mark };
     }
     if (await updateConversation(changes)) $("rename-dialog").close();
   });

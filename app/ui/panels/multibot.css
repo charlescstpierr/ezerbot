@@ -6,7 +6,12 @@
 .group-cost-banner p + p { margin-top: 4px; color: var(--muted); }
 .group-cost-banner button { flex: 0 0 auto; }
 .group-profile { display: grid; gap: 8px; margin-bottom: 8px; }
-.group-avatar-row { display: flex; gap: 12px; align-items: center; }
+.group-avatar-row { display: flex; gap: 12px; align-items: flex-start; }
+.group-avatar-row .accent-options { flex: 1; min-width: 0; }
+#rename-avatar-colors,
+.group-dialog .accent-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#rename-avatar-colors span,
+.group-dialog .accent-options span { overflow: visible; text-overflow: unset; white-space: normal; overflow-wrap: anywhere; }
 .group-mark-preview { width: 36px; height: 36px; font-size: 14px; }
 .group-bar-copy { min-width: 0; line-height: 15px; }
 .group-bar-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

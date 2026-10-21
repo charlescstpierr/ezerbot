@@ -23,6 +23,8 @@ class Element {
     this.checked = false;
     this.type = "";
     this.scrollTop = 0;
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this.isConnected = true;
     this.id = "";
     const styleProps = {};
@@ -76,6 +78,7 @@ class Element {
   contains(node) { return Boolean(node) && (this === node || this.children.some((child) => child instanceof Element && child.contains(node))); }
   closest() { return null; }
   focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  setSelectionRange(start, end = start) { this.selectionStart = start; this.selectionEnd = end; }
   select() {}
   scrollIntoView() {}
   showModal() { this.open = true; }
@@ -241,9 +244,11 @@ test("un groupe affiche son nom, le bandeau, une fermeture locale et aucun champ
   h.dialog.querySelector("[data-avatar-color=cyan]").click();
   const create = () => h.dialog.querySelector("[data-group-action=create]");
   assert.equal(create().disabled, true);
-  const beta = h.dialog.querySelector("[data-bot-choice=beta]");
-  beta.checked = true;
-  beta.onchange();
+  for (const id of ["alpha", "beta"]) {
+    const choice = h.dialog.querySelector(`[data-bot-choice=${id}]`);
+    choice.checked = true;
+    choice.onchange();
+  }
   assert.equal(create().disabled, false);
   await create().click();
   assert.deepEqual(h.calls[0], {
@@ -453,6 +458,76 @@ const AVATAR_COLORS = [
   ["violet", "Violet", "#9B7BFF"],
   ["blanc", "Sans couleur", "#F5F5F5"],
 ];
+
+test("rouvrir Créer un groupe repart d’un formulaire vide", () => {
+  const ids = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"];
+  const h = harness({ bots: ids.map((id, index) => bot(id, `Bot ${index + 1}`)) });
+  h.openCreate();
+  fill(h.dialog.querySelector("[data-group-field=name]"), "Atelier");
+  fill(h.dialog.querySelector("[data-group-field=description]"), "Croiser les lectures");
+  fill(h.dialog.querySelector("[data-group-field=mark]"), "ZZ");
+  while (h.dialog.querySelectorAll("[data-bot-choice]").filter((box) => box.checked).length < 6) {
+    const next = h.dialog.querySelectorAll("[data-bot-choice]").find((box) => !box.checked && !box.disabled);
+    next.checked = true;
+    next.onchange();
+  }
+  assert.equal(h.dialog.querySelectorAll("[data-bot-choice]").filter((box) => box.checked).length, 6);
+  h.dialog.close();
+  h.openCreate();
+  assert.equal(h.dialog.open, true);
+  assert.equal(h.dialog.querySelectorAll("[data-bot-choice]").filter((box) => box.checked).length, 0);
+  assert.equal(h.dialog.querySelector("[data-group-field=name]").value, "");
+  assert.equal(h.dialog.querySelector("[data-group-field=description]").value, "");
+  assert.equal(h.dialog.querySelector("[data-group-field=mark]").value, "");
+  assert.equal(h.dialog.querySelector("[data-bot-choice=eta]").disabled, false);
+});
+
+test("la couleur d’avatar est enregistrée même si le signe est vide", async () => {
+  const h = harness();
+  h.openCreate();
+  fill(h.dialog.querySelector("[data-group-field=name]"), "Atelier");
+  fill(h.dialog.querySelector("[data-group-field=description]"), "Croiser les lectures");
+  h.dialog.querySelector("[data-avatar-color=cyan]").click();
+  for (const id of ["alpha", "beta"]) {
+    const choice = h.dialog.querySelector(`[data-bot-choice=${id}]`);
+    choice.checked = true;
+    choice.onchange();
+  }
+  await h.dialog.querySelector("[data-group-action=create]").click();
+  assert.deepEqual(h.calls[0].body.avatar, { color: "cyan", mark: "A" });
+
+  const app = bootApp();
+  for (let i = 0; i < 20 && !app.byId["conversation-list"].querySelector(".conversation-item"); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  app.byId["rename-button"].click();
+  app.byId["rename-input"].value = "Atelier";
+  app.byId["rename-description"].value = "Croiser les lectures";
+  app.byId["rename-mark"].value = "";
+  app.byId["rename-avatar-colors"].querySelectorAll("button").find((node) => node.dataset.avatarColor === "violet").click();
+  await app.byId["rename-form"].dispatch("submit");
+  assert.deepEqual(app.posts[0].avatar, { color: "violet", mark: "A" });
+});
+
+test("le nom, la description et le signe gardent le focus pendant un rafraîchissement", () => {
+  const h = harness();
+  h.openCreate();
+  const name = h.dialog.querySelector("[data-group-field=name]");
+  const description = h.dialog.querySelector("[data-group-field=description]");
+  const mark = h.dialog.querySelector("[data-group-field=mark]");
+  assert.equal(name.dataset.focusKey, "profil:nom");
+  assert.equal(description.dataset.focusKey, "profil:description");
+  assert.equal(mark.dataset.focusKey, "profil:signe");
+  fill(name, "Atelier");
+  name.focus();
+  name.setSelectionRange(2, 5);
+  h.show(null);
+  const again = h.dialog.querySelector("[data-group-field=name]");
+  assert.equal(h.document.activeElement, again);
+  assert.equal(again.value, "Atelier");
+  assert.equal(again.selectionStart, 2);
+  assert.equal(again.selectionEnd, 5);
+});
 
 test("le renommage d’un groupe montre la pastille et le nom de chaque couleur", async () => {
   const app = bootApp();

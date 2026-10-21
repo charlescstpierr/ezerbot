@@ -60,11 +60,18 @@
     return Boolean(profile.name.trim() && profile.description.trim() && selected.size >= 2 && selected.size <= 6);
   }
   function canSave() { return Boolean(profile.name.trim() && profile.description.trim()); }
+  function isTextField(node) {
+    return node.tagName === "TEXTAREA" || (node.tagName === "INPUT" && node.type !== "checkbox");
+  }
+  function avatarMark() {
+    return profile.mark.trim() || Array.from(profile.name.trim() || "G")[0] || "G";
+  }
   function payloadFields() {
-    const fields = { title: profile.name.trim(), description: profile.description.trim() };
-    const mark = profile.mark.trim();
-    if (mark) fields.avatar = { color: profile.color, mark };
-    return fields;
+    return {
+      title: profile.name.trim(),
+      description: profile.description.trim(),
+      avatar: { color: profile.color, mark: avatarMark() },
+    };
   }
   function syncActions() {
     const create = dialog.querySelector("[data-group-action=create]");
@@ -104,6 +111,7 @@
     name.required = true;
     name.autocomplete = "off";
     name.dataset.groupField = "name";
+    name.dataset.focusKey = "profil:nom";
     name.value = profile.name;
     name.setAttribute("aria-label", "Nom du groupe");
     name.oninput = () => { profile.name = name.value; syncActions(); };
@@ -113,6 +121,7 @@
     description.rows = 3;
     description.required = true;
     description.dataset.groupField = "description";
+    description.dataset.focusKey = "profil:description";
     description.value = profile.description;
     description.setAttribute("aria-label", "Description du groupe");
     description.oninput = () => { profile.description = description.value; syncActions(); };
@@ -148,6 +157,7 @@
     mark.autocomplete = "off";
     mark.placeholder = "A";
     mark.dataset.groupField = "mark";
+    mark.dataset.focusKey = "profil:signe";
     mark.value = profile.mark;
     mark.setAttribute("aria-label", "Signe de l’avatar");
     mark.oninput = () => { profile.mark = mark.value; syncActions(); };
@@ -156,7 +166,12 @@
     return section;
   }
   function renderDialog() {
-    if (dialog.contains(document.activeElement) && document.activeElement.dataset.focusKey) focusKey = document.activeElement.dataset.focusKey;
+    const active = document.activeElement;
+    let selection = null;
+    if (dialog.contains(active) && active.dataset.focusKey) {
+      focusKey = active.dataset.focusKey;
+      if (isTextField(active)) selection = { start: active.selectionStart ?? 0, end: active.selectionEnd ?? active.selectionStart ?? 0 };
+    }
     const scrollTop = dialog.scrollTop;
     const conversation = context.conversation;
     const bots = context.state.bots.filter((b) => !b.deleted || conversation?.member_ids?.includes(b.id));
@@ -235,7 +250,10 @@
     }
     dialog.scrollTop = scrollTop;
     const focused = [...dialog.querySelectorAll("[data-focus-key]")].find((control) => control.dataset.focusKey === focusKey) || dialog.querySelector("button");
-    if (dialog.open && focused && !focused.disabled) focused.focus({ preventScroll: true });
+    if (dialog.open && focused && !focused.disabled) {
+      focused.focus({ preventScroll: true });
+      if (selection && isTextField(focused)) focused.setSelectionRange(selection.start, selection.end);
+    }
   }
   function renderBars() {
     const conversation = context?.conversation;
@@ -271,10 +289,15 @@
     close.onclick = () => { dismiss(conversation.id); renderBars(); };
     banner.replaceChildren(text, close);
   }
+  dialog.addEventListener("close", () => {
+    focusKey = null;
+    selected = new Set();
+    if (creating) profile = blankProfile();
+  });
   button.onclick = () => {
     focusKey = null;
     creating = !context.conversation;
-    selected = new Set(creating ? [context.bot?.id].filter(Boolean) : []);
+    selected = new Set();
     profile = creating ? blankProfile() : profileFrom(context.conversation);
     renderDialog();
     dialog.showModal();

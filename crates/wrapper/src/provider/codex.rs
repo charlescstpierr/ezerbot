@@ -116,7 +116,6 @@ impl Session {
         self.write(&credentials).map_err(|_| {
             Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
         })?;
-        self.reset_probe();
         self.inner.local_revoked.store(false, Ordering::SeqCst);
         *lock(&self.inner.catalog) = Catalog::default();
         Ok(())

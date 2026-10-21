@@ -10,23 +10,6 @@ pub struct Provider {
     selection_file: PathBuf,
 }
 
-/// Small streamed probe. No output cap: a reasoning model would spend 16 tokens
-/// before any visible answer and look disconnected. Minimal effort is sent only
-/// when this model advertises it.
-fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
-    let mut body = json!({
-        "model": model,
-        "input": [{"role": "user", "content": "Réponds seulement OK."}],
-        "instructions": "Test de connexion. Réponds seulement OK.",
-        "store": false,
-        "stream": true
-    });
-    if efforts.iter().any(|effort| effort.effort == "minimal") {
-        body["reasoning"] = json!({"effort": "minimal"});
-    }
-    body
-}
-
 impl Provider {
     pub fn new(db: &Path) -> Self {
         Self::with_backends(db, Endpoints::default(), Endpoints::codex(), true)
@@ -156,37 +139,33 @@ impl Provider {
     }
     pub(crate) fn test_connection(&self) {
         let session = self.session();
-        if !session.connected() {
-            *lock(&session.inner.probe) = json!({"state":"unavailable", "message":"Aucun compte connecté. Connectez-vous via Codex ci-dessus."});
-            return;
-        }
-        let generation = {
+        {
             let mut probe = lock(&session.inner.probe);
             if probe["state"] == "running" {
                 return;
             }
             *probe = json!({"state":"running"});
-            session.inner.probe_generation.load(Ordering::SeqCst)
-        };
+        }
         thread::spawn(move || {
             let mut failure = None;
-            let mut responded = false;
-            let mut capped = false;
-            let models = session.models();
-            let chosen = models.first();
-            let model = chosen.map(|model| model.slug.clone()).unwrap_or_else(|| {
-                if session.inner.codex {
-                    "gpt-5.5"
-                } else {
-                    "gpt-5"
-                }
-                .into()
-            });
-            let efforts = chosen
-                .map(|model| model.efforts.clone())
-                .unwrap_or_default();
+            let mut completed = false;
+            let model = session
+                .models()
+                .first()
+                .map(|model| model.slug.clone())
+                .unwrap_or_else(|| {
+                    if session.inner.codex {
+                        "gpt-5.5"
+                    } else {
+                        "gpt-5"
+                    }
+                    .into()
+                });
             let result = session.reliable_stream(
-                connection_probe_body(&model, &efforts),
+                json!({"model": model,
+                    "input":[{"role":"user","content":"Réponds seulement OK."}],
+                    "instructions":"Test de connexion. Réponds seulement OK.",
+                    "store":false,"stream":true,"max_output_tokens":16}),
                 &AtomicBool::new(false),
                 Some("connection-test"),
                 &mut |_, error| {
@@ -196,31 +175,14 @@ impl Provider {
                     Ok(())
                 },
                 &mut |event| {
-                    match &event {
-                        grokbot_engine::contracts::ModelEvent::Completed => responded = true,
-                        grokbot_engine::contracts::ModelEvent::Incomplete { reason }
-                            if reason == "max_output_tokens" =>
-                        {
-                            // A reasoning model that spends the cap still proves the service answers.
-                            responded = true;
-                            capped = true;
-                        }
-                        _ => {}
-                    }
+                    completed |= matches!(event, grokbot_engine::contracts::ModelEvent::Completed);
                     Ok(())
                 },
             );
-            if capped {
-                failure = None;
-            }
             if !session.connected() {
                 failure = Some(Failure::signin().message);
             }
-            let mut probe = lock(&session.inner.probe);
-            if session.inner.probe_generation.load(Ordering::SeqCst) != generation {
-                return; // A previous account's result must never label a new session.
-            }
-            *probe = if responded && result.is_ok() && failure.is_none() {
+            *lock(&session.inner.probe) = if completed && result.is_ok() && failure.is_none() {
                 json!({"state":"ok","message":"OK — ChatGPT répond."})
             } else {
                 json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
@@ -338,43 +300,4 @@ impl Provider {
 
 fn storage_failure(_: std::io::Error) -> Failure {
     Failure::other("Impossible d’enregistrer le mode de connexion sur ce Mac.")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn probe_requests_minimal_reasoning_only_when_the_model_lists_it() {
-        let bare = connection_probe_body("gpt-5", &[]);
-        assert!(bare.get("max_output_tokens").is_none());
-        assert!(bare.get("reasoning").is_none());
-        assert_eq!(
-            bare["instructions"],
-            "Test de connexion. Réponds seulement OK."
-        );
-        let listed = connection_probe_body(
-            "gpt-5",
-            &[
-                Effort {
-                    effort: "minimal".into(),
-                    description: "Court".into(),
-                },
-                Effort {
-                    effort: "high".into(),
-                    description: "Long".into(),
-                },
-            ],
-        );
-        assert_eq!(listed["reasoning"]["effort"], "minimal");
-        assert!(listed.get("max_output_tokens").is_none());
-        let other = connection_probe_body(
-            "gpt-5.5",
-            &[Effort {
-                effort: "low".into(),
-                description: "Léger".into(),
-            }],
-        );
-        assert!(other.get("reasoning").is_none());
-    }
 }

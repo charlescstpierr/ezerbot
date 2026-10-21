@@ -28,40 +28,16 @@ enum Wire {
     Failure(Failure),
     Event(ModelEvent),
 }
-struct Settled {
-    worker_done: bool,
-    counted: bool,
-}
-/// Caller side of one transport. Dropping it tells the worker to stop and, if
-/// that worker is still inside a read ureq cannot abort, counts the socket as
-/// closing until the worker actually exits.
-struct Abandon {
-    flag: Arc<AtomicBool>,
-    inner: Arc<Inner>,
-    settled: Arc<Mutex<Settled>>,
-}
+struct Abandon(Arc<AtomicBool>);
 impl Drop for Abandon {
     fn drop(&mut self) {
-        self.flag.store(true, Ordering::SeqCst);
-        let mut settled = lock(&self.settled);
-        if !settled.worker_done {
-            settled.counted = true;
-            self.inner.closing.fetch_add(1, Ordering::SeqCst);
-        }
+        self.0.store(true, Ordering::SeqCst);
     }
 }
-struct Worker {
-    inner: Arc<Inner>,
-    settled: Arc<Mutex<Settled>>,
-}
+struct Worker(Arc<Inner>);
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.inner.transports.fetch_sub(1, Ordering::SeqCst);
-        let mut settled = lock(&self.settled);
-        settled.worker_done = true;
-        if settled.counted {
-            self.inner.closing.fetch_sub(1, Ordering::SeqCst);
-        }
+        self.0.transports.fetch_sub(1, Ordering::SeqCst);
     }
 }
 fn send(tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
@@ -84,9 +60,8 @@ impl Session {
         if cancel.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput("run cancelled".into()));
         }
-        // Live turns, titles and compaction stay admitted. Only sockets already
-        // abandoned — and still blocked in a read — can pile up.
-        if self.inner.closing.load(Ordering::SeqCst) >= 4 {
+        if self.inner.transports.fetch_add(1, Ordering::SeqCst) >= 4 {
+            self.inner.transports.fetch_sub(1, Ordering::SeqCst);
             let failure = Failure::other(
                 "Les connexions précédentes se ferment encore. Réessayez dans quelques instants.",
             );
@@ -96,30 +71,20 @@ impl Session {
                 reason: failure.message,
             });
         }
-        let _ = self.inner.transports.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::sync_channel(32);
         let abandoned = Arc::new(AtomicBool::new(false));
-        let settled = Arc::new(Mutex::new(Settled {
-            worker_done: false,
-            counted: false,
-        }));
+        let _abandon = Abandon(abandoned.clone());
         let session = self.clone();
-        let worker_abandoned = abandoned.clone();
-        let worker_settled = settled.clone();
         let mut limits = *lock(&self.inner.deadlines);
         if turn.is_none() {
-            // Titles are best-effort bounded work, not another foreground turn.
-            // Compaction carries its run identity and keeps normal turn deadlines.
+            // Titles/compaction helpers are best-effort bounded internal work,
+            // not another ten-minute foreground turn.
             limits.first = limits.first.min(Duration::from_secs(10));
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));
         }
         thread::spawn(move || {
-            let _worker = Worker {
-                inner: session.inner.clone(),
-                settled: worker_settled,
-            };
-            let abandoned = worker_abandoned;
+            let _worker = Worker(session.inner.clone());
             let mut notices = Vec::new();
             let result = (|| -> Result<()> {
                 let response = match session.responses_checked(
@@ -195,11 +160,6 @@ impl Session {
             })();
             let _ = result; // Receiver is the sole persistence owner; never log content/errors here.
         });
-        let _abandon = Abandon {
-            flag: abandoned,
-            inner: self.inner.clone(),
-            settled,
-        };
         log(0, "started");
         let started = Instant::now();
         let mut last = started;
@@ -210,9 +170,6 @@ impl Session {
         loop {
             if cancel.load(Ordering::SeqCst) {
                 log(http, "cancelled");
-                if tool_notice {
-                    metadata(Some(&previous_notice), None)?;
-                }
                 return Err(Error::InvalidInput("run cancelled".into()));
             }
             let timeout = if started.elapsed() >= limits.total {
@@ -287,14 +244,7 @@ impl Session {
                     log(http, "transport_closed");
                     let failure =
                         Failure::other("La connexion à OpenAI a été interrompue. Réessayez.");
-                    metadata(
-                        if tool_notice {
-                            Some(&previous_notice)
-                        } else {
-                            None
-                        },
-                        Some(&failure),
-                    )?;
+                    metadata(None, Some(&failure))?;
                     return emit(ModelEvent::Failed {
                         reason: failure.message,
                     });

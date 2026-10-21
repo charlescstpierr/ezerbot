@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { composerConnectionState } from "./connection-view.js";
 
 // Exercise the actual shell function with a small editor/DOM adapter, without
 // adding a second copy of its task/group/composer policy to the tests.
@@ -17,7 +16,7 @@ function composer(kind = "task") {
   const ui = { input, send: { dataset: {}, setAttribute() {}, querySelector: () => use }, hint: { dataset: {} }, menuButton: {} };
   const panel = { composer: { discard() { discarded.push(ctx.conversation.id); } } };
   const update = runInNewContext(`(${updateSource})`, {
-    ui, window: { GrokbotDelegation: { canFollowUp: () => ctx.active }, GrokbotChat: { composerConnectionState } },
+    ui, window: { GrokbotDelegation: { canFollowUp: () => ctx.active } },
     document: { activeElement: null }, TextEncoder,
     currentConversation: () => ctx.conversation, streamingMessage: () => ctx.streaming,
     pendingStates: new Set(["queued", "dispatching", "unknown"]),

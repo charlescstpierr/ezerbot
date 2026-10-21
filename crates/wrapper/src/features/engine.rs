@@ -1163,7 +1163,7 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
     if (live && !ctx.provider.connected())
         || (!live && !ctx.provider.simulation_allowed() && !run.run_id.starts_with("mcp-host-"))
     {
-        ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='signin' WHERE run_id=?1", params![run.run_id,"Connectez votre compte ChatGPT pour recevoir une réponse. Votre question est conservée ; vous pourrez réessayer après la connexion."])?;
+        ctx.connection.execute("UPDATE wrapper_engine_runs SET error=?2,error_kind='signin' WHERE run_id=?1", params![run.run_id,"Connecte ton compte ChatGPT pour recevoir une réponse. Ta question est conservée ; tu pourras réessayer après la connexion."])?;
         let mut services = Services::new(ctx)?;
         fail_host(ctx.connection, &mut services, &run.run_id)?;
         crate::upstream::turn(
@@ -2166,7 +2166,6 @@ impl RunGatewayCall<'_> {
                 provider: self.provider,
                 cancel: self.cancel,
                 metadata: None,
-                turn: Some(self.run_id),
             };
             let mut next = match compaction::summarize_with_options(
                 &gateway,
@@ -2300,7 +2299,6 @@ impl RunGatewayCall<'_> {
             provider: self.provider,
             cancel: self.cancel,
             metadata: Some((self.path, self.run_id)),
-            turn: Some(self.run_id),
         };
         let mut deltas = RedactedDeltas::new(&vault)?;
         let mut forward = |event| {
@@ -2461,7 +2459,6 @@ struct ProviderGateway<'a> {
     provider: &'a Provider,
     cancel: &'a AtomicBool,
     metadata: Option<(&'a Path, &'a str)>,
-    turn: Option<&'a str>,
 }
 impl ModelGateway for ProviderGateway<'_> {
     fn stream(
@@ -2475,7 +2472,7 @@ impl ModelGateway for ProviderGateway<'_> {
         if request.model == "simulated" && self.provider.simulation_allowed() {
             return crate::gateway::SimulatedGateway.stream(request, emit);
         }
-        self.provider.stream_run(request,self.cancel,self.turn,&mut |notice,failure| {
+        self.provider.stream_run(request,self.cancel,self.metadata.map(|(_, id)| id),&mut |notice,failure| {
             if let Some((path,id))=self.metadata {
                 let conn=database(path)?;
                 let vault=vault(path)?;
@@ -3047,7 +3044,7 @@ fn retitle(
         )?;
         let mut title = String::new();
         let mut completed = false;
-        ProviderGateway{provider,cancel,metadata:None,turn:None}.stream(&ModelRequest{model,instructions:"Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.".into(),input:vec![item("title",Role::User,text)],tools:vec![],effort:None,service_tier:None,prompt_cache_key:None},&mut |event|{
+        ProviderGateway{provider,cancel,metadata:None}.stream(&ModelRequest{model,instructions:"Tu écris le titre d'une conversation pour la retrouver facilement dans une liste. Réponds seulement par le titre : 3 à 6 mots, dans la langue de l'utilisateur, sans guillemets, sans point final, sans mise en forme. Le titre nomme le sujet précis dont on parle, jamais une salutation ni une formule vague.".into(),input:vec![item("title",Role::User,text)],tools:vec![],effort:None,service_tier:None,prompt_cache_key:None},&mut |event|{
             match event {
                 ModelEvent::TextDelta{text}=>title.push_str(&text),
                 ModelEvent::Completed=>completed=true,

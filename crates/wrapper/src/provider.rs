@@ -88,15 +88,10 @@ impl Failure {
 
     fn signin() -> Self {
         Self {
-            message: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.".into(),
+            message:
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous dans les paramètres."
+                    .into(),
             kind: "signin",
-        }
-    }
-
-    fn expired() -> Self {
-        Self {
-            message: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.".into(),
-            kind: "signin_expired",
         }
     }
 }
@@ -228,10 +223,8 @@ struct Inner {
     codex: bool,
     deadlines: Mutex<reliable::Deadlines>,
     transports: AtomicUsize,
-    closing: AtomicUsize,
     simulation: AtomicBool,
     probe: Mutex<Value>,
-    probe_generation: AtomicUsize,
     local_revoked: AtomicBool,
     file: PathBuf,
     endpoints: Endpoints,
@@ -380,8 +373,6 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
         "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Ezerbot."),
         "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
         "subscription_sharing_invalid_user" => Failure::signin(),
-        "invalid_grant" | "invalid_refresh_token" | "token_expired" | "refresh_token_expired"
-        | "refresh_token_invalidated" | "refresh_token_reused" => Failure::expired(),
         _ if status == 401 => Failure::signin(),
         _ if status == 503 => Failure::other(format!("Le service d’OpenAI est indisponible (HTTP 503). Réessayez dans quelques minutes.{}", if message.is_empty() { String::new() } else { format!(" Détail : {}", message.chars().take(300).collect::<String>()) })),
         _ => {
@@ -484,13 +475,11 @@ impl Session {
                 codex,
                 deadlines: Mutex::new(reliable::Deadlines::default()),
                 transports: AtomicUsize::new(0),
-                closing: AtomicUsize::new(0),
                 simulation: AtomicBool::new(
                     cfg!(debug_assertions)
                         && std::env::var_os("GROKBOT_DISABLE_SIMULATION").is_none(),
                 ),
                 probe: Mutex::new(json!({"state":"idle"})),
-                probe_generation: AtomicUsize::new(0),
                 local_revoked: AtomicBool::new(false),
                 file,
                 endpoints,
@@ -906,7 +895,6 @@ impl Session {
         self.write(&credentials)
             .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
         if granted {
-            self.reset_probe();
             self.inner.local_revoked.store(false, Ordering::SeqCst);
             Ok(())
         } else {
@@ -1010,7 +998,7 @@ impl Session {
                 ) {
                     credentials.clear_tokens();
                     let _ = self.write(&credentials);
-                    return Err(Failure::expired());
+                    return Err(Failure::signin());
                 }
                 return Err(failure);
             }
@@ -1036,16 +1024,9 @@ impl Session {
         Ok(tokens.access_token)
     }
 
-    fn reset_probe(&self) {
-        let mut probe = lock(&self.inner.probe);
-        self.inner.probe_generation.fetch_add(1, Ordering::SeqCst);
-        *probe = json!({"state":"idle"});
-    }
-
     /// Révoque la session renouvelable puis efface les jetons. Rend `false` si OpenAI n'a pas confirmé.
     pub fn signout(&self) -> Result<bool, Failure> {
         self.cancel_signin();
-        self.reset_probe();
         self.inner.local_revoked.store(true, Ordering::SeqCst);
         // The engine route durably stops only provider-consuming runs. A blanket
         // signal here could cancel an already-suspended form during owner release.

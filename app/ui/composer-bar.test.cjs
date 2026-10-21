@@ -389,15 +389,23 @@ test("Nouvelle conversation stays whole at 820px beside a long workspace", async
   }
 });
 
-test("Notifications, Créer un groupe and Membres keep their height at 820px", async () => {
-  const wide = await measure(1140, 780, "Ezerbot");
-  const band = await measure(820, 560, "Ezerbot");
-  const edge = await measure(901, 780, "Ezerbot");
-  const phone = await measure(500, 780, "Ezerbot");
+test("Notifications, Créer un groupe and Membres keep their height at 820, 910 and 960px", async () => {
+  const wide = await measure(1140, 780, "Ezerbot", { workspace: MEDIUM_NAME });
+  const frames = [
+    [820, 560],
+    [901, 780],
+    [910, 780],
+    [960, 780],
+    [500, 780],
+  ];
+  const reports = [];
+  for (const [width, height] of frames) reports.push(await measure(width, height, "Ezerbot", { workspace: MEDIUM_NAME }));
   for (const theme of ["dark", "light"]) {
     const reference = wide.themes.find((item) => item.theme === theme);
-    for (const report of [band, edge, phone]) {
+    assert.equal(reference.titleFits, true, `${theme} title=${reference.titleClient}/${reference.titleScroll} at 1140`);
+    for (const report of reports) {
       const actual = report.themes.find((item) => item.theme === theme);
+      assert.equal(actual.titleFits, true, `${theme} title=${actual.titleClient}/${actual.titleScroll} at ${actual.viewport}`);
       assert.deepEqual(actual.headerHeights.map((item) => item.text), ["Notifications", "Créer un groupe", "Membres"]);
       for (let index = 0; index < actual.headerHeights.length; index += 1) {
         const seen = actual.headerHeights[index];

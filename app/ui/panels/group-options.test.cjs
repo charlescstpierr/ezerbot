@@ -25,7 +25,11 @@ class Element {
     this.scrollTop = 0;
     this.isConnected = true;
     this.id = "";
-    this.style = { setProperty() {} };
+    const styleProps = {};
+    this.style = {
+      setProperty(name, value) { styleProps[name] = String(value); },
+      getPropertyValue(name) { return styleProps[name] || ""; },
+    };
     this.classList = {
       add: (...names) => { this.className = [...new Set(`${this.className} ${names.join(" ")}`.trim().split(/\s+/))].join(" "); },
       remove: (...names) => { this.className = this.className.split(/\s+/).filter((name) => !names.includes(name)).join(" "); },
@@ -436,4 +440,32 @@ test("la liste montre le nom, la description et l’avatar, et le renommage les 
   assert.match(renamed.textContent, /Atelier renommé/);
   assert.match(renamed.textContent, /Description revue/);
   assert.equal(renamed.querySelector(".group-mark").textContent, "Z");
+});
+
+const AVATAR_COLORS = [
+  ["citron", "Jaune citron", "#E6FF3D"],
+  ["orange", "Orange vif", "#FF5C1F"],
+  ["ambre", "Ambre", "#FFB224"],
+  ["menthe", "Vert menthe", "#35E0A1"],
+  ["cyan", "Cyan", "#22D3EE"],
+  ["magenta", "Rose magenta", "#FF3D8B"],
+  ["vermillon", "Rouge vermillon", "#FF4530"],
+  ["violet", "Violet", "#9B7BFF"],
+  ["blanc", "Sans couleur", "#F5F5F5"],
+];
+
+test("le renommage d’un groupe montre la pastille et le nom de chaque couleur", async () => {
+  const app = bootApp();
+  for (let i = 0; i < 20 && !app.byId["conversation-list"].querySelector(".conversation-item"); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  app.byId["rename-button"].click();
+  const buttons = app.byId["rename-avatar-colors"].querySelectorAll("button");
+  assert.equal(buttons.length, AVATAR_COLORS.length);
+  for (const [accent, label, swatch] of AVATAR_COLORS) {
+    const button = buttons.find((node) => node.dataset.avatarColor === accent);
+    assert.ok(button, accent);
+    assert.equal(button.querySelector("i").style.getPropertyValue("--swatch"), swatch, accent);
+    assert.equal(button.querySelector("span").textContent, label);
+  }
 });

@@ -1602,14 +1602,28 @@
     const box = $("rename-avatar-colors");
     if (!box) return;
     if (!box.querySelector("button")) {
-      const labels = { citron: "Jaune citron", orange: "Orange vif", ambre: "Ambre", menthe: "Vert menthe", cyan: "Cyan", magenta: "Rose magenta", vermillon: "Rouge vermillon", violet: "Violet", blanc: "Sans couleur" };
-      box.replaceChildren(...accents.map((accent) => {
+      const colors = [
+        ["citron", "Jaune citron", "#E6FF3D"],
+        ["orange", "Orange vif", "#FF5C1F"],
+        ["ambre", "Ambre", "#FFB224"],
+        ["menthe", "Vert menthe", "#35E0A1"],
+        ["cyan", "Cyan", "#22D3EE"],
+        ["magenta", "Rose magenta", "#FF3D8B"],
+        ["vermillon", "Rouge vermillon", "#FF4530"],
+        ["violet", "Violet", "#9B7BFF"],
+        ["blanc", "Sans couleur", "#F5F5F5"],
+      ];
+      box.replaceChildren(...colors.map(([accent, label, swatch]) => {
         const button = element("button");
         button.type = "button";
         button.dataset.avatarColor = accent;
         button.dataset.botColor = accent;
-        button.setAttribute("aria-label", labels[accent] || accent);
+        button.setAttribute("aria-label", label);
         button.setAttribute("aria-pressed", "false");
+        const dot = element("i");
+        dot.style.setProperty("--swatch", swatch);
+        dot.setAttribute("aria-hidden", "true");
+        button.append(dot, element("span", "", label));
         button.addEventListener("click", () => selectRenameColor(accent));
         return button;
       }));

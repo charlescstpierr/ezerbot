@@ -28,6 +28,13 @@ pub struct Seen {
     /// Distinct issued tokens let tests detect reuse of a stale bearer after refresh.
     pub access_tokens: Vec<String>,
     pub bodies: Vec<Value>,
+    /// Connection probes are not chat turns: they must not consume scripted replies.
+    pub probe_bodies: Vec<Value>,
+    pub probe_reply: Option<ScriptedResponse>,
+    pub codex_catalog: Option<Value>,
+    pub codex_model_headers: Vec<HashMap<String, String>>,
+    pub fail_probe: bool,
+    pub probe_gate: Option<Arc<AtomicBool>>,
     pub revoked: bool,
     /// Header supplied by the fake Responses server, never an event/body identifier.
     pub request_id: Option<String>,
@@ -213,6 +220,8 @@ impl FakeOpenAi {
                     None
                 };
                 let mut delay = Duration::ZERO;
+                let mut is_probe = false;
+                let mut probe_gate = None;
                 let (status, content_type, payload) = match request.url() {
                     "/jwks" => (200, "application/json".to_owned(), JWKS.to_owned()),
                     "/token" => {
@@ -225,7 +234,7 @@ impl FakeOpenAi {
                             let auth = if seen.invalid_codex_account {
                                 json!({})
                             } else {
-                                json!({"chatgpt_account_id":"account-test", "chatgpt_plan_type":"plus"})
+                                json!({"chatgpt_account_id":"account-test", "chatgpt_plan_type":"plus", "chatgpt_data_residency":"eu"})
                             };
                             encode(&Header::new(Algorithm::RS256), &json!({
                                 "https://api.openai.com/auth":auth, "email":"codex@exemple.com", "sequence":sequence,
@@ -271,6 +280,24 @@ impl FakeOpenAi {
                         let reply = seen.quota_reply.take().unwrap_or_else(|| ScriptedResponse::json(200, json!({"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":35,"limit_window_seconds":18000,"reset_at":4102444800u64},"secondary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_at":4102531200u64}}})));
                         (reply.status, reply.content_type, reply.body)
                     }
+                    "/backend-api/codex/models?client_version=99.0.0" => {
+                        seen.codex_model_headers.push(
+                            request
+                                .headers()
+                                .iter()
+                                .map(|h| {
+                                    (
+                                        h.field.to_string().to_ascii_lowercase(),
+                                        h.value.to_string(),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        match &seen.codex_catalog {
+                            Some(catalog) => (200, "application/json".into(), catalog.to_string()),
+                            None => (404, "application/json".into(), "{}".into()),
+                        }
+                    }
                     "/v1/models" => {
                         seen.model_requests += 1;
                         seen.bearer.push(bearer);
@@ -287,103 +314,133 @@ impl FakeOpenAi {
                         (200, "application/json".into(), models.to_string())
                     }
                     "/v1/responses" | "/backend-api/codex/responses" => {
-                        seen.headers.push(
-                            request
-                                .headers()
-                                .iter()
-                                .map(|h| {
-                                    (
-                                        h.field.to_string().to_ascii_lowercase(),
-                                        h.value.to_string(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                        seen.bearer.push(bearer);
-                        let request_body: Value = serde_json::from_str(&body).unwrap();
-                        seen.bodies.push(request_body.clone());
-                        if request.url() == "/backend-api/codex/responses"
-                            && matches!(
-                                request_body["model"].as_str(),
-                                Some("gpt-5.5" | "gpt-5.3-codex-spark")
-                            )
+                        let request_body: Value =
+                            serde_json::from_str(&body).unwrap_or(Value::Null);
+                        if request_body["instructions"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .starts_with("Test de connexion.")
                         {
-                            // Real-account refusals observed on 2026-10-20. Keep
-                            // fresh-install tests from succeeding with retired defaults.
-                            (400, "application/json".into(), json!({"detail":format!(
+                            is_probe = true;
+                            probe_gate = seen.probe_gate.clone();
+                            seen.probe_bodies.push(request_body);
+                            if let Some(reply) = seen.probe_reply.take() {
+                                (reply.status, reply.content_type, reply.body)
+                            } else if seen.fail_probe {
+                                (
+                                    401,
+                                    "application/json".into(),
+                                    json!({"error":{"message":"probe refused"}}).to_string(),
+                                )
+                            } else {
+                                let ok = ScriptedResponse::events(&[
+                                    json!({"type":"response.output_text.delta","delta":"OK"}),
+                                    json!({"type":"response.completed"}),
+                                ]);
+                                (ok.status, ok.content_type, ok.body)
+                            }
+                        } else {
+                            seen.headers.push(
+                                request
+                                    .headers()
+                                    .iter()
+                                    .map(|h| {
+                                        (
+                                            h.field.to_string().to_ascii_lowercase(),
+                                            h.value.to_string(),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            seen.bearer.push(bearer);
+                            seen.bodies.push(request_body.clone());
+                            if request.url() == "/backend-api/codex/responses"
+                                && matches!(
+                                    request_body["model"].as_str(),
+                                    Some("gpt-5.5" | "gpt-5.3-codex-spark")
+                                )
+                            {
+                                // Real-account refusals observed on 2026-10-20. Keep
+                                // fresh-install tests from succeeding with retired defaults.
+                                (400, "application/json".into(), json!({"detail":format!(
                                 "The '{}' model is not supported when using Codex with a ChatGPT account.",
                                 request_body["model"].as_str().unwrap()
                             )}).to_string())
-                        } else if let Some(key) = request_body["prompt_cache_key"]
-                            .as_str()
-                            .filter(|key| key.chars().count() > 64)
-                        {
-                            // Mirror the Responses constraint before consuming scripted replies.
-                            let error = json!({"error": {
-                                "type":"invalid_request_error", "code":"string_above_max_length",
-                                "param":"prompt_cache_key",
-                                "message":format!("Invalid 'prompt_cache_key': string too long. Expected a string with maximum length 64, but got a string with length {} instead.", key.chars().count()),
-                            }});
-                            (400, "application/json".into(), error.to_string())
-                        } else if request_body["instructions"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .starts_with("Extraction de mémoire automatique.")
-                        {
-                            let reply = seen.memory_responses.pop_front().unwrap_or_else(|| ScriptedResponse::events(&[
+                            } else if let Some(key) = request_body["prompt_cache_key"]
+                                .as_str()
+                                .filter(|key| key.chars().count() > 64)
+                            {
+                                // Mirror the Responses constraint before consuming scripted replies.
+                                let error = json!({"error": {
+                                    "type":"invalid_request_error", "code":"string_above_max_length",
+                                    "param":"prompt_cache_key",
+                                    "message":format!("Invalid 'prompt_cache_key': string too long. Expected a string with maximum length 64, but got a string with length {} instead.", key.chars().count()),
+                                }});
+                                (400, "application/json".into(), error.to_string())
+                            } else if request_body["instructions"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .starts_with("Extraction de mémoire automatique.")
+                            {
+                                let reply = seen.memory_responses.pop_front().unwrap_or_else(|| ScriptedResponse::events(&[
                                 json!({"type":"response.output_text.delta","delta":"{\"facts\":[]}"}),
                                 json!({"type":"response.completed"}),
                             ]));
-                            delay = seen.memory_delay;
-                            (reply.status, reply.content_type, reply.body)
-                        } else if let Some(reply) = seen.responses.pop_front() {
-                            (reply.status, reply.content_type, reply.body)
-                        } else if request_body["instructions"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .contains("titre")
-                        {
-                            let title = json!({"type": "response.output_text.delta", "delta": "« Salutations en français. »"});
-                            (
-                                200,
-                                "text/event-stream".into(),
-                                format!(
-                                    "data: {title}\n\ndata: {}\n\n",
-                                    json!({"type": "response.completed"})
-                                ),
-                            )
-                        } else if request_body.get("service_tier").is_some() {
-                            let refusal = json!({"error": {"code": "subscription_sharing_unsupported_capability", "message": "unsupported", "param": "service_tier"}});
-                            (400, "application/json".into(), refusal.to_string())
-                        } else {
-                            let events = [
-                                json!({"type": "response.created"}),
-                                json!({"type": "response.output_text.delta", "delta": "Bon"}),
-                                json!({"type": "response.output_text.delta", "delta": "jour **vous**"}),
-                                json!({"type": "response.completed", "response": {"usage": seen.usage}}),
-                            ];
-                            let stream = events
-                                .iter()
-                                .map(|event| {
+                                delay = seen.memory_delay;
+                                (reply.status, reply.content_type, reply.body)
+                            } else if let Some(reply) = seen.responses.pop_front() {
+                                (reply.status, reply.content_type, reply.body)
+                            } else if request_body["instructions"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .contains("titre")
+                            {
+                                let title = json!({"type": "response.output_text.delta", "delta": "« Salutations en français. »"});
+                                (
+                                    200,
+                                    "text/event-stream".into(),
                                     format!(
-                                        "event: {}\ndata: {event}\n\n",
-                                        event["type"].as_str().unwrap()
-                                    )
-                                })
-                                .collect();
-                            (200, "text/event-stream".into(), stream)
+                                        "data: {title}\n\ndata: {}\n\n",
+                                        json!({"type": "response.completed"})
+                                    ),
+                                )
+                            } else if request_body.get("service_tier").is_some() {
+                                let refusal = json!({"error": {"code": "subscription_sharing_unsupported_capability", "message": "unsupported", "param": "service_tier"}});
+                                (400, "application/json".into(), refusal.to_string())
+                            } else {
+                                let events = [
+                                    json!({"type": "response.created"}),
+                                    json!({"type": "response.output_text.delta", "delta": "Bon"}),
+                                    json!({"type": "response.output_text.delta", "delta": "jour **vous**"}),
+                                    json!({"type": "response.completed", "response": {"usage": seen.usage}}),
+                                ];
+                                let stream = events
+                                    .iter()
+                                    .map(|event| {
+                                        format!(
+                                            "event: {}\ndata: {event}\n\n",
+                                            event["type"].as_str().unwrap()
+                                        )
+                                    })
+                                    .collect();
+                                (200, "text/event-stream".into(), stream)
+                            }
                         }
                     }
                     _ => (404, "text/plain".into(), String::new()),
                 };
-                let gate = match request.url() {
-                    "/v1/models" => seen.models_gate.clone(),
-                    "/v1/responses" => seen
-                        .response_gate
-                        .as_ref()
-                        .filter(|(at, _)| *at == seen.bodies.len())
-                        .map(|(_, gate)| gate.clone()),
-                    _ => None,
+                let gate = if is_probe {
+                    None
+                } else {
+                    match request.url() {
+                        "/v1/models" => seen.models_gate.clone(),
+                        "/v1/responses" => seen
+                            .response_gate
+                            .as_ref()
+                            .filter(|(at, _)| *at == seen.bodies.len())
+                            .map(|(_, gate)| gate.clone()),
+                        _ => None,
+                    }
                 };
                 let gate = if request.url() == "/token" {
                     seen.token_gate.clone()
@@ -397,6 +454,11 @@ impl FakeOpenAi {
                     .clone()
                     .filter(|_| request.url() == "/v1/responses");
                 drop(seen);
+                if let Some(gate) = probe_gate {
+                    while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 if let Some(gate) = gate {
                     while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
                         std::thread::sleep(Duration::from_millis(5));

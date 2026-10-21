@@ -64,6 +64,12 @@ struct ConnectionChoice {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectionTest {
+    #[serde(default)]
+    refresh: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
@@ -471,8 +477,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.conversation_response(&input.conversation_id)
         }
         "/api/provider/test" => {
-            let _: Empty = parse(body)?;
-            app.provider.test_connection();
+            let input: ConnectionTest = parse(body)?;
+            app.provider.test_connection_with_refresh(input.refresh);
             Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/select" => {
@@ -643,6 +649,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .checked_add(1)
                     .ok_or_else(|| ApiError::new(409, "Trop de relances."))?;
                 stop_run(&app.feature_context(), &old, TurnEnd::Superseded)?;
+                // A failed probe is cached until an explicit retry. Coalesce
+                // with any running probe, then let the new run await it off-thread.
+                if live && app.provider.status()["connection_test"]["state"] != "ok" {
+                    app.provider.test_connection();
+                }
                 app.start_message(&input.conversation_id, &input.message_id, next)?;
             }
             app.conversation_response(&input.conversation_id)
@@ -1263,6 +1274,28 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 bot_id: Some(store::required(&conn, &id)?.bot_id),
                 host_mcp: id.starts_with("mcp-host-"),
             };
+            // The HTTP mutex and SQLite writer are free while OpenAI verifies.
+            // Send/refresh/stop/signout must remain usable during a slow probe.
+            if live {
+                let verified = provider.ensure_service(&cancel);
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if let Err(error) = verified {
+                    conn.execute(
+                        "UPDATE wrapper_engine_runs SET error=?2,error_kind=?3 WHERE run_id=?1",
+                        params![id, error.message, error.kind],
+                    )?;
+                    fail_host(&conn, &mut services, &id)?;
+                    crate::upstream::turn(
+                        path.parent().unwrap_or(Path::new(".")),
+                        &id,
+                        0,
+                        "connection_unconfirmed",
+                    );
+                    return Ok(());
+                }
+            }
             let gateway = RunGateway {
                 path: &path,
                 provider: &provider,

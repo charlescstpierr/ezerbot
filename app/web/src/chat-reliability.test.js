@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { pendingReply } from "./thread-order.js";
 import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
@@ -107,4 +108,12 @@ test("a pending tool has a single visible progress state, never after failure or
   assert.equal(visibleNotice({ state: "streaming", notice }), notice);
   assert.equal(visibleNotice({ state: "stopped", notice: "Autre information" }), "Autre information");
   assert.equal(preparingTool({ state: "streaming" }), false);
+});
+
+test("a disabled secondary button is dimmed and does not look actionable", () => {
+  const css = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
+  const rule = css.match(/\.secondary-button:disabled\s*\{[^}]*\}/);
+  assert.ok(rule, "règle .secondary-button:disabled absente");
+  assert.match(rule[0], /opacity:\s*\.5/);
+  assert.match(rule[0], /cursor:\s*default/);
 });

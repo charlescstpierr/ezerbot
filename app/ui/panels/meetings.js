@@ -172,7 +172,8 @@
         context = ctx;
         startButton = button("● Enregistrer une réunion", () => { title.value = "Réunion"; consent.checked = false; begin.disabled = true; dialogError.textContent = ""; dialog.showModal(); }, "attachment-choose meeting-start");
         startButton.id = "meeting-start"; startButton.setAttribute("aria-label", "Enregistrer une réunion");
-        const attach = _container.querySelector(".attachment-choose");
+        // Le « + » des pièces jointes vit dans la barre d'écriture ; la réunion se range juste après.
+        const attach = _container.querySelector(".attachment-choose") || document.getElementById("composer-model")?.querySelector?.(".attachment-choose");
         if (attach) attach.after(startButton); else _container.append(startButton);
         dialog = node("dialog", "dialog small-dialog meeting-dialog"); dialog.setAttribute("aria-labelledby", "meeting-consent-title");
         const heading = node("h2", "", "Enregistrer une réunion"); heading.id = "meeting-consent-title";

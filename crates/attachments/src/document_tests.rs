@@ -34,9 +34,11 @@ fn office(parts: &[(&str, &str)]) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 /// A real, searchable one-page PDF, with a valid xref. No test-only parser.
+#[cfg(target_os = "macos")]
 fn pdf() -> Vec<u8> {
     pdf_with_stream("BT /F1 18 Tf 40 100 Td (Bonjour PDF local) Tj ET")
 }
+#[cfg(target_os = "macos")]
 fn pdf_with_stream(stream: &str) -> Vec<u8> {
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".into(),

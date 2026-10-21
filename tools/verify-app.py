@@ -113,8 +113,8 @@ def verify_ui_regressions():
     // Tiptap observes the DOM edit in a microtask before firing onInput.
     await new Promise(resolve => setTimeout(resolve, 0));
   };
-  const choose = name => [...document.querySelectorAll('.bot-chip')].find(node => node.textContent.trim() === name).click();
-  const chip = () => document.querySelector('.bot-chip[aria-pressed=true]').textContent.trim();
+  const choose = name => [...document.querySelectorAll('.sidebar-bot')].find(node => node.textContent.trim() === name).click();
+  const chip = () => document.querySelector('.sidebar-bot[aria-pressed=true]').textContent.trim();
   const cmdN = () => document.dispatchEvent(new KeyboardEvent('keydown', {key:'n', metaKey:true, bubbles:true, cancelable:true}));
   const saved = () => api('/api/state');
   const send = async body => {
@@ -159,6 +159,93 @@ def verify_ui_regressions():
   window.GrokbotChat.renderThread(formHost, {messages:[]});
   await until(() => !formHost.querySelector('[data-card-kind]'));
   formHost.remove();
+  // Composer bot menu: a 40-character name stays inside at both welcome sizes and themes.
+  // Focus survives a refresh, arrows/Home/End move, and Escape returns to the trigger.
+  const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
+  await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
+  await window.GrokbotPanels.refresh();
+  choose(longName);
+  const menuFits = () => {
+    const menu = $('bot-menu');
+    const menuBox = menu.getBoundingClientRect();
+    const list = menu.querySelector('.bot-menu-list');
+    const buttons = [...menu.querySelectorAll('button')];
+    const inside = buttons.every(button => {
+      const box = button.getBoundingClientRect();
+      const childrenInside = [...button.children].every(child => {
+        const childBox = child.getBoundingClientRect();
+        return childBox.right <= box.right + 0.5 && childBox.left >= box.left - 0.5;
+      });
+      const label = button.querySelector('.bot-menu-name, .bot-menu-action > span');
+      const readable = Boolean(label && label.clientWidth > 12 && label.textContent.trim());
+      const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return box.width > 0 && box.right <= menuBox.right + 0.5 && box.left >= menuBox.left - 0.5
+        && childrenInside && readable && (point === button || button.contains(point));
+    });
+    const checkedIcon = menu.querySelector('[aria-checked="true"] .icon')?.getBoundingClientRect();
+    const iconInside = Boolean(checkedIcon && checkedIcon.width > 0 && checkedIcon.right <= menuBox.right + 0.5 && checkedIcon.left >= menuBox.left - 0.5);
+    const actionText = menu.querySelector('.bot-menu-action span')?.textContent || '';
+    const noHorizontalScroll = !list || list.scrollWidth <= list.clientWidth + 1;
+    return inside && iconInside && noHorizontalScroll && menuBox.right <= innerWidth + 0.5
+      && actionText.startsWith('Modifier ') && actionText.includes(longName);
+  };
+  // Largeur réelle du composeur à 1140×780 (720 px) et à 820×560 (~516 px).
+  const applyFrame = (width) => {
+    let style = document.getElementById('qa-menu-frame');
+    if (!style) { style = document.createElement('style'); style.id = 'qa-menu-frame'; document.head.append(style); }
+    const sidebar = width <= 1100 ? 244 : 270;
+    const main = width - sidebar - 16;
+    const area = width <= 1100 ? main - 44 : Math.min(720, main - 54);
+    style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
+  };
+  const setTheme = theme => { document.documentElement.dataset.theme = theme; };
+  const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
+  const clearOfControls = (label) => {
+    const nameBox = label.getBoundingClientRect();
+    const voice = document.querySelector('.voice-controls')?.getBoundingClientRect();
+    const send = $('send-button').getBoundingClientRect();
+    if (!voice || voice.width === 0) throw new Error('voice controls missing');
+    return nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5;
+  };
+  for (const [width, height] of [[1140, 780], [820, 560]]) {
+    applyFrame(width);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const theme of ['dark', 'light']) {
+      setTheme(theme);
+      choose('Ezerbot');
+      const ezerbotName = $('composer-bot-name');
+      check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1 && clearOfControls(ezerbotName));
+      choose('Rédacteur');
+      const writerName = $('composer-bot-name');
+      check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1 && clearOfControls(writerName));
+      choose(longName);
+      const longLabel = $('composer-bot-name');
+      check(`maximal composer name stays left of the voice controls and send button at ${width}×${height} ${theme}`, longLabel.textContent === longName && clearOfControls(longLabel));
+      if (width <= 820) check(`maximal composer name ellipsizes when the bar is full at ${width}×${height} ${theme}`, longLabel.scrollWidth > longLabel.clientWidth + 1);
+      openMenu();
+      check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
+    }
+  }
+  document.getElementById('qa-menu-frame')?.remove();
+  setTheme('dark');
+  openMenu();
+  check('opened bot menu focuses the chosen bot', document.activeElement?.getAttribute('aria-checked') === 'true');
+  await window.GrokbotPanels.refresh();
+  check('bot menu refresh keeps focus on the same option', !$('bot-menu').hidden && document.activeElement?.getAttribute('aria-checked') === 'true');
+  const menuItems = () => [...$('bot-menu').querySelectorAll('button')];
+  const before = menuItems().indexOf(document.activeElement);
+  const press = key => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true}));
+  press('ArrowDown');
+  check('ArrowDown moves to the next menu item', menuItems().indexOf(document.activeElement) === (before + 1) % menuItems().length);
+  press('ArrowUp');
+  check('ArrowUp returns to the previous menu item', menuItems().indexOf(document.activeElement) === before);
+  press('Home');
+  check('Home moves to the first menu item', document.activeElement === menuItems()[0]);
+  press('End');
+  check('End moves to the last menu item', document.activeElement === menuItems().at(-1));
+  press('Escape');
+  check('Escape closes the bot menu and returns focus to its trigger', $('bot-menu').hidden && document.activeElement === $('composer-bot'));
+  choose('Ezerbot');
   const first = await send('Qui me répond ?');
   check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');
   check('reply and conversation page title use Ezerbot', $('messages').innerText.includes('Ezerbot') && document.title.endsWith(' · Ezerbot'));
@@ -197,9 +284,11 @@ def verify_ui_regressions():
   window.fetch = originalFetch;
   const inFlightConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
   check('in-flight send keeps the original recipient', inFlightConversation.bot_id === 'grokbot');
-  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null);
+  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null && localStorage.getItem('grokbot.draft.new.document') === null);
   check('in-flight edits are not appended to the submitted message', inFlightConversation.messages.some(item => item.role === 'user' && item.body === 'Choix figé pendant l’envoi'));
-  cmdN(); await type('Message à restaurer');
+  cmdN();
+  check('a draft transferred to its thread does not reappear in a new conversation', empty() && localStorage.getItem('grokbot.draft.new.document') === null);
+  await type('Message à restaurer');
   const beforeFailure = (await saved()).conversations.length;
   let failCreation;
   const failureGate = new Promise(resolve => { failCreation = resolve; });
@@ -288,7 +377,7 @@ def verify_ui_regressions():
   };
   await stageImage(); choose('Rédacteur');
   check('pending image upload already pins the displayed bot', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && Boolean(document.querySelector('.attachment-chip')));
-  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Ezerbot'));
+  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez les pièces jointes') && $('toast').textContent.includes('Ezerbot'));
   allowUpload();
   await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
   window.fetch = originalFetch;
@@ -298,7 +387,7 @@ def verify_ui_regressions():
   document.querySelector('.add-bot').click(); $('bot-name').value = 'Bot image'; $('bot-form').requestSubmit();
   await until(() => !$('bot-dialog').open);
   check('creating a bot also retains staged image and current recipient', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
-  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez l’image jointe'));
+  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez les pièces jointes'));
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
   const imageState = await saved();

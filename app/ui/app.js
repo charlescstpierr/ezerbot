@@ -41,6 +41,7 @@
   let preferencesLoaded = false;
   let pollTimer;
   let pickerKind = null;
+  let revealedBotId = null;
   function usageUrl() {
     return provider().backend === "codex"
       ? "https://chatgpt.com/codex/settings/usage"
@@ -536,8 +537,11 @@
   }
   function restoreDraftDocument() {
     try {
+      const text = readPreference(draftKey(), null);
+      // A rich document without its text twin is an orphan from an earlier transfer.
+      if (text === null) { removePreference(`${draftKey()}.document`); return; }
       const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
-      if (document && readPreference(draftKey(), "") === ui.input.value) ui.input.document = document;
+      if (document && text === ui.input.value) ui.input.document = document;
     } catch { /* Plain text remains usable when an older draft has no rich document. */ }
   }
 
@@ -676,42 +680,110 @@
     return stack;
   }
 
+  // Le choix vaut pour le fil vide affiché ; depuis un autre fil, il ouvre un nouveau fil avec ce bot.
+  function chooseBot(bot) {
+    if (busy) return;
+    if (stagedOnEmptyThread()) {
+      notify(`Retirez les pièces jointes pour changer de bot, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`);
+      return;
+    }
+    closeBotMenu();
+    chosenBotId = bot.id;
+    writePreference("grokbot.bot", bot.id);
+    const conversation = currentConversation();
+    if (conversation?.messages.length || conversation?.kind === "group") { selectConversation(null, true); return; }
+    // Preserve both drafts when leaving a persisted empty thread from an old version.
+    leaveEmptyThread();
+    render();
+  }
+
+  function revealChosenBot() {
+    const list = $("sidebar-bot-list");
+    const pressed = list.querySelector("[aria-pressed=true]");
+    if (pressed && (pressed.offsetTop < list.scrollTop || pressed.offsetTop + pressed.offsetHeight > list.scrollTop + list.clientHeight)) list.scrollTop = pressed.offsetTop;
+  }
+
+  // Un fondu bas signale qu'il reste des bots à faire défiler.
+  function fadeBotList() {
+    const list = $("sidebar-bot-list");
+    list.classList.toggle("has-more", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
+  }
+
+  function closeBotMenu(options = {}) {
+    const menu = $("bot-menu");
+    const wasOpen = !menu.hidden;
+    const hadFocus = menu.contains(document.activeElement);
+    // Move focus before hiding, so removing the focused item cannot leave focus on body.
+    // A disabled trigger cannot take focus: return it to the editor instead.
+    if (wasOpen && (hadFocus || options.restoreFocus)) {
+      if ($("composer-bot").disabled) ui.input?.focus();
+      else $("composer-bot").focus();
+    }
+    menu.hidden = true;
+    menu.replaceChildren();
+    $("composer-bot").setAttribute("aria-expanded", "false");
+  }
+
+  function renderBotMenu() {
+    const menu = $("bot-menu");
+    if (menu.hidden) return;
+    // Un rafraîchissement remplace les boutons : garder l'option focalisée et le défilement.
+    const focusedKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
+    const scrollTop = menu.querySelector(".bot-menu-list")?.scrollTop || 0;
+    const chosen = currentBot();
+    const options = liveBots().map((bot) => {
+      const button = element("button");
+      button.type = "button";
+      button.dataset.menuKey = `bot:${bot.id}`;
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", String(bot.id === chosen?.id));
+      const copy = element("span", "bot-menu-copy");
+      copy.append(element("span", "bot-menu-name", bot.name), element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
+      button.append(botAvatar(bot), copy, icon("check"));
+      button.addEventListener("click", () => chooseBot(bot));
+      return button;
+    });
+    const action = (glyph, label, run) => {
+      const button = element("button", "bot-menu-action");
+      button.type = "button";
+      button.dataset.menuKey = `action:${glyph}`;
+      button.setAttribute("role", "menuitem");
+      button.append(icon(glyph), element("span", "", label));
+      button.addEventListener("click", () => { closeBotMenu(); run(); });
+      return button;
+    };
+    const actions = chosen && !chosen.deleted ? [action("edit", `Modifier ${chosen.name}`, () => openBotDialog(chosen))] : [];
+    const list = element("div", "bot-menu-list");
+    list.append(...options);
+    menu.replaceChildren(element("h4", "", "Avec qui ?"), list, element("div", "menu-divider"), ...actions, action("plus", "Nouveau bot", () => openBotDialog(null)));
+    list.scrollTop = scrollTop;
+    if (focusedKey) [...menu.querySelectorAll("button")].find((button) => button.dataset.menuKey === focusedKey)?.focus({ preventScroll: true });
+    $("composer-bot").setAttribute("aria-expanded", "true");
+  }
+
   function renderBots() {
     const chosen = currentBot();
-    const chips = liveBots().flatMap((bot) => {
-      const chip = element("button", "bot-chip");
-      chip.type = "button";
-      chip.dataset.botColor = bot.color;
-      chip.setAttribute("aria-pressed", String(bot.id === chosen?.id));
-      if (bot.description) chip.title = bot.description;
-      chip.append(botAvatar(bot), element("span", "", bot.name));
-      chip.addEventListener("click", () => {
-        if (busy) return;
-        if (stagedOnEmptyThread()) {
-          notify(`Retirez les pièces jointes pour changer de bot, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`);
-          return;
-        }
-        chosenBotId = bot.id;
-        writePreference("grokbot.bot", bot.id);
-        // Preserve both drafts when leaving a persisted empty thread from an old version.
-        leaveEmptyThread();
-        render();
-      });
-      if (bot.id !== chosen?.id) return [chip];
-      // Le crayon est un frère de la puce : un bouton ne peut pas en contenir un autre.
-      const edit = element("button", "bot-chip-edit");
-      edit.type = "button";
-      edit.setAttribute("aria-label", `Modifier ${bot.name}`);
-      edit.title = "Modifier la personnalité";
-      edit.append(icon("edit"));
-      edit.addEventListener("click", () => openBotDialog(bot));
-      return [chip, edit];
+    const conversation = currentConversation();
+    const bots = liveBots().map((bot) => {
+      const button = element("button", "sidebar-bot");
+      button.type = "button";
+      button.dataset.botColor = bot.color;
+      button.setAttribute("aria-pressed", String(bot.id === chosen?.id));
+      button.title = bot.description || bot.name;
+      button.append(botAvatar(bot), element("span", "", bot.name));
+      button.addEventListener("click", () => chooseBot(bot));
+      return button;
     });
-    const add = element("button", "bot-chip add-bot");
-    add.type = "button";
-    add.append(icon("plus"), element("span", "", "Nouveau bot"));
-    add.addEventListener("click", () => openBotDialog(null));
-    $("bot-chips").replaceChildren(...chips, add);
+    const list = $("sidebar-bot-list");
+    list.replaceChildren(...bots);
+    // Ramène le bot choisi dans la vue quand il change, sans contrarier un défilement manuel.
+    if (chosen?.id !== revealedBotId) { revealedBotId = chosen?.id; revealChosenBot(); }
+    fadeBotList();
+    // La barre d'écriture montre le bot du fil ; il ne se change que sur un fil direct encore vide.
+    $("composer-bot-name").textContent = chosen?.name || "Ezerbot";
+    $("composer-bot").disabled = Boolean(conversation?.messages.length) || ["group", "task", "routine"].includes(conversation?.kind);
+    if ($("composer-bot").disabled) closeBotMenu();
+    renderBotMenu();
     $("welcome-description").textContent = currentConversation()?.kind === "group"
       ? "Un fil partagé pour croiser vos idées. Sans mention, le coordinateur répond."
       : chosen?.description || defaultWelcome;
@@ -780,10 +852,23 @@
   function selectBotColor(color) {
     $("bot-colors").querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.botColor === color)));
     $("bot-shapes").dataset.botColor = color;
+    renderBotPreview();
   }
 
   function selectBotShape(shape) {
     $("bot-shapes").querySelectorAll("button").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.shape === shape)));
+    renderBotPreview();
+  }
+
+  // L'aperçu en tête du formulaire suit chaque frappe, forme et couleur.
+  function renderBotPreview() {
+    const { name, color, shape, description } = botFormValues();
+    $("bot-preview").dataset.botColor = color;
+    const figure = $("bot-preview-mascot").firstElementChild;
+    if (figure) mascot.setShape(figure, shape);
+    $("bot-preview-name").textContent = name || "Votre nouveau bot";
+    $("bot-preview-name").classList.toggle("is-empty", !name);
+    $("bot-preview-description").textContent = description || "Sa présentation apparaîtra ici.";
   }
 
   function upsertBot(bot) {
@@ -908,7 +993,6 @@
     $("edit-bot-button").disabled = !bot || bot.deleted;
     document.title = conversation ? `${conversation.title} · Ezerbot` : "Ezerbot";
     ui.welcome.hidden = hasMessages;
-    document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
     window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
@@ -983,7 +1067,8 @@
     const selected = (current.models || []).find((item) => item.slug === model);
     const isCodex = current.backend === "codex";
     $("mode-badge-text").textContent = current.connected ? (isCodex ? "Codex" : "ChatGPT") : "Local";
-    $("plan-banner").hidden = current.connected;
+    // Un compte connecté dans l'autre mode suffit : la connexion reste dans les paramètres.
+    $("plan-banner").hidden = current.connected || Object.values(current.connections || {}).some(Boolean);
     $("plan-banner").querySelector("span").textContent = isCodex
       ? "Connectez votre compte ChatGPT via Codex pour obtenir de vraies réponses."
       : "Utilisez votre abonnement ChatGPT pour obtenir de vraies réponses.";
@@ -1003,7 +1088,7 @@
       if (pickerKind === "speed" && !selected?.tiers.length) pickerKind = null;
     } else {
       closePicker();
-      tools.replaceChildren(document.createTextNode(`${currentBot()?.name || "Ezerbot"} `), element("span", "composer-local", "Local"));
+      tools.replaceChildren(element("span", "composer-local", "Local"));
     }
     renderPicker();
 
@@ -1219,6 +1304,7 @@
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
+      removePreference(`${previousDraftKey}.document`);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
@@ -1414,6 +1500,7 @@
     const opener = event.target.closest("[data-picker]");
     if (opener) { pickerKind = pickerKind === opener.dataset.picker ? null : opener.dataset.picker; renderProvider(); }
     else if (pickerKind && !$("picker").contains(event.target)) { closePicker(); renderProvider(); }
+    if (!$("bot-menu").hidden && !$("bot-menu").contains(event.target) && !$("composer-bot").contains(event.target)) closeBotMenu();
     if (event.target.closest("[data-provider-signin]")) signIn();
   });
   window.addEventListener("resize", () => { if (pickerKind) renderPicker(); });
@@ -1514,6 +1601,30 @@
     button.addEventListener("click", () => selectBotShape(shape));
     return button;
   }));
+  if (mascot) $("bot-preview-mascot").append(mascot.create(true));
+  for (const id of ["bot-name", "bot-description"]) $(id).addEventListener("input", renderBotPreview);
+  $("sidebar-bot-list").addEventListener("scroll", fadeBotList, { passive: true });
+  // Le nombre de tuiles par rangée suit la largeur de la barre latérale.
+  window.addEventListener("resize", () => { revealChosenBot(); fadeBotList(); });
+  $("composer-bot").addEventListener("click", () => {
+    if (!$("bot-menu").hidden) { closeBotMenu(); return; }
+    if (pickerKind) { closePicker(); renderProvider(); }
+    $("bot-menu").hidden = false;
+    renderBotMenu();
+    const checked = $("bot-menu").querySelector("[aria-checked=true]");
+    checked?.scrollIntoView({ block: "nearest" });
+    checked?.focus({ preventScroll: true });
+  });
+  $("bot-menu").addEventListener("keydown", (event) => {
+    const items = [...$("bot-menu").querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    const last = items.length - 1;
+    const target = { ArrowDown: index >= last ? 0 : index + 1, ArrowUp: index <= 0 ? last : index - 1, Home: 0, End: last }[event.key];
+    if (target === undefined || !items.length) return;
+    event.preventDefault();
+    items[target].focus({ preventScroll: true });
+    items[target].scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
   $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);
   $("bot-delete-button").addEventListener("click", () => $("bot-delete-dialog").showModal());
@@ -1546,7 +1657,11 @@
     finally { $("reconnect-button").disabled = false; }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { closeMenu(); closeSidebar(); if (pickerKind) { closePicker(); renderProvider(); } }
+    if (event.key === "Escape") {
+      const returnToBot = !$("bot-menu").hidden;
+      closeMenu(); closeSidebar(); closeBotMenu({ restoreFocus: returnToBot });
+      if (pickerKind) { closePicker(); renderProvider(); }
+    }
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     const dialogOpen = Boolean(document.querySelector("dialog[open]"));
     if (event.key.toLowerCase() === "n" && !dialogOpen) { event.preventDefault(); newConversation(); }

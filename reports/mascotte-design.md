@@ -10,7 +10,7 @@ La reconstruction reprend la silhouette, les yeux en capsules et ce rythme de re
 
 ## Animation et états
 
-[mascot.js](../app/ui/mascot.js) clone le SVG du [template HTML](../app/ui/index.html), avec des identifiants de gradients uniques. [mascot.css](../app/ui/mascot.css) anime le repos, la respiration, les clignements, la curiosité et le sourire. Un seul contrôleur suit le pointeur avec un mouvement limité et lissé. Les avatars des messages restent statiques; les mascottes de l’accueil, du composeur et du panneau latéral restent montées entre les rendus.
+[mascot.js](../app/ui/mascot.js) clone le SVG du [template HTML](../app/ui/index.html), avec des identifiants de gradients uniques. [mascot.css](../app/ui/mascot.css) anime le repos, la respiration, les clignements, la curiosité et le sourire. Un seul contrôleur suit le pointeur avec un mouvement limité et lissé. Les avatars des messages restent statiques; les mascottes de l’accueil, du composeur et de l’aperçu de création de bot restent montées entre les rendus.
 
 Le contrôleur suit les états réels du wrapper : chargement, repos, saisie, envoi ou vérification, attente de confirmation, réussite et déconnexion. La réussite vient uniquement d’une acceptation ou d’un écho du message concerné. Le bouton de l’accueil déclenche un petit salut distinct de cette confirmation. Les erreurs de transport mettent désormais la bannière et la mascotte en état déconnecté; une réponse HTTP de validation ne simule pas une panne réseau.
 

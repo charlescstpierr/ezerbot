@@ -132,10 +132,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .main-panel { min-width: 0; display: flex; flex-direction: column; height: calc(100dvh - 16px); margin: 8px; position: relative; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .topbar { height: 63px; flex: 0 0 auto; padding: 0 27px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); position: relative; }
 .topbar-title { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.workspace-label { color: var(--subtle); font-size: 10px; white-space: nowrap; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background .15s, color .15s; }
+.workspace-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--subtle); font-size: 10px; white-space: nowrap; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background .15s, color .15s; }
 .workspace-label:hover:not(:disabled) { background: var(--soft); color: var(--text); }
 .breadcrumb-separator { color: var(--line); font-weight: 300; font-size: 17px; }
-.topbar h1 { font-size: 11px; margin: 0; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: 0; }
+.topbar h1 { flex: 0 0 auto; font-size: 11px; margin: 0; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: min(115px, 100%); }
 .topbar-actions { display: flex; align-items: center; gap: 11px; flex: 0 0 auto; }
 .mode-badge { font-size: 9px; color: var(--muted); display: flex; align-items: center; gap: 5px; background: var(--soft); border-radius: 6px; padding: 5px 9px; }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }

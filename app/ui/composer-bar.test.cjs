@@ -27,7 +27,7 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "" } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
@@ -55,7 +55,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
   <aside class="sidebar"></aside>
   <main class="main-panel">
     <header class="topbar">
-      <div class="topbar-title"><h1 id="conversation-title">Nouvelle conversation</h1></div>
+      <div class="topbar-title">${workspace ? `<button class="workspace-label" type="button" disabled>${workspace}</button><span class="breadcrumb-separator" aria-hidden="true">/</span>` : ""}<h1 id="conversation-title">Nouvelle conversation</h1></div>
       <div class="topbar-actions">
         <button class="tool-pill notifications-button" type="button">Notifications</button>
         <button class="tool-pill" type="button">Créer un groupe</button>
@@ -160,6 +160,10 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         speedFits: !speedLabel || speedLabel.scrollWidth <= speedLabel.clientWidth + 1,
         modelInside: !modelLabel || contained(modelBox, modelButtonBox),
         modelBeforeEffort: !modelButtonBox || !effortButtonBox || modelButtonBox.right <= effortButtonBox.left + 0.5,
+        titleText: document.getElementById("conversation-title").textContent,
+        titleClient: document.getElementById("conversation-title").clientWidth,
+        titleScroll: document.getElementById("conversation-title").scrollWidth,
+        titleFits: document.getElementById("conversation-title").scrollWidth <= document.getElementById("conversation-title").clientWidth + 1,
         headerHeights: [...document.querySelectorAll(".topbar-actions .tool-pill")].map((node) => ({
           text: node.textContent,
           height: node.getBoundingClientRect().height,
@@ -372,6 +376,16 @@ test("GPT-6.1 Sol and medium stay whole inside the model button, left of the eff
       assert.equal(theme.toolsClear, true, where);
       if (bot === MEDIUM_NAME) assert.equal(theme.nameFits, true, where);
     }
+  }
+});
+
+test("Nouvelle conversation stays whole at 820px beside a long workspace", async () => {
+  const report = await measure(820, 560, "Ezerbot", { workspace: MEDIUM_NAME });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} title=${theme.titleClient}/${theme.titleScroll} viewport=${theme.viewport} heights=${JSON.stringify(theme.headerHeights)}`;
+    assert.equal(theme.titleText, "Nouvelle conversation", where);
+    assert.equal(theme.titleFits, true, where);
+    assert.deepEqual(theme.headerHeights.map((item) => item.text), ["Notifications", "Créer un groupe", "Membres"], where);
   }
 });
 

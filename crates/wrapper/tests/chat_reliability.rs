@@ -31,6 +31,10 @@ enum Fault {
     RefreshHang,
     RefreshExpired,
     Incomplete,
+    /// A few header bytes, repeatedly, never a finished status line.
+    DripHeader,
+    /// Finished headers, then one byte well under the read deadline.
+    DripBody,
 }
 struct Fake {
     base: String,
@@ -49,6 +53,20 @@ struct Fake {
 fn event(stream: &mut TcpStream, value: Value) {
     let _ = write!(stream, "data: {value}\n\n");
     let _ = stream.flush();
+}
+fn drip(stream: &mut TcpStream, stop: &AtomicBool) {
+    let _ = stream.set_nodelay(true);
+    while !stop.load(Ordering::SeqCst) {
+        if stream.write_all(b"x").is_err() || stream.flush().is_err() {
+            break;
+        }
+        for _ in 0..4 {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 fn hold(stream: &mut TcpStream, stop: &AtomicBool, keepalive: bool) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
@@ -156,6 +174,7 @@ impl Fake {
                     let internal=instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");
                     let fault=if internal { if side.load(Ordering::SeqCst) { Fault::Headers } else { Fault::Happy } } else { q.lock().unwrap().pop_front().unwrap_or(Fault::Happy) };
                     if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); holds.fetch_add(1, Ordering::SeqCst); return; }
+                    if matches!(fault, Fault::DripHeader) { drip(&mut socket, &s); return; }
                     if let Fault::Http(code)=fault { let body=json!({"error":{"code":"fake_error","message":"Erreur factice précise"}}).to_string(); let _=write!(socket,"HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
                     let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); let _=socket.flush();
                     if instructions.starts_with("Summarize the supplied conversation") {
@@ -190,6 +209,7 @@ impl Fake {
                         Fault::Invalid => { let _=socket.write_all(b"data: {broken}\n\n"); },
                         Fault::Refusal => event(&mut socket,json!({"type":"response.refusal.delta","delta":"refus factice"})),
                         Fault::Incomplete => event(&mut socket,json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}})),
+                        Fault::DripBody => drip(&mut socket, &s),
                         _ => { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Réponse factice terminée."})); event(&mut socket,json!({"type":"response.completed"})); },
                     }
                 }));
@@ -723,6 +743,122 @@ fn title_socket_obeys_the_twelve_second_cap_not_the_session_stall() {
         started.elapsed()
     );
 }
+
+#[test]
+fn a_dripping_body_does_not_outlive_the_read_deadline() {
+    // A few bytes before each read deadline must not stretch the turn out to
+    // the 60s session total. The read deadline here is 2s; the first-byte wait
+    // would otherwise be 20s.
+    let mut f = Fixture::with_deadlines(
+        true,
+        Duration::from_secs(20),
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+    );
+    let started = Instant::now();
+    f.send(Fault::DripBody);
+    let mut reply = Value::Null;
+    while started.elapsed() < Duration::from_secs(6) {
+        reply = f.reply();
+        if !reply.is_null() && reply["state"] != "streaming" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(reply["state"], "failed", "{reply}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "drip kept the turn for {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn four_dripping_headers_release_their_slots_at_the_session_deadline() {
+    // Headers that drip never leave send_json. The session read deadline, not
+    // a 10 minute total, has to free the four closing slots.
+    let mut f = Fixture::with_deadlines(
+        true,
+        Duration::from_secs(2),
+        Duration::from_secs(3),
+        Duration::from_secs(600),
+    );
+    let mut held = vec![];
+    for n in 0..4 {
+        let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let message = format!("drip-{n}");
+        f.fake.queue.lock().unwrap().push_back(Fault::DripHeader);
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":message,"body":"En-tête qui goutte"}),
+        );
+        held.push((chat, message));
+    }
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        held.iter().all(|(chat, message)| {
+            state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == *chat)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == format!("reply-{message}") && m["state"] == "failed")
+        })
+    });
+    let recover = Instant::now();
+    let mut reply = Value::Null;
+    let mut chat = String::new();
+    let mut message = String::new();
+    loop {
+        assert!(
+            recover.elapsed() < Duration::from_secs(8),
+            "fifth turn still blocked after {:?} (read deadline 3s, session total 600s): {reply}",
+            recover.elapsed()
+        );
+        let in_flight = !reply.is_null() && reply["state"] == "streaming";
+        if !in_flight && reply["state"] != "echoed" {
+            chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            message = format!("after-drip-{}", recover.elapsed().as_millis());
+            f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+            post(
+                &mut f.app,
+                "/api/send",
+                json!({"conversation_id":chat,"message_id":message,"body":"Nouvelle question"}),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        reply = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == chat)
+            .and_then(|c| {
+                c["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["id"] == format!("reply-{message}"))
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        if reply["state"] == "echoed" {
+            break;
+        }
+    }
+}
+
 #[test]
 fn a_hanging_pre_description_never_blocks_the_main_reply() {
     let mut f = Fixture::new(true);

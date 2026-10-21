@@ -5,7 +5,13 @@
 use super::*;
 use grokbot_engine::contracts::{Error, ModelEvent, Result};
 use std::cell::RefCell;
+use std::io::{ErrorKind, Read};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+
+/// Bytes below this never refresh the read deadline. A drip of a few octets
+/// before each `timeout_read` must not keep the socket until `total`.
+const MEANINGFUL_READ: usize = 16;
 
 struct Flight {
     deadlines: Deadlines,
@@ -32,6 +38,255 @@ pub(super) fn flight_deadlines(fallback: Deadlines) -> Deadlines {
             .map(|flight| flight.deadlines)
             .unwrap_or(fallback)
     })
+}
+
+/// Local relay for the worker that is inside `request()`. ureq has no abort,
+/// and `.timeout()` would replace `.timeout_read()` on every body read. The
+/// relay closes the sockets at `stall` unless a real burst arrived, and always
+/// at `total`. Abandon does not close early: Stop must keep the closing slot
+/// until the read deadline, and the HTTP handler must return in under a second.
+pub(super) fn spawn_deadline_proxy() -> Option<std::io::Result<String>> {
+    let limits = FLIGHT.with(|slot| slot.borrow().as_ref().map(|flight| flight.deadlines))?;
+    Some((|| {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        thread::spawn(move || accept_relay(listener, limits));
+        Ok(addr.to_string())
+    })())
+}
+
+fn accept_relay(listener: TcpListener, limits: Deadlines) {
+    let started = Instant::now();
+    let mut served = 0u8;
+    let mut idle = Instant::now();
+    while served < 3 && started.elapsed() < limits.total.saturating_add(Duration::from_secs(2)) {
+        match listener.accept() {
+            Ok((sock, _)) => {
+                served = served.saturating_add(1);
+                let _ = sock.set_nonblocking(false);
+                let _ = serve_relay(sock, limits);
+                idle = Instant::now();
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                if served > 0 && idle.elapsed() > Duration::from_millis(300) {
+                    break;
+                }
+                if served == 0 && started.elapsed() > Duration::from_secs(20) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn serve_relay(mut client: TcpStream, limits: Deadlines) -> std::io::Result<()> {
+    let started = Instant::now();
+    let _ = client.set_nodelay(true);
+    // ureq writes the whole body before it reads a response. Take that body
+    // before dialing upstream: leaving it unread while the origin is polled
+    // makes the client reset, and the origin then sees a truncated JSON body.
+    let (head, body) = read_request(&mut client)?;
+    let target = parse_target(&head)?;
+    let mut upstream = connect_host(&target.host, target.port)?;
+    if target.tunnel {
+        client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    } else {
+        upstream.write_all(&target.prelude)?;
+        if !body.is_empty() {
+            upstream.write_all(&body)?;
+        }
+    }
+    pump(client, upstream, limits, started)
+}
+
+fn read_request(sock: &mut TcpStream) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    sock.set_read_timeout(Some(Duration::from_secs(15)))?;
+    let mut data = Vec::new();
+    let mut buf = [0u8; 8192];
+    let header_end = loop {
+        if data.len() > 64 * 1024 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "en-tête HTTP trop long",
+            ));
+        }
+        let n = read_some(sock, &mut buf)?;
+        data.extend_from_slice(&buf[..n]);
+        if let Some(end) = data.windows(4).position(|mark| mark == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let need = content_length(&data[..header_end]);
+    while data.len() - header_end < need {
+        if data.len() > 32 * 1024 * 1024 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "corps HTTP trop long",
+            ));
+        }
+        let n = read_some(sock, &mut buf)?;
+        data.extend_from_slice(&buf[..n]);
+    }
+    let body = data.split_off(header_end);
+    Ok((data, body))
+}
+
+fn read_some(sock: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match sock.read(buf) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "requête relais interrompue",
+                ));
+            }
+            Ok(n) => return Ok(n),
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn content_length(head: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(head);
+    text.split("\r\n")
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap_or(0))
+        })
+        .unwrap_or(0)
+}
+
+struct RelayTarget {
+    host: String,
+    port: u16,
+    prelude: Vec<u8>,
+    tunnel: bool,
+}
+
+fn parse_target(head: &[u8]) -> std::io::Result<RelayTarget> {
+    let text = String::from_utf8_lossy(head);
+    let request = text.split("\r\n").next().unwrap_or("");
+    let mut parts = request.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    let invalid = || std::io::Error::new(ErrorKind::InvalidData, "requête relais illisible");
+    if method.eq_ignore_ascii_case("CONNECT") {
+        let (host, port) = target.rsplit_once(':').ok_or_else(invalid)?;
+        return Ok(RelayTarget {
+            host: host.to_owned(),
+            port: port.parse().map_err(|_| invalid())?,
+            prelude: Vec::new(),
+            tunnel: true,
+        });
+    }
+    let url = url::Url::parse(target).map_err(|_| invalid())?;
+    let host = url.host_str().ok_or_else(invalid)?.to_owned();
+    let port = url.port_or_known_default().ok_or_else(invalid)?;
+    let path = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    let mut prelude = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
+    if let Some(split) = head.windows(2).position(|mark| mark == b"\r\n") {
+        prelude.extend_from_slice(&head[split + 2..]);
+    }
+    Ok(RelayTarget {
+        host,
+        port,
+        prelude,
+        tunnel: false,
+    })
+}
+
+fn connect_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "hôte introuvable"))?;
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(15))?;
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
+}
+
+fn pump(
+    mut client: TcpStream,
+    mut upstream: TcpStream,
+    limits: Deadlines,
+    started: Instant,
+) -> std::io::Result<()> {
+    client.set_read_timeout(Some(Duration::from_millis(200)))?;
+    upstream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    client.set_write_timeout(Some(Duration::from_secs(15)))?;
+    upstream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let mut last = Instant::now();
+    let mut accrued = 0usize;
+    let mut client_open = true;
+    let mut buf = [0u8; 8192];
+    let result = loop {
+        if started.elapsed() >= limits.total || last.elapsed() >= limits.stall {
+            break Ok(());
+        }
+        // The origin closing ends the response. The client closing does not:
+        // the request body is already forwarded, and the reply may still flow.
+        if transfer(
+            &mut upstream,
+            &mut client,
+            &mut buf,
+            &mut accrued,
+            &mut last,
+        )? {
+            break Ok(());
+        }
+        if client_open
+            && transfer(
+                &mut client,
+                &mut upstream,
+                &mut buf,
+                &mut accrued,
+                &mut last,
+            )?
+        {
+            client_open = false;
+        }
+    };
+    let _ = client.shutdown(Shutdown::Both);
+    let _ = upstream.shutdown(Shutdown::Both);
+    result
+}
+
+fn transfer(
+    from: &mut TcpStream,
+    to: &mut TcpStream,
+    buf: &mut [u8],
+    accrued: &mut usize,
+    last: &mut Instant,
+) -> std::io::Result<bool> {
+    match from.read(buf) {
+        Ok(0) => Ok(true),
+        Ok(n) => {
+            to.write_all(&buf[..n])?;
+            *accrued = accrued.saturating_add(n);
+            if *accrued >= MEANINGFUL_READ {
+                *accrued = 0;
+                *last = Instant::now();
+            }
+            Ok(false)
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[derive(Clone, Copy)]

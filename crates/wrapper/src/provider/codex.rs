@@ -134,11 +134,20 @@ impl Session {
         // ureq 2.12.1 applies `.timeout()` on every body read and ignores
         // `.timeout_read()`. The session loop already enforces `limits.total`.
         // Do not set that global deadline: a silent socket would block until
-        // it, and Stop would wait on it.
-        let mut request = ureq::AgentBuilder::new()
+        // it, and Stop would wait on it. A local relay enforces stall/total
+        // without resetting the stall on a few dripped octets.
+        let mut builder = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
             .timeout_write(Duration::from_secs(15))
-            .timeout_read(limits.stall)
+            .timeout_read(limits.stall);
+        if let Some(proxy) = super::reliable::spawn_deadline_proxy() {
+            let addr = proxy.map_err(|_| Failure::other("Relais local indisponible."))?;
+            builder = builder.max_idle_connections(0).proxy(
+                ureq::Proxy::new(format!("http://{addr}"))
+                    .map_err(|_| Failure::other("Relais local indisponible."))?,
+            );
+        }
+        let mut request = builder
             .build()
             .post(&format!("{}/responses", self.inner.endpoints.api))
             .set("Authorization", &format!("Bearer {token}"));

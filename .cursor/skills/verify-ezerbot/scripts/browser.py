@@ -369,17 +369,23 @@ def command_open(cdp: Cdp, url: str) -> None:
     if not url.startswith("http://127.0.0.1:"):
         raise SystemExit("refus: navigation hors du wrapper de bouclage")
     cdp.call("Page.navigate", {"url": url})
-    deadline = time.time() + 15
+    expression = (
+        "({state: document.readyState, href: location.href, "
+        "ready: !!document.getElementById('home-link')})"
+    )
+    deadline = time.time() + 20
+    last = None
     while time.time() < deadline:
         result = cdp.call(
             "Runtime.evaluate",
-            {"expression": "document.readyState", "returnByValue": True},
+            {"expression": expression, "returnByValue": True},
             timeout=5,
         )
-        if result.get("result", {}).get("value") == "complete":
+        last = result.get("result", {}).get("value")
+        if isinstance(last, dict) and str(last.get("href", "")).startswith(url) and last.get("ready") and last.get("state") in ("interactive", "complete"):
             return
         time.sleep(0.1)
-    raise SystemExit("la page n'a pas fini de charger")
+    raise SystemExit(f"la page n'a pas fini de charger: {last}")
 
 
 def command_screenshot(cdp: Cdp, state: dict, path: Path) -> None:

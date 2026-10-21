@@ -308,19 +308,19 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"sphère inconnue: {', '.join(unknown)}")
     run = load_run(evidence)
-    browser(evidence, "open", run["url"])
-    wait_js(
-        evidence,
-        """() => {
-          const editor = document.querySelector(".gb-editor");
-          const badge = document.getElementById("mode-badge-text")?.textContent || "";
-          return editor && badge === "ChatGPT" ? {badge} : null;
-        }""",
-        "Ezerbot n'est pas connecté au faux OpenAI",
-        timeout=25,
-    )
     findings = load_findings(evidence)
     try:
+        browser(evidence, "open", run["url"])
+        wait_js(
+            evidence,
+            """() => {
+              const editor = document.querySelector(".gb-editor");
+              const badge = document.getElementById("mode-badge-text")?.textContent || "";
+              return editor && badge === "ChatGPT" ? {badge} : null;
+            }""",
+            "Ezerbot n'est pas connecté au faux OpenAI",
+            timeout=25,
+        )
         for sphere in spheres:
             drive_sphere(evidence, sphere, findings)
     except SystemExit as error:

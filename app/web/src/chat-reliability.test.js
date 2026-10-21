@@ -64,6 +64,19 @@ test("a group sign-in card never promises a retry, even after account changes", 
   }
 });
 
+test("a connected account card is a status, not a red alert", () => {
+  const connected = signInCardState({ message: { error_kind: "signin" }, providerConnected: true });
+  assert.equal(connected.title, "Compte ChatGPT connecté");
+  assert.equal(connected.alert, false);
+  const offline = signInCardState({ message: { error_kind: "signin" }, providerConnected: true, engineConnected: false });
+  assert.equal(offline.alert, false);
+  assert.equal(signInCardState({ message: { error_kind: "signin" } }).alert, true);
+  assert.equal(signInCardState({ message: { error_kind: "signin_expired" } }).alert, true);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /className=\{`gb-pending\$\{view\.alert \? " gb-problem" : ""\}`\}/);
+  assert.match(source, /\{view\.alert \? <TriangleAlert \/> : <Check \/>\}/);
+});
+
 test("direct retries are enabled only after both account and local engine are available", () => {
   const message = { error_kind: "signin" };
   const missing = signInCardState({ message });

@@ -38,6 +38,7 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
     retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez-vous via Codex avant de réessayer." : "Réessayer cette réponse",
     signInDisabled: !engineConnected,
     showSignIn: !providerConnected,
+    alert: !providerConnected,
   };
 }
 

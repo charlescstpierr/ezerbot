@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 import { floatingConversations, floatingReply, floatingPendingRequests, floatingHasMore, resizeFloatingInput } from "./floating-view.js";
+import { floatingFailureState } from "./connection-view.js";
 
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.events = {}; this.value = "cmd+option+space"; }
@@ -108,10 +109,32 @@ test("overflow hint disappears at the bottom and tolerates fractional pixel roun
   assert.equal(floatingHasMore(null),false);
 });
 
+test("a floating panel without a session is not titled as a failed answer", () => {
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  assert.equal(expired.alert, false);
+  assert.equal(expired.title, "Votre session ChatGPT a expiré");
+  assert.equal(expired.detail, "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.");
+  const missing = floatingFailureState({ state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." });
+  assert.equal(missing.alert, false);
+  assert.equal(missing.title, "Connexion ChatGPT requise");
+  const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });
+  assert.equal(failed.alert, true);
+  assert.equal(failed.title, "La réponse a échoué.");
+  assert.equal(failed.detail, "Panne");
+  const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
+  assert.equal(ping.alert, true);
+  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
+  assert.equal(floatingFailureState({ state: "echoed", error_kind: "signin" }), null);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /floatingFailureState\(reply\)/);
+  assert.match(source, /failure\.alert \? " floating-failure" : ""/);
+  assert.match(source, /<strong>\{failure\.title\}<\/strong>/);
+});
+
 test("compact layout keeps decisions outside the scroll region and disabled actions visibly muted", () => {
   const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
   assert.match(source, /<\/div>\s*\{requests\.map\(\(request\) => <div className="floating-notice"/);
-  assert.match(source, /floating-notice floating-failure/);
+  assert.match(source, /floating-notice\$\{failure\.alert \? " floating-failure" : ""\}/);
   assert.match(source, /!inNativePanel && <button className="icon-button floating-close"/);
   assert.ok(!source.includes("reply?.body || reply?.error"));
   assert.match(source, /live && reply\?\.body && <small>/);

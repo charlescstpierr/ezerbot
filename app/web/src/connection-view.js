@@ -67,6 +67,17 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
 
+export function floatingFailureState(reply) {
+  if (reply?.state !== "failed") return null;
+  const expired = reply.error_kind === "signin_expired";
+  const signin = expired || reply.error_kind === "signin";
+  return {
+    title: expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
+    alert: !signin,
+    detail: presentedFailureText(reply.error) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
+  };
+}
+
 export function visibleNotice(message) {
   return message.state !== "streaming" && message.notice?.startsWith("Préparation d’un outil") ? null : message.notice;
 }

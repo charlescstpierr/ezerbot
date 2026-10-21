@@ -22,6 +22,8 @@ La lecture du mémo prend une vitesse entre 0,5 et 2. La transcription est cliqu
 
 ## Décisions
 
+La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences. La minute maximale et l’audio qui reste sur le Mac sont la règle déjà livrée, pas une preuve Grok.
+
 1. **La vitesse est celle du mémo, dans la plage déjà décidée.** Le contrôle va de 0,5 à 2. Une valeur hors plage est refusée et laisse la vitesse précédente. La plage est celle de la voix du bot (#68). Le mémo ne gagne pas une autre échelle.
 2. **Le mot est un instant.** Chaque mot affiché a un début. Le clic lance la lecture à cet instant. Sans horodatage pour un mot, le clic ne saute pas et la phrase le dit.
 3. **Le mémo reste local et court.** L’audio ne part pas vers un serveur. La minute maximale, la dictée, le mode voix, l’appel et Recall ne changent pas. Cette lecture ne devient pas l’appel vocal.
@@ -67,6 +69,15 @@ La tranche commence par un test rouge, puis le code qui le rend vert. Le juge vi
 - **Un clic sans temps donnerait un saut au début.** La décision 2 l’interdit : le mot sans temps n’est pas une cible. Le test injecte un mot sans début et vérifie que la position ne change pas.
 - **La vitesse du bot et celle du mémo pourraient diverger.** La plage unique 0,5–2 et le bloquant #68 sont la parade. Le juge écoute le mémo après avoir réglé la voix du bot.
 - **Confondre mémo et appel.** L’appel transmet l’audio le temps de la session. Le mémo non. Le parcours 1 vérifie que l’écran du mémo ne reprend pas la phrase de l’appel.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, `grokbot-rea.md` §e et `tickets-parite.md` T23. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
+
+- **Vitesse.** [P] `SetGrokBotAgentVoiceRequest` porte `voice_speed` dans `electron-main/proto.cjs`. [P] `TextToSpeechRequest` porte `speed` dans le même fichier (rea §e). [P] les vitesses vont de 0,5x à 2x. La plage du mémo est celle déjà décidée pour la voix du bot (#68).
+- **Saut au mot.** [P] `TextToSpeechRequest` porte `with_timestamps`. rea §e : les horodatages par mot permettent de sauter à un mot du mémo. [I] le gestionnaire de clic n’est pas un symbole cité. T23 l’infère de ce champ et de cette phrase.
+- **Mémo local.** [P] le drapeau `sand_voice_memos` est activé par défaut. [P] la chaîne « Playing voice memos needs Cursor Pro » existe. Ce lot ne copie pas cette restriction. [I] « l’audio reste seulement sur le Mac » n’est pas une preuve Grok : la synthèse de Grok est une requête. C’est la règle Ezerbot de la spec des réunions, mémo local, une minute.
+- **Dictée, appel, Recall.** Les symboles existent dans rea §e (`TranscribeAudioRequest`, `MintSandVoiceCallSecretResponse`, `recall_bot_id` en §a). Ce complément ne les reprend pas.
 
 ## Tranches
 

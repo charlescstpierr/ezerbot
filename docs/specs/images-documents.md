@@ -30,7 +30,7 @@ La vidéo, la retouche et le partage public d’une Page restent dehors. Les dé
 
 ## Décisions
 
-Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’est rouverte.
+Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’est rouverte. La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences.
 
 1. **La génération n’a pas de carte d’approbation.** Le bot appelle `generate_image` quand la phrase le justifie. L’indicateur est « Génération d’une image… ». L’image remplace l’indicateur. Un refus `content_safety_blocked` ou un modèle restreint devient une phrase française, une fois, sans nouvel appel. Sans clé OpenAI, la carte « Connecte ton compte OpenAI » s’affiche et le fournisseur n’est pas appelé. La clé reste au trousseau. Elle ne va pas dans le fil, les journaux, ni le contexte du modèle.
 2. **Les références et le cadre sont ceux de Grok Bot.** `reference_image_paths` désigne des images déjà jointes au fil. `aspect_ratio` vaut 1:1, 16:9, 9:16, 4:3 ou 3:4. Un autre cadre est refusé en français, sans appel. Pas de masque, pas de retouche, pas de variation.
@@ -133,6 +133,19 @@ Le juge coche ces parcours dans l’app, avec le compte OpenAI de Charles capabl
 - **Le PDF change de police.** Les accents qui passaient par WinAnsi doivent encore passer. Le parcours 6 et le test d’extraction sont là pour cela. Un glyphe hors police échoue encore en français.
 - **La bibliothèque peut être volumineuse.** Le plafond de 20 Mo par fichier et la recherche lexicale locale évitent d’envoyer tous les fichiers à chaque tour. Un fichier retiré doit disparaître du rappel au fil suivant : le parcours 8 le coche.
 - **L’enfant et la vie privée.** `selected_images` ne prend que les images du fil d’origine. Le test du parcours 4 couvre l’autre fil.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, extraction asar en lecture seule. `grokbot-rea.md` §d et `tickets-parite.md` R1, R3, R4. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
+
+- **Génération sans carte.** [P] `GenerateImageRequestResponse` (`approved`, `rejected`) n’est qu’un proto hérité inutilisé dans `electron-main/proto.cjs`. Le renderer n’a que « Generating a photo » dans `renderer/assets/index.eager-app-*.js` (R1). [P] outil `GenerateImageArgs` (`description`, `file_path` optionnel, `reference_image_paths`, `aspect_ratio`) dans `electron-main/proto.cjs`. [P] RPC `RunGenerateImage`, requête `RunGenerateImageRequest` (`description`, `reference_images`, `model_id`, `max_mode`, `aspect_ratio`). [P] erreurs `RunGenerateImageError` : `model_restricted`, `content_safety_blocked` (rea §d). L’indicateur « Génération d’une image… », la carte « Connecte ton compte OpenAI », la clé au trousseau et l’absence de nouvel appel sont le choix Ezerbot de T1, pas des chaînes extraites.
+- **Modèle.** [P] aucune occurrence de `imagine`, `grok-2-image`, `flux`, `gpt-image` ni `images/generations` (rea §d). [P] l’avatar part de `modelId` `SAND_DEFAULT_MODEL_ID`, où `Pp="grok-4.5"` dans `electron-main/main-core.cjs`, avec `aspectRatio:"1:1"`. [I] le modèle d’image de Grok est probablement Grok Imagine. gpt-image et la clé OpenAI de Charles sont le choix Ezerbot.
+- **Références et cadre.** [P] `reference_image_paths` et `reference_images` (rea §d). [P] la seule valeur de cadre citée est `aspectRatio:"1:1"`, pour l’avatar. [I] la liste fermée 1:1, 16:9, 9:16, 4:3, 3:4 est celle de T2. L’extrait ne cite pas ces quatre autres rapports.
+- **Galerie.** [P] `gallery`, `galleryIndex`, `captions` dans `renderer/assets/index.eager-app-BBYQQe1M.js`, plus « Enregistrer l'image… » et « Copier l'image » (rea §d). [I] « aucune page de galerie dédiée n’a été trouvée » est une absence dans l’extrait, pas une preuve exhaustive. Les flèches et le clavier ne sont pas des symboles cités. [P] pas de retouche : pas de `inpaint`, `edit_image` ni `variation` hors CSS. `chunk-agent-avatar-editor-*.js` et l’IPC `generateAgentAvatarImage` concernent l’avatar du bot, pas la galerie du fil.
+- **Vidéo.** [P] drapeau `grok_bot_generate_video`, défaut `!1` (rea §d). Hors périmètre. L’extrait d’images ne nomme pas d’autre fichier pour ce drapeau.
+- **Image à l’enfant.** [P] le schéma prévoit `SubagentArgs.selected_context.selected_images` dans `local-exec-daemon/main.cjs` (R3). [I] que le serveur transmette vraiment les octets n’est pas tranchable dans le client : l’orchestrateur est serveur. T4 copie le schéma, octets ou chemin plus type MIME, pas seulement le nom.
+- **Page.** [P] `WriteCanvasArgs` et `GetCanvasPayloadResponse` dans `electron-main/proto.cjs`. Skill « Cursor Canvas » dans `electron-main/main-app.cjs` (R4). L’extrait dit une app React vivante, compilée, renommable, partageable. [I] le fichier local `.page.tsx`, le diagnostic ligne et caractère rendu au bot, « Ouvrir en pleine page » et la liste « Pages » sont la précision de T24. Ces libellés ne sont pas des chaînes extraites. Pas de lien public : choix Ezerbot, Ezerbot n’a pas de serveur.
+- **PDF et bibliothèque.** Aucun symbole de police PDF, d’emoji, de tableau ni de bibliothèque par bot dans `grokbot-rea.md` ni dans R1, R3, R4. [I] T5 et T6 reprennent les écarts DOC-2 et DOC-3 du tableau de parité. Courier et WinAnsi sont le code Ezerbot actuel, pas une chaîne Grok. Le plafond de 20 Mo est celui déjà en vigueur pour une pièce jointe.
 
 ## Tranches
 

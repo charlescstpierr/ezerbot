@@ -200,7 +200,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .bot-menu { width: min(290px, calc(100% - 24px)); }
 .bot-menu button { align-items: center; }
 .bot-menu .bot-avatar { width: 24px; height: 21px; flex: 0 0 auto; }
-.bot-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-menu button > span:not(.bot-avatar), .bot-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-menu button > .icon { flex: 0 0 auto; }
 .bot-menu .bot-menu-action .icon { visibility: visible; margin-top: 0; color: var(--muted); }
 .bot-menu { overflow: visible; max-height: none; }
 .bot-menu-list { max-height: 236px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }

@@ -159,6 +159,28 @@ def verify_ui_regressions():
   window.GrokbotChat.renderThread(formHost, {messages:[]});
   await until(() => !formHost.querySelector('[data-card-kind]'));
   formHost.remove();
+  // Composer bot menu: maximal names stay inside it, focus survives a refresh and returns on Escape.
+  const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
+  await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
+  await window.GrokbotPanels.refresh();
+  choose(longName); $('composer-bot').click();
+  const menuBox = $('bot-menu').getBoundingClientRect();
+  check('bot menu keeps maximal names and actions inside the panel', [...$('bot-menu').querySelectorAll('button')].every(button => {
+    const box = button.getBoundingClientRect();
+    return box.right <= menuBox.right + 0.5 && [...button.children].every(child => child.getBoundingClientRect().right <= box.right + 0.5);
+  }));
+  check('opened bot menu focuses the chosen bot', document.activeElement?.getAttribute('aria-checked') === 'true');
+  await window.GrokbotPanels.refresh();
+  check('bot menu refresh keeps focus on the same option', !$('bot-menu').hidden && document.activeElement?.getAttribute('aria-checked') === 'true');
+  const menuItems = () => [...$('bot-menu').querySelectorAll('button')];
+  const before = menuItems().indexOf(document.activeElement);
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown', bubbles:true, cancelable:true}));
+  check('ArrowDown moves to the next menu item', menuItems().indexOf(document.activeElement) === (before + 1) % menuItems().length);
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'End', bubbles:true, cancelable:true}));
+  check('End moves to the last menu item', document.activeElement === menuItems().at(-1));
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}));
+  check('Escape closes the bot menu and returns focus to its trigger', $('bot-menu').hidden && document.activeElement === $('composer-bot'));
+  choose('Ezerbot');
   const first = await send('Qui me répond ?');
   check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');
   check('reply and conversation page title use Ezerbot', $('messages').innerText.includes('Ezerbot') && document.title.endsWith(' · Ezerbot'));
@@ -197,9 +219,11 @@ def verify_ui_regressions():
   window.fetch = originalFetch;
   const inFlightConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
   check('in-flight send keeps the original recipient', inFlightConversation.bot_id === 'grokbot');
-  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null);
+  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null && localStorage.getItem('grokbot.draft.new.document') === null);
   check('in-flight edits are not appended to the submitted message', inFlightConversation.messages.some(item => item.role === 'user' && item.body === 'Choix figé pendant l’envoi'));
-  cmdN(); await type('Message à restaurer');
+  cmdN();
+  check('a draft transferred to its thread does not reappear in a new conversation', empty() && localStorage.getItem('grokbot.draft.new.document') === null);
+  await type('Message à restaurer');
   const beforeFailure = (await saved()).conversations.length;
   let failCreation;
   const failureGate = new Promise(resolve => { failCreation = resolve; });
@@ -288,7 +312,7 @@ def verify_ui_regressions():
   };
   await stageImage(); choose('Rédacteur');
   check('pending image upload already pins the displayed bot', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && Boolean(document.querySelector('.attachment-chip')));
-  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez l’image jointe') && $('toast').textContent.includes('Ezerbot'));
+  check('blocked switch explains how to retain or remove the image', $('toast').textContent.includes('Retirez les pièces jointes') && $('toast').textContent.includes('Ezerbot'));
   allowUpload();
   await until(() => localStorage.getItem('grokbot.selected') && document.querySelector('.attachment-chip')?.dataset.status !== 'pending');
   window.fetch = originalFetch;
@@ -298,7 +322,7 @@ def verify_ui_regressions():
   document.querySelector('.add-bot').click(); $('bot-name').value = 'Bot image'; $('bot-form').requestSubmit();
   await until(() => !$('bot-dialog').open);
   check('creating a bot also retains staged image and current recipient', chip() === 'Ezerbot' && $('workspace-label').textContent === 'Ezerbot' && localStorage.getItem('grokbot.bot') === 'grokbot' && localStorage.getItem('grokbot.selected') === imageConversationId && document.querySelectorAll('.attachment-chip').length === 1);
-  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez l’image jointe'));
+  check('new-bot toast explains why image recipient is retained', $('toast').textContent.includes('Bot image est prêt') && $('toast').textContent.includes('Retirez les pièces jointes'));
   $('composer-form').requestSubmit();
   await until(() => !$('new-chat').disabled);
   const imageState = await saved();

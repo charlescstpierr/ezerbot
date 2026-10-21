@@ -493,8 +493,11 @@
   }
   function restoreDraftDocument() {
     try {
+      const text = readPreference(draftKey(), null);
+      // A rich document without its text twin is an orphan from an earlier transfer.
+      if (text === null) { removePreference(`${draftKey()}.document`); return; }
       const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
-      if (document && readPreference(draftKey(), "") === ui.input.value) ui.input.document = document;
+      if (document && text === ui.input.value) ui.input.document = document;
     } catch { /* Plain text remains usable when an older draft has no rich document. */ }
   }
 
@@ -663,18 +666,24 @@
   }
 
   function closeBotMenu() {
+    const hadFocus = $("bot-menu").contains(document.activeElement);
     $("bot-menu").hidden = true;
     $("bot-menu").replaceChildren();
     $("composer-bot").setAttribute("aria-expanded", "false");
+    if (hadFocus) $("composer-bot").focus();
   }
 
   function renderBotMenu() {
     const menu = $("bot-menu");
     if (menu.hidden) return;
+    // Un rafraîchissement remplace les boutons : garder l'option focalisée et le défilement.
+    const focusedKey = menu.contains(document.activeElement) ? document.activeElement.dataset.menuKey : null;
+    const scrollTop = menu.querySelector(".bot-menu-list")?.scrollTop || 0;
     const chosen = currentBot();
     const options = liveBots().map((bot) => {
       const button = element("button");
       button.type = "button";
+      button.dataset.menuKey = `bot:${bot.id}`;
       button.setAttribute("role", "menuitemradio");
       button.setAttribute("aria-checked", String(bot.id === chosen?.id));
       const copy = element("span", "", bot.name);
@@ -686,6 +695,7 @@
     const action = (glyph, label, run) => {
       const button = element("button", "bot-menu-action");
       button.type = "button";
+      button.dataset.menuKey = `action:${glyph}`;
       button.setAttribute("role", "menuitem");
       button.append(icon(glyph), element("span", "", label));
       button.addEventListener("click", () => { closeBotMenu(); run(); });
@@ -695,6 +705,8 @@
     const list = element("div", "bot-menu-list");
     list.append(...options);
     menu.replaceChildren(element("h4", "", "Avec qui ?"), list, element("div", "menu-divider"), ...actions, action("plus", "Nouveau bot", () => openBotDialog(null)));
+    list.scrollTop = scrollTop;
+    if (focusedKey) [...menu.querySelectorAll("button")].find((button) => button.dataset.menuKey === focusedKey)?.focus({ preventScroll: true });
     $("composer-bot").setAttribute("aria-expanded", "true");
   }
 
@@ -1234,6 +1246,7 @@
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
+      removePreference(`${previousDraftKey}.document`);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);
@@ -1530,6 +1543,15 @@
     const checked = $("bot-menu").querySelector("[aria-checked=true]");
     checked?.scrollIntoView({ block: "nearest" });
     checked?.focus({ preventScroll: true });
+  });
+  $("bot-menu").addEventListener("keydown", (event) => {
+    const items = [...$("bot-menu").querySelectorAll("button")];
+    const index = items.indexOf(document.activeElement);
+    const last = items.length - 1;
+    const target = { ArrowDown: index >= last ? 0 : index + 1, ArrowUp: index <= 0 ? last : index - 1, Home: 0, End: last }[event.key];
+    if (target === undefined || !items.length) return;
+    event.preventDefault();
+    items[target].focus();
   });
   $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);

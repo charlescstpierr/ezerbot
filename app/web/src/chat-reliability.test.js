@@ -106,6 +106,27 @@ test("an expired session body states the expiry instead of the generic sign-in c
   assert.match(reconnected.copy, /Réessayez pour obtenir la réponse/);
 });
 
+test("a group failure does not tell the reader to retry when no retry button is offered", () => {
+  const message = { error_kind: "other", error: "La réponse a dépassé le délai maximal. Réessayez.", payload: { turn_id: "t" } };
+  const view = replyProblemState(message, { isGroup: true });
+  assert.equal(view.retry, false);
+  assert.equal(view.error, "La réponse a dépassé le délai maximal. Envoyez un nouveau message.");
+  assert.equal(view.advice, null);
+  const direct = replyProblemState({ error_kind: "other", error: message.error });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, message.error);
+  const task = replyProblemState({ error_kind: "other", error: message.error }, { isTask: true });
+  assert.equal(task.retry, false);
+  assert.match(task.error, /Poursuivez dans la conversation principale\.$/);
+  assert.equal(task.advice, null);
+  const local = replyProblemState({ error_kind: "local_connection", error: "La connexion au moteur local est interrompue. La réponse peut avoir continué : réessayez pour retrouver son état, sans renvoyer votre question." }, { isGroup: true });
+  assert.equal(local.retry, true);
+  assert.match(local.error, /réessayez pour retrouver son état/);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /<p>\{error\}<\/p>/);
+  assert.ok(!source.includes("<p>{message.error}</p>"));
+});
+
 test("deduplicating group advice does not accidentally enable forbidden regeneration", () => {
   const group = replyProblemState({ error_kind: "other", error: "Reconnectez-vous et envoyez un nouveau message." }, { isGroup: true });
   assert.equal(group.advice, null);

@@ -41,14 +41,23 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   };
 }
 
+export function presentedFailureText(error, { retry = true, replacement = "Envoyez un nouveau message." } = {}) {
+  const text = error || "";
+  if (!retry && /Réessayez\.\s*$/.test(text)) return text.replace(/Réessayez\.\s*$/, replacement);
+  return text;
+}
+
 export function replyProblemState(message, { isGroup = false, isTask = false, engineConnected = true } = {}) {
   const signin = ["signin", "signin_expired"].includes(message.error_kind);
   const local = message.error_kind === "local_connection";
   const group = (isGroup || Boolean(message.payload?.turn_id)) && !signin && !local;
-  const advice = local || signin || message.error?.toLocaleLowerCase("fr").includes("envoyez un nouveau message") ? null
+  const retry = local || (!group && !isTask && message.error_kind !== "context_budget");
+  const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
+  const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
+  const advice = local || signin || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
     : group ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
-  return { signin, advice, retry: local || (!group && !isTask && message.error_kind !== "context_budget"), retryDisabled: !engineConnected,
+  return { signin, advice, error, retry, retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
 

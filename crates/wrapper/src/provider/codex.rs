@@ -382,8 +382,18 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
     }
     object.insert("include".into(), json!(["reasoning.encrypted_content"]));
     object.entry("text").or_insert(json!({}))["verbosity"] = json!("low");
-    object.insert("tool_choice".into(), json!("auto"));
-    object.insert("parallel_tool_calls".into(), json!(true));
+    // Codex rejects tool_choice when the call has no tools (connection probe, titles).
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+    {
+        object.insert("tool_choice".into(), json!("auto"));
+        object.insert("parallel_tool_calls".into(), json!(true));
+    } else {
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+    }
     // Le backend Codex refuse ces champs, même dans les petits appels internes.
     object.remove("max_output_tokens");
     object.remove("temperature");
@@ -467,7 +477,29 @@ mod tests {
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
         assert_eq!(body["tools"][0]["name"], "remember");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["prompt_cache_key"], "conversation");
         assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn body_omits_tool_choice_when_the_call_has_no_tools() {
+        let mut body = json!({
+            "model": DEFAULT_MODEL,
+            "instructions": "Test de connexion. Réponds seulement OK.",
+            "input": [{"role": "user", "content": "Réponds seulement OK."}],
+            "tool_choice": "required",
+            "parallel_tool_calls": true
+        });
+        prepare_body(&mut body).unwrap();
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+        assert!(body.get("tools").is_none());
+
+        let mut empty = json!({"model": DEFAULT_MODEL, "instructions": "Consignes", "tools": []});
+        prepare_body(&mut empty).unwrap();
+        assert!(empty.get("tool_choice").is_none(), "{empty}");
+        assert!(empty.get("parallel_tool_calls").is_none(), "{empty}");
     }
 }

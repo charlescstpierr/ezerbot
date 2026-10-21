@@ -13,6 +13,13 @@ pub struct Provider {
 /// Small streamed probe. No output cap: a reasoning model would spend 16 tokens
 /// before any visible answer and look disconnected. Minimal effort is sent only
 /// when this model advertises it.
+fn probe_model(codex: bool, models: &[Model]) -> String {
+    models
+        .first()
+        .map(|model| model.slug.clone())
+        .unwrap_or_else(|| if codex { codex::DEFAULT_MODEL } else { "gpt-5" }.into())
+}
+
 fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
     let mut body = json!({
         "model": model,
@@ -205,16 +212,9 @@ impl Provider {
             let mut responded = false;
             let mut capped = false;
             let models = session.models();
-            let chosen = models.first();
-            let model = chosen.map(|model| model.slug.clone()).unwrap_or_else(|| {
-                if session.inner.codex {
-                    "gpt-5.5"
-                } else {
-                    "gpt-5"
-                }
-                .into()
-            });
-            let efforts = chosen
+            let model = probe_model(session.inner.codex, &models);
+            let efforts = models
+                .first()
                 .map(|model| model.efforts.clone())
                 .unwrap_or_default();
             let result = session.reliable_stream(
@@ -441,5 +441,21 @@ mod tests {
             }],
         );
         assert!(other.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn empty_codex_catalog_probes_the_supported_default_not_a_retired_model() {
+        assert_eq!(probe_model(true, &[]), codex::DEFAULT_MODEL);
+        assert_ne!(probe_model(true, &[]), "gpt-5.5");
+        assert_eq!(probe_model(false, &[]), "gpt-5");
+        let listed = [Model {
+            slug: "gpt-6-sol".into(),
+            name: "GPT-6 Sol".into(),
+            description: String::new(),
+            efforts: vec![],
+            default_effort: None,
+            tiers: vec![],
+        }];
+        assert_eq!(probe_model(true, &listed), "gpt-6-sol");
     }
 }

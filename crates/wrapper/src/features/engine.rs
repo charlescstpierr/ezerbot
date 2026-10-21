@@ -1083,6 +1083,15 @@ fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
                 if status == RunStatus::Interrupted
                     && super::multibot::is_group(ctx.connection, &run.conversation_id)
                 {
+                    // The remote attempt is not reissued. Pending calls still need
+                    // a result, or the card stays open and replay drops the call.
+                    if let Ok(mut services) = Services::new(ctx) {
+                        let _ = run_loop::settle_interrupted_without_resume(
+                            ctx.connection,
+                            &mut services,
+                            &run.run_id,
+                        );
+                    }
                     continue;
                 }
                 if super::multibot::managed(ctx.connection, &run.run_id) {

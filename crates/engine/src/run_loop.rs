@@ -374,6 +374,22 @@ fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record results for calls an interrupted run will not resume. Status stays
+/// interrupted and no model request is made.
+pub fn settle_interrupted_without_resume(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    run_id: &str,
+) -> Result<()> {
+    with_run_events(conn, services, run_id, |conn, _| {
+        let run = store::required(conn, run_id)?;
+        if run.status != RunStatus::Interrupted {
+            return Ok(());
+        }
+        settle_pending(conn, run_id, "interrupted")
+    })
+}
+
 /// Stop/regenerate entry point. Settle every outstanding call and deliver the
 /// cancellation reaction in the same transaction. External writers must use
 /// this instead of model::cancel; use with_run_events for other lifecycle writes.

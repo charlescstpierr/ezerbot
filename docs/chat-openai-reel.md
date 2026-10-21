@@ -65,3 +65,9 @@ Build release de cette branche, avec son compte ChatGPT habituel. Pas de `GROKBO
 5. Troisième message : `Quel est le nombre premier qui suit 10 ? Réponds seulement par le nombre.`
    - Réponse attendue : `11`.
 6. Si une bulle contient un texte qui ne répond pas à la question, copier le SSE brut du POST correspondant (types d'événements, `item_id`, `phase`, deltas) et le modèle du corps. Ne pas juger la connexion au seul badge si l'étape 2 n'a pas montré un `response.completed`.
+
+## Piste « Réponse factice terminée. »
+
+Cette phrase n’existe que dans le serveur de test `crates/wrapper/tests/chat_reliability.rs` (bras par défaut, file de fautes vide) et dans le test unitaire qui le reproduit. L’état `echoed` est l’état normal d’une réponse terminée (`engine.rs`, projection `run_reply`). Aucun binaire de production n’écrit cette phrase.
+
+Le test `four_blocked_reads_accept_another_turn_once_the_read_timeout_elapses` peut pourtant la voir en environ 0,2 s à la place de `failed`. Quatre lectures sont abandonnées, mais `closing` n’était incrémenté que lorsque le fil de lecture se réveillait. Un cinquième envoi parti avant ce réveil atteignait le serveur. Avec la file vide, le serveur de test répondait tout de suite par « Réponse factice terminée. » et `response.completed`, donc `echoed`. En production, le même créneau n’invente pas de texte : il envoyait la question à OpenAI et affichait la réponse du modèle. Le créneau est fermé : `cancel_run` compte le socket tout de suite, sur la session qui streame. Le tour suivant échoue avec « Les connexions précédentes se ferment encore. Réessayez dans une minute. » et aucun POST de chat n’est envoyé.

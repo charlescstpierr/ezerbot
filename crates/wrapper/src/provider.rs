@@ -240,6 +240,10 @@ struct Inner {
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Lectures encore ouvertes, pour les compter dès l'annulation.
+    live_reads: Mutex<HashMap<String, Arc<Mutex<reliable::Settled>>>>,
+    #[cfg(test)]
+    paused_turns: Mutex<std::collections::HashSet<String>>,
     interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
@@ -510,6 +514,9 @@ impl Session {
                     cancel: None,
                 }),
                 runs: Mutex::new(HashMap::new()),
+                live_reads: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                paused_turns: Mutex::new(std::collections::HashSet::new()),
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),

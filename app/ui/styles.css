@@ -528,4 +528,17 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .mascot-stage { height: 118px; }
   .mascot-greeting { width: 132px; height: 116px; }
 }
+@media (max-height: 560px) and (min-width: 761px) {
+  .welcome { margin-top: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 4px; }
+  .plan-banner { flex-wrap: nowrap; align-items: center; margin-bottom: 6px; padding: 6px 8px; }
+  .plan-banner > span { flex: 1 1 auto; min-width: 0; }
+  .mascot-stage { height: 40px; margin-bottom: 0; }
+  .mascot-greeting { width: 46px; height: 40px; }
+  .welcome-eyebrow { margin-bottom: 1px; }
+  .welcome h2 { font-size: 20px; margin-bottom: 1px; }
+  .welcome-description { margin-bottom: 6px; font-size: 11px; line-height: 1.35; }
+  .suggestion { padding: 5px 8px; gap: 2px; }
+  .suggestion strong { margin-bottom: 0; }
+  .suggestion-grid { gap: 4px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

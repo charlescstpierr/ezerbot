@@ -27,13 +27,14 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "", workspace = "", welcome = false } = {}) {
   const speedPill = speed
     ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
   const tools = pills
     ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>${speedPill}`
     : "";
+  const welcomeBlock = welcome ? `<section class="chat-scroll" id="chat-scroll"><div class="welcome" id="welcome"><div class="mascot-stage"><button class="mascot-greeting" type="button"></button></div><p class="welcome-eyebrow">UN PETIT COMPAGNON, DE GRANDES IDÉES</p><h2>Une idée en tête<span> ?</span></h2><p class="welcome-description">Posez-la ici. On lui fait une place.</p><div class="plan-banner" id="plan-banner"><span>Connectez votre compte ChatGPT via Codex pour obtenir de vraies réponses.</span><button class="chatgpt-button" type="button">Se connecter via Codex</button></div><div class="suggestion-grid"><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Faire grandir une idée</strong><small>Du premier déclic au prochain pas</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Trouver les bons mots</strong><small>Un texte clair, à votre manière</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Explorer du code</strong><small>Comprendre, construire, affiner</small></span></button><button class="suggestion" type="button"><span class="suggestion-icon"></span><span><strong>Suivre sa curiosité</strong><small>Une bonne question ouvre des portes</small></span></button></div></div></section>` : "";
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">
 <head>
@@ -62,7 +63,9 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         <button class="tool-pill" type="button">Membres</button>
       </div>
     </header>
+    ${welcomeBlock}
     <div class="composer-dock"><div class="composer-area"><form class="composer" id="composer-form">
+      ${welcome ? `<div class="composer-input"></div>` : ""}
       <div class="composer-bottom">
         <span class="composer-model" id="composer-model">
           <button class="attachment-choose" type="button" aria-label="Joindre un fichier" title="Joindre un fichier"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
@@ -84,7 +87,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         </div>
         <button class="send-button" id="send-button" type="button" aria-label="Envoyer le message" title="Envoyer le message"><svg class="icon"><use href="#i-send"/></svg></button>
       </div>
-    </form></div></div>
+    </form>${welcome ? `<div class="composer-caption"><span id="composer-hint">Entrée pour envoyer</span><span class="simulation-note">Connexion ChatGPT requise</span></div>` : ""}</div></div>
   </main>
   <pre id="qa-result"></pre>
   <script>
@@ -160,6 +163,16 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         speedFits: !speedLabel || speedLabel.scrollWidth <= speedLabel.clientWidth + 1,
         modelInside: !modelLabel || contained(modelBox, modelButtonBox),
         modelBeforeEffort: !modelButtonBox || !effortButtonBox || modelButtonBox.right <= effortButtonBox.left + 0.5,
+        welcome: (() => {
+          const scroll = document.getElementById("chat-scroll");
+          const banner = document.getElementById("plan-banner");
+          if (!scroll || !banner) return null;
+          const parent = boxOf(scroll);
+          return {
+            banner: contained(boxOf(banner), parent),
+            suggestions: [...document.querySelectorAll(".suggestion")].map((node) => contained(boxOf(node), parent)),
+          };
+        })(),
         titleText: document.getElementById("conversation-title").textContent,
         titleClient: document.getElementById("conversation-title").clientWidth,
         titleScroll: document.getElementById("conversation-title").scrollWidth,
@@ -429,6 +442,16 @@ test("Notifications, Créer un groupe and Membres keep their height at 820, 910 
         );
       }
     }
+  }
+});
+
+test("the connection card and suggestions stay visible at 820×560", async () => {
+  const report = await measure(820, 560, "Ezerbot", { pills: false, welcome: true });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} viewport=${theme.viewport} banner=${theme.welcome?.banner} suggestions=${JSON.stringify(theme.welcome?.suggestions)}`;
+    assert.equal(theme.welcome.banner, true, where);
+    assert.equal(theme.welcome.suggestions.length, 4, where);
+    assert.equal(theme.welcome.suggestions.every(Boolean), true, where);
   }
 });
 

@@ -168,15 +168,44 @@ test("voice mode and voice memo icons differ and keep accessible names", async (
   assert.ok(overlap.iou < 0.3, `icons still overlap (IoU ${overlap.iou.toFixed(2)}, ink ${overlap.modeInk}/${overlap.memoInk})`);
 });
 
+function setRootAttr(markup, name, value) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const existing = new RegExp(`(<svg\\b[^>]*\\s)${escaped}\\s*=\\s*("[^"]*"|'[^']*')`);
+  if (existing.test(markup)) return markup.replace(existing, `$1${name}="${value}"`);
+  return markup.replace("<svg", `<svg ${name}="${value}"`);
+}
+
+function paintRoot(markup, attrs) {
+  return Object.entries(attrs).reduce((svg, [name, value]) => setRootAttr(svg, name, value), markup);
+}
+
 function paintIcon(markup, size) {
-  return markup
-    .replace(/\sclass="icon"/, "")
-    .replace("<svg ", `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" fill="none" stroke="black" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" `);
+  return paintRoot(markup.replace(/\sclass="icon"/, ""), {
+    xmlns: "http://www.w3.org/2000/svg",
+    width: String(size),
+    height: String(size),
+    fill: "none",
+    stroke: "black",
+    "stroke-width": "1.55",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+  });
 }
 
 function paintMemo(markup, size) {
-  const svg = markup.startsWith("<svg") ? markup : markup;
-  return svg.replace("<svg ", `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" `);
+  return paintRoot(markup, {
+    xmlns: "http://www.w3.org/2000/svg",
+    width: String(size),
+    height: String(size),
+  });
+}
+
+function assertPaintableSvg(svg) {
+  const open = svg.match(/^<svg\b([^>]*)>/);
+  assert.ok(open, "racine svg");
+  const names = [...open[1].matchAll(/(?:^|\s)([^\s=]+)\s*=/g)].map((match) => match[1]);
+  const duplicates = names.filter((name, index) => names.indexOf(name) !== index);
+  assert.deepEqual(duplicates, [], `attributs SVG dupliqués: ${duplicates.join(", ")}`);
 }
 
 function glyphPage(icons) {
@@ -271,11 +300,13 @@ test("voice memo glyph is centered and as large as the neighbouring icons", asyn
   assert.match(memoRule[1], /height:\s*16px/);
   const mic = voice.match(/<svg class="icon" aria-hidden="true" viewBox="0 0 24 24">[\s\S]*?<\/svg>/);
   assert.ok(mic, "dictation microphone");
-  const report = await measureGlyphs([
+  const icons = [
     { name: "memo", size: 16, svg: paintMemo(memoSvg(voiceCss), 16) },
     { name: "mode", size: 16, svg: paintIcon(modeMarkup(session), 16) },
     { name: "mic", size: 19, svg: paintIcon(mic[0], 19) },
-  ]);
+  ];
+  icons.forEach((icon) => assertPaintableSvg(icon.svg));
+  const report = await measureGlyphs(icons);
   assert.equal(report.error, undefined, report.error);
   const glyphs = Object.fromEntries(report.glyphs.map((glyph) => [glyph.name, glyph]));
   const memo = glyphs.memo;

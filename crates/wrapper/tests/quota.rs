@@ -266,7 +266,10 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
                 "/api/send",
                 json!({"conversation_id":id,"message_id":"m1","body":"prompt confidentiel"}),
             );
-            wait("erreur durable", || reply(&mut app)["error_kind"] == kind);
+            wait("erreur durable", || {
+                let reply = reply(&mut app);
+                reply["state"] == "failed" && reply["error_kind"] == kind
+            });
             let error = reply(&mut app);
             assert_eq!(
                 fixture

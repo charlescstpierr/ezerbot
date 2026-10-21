@@ -60,10 +60,10 @@ impl Session {
         if cancel.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput("run cancelled".into()));
         }
-        if self.inner.transports.fetch_add(1, Ordering::SeqCst) >= 4 {
+        if self.inner.transports.fetch_add(1, Ordering::SeqCst) >= 16 {
             self.inner.transports.fetch_sub(1, Ordering::SeqCst);
             let failure = Failure::other(
-                "Les connexions précédentes se ferment encore. Réessayez dans quelques instants.",
+                "Trop de réponses sont en cours ou de connexions se ferment encore. Réessayez dans quelques instants.",
             );
             log(0, "transport_busy");
             metadata(None, Some(&failure))?;
@@ -77,8 +77,8 @@ impl Session {
         let session = self.clone();
         let mut limits = *lock(&self.inner.deadlines);
         if turn.is_none() {
-            // Titles/compaction helpers are best-effort bounded internal work,
-            // not another ten-minute foreground turn.
+            // Titles are best-effort bounded work, not another foreground turn.
+            // Compaction carries its run identity and keeps normal turn deadlines.
             limits.first = limits.first.min(Duration::from_secs(10));
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));
@@ -170,6 +170,9 @@ impl Session {
         loop {
             if cancel.load(Ordering::SeqCst) {
                 log(http, "cancelled");
+                if tool_notice {
+                    metadata(Some(&previous_notice), None)?;
+                }
                 return Err(Error::InvalidInput("run cancelled".into()));
             }
             let timeout = if started.elapsed() >= limits.total {
@@ -244,7 +247,14 @@ impl Session {
                     log(http, "transport_closed");
                     let failure =
                         Failure::other("La connexion à OpenAI a été interrompue. Réessayez.");
-                    metadata(None, Some(&failure))?;
+                    metadata(
+                        if tool_notice {
+                            Some(&previous_notice)
+                        } else {
+                            None
+                        },
+                        Some(&failure),
+                    )?;
                     return emit(ModelEvent::Failed {
                         reason: failure.message,
                     });

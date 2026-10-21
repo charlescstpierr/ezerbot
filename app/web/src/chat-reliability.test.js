@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pendingReply } from "./thread-order.js";
-import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool } from "./connection-view.js";
+import { connectionMessages, composerConnectionState, signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 test("an authoritative terminal snapshot releases loading without a final stream event", () => {
   const live = [{ role: "assistant", state: "streaming", body: "Début" }];
@@ -58,7 +58,8 @@ test("a group sign-in card never promises a retry, even after account changes", 
   for (const providerConnected of [false, true]) {
     const card = signInCardState({ message, providerConnected, isGroup: true });
     assert.equal(card.showRetry, false);
-    assert.equal(card.copy, "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message.");
+    assert.equal(card.copy, providerConnected ? "Envoyez un nouveau message pour obtenir une réponse." : "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message.");
+    assert.equal(card.showSignIn, !providerConnected);
   }
 });
 
@@ -70,6 +71,9 @@ test("direct retries are enabled only after both account and local engine are av
   assert.equal(missing.retryDisabled, true);
   const ready = signInCardState({ message, providerConnected: true });
   assert.equal(ready.retryDisabled, false);
+  assert.equal(ready.title, "Compte ChatGPT connecté");
+  assert.equal(ready.showSignIn, false);
+  assert.match(ready.copy, /Réessayez pour obtenir la réponse/);
   const offline = signInCardState({ message, providerConnected: true, engineConnected: false });
   assert.equal(offline.retryDisabled, true);
   assert.equal(offline.signInDisabled, true);
@@ -96,6 +100,11 @@ test("deduplicating group advice does not accidentally enable forbidden regenera
 test("a pending tool has a single visible progress state, never after failure or completion", () => {
   const notice = "Préparation d’un outil par OpenAI… Aucune action n’a encore été exécutée.";
   assert.equal(preparingTool({ state: "streaming", notice }), true);
-  for (const state of ["failed", "echoed", "stopped"]) assert.equal(preparingTool({ state, notice }), false);
+  for (const state of ["failed", "echoed", "stopped"]) {
+    assert.equal(preparingTool({ state, notice }), false);
+    assert.equal(visibleNotice({ state, notice }), null);
+  }
+  assert.equal(visibleNotice({ state: "streaming", notice }), notice);
+  assert.equal(visibleNotice({ state: "stopped", notice: "Autre information" }), "Autre information");
   assert.equal(preparingTool({ state: "streaming" }), false);
 });

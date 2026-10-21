@@ -292,7 +292,8 @@ a.secondary-button { text-decoration: none; }
 .primary-button { background: var(--accent); color: var(--accent-on); font-weight: 600; transition: filter .15s; }
 .primary-button:hover { filter: brightness(1.08); }
 .secondary-button { border: 1px solid var(--line); color: var(--muted); }
-.secondary-button:hover { background: var(--soft); }
+.secondary-button:hover:not(:disabled) { background: var(--soft); }
+.secondary-button:disabled { opacity: .5; cursor: default; }
 .danger-button { background: var(--danger); color: #fff; transition: filter .15s; }
 .danger-button:hover { filter: brightness(1.1); }
 .small-dialog { width: min(430px, calc(100% - 32px)); }

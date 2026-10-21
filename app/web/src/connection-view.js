@@ -20,8 +20,8 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   const expired = message.error_kind === "signin_expired";
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
-    title: expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
+    title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
+    copy: providerConnected ? group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse." : group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
       : isTask ? "Connectez votre compte ChatGPT via Codex, puis poursuivez dans la conversation principale."
         : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.",
     signInLabel: expired ? "Se reconnecter via Codex" : "Se connecter via Codex",
@@ -29,6 +29,7 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
     retryDisabled: !providerConnected || !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez-vous via Codex avant de réessayer." : "Réessayer cette réponse",
     signInDisabled: !engineConnected,
+    showSignIn: !providerConnected,
   };
 }
 
@@ -43,6 +44,10 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
 
+export function visibleNotice(message) {
+  return message.state !== "streaming" && message.notice?.startsWith("Préparation d’un outil") ? null : message.notice;
+}
+
 export function preparingTool(message) {
-  return message.state === "streaming" && Boolean(message.notice?.startsWith("Préparation d’un outil"));
+  return message.state === "streaming" && Boolean(visibleNotice(message)?.startsWith("Préparation d’un outil"));
 }

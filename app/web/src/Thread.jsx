@@ -13,7 +13,7 @@ import { orderThread } from "./thread-order.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage } from "./teach.js";
-import { signInCardState, replyProblemState, preparingTool } from "./connection-view.js";
+import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -201,7 +201,7 @@ function SignInCard({ message, actions }) {
       <TriangleAlert />
       <div className="gb-pending-copy"><strong>{view.title}</strong><p>{view.copy}</p></div>
       <div className="gb-problem-actions">
-        <button type="button" className="chatgpt-button" disabled={view.signInDisabled} title={view.signInDisabled ? "Moteur local indisponible" : view.signInLabel} onClick={actions.onSignIn}>{view.signInLabel}</button>
+        {view.showSignIn && <button type="button" className="chatgpt-button" disabled={view.signInDisabled} title={view.signInDisabled ? "Moteur local indisponible" : view.signInLabel} onClick={actions.onSignIn}>{view.signInLabel}</button>}
         {view.showRetry && <button type="button" className="gb-retry" disabled={view.retryDisabled} title={view.retryTitle} onClick={() => actions.onRegenerate(message)}><RefreshCw />Réessayer</button>}
       </div>
     </div>
@@ -277,7 +277,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
-        {message.notice && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
+        {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}

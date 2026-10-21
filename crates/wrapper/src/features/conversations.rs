@@ -424,6 +424,37 @@ impl App {
                 .cmp(&a.updated_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
+        let reactions = self.reactions()?;
+        for conversation in &mut result {
+            for message in &mut conversation.messages {
+                if let Some(emoji) = reactions.get(&(conversation.id.clone(), message.id.clone())) {
+                    stamp_reaction(message, emoji);
+                }
+            }
+        }
         Ok(result)
+    }
+
+    fn reactions(&self) -> Result<BTreeMap<(String, String), String>, ApiError> {
+        let mut statement = self.connection.prepare(
+            "SELECT conversation_id, message_id, emoji FROM wrapper_reactions WHERE account_id = ?1",
+        )?;
+        let rows =
+            statement.query_map([ACCOUNT], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let mut reactions = BTreeMap::new();
+        for row in rows {
+            let (conversation, message, emoji) = row?;
+            reactions.insert((conversation, message), emoji);
+        }
+        Ok(reactions)
+    }
+}
+
+fn stamp_reaction(message: &mut Message, emoji: &str) {
+    if message.payload.is_null() {
+        message.payload = json!({});
+    }
+    if let Some(object) = message.payload.as_object_mut() {
+        object.insert("reaction".into(), json!(emoji));
     }
 }

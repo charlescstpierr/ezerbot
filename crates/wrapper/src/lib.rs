@@ -218,6 +218,13 @@ CREATE TABLE IF NOT EXISTS wrapper_messages (
     created_at INTEGER NOT NULL,
     UNIQUE (account_id, conversation_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS wrapper_reactions (
+    account_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (account_id, conversation_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS wrapper_remote (
     account_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,

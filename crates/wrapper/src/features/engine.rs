@@ -327,6 +327,9 @@ pub fn routes(
             path,
             "/api/send"
                 | "/api/reconcile"
+                | "/api/messages/react"
+                | "/api/messages/resend"
+                | "/api/messages/delete"
                 | "/api/provider/signin"
                 | "/api/provider/test"
                 | "/api/provider/select"
@@ -470,6 +473,9 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
+        "/api/messages/react" => react(app, body),
+        "/api/messages/resend" => resend(app, body),
+        "/api/messages/delete" => delete_undelivered(app, body),
         "/api/provider/test" => {
             let _: Empty = parse(body)?;
             app.provider.test_connection();
@@ -3115,6 +3121,200 @@ fn clean_title(raw: &str) -> Option<String> {
         Some(title)
     }
 }
+const REACTIONS: &[&str] = &["👍", "❤️", "😂", "🎉", "👀", "🙏"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reaction {
+    conversation_id: String,
+    message_id: String,
+    emoji: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageRef {
+    conversation_id: String,
+    message_id: String,
+}
+
+fn delivered(state: &SubmissionState) -> bool {
+    matches!(
+        state,
+        SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
+    )
+}
+
+fn message_ids(body: &[u8]) -> Result<(String, String), ApiError> {
+    let input: MessageRef = parse(body)?;
+    validate_conversation_id(&input.conversation_id)?;
+    validate_id(&input.message_id)?;
+    Ok((input.conversation_id, input.message_id))
+}
+
+fn require_visible_message(app: &App, conversation: &str, message: &str) -> Result<(), ApiError> {
+    let visible = app
+        .conversations()?
+        .into_iter()
+        .find(|item| item.id == conversation)
+        .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?
+        .messages
+        .into_iter()
+        .any(|item| item.id == message);
+    if visible {
+        Ok(())
+    } else {
+        Err(ApiError::new(404, "Message introuvable."))
+    }
+}
+
+fn submission_body(
+    app: &App,
+    conversation: &ConversationId,
+    message: &MessageId,
+) -> Result<String, ApiError> {
+    app.reader
+        .list_submissions()?
+        .into_iter()
+        .find(|item| &item.conversation_id == conversation && &item.message_id == message)
+        .map(|item| item.body)
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))
+}
+
+fn dispatch_queued(
+    app: &mut App,
+    conversation: &ConversationId,
+    message: &MessageId,
+) -> Result<(), ApiError> {
+    if !matches!(
+        app.session.state(conversation, message)?,
+        Some(SubmissionState::Queued)
+    ) {
+        return Ok(());
+    }
+    let mut carrier = LocalTransport {
+        connection: &app.connection,
+        lose_reply: false,
+        #[cfg(test)]
+        live: app.provider.connected(),
+        error: None,
+    };
+    app.session.send_with(conversation, message, &mut carrier)?;
+    carrier.error.map_or(Ok(()), Err)
+}
+
+fn react(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let input: Reaction = parse(body)?;
+    validate_conversation_id(&input.conversation_id)?;
+    validate_id(&input.message_id)?;
+    if !REACTIONS.contains(&input.emoji.as_str()) {
+        return Err(ApiError::new(400, "Choisissez une réaction proposée."));
+    }
+    app.require_conversation(&input.conversation_id)?;
+    require_visible_message(app, &input.conversation_id, &input.message_id)?;
+    let current: Option<String> = match app.connection.query_row(
+        "SELECT emoji FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, input.conversation_id, input.message_id],
+        |row| row.get(0),
+    ) {
+        Ok(emoji) => Some(emoji),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if current.as_deref() == Some(input.emoji.as_str()) {
+        app.connection.execute(
+            "DELETE FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+            params![ACCOUNT, input.conversation_id, input.message_id],
+        )?;
+    } else {
+        app.connection.execute(
+            "INSERT INTO wrapper_reactions (account_id, conversation_id, message_id, emoji) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET emoji = excluded.emoji",
+            params![ACCOUNT, input.conversation_id, input.message_id, input.emoji],
+        )?;
+    }
+    app.conversation_response(&input.conversation_id)
+}
+
+fn resend(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let (conversation_id, message_id) = message_ids(body)?;
+    app.require_conversation(&conversation_id)?;
+    let conversation = ConversationId::new(&conversation_id).expect("validated");
+    let message = MessageId::new(&message_id).expect("validated");
+    let state = app
+        .session
+        .state(&conversation, &message)?
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))?;
+    if delivered(&state) {
+        return Err(ApiError::new(409, "Ce message est déjà livré."));
+    }
+    match state {
+        SubmissionState::Refused { .. } => {
+            let text = submission_body(app, &conversation, &message)?;
+            app.session.discard_undelivered(&conversation, &message)?;
+            app.session
+                .prepare(conversation.clone(), message.clone(), text)?;
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::Prepared | SubmissionState::Queued => {
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::Dispatching { .. } | SubmissionState::OutcomeUnknown { .. } => {
+            let error = {
+                let mut carrier = LocalTransport {
+                    connection: &app.connection,
+                    lose_reply: false,
+                    #[cfg(test)]
+                    live: app.provider.connected(),
+                    error: None,
+                };
+                app.session
+                    .reconcile_with(&conversation, &message, &mut carrier)?;
+                carrier.error
+            };
+            if let Some(error) = error {
+                return Err(error);
+            }
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. } => {
+            return Err(ApiError::new(409, "Ce message est déjà livré."));
+        }
+    }
+    app.finish_echo(&conversation, &message)?;
+    app.start_message(&conversation_id, &message_id, 0)?;
+    app.touch(&conversation_id)?;
+    app.conversation_response(&conversation_id)
+}
+
+fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let (conversation_id, message_id) = message_ids(body)?;
+    app.require_conversation(&conversation_id)?;
+    let conversation = ConversationId::new(&conversation_id).expect("validated");
+    let message = MessageId::new(&message_id).expect("validated");
+    let state = app
+        .session
+        .state(&conversation, &message)?
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))?;
+    if delivered(&state) {
+        return Err(ApiError::new(409, "Un message livré ne se supprime pas."));
+    }
+    app.session.discard_undelivered(&conversation, &message)?;
+    app.connection.execute(
+        "DELETE FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    app.connection.execute(
+        "DELETE FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    app.connection.execute(
+        "DELETE FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    app.conversation_response(&conversation_id)
+}
+
 pub(crate) struct LocalTransport<'a> {
     pub(crate) connection: &'a Connection,
     pub(crate) lose_reply: bool,

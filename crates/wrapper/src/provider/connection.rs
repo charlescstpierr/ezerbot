@@ -20,6 +20,14 @@ fn probe_model(codex: bool, models: &[Model]) -> String {
         .unwrap_or_else(|| if codex { codex::DEFAULT_MODEL } else { "gpt-5" }.into())
 }
 
+fn service_refusal(status: &Value) -> String {
+    let detail = status["connection_test"]["message"]
+        .as_str()
+        .filter(|message| !message.is_empty())
+        .unwrap_or("OpenAI n’a pas répondu.");
+    format!("OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite. {detail}")
+}
+
 fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
     let mut body = json!({
         "model": model,
@@ -150,13 +158,54 @@ impl Provider {
         self.session().connected()
     }
     pub fn status(&self) -> Value {
-        let mut value = self.session().status();
+        let session = self.session();
+        let mut value = session.status();
+        let signed_in = value["connected"] == true;
+        value["signed_in"] = json!(signed_in);
         value["titling"] = json!(self.sharing.inner.titling.load(Ordering::SeqCst) > 0);
         value["simulation"] = json!(self.simulation_allowed());
-        value["connection_test"] = lock(&self.session().inner.probe).clone();
+        // A token on disk is not a connection. Confirm with one real Responses call.
+        if signed_in
+            && lock(&session.inner.probe)["state"]
+                .as_str()
+                .unwrap_or("idle")
+                == "idle"
+        {
+            self.test_connection();
+        }
+        let probe = lock(&session.inner.probe).clone();
+        let verified = signed_in && probe["state"] == "ok";
+        value["connection_test"] = probe;
+        value["connected"] = json!(verified);
         value["connections"] =
             json!({"codex":self.codex.connected(), "sharing":self.sharing.connected()});
         value
+    }
+
+    /// Blocks until the selected account has a successful Responses call, or fails closed.
+    pub(crate) fn ensure_service(&self) -> Result<(), Failure> {
+        if !self.connected() {
+            return Err(Failure::signin());
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = self.status();
+            if status["connected"] == true {
+                return Ok(());
+            }
+            let state = status["connection_test"]["state"]
+                .as_str()
+                .unwrap_or("idle");
+            if state == "failed" || state == "unavailable" {
+                return Err(Failure::other(service_refusal(&status)));
+            }
+            if Instant::now() >= deadline {
+                return Err(Failure::other(
+                    "OpenAI n’a pas confirmé la connexion à temps. Aucune réponse n’est produite.",
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     /// Quota of the selected Ezerbot-owned Codex session only. No credentials
     /// from the CLI, pi, or another application's keychain are consulted.

@@ -1068,7 +1068,13 @@
     const { model, effort, fast } = state.preferences || {};
     const selected = (current.models || []).find((item) => item.slug === model);
     const isCodex = current.backend === "codex";
-    $("mode-badge-text").textContent = current.connected ? (isCodex ? "Codex" : "ChatGPT") : "Local";
+    const probe = current.connection_test || {};
+    const signedIn = Boolean(current.signed_in);
+    $("mode-badge-text").textContent = current.connected
+      ? (isCodex ? "Codex" : "ChatGPT")
+      : signedIn
+        ? (probe.state === "running" ? "Vérification" : "Non connecté")
+        : "Local";
     // Un compte connecté dans l'autre mode suffit : la connexion reste dans les paramètres.
     $("plan-banner").hidden = current.connected || Object.values(current.connections || {}).some(Boolean);
     $("plan-banner").querySelector("span").textContent = isCodex
@@ -1090,7 +1096,7 @@
       if (pickerKind === "speed" && !selected?.tiers.length) pickerKind = null;
     } else {
       closePicker();
-      tools.replaceChildren(element("span", "composer-local", "Local"));
+      tools.replaceChildren(element("span", "composer-local", signedIn ? (probe.state === "running" ? "Vérification" : "Non connecté") : "Local"));
     }
     renderPicker();
 
@@ -1099,6 +1105,10 @@
       const link = element("a", "", "Gérer l’utilisation");
       link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
       note.replaceChildren(document.createTextNode(isCodex ? "Quota Codex utilisé · " : "Partage d’abonnement ChatGPT · "), link);
+    } else if (signedIn) {
+      note.replaceChildren(document.createTextNode(probe.state === "running"
+        ? "Vérification d’un appel réel à OpenAI. Aucune réponse tant que ce n’est pas confirmé."
+        : "OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite."));
     } else {
       note.replaceChildren(element("span", "simulation-dot"), document.createTextNode(current.simulation ? "Mode développeur · réponses simulées" : "Connexion ChatGPT requise"));
     }
@@ -1120,9 +1130,14 @@
       text.append(element("strong", "", title), element("small", "", description + (current.connections?.[id] ? " Compte connecté." : "")));
       label.append(radio, text); choice.append(label);
     }
-    const heading = element("h3", "", current.connected ? (isCodex ? "Connecté via Codex" : "Connecté à ChatGPT") : "Utiliser votre compte ChatGPT");
+    const heading = element("h3", "", current.connected ? (isCodex ? "Connecté via Codex" : "Connecté à ChatGPT")
+      : signedIn ? (probe.state === "running" ? "Vérification de la connexion OpenAI" : "OpenAI n’a pas confirmé la connexion")
+      : "Utiliser votre compte ChatGPT");
     if (current.connected) heading.prepend(element("span", "status-dot"));
     copy.append(heading, element("p", "", current.connected ? (current.email ? `Compte ChatGPT : ${current.email}` : "Adresse e-mail du compte ChatGPT indisponible.")
+      : signedIn ? (probe.state === "running"
+        ? "Ezerbot attend un appel réel réussi vers OpenAI. Aucune réponse n’est produite avant cette confirmation."
+        : "OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite.")
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
       : isCodex ? "Les réponses d’Ezerbot utiliseront le quota Codex de votre forfait ChatGPT. Sans connexion, une carte vous invite à connecter ChatGPT."
       : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, une carte vous invite à connecter ChatGPT."));
@@ -1131,15 +1146,16 @@
     if (current.connected && isCodex) copy.append(element("p", "", "Cette session est propre à Ezerbot. La déconnexion l’efface sur ce Mac uniquement."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
     const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
-    const probe = current.connection_test || {};
     const test = action(probe.state === "running" ? "Test en cours…" : "Tester la connexion", "secondary-button", () => providerAction("/api/provider/test"));
-    test.disabled = !current.connected || probe.state === "running";
-    test.title = !current.connected ? "Connectez-vous via Codex pour tester la connexion." : "Envoyer une petite requête de vérification à ChatGPT";
+    test.disabled = !signedIn || probe.state === "running";
+    test.title = !signedIn ? "Connectez-vous via Codex pour tester la connexion." : "Envoyer une petite requête de vérification à OpenAI";
     if (current.connected) {
       actions.append(test);
       const link = element("a", "secondary-button", "Gérer l’utilisation");
       link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
       actions.append(link, action("Se déconnecter", "secondary-button", signOut));
+    } else if (signedIn) {
+      actions.append(test, action("Se déconnecter", "secondary-button", signOut));
     } else if (current.retained) {
       copy.append(element("p", "provider-error", "Connexion suspendue sur ce Mac. Des identifiants restent sur le disque : réessayez de les effacer avant de fermer Ezerbot."));
       actions.append(action("Réessayer la déconnexion", "secondary-button", signOut));
@@ -1153,8 +1169,8 @@
       actions.classList.add("provider-actions-legacy");
       actions.append(action("Passer à Codex", "secondary-button", signInCodex));
     }
-    if (!current.connected) actions.append(test);
-    if (probe.message && probe.state !== "running" && current.connected) {
+    if (!signedIn) actions.append(test);
+    if (probe.message && probe.state !== "running" && signedIn) {
       const result = element("p", probe.state === "failed" ? "provider-error" : probe.state === "ok" ? "provider-success" : "", probe.message);
       if (probe.state === "ok") result.prepend(element("span", "status-dot"));
       result.setAttribute("role", "status"); copy.append(result);

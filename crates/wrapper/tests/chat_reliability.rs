@@ -388,6 +388,9 @@ fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
 #[test]
 fn refresh_hang_never_blocks_state_or_dispatches_after_cancellation() {
     let mut f = Fixture::new(true);
+    // Opening the app confirms OpenAI once. That probe is not the hung refresh.
+    until(|| f.provider.status()["connected"] == true);
+    f.fake.seen.lock().unwrap().clear();
     save_token(&f.db, true);
     *f.fake.refresh.lock().unwrap() = Some(Fault::RefreshHang);
     f.send(Fault::Happy);
@@ -719,9 +722,12 @@ fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
 #[test]
 fn signing_out_fences_an_inflight_connection_test_result() {
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    // The automatic open probe must finish before this test arms a partial reply.
+    until(|| f.provider.status()["connected"] == true);
+    let before = f.fake.seen.lock().unwrap().len();
     f.fake.queue.lock().unwrap().push_back(Fault::Partial);
     post(&mut f.app, "/api/provider/test", json!({}));
-    until(|| !f.fake.seen.lock().unwrap().is_empty());
+    until(|| f.fake.seen.lock().unwrap().len() > before);
     assert_eq!(f.provider.status()["connection_test"]["state"], "running");
     f.provider.signout().unwrap();
     f.fake.partial_released.store(true, Ordering::SeqCst);

@@ -7,7 +7,7 @@ const source = readFileSync(__dirname + "/app.js", "utf8");
 const urls = source.slice(source.indexOf("  function usageUrl()"), source.indexOf("  const systemTheme"));
 const rendering = source.slice(source.indexOf("  function renderPicker()"), source.indexOf("  async function providerAction("));
 
-function mount(backend, connected = false) {
+function mount(backend, connected = false, extra = {}) {
   let document;
   class Element {
     constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.className = ""; this.dataset = {}; this.attributes = {}; }
@@ -55,7 +55,7 @@ function mount(backend, connected = false) {
   }
   const signin = element("button"); nodes.get("plan-banner").append(element("span"), signin);
   nodes.get("plan-dialog").append(element("p", "delete-description"), element("a"));
-  const state = { provider: { backend, connected, signin: "idle", welcomed: true, email: "qa@example.test", plan: "plus", connections: {}, models: [{ slug: "model", name: "Modèle", efforts: [], tiers: [] }] }, preferences: { model: "model" } };
+  const state = { provider: { backend, connected, signed_in: extra.signed_in ?? connected, connection_test: extra.connection_test || {}, signin: "idle", welcomed: true, email: "qa@example.test", plan: "plus", connections: extra.connections || {}, models: [{ slug: "model", name: "Modèle", efforts: [], tiers: [] }] }, preferences: { model: "model" } };
   const context = {
     document, state, element, $: (id) => nodes.get(id), provider: () => state.provider,
     currentBot: () => ({ name: "Ezerbot" }), pill: () => element("button"), option: () => element("button"),
@@ -200,4 +200,21 @@ test("the sign-in banner stays hidden while either ChatGPT account is connected"
   state.provider.connections = { codex: false, sharing: true };
   context.renderProvider();
   assert.equal(nodes.get("plan-banner").hidden, true);
+});
+
+test("a signed-in account is not shown as Codex until OpenAI answers", () => {
+  const failed = mount("codex", false, { signed_in: true, connection_test: { state: "failed", message: "probe refused" } });
+  assert.equal(failed.nodes.get("mode-badge-text").textContent, "Non connecté");
+  assert.match(failed.nodes.get("mode-note").textContent, /Aucune réponse n’est produite/);
+  assert.match(failed.nodes.get("provider-section").textContent, /Aucune réponse n’est produite/);
+  assert.equal(failed.nodes.get("composer-tools").textContent, "Non connecté");
+  const retry = failed.nodes.get("provider-section").querySelectorAll("button").find((button) => button.textContent === "Tester la connexion");
+  assert.equal(retry.disabled, false);
+  const running = mount("codex", false, { signed_in: true, connection_test: { state: "running" } });
+  assert.equal(running.nodes.get("mode-badge-text").textContent, "Vérification");
+  assert.match(running.nodes.get("mode-note").textContent, /Aucune réponse tant que ce n’est pas confirmé/);
+  assert.equal(running.nodes.get("provider-section").querySelectorAll("button").find((button) => /Test/.test(button.textContent)).disabled, true);
+  const ready = mount("codex", true, { connection_test: { state: "ok", message: "OK — ChatGPT répond." } });
+  assert.equal(ready.nodes.get("mode-badge-text").textContent, "Codex");
+  assert.match(ready.nodes.get("provider-section").textContent, /Forfait : Plus/);
 });

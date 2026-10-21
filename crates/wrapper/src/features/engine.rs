@@ -1214,6 +1214,24 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
             )?;
         }
     }
+    // Tokens without a successful Responses call must not reach the model or a demo reply.
+    if live && ctx.provider.connected() {
+        if let Err(error) = ctx.provider.ensure_service() {
+            ctx.connection.execute(
+                "UPDATE wrapper_engine_runs SET error=?2,error_kind=?3 WHERE run_id=?1",
+                params![run.run_id, error.message, error.kind],
+            )?;
+            let mut services = Services::new(ctx)?;
+            fail_host(ctx.connection, &mut services, &run.run_id)?;
+            crate::upstream::turn(
+                ctx.db_path.parent().unwrap_or(Path::new(".")),
+                &run.run_id,
+                0,
+                "connection_unconfirmed",
+            );
+            return Ok(());
+        }
+    }
     let images_degraded: bool = ctx.connection.query_row(
         "SELECT images_degraded FROM wrapper_engine_runs WHERE run_id=?1",
         [&run.run_id],

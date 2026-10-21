@@ -478,7 +478,8 @@ mod elapsed_interval {
             .unwrap_or_default();
         let user_turn = path.contains("/responses")
             && !instructions.contains("titre")
-            && !instructions.starts_with("Extraction");
+            && !instructions.starts_with("Extraction")
+            && !instructions.starts_with("Test de connexion.");
         if user_turn {
             started.store(true, Ordering::SeqCst);
             thread::sleep(BLOCKED_READ);

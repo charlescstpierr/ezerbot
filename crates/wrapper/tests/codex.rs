@@ -201,7 +201,8 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
     assert_eq!(restored.status()["backend"], "sharing");
     assert_eq!(restored.status()["connections"]["codex"], true);
     restored.select_backend("codex").unwrap();
-    assert_eq!(restored.status()["connected"], true);
+    assert_eq!(restored.status()["signed_in"], true);
+    wait("service Codex", || restored.status()["connected"] == true);
     assert!(restored.signout().unwrap());
     assert!(!f.server.seen.lock().unwrap().revoked); // no undocumented revoke endpoint
     let restarted = Fixture::provider(&f.db, &f.server);
@@ -990,4 +991,104 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
         .headers
         .iter()
         .all(|headers| headers["chatgpt-account-id"] == "account-test"));
+}
+
+#[test]
+fn connected_requires_a_real_openai_call_and_a_failed_probe_never_replies() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().probe_gate = Some(gate.clone());
+    f.login();
+    let first = f.provider.status();
+    assert_eq!(first["signed_in"], true);
+    assert_eq!(first["connected"], false);
+    assert_eq!(first["connection_test"]["state"], "running");
+    assert_eq!(first["connections"]["codex"], true);
+    gate.store(true, Ordering::SeqCst);
+    wait("appel OpenAI confirmé", || {
+        f.provider.status()["connected"] == true
+    });
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(
+            seen.bodies.is_empty(),
+            "la sonde ne doit pas compter comme un tour de chat"
+        );
+        let probe = &seen.probe_bodies[0];
+        assert!(probe["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("Test de connexion."));
+        assert!(probe["input"].to_string().contains("Réponds seulement OK."));
+        assert_ne!(probe["model"], "gpt-5.5");
+        assert!(probe.get("tool_choice").is_none(), "{probe}");
+        assert!(probe.get("parallel_tool_calls").is_none(), "{probe}");
+    }
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let conversation = post(
+        &mut app,
+        "/api/conversations",
+        json!({"title":"Vérification"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"391"}),
+        json!({"type":"response.completed"}),
+    ]));
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"q1","body":"Combien font 17 × 23 ?"}),
+    );
+    wait("réponse du modèle", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == "reply-q1" && message["body"] == "391")
+    });
+    let question = f.server.seen.lock().unwrap().bodies[0].clone();
+    assert!(question["input"]
+        .to_string()
+        .contains("Combien font 17 × 23 ?"));
+    assert!(!question["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("Test de connexion."));
+    drop(app);
+    drop(f);
+
+    let denied = Fixture::new();
+    denied.server.seen.lock().unwrap().fail_probe = true;
+    denied.login();
+    assert_eq!(denied.provider.status()["signed_in"], true);
+    assert_eq!(denied.provider.status()["connected"], false);
+    let mut app = App::open_with(&denied.db, denied.provider.clone()).unwrap();
+    let conversation = post(&mut app, "/api/conversations", json!({"title":"Refus"}))
+        ["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sent = post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"q2","body":"Dis bonjour"}),
+    );
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == "reply-q2")
+        .unwrap();
+    assert_eq!(reply["state"], "failed");
+    assert_eq!(reply["body"], "");
+    assert!(reply["error"]
+        .as_str()
+        .unwrap()
+        .contains("Aucune r\u{00e9}ponse n\u{2019}est produite"));
+    assert!(!sent.to_string().contains("Bien reçu"));
+    assert!(denied.server.seen.lock().unwrap().bodies.is_empty());
 }

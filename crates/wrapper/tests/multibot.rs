@@ -1542,3 +1542,75 @@ fn a_failed_initial_group_turn_does_not_prevent_the_first_completed_title() {
     f.drain();
     wait("fin du titrage", || f.provider.status()["titling"] == false);
 }
+
+#[test]
+fn group_profile_is_saved_on_create_and_rename() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    assert_eq!(
+        f.bad(
+            "/api/conversations",
+            json!({"bot_ids":["a"],"title":"Seul","description":"Pas un groupe"})
+        ),
+        400
+    );
+    assert_eq!(
+        f.bad(
+            "/api/conversations",
+            json!({"bot_ids":["a","b","c","d","e","f","g"],"title":"Trop","description":"Sept bots"})
+        ),
+        400
+    );
+    let created = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["a","b"],"title":"Atelier","description":"Croiser les lectures","avatar":{"color":"cyan","mark":"A"}}),
+    );
+    let id = created["conversation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["conversation"]["kind"], "group");
+    assert_eq!(created["conversation"]["title"], "Atelier");
+    assert_eq!(
+        created["conversation"]["description"],
+        "Croiser les lectures"
+    );
+    assert_eq!(created["conversation"]["avatar"]["color"], "cyan");
+    assert_eq!(created["conversation"]["avatar"]["mark"], "A");
+    assert_eq!(created["conversation"]["member_ids"], json!(["a", "b"]));
+    let renamed = f.post(
+        "/api/conversations/update",
+        json!({"id": id, "title": "Atelier bis", "description": "Nouvelle description", "avatar": {"color": "violet", "mark": "B"}}),
+    );
+    assert_eq!(renamed["conversation"]["title"], "Atelier bis");
+    assert_eq!(
+        renamed["conversation"]["description"],
+        "Nouvelle description"
+    );
+    assert_eq!(
+        renamed["conversation"]["avatar"],
+        json!({"color": "violet", "mark": "B"})
+    );
+    f.post(
+        "/api/conversations/update",
+        json!({"id": id, "favorite": true}),
+    );
+    f.restart();
+    let stored = f.conversation(&id);
+    assert_eq!(stored["title"], "Atelier bis");
+    assert_eq!(stored["description"], "Nouvelle description");
+    assert_eq!(stored["avatar"]["mark"], "B");
+    assert_eq!(stored["favorite"], true);
+    let direct = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["a"],"title":"Direct"}),
+    );
+    let direct_id = direct["conversation"]["id"].as_str().unwrap();
+    assert_eq!(direct["conversation"]["description"], "");
+    assert!(direct["conversation"].get("avatar").is_none());
+    assert_eq!(
+        f.bad(
+            "/api/conversations/update",
+            json!({"id": direct_id, "description": "Interdit"})
+        ),
+        400
+    );
+}

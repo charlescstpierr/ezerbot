@@ -186,6 +186,56 @@ fn accepted_by_host(status: u16) -> bool {
 }
 
 #[test]
+fn proof_script_calls_pass_the_local_guard_and_a_bare_post_stays_forbidden() {
+    let host = Host::new();
+    let ui = |path: &str, body: &[u8]| host.post(path, "application/json", body);
+    assert_eq!(
+        status(ureq::get(&format!("{}/api/state", host.url)).call()),
+        200
+    );
+    assert_eq!(
+        ui(
+            "/api/preferences",
+            br#"{"model":"gpt-6.1-sol","effort":"high"}"#
+        ),
+        200
+    );
+    let created = ureq::post(&format!("{}/api/conversations", host.url))
+        .set("Origin", &host.url)
+        .set("X-Grokbot-Request", "local")
+        .set("Content-Type", "application/json")
+        .send_bytes(b"{}")
+        .unwrap()
+        .into_json::<Value>()
+        .unwrap();
+    let conversation = created["conversation"]["id"].as_str().unwrap();
+    let send = serde_json::to_vec(&json!({
+        "conversation_id": conversation,
+        "message_id": "preuve-1",
+        "body": "Réponds uniquement par trois lignes."
+    }))
+    .unwrap();
+    assert_ne!(ui("/api/send", &send), 403);
+    assert_eq!(ui("/api/provider/test", br#"{"refresh":true}"#), 200);
+    assert_eq!(
+        status(ureq::get(&format!("{}/api/usage", host.url)).call()),
+        200
+    );
+    assert_eq!(ui("/api/usage/refresh", b"{}"), 200);
+    assert_eq!(ui("/api/provider/signout", b"{}"), 200);
+    let bare = ureq::post(&format!("{}/api/preferences", host.url))
+        .set("Content-Type", "application/json")
+        .send_bytes(br#"{"model":"gpt-6.1-sol","effort":"high"}"#);
+    assert_eq!(status(bare), 403);
+    let wrong_origin = ureq::post(&format!("{}/api/preferences", host.url))
+        .set("Origin", "https://example.invalid")
+        .set("X-Grokbot-Request", "local")
+        .set("Content-Type", "application/json")
+        .send_bytes(br#"{"model":"gpt-6.1-sol","effort":"high"}"#);
+    assert_eq!(status(wrong_origin), 403);
+}
+
+#[test]
 fn floating_surface_is_separate_and_settings_keep_the_http_origin_gate() {
     let host = Host::new();
     let page = ureq::get(&format!("{}/floating", host.url)).call().unwrap();

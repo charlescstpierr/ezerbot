@@ -90,6 +90,7 @@ pub mod engine;
 pub mod floating;
 pub mod forms;
 pub mod generated;
+pub mod iphone;
 pub mod local;
 pub mod mcp;
 pub mod meetings;
@@ -148,6 +149,7 @@ registry!(
     storage,
     usage,
     notifications,
+    iphone,
     floating,
     local,
     voice,

@@ -1,5 +1,8 @@
 "use strict";
 (() => {
+  // Native session administration stays on the Mac; remote tools still use
+  // the same approval cards and may display authenticated transcript captures.
+  if (window.EzerbotIPhone?.remote) return;
   const host = window.GrokbotPanels;
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; return el; };
   const button = (text, action, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.onclick = action; return b; };

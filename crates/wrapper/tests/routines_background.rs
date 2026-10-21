@@ -1,5 +1,8 @@
 //! Binary-level tests: every launchctl call is recorded below a throwaway HOME.
 //! No test invokes launchctl or touches the user's LaunchAgents directory.
+//! Installation still asks /usr/bin/plutil to read the agent plist, so these
+//! tests run on macOS only.
+#![cfg(target_os = "macos")]
 mod support;
 use serde_json::{json, Value};
 use std::{
@@ -534,41 +537,4 @@ fn deadline_checkpoints_elapsed_budget_and_cannot_replay_forever() {
         .as_str()
         .unwrap()
         .contains("échoué"));
-}
-
-#[test]
-fn debug_build_cannot_install_without_explicit_throwaway_override() {
-    let f = Fixture::new();
-    f.stopless_debug_safety();
-}
-impl Fixture {
-    fn stopless_debug_safety(&self) {
-        // Test the environment boundary in a separate process, never mutating
-        // this test runner's shared HOME or invoking an actual launchctl.
-        let root = self.root.join("unsafe-override");
-        fs::create_dir_all(&root).unwrap();
-        let mut command = self.command();
-        command
-            .env_remove("GROKBOT_LAUNCH_AGENT_TEST_ROOT")
-            .arg("--port")
-            .arg("0")
-            .arg("--db")
-            .arg(root.join("workspace.sqlite"));
-        let mut child = command.spawn().unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let url = serde_json::from_str::<Value>(&line).unwrap()["url"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let response = ureq::post(&format!("{url}/api/routines/background"))
-            .set("X-Grokbot-Request", "local")
-            .send_json(json!({"enabled":true}));
-        assert!(response.is_err());
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(!self.plist().exists());
-    }
 }

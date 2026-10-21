@@ -55,7 +55,7 @@ SELECT 'delegation:'||d.id, 'delegation', p.conversation_id, d.id, 'Sous-tâche 
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Settings {
+pub(super) struct Settings {
     enabled: bool,
     dnd: bool,
     reply: bool,
@@ -80,7 +80,7 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    fn permits(&self, kind: &str) -> bool {
+    pub(super) fn permits(&self, kind: &str) -> bool {
         self.enabled
             && !self.dnd
             && match kind {
@@ -105,7 +105,7 @@ fn should_deliver(
     !visible && settings.permits(kind) && last.is_none_or(|last| now.saturating_sub(last) >= 5_000)
 }
 
-fn settings(conn: &Connection) -> Result<Settings, ApiError> {
+pub(super) fn settings(conn: &Connection) -> Result<Settings, ApiError> {
     let raw: String = conn.query_row(
         "SELECT settings FROM wrapper_notification_settings WHERE account_id=?1",
         [ACCOUNT],
@@ -149,7 +149,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn project(conn: &Connection, now: u64, baseline: bool) -> Result<(), ApiError> {
+pub(super) fn project(conn: &Connection, now: u64, baseline: bool) -> Result<(), ApiError> {
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO wrapper_notifications

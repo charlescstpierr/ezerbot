@@ -149,8 +149,11 @@
         panelError(panel?.id, new Error("Duplicate or missing panel id"));
         return false;
       }
+      if (window.EzerbotIPhone?.remote && !["iphone", "notifications", "forms", "attachments", "multibot", "engine", "delegation", "local"].includes(panel.id)) return false;
       panels.set(panel.id, panel);
-      mountSection(panel, panel.settingsSection, $("settings-extensions"));
+      if (!window.EzerbotIPhone?.remote || ["iphone", "notifications", "forms"].includes(panel.id)) {
+        mountSection(panel, panel.settingsSection, $("settings-extensions"));
+      }
       if ($("bot-dialog").open) mountBotSection(panel, botById(editingBotId) || null);
       panelCall(panel, panel.composer?.mount, $("composer-attachments"));
       panelCall(panel, panel.onState, state);
@@ -414,7 +417,14 @@
       let data;
       try { data = await response.json(); }
       catch (error) { showConnectionError(error); throw new Error("Le moteur local a renvoyé une réponse illisible."); }
-      if (!response.ok) throw new Error(data.error || "L’action n’a pas pu être terminée.");
+      if (!response.ok) {
+        const error = new Error(data.error || "L’action n’a pas pu être terminée.");
+        if (remoteAccessDisabled(response.status, data)) {
+          error.accessDisabled = true;
+          showConnectionError(error);
+        }
+        throw error;
+      }
       return data;
     } finally { clearTimeout(timeout); }
   }
@@ -471,14 +481,26 @@
             schedulePoll();
           }
         }
-      } catch { schedulePoll(); }
+      } catch (error) {
+        if (error?.accessDisabled) showConnectionError(error);
+        schedulePoll();
+      }
     }, !connected ? 1500 : live ? 200 : waiting || panelWaiting ? 800 : 5000);
+  }
+
+  function remoteAccessDisabled(status, data) {
+    const message = String(data?.error || "").replaceAll("'", "’");
+    return Boolean(window.EzerbotIPhone?.remote && status === 403 && message === "L’accès iPhone est désactivé sur le Mac.");
   }
 
   function showConnectionError(error) {
     connected = false;
-    connectionStatus = "offline";
-    ui.bannerText.textContent = "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
+    connectionStatus = error?.accessDisabled ? "disabled" : "offline";
+    ui.bannerText.textContent = error?.accessDisabled
+      ? "L’accès iPhone est désactivé sur le Mac. Réactivez-le dans Paramètres › iPhone. Reconnexion automatique…"
+      : window.EzerbotIPhone?.remote
+      ? "Mac injoignable. Vérifiez que le Mac est allumé, Ezerbot ouvert et Tailscale connecté. Reconnexion automatique…"
+      : "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
     updateComposer();
     for (const panel of panels.values()) panelCall(panel, panel.onConnection, false);
@@ -1215,7 +1237,15 @@
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (optimisticMessage) optimisticMessage.state = "unknown";
+          const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
+          if (!confirmed) {
+            if (error.accessDisabled) {
+              const owner = state.conversations.find((item) => item.messages.some((message) => message.id === messageId));
+              if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
+              pendingSends.delete(messageId);
+            } else if (optimisticMessage) optimisticMessage.state = "unknown";
+            restoreDraft();
+          }
           render();
           showConnectionError(error);
         }
@@ -1279,6 +1309,9 @@
   function applyTheme(choice) {
     themeChoice = ["light", "dark", "system"].includes(choice) ? choice : "dark";
     document.documentElement.dataset.theme = themeChoice === "system" ? (systemTheme.matches ? "dark" : "light") : themeChoice;
+    const dark = document.documentElement.dataset.theme === "dark";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#14161a" : "#ffffff");
+    document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute("content", dark ? "black-translucent" : "default");
     writePreference("grokbot.theme", themeChoice);
     document.querySelectorAll("[data-theme-choice]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.themeChoice === themeChoice)));
   }
@@ -1388,7 +1421,8 @@
   $("sidebar-toggle").addEventListener("click", () => {
     const open = document.body.classList.toggle("sidebar-open");
     $("sidebar-toggle").setAttribute("aria-expanded", String(open));
-    if (open) ui.search.focus();
+    if (open && !window.EzerbotIPhone?.remote) ui.search.focus();
+    else if (open) $("sidebar-close").focus({ preventScroll: true });
   });
   $("sidebar-close").addEventListener("click", closeSidebar);
   $("sidebar-scrim").addEventListener("click", closeSidebar);

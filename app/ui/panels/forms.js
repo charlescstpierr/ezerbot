@@ -297,7 +297,15 @@
 
   panels.register({
     id: "forms",
-    settingsSection(container) { settings = container; renderRules(panels.state); },
+    settingsSection(container) {
+      if (window.EzerbotIPhone?.remote) {
+        container.className = "setting-section";
+        const title = document.createElement("h3"); title.textContent = "Autorisations";
+        const text = document.createElement("p"); text.textContent = "Les mêmes cartes et règles Toujours s’appliquent ici. Gérez les autorisations permanentes et les réglages sensibles sur le Mac.";
+        container.append(title, text); return;
+      }
+      settings = container; renderRules(panels.state);
+    },
     onState(state) {
       observeStorage(state);
       for (const request of state.forms?.requests || []) observe(request);

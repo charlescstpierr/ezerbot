@@ -455,6 +455,26 @@ test("the connection card and suggestions stay visible at 820×560", async () =>
   }
 });
 
+test("a short name and its chevron stay whole when speed is shown", async () => {
+  const cases = [
+    [820, 560, "GPT-5.6 Terra"],
+    [1140, 780, "GPT-6.1 Sol"],
+    [1140, 780, "GPT-5.6 Terra"],
+  ];
+  for (const [width, height, model] of cases) {
+    const report = await measure(width, height, "Ezerbot", { model, effort: "Moyen", speed: "Standard" });
+    for (const theme of report.themes) {
+      const where = `${model} ${theme.theme} at ${width} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} effort=${theme.effortClient}/${theme.effortScroll} speed=${theme.speedClient}/${theme.speedScroll}`;
+      assert.equal(theme.nameFits, true, where);
+      assert.equal(theme.chevronInside, true, where);
+      assert.equal(theme.toolsClear, true, where);
+      assert.equal(theme.modelFits, true, where);
+      assert.ok(theme.effortClient >= 40, where);
+      assert.equal(theme.speedFits, true, where);
+    }
+  }
+});
+
 test("GPT-5.6 Terra keeps a medium bot name whole at 820px", async () => {
   const report = await measure(820, 560, MEDIUM_NAME, { model: TERRA_MODEL, effort: "medium" });
   for (const theme of report.themes) {

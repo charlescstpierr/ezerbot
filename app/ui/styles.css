@@ -246,6 +246,7 @@ a.secondary-button { text-decoration: none; }
 .composer-bot:disabled { cursor: default; }
 .composer-bot:disabled .composer-chevron { display: none; }
 .composer-bot-name { flex: 0 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .composer-bot-name { min-width: 45px; }
 .composer-chevron { width: 13px; height: 13px; color: var(--subtle); }
 .composer-mascot { display: inline-block; width: 22px; height: 19.25px; flex: 0 0 auto; }
 .send-button { display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 50%; background: var(--text); color: var(--canvas); transition: background .15s, opacity .15s; }
@@ -382,7 +383,7 @@ a.secondary-button { text-decoration: none; }
   .composer-bottom { gap: 8px; }
   .composer-tools { gap: 2px; }
   .composer-tools .tool-pill { gap: 2px; padding-inline: 3px; }
-  .composer .composer-bot-name { min-width: 137px; }
+  .composer-model:not(:has([data-picker="speed"])) .composer-bot-name { min-width: 137px; }
   .composer-caption:has(#restore-link-draft:not([hidden])) > #composer-hint:not([data-alert="true"]) { display: none; }
 }
 #bot-form > .dialog-footer { flex-wrap: wrap; }
@@ -503,7 +504,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer .tool-pill { padding: 0 3px; }
   /* Le bouton du bot cède seulement quand le nom dépasse ; le plus reste compact. */
   .composer .composer-bot { flex-shrink: 1; max-width: none; }
-  .composer .composer-bot-name { min-width: 45px; }
+  .composer .composer-model .composer-bot-name { min-width: 45px; }
   .composer .attachment-choose { width: 26px; }
   .composer-tools [data-picker="effort"],
   .composer-tools [data-picker="speed"] { flex: 0 1 auto; min-width: max-content; }

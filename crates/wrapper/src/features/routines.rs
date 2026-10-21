@@ -454,6 +454,28 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
     }
     Ok(r)
 }
+/// Bot templates create user routines inside the caller's transaction; the
+/// template module decides whether they start paused.
+pub(super) fn create_for_template(
+    ctx: &Context<'_>,
+    bot_id: &str,
+    name: &str,
+    body: RoutineBody,
+    trigger: Schedule,
+    enabled: bool,
+) -> Result<Routine, ApiError> {
+    let input = Create {
+        bot_id: bot_id.into(),
+        name: name.into(),
+        body: Some(body),
+        prompt: None,
+        trigger: Some(trigger),
+        schedule: None,
+        time_zone: local_zone(),
+        enabled,
+    };
+    create(ctx, input, Origin::User)
+}
 fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError> {
     let mut r = owned(ctx.connection, &input.bot_id, &input.routine_id)?;
     if r.modified_at != input.modified_at || r.schedule_version != input.schedule_version {

@@ -1,13 +1,31 @@
 // Run with: node --test app/ui/composer-bar.test.cjs
+// Optional: CHROME_BIN=/path/to/chrome node --test app/ui/composer-bar.test.cjs
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
-const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const { existsSync, mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
 
 const UI = __dirname;
 const FRAMES = [[1140, 780], [820, 560]];
+const CHROME_CANDIDATES = [
+  "google-chrome",
+  "google-chrome-stable",
+  "chromium",
+  "chromium-browser",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+];
+
+function chromeOnPath(command) {
+  if (command.includes("/")) return existsSync(command);
+  return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
+}
+
+function chromeBinary() {
+  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
+  return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
+}
 
 function page(name) {
   return `<!doctype html>
@@ -129,7 +147,7 @@ function measure(width, height, name) {
   const directory = mkdtempSync(join(tmpdir(), "composer-bar-"));
   const file = join(directory, "bar.html");
   writeFileSync(file, page(name).replace("FRAMES_PLACEHOLDER", "null"));
-  const chrome = spawn("google-chrome", [
+  const chrome = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -164,6 +182,21 @@ function measure(width, height, name) {
     });
   });
 }
+
+test("CHROME_BIN selects the browser and otherwise falls back to an installed Chrome", () => {
+  const previous = process.env.CHROME_BIN;
+  process.env.CHROME_BIN = "/opt/chrome/custom";
+  try {
+    assert.equal(chromeBinary(), "/opt/chrome/custom");
+    delete process.env.CHROME_BIN;
+    const fallback = chromeBinary();
+    assert.notEqual(fallback, "/opt/chrome/custom");
+    assert.ok(chromeOnPath(fallback) || fallback === "google-chrome", fallback);
+  } finally {
+    if (previous === undefined) delete process.env.CHROME_BIN;
+    else process.env.CHROME_BIN = previous;
+  }
+});
 
 test("voice composer controls keep a name when they are icon-only", () => {
   const voice = readFileSync(`${UI}/panels/voice.js`, "utf8");

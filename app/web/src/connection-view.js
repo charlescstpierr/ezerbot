@@ -82,7 +82,7 @@ export function floatingFailureState(reply, { providerConnected = false } = {}) 
     alert,
     detailClass: alert ? "floating-error" : "",
     detail: reconnected ? "Votre question est conservée. Ouvrez le fil pour reprendre la réponse."
-      : presentedFailureText(reply.error) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
+      : presentedFailureText(reply.error, { retry: false, replacement: "Ouvrez le fil." }) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
   };
 }
 

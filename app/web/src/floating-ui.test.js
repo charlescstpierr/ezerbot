@@ -147,6 +147,15 @@ test("a floating detail stays neutral when the notice is not an alert", () => {
   assert.match(source, /className=\{failure\.detailClass \|\| undefined\}/);
 });
 
+test("a floating ping points at Ouvrir le fil instead of a missing retry button", () => {
+  const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
+  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
+  assert.doesNotMatch(ping.detail, /Réessayez/);
+  const delayed = floatingFailureState({ state: "failed", error_kind: "other", error: "Les connexions précédentes se ferment encore. Réessayez dans une minute." });
+  assert.equal(delayed.detail, "Les connexions précédentes se ferment encore. Ouvrez le fil dans une minute.");
+  assert.doesNotMatch(delayed.detail, /Réessayez/);
+});
+
 test("a floating panel without a session is not titled as a failed answer", () => {
   const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
   assert.equal(expired.alert, false);
@@ -161,7 +170,7 @@ test("a floating panel without a session is not titled as a failed answer", () =
   assert.equal(failed.detail, "Panne");
   const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
   assert.equal(ping.alert, true);
-  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
+  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
   assert.equal(floatingFailureState({ state: "echoed", error_kind: "signin" }), null);
   const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
   assert.match(source, /floatingFailureState\(reply, \{ providerConnected: state\?\.provider\?\.connected === true \}\)/);

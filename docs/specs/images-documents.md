@@ -1,6 +1,6 @@
 # Images et documents
 
-Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. Aucune implémentation de ce lot n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
+Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. La génération vidéo est hors périmètre. Aucune implémentation de ce lot n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
 
 ## Contexte
 
@@ -32,16 +32,15 @@ Preuves, lues le 21 octobre 2026 :
 
 **Ce que Charles fournit pour les images.** Rien, tant que la session sélectionnée est Codex et que la route Images accepte le compte. Si cette route refuse le compte (plan, droit ou rejet du client), la voie de repli est une clé d’API OpenAI collée une fois dans le trousseau du Mac, le même coffre que les secrets déjà gardés par l’app. Charles la crée dans les clés d’API de `platform.openai.com`. Elle est facturée sur le compte API, à part de l’abonnement ChatGPT. Il ne la fournit pas à l’avance.
 
-### Vidéo : Sora n’est plus appelable
+### Vidéo : aucune génération disponible
 
-Aucune des deux sessions ne peut générer une vidéo Sora.
+La génération vidéo est hors périmètre. Le lot garde seulement le fait de joindre une vidéo et de la lire dans la conversation. Charles n’a rien à fournir pour cela. Ni le jeton Codex ni une clé d’API OpenAI n’ouvrent une génération vidéo.
 
-- Le centre d’aide OpenAI date l’arrêt des sites et apps Sora au 26 avril 2026, et l’arrêt de l’API Sora au 24 septembre 2026.
-- La page Deprecations retire à cette date l’API Videos et les modèles `sora-2`, `sora-2-pro` et leurs instantanés, sans remplaçant.
-- Le guide « Video generation with Sora » est conservé comme archive : l’API n’est plus disponible, il n’y a pas d’API de remplacement, et l’authentification historique était une clé d’API, pas un jeton ChatGPT.
-- Le support OpenAI, le 8 septembre 2026, indique qu’il n’y a pas d’échéance pour une génération vidéo dans ChatGPT.
+Sources lues le 21 octobre 2026 :
 
-**Ce que Charles fournit pour la vidéo.** Pour joindre une vidéo et la lire dans la conversation : rien. Pour générer une courte vidéo : un nom de fournisseur et la clé de ce fournisseur, collée dans le trousseau. Aucun fournisseur n’est choisi ici. Tant que ces deux éléments manquent, la génération vidéo reste une question ouverte, pas une tranche à coder.
+- Guide officiel de génération vidéo, [developers.openai.com/api/docs/guides/video-generation](https://developers.openai.com/api/docs/guides/video-generation) : les modèles de génération vidéo et l’API Videos ont été arrêtés le 24 septembre 2026. Aucune API de remplacement n’est disponible. Le guide est conservé comme archive.
+- Page [Deprecations](https://developers.openai.com/api/docs/deprecations), avis du 24 mars 2026 : retrait le 24 septembre 2026 de l’API Videos et de ses modèles. La colonne « Recommended replacement » est vide.
+- Journal de l’API, [changelog](https://developers.openai.com/api/docs/changelog), section October 2026 jusqu’au 20 octobre : aucune nouvelle API ni aucun nouveau modèle de génération vidéo. Les dernières entrées qui touchent `v1/videos` datent de mars 2026.
 
 ## Décisions
 
@@ -52,7 +51,7 @@ Aucune des deux sessions ne peut générer une vidéo Sora.
 5. **Les documents générés deviennent des pages lisibles.** PDF et DOCX utilisent une vraie police proportionnelle, gardent les emoji visibles, traitent les titres comme des titres et les tableaux comme des tableaux, et portent les couleurs d’accent déjà choisies dans l’app. L’aperçu plein écran se fait dans Ezerbot. La page reste claire : l’accent colore le bandeau ou le titre, le texte reste encre foncée. Le thème sombre de l’app ne renverse pas la page.
 6. **L’accent suivi est celui de l’app.** L’accent par défaut est le chartreuse de l’interface, `rgb(230 255 61)`, encre `#0f1012`, accent profond `#5b6b00`. Si Charles choisit un autre accent (orange, ambre, menthe, cyan, magenta, vermillon, violet, blanc), les documents générés ensuite prennent cet accent. Un document déjà produit ne change pas.
 7. **La bibliothèque est une, avec deux rôles.** Elle appartient au bot. Les fichiers de contexte sont relus, de façon bornée, à chaque conversation de ce bot. Les fichiers générés (images et documents) y sont rangés et retrouvables ; ils ne sont pas recopiés en entier dans chaque prompt. La recherche, au besoin, couvre les deux rôles et reste locale, sur le modèle du rappel de mémoire : lexicale, sans embeddings, limitée au bot.
-8. **Une vidéo jointe se lit dans la bulle.** Charles joint une vidéo comme il joint une image. La bulle montre un lecteur (lecture, pause, sans démarrage sonore automatique). La génération de vidéo n’est pas Sora et n’est pas construite dans ce lot.
+8. **Une vidéo jointe se lit dans la bulle.** Charles joint une vidéo comme il joint une image. La bulle montre un lecteur (lecture, pause, sans démarrage sonore automatique). Le bot ne génère pas de vidéo.
 9. **Les octets restent sur le Mac.** Images, documents et fichiers de bibliothèque vivent dans la base locale, comme les documents générés aujourd’hui. Le prompt et les images envoyés à OpenAI partent parce que c’est le générateur. Aucun galerie en ligne n’est ajoutée. Le téléchargement est le passage vers le disque, et il demande un accord.
 
 ## Récits
@@ -91,7 +90,6 @@ Aucune des deux sessions ne peut générer une vidéo Sora.
 32. En tant que Charles, je veux que les fichiers générés ne soient pas relus en entier à chaque tour, afin que le contexte reste celui des fichiers que j’ai désignés comme contexte.
 33. En tant que Charles, je veux joindre une courte vidéo et la lire dans la bulle, afin de la revoir dans le fil.
 34. En tant que Charles, je veux que la vidéo ne démarre pas toute seule avec le son, afin de ne pas être surpris en ouvrant le fil.
-35. En tant que Charles, je veux comprendre, dans l’app, que Sora n’est plus disponible et qu’une génération vidéo attend un fournisseur et une clé, afin de ne pas croire à une panne locale.
 
 ## Décisions d’implémentation
 
@@ -139,7 +137,7 @@ Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est se
 ## Hors-périmètre
 
 - Réécrire PPTX, XLSX, CSV, Markdown et SVG. Ils continuent de se générer comme aujourd’hui et ne doivent pas régresser. Ils ne reçoivent pas le modèle couleur dans ce lot.
-- Choisir ou appeler un fournisseur de vidéo. Sora est arrêté. La génération de courtes vidéos attend le fournisseur et la clé que Charles nommera.
+- Générer une vidéo. Le guide officiel de génération vidéo et la page Deprecations constatent l’arrêt de l’API Videos le 24 septembre 2026, sans API de remplacement. Le compte de Charles ne peut pas en produire. Joindre une vidéo et la lire dans la conversation reste dans le lot.
 - Un bouton « générer une image », un éditeur de dessin, des calques, ou un choix manuel de taille et de qualité. `quality` et `size` restent `auto`.
 - Prétendre que le poids `gpt-image-2` a bien été celui qui a dessiné, lorsque la route ne le confirme pas.
 - Embarquer une police Apple dans le dépôt ou dans un fichier redistribué.
@@ -158,7 +156,7 @@ Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est se
 - **Emoji et PDF hors de ce Mac.** L’API PDF du système montre l’emoji dans Aperçu et dans l’app. Un lecteur Linux du fichier peut ne pas dessiner l’emoji couleur. Les tests hors Mac vérifient que la génération accepte l’emoji et que la police n’est plus Courier ; le glyphe est jugé sur Mac.
 - **Couleur d’accent peu lisible.** L’accent « blanc » ou un accent clair sur page claire disparaîtrait. Le bandeau utilise l’accent profond quand l’accent clair ne contraste pas avec le fond de page. Le juge le vérifie avec l’accent par défaut et avec le violet.
 - **Taille des images dans la base.** Les PNG s’accumulent par bot. Les plafonds existants s’appliquent ; un dépassement échoue en français avant d’écrire. Ce lot ne migre pas l’historique.
-- **Vidéo.** Promettre Sora serait un mensonge de produit. Le lecteur local peut échouer sur un MOV exotique : le message d’erreur fait partie du contrat, pas une conversion cachée.
+- **Lecture vidéo.** Un conteneur que le WebView macOS ne lit pas affiche une erreur française. Aucune conversion cachée.
 - **Clé d’API.** Elle est un secret de facturation. Elle reste dans le trousseau, absente des prompts, des journaux, de la mémoire et des exports. Les tests utilisent un coffre jetable, comme les tests de trousseau déjà présents.
 
 ## Tranches
@@ -175,6 +173,5 @@ Carte : [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/
 8. [Recherche dans la bibliothèque du bot](https://github.com/charlescstpierr/ezerbot/issues/42). Bloquée par 35.
 9. [Ranger images et documents générés dans la bibliothèque](https://github.com/charlescstpierr/ezerbot/issues/43). Bloquée par 40 et 35.
 10. [Lire une vidéo jointe dans la bulle](https://github.com/charlescstpierr/ezerbot/issues/36). Aucun bloquant.
-11. [Choisir le remplaçant de Sora](https://github.com/charlescstpierr/ezerbot/issues/37). Question pour Charles, pas une tranche à coder. Rien d’autre n’en dépend tant qu’il n’a pas nommé un fournisseur et une clé.
 
-La génération vidéo elle-même n’est pas découpée : elle reste dans le brouillard jusqu’à la réponse de Charles.
+La génération vidéo est hors périmètre. L’issue [Génération vidéo](https://github.com/charlescstpierr/ezerbot/issues/37) est fermée pour cette raison.

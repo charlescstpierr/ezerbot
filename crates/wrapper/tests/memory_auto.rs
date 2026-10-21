@@ -1123,6 +1123,30 @@ fn plain_everyone_produces_a_receipt_and_consent_card_without_weakening_email_gu
 }
 
 #[test]
+fn punctuated_everyone_is_stripped_without_rewriting_addresses_or_longer_names() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    let text = "Je travaille sur le projet Boréal.";
+    for (id, body) in [
+        ("dot", format!("@everyone. {text}")),
+        ("paren", format!("(@everyone) {text}")),
+        ("ellipsis", format!("@everyone… {text}")),
+    ] {
+        f.script(json!([fact(text, None)]));
+        f.send(&c, id, &body);
+        f.settle();
+    }
+    let calls = f.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls.iter().all(|call| !call["input"].to_string().contains("@everyone")));
+    f.send(&c, "address", "Écrivez à x@everyone.com au sujet du projet.");
+    f.settle();
+    f.send(&c, "longer", "@everyoneElse Je préfère le thé vert.");
+    f.settle();
+    assert_eq!(f.calls().len(), 3);
+}
+
+#[test]
 fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
     let mut f = Fixture::new();
     let c = f.conv("grokbot");

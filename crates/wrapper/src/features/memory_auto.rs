@@ -495,6 +495,10 @@ fn form_overlap(conn: &Connection, text: &str) -> Result<bool, ApiError> {
     }
     Ok(false)
 }
+fn mention_boundary(c: Option<char>) -> bool {
+    c.is_none_or(|c| !c.is_alphanumeric())
+}
+
 fn without_routing_mentions(
     conn: &Connection,
     conversation: &str,
@@ -527,10 +531,7 @@ fn without_routing_mentions(
                 .find(|(start, _)| {
                     let before = text[..*start].chars().next_back();
                     let after = text[*start + token.len()..].chars().next();
-                    before.is_none_or(char::is_whitespace)
-                        && after.is_none_or(|c| {
-                            c.is_whitespace() || matches!(c, ',' | '!' | '?' | ':' | ';')
-                        })
+                    mention_boundary(before) && mention_boundary(after)
                 })
                 .map(|(start, _)| start)
         };
@@ -543,9 +544,7 @@ fn without_routing_mentions(
     for (start, token) in text.match_indices("@everyone") {
         let before = text[..start].chars().next_back();
         let after = text[start + token.len()..].chars().next();
-        if before.is_none_or(char::is_whitespace)
-            && after.is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '!' | '?' | ':' | ';'))
-        {
+        if mention_boundary(before) && mention_boundary(after) {
             ranges.push((start, start + token.len()));
         }
     }

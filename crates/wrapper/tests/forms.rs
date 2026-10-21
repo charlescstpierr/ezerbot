@@ -520,11 +520,137 @@ fn secret_value_absent_from_state_export_and_events() {
         f.post("/api/secrets/delete", json!({"name":"api_token"})),
         json!({"secrets":[]})
     );
+    let stale = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"secret-again","conversation_id":f.conversation,"value":"autre phrase refusee ici"}),
+    )
+    .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.message, "Ce formulaire n’a pas été accepté.");
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .get("API_TOKEN")
+        .unwrap()
+        .is_none());
     for name in ["app.sqlite", "app.sqlite-wal"] {
         assert!(!std::fs::read(f.directory.join(name))
             .unwrap()
             .windows(secret.len())
             .any(|bytes| bytes == secret.as_bytes()));
+    }
+    assert!(!bytes_contain(
+        &f.directory.join("app.secrets.json"),
+        "autre phrase refusee ici"
+    ));
+}
+
+#[test]
+fn conversation_secret_card_records_the_name_and_rejects_another_submission() {
+    const STALE: &str = "Ce formulaire n’a pas été accepté.";
+    const VALUE: &str = "phrase stripe du formulaire";
+    const OTHER: &str = "autre phrase du formulaire";
+    let mut f = Fixture::new();
+    let request = f.suspended_request(
+        "run",
+        "stripe",
+        "request_secret",
+        json!({"name":"stripe_key","purpose":"Clé API Stripe"}),
+    );
+    assert!(matches!(
+        &request.kind,
+        grokbot_forms::requests::InputKind::Secret { name, purpose }
+            if name == "STRIPE_KEY" && purpose == "Clé API Stripe"
+    ));
+    let pending = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = pending["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| message["kind"] == "secret")
+        .unwrap();
+    assert_eq!(card["body"], "");
+    assert_eq!(card["payload"]["kind"]["name"], "STRIPE_KEY");
+    assert_eq!(card["payload"]["kind"]["purpose"], "Clé API Stripe");
+    assert_eq!(card["payload"]["status"]["status"], "pending");
+    assert!(!card.to_string().contains(VALUE));
+
+    let first = f.post(
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-submit","conversation_id":f.conversation,"value":VALUE}),
+    );
+    assert_eq!(
+        requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
+            .unwrap(),
+        json!({"name":"STRIPE_KEY"})
+    );
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive("run", &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    let seen = gateway.requests.lock().unwrap();
+    let model = seen[0]
+        .input
+        .iter()
+        .flat_map(|item| &item.tool_items)
+        .map(|item| serde_json::to_value(item).unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(model.contains("STRIPE_KEY"));
+    assert!(!model.contains(VALUE));
+    drop(seen);
+
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let resolved = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| message["kind"] == "secret")
+        .unwrap();
+    assert_eq!(resolved["payload"]["status"]["status"], "resolved");
+    assert_eq!(resolved["payload"]["kind"]["name"], "STRIPE_KEY");
+    assert_eq!(resolved["body"], "");
+    let events = store::events(&f.conn, "run", 0).unwrap();
+    let encoded = json!({"state":state,"events":events}).to_string();
+    assert!(encoded.contains("STRIPE_KEY"));
+    assert!(encoded.contains("Clé API Stripe"));
+    assert!(!encoded.contains(VALUE));
+    let listed = post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"grokbot"})).unwrap();
+    assert_eq!(listed["secrets"][0]["name"], "STRIPE_KEY");
+    assert_eq!(listed["secrets"][0]["description"], "Clé API Stripe");
+    assert!(listed["secrets"][0].get("value").is_none());
+    assert!(!listed.to_string().contains(VALUE));
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+
+    let replay = f.post(
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-submit","conversation_id":f.conversation,"value":OTHER}),
+    );
+    assert_eq!(
+        replay["receipt"]["resolution_id"],
+        first["receipt"]["resolution_id"]
+    );
+    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+
+    let resolutions = f.count("forms_resolutions");
+    let stale = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-autre","conversation_id":f.conversation,"value":OTHER}),
+    )
+    .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.message, STALE);
+    assert_eq!(f.count("forms_resolutions"), resolutions);
+    assert_eq!(vault.get("STRIPE_KEY").unwrap().as_deref(), Some(VALUE));
+    assert!(!bytes_contain(vault.path(), OTHER));
+    for name in ["app.sqlite", "app.sqlite-wal"] {
+        assert!(!bytes_contain(&f.directory.join(name), VALUE));
+        assert!(!bytes_contain(&f.directory.join(name), OTHER));
     }
 }
 

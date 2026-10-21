@@ -973,6 +973,19 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 |r| r.get(0),
             )?;
             if existing {
+                // A secret card is single use. The same submission id still
+                // returns the original receipt and does not rewrite the vault.
+                // Any other submission is refused before a write.
+                if matches!(request.kind, InputKind::Secret { .. }) {
+                    let same: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM forms_resolutions WHERE entry_id=?1 AND submission_id=?2)",
+                        params![&input.entry_id, &submission],
+                        |row| row.get(0),
+                    )?;
+                    if !same {
+                        return Err(ApiError::new(409, STALE_FORM));
+                    }
+                }
                 requests::receipt(&tx, &input.entry_id, &submission)?
             } else {
                 let receipt = match &request.kind {

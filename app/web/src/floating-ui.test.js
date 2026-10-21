@@ -109,6 +109,24 @@ test("overflow hint disappears at the bottom and tolerates fractional pixel roun
   assert.equal(floatingHasMore(null),false);
 });
 
+test("a reconnected account follows provider.connected instead of the stale sign-in kind", () => {
+  const expired = { state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." };
+  const missing = { state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." };
+  for (const reply of [expired, missing]) {
+    const view = floatingFailureState(reply, { providerConnected: true });
+    assert.equal(view.title, "Compte ChatGPT connecté");
+    assert.equal(view.alert, false);
+    assert.doesNotMatch(`${view.title} ${view.detail}`, /expiré|requise|Reconnectez/);
+  }
+  assert.equal(floatingFailureState(expired, { providerConnected: false }).title, "Votre session ChatGPT a expiré");
+  assert.equal(floatingFailureState(missing).title, "Connexion ChatGPT requise");
+  const other = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" }, { providerConnected: true });
+  assert.equal(other.title, "La réponse a échoué.");
+  assert.equal(other.alert, true);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /provider\?\.connected === true/);
+});
+
 test("a floating panel without a session is not titled as a failed answer", () => {
   const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
   assert.equal(expired.alert, false);
@@ -126,7 +144,7 @@ test("a floating panel without a session is not titled as a failed answer", () =
   assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
   assert.equal(floatingFailureState({ state: "echoed", error_kind: "signin" }), null);
   const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
-  assert.match(source, /floatingFailureState\(reply\)/);
+  assert.match(source, /floatingFailureState\(reply, \{ providerConnected: state\?\.provider\?\.connected === true \}\)/);
   assert.match(source, /failure\.alert \? " floating-failure" : ""/);
   assert.match(source, /<strong>\{failure\.title\}<\/strong>/);
 });

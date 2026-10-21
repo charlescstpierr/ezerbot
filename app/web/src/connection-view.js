@@ -67,14 +67,16 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
 
-export function floatingFailureState(reply) {
+export function floatingFailureState(reply, { providerConnected = false } = {}) {
   if (reply?.state !== "failed") return null;
   const expired = reply.error_kind === "signin_expired";
   const signin = expired || reply.error_kind === "signin";
+  const reconnected = signin && providerConnected;
   return {
-    title: expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
+    title: reconnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
     alert: !signin,
-    detail: presentedFailureText(reply.error) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
+    detail: reconnected ? "Votre question est conservée. Ouvrez le fil pour reprendre la réponse."
+      : presentedFailureText(reply.error) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
   };
 }
 

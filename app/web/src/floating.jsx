@@ -46,7 +46,7 @@ function Floating() {
   const displayReply = requests.length ? floatingReply(conversation, true) : reply;
   const question = conversation?.messages.filter((m) => m.role === "user").at(-1)?.body;
   const failed = reply?.state === "failed";
-  const failure = floatingFailureState(reply);
+  const failure = floatingFailureState(reply, { providerConnected: state?.provider?.connected === true });
   const live = conversation?.messages.some((m) => ["streaming", "generating", "queued", "dispatching", "unknown"].includes(m.state));
   const unavailable = Boolean(target && !conversation);
 

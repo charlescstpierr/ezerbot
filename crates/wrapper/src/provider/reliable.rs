@@ -9,9 +9,9 @@ use std::io::{ErrorKind, Read};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 
-/// Bytes below this never refresh the read deadline. A drip of a few octets
-/// before each `timeout_read` must not keep the socket until `total`.
-const MEANINGFUL_READ: usize = 16;
+/// Only a finished SSE `data:` event refreshes the read deadline. A trickle of
+/// raw octets, or a comment line such as `: ping`, must not.
+const SSE_PENDING_CAP: usize = 64 * 1024;
 
 struct Flight {
     deadlines: Deadlines,
@@ -260,7 +260,7 @@ fn pump(
     client.set_write_timeout(Some(Duration::from_secs(15)))?;
     upstream.set_write_timeout(Some(Duration::from_secs(15)))?;
     let mut last = Instant::now();
-    let mut accrued = 0usize;
+    let mut pending = Vec::new();
     let mut client_open = true;
     let mut buf = [0u8; 8192];
     let result = loop {
@@ -273,7 +273,8 @@ fn pump(
             &mut upstream,
             &mut client,
             &mut buf,
-            &mut accrued,
+            true,
+            &mut pending,
             &mut last,
         )? {
             break Ok(());
@@ -283,7 +284,8 @@ fn pump(
                 &mut client,
                 &mut upstream,
                 &mut buf,
-                &mut accrued,
+                false,
+                &mut pending,
                 &mut last,
             )?
         {
@@ -299,16 +301,15 @@ fn transfer(
     from: &mut TcpStream,
     to: &mut TcpStream,
     buf: &mut [u8],
-    accrued: &mut usize,
+    count_events: bool,
+    pending: &mut Vec<u8>,
     last: &mut Instant,
 ) -> std::io::Result<bool> {
     match from.read(buf) {
         Ok(0) => Ok(true),
         Ok(n) => {
             to.write_all(&buf[..n])?;
-            *accrued = accrued.saturating_add(n);
-            if *accrued >= MEANINGFUL_READ {
-                *accrued = 0;
+            if count_events && sse_data_progress(pending, &buf[..n]) {
                 *last = Instant::now();
             }
             Ok(false)
@@ -323,6 +324,45 @@ fn transfer(
         }
         Err(err) => Err(err),
     }
+}
+
+/// True when `chunk` completes an SSE event whose block contains a `data:` line.
+fn sse_data_progress(pending: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    pending.extend_from_slice(chunk);
+    let mut progressed = false;
+    while let Some(end) = sse_boundary(pending) {
+        let event: Vec<u8> = pending.drain(..end).collect();
+        if event_has_data_field(&event) {
+            progressed = true;
+        }
+    }
+    if pending.len() > SSE_PENDING_CAP {
+        let drop_to = pending.len() - 8 * 1024;
+        pending.drain(..drop_to);
+    }
+    progressed
+}
+
+fn sse_boundary(buf: &[u8]) -> Option<usize> {
+    let crlf = buf
+        .windows(4)
+        .position(|mark| mark == b"\r\n\r\n")
+        .map(|index| index + 4);
+    let lf = buf
+        .windows(2)
+        .position(|mark| mark == b"\n\n")
+        .map(|index| index + 2);
+    match (crlf, lf) {
+        (Some(crlf), Some(lf)) => Some(crlf.min(lf)),
+        (Some(end), None) | (None, Some(end)) => Some(end),
+        (None, None) => None,
+    }
+}
+
+fn event_has_data_field(event: &[u8]) -> bool {
+    String::from_utf8_lossy(event)
+        .split(['\n', '\r'])
+        .any(|line| line.starts_with("data:"))
 }
 
 #[derive(Clone, Copy)]

@@ -35,6 +35,9 @@ enum Fault {
     DripHeader,
     /// Finished headers, then one byte well under the read deadline.
     DripBody,
+    /// One octet every 30 ms: sixteen octets arrive inside a 2s stall, the
+    /// same ratio as one octet per second against the 60s production stall.
+    Trickle,
 }
 struct Fake {
     base: String,
@@ -55,16 +58,20 @@ fn event(stream: &mut TcpStream, value: Value) {
     let _ = stream.flush();
 }
 fn drip(stream: &mut TcpStream, stop: &AtomicBool) {
+    trickle_at(stream, stop, Duration::from_millis(400));
+}
+fn trickle_at(stream: &mut TcpStream, stop: &AtomicBool, interval: Duration) {
     let _ = stream.set_nodelay(true);
     while !stop.load(Ordering::SeqCst) {
         if stream.write_all(b"x").is_err() || stream.flush().is_err() {
             break;
         }
+        let step = interval / 4;
         for _ in 0..4 {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(step);
         }
     }
 }
@@ -210,6 +217,7 @@ impl Fake {
                         Fault::Refusal => event(&mut socket,json!({"type":"response.refusal.delta","delta":"refus factice"})),
                         Fault::Incomplete => event(&mut socket,json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}})),
                         Fault::DripBody => drip(&mut socket, &s),
+                        Fault::Trickle => trickle_at(&mut socket, &s, Duration::from_millis(30)),
                         _ => { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Réponse factice terminée."})); event(&mut socket,json!({"type":"response.completed"})); },
                     }
                 }));
@@ -769,6 +777,40 @@ fn a_dripping_body_does_not_outlive_the_read_deadline() {
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "drip kept the turn for {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_byte_trickle_does_not_refresh_the_production_stall_ratio() {
+    // Production stall is 60s. One octet per second yields 16 octets in 16s,
+    // which used to reset that stall and hold the socket until the 600s total.
+    // Scaled by 30: stall 2s, one octet every 30ms (16 octets in 480ms).
+    let mut f = Fixture::with_deadlines(
+        true,
+        Duration::from_secs(20),
+        Duration::from_secs(2),
+        Duration::from_secs(60),
+    );
+    let started = Instant::now();
+    f.send(Fault::Trickle);
+    let mut reply = Value::Null;
+    while started.elapsed() < Duration::from_secs(8) {
+        reply = f.reply();
+        if !reply.is_null() && reply["state"] != "streaming" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(reply["state"], "failed", "{reply}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "trickle failed immediately: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "trickle kept the turn for {:?}",
         started.elapsed()
     );
 }

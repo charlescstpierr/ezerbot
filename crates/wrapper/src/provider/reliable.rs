@@ -42,9 +42,12 @@ pub(super) fn flight_deadlines(fallback: Deadlines) -> Deadlines {
 
 /// Local relay for the worker that is inside `request()`. ureq has no abort,
 /// and `.timeout()` would replace `.timeout_read()` on every body read. The
-/// relay closes the sockets at `stall` unless a real burst arrived, and always
-/// at `total`. Abandon does not close early: Stop must keep the closing slot
-/// until the read deadline, and the HTTP handler must return in under a second.
+/// relay closes the sockets at `stall` unless the stream is still moving, and
+/// always at `total`. On plaintext HTTP only a finished SSE `data:` event
+/// counts. A CONNECT tunnel carries opaque TLS, so any byte in either
+/// direction counts: production chat never contains the ASCII `data:`.
+/// Abandon does not close early: Stop must keep the closing slot until the
+/// read deadline, and the HTTP handler must return in under a second.
 pub(super) fn spawn_deadline_proxy() -> Option<std::io::Result<String>> {
     let limits = FLIGHT.with(|slot| slot.borrow().as_ref().map(|flight| flight.deadlines))?;
     Some((|| {
@@ -99,7 +102,7 @@ fn serve_relay(mut client: TcpStream, limits: Deadlines) -> std::io::Result<()> 
             upstream.write_all(&body)?;
         }
     }
-    pump(client, upstream, limits, started)
+    pump(client, upstream, limits, started, target.tunnel)
 }
 
 fn read_request(sock: &mut TcpStream) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
@@ -254,6 +257,7 @@ fn pump(
     mut upstream: TcpStream,
     limits: Deadlines,
     started: Instant,
+    tunnel: bool,
 ) -> std::io::Result<()> {
     client.set_read_timeout(Some(Duration::from_millis(200)))?;
     upstream.set_read_timeout(Some(Duration::from_millis(200)))?;
@@ -274,6 +278,7 @@ fn pump(
             &mut client,
             &mut buf,
             true,
+            tunnel,
             &mut pending,
             &mut last,
         )? {
@@ -285,6 +290,7 @@ fn pump(
                 &mut upstream,
                 &mut buf,
                 false,
+                tunnel,
                 &mut pending,
                 &mut last,
             )?
@@ -302,6 +308,7 @@ fn transfer(
     to: &mut TcpStream,
     buf: &mut [u8],
     count_events: bool,
+    tunnel: bool,
     pending: &mut Vec<u8>,
     last: &mut Instant,
 ) -> std::io::Result<bool> {
@@ -309,7 +316,15 @@ fn transfer(
         Ok(0) => Ok(true),
         Ok(n) => {
             to.write_all(&buf[..n])?;
-            if count_events && sse_data_progress(pending, &buf[..n]) {
+            // TLS records never contain `data:`. Any byte on a CONNECT tunnel
+            // is activity. Plaintext HTTP still requires a finished SSE event,
+            // and only on the upstream direction.
+            let progressed = if tunnel {
+                true
+            } else {
+                count_events && sse_data_progress(pending, &buf[..n])
+            };
+            if progressed {
                 *last = Instant::now();
             }
             Ok(false)
@@ -719,7 +734,7 @@ mod elapsed_interval {
     use crate::{App, Endpoints, Provider};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use std::{
-        io::{BufRead, BufReader, Read, Write},
+        io::{BufRead, BufReader, ErrorKind, Read, Write},
         net::{SocketAddr, TcpListener},
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -916,6 +931,140 @@ mod elapsed_interval {
             listener.accept().is_ok(),
             "the live listener saw no connection"
         );
+    }
+
+    /// Production chat is HTTPS. After CONNECT, the relay only sees TLS records,
+    /// never a `data:` line. Those records must still refresh the stall.
+    #[test]
+    fn an_opaque_connect_stream_is_not_cut_while_bytes_flow() {
+        let stall = Duration::from_millis(300);
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        thread::spawn(move || {
+            let Ok((mut socket, _)) = origin.accept() else {
+                return;
+            };
+            let _ = socket.set_nodelay(true);
+            // A TLS record header. It never contains the ASCII sequence `data:`.
+            let record = [0x16u8, 0x03, 0x03, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44];
+            while !flag.load(Ordering::SeqCst) {
+                if socket.write_all(&record).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let (mut client, started) = open_connect_tunnel(origin_addr, stall, Duration::from_secs(4));
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let mut raw = Vec::new();
+        let mut late = 0usize;
+        while started.elapsed() < Duration::from_millis(1400) {
+            match client.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    raw.extend_from_slice(&buf[..n]);
+                    if started.elapsed() >= stall * 3 {
+                        late += n;
+                    }
+                }
+                Err(err)
+                    if err.kind() == ErrorKind::TimedOut || err.kind() == ErrorKind::WouldBlock => {
+                }
+                Err(_) => break,
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        let header = raw
+            .windows(4)
+            .position(|mark| mark == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .unwrap_or(0);
+        assert!(raw.len() > header, "opaque bytes never crossed the tunnel");
+        assert!(
+            late > 0,
+            "opaque tunnel closed at the stall after {:?}: {} payload bytes",
+            started.elapsed(),
+            raw.len() - header
+        );
+    }
+
+    /// A mute HTTPS socket must still die at the stall, not at the overall cap.
+    #[test]
+    fn a_silent_connect_tunnel_closes_at_the_stall() {
+        let stall = Duration::from_millis(300);
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        thread::spawn(move || {
+            let Ok((mut socket, _)) = origin.accept() else {
+                return;
+            };
+            let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+            let mut buf = [0u8; 64];
+            let _ = socket.read(&mut buf);
+        });
+        let (mut client, started) = open_connect_tunnel(origin_addr, stall, Duration::from_secs(3));
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let mut saw_header = false;
+        let mut closed = None;
+        while started.elapsed() < Duration::from_secs(2) {
+            match client.read(&mut buf) {
+                Ok(0) => {
+                    closed = Some(started.elapsed());
+                    break;
+                }
+                Ok(n) => {
+                    if buf[..n].windows(4).any(|mark| mark == b"\r\n\r\n") {
+                        saw_header = true;
+                    }
+                }
+                Err(err)
+                    if err.kind() == ErrorKind::TimedOut || err.kind() == ErrorKind::WouldBlock => {
+                }
+                Err(_) => {
+                    closed = Some(started.elapsed());
+                    break;
+                }
+            }
+        }
+        assert!(saw_header, "CONNECT was not established");
+        let closed = closed.expect("silent tunnel stayed open until the overall cap");
+        assert!(
+            closed >= stall && closed < stall + Duration::from_millis(700),
+            "silent tunnel closed outside the stall: {closed:?}"
+        );
+    }
+
+    fn open_connect_tunnel(
+        origin: std::net::SocketAddr,
+        stall: Duration,
+        total: Duration,
+    ) -> (std::net::TcpStream, Instant) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let limits = super::Deadlines {
+            first: Duration::from_secs(30),
+            stall,
+            total,
+        };
+        thread::spawn(move || {
+            let Ok((socket, _)) = listener.accept() else {
+                return;
+            };
+            let _ = super::serve_relay(socket, limits);
+        });
+        let mut client = std::net::TcpStream::connect(proxy).unwrap();
+        let _ = client.set_nodelay(true);
+        let request = format!("CONNECT {origin} HTTP/1.1\r\nHost: {origin}\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        (client, Instant::now())
     }
 
     #[test]

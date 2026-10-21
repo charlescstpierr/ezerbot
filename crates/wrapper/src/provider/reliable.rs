@@ -96,6 +96,22 @@ fn send(tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
     tx.send(value)
         .map_err(|_| Error::InvalidInput("transport abandoned".into()))
 }
+fn terminal_event(value: &Wire) -> bool {
+    matches!(
+        value,
+        Wire::Event(
+            ModelEvent::Completed | ModelEvent::Failed { .. } | ModelEvent::Incomplete { .. }
+        )
+    )
+}
+/// Hands the caller its last event. The worker must already be finished so
+/// dropping the caller does not count a socket that is about to exit.
+fn deliver_terminal(settled: &Mutex<Settled>, tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
+    if terminal_event(&value) {
+        lock(settled).worker_done = true;
+    }
+    send(tx, value)
+}
 impl Session {
     pub(super) fn reliable_stream(
         &self,
@@ -134,6 +150,7 @@ impl Session {
         let session = self.clone();
         let worker_abandoned = abandoned.clone();
         let worker_settled = settled.clone();
+        let emit_settled = worker_settled.clone();
         let mut limits = *lock(&self.inner.deadlines);
         if turn.is_none() {
             // Titles are best-effort bounded work, not another foreground turn.
@@ -165,7 +182,8 @@ impl Session {
                     Ok(response) => response,
                     Err(failure) => {
                         send(&tx, Wire::Failure(failure.clone()))?;
-                        return send(
+                        return deliver_terminal(
+                            &emit_settled,
                             &tx,
                             Wire::Event(ModelEvent::Failed {
                                 reason: failure.message,
@@ -220,7 +238,7 @@ impl Session {
                                 }),
                             )?;
                         }
-                        send(&tx, Wire::Event(event))
+                        deliver_terminal(&emit_settled, &tx, Wire::Event(event))
                     },
                 )
             })();
@@ -529,6 +547,63 @@ mod elapsed_interval {
             "HTTP/1.1 200 OK\r\nContent-Type: {content}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         );
+    }
+
+    #[test]
+    fn a_terminal_event_does_not_occupy_a_closing_slot() {
+        let inner = std::sync::Arc::new(sample_inner());
+        let settled = std::sync::Arc::new(super::super::Mutex::new(super::Settled {
+            worker_done: false,
+            counted: false,
+        }));
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        super::deliver_terminal(
+            &settled,
+            &tx,
+            super::Wire::Event(grokbot_engine::contracts::ModelEvent::Completed),
+        )
+        .unwrap();
+        drop(tx);
+        let _ = rx.recv();
+        {
+            let _abandon = super::Abandon {
+                flag: std::sync::Arc::new(AtomicBool::new(false)),
+                inner: inner.clone(),
+                settled: settled.clone(),
+            };
+        }
+        assert_eq!(
+            inner.closing.load(Ordering::SeqCst),
+            0,
+            "a worker that already delivered its last event was counted as closing"
+        );
+    }
+
+    fn sample_inner() -> super::super::Inner {
+        super::super::Inner {
+            codex: true,
+            deadlines: std::sync::Mutex::new(super::Deadlines::default()),
+            transports: std::sync::atomic::AtomicUsize::new(0),
+            closing: std::sync::atomic::AtomicUsize::new(0),
+            simulation: AtomicBool::new(false),
+            probe: std::sync::Mutex::new(serde_json::Value::Null),
+            probe_generation: std::sync::atomic::AtomicUsize::new(0),
+            local_revoked: AtomicBool::new(false),
+            file: std::path::PathBuf::from("unused.sqlite"),
+            endpoints: super::super::Endpoints::default(),
+            open_browser: false,
+            credentials: std::sync::Mutex::new(()),
+            signin: std::sync::Mutex::new(super::super::SignIn {
+                phase: super::super::Phase::Idle,
+                cancel: None,
+            }),
+            runs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            interrupting: AtomicBool::new(false),
+            titling: std::sync::atomic::AtomicUsize::new(0),
+            catalog: std::sync::Mutex::new(super::super::Catalog::default()),
+            quota: std::sync::Mutex::new(super::super::codex::UsageCache::default()),
+            mcp: crate::mcp::Manager::default(),
+        }
     }
 
     fn token() -> String {

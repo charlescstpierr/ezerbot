@@ -201,10 +201,13 @@ function boot({ attachments = false, draft = "Brouillon du fil" } = {}) {
       mountInput: () => input,
       isPendingReply: () => false,
       renderThread() {},
+      connectionMessages: (messages) => messages,
+      composerConnectionState: ({ offline = false, live = false, busy = false }) => ({ offline, live: live && !offline, busy: busy && !offline, mode: live && !offline ? "stop" : "send", icon: live && !offline ? "#i-stop" : "#i-send", title: offline ? "Moteur local indisponible" : "Envoyer le message", label: "Envoyer le message" }),
       searchableMessageText: () => "",
       revealPendingApproval() {},
       teachPrompt: "",
     },
+    addEventListener() {},
     GrokbotMascot: { shapes: {}, setShape() {}, setContext() {}, celebrate() {}, create: () => new Element("span", document) },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
   };

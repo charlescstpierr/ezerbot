@@ -11,6 +11,18 @@ function mount(backend, connected = false) {
   let document;
   class Element {
     constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.className = ""; this.dataset = {}; this.attributes = {}; }
+    get classList() {
+      const node = this;
+      return {
+        add(...names) {
+          const classes = new Set(node.className.split(/\s+/).filter(Boolean));
+          for (const name of names) classes.add(name);
+          node.className = [...classes].join(" ");
+        },
+        remove(...names) { node.className = node.className.split(/\s+/).filter((name) => name && !names.includes(name)).join(" "); },
+        contains(name) { return node.className.split(/\s+/).includes(name); },
+      };
+    }
     setAttribute(name, value) { this.attributes[name] = String(value); }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
     contains(node) { return node === this || this.children.some((child) => child.contains(node)); }
@@ -47,7 +59,7 @@ function mount(backend, connected = false) {
   const context = {
     document, state, element, $: (id) => nodes.get(id), provider: () => state.provider,
     currentBot: () => ({ name: "Ezerbot" }), pill: () => element("button"), option: () => element("button"),
-    signIn() {}, signOut() {}, providerAction() {}, refresh() {},
+    signIn() {}, signInCodex() {}, signOut() {}, providerAction() {}, refresh() {},
     pickerKind: connected ? "model" : null,
     closePicker() { context.pickerKind = null; nodes.get("picker").hidden = true; },
   };

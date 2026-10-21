@@ -429,7 +429,7 @@
   function schedulePoll() {
     clearTimeout(pollTimer);
     const live = state.conversations.some((conversation) => streamingMessage(conversation));
-    const waiting = provider().signin === "pending" || provider().titling || (provider().connected && !provider().models_ready);
+    const waiting = provider().signin === "pending" || provider().connection_test?.state === "running" || provider().titling || (provider().connected && !provider().models_ready);
     const panelWaiting = [...panels.values()].some((panel) => panelCall(panel, panel.wantsPolling) === true);
     // A failed refresh must never disarm recovery. An idle heartbeat also
     // notices a wrapper restart or a run started by another window.
@@ -456,7 +456,7 @@
     connectionStatus = "offline";
     ui.bannerText.textContent = "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
-    updateComposer();
+    render();
     for (const panel of panels.values()) panelCall(panel, panel.onConnection, false);
     schedulePoll();
     if (error) console.warn("Ezerbot local connection:", error.message);
@@ -516,13 +516,15 @@
     const attachmentsBlocked = Boolean(blockingPanel);
     const blockedReason = blockingPanel && panelCall(blockingPanel, blockingPanel.composer?.blockedReason);
     // The task banner is the single cancellation control. The composer only sends follow-ups.
-    const live = !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments));
+    const control = window.GrokbotChat.composerConnectionState({ offline: connectionStatus === "offline", busy, group,
+      live: !task && Boolean(streamingMessage()) && (!group || (!ui.input.value.trim() && !hasAttachments)) });
+    const live = control.live;
     const noMembers = group && !currentConversation().member_ids?.length;
-    ui.send.disabled = taskFinished || (live ? ((group || task) && (busy || !connected)) : busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
-    ui.send.dataset.mode = live ? "stop" : "send";
-    ui.send.title = live ? group ? "Arrêter les tours" : "Arrêter la réponse" : "Envoyer le message";
-    ui.send.setAttribute("aria-label", live ? ui.send.title : busy ? "Envoi en cours" : "Envoyer le message");
-    ui.send.querySelector("use").setAttribute("href", live ? "#i-stop" : "#i-send");
+    ui.send.disabled = control.offline || taskFinished || (live ? ((group || task) && (control.busy || !connected)) : control.busy || !connected || noMembers || (!ui.input.value.trim() && !hasAttachments) || pending || tooLong || attachmentsBlocked);
+    ui.send.dataset.mode = control.mode;
+    ui.send.title = control.title;
+    ui.send.setAttribute("aria-label", control.label);
+    ui.send.querySelector("use").setAttribute("href", control.icon);
     ui.input.setInvalid(tooLong);
     ui.hint.dataset.alert = String(Boolean(pending || tooLong || blockedReason));
     ui.hint.textContent = taskFinished ? "Cette tâche est terminée ; poursuivez dans la conversation principale." : noMembers ? "Ajoutez un bot au groupe pour poursuivre." : pending ? "Vérifiez le dernier envoi pour poursuivre la conversation." : tooLong ? "Ce message est trop long. Raccourcissez-le pour l’envoyer." : typeof blockedReason === "string" ? blockedReason : task ? "Suivi réservé à cette sous-tâche · Entrée pour envoyer" : group && live ? "Écrivez pour envoyer un nouveau message, ou arrêtez les tours." : "Entrée pour envoyer · ⇧ Entrée pour une nouvelle ligne";
@@ -535,7 +537,7 @@
     learn.disabled = busy || !connected || pending || noMembers || Boolean(streamingMessage())
       || !currentConversation()?.messages.some((message) => message.role === "user" && ["accepted", "echoed"].includes(message.state));
     mascot?.setContext({ connection: connected ? "online" : connectionStatus,
-      activity: taskFinished ? null : submissionActivity, pending: taskFinished ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
+      activity: taskFinished || control.offline ? null : submissionActivity, pending: taskFinished || control.offline ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
   }
 
   function selectConversation(id, focus = false) {
@@ -811,8 +813,8 @@
   const thread = {
     createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
-    onRegenerate: (message) => generation("/api/regenerate", message.id.replace(/^reply-/, "")),
-    onSignIn: () => signIn(),
+    onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
+    onSignIn: () => signInCodex(),
     onCardAction: cardAction,
     get usageUrl() { return usageUrl(); },
     async onCopy(text) {
@@ -864,7 +866,7 @@
     ui.welcome.hidden = hasMessages;
     document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: conversation?.messages || [], busy, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: window.GrokbotChat.connectionMessages(conversation?.messages || [], connected), busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -967,7 +969,7 @@
       link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
       note.replaceChildren(document.createTextNode(isCodex ? "Quota Codex utilisé · " : "Partage d’abonnement ChatGPT · "), link);
     } else {
-      note.replaceChildren(element("span", "simulation-dot"), document.createTextNode("Réponses simulées"));
+      note.replaceChildren(element("span", "simulation-dot"), document.createTextNode(current.simulation ? "Mode développeur · réponses simulées" : "Connexion ChatGPT requise"));
     }
 
     const card = element("div", "provider-card");
@@ -991,14 +993,19 @@
     if (current.connected) heading.prepend(element("span", "status-dot"));
     copy.append(heading, element("p", "", current.connected ? (current.email ? `Compte ChatGPT : ${current.email}` : "Adresse e-mail du compte ChatGPT indisponible.")
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
-      : isCodex ? "Les réponses d’Ezerbot utiliseront le quota Codex de votre forfait ChatGPT. Sans connexion, les réponses restent simulées."
-      : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, les réponses restent simulées."));
+      : isCodex ? "Les réponses d’Ezerbot utiliseront le quota Codex de votre forfait ChatGPT. Sans connexion, une carte vous invite à connecter ChatGPT."
+      : "Les réponses d’Ezerbot utilisent l’usage inclus dans votre abonnement ChatGPT. Sans connexion, une carte vous invite à connecter ChatGPT."));
     const planNames = { plus: "Plus", pro: "Pro", free: "Gratuit", team: "Équipe", business: "Business", enterprise: "Entreprise", edu: "Éducation" };
     if (current.connected) copy.append(element("p", "", `Forfait : ${planNames[current.plan] || current.plan || "non communiqué par OpenAI"}`));
     if (current.connected && isCodex) copy.append(element("p", "", "Cette session est propre à Ezerbot. La déconnexion l’efface sur ce Mac uniquement."));
     if (current.signin === "failed" && current.error) copy.append(element("p", "provider-error", current.error));
     const action = (label, className, run) => { const button = element("button", className, label); button.type = "button"; button.addEventListener("click", run); return button; };
+    const probe = current.connection_test || {};
+    const test = action(probe.state === "running" ? "Test en cours…" : "Tester la connexion", "secondary-button", () => providerAction("/api/provider/test"));
+    test.disabled = !current.connected || probe.state === "running";
+    test.title = !current.connected ? "Connectez-vous via Codex pour tester la connexion." : "Envoyer une petite requête de vérification à ChatGPT";
     if (current.connected) {
+      actions.append(test);
       const link = element("a", "secondary-button", "Gérer l’utilisation");
       link.href = usageUrl(); link.target = "_blank"; link.rel = "noreferrer";
       actions.append(link, action("Se déconnecter", "secondary-button", signOut));
@@ -1009,6 +1016,17 @@
       actions.append(action("Annuler", "secondary-button", () => providerAction("/api/provider/cancel")));
     } else {
       actions.append(action(isCodex ? "Se connecter via Codex" : "Continuer avec ChatGPT", "chatgpt-button", signIn));
+    }
+    if (current.backend === "sharing") {
+      copy.append(element("p", "provider-legacy-note", "Vous utilisez l’ancienne connexion. Pour utiliser votre quota Codex, connectez votre compte ChatGPT via Codex. Votre historique est conservé."));
+      actions.classList.add("provider-actions-legacy");
+      actions.append(action("Passer à Codex", "secondary-button", signInCodex));
+    }
+    if (!current.connected) actions.append(test);
+    if (probe.message && probe.state !== "running" && current.connected) {
+      const result = element("p", probe.state === "failed" ? "provider-error" : probe.state === "ok" ? "provider-success" : "", probe.message);
+      if (probe.state === "ok") result.prepend(element("span", "status-dot"));
+      result.setAttribute("role", "status"); copy.append(result);
     }
     card.append(copy, actions);
     $("provider-section").replaceChildren(choice, card);
@@ -1035,7 +1053,16 @@
     } catch (error) { notify(error.message); return null; }
   }
 
-  function signIn() { return providerAction("/api/provider/signin"); }
+  async function signIn() {
+    const response = await providerAction("/api/provider/signin");
+    // Debug fake OAuth only; production opens the system browser in Rust.
+    if (response?.authorization_url?.startsWith("http://127.0.0.1:")) window.open(response.authorization_url, "_blank", "noopener");
+    return response;
+  }
+  async function signInCodex() {
+    if (provider().backend !== "codex" && !await providerAction("/api/provider/select", { backend: "codex" })) return;
+    return signIn();
+  }
 
   async function signOut() {
     const response = await providerAction("/api/provider/signout");
@@ -1201,6 +1228,7 @@
       submissionActivity = null;
       render();
       if (delivered) mascot?.celebrate();
+      schedulePoll();
       ui.input.focus();
     }
   }

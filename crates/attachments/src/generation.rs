@@ -1304,6 +1304,9 @@ mod tests {
             .unwrap();
             if format == "svg" {
                 assert!(result.preview.contains("Cœur"));
+            } else if format == "pdf" && !cfg!(target_os = "macos") {
+                // The text reader is PDFKit. Off macOS, still require a real PDF file.
+                assert!(result.bytes.starts_with(b"%PDF-"), "{format}");
             } else {
                 let doc = documents::prepare(&conn, &result.name, &result.bytes)
                     .unwrap_or_else(|e| panic!("{format}: {e:?}"));
@@ -1353,14 +1356,18 @@ mod tests {
             content: "E\u{301}te\u{301} — coût : 1\u{202f}250 €".into(),
         })
         .unwrap();
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        documents::migrate(&conn).unwrap();
-        assert!(
-            documents::prepare(&conn, &decomposed.name, &decomposed.bytes)
-                .unwrap()
-                .text
-                .contains("Été")
-        );
+        assert!(decomposed.bytes.starts_with(b"%PDF-"));
+        #[cfg(target_os = "macos")]
+        {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            documents::migrate(&conn).unwrap();
+            assert!(
+                documents::prepare(&conn, &decomposed.name, &decomposed.bytes)
+                    .unwrap()
+                    .text
+                    .contains("Été")
+            );
+        }
     }
     fn well_formed(svg: &str) {
         let mut reader = quick_xml::Reader::from_str(svg);

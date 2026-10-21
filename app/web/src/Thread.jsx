@@ -13,6 +13,7 @@ import { orderThread } from "./thread-order.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage } from "./teach.js";
+import { signInCardState, replyProblemState, preparingTool, visibleNotice } from "./connection-view.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -193,12 +194,24 @@ function Dots() {
   return <div className="gb-dots" aria-hidden="true"><i /><i /><i /></div>;
 }
 
+function SignInCard({ message, actions }) {
+  const view = signInCardState({ message, ...actions });
+  return (
+    <div className="gb-pending gb-problem" role="alert">
+      <TriangleAlert />
+      <div className="gb-pending-copy"><strong>{view.title}</strong><p>{view.copy}</p></div>
+      <div className="gb-problem-actions">
+        {view.showSignIn && <button type="button" className="chatgpt-button" disabled={view.signInDisabled} title={view.signInDisabled ? "Moteur local indisponible" : view.signInLabel} onClick={actions.onSignIn}>{view.signInLabel}</button>}
+        {view.showRetry && <button type="button" className="gb-retry" disabled={view.retryDisabled} title={view.retryTitle} onClick={() => actions.onRegenerate(message)}><RefreshCw />Réessayer</button>}
+      </div>
+    </div>
+  );
+}
+
 function ReplyProblem({ message, actions }) {
+  const { signin, advice, retry, retryDisabled, retryTitle } = replyProblemState(message, actions);
+  if (signin) return <SignInCard message={message} actions={actions} />;
   const limit = message.error_kind === "limit";
-  const advice = (message.payload?.turn_id || actions.isGroup) && message.error_kind !== "signin"
-    ? "Envoyez un nouveau message pour demander une nouvelle réponse."
-    : actions.isTask ? "Poursuivez dans la conversation principale." : null;
-  const retry = !advice && message.error_kind !== "context_budget";
   return (
     <div className="gb-pending gb-problem" role="alert">
       <TriangleAlert />
@@ -209,9 +222,7 @@ function ReplyProblem({ message, actions }) {
       {/* OpenAI asks for "Manage usage" as the primary action on a usage limit. */}
       {(limit || retry) && <div className="gb-problem-actions">
         {limit && <a className="gb-retry gb-retry-primary" href={actions.usageUrl} target="_blank" rel="noreferrer">Gérer l’utilisation</a>}
-        {retry && (message.error_kind === "signin"
-          ? <button type="button" className="gb-retry" onClick={actions.onSignIn}>Se reconnecter</button>
-          : <button type="button" className="gb-retry" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>)}
+        {retry && <button type="button" className="gb-retry" disabled={retryDisabled} title={retryTitle} onClick={() => actions.onRegenerate(message)}><RefreshCw />Réessayer</button>}
       </div>}
       {advice && <p className="gb-reply-advice">{advice}</p>}
     </div>
@@ -225,6 +236,7 @@ function TurnLabel({ message }) {
 function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
+  const toolPreparing = preparingTool(message);
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const copyText = "copyText" in message ? message.copyText : message.body;
@@ -263,9 +275,9 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
               {message.body}
             </Streamdown>
           )
-          : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : message.payload?.wait_reason === "signin" ? "En attente de connexion" : "En attente"}</span> : streaming && <Dots />}
+          : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
-        {message.notice && (!queued || message.payload?.parent_turn_id) && <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>}
+        {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
@@ -287,12 +299,12 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = true, engineConnected = true, onLayout }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask]);
+  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);

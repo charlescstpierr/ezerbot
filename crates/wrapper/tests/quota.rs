@@ -266,13 +266,17 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
                 "/api/send",
                 json!({"conversation_id":id,"message_id":"m1","body":"prompt confidentiel"}),
             );
-            wait("erreur durable", || {
-                let message = reply(&mut app);
-                message["error_kind"] == kind && message["error"].is_string()
-            });
+            wait("erreur durable", || durable_limit(&reply(&mut app), kind));
             let error = reply(&mut app);
-            assert_eq!(fixture.log().lines().count(), 1);
-            assert!(fixture.log().ends_with(&format!(
+            assert_eq!(
+                fixture
+                    .log()
+                    .lines()
+                    .filter(|line| line.contains("OpenAI refus"))
+                    .count(),
+                1
+            );
+            assert!(fixture.log().contains(&format!(
                 "statut=200 code={code} param=input request_id=req_quota_test\n"
             )));
             assert!(!fixture.log().contains("private") && !fixture.log().contains("confidentiel"));
@@ -412,7 +416,14 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     // from another handle would leave this offset stale and overwrite the log.
     writeln!(log, "native shutdown").unwrap();
     let contents = fixture.log();
-    assert_eq!(contents.lines().count(), 3);
+    assert_eq!(
+        contents
+            .lines()
+            .filter(|line| !line.contains("upstream turn="))
+            .count(),
+        3
+    );
+    assert!(contents.contains("code=started") && contents.contains("code=failed"));
     assert!(contents.starts_with("native startup\n"));
     assert!(contents.contains("statut=429 code=subscription_sharing_usage_limit_exceeded param=- request_id=req_quota_test\n"));
     assert!(contents.ends_with("native shutdown\n"));
@@ -435,7 +446,7 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
         "/api/send",
         json!({"conversation_id":id,"message_id":"m1","body":"Bonjour"}),
     );
-    wait("limite", || reply(&mut app)["error_kind"] == "limit");
+    wait("limite", || durable_limit(&reply(&mut app), "limit"));
     let error = reply(&mut app)["error"].clone();
     drop(app);
     let mut app = fixture.app();
@@ -444,4 +455,17 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
     assert_eq!(state(&mut app)["provider"]["email"], "quota@example.test");
     post(&mut app, "/api/provider/signout", json!({}));
     assert!(state(&mut app)["provider"]["email"].is_null());
+}
+
+fn durable_limit(reply: &Value, kind: &str) -> bool {
+    reply["state"] == "failed" && reply["error_kind"] == kind
+}
+
+#[test]
+fn durable_limit_ignores_an_error_kind_while_the_reply_is_still_streaming() {
+    let streaming = json!({"state":"streaming","error_kind":"limit"});
+    assert!(!durable_limit(&streaming, "limit"));
+    let settled = json!({"state":"failed","error_kind":"limit"});
+    assert!(durable_limit(&settled, "limit"));
+    assert!(!durable_limit(&settled, "other"));
 }

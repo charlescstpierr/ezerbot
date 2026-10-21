@@ -366,7 +366,16 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
         }
         f.send(Fault::Happy);
         let reply = f.settled();
-        assert_eq!(reply["error_kind"], "signin");
+        assert_eq!(
+            reply["error_kind"],
+            if expired { "signin_expired" } else { "signin" }
+        );
+        if expired {
+            assert!(reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("session ChatGPT a expiré"));
+        }
         assert_eq!(reply["body"], "");
         let mut reopened = App::open_with(&f.db, f.provider.clone()).unwrap();
         let state = reopened.api("GET", "/api/state", b"").unwrap();

@@ -395,7 +395,14 @@
       let data;
       try { data = await response.json(); }
       catch (error) { showConnectionError(error); throw new Error("Le moteur local a renvoyé une réponse illisible."); }
-      if (!response.ok) throw new Error(data.error || "L’action n’a pas pu être terminée.");
+      if (!response.ok) {
+        const error = new Error(data.error || "L’action n’a pas pu être terminée.");
+        if (remoteAccessDisabled(response.status, data)) {
+          error.accessDisabled = true;
+          showConnectionError(error);
+        }
+        throw error;
+      }
       return data;
     } finally { clearTimeout(timeout); }
   }
@@ -452,14 +459,24 @@
             schedulePoll();
           }
         }
-      } catch { schedulePoll(); }
+      } catch (error) {
+        if (error?.accessDisabled) showConnectionError(error);
+        schedulePoll();
+      }
     }, !connected ? 1500 : live ? 200 : waiting || panelWaiting ? 800 : 5000);
+  }
+
+  function remoteAccessDisabled(status, data) {
+    const message = String(data?.error || "").replaceAll("'", "’");
+    return Boolean(window.EzerbotIPhone?.remote && status === 403 && message === "L’accès iPhone est désactivé sur le Mac.");
   }
 
   function showConnectionError(error) {
     connected = false;
-    connectionStatus = "offline";
-    ui.bannerText.textContent = window.EzerbotIPhone?.remote
+    connectionStatus = error?.accessDisabled ? "disabled" : "offline";
+    ui.bannerText.textContent = error?.accessDisabled
+      ? "L’accès iPhone est désactivé sur le Mac. Réactivez-le dans Paramètres › iPhone. Reconnexion automatique…"
+      : window.EzerbotIPhone?.remote
       ? "Mac injoignable. Vérifiez que le Mac est allumé, Ezerbot ouvert et Tailscale connecté. Reconnexion automatique…"
       : "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;

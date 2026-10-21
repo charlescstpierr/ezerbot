@@ -6,14 +6,50 @@
   const button = (text, fn, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.addEventListener("click", fn); return b; };
   const label = (text, input) => { const n = node("label"); n.append(node("span", text), input); return n; };
   const input = (name, placeholder, type = "text") => { const n = node("input"); n.type = type; n.name = name; n.placeholder = placeholder; n.autocomplete = "off"; n.spellcheck = false; return n; };
-  let section, list, catalogue, feedback, key;
+  let section, list, catalogue, catalogueHeader, feedback, key;
+  const catalogueCards = new Map();
+  function rememberCard(card) {
+    const details = [...card.querySelectorAll("details")];
+    const inputs = [...card.querySelectorAll("input")];
+    const controls = [...card.querySelectorAll("button, a, summary")];
+    const focused = [...inputs, ...controls].find(n => n === document.activeElement);
+    return {
+      details: details.map(n => n.open),
+      fields: inputs.filter(n => n.type !== "checkbox").map(n => ({name:n.name,value:n.value})),
+      focus: focused && {name:focused.name,action:focused.getAttribute("data-connector-action"),label:focused.getAttribute("aria-label"),summary:details.findIndex(n => n.querySelector("summary") === focused),start:focused.selectionStart,end:focused.selectionEnd,direction:focused.selectionDirection},
+    };
+  }
+  function restoreCard(card, view) {
+    if (!view) return;
+    const details = [...card.querySelectorAll("details")];
+    details.forEach((n,i) => { if (i < view.details.length) n.open = view.details[i]; });
+    const inputs = [...card.querySelectorAll("input")];
+    for (const field of view.fields) { const target = inputs.find(n => n.name === field.name); if (target) target.value = field.value; }
+    const f = view.focus;
+    if (!f) return;
+    const controls = [...card.querySelectorAll("button, a, summary")];
+    const target = (f.name && inputs.find(n => n.name === f.name))
+      || (f.action && controls.find(n => n.getAttribute("data-connector-action") === f.action))
+      || (f.label && controls.find(n => n.getAttribute("aria-label") === f.label))
+      || (f.summary >= 0 ? details[f.summary]?.querySelector("summary") : undefined);
+    target?.focus({preventScroll:true});
+    if (target && Number.isInteger(f.start) && Number.isInteger(f.end)) target.setSelectionRange?.(f.start,f.end,f.direction);
+  }
   function renderCatalogue(items, bots) {
-    catalogue.replaceChildren();
-    if (!items.length) return;
-    const header = node("div", null, "mcp-catalogue-header");
-    header.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
-    catalogue.append(header);
+    if (!catalogueHeader && items.length) {
+      catalogueHeader = node("div", null, "mcp-catalogue-header");
+      catalogueHeader.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
+      catalogue.append(catalogueHeader);
+    }
+    const ids = new Set(items.map(item => item.id));
+    for (const [id, previous] of catalogueCards) { if (!ids.has(id)) { previous.node.remove(); catalogueCards.delete(id); } }
     for (const item of items) {
+      const cardKey = JSON.stringify([item,bots.map(b => [b.id,b.name])]);
+      const previous = catalogueCards.get(item.id);
+      // Do not even detach an unchanged card: detaching an active password field
+      // loses browser focus/selection despite keeping the node and its value.
+      if (previous?.key === cardKey) continue;
+      const view = previous && rememberCard(previous.node);
       const card = node("article", null, "mcp-server mcp-catalogue-card");
       card.setAttribute("data-connector", item.id);
       const heading = node("div", null, "mcp-heading");
@@ -28,8 +64,10 @@
       const copyable = (caption, value) => {
         setup.append(node("p", caption, "mcp-note"));
         const row = node("div", null, "mcp-copy-row");
+        let resetCopy;
         const copy = button("Copier", async () => {
-          try { await panels.copyText(value); copy.textContent = "Copié"; }
+          clearTimeout(resetCopy);
+          try { await panels.copyText(value); copy.textContent = "Copié"; resetCopy = setTimeout(() => { copy.textContent = "Copier"; },1500); }
           catch { feedback.textContent = "Sélectionnez le texte pour le copier. La copie automatique n’est pas disponible."; feedback.scrollIntoView?.({block:"nearest"}); }
         });
         copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${item.name}`);
@@ -40,7 +78,8 @@
       else copyable("Portées OAuth", item.scopes_label || item.scopes);
       setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
       let form, client, secret;
-      if (item.needs_client && item.status !== "authorizing") {
+      if (item.needs_client && item.has_tokens) setup.append(node("p", "Pour changer d’application OAuth, déconnectez d’abord le service.", "mcp-note"));
+      if (item.needs_client && !item.has_tokens && item.status !== "authorizing") {
         form = node("form", null, "mcp-form"); form.id = `connector-setup-${item.id}`;
         client = input(`${item.id}-client`, "Identifiant de l’application OAuth"); client.maxLength = 512;
         secret = input(`${item.id}-secret`, "Secret de l’application OAuth", "password"); secret.maxLength = 1024;
@@ -73,12 +112,12 @@
       if (item.status !== "authorizing") actions.append(connect);
       if (item.authorization_url && item.status === "authorizing") {
         const link = node("a", "Ouvrir la page de connexion", "secondary-button");
-        link.href = item.authorization_url; link.target = "_blank"; link.rel = "noopener noreferrer";
+        link.href = item.authorization_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.setAttribute("data-connector-action","authorize");
         actions.append(link);
       }
       if (item.server) {
-        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); actions.append(remove);
-        {
+        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); remove.setAttribute("data-connector-action","disconnect"); actions.append(remove);
+        if (item.status === "connected" || item.server.tools.length) {
           const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
           for (const bot of bots) {
             const check = input(`catalogue-${item.id}-${bot.id}`, "", "checkbox"); check.checked = item.server.enabled_bots.includes(bot.id);
@@ -86,12 +125,18 @@
             choices.append(label(bot.name, check));
           }
           card.append(choices);
+          if (item.status === "authorizing") card.append(node("p", "Une nouvelle identification réinitialise l’activation par bot.", "mcp-note"));
           const tools = node("details"); tools.append(node("summary", `Outils (${item.server.tools.length})${item.status === "connected" ? "" : " · dernier catalogue connu"}`));
           for (const tool of item.server.tools) tools.append(node("p", `${tool.name} — ${tool.description || "Sans description"}`, "mcp-note"));
           card.append(tools);
+        } else {
+          card.append(node("p", "Les outils et leur activation par bot seront disponibles après la connexion.", "mcp-note"));
         }
       }
-      card.append(actions); catalogue.append(card);
+      card.append(actions);
+      if (previous) previous.node.replaceWith(card); else catalogue.append(card);
+      catalogueCards.set(item.id,{key:cardKey,node:card});
+      restoreCard(card,view);
     }
   }
   async function act(path, body, b) {
@@ -109,6 +154,7 @@
       feedback.textContent = e.message || "L’action du connecteur a échoué.";
       // Restore checkboxes from confirmed state after a refusal or lost reply.
       key = undefined;
+      for (const cached of catalogueCards.values()) { if (cached.node.contains(b)) cached.key = null; }
       await panels.refresh().catch(() => {});
       render(panels.state);
       feedback.scrollIntoView?.({block:"nearest"});
@@ -121,11 +167,13 @@
     const catalogueIds = new Set(items.map(i => i.server?.id).filter(Boolean));
     const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);
-    const next = JSON.stringify([servers, items, bots.map(b => [b.id,b.name]),state.mcp?.error]);
+    // Catalogue updates are keyed independently of the custom-server list.
+    // Keep existing drafts if an unavailable vault temporarily omits catalogue.
+    if (Array.isArray(state.mcp?.catalogue)) renderCatalogue(items, bots);
+    const next = JSON.stringify([servers, bots.map(b => [b.id,b.name]),state.mcp?.error]);
     if (next === key) return;
     key = next;
     list.replaceChildren();
-    renderCatalogue(items, bots);
     if (state.mcp?.error) list.append(node("p", state.mcp.error, "mcp-error"));
     if (!servers.length) list.append(node("p", "Aucun connecteur ajouté.", "mcp-note"));
     for (const server of servers) {
@@ -164,6 +212,7 @@
     settingsSection(container) {
       section = container; section.className = "setting-section mcp-section";
       section.append(node("h3", "Connecteurs"),node("p", "Choisissez un service du catalogue ou ajoutez votre propre serveur MCP. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
+      catalogueCards.clear(); catalogueHeader = undefined;
       catalogue = node("div", null, "mcp-catalogue mcp-list"); section.append(catalogue);
       section.append(node("h4", "Serveurs personnalisés"));
       list = node("div", null, "mcp-list"); section.append(list);

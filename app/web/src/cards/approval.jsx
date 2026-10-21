@@ -67,7 +67,7 @@ export function Card({ message, busy, onAction }) {
             <dl className="grid gap-3 text-sm" aria-label="Configuration du connecteur">
               {!(preview.catalogue && action.tool.startsWith("mcp_remove_")) && <>
                 <div className="min-w-0"><dt className="text-xs text-muted-foreground">{preview.catalogue?.transport === "https" ? "Adresse du service" : "Commande"}</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
-                {preview.catalogue?.transport !== "https" && <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>}
+                {!preview.catalogue && <div className="min-w-0"><dt className="text-xs text-muted-foreground">Arguments</dt><dd className="mt-1 ml-0">{preview.arguments.length ? <ol className="space-y-1">{preview.arguments.map((arg, i) => <li className="whitespace-pre-wrap break-words" key={i}>{arg}</li>)}</ol> : "Aucun argument."}</dd></div>}
               </>}
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 ml-0 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : preview.catalogue ? "Les jetons reçus après votre consentement seront conservés dans le coffre." : "Aucune variable privée."}</dd></div>
             </dl>

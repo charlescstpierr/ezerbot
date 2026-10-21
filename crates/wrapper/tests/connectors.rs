@@ -13,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +28,7 @@ struct SeenOAuth {
     tools_error: bool,
     revoke_error: bool,
     sse: bool,
+    token_scope: Option<String>,
 }
 struct OAuth {
     base: String,
@@ -56,7 +57,7 @@ impl OAuth {
                     url::form_urlencoded::parse(body.as_bytes())
                         .into_owned()
                         .collect();
-                let (status, data) = if url.ends_with("/register") {
+                let (status, mut data) = if url.ends_with("/register") {
                     (200, json!({"client_id":"fake-notion-client"}))
                 } else if url.ends_with("/token") {
                     if seen.token_error {
@@ -115,6 +116,11 @@ impl OAuth {
                 } else {
                     (404, json!({}))
                 };
+                if url.ends_with("/token") && status == 200 {
+                    if let Some(scope) = &seen.token_scope {
+                        data["scope"] = json!(scope);
+                    }
+                }
                 let sse = seen.sse && url.ends_with("/mcp") && status == 200;
                 drop(seen);
                 let text = if sse {
@@ -157,17 +163,25 @@ impl Drop for OAuth {
         self.stop.store(true, Ordering::Release);
     }
 }
+static OAUTH_TEST_LOCK: Mutex<()> = Mutex::new(());
 struct Fixture {
     app: App,
     path: PathBuf,
     provider: Provider,
     ai: FakeOpenAi,
     oauth: OAuth,
+    _environment_guard: MutexGuard<'static, ()>,
 }
 impl Fixture {
     fn new() -> Self {
+        let environment_guard = OAUTH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir()
-            .join(format!("ezerbot-connectors-{}", std::process::id()))
+            .join(format!(
+                "ezerbot-connectors-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
             .join("workspace.sqlite");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let now = SystemTime::now()
@@ -187,6 +201,7 @@ impl Fixture {
             provider,
             ai,
             oauth,
+            _environment_guard: environment_guard,
         }
     }
     fn db(&self) -> rusqlite::Connection {
@@ -341,6 +356,91 @@ fn google_server_adapter_keeps_only_an_access_snapshot_in_memory() {
 }
 
 #[test]
+fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconnect_is_denied() {
+    let mut f = Fixture::new();
+    let start = f.connect("gmail");
+    f.decide(&start, json!("allow_once"));
+    assert_eq!(f.callback("gmail", false, false), 200);
+    let server = f.item("gmail")["server"].clone();
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+    );
+    assert_eq!(f.item("gmail")["has_tokens"], true);
+    let pending = f.connect("gmail");
+    let key = format!("MCP_{}_ENV", server["id"].as_str().unwrap()).to_uppercase();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    let original = vault.get(&key).unwrap().unwrap();
+    let revokes = f.oauth.count("/revoke");
+    let token_calls = f.oauth.count("/token");
+    for body in [
+        json!({"id":"gmail","client_id":"other-oauth-application","client_secret":"another-application-secret"}),
+        json!({"id":"gmail","client_id":"fixture-oauth-client","client_secret":"changed-secret"}),
+        json!({"id":"gmail","client_secret":"changed-secret"}),
+    ] {
+        let error = f
+            .app
+            .api(
+                "POST",
+                "/api/connectors/connect",
+                body.to_string().as_bytes(),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(
+            error.message,
+            "Déconnectez d’abord le service pour changer d’application OAuth."
+        );
+        assert_eq!(vault.get(&key).unwrap().unwrap(), original);
+        assert_eq!(f.item("gmail")["status"], "connected");
+    }
+    f.decide(&pending, json!("deny"));
+    let after = vault.get(&key).unwrap().unwrap();
+    assert_eq!(after, original);
+    let stored: Value = serde_json::from_str(&after).unwrap();
+    assert!(stored["variables"]["ACCESS_TOKEN"].is_string());
+    assert!(stored["variables"]["REFRESH_TOKEN"].is_string());
+    assert_eq!(f.oauth.count("/revoke"), revokes);
+    assert_eq!(f.oauth.count("/token"), token_calls);
+    assert_eq!(
+        f.item("gmail")["server"]["enabled_bots"],
+        json!(["grokbot"])
+    );
+    assert_eq!(f.item("gmail")["status"], "connected");
+    assert!(!f.state().to_string().contains("other-oauth-application"));
+    for removed in ["ACCESS_TOKEN", "REFRESH_TOKEN"] {
+        let mut single: Value = serde_json::from_str(&original).unwrap();
+        single["variables"].as_object_mut().unwrap().remove(removed);
+        vault
+            .set(
+                &key,
+                grokbot_forms::vault::MCP_ENV_PURPOSE,
+                &single.to_string(),
+            )
+            .unwrap();
+        let before = vault.get(&key).unwrap().unwrap();
+        let error = f
+            .app
+            .api(
+                "POST",
+                "/api/connectors/connect",
+                br#"{"id":"gmail","client_id":"other-oauth-application"}"#,
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(f.item("gmail")["has_tokens"], true);
+        assert_eq!(vault.get(&key).unwrap().unwrap(), before);
+    }
+    vault
+        .set(&key, grokbot_forms::vault::MCP_ENV_PURPOSE, &original)
+        .unwrap();
+    let tool = f.tool_run(&server, "still-connected-after-refusal");
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&tool, json!("allow_once"));
+    assert!(matches!(f.outcome(&tool), ToolOutcome::Done { .. }));
+}
+
+#[test]
 fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     let mut f = Fixture::new();
     assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 6);
@@ -375,6 +475,11 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     assert_eq!(f.callback("gmail", true, false), 400);
     assert_eq!(f.item("gmail")["status"], "reconnect");
     for id in ["gmail", "calendar", "drive", "slack", "notion", "github"] {
+        f.oauth.seen.lock().unwrap().token_scope = if id == "notion" {
+            Some(String::new())
+        } else {
+            None
+        };
         let run = f.connect(id);
         f.decide(&run, json!("allow_once"));
         assert_eq!(f.item(id)["status"], "authorizing");
@@ -388,6 +493,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         assert_eq!(item["server"]["tools"].as_array().unwrap().len(), 1);
         assert!(!item.to_string().contains("access-secret"));
     }
+    f.oauth.seen.lock().unwrap().token_scope = None;
     let server = f.item("gmail")["server"].clone();
     f.post(
         "/api/mcp/select",

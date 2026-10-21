@@ -292,6 +292,18 @@ test("connector lifecycle cards show the provider-specific action and its result
   } finally {delete globalThis.window;}
 });
 
+test("managed Google approvals describe the adapter without inventing an empty argument list", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    for (const managed of [false,true]) {
+      const args={commande:managed?"uvx · workspace-mcp 2.1.1":"python3",arguments:[],variables_privées:[],...(managed?{catalogue:{transport:"stdio",service:"Gmail",connexion:"Lancement avec uvx et l’adaptateur Ezerbot (identifiants en mémoire)."}}:{})};
+      const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"launch",kind:"approval",payload:{entry_id:"launch",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},kind:{kind:"approval",tool:"mcp_start_fixture",expires_at:Date.now()+60000},connector:{server:managed?"Gmail":"Atelier",tool:"Démarrer",origin:"settings"},arguments:args}}}));
+      assert.equal(html.includes(">Arguments<"),!managed);assert.equal(html.includes("Aucun argument."),!managed);
+      if(managed) assert.ok(html.includes("adaptateur Ezerbot"));
+    }
+  } finally {delete globalThis.window;}
+});
+
 test("connector recovery reveals the affected card and focuses its single action", () => {
   const focus=[],scroll=[];
   const target={dataset:{connector:"gmail"},scrollIntoView(){scroll.push("gmail");},querySelector(){return{focus(){focus.push("reconnect");}};}};

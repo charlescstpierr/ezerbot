@@ -54,6 +54,27 @@ fn token_fields(env: &HashMap<String, String>) -> Vec<(String, String)> {
         .filter_map(|k| env.get(k).map(|v| (k.to_lowercase(), v.clone())))
         .collect()
 }
+fn validate_scopes(m: Manifest, scopes: Option<&str>) -> Result<(), ApiError> {
+    // Notion's "default" is a broker selector, not a permission that its token
+    // response must echo. The user chooses pages/permissions at consent.
+    if m.id == "notion" {
+        return Ok(());
+    }
+    if let Some(scopes) = scopes {
+        let granted: BTreeSet<_> = scopes
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if m.scopes.split_whitespace().any(|scope| {
+            !granted.contains(scope)
+                && !(scope == "email"
+                    && granted.contains("https://www.googleapis.com/auth/userinfo.email"))
+        }) {
+            return Err(invalid("Certaines autorisations nécessaires n’ont pas été accordées. Reconnectez le service et vérifiez les portées demandées."));
+        }
+    }
+    Ok(())
+}
 fn accept_token(
     ctx: &Context<'_>,
     server: &super::super::Server,
@@ -75,19 +96,7 @@ fn accept_token(
     {
         return Err(fail());
     }
-    if let Some(scopes) = raw["scope"].as_str() {
-        let granted: BTreeSet<_> = scopes
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|s| !s.is_empty())
-            .collect();
-        if m.scopes.split_whitespace().any(|scope| {
-            !granted.contains(scope)
-                && !(scope == "email"
-                    && granted.contains("https://www.googleapis.com/auth/userinfo.email"))
-        }) {
-            return Err(invalid("Certaines autorisations nécessaires n’ont pas été accordées. Reconnectez le service et vérifiez les portées demandées."));
-        }
-    }
+    validate_scopes(m, raw["scope"].as_str())?;
     let access = raw["access_token"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 3000 && !s.chars().any(char::is_control))
@@ -444,6 +453,24 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notion_consent_scopes_need_not_echo_default_but_other_services_stay_strict() {
+        let notion = manifest("notion").unwrap();
+        for scopes in [
+            None,
+            Some(""),
+            Some("pages:read pages:write"),
+            Some("default"),
+        ] {
+            assert!(validate_scopes(notion, scopes).is_ok());
+        }
+        let gmail = manifest("gmail").unwrap();
+        assert!(validate_scopes(gmail, Some("")).is_err());
+        assert!(validate_scopes(gmail, Some("openid email")).is_err());
+        assert!(validate_scopes(gmail, Some(gmail.scopes)).is_ok());
+        let slack = manifest("slack").unwrap();
+        assert!(validate_scopes(slack, Some(&slack.scopes.replace(' ', ","))).is_ok());
+    }
     #[test]
     fn callback_pages_are_self_contained_themed_and_escape_public_text() {
         for (status, title, tone) in [

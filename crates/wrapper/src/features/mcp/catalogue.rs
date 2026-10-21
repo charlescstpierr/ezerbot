@@ -86,6 +86,8 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
         };
         let has_client = private.contains_key("CLIENT_ID")
             && (m.id == "notion" || private.contains_key("CLIENT_SECRET"));
+        let has_tokens =
+            private.contains_key("ACCESS_TOKEN") || private.contains_key("REFRESH_TOKEN");
         let can_refresh = private.contains_key("REFRESH_TOKEN");
         let expired = expires > 0 && expires <= wall_clock() as i64 + 30_000;
         let warning = message.as_deref() == Some(REVOCATION_WARNING);
@@ -131,7 +133,7 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
                 s
             }
         });
-        items.push(json!({"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(*m),"redirect_uri":setup_redirect(*m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":m.id!="notion","has_client":has_client,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
+        items.push(json!({"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(*m),"redirect_uri":setup_redirect(*m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":m.id!="notion","has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
     }
     Ok(json!(items))
 }
@@ -175,6 +177,18 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
             )
         })?;
         let mut env = credentials(&ctx, &id)?.unwrap_or_default();
+        // A setup form is not a disconnect decision. Never replace credentials
+        // or discard a live account's tokens before revocation was approved.
+        let has_tokens = env.contains_key("ACCESS_TOKEN") || env.contains_key("REFRESH_TOKEN");
+        if has_tokens
+            && ((!input.client_id.is_empty() && env.get("CLIENT_ID") != Some(&input.client_id))
+                || !input.client_secret.is_empty())
+        {
+            return Err(ApiError::new(
+                409,
+                "Déconnectez d’abord le service pour changer d’application OAuth.",
+            ));
+        }
         if !input.client_id.is_empty() {
             if env.get("CLIENT_ID") != Some(&input.client_id) {
                 env.clear();
@@ -223,7 +237,7 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         m.name
     );
     let connection = if m.endpoint.is_empty() {
-        "Le serveur Google workspace-mcp 2.1.1 est téléchargé si nécessaire, puis lancé avec uvx sur ce Mac."
+        "Le serveur Google workspace-mcp 2.1.1 est téléchargé si nécessaire, puis lancé sur ce Mac avec uvx et l’adaptateur Ezerbot (identifiants en mémoire)."
     } else {
         "Le serveur officiel du service est contacté par HTTPS ; aucun programme supplémentaire n’est installé."
     };

@@ -828,8 +828,10 @@ pub(crate) fn resolve_model(
         )
         .optional()?
         .unwrap_or((None, None, false));
-    // Persist the Codex upgrade even before the async catalogue is ready. Do not
-    // rewrite sharing selections or overwrite a concurrently changed preference.
+    // Persist the upgrade before the async catalogue is ready, only in Codex.
+    // Both connections share this preference: migration (like a manual Codex
+    // selection) also changes the model restored on return to sharing.
+    // Never overwrite a concurrently changed preference.
     if let Some(replacement) = model
         .as_deref()
         .and_then(|model| provider.retired_model_replacement(model))

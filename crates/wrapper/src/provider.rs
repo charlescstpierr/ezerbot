@@ -374,7 +374,7 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
                     && slug.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)))
                 .map(|slug| format!(" « {slug} »"))
                 .unwrap_or_default();
-            Failure::other(format!("OpenAI n’accepte pas ce modèle{model} avec votre connexion. Choisissez un autre modèle avec le bouton « Modèle » sous la zone de message, puis cliquez sur Relancer."))
+            Failure::other(format!("OpenAI n’accepte pas ce modèle{model} avec votre connexion. Choisissez un autre modèle avec le bouton « Modèle » sous la zone de message, puis relancez la réponse ou envoyez un nouveau message."))
         }
         _ => {
             let detail: String = if message.is_empty() { code } else { message }.chars().take(300).collect();

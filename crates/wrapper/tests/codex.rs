@@ -520,7 +520,7 @@ fn first_simple_question_uses_supported_default_and_persists_answer_text() {
 }
 
 #[test]
-fn retired_codex_preferences_migrate_durably_without_changing_other_choices() {
+fn retired_codex_preferences_migrate_durably_only_while_codex_is_selected() {
     let _serial = OAUTH.lock().unwrap();
     let f = Fixture::new();
     f.login();
@@ -576,6 +576,20 @@ fn retired_codex_preferences_migrate_durably_without_changing_other_choices() {
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
         "gpt-6.1-sol"
     );
+    post(
+        &mut app,
+        "/api/provider/select",
+        json!({"backend":"sharing"}),
+    );
+    let saved: String = conn
+        .query_row("SELECT model FROM wrapper_preferences", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        saved, "gpt-6.1-sol",
+        "the existing single preference is shared across connections"
+    );
 }
 
 #[test]
@@ -610,7 +624,8 @@ fn unsupported_model_refusal_proposes_switching_without_retry_or_signout() {
             message.contains("bouton « Modèle » sous la zone de message"),
             "{message}"
         );
-        assert!(message.contains("puis cliquez sur Relancer"));
+        assert!(message.contains("puis relancez la réponse ou envoyez un nouveau message"));
+        assert!(!message.contains("cliquez sur Relancer"));
         assert!(!message.contains("en haut"));
         assert_eq!(message.contains("gpt-5.5"), identifies_model);
         assert!(!message.contains("Reconnectez-vous"));
@@ -799,11 +814,13 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
         call("delegate", "delegate", json!({"child_bot":"codex-child", "objective":"Relis ce texte", "selected_context":{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}})),
         json!({"type":"response.completed"}),
     ]));
+    let complete_result = "Voici le paragraphe relu en entier : le texte demandé reste disponible pour le bot parent.";
     f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":complete_result}),
         call(
             "finish",
             "complete_task",
-            json!({"summary":"Relecture Codex terminée"}),
+            json!({"summary":complete_result}),
         ),
         json!({"type":"response.completed"}),
     ]));
@@ -842,6 +859,11 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     let routine = post(&mut app, "/api/routines", json!({"bot_id":"grokbot","name":"Routine Codex","prompt":"Fais un bilan","schedule":"@every 1m"}))["routine"].clone();
     f.reply(ScriptedResponse::events(&[
         json!({"type":"response.output_text.delta","delta":"Bilan Codex."}),
+        call(
+            "routine-finish",
+            "complete_task",
+            json!({"summary":"Bilan Codex."}),
+        ),
         json!({"type":"response.completed"}),
     ]));
     post(
@@ -851,18 +873,24 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     );
     wait("routine Codex terminée", || {
         tick(&mut app);
-        app.api("GET", "/api/state", b"").unwrap()["conversations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|chat| {
-                chat["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| message["body"] == "Bilan Codex.")
-            })
+        let history = post(
+            &mut app,
+            "/api/routines/history",
+            json!({"bot_id":"grokbot","routine_id":routine["routine_id"]}),
+        );
+        history["occurrences"][0]["status"]["status"] == "done"
     });
+    assert!(app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|chat| {
+            chat["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["body"] == "Bilan Codex.")
+        }));
     let conn = rusqlite::Connection::open(&f.db).unwrap();
     let status: String = conn
         .query_row(
@@ -873,11 +901,30 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
         .unwrap();
     let status: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["status"], "done", "{status}");
-    assert!(status["result"]
-        .as_str()
-        .unwrap()
-        .contains("Relecture Codex terminée"));
+    assert_eq!(status["result"], complete_result);
     let seen = f.server.seen.lock().unwrap();
+    let task_requests: Vec<_> = seen
+        .bodies
+        .iter()
+        .filter(|body| {
+            body["instructions"]
+                .as_str()
+                .is_some_and(|text| text.contains("You are executing a Task"))
+        })
+        .collect();
+    assert_eq!(
+        task_requests.len(),
+        2,
+        "one delegated task and one routine occurrence"
+    );
+    for body in task_requests {
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("then call complete_task(summary) when the task is finished"));
+        assert!(instructions
+            .contains("for a delegated task the summary must contain the complete result"));
+        assert!(!instructions.contains("without begin_task or complete_task"));
+        assert!(!instructions.contains("A complete_task summary never replaces the answer"));
+    }
     assert!(seen
         .bodies
         .iter()

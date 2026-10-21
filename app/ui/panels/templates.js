@@ -44,11 +44,13 @@
   function useStarter(botId, starter) {
     let last = "";
     try { last = localStorage.getItem(STARTER_KEY) || ""; } catch { /* Appending stays safe. */ }
-    panels.selectBot?.(botId);
+    if (panels.selectBot?.(botId) === false) return false;
     const draft = panels.draft().trim();
-    if (!draft || draft === last) panels.selectBot?.(botId, starter);
-    else panels.appendDraft(starter);
+    if (!draft || draft === last) {
+      if (panels.selectBot?.(botId, starter) === false) return false;
+    } else panels.appendDraft(starter);
     try { localStorage.setItem(STARTER_KEY, starter); } catch { /* Same as above. */ }
+    return true;
   }
 
   async function load() {
@@ -313,6 +315,7 @@
         else payload.document = { ...template, routines: template.routines.map(({ schedule_description, ...routine }) => routine) };
         const result = await panels.api("/api/templates/create", payload);
         await panels.refresh();
+        if (!panels.state.bots?.some((bot) => bot.id === result.bot.id && !bot.deleted)) await panels.refresh();
         dialog.close();
         if (starter) useStarter(result.bot.id, starter);
         else panels.selectBot?.(result.bot.id);

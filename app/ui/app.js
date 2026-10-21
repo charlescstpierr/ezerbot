@@ -211,8 +211,14 @@
     selectBot(id, text) {
       const bot = botById(id);
       if (busy || !bot || bot.deleted) return false;
-      selectConversation(null, true);
-      chosenBotId = id; writePreference("grokbot.bot", id);
+      if (stagedOnEmptyThread()) {
+        notify(`Retirez les pièces jointes pour changer de bot, ou envoyez-les à ${currentBot()?.name || "ce bot"}.`);
+        return false;
+      }
+      chosenBotId = id;
+      writePreference("grokbot.bot", id);
+      leaveEmptyThread();
+      if (currentConversation()) selectConversation(null, true);
       if (typeof text === "string") { setComposerText(text); saveDraft(); }
       render();
       return true;

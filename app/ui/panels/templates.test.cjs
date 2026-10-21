@@ -48,7 +48,7 @@ const catalogue = {
   ],
 };
 
-function harness({ draft = '', servers = [] } = {}) {
+function harness({ draft = '', servers = [], prepare } = {}) {
   const calls = [];
   const storage = new Map();
   const panels = {
@@ -68,6 +68,7 @@ function harness({ draft = '', servers = [] } = {}) {
     selectBot(id, text) { this.selected.push(id); if (typeof text === 'string') this.draftText = text; return true; },
     register(panel) { this.panel = panel; },
   };
+  prepare?.(panels, calls);
   const window = { GrokbotPanels: panels };
   const byId = {};
   const document = {
@@ -160,6 +161,43 @@ test('an imported bot is previewed, then created without display-only fields', a
   assert.equal(body.template_id, undefined);
   assert.equal(body.document.routines[0].schedule_description, undefined);
   assert.equal(body.document.routines[0].prompt, 'Trie');
+});
+
+test('a starter is not written when the bot cannot be selected', () => {
+  const typed = harness({
+    draft: 'Mon brouillon',
+    prepare(panels) { panels.selectBot = () => false; },
+  });
+  assert.equal(typed.t.useStarter('bot-a', 'Trie mes courriels.'), false);
+  assert.equal(typed.panels.draftText, 'Mon brouillon');
+
+  const fresh = harness({ prepare(panels) { panels.selectBot = () => false; } });
+  assert.equal(fresh.t.useStarter('bot-a', 'Trie mes courriels.'), false);
+  assert.equal(fresh.panels.draftText, '');
+});
+
+test('creation waits for a refresh that actually contains the new bot', async () => {
+  let refreshes = 0;
+  const { panels, calls, open, t } = harness({
+    prepare(panels, calls) {
+      panels.refresh = async () => {
+        refreshes += 1;
+        const created = calls.find((call) => call[0] === '/api/templates/create');
+        if (refreshes >= 2 && created) panels.state.bots.push({ id: created[1].bot_id, name: 'Tri de boîte' });
+      };
+      panels.selectBot = function (id, text) {
+        if (!this.state.bots.some((bot) => bot.id === id && !bot.deleted)) return false;
+        this.selected.push(id);
+        if (typeof text === 'string') this.draftText = text;
+        return true;
+      };
+    },
+  });
+  await open({ templateId: 'tri-boite' });
+  await t.body.querySelector('[data-template-create]').click();
+  const created = calls.find((call) => call[0] === '/api/templates/create');
+  assert.equal(refreshes, 2);
+  assert.deepEqual(panels.selected, [created[1].bot_id]);
 });
 
 test('a starter replaces an untouched starter but never a typed draft', () => {

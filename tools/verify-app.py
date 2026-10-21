@@ -159,26 +159,74 @@ def verify_ui_regressions():
   window.GrokbotChat.renderThread(formHost, {messages:[]});
   await until(() => !formHost.querySelector('[data-card-kind]'));
   formHost.remove();
-  // Composer bot menu: maximal names stay inside it, focus survives a refresh and returns on Escape.
+  // Composer bot menu: a 40-character name stays inside at both welcome sizes and themes.
+  // Focus survives a refresh, arrows/Home/End move, and Escape returns to the trigger.
   const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
   await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
   await window.GrokbotPanels.refresh();
-  choose(longName); $('composer-bot').click();
-  const menuBox = $('bot-menu').getBoundingClientRect();
-  check('bot menu keeps maximal names and actions inside the panel', [...$('bot-menu').querySelectorAll('button')].every(button => {
-    const box = button.getBoundingClientRect();
-    return box.right <= menuBox.right + 0.5 && [...button.children].every(child => child.getBoundingClientRect().right <= box.right + 0.5);
-  }));
+  choose(longName);
+  const menuFits = () => {
+    const menu = $('bot-menu');
+    const menuBox = menu.getBoundingClientRect();
+    const list = menu.querySelector('.bot-menu-list');
+    const buttons = [...menu.querySelectorAll('button')];
+    const inside = buttons.every(button => {
+      const box = button.getBoundingClientRect();
+      const childrenInside = [...button.children].every(child => {
+        const childBox = child.getBoundingClientRect();
+        return childBox.right <= box.right + 0.5 && childBox.left >= box.left - 0.5;
+      });
+      const label = button.querySelector('.bot-menu-name, .bot-menu-action > span');
+      const readable = Boolean(label && label.clientWidth > 12 && label.textContent.trim());
+      const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return box.width > 0 && box.right <= menuBox.right + 0.5 && box.left >= menuBox.left - 0.5
+        && childrenInside && readable && (point === button || button.contains(point));
+    });
+    const checkedIcon = menu.querySelector('[aria-checked="true"] .icon')?.getBoundingClientRect();
+    const iconInside = Boolean(checkedIcon && checkedIcon.width > 0 && checkedIcon.right <= menuBox.right + 0.5 && checkedIcon.left >= menuBox.left - 0.5);
+    const actionText = menu.querySelector('.bot-menu-action span')?.textContent || '';
+    const noHorizontalScroll = !list || list.scrollWidth <= list.clientWidth + 1;
+    return inside && iconInside && noHorizontalScroll && menuBox.right <= innerWidth + 0.5
+      && actionText.startsWith('Modifier ') && actionText.includes(longName);
+  };
+  // Largeur réelle du composeur à 1140×780 (720 px) et à 820×560 (~516 px).
+  const applyFrame = (width) => {
+    let style = document.getElementById('qa-menu-frame');
+    if (!style) { style = document.createElement('style'); style.id = 'qa-menu-frame'; document.head.append(style); }
+    const sidebar = width <= 1100 ? 244 : 270;
+    const main = width - sidebar - 16;
+    const area = width <= 1100 ? main - 44 : Math.min(720, main - 54);
+    style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
+  };
+  const setTheme = theme => { document.documentElement.dataset.theme = theme; };
+  const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
+  for (const [width, height] of [[1140, 780], [820, 560]]) {
+    applyFrame(width);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const theme of ['dark', 'light']) {
+      setTheme(theme);
+      openMenu();
+      check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
+    }
+  }
+  document.getElementById('qa-menu-frame')?.remove();
+  setTheme('dark');
+  openMenu();
   check('opened bot menu focuses the chosen bot', document.activeElement?.getAttribute('aria-checked') === 'true');
   await window.GrokbotPanels.refresh();
   check('bot menu refresh keeps focus on the same option', !$('bot-menu').hidden && document.activeElement?.getAttribute('aria-checked') === 'true');
   const menuItems = () => [...$('bot-menu').querySelectorAll('button')];
   const before = menuItems().indexOf(document.activeElement);
-  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown', bubbles:true, cancelable:true}));
+  const press = key => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true}));
+  press('ArrowDown');
   check('ArrowDown moves to the next menu item', menuItems().indexOf(document.activeElement) === (before + 1) % menuItems().length);
-  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'End', bubbles:true, cancelable:true}));
+  press('ArrowUp');
+  check('ArrowUp returns to the previous menu item', menuItems().indexOf(document.activeElement) === before);
+  press('Home');
+  check('Home moves to the first menu item', document.activeElement === menuItems()[0]);
+  press('End');
   check('End moves to the last menu item', document.activeElement === menuItems().at(-1));
-  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}));
+  press('Escape');
   check('Escape closes the bot menu and returns focus to its trigger', $('bot-menu').hidden && document.activeElement === $('composer-bot'));
   choose('Ezerbot');
   const first = await send('Qui me répond ?');

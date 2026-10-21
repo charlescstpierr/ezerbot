@@ -665,12 +665,15 @@
     list.classList.toggle("has-more", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
   }
 
-  function closeBotMenu() {
-    const hadFocus = $("bot-menu").contains(document.activeElement);
-    $("bot-menu").hidden = true;
-    $("bot-menu").replaceChildren();
+  function closeBotMenu(options = {}) {
+    const menu = $("bot-menu");
+    const wasOpen = !menu.hidden;
+    const hadFocus = menu.contains(document.activeElement);
+    // Focus the trigger before hiding, so removing the focused item cannot leave focus on body.
+    if (wasOpen && (hadFocus || options.restoreFocus) && !$("composer-bot").disabled) $("composer-bot").focus();
+    menu.hidden = true;
+    menu.replaceChildren();
     $("composer-bot").setAttribute("aria-expanded", "false");
-    if (hadFocus) $("composer-bot").focus();
   }
 
   function renderBotMenu() {
@@ -686,8 +689,8 @@
       button.dataset.menuKey = `bot:${bot.id}`;
       button.setAttribute("role", "menuitemradio");
       button.setAttribute("aria-checked", String(bot.id === chosen?.id));
-      const copy = element("span", "", bot.name);
-      copy.append(element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
+      const copy = element("span", "bot-menu-copy");
+      copy.append(element("span", "bot-menu-name", bot.name), element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
       button.append(botAvatar(bot), copy, icon("check"));
       button.addEventListener("click", () => chooseBot(bot));
       return button;
@@ -1551,7 +1554,8 @@
     const target = { ArrowDown: index >= last ? 0 : index + 1, ArrowUp: index <= 0 ? last : index - 1, Home: 0, End: last }[event.key];
     if (target === undefined || !items.length) return;
     event.preventDefault();
-    items[target].focus();
+    items[target].focus({ preventScroll: true });
+    items[target].scrollIntoView({ block: "nearest", inline: "nearest" });
   });
   $("bot-dialog").addEventListener("close", () => { if (!$("bot-dialog").open) clearBotExtensions(); });
   $("bot-form").addEventListener("submit", saveBot);
@@ -1585,7 +1589,11 @@
     finally { $("reconnect-button").disabled = false; }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { closeMenu(); closeSidebar(); closeBotMenu(); if (pickerKind) { closePicker(); renderProvider(); } }
+    if (event.key === "Escape") {
+      const returnToBot = !$("bot-menu").hidden;
+      closeMenu(); closeSidebar(); closeBotMenu({ restoreFocus: returnToBot });
+      if (pickerKind) { closePicker(); renderProvider(); }
+    }
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     const dialogOpen = Boolean(document.querySelector("dialog[open]"));
     if (event.key.toLowerCase() === "n" && !dialogOpen) { event.preventDefault(); newConversation(); }

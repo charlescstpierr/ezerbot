@@ -89,6 +89,33 @@ pub(crate) fn turn(directory: &std::path::Path, id: &str, status: u16, code: &'s
     );
 }
 
+/// Allowlisted request options only. No content, account, token or header is retained.
+pub(crate) fn request_options(directory: &std::path::Path, body: &Value) {
+    let model = body["model"]
+        .as_str()
+        .filter(|value| {
+            value.starts_with("gpt-")
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        })
+        .unwrap_or("-");
+    let effort = body["reasoning"]["effort"]
+        .as_str()
+        .filter(|value| {
+            matches!(
+                *value,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        })
+        .unwrap_or("default");
+    append(
+        &directory.join("logs/engine.log"),
+        &format!("OpenAI request model={model} effort={effort}\n"),
+    );
+}
+
 fn append(path: &std::path::Path, line: &str) {
     // The native shell already redirects stderr to this file. Use its open
     // handle so its non-append offset cannot later overwrite a direct append.

@@ -201,6 +201,23 @@ impl GatedResponses {
                         ),
                     );
                 } else {
+                    let mut request = request;
+                    let mut raw = String::new();
+                    let _ = request.as_reader().read_to_string(&mut raw);
+                    let probe = serde_json::from_str::<Value>(&raw)
+                        .ok()
+                        .and_then(|body| body["instructions"].as_str().map(str::to_owned))
+                        .is_some_and(|text| text.starts_with("Test de connexion."));
+                    if probe {
+                        let payload = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+                        let _ = request.respond(
+                            tiny_http::Response::from_string(payload).with_header(
+                                tiny_http::Header::from_bytes("Content-Type", "text/event-stream")
+                                    .unwrap(),
+                            ),
+                        );
+                        continue;
+                    }
                     counting.fetch_add(1, Ordering::SeqCst);
                     let first = (0..100)
                         .map(|_| {

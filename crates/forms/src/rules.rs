@@ -724,7 +724,10 @@ mod tests {
                     scope: RuleScope::Pattern,
                 },
                 1,
-                Some("printf oui"),
+                crate::approvals::StandingWrite {
+                    pattern_key: Some("printf oui"),
+                    rule_tool: None,
+                },
             )?;
             Ok(())
         })

@@ -9,6 +9,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub const MAX_PATTERN_CHARS: usize = 500;
+/// Standing-rule tool for every background computer task of one bot.
+pub const BACKGROUND_TOOL: &str = "background_computer";
+pub const BACKGROUND_KIND: &str = "Exécuter une tâche sur l'ordinateur";
+const SUMMARY_CHARS: usize = 160;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +45,15 @@ pub fn describe(tool: &str, arguments: &Value, remote_name: Option<&str>) -> Pol
                 Protection::Outbound => "Envoi sous votre nom".into(),
                 Protection::Destructive => "Suppression à confirmer".into(),
             },
+        };
+    }
+    if background_launch(tool, arguments) {
+        return Policy {
+            remember: true,
+            protection: None,
+            scope: "action".into(),
+            pattern: String::new(),
+            label: BACKGROUND_KIND.into(),
         };
     }
     if tool == "run_shell" {
@@ -102,6 +115,32 @@ pub fn command_pattern(tool: &str, arguments: &Value) -> Option<String> {
     let command = arguments.get("command").and_then(Value::as_str)?;
     let pattern = command.split_whitespace().collect::<Vec<_>>().join(" ");
     valid_pattern_key(&pattern).then_some(pattern)
+}
+
+/// A sub-agent or a shell command explicitly started in the background.
+pub fn background_launch(tool: &str, arguments: &Value) -> bool {
+    tool == "delegate"
+        || (tool == "run_shell"
+            && arguments.get("background").and_then(Value::as_bool) == Some(true))
+}
+
+/// One-line preview. Long text ends with `… (raccourci)`.
+pub fn background_summary(tool: &str, arguments: &Value) -> String {
+    let raw = if tool == "delegate" {
+        arguments.get("objective")
+    } else {
+        arguments.get("command")
+    };
+    shorten_summary(raw.and_then(Value::as_str).unwrap_or(""))
+}
+
+pub fn shorten_summary(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= SUMMARY_CHARS {
+        return flat;
+    }
+    let head: String = flat.chars().take(SUMMARY_CHARS).collect();
+    format!("{}… (raccourci)", head.trim_end())
 }
 
 pub fn valid_pattern_key(key: &str) -> bool {
@@ -351,6 +390,29 @@ mod tests {
         );
         assert!(protected("mcp_hash", &json!({}), Some("echo")).is_none());
         assert!(protected("write_file", &json!({}), None).is_none());
+        let background = describe(
+            "run_shell",
+            &json!({"command":"printf oui","background":true}),
+            None,
+        );
+        assert!(background.remember);
+        assert_eq!(background.scope, "action");
+        assert_eq!(background.label, BACKGROUND_KIND);
+        let removal = describe(
+            "run_shell",
+            &json!({"command":"rm note","background":true}),
+            None,
+        );
+        assert!(!removal.remember);
+        assert_eq!(removal.protection, Some(Protection::Destructive));
+        let long = "préparer ".repeat(40);
+        assert!(
+            background_summary("delegate", &json!({"objective": long})).ends_with("… (raccourci)")
+        );
+        assert_eq!(
+            background_summary("delegate", &json!({"objective":"  Relire   le dossier  "})),
+            "Relire le dossier"
+        );
         let echo = describe("mcp_hash", &json!({}), Some("echo"));
         assert!(echo.remember);
         assert_eq!(echo.scope, "global");

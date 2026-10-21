@@ -63,7 +63,7 @@ pub fn is_read(name: &str) -> bool {
 pub fn tools() -> Vec<ToolSpec> {
     let path = json!({"type":"string","description":"Chemin absolu sur le Mac."});
     [
-        ("run_shell", "Exécuter une commande sur le Mac après approbation. Pas un sandbox. Ne pas lancer de tâche détachée.", json!({"command":{"type":"string"},"cwd":path,"timeout_ms":{"type":"integer","minimum":100,"maximum":120000},"output_limit":{"type":"integer","minimum":1024,"maximum":1048576}}), json!(["command","cwd","timeout_ms","output_limit"])),
+        ("run_shell", "Exécuter une commande sur le Mac après approbation. Pas un sandbox. background=true lance une tâche en arrière-plan, soumise à sa propre carte. Ne pas détacher une commande autrement.", json!({"command":{"type":"string"},"cwd":path,"timeout_ms":{"type":"integer","minimum":100,"maximum":120000},"output_limit":{"type":"integer","minimum":1024,"maximum":1048576},"background":{"type":"boolean"}}), json!(["command","cwd","timeout_ms","output_limit"])),
         ("read_file", "Lire un fichier UTF-8 borné. Lecture sans carte seulement dans un dossier accordé.", json!({"path":path}), json!(["path"])),
         ("list_directory", "Lister un dossier (1000 entrées maximum).", json!({"path":path}), json!(["path"])),
         ("write_file", "Créer ou remplacer un fichier UTF-8 après approbation. expected_sha256=null exige un nouveau fichier ; sinon fournir le SHA-256 obtenu par read_file. Pas de création implicite de dossiers.", json!({"path":path,"content":{"type":"string"},"expected_sha256":{"type":["string","null"]}}), json!(["path","content","expected_sha256"]))
@@ -229,6 +229,8 @@ struct ShellArgs {
     timeout_ms: u64,
     #[serde(default = "limit")]
     output_limit: usize,
+    #[serde(default)]
+    background: bool,
 }
 fn timeout() -> u64 {
     30_000
@@ -253,6 +255,7 @@ pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     match call.name.as_str() {
         "run_shell" => {
             let a: ShellArgs = args(call)?;
+            let _ = a.background;
             absolute(&a.cwd)?;
             if a.command.trim().is_empty()
                 || a.command.len() > 16384

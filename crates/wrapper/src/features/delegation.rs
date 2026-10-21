@@ -262,7 +262,7 @@ pub fn tools() -> Vec<ToolSpec> {
                     "texts":strings,"entry_ids":strings,"fact_ids":strings,"skill_ids":strings
                 },"required":["texts","entry_ids","fact_ids","skill_ids"]}
             },"required":["child_bot","objective","selected_context"]}),
-            requires_approval: false,
+            requires_approval: true,
         },
         ToolSpec {
             name: "list_delegation_context".into(),

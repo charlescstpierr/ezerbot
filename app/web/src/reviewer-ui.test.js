@@ -424,6 +424,64 @@ test("the approval card offers Toujours autoriser for a rememberable command", (
   assert.ok(html.includes("Autoriser une fois"));
 });
 
+test("a background task card names the bot, the action and the shortened prompt", () => {
+  const summary = `${"Préparer le dossier ".repeat(12)}… (raccourci)`;
+  const base = {
+    entry_id: "approval-bg", status: { status: "pending" }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "delegate", expires_at: Date.now() + 60000 },
+    arguments: { objective: "Préparer le dossier" },
+    policy: { remember: true, scope: "action", pattern: "", label: "Exécuter une tâche sur l'ordinateur" },
+    background_task: { kind: "Exécuter une tâche sur l'ordinateur", summary, bot_name: "Ezerbot" },
+  };
+  const render = (payload) => {
+    globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+    try {
+      return renderToStaticMarkup(React.createElement(Card, { message: { id: "approval-bg", kind: "approval", payload } }));
+    } finally { delete globalThis.window; }
+  };
+  const pending = render(base);
+  assert.ok(pending.includes("Autoriser Ezerbot à exécuter une tâche en arrière-plan ?"));
+  assert.ok(pending.includes("gb-background-kind"));
+  assert.match(pending, /Exécuter une tâche sur l(?:'|&#x27;)ordinateur/);
+  assert.ok(pending.includes("… (raccourci)"));
+  assert.ok(pending.includes("Autoriser une fois"));
+  assert.ok(pending.includes('data-always-scope="global"'));
+  assert.ok(pending.includes("Toujours autoriser"));
+  assert.ok(pending.includes("Refuser"));
+  assert.ok(!pending.includes("gb-status-ok"));
+  const once = render({ ...base, status: { status: "resolved" }, decision: "allow_once" });
+  assert.ok(once.includes("gb-status-ok"));
+  assert.ok(once.includes("Autorisé une fois"));
+  assert.ok(!once.includes("Toujours autoriser"));
+  const always = render({ ...base, status: { status: "resolved" }, decision: { always_allow: { scope: "global" } } });
+  assert.ok(always.includes("gb-status-ok"));
+  assert.ok(always.includes("Toujours autorisé"));
+  const refused = render({ ...base, status: { status: "denied" }, decision: "deny" });
+  assert.ok(refused.includes("gb-status-alert"));
+  assert.ok(refused.includes("Refusé"));
+  assert.ok(!refused.includes("gb-status-ok"));
+  const protectedLaunch = render({
+    ...base,
+    policy: { remember: false, protection: "destructive", scope: "none", pattern: "", label: "Suppression à confirmer" },
+    background_task: undefined,
+  });
+  assert.ok(protectedLaunch.includes("Confirmation d’une suppression"));
+  assert.ok(!protectedLaunch.includes("Toujours autoriser"));
+});
+
+test("a background computer rule is revoked from Settings as that action type", async () => {
+  const rule = { ...standingRule("background_computer", true, "global"), args_digest: "" };
+  const f = settingsPanel({ rules: [rule] });
+  assert.match(ruleRows(f.root)[0].textContent, /Tâche en arrière-plan · Exécuter une tâche sur l'ordinateur/);
+  assert.match(ruleRows(f.root)[0].textContent, /Ce type d’action/);
+  await button(ruleRows(f.root)[0], "Retirer la règle").listeners.click();
+  assert.equal(f.requests[0].path, "/api/approvals/rules/revoke");
+  assert.equal(f.requests[0].body.tool, "background_computer");
+  assert.equal(f.requests[0].body.args_digest, "");
+  assert.equal(f.requests[0].body.scope, "global");
+  assert.equal(f.requests[0].body.requesting_bot_id, "grokbot");
+});
+
 test("outbound sends and deletions stay on a confirmation card without Toujours autoriser", () => {
   const outbound = cardWithPolicy(
     { remember: false, protection: "outbound", scope: "none", pattern: "", label: "Envoi sous votre nom" },

@@ -1056,22 +1056,32 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
-    tick_selected(ctx, false);
+    tick_selected(ctx, false, false);
 }
 pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
-    tick_selected(ctx, true);
+    tick_selected(ctx, true, false);
 }
-fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
+/// Resume a run parked on an approval without starting queued child tasks.
+/// The desktop loop uses [`tick`], which also launches those children.
+pub fn tick_suspended(ctx: &super::Context<'_>) {
+    tick_selected(ctx, false, true);
+}
+fn tick_selected(ctx: &super::Context<'_>, routines_only: bool, suspended_only: bool) {
     // run() commits Resumed and the matching receipt together. Merely scanning
     // pending wakes must NEVER mark them Delivered (SR01/SR02).
-    for status in [
-        RunStatus::Queued,
-        RunStatus::Running,
-        RunStatus::Interrupted,
-        RunStatus::AwaitingHumanInput,
-        RunStatus::AwaitingApproval,
-        RunStatus::AwaitingChildren,
-    ] {
+    let mut statuses = vec![RunStatus::AwaitingHumanInput, RunStatus::AwaitingApproval];
+    if !suspended_only {
+        statuses.splice(
+            0..0,
+            [
+                RunStatus::Queued,
+                RunStatus::Running,
+                RunStatus::Interrupted,
+            ],
+        );
+        statuses.push(RunStatus::AwaitingChildren);
+    }
+    for status in statuses {
         if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
             for run in runs {
                 if routines_only {

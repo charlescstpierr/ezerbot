@@ -167,9 +167,73 @@ impl Fixture {
             .as_millis() as u64;
         self.app.tick(ms);
     }
-    fn wait_parent(&self, c: &str, m: &str, status: RunStatus) {
+    fn wait_parent(&mut self, c: &str, m: &str, status: RunStatus) {
+        let mut delivered = false;
         wait("parent state", || {
+            // A background launch pauses on its own card. Existing engine tests
+            // that wait for the child (or for the parent to finish) allow it once.
+            if self.run(c, m).status == RunStatus::AwaitingApproval {
+                if self.allow_pending_background() || !delivered {
+                    self.tick_suspended();
+                    delivered = true;
+                }
+            } else {
+                delivered = false;
+            }
             self.run(c, m).status == status && self.provider.status()["titling"] == false
+        });
+    }
+    fn allow_pending_background(&mut self) -> bool {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        let mut pending = Vec::new();
+        for conversation in state["conversations"].as_array().into_iter().flatten() {
+            for message in conversation["messages"].as_array().into_iter().flatten() {
+                if message["kind"] == "approval"
+                    && message["payload"]["status"]["status"] == "pending"
+                    && message["payload"]["policy"]["scope"] == "action"
+                {
+                    pending.push((
+                        message["payload"]["entry_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                        message["payload"]["route"]["target_conversation_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        if pending.is_empty() {
+            return false;
+        }
+        for (entry, conversation) in pending {
+            self.post(
+                "/api/approvals/resolve",
+                json!({
+                    "entry_id": entry,
+                    "submission_id": format!("bg-{entry}"),
+                    "conversation_id": conversation,
+                    "decision": "allow_once"
+                }),
+            );
+        }
+        true
+    }
+    fn tick_suspended(&mut self) {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        self.app.tick_suspended(ms);
+    }
+    fn reopen(&mut self) {
+        assert_eq!(self.provider.status()["titling"], false);
+        self.provider = Provider::with_endpoints(&self.path, self.server.endpoints(), false);
+        self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
+        wait("reopened models", || {
+            self.provider.status()["models_ready"] == true
         });
     }
     fn begin(&mut self, c: &str, m: &str, args: Value) -> (Run, Delegation) {
@@ -223,6 +287,15 @@ fn call(id: &str, name: &str, args: Value) -> Value {
 fn args(bot: &str) -> Value {
     json!({"child_bot":bot,"objective":"Verify selected material","selected_context":{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}})
 }
+fn form_request(state: &Value) -> &Value {
+    state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["kind"]["kind"] == "form")
+        .expect("formulaire")
+}
+
 fn suspended(outcome: ToolOutcome) -> String {
     match outcome {
         ToolOutcome::Suspend {
@@ -388,7 +461,17 @@ fn tool_budget_cannot_skip_the_final_batch_wait() {
     }
     tx.commit().unwrap();
     f.tick();
+    let mut budget_delivered = false;
     wait("budget batch waits", || {
+        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval
+            && (f.allow_pending_background() || !budget_delivered)
+        {
+            f.tick_suspended();
+            budget_delivered = true;
+        }
+        if store::required(&f.db(), &root.run_id).unwrap().status != RunStatus::AwaitingApproval {
+            budget_delivered = false;
+        }
         store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
     });
     let edge = f.children(&root).remove(0);
@@ -709,13 +792,13 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     let state = f.app.api("GET", "/api/state", b"").unwrap();
     assert_eq!(state["delegation"]["active_by_conversation"][&c], 2);
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.kind == RunEventKind::Suspended)
-            .count(),
-        1
-    );
+    let children_wait = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::Suspended && e.payload["cause"]["kind"] == "children")
+        .expect("attente des sous-tâches");
+    assert!(events
+        .iter()
+        .any(|e| { e.kind == RunEventKind::Suspended && e.payload["approval"] == true }));
     assert_eq!(
         events
             .iter()
@@ -725,11 +808,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
         "done"
     );
     assert_eq!(
-        events
-            .iter()
-            .find(|e| e.kind == RunEventKind::Suspended)
-            .unwrap()
-            .payload["cause"]["ids"]
+        children_wait.payload["cause"]["ids"]
             .as_array()
             .unwrap()
             .len(),
@@ -765,7 +844,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     assert!(!model::ready_to_resume(&f.db(), &parent.run_id).unwrap());
     assert_eq!(f.run(&c, "parallel").status, RunStatus::AwaitingChildren);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "second-done",
@@ -786,12 +865,17 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     });
     f.resume(&c, "parallel");
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    let approvals = events
+        .iter()
+        .filter(|e| e.kind == RunEventKind::Suspended && e.payload["approval"] == true)
+        .count();
     assert_eq!(
         events
             .iter()
             .filter(|e| e.kind == RunEventKind::Resumed)
             .count(),
-        1
+        approvals + 1,
+        "une reprise pour chaque carte, puis une seule pour le lot de sous-tâches"
     );
     let seen = f.server.seen.lock().unwrap();
     let body = seen.bodies.last().unwrap().to_string();
@@ -993,7 +1077,7 @@ fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
         json!({"bot_id":"grokbot","fact_id":fact}),
     );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "done",
@@ -1664,7 +1748,7 @@ fn child_human_input_routes_to_principal_and_is_cancelled_with_parent() {
     });
     wait("released child", || f.provider.status()["titling"] == false);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let request = &state["forms"]["requests"][0];
+    let request = form_request(&state);
     assert_eq!(request["route"]["target_conversation_id"], c);
     assert_eq!(request["route"]["target_bot_id"], "grokbot");
     assert_eq!(request["route"]["requesting_bot_id"], "child");
@@ -2110,7 +2194,25 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
     ]);
     f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
     f.tick();
+    let mut group_delivered = false;
     wait("group delegates", || {
+        let waiting = f
+            .db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_runs WHERE status='awaiting_approval')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if waiting && (f.allow_pending_background() || !group_delivered) {
+            // Group turns resume from the multibot driver, which a full tick runs
+            // after the engine has already scanned queued children.
+            f.tick();
+            group_delivered = true;
+        }
+        if !waiting {
+            group_delivered = false;
+        }
         f.db()
             .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {
                 r.get::<_, i64>(0)
@@ -2568,4 +2670,87 @@ fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
     assert!(events.iter().any(|e| e.kind == RunEventKind::ToolResult
         && e.payload["call_id"] == "stale-completion"
         && e.payload["outcome"]["status"] == "failed"));
+}
+
+#[test]
+fn background_delegate_card_saves_the_action_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let mut first = args("child");
+    first["objective"] = json!(format!("Préparer {}", "le dossier ".repeat(30)));
+    f.events(vec![call("delegate-call", "delegate", first), completed()]);
+    f.send(&c, "bg-task", "Lance la tâche de fond");
+    wait("carte de tâche", || {
+        f.run(&c, "bg-task").status == RunStatus::AwaitingApproval
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["kind"] == "approval")
+        .expect("carte");
+    assert_eq!(card["payload"]["policy"]["scope"], "action");
+    assert_eq!(card["payload"]["policy"]["remember"], true);
+    assert_eq!(
+        card["payload"]["background_task"]["kind"],
+        "Exécuter une tâche sur l'ordinateur"
+    );
+    assert_eq!(card["payload"]["background_task"]["bot_name"], "Ezerbot");
+    assert!(card["payload"]["background_task"]["summary"]
+        .as_str()
+        .unwrap()
+        .ends_with("… (raccourci)"));
+    f.post(
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card["payload"]["entry_id"],
+            "submission_id": "always-bg",
+            "conversation_id": card["payload"]["route"]["target_conversation_id"],
+            "decision": {"always_allow": {"scope": "global"}}
+        }),
+    );
+    f.wait_parent(&c, "bg-task", RunStatus::AwaitingChildren);
+    let settled = f.app.api("GET", "/api/state", b"").unwrap();
+    let shown = settled["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["id"] == card["id"])
+        .unwrap();
+    assert!(shown["payload"]["decision"]["always_allow"].is_object());
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-next", "La même sorte de tâche");
+    f.wait_parent(&c, "bg-next", RunStatus::AwaitingChildren);
+    assert_ne!(f.run(&c, "bg-next").status, RunStatus::AwaitingApproval);
+    f.reopen();
+    f.events(vec![
+        call("delegate-call", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "bg-restart", "Après redémarrage");
+    f.wait_parent(&c, "bg-restart", RunStatus::AwaitingChildren);
+    f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id": "grokbot",
+            "target_bot_id": "grokbot",
+            "tool": "background_computer",
+            "args_digest": "",
+            "scope": "global"
+        }),
+    );
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-revoked", "La règle est retirée");
+    wait("carte revenue", || {
+        f.run(&c, "bg-revoked").status == RunStatus::AwaitingApproval
+    });
 }

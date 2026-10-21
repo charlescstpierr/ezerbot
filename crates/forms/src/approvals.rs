@@ -150,12 +150,20 @@ pub fn decide(
         submission_id,
         decision,
         now_ms,
-        None,
+        StandingWrite::default(),
     )
 }
 
-/// `pattern_key` is the server-derived command text for [`RuleScope::Pattern`].
-/// A missing or invalid key degrades to a one-shot decision, same as Call.
+/// Where a permanent decision is stored. `pattern_key` is the server-derived
+/// command text for [`RuleScope::Pattern`]. A missing or invalid key degrades
+/// to a one-shot decision, same as Call. `rule_tool` stores the rule under
+/// another tool name than the request, for one action type shared by several calls.
+#[derive(Clone, Copy, Default)]
+pub struct StandingWrite<'a> {
+    pub pattern_key: Option<&'a str>,
+    pub rule_tool: Option<&'a str>,
+}
+
 pub fn decide_with_pattern(
     conn: &Connection,
     id: &str,
@@ -163,7 +171,7 @@ pub fn decide_with_pattern(
     submission_id: &str,
     decision: ApprovalDecision,
     now_ms: i64,
-    pattern_key: Option<&str>,
+    standing: StandingWrite<'_>,
 ) -> Result<ResumeReceipt> {
     let request = approval(conn, id)?;
     if deciding_conversation_id != request.route.target_conversation_id {
@@ -191,10 +199,14 @@ pub fn decide_with_pattern(
         // expire_pending returns the durable resolution/wake work to its caller.
         return Err(invalid("approval expired"));
     }
+    let StandingWrite {
+        pattern_key,
+        rule_tool,
+    } = standing;
     let effective = match decision {
         ApprovalDecision::AlwaysAllow { scope } => {
             if !can_persist(scope, pattern_key)
-                || save_rule(conn, &request, scope, true, pattern_key).is_err()
+                || save_rule(conn, &request, scope, true, pattern_key, rule_tool).is_err()
             {
                 requests::require_transaction(conn)?;
                 ApprovalDecision::AllowOnce
@@ -204,7 +216,7 @@ pub fn decide_with_pattern(
         }
         ApprovalDecision::Never { scope } => {
             if !can_persist(scope, pattern_key)
-                || save_rule(conn, &request, scope, false, pattern_key).is_err()
+                || save_rule(conn, &request, scope, false, pattern_key, rule_tool).is_err()
             {
                 requests::require_transaction(conn)?;
                 ApprovalDecision::Deny
@@ -248,6 +260,7 @@ fn save_rule(
     scope: RuleScope,
     allow: bool,
     pattern_key: Option<&str>,
+    rule_tool: Option<&str>,
 ) -> Result<()> {
     let InputKind::Approval {
         tool, args_digest, ..
@@ -255,6 +268,7 @@ fn save_rule(
     else {
         return Err(invalid("not an approval"));
     };
+    let tool = rule_tool.unwrap_or(tool);
     let stored = match scope {
         RuleScope::Global => "",
         RuleScope::Pattern => pattern_key.unwrap_or(""),
@@ -333,7 +347,7 @@ pub fn auto_review(
     submission_id: &str,
     now_ms: i64,
 ) -> Result<Option<ResumeReceipt>> {
-    auto_review_matching(conn, id, submission_id, now_ms, None)
+    auto_review_matching(conn, id, submission_id, now_ms, None, None)
 }
 
 /// `pattern_key` matches a command rule in addition to subject and global rules.
@@ -343,6 +357,7 @@ pub fn auto_review_matching(
     submission_id: &str,
     now_ms: i64,
     pattern_key: Option<&str>,
+    standing_tool: Option<&str>,
 ) -> Result<Option<ResumeReceipt>> {
     let request = approval(conn, id)?;
     if let Some(receipt) = requests::replay(conn, &request.entry_id, submission_id)? {
@@ -359,6 +374,7 @@ pub fn auto_review_matching(
         unreachable!()
     };
     let pattern = pattern_key.unwrap_or("");
+    let lookup = standing_tool.unwrap_or(tool);
     let allow: Option<bool> = conn
         .query_row(
             "SELECT allow FROM forms_approval_rules WHERE requesting_bot_id=?1 AND target_bot_id=?2
@@ -367,7 +383,7 @@ pub fn auto_review_matching(
             params![
                 route.requesting_bot_id,
                 route.target_bot_id,
-                tool,
+                lookup,
                 args_digest,
                 pattern
             ],

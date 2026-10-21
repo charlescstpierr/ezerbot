@@ -910,6 +910,14 @@ impl App {
         features::tick(&ctx);
     }
 
+    /// Deliver an approval wake without launching queued background tasks.
+    #[doc(hidden)]
+    pub fn tick_suspended(&mut self, now_ms: u64) {
+        let mut ctx = self.feature_context();
+        ctx.now_ms = now_ms;
+        features::engine::tick_suspended(&ctx);
+    }
+
     #[doc(hidden)]
     pub fn feature_context(&self) -> features::Context<'_> {
         features::Context {

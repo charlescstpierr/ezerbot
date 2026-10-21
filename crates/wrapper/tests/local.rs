@@ -1246,3 +1246,94 @@ fn destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
     f.finish("rm");
     assert!(!target.exists());
 }
+
+#[test]
+fn background_shell_always_persists_across_restart_and_a_deletion_still_asks() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let mut first = f.shell(&format!("printf {}", "z".repeat(180)));
+    first["background"] = json!(true);
+    f.send("bg", "run_shell", first);
+    let card = f.request("bg");
+    let policy = approval_policy(&mut f, "bg");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "action");
+    let shown = approval_message(&mut f, "bg");
+    assert_eq!(
+        shown["background_task"]["kind"],
+        "Exécuter une tâche sur l'ordinateur"
+    );
+    assert_eq!(shown["background_task"]["bot_name"], "Ezerbot");
+    assert!(shown["background_task"]["summary"]
+        .as_str()
+        .unwrap()
+        .ends_with("… (raccourci)"));
+    f.decide(&card, json!({"always_allow":{"scope":"global"}}));
+    f.finish("bg");
+    let mut again = f.shell("printf oui");
+    again["background"] = json!(true);
+    f.send("again", "run_shell", again);
+    f.finish("again");
+    assert!(requests::list_for_run(&f.db(), &f.run("again").run_id)
+        .unwrap()
+        .is_empty());
+    f.reopen();
+    let mut restarted = f.shell("printf encore");
+    restarted["background"] = json!(true);
+    f.send("restarted", "run_shell", restarted);
+    f.finish("restarted");
+    assert!(requests::list_for_run(&f.db(), &f.run("restarted").run_id)
+        .unwrap()
+        .is_empty());
+    let target = f.root().join("victime-bg.txt");
+    std::fs::write(&target, "garde").unwrap();
+    let mut removal = f.shell("rm victime-bg.txt");
+    removal["background"] = json!(true);
+    f.send("rm-bg", "run_shell", removal);
+    wait("suppression demandée", || {
+        let status = f.run("rm-bg").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(f.run("rm-bg").status, RunStatus::AwaitingApproval);
+    assert!(target.exists());
+    let removal_policy = approval_policy(&mut f, "rm-bg");
+    assert_eq!(removal_policy["remember"], false);
+    assert_eq!(removal_policy["protection"], "destructive");
+    f.decide(&f.request("rm-bg"), json!("deny"));
+    f.finish("rm-bg");
+    assert!(target.exists());
+    let rules = f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"background_computer",
+            "args_digest":"","scope":"global"
+        }),
+    );
+    assert!(rules["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|rule| rule["tool"] != "background_computer"));
+    let mut revoked = f.shell("printf revenu");
+    revoked["background"] = json!(true);
+    f.send("revoked", "run_shell", revoked);
+    let back = f.request("revoked");
+    assert!(matches!(
+        back.status,
+        grokbot_forms::requests::RequestStatus::Pending
+    ));
+    f.decide(&back, json!("deny"));
+    f.finish("revoked");
+}
+
+fn approval_message(f: &mut Fixture, id: &str) -> Value {
+    let run = f.run(id).run_id;
+    f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .find(|m| m["kind"] == "approval" && m["payload"]["run_id"] == run)
+        .expect("carte d’approbation")["payload"]
+        .clone()
+}

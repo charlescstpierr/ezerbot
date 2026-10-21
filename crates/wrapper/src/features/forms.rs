@@ -376,12 +376,14 @@ fn create_request(
     // stay on the card even when a stored rule would otherwise match.
     if let Some(policy) = policy.filter(|policy| policy.remember) {
         let key = (policy.scope == "pattern").then_some(policy.pattern.as_str());
+        let standing = (policy.scope == "action").then_some(grokbot_forms::policy::BACKGROUND_TOOL);
         if let Some(receipt) = approvals::auto_review_matching(
             ctx.connection,
             id,
             &format!("auto:{id}"),
             clock(ctx),
             key,
+            standing,
         )? {
             attach(ctx.connection, &request, receipt)?;
         }
@@ -533,11 +535,32 @@ pub fn check_tool_approval(
         };
     }
     // A standing allow or deny never covers an outbound send or a deletion.
-    if approval_policy(ctx, &call.name, &call.arguments)
-        .protection
-        .is_some()
-    {
+    let policy = approval_policy(ctx, &call.name, &call.arguments);
+    if policy.protection.is_some() {
         return Ok(ApprovalCheck::Ask);
+    }
+    if policy.scope == "action" {
+        let route = ApprovalRoute {
+            requesting_bot_id: run.bot_id.clone(),
+            target_bot_id: DEFAULT_BOT.id.into(),
+            target_conversation_id: run.conversation_id.clone(),
+        };
+        return Ok(
+            match rules::evaluate(
+                ctx.connection,
+                &route,
+                grokbot_forms::policy::BACKGROUND_TOOL,
+                &json!({}),
+            )? {
+                Some((true, rule_id)) => ApprovalCheck::Authorized {
+                    by: AuthorizedBy::Rule { rule_id },
+                },
+                Some((false, _)) => ApprovalCheck::Denied {
+                    reason: "Une autorisation permanente refuse cette action.".into(),
+                },
+                None => ApprovalCheck::Ask,
+            },
+        );
     }
     if super::mcp::is_lifecycle(&call.name) || super::screen::is_tool(&call.name) {
         return Ok(ApprovalCheck::Ask);
@@ -1008,15 +1031,37 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     ))
                 }
             }
+            let mut decision = input.decision;
+            let mut rule_tool = None;
+            if policy.scope == "action" {
+                decision = match decision {
+                    ApprovalDecision::AlwaysAllow { .. } => ApprovalDecision::AlwaysAllow {
+                        scope: RuleScope::Global,
+                    },
+                    ApprovalDecision::Never { .. } => ApprovalDecision::Never {
+                        scope: RuleScope::Global,
+                    },
+                    other => other,
+                };
+                if matches!(
+                    decision,
+                    ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
+                ) {
+                    rule_tool = Some(grokbot_forms::policy::BACKGROUND_TOOL);
+                }
+            }
             let pattern = (policy.scope == "pattern").then_some(policy.pattern.as_str());
             let receipt = approvals::decide_with_pattern(
                 &tx,
                 &request.id,
                 &input.conversation_id,
                 &submission,
-                input.decision,
+                decision,
                 clock(&ctx),
-                pattern,
+                approvals::StandingWrite {
+                    pattern_key: pattern,
+                    rule_tool,
+                },
             )?;
             if matches!(request.kind, InputKind::Approval { .. })
                 && requests::get(&tx, &request.id)?
@@ -1167,12 +1212,48 @@ fn request_value(
         if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
         }
-        value["policy"] = json!(policy_for_request(ctx, request)?);
+        let policy = policy_for_request(ctx, request)?;
+        if policy.scope == "action" {
+            let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+            value["background_task"] = json!({
+                "kind": grokbot_forms::policy::BACKGROUND_KIND,
+                "summary": grokbot_forms::policy::background_summary(tool, &arguments),
+                "bot_name": bot_display_name(ctx, &request.route.requesting_bot_id),
+            });
+            value["decision"] = decision_value(ctx, &request.entry_id)?;
+        }
+        value["policy"] = json!(policy);
     }
     Ok(value)
 }
 
 /// One classifier for the gate, the card and the decision route.
+fn bot_display_name(ctx: &Context<'_>, bot_id: &str) -> String {
+    ctx.connection
+        .query_row(
+            "SELECT name FROM wrapper_bots WHERE account_id=?1 AND id=?2",
+            params![ACCOUNT, bot_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| bot_id.to_owned())
+}
+
+fn decision_value(ctx: &Context<'_>, entry_id: &str) -> Result<Value, ApiError> {
+    let stored: Option<String> = ctx
+        .connection
+        .query_row(
+            "SELECT values_json FROM forms_resolutions WHERE entry_id=?1",
+            [entry_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(|_| ApiError::new(500, "Décision d’approbation illisible."))?
+        .unwrap_or(Value::Null))
+}
+
 fn approval_policy(
     ctx: &Context<'_>,
     tool: &str,

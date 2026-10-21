@@ -135,6 +135,10 @@
 .gb-actions { display: flex; align-items: center; gap: 6px; min-height: 26px; margin-top: 6px; color: var(--subtle); font-size: 11px; }
 .gb-status { display: inline-flex; align-items: center; gap: 4px; }
 .gb-status-alert { color: var(--danger-text); }
+.gb-status-ok { color: var(--ok); font-weight: 600; }
+.gb-background-box { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--soft); }
+.gb-background-kind { margin: 0; font-size: 14px; font-weight: 600; }
+.gb-background-summary { margin: 6px 0 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .gb-secret-storage-warning { color: var(--text); background: var(--soft); border-color: color-mix(in srgb, var(--danger-text) 45%, var(--line)); }
 .gb-secret-storage-warning > strong { color: var(--danger-text); }
 .gb-card-slot .gb-approval-denied { border-inline-start: 3px solid var(--danger-text); }

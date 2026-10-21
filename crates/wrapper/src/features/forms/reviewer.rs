@@ -248,7 +248,17 @@ pub(super) fn complete(
         let key = policy
             .as_ref()
             .and_then(|item| (item.scope == "pattern").then_some(item.pattern.as_str()));
-        approvals::auto_review_matching(&tx, id, &format!("auto:standing:{id}"), clock(ctx), key)?
+        let standing = policy.as_ref().and_then(|item| {
+            (item.scope == "action").then_some(grokbot_forms::policy::BACKGROUND_TOOL)
+        });
+        approvals::auto_review_matching(
+            &tx,
+            id,
+            &format!("auto:standing:{id}"),
+            clock(ctx),
+            key,
+            standing,
+        )?
     } else {
         None
     };

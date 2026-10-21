@@ -29,6 +29,31 @@ export function Card({ message, busy, onAction }) {
   const blocked = !previewAvailable || localApprovalBlocked(action.tool, preview);
   // entry_id, not an echo of a redacted preview, binds the canonical action.
   const decide = (decision) => act("forms.decide", { decision });
+  const backgroundTask = request.background_task;
+  if (backgroundTask) {
+    const decision = request.decision;
+    const always = Boolean(decision && typeof decision === "object" && decision.always_allow);
+    const once = decision === "allow_once";
+    const refused = input.status === "denied" || decision === "deny" || Boolean(decision?.never);
+    const state = once ? "Autorisé une fois" : always ? "Toujours autorisé" : refused ? "Refusé" : "";
+    const bot = backgroundTask.bot_name || "le bot";
+    return (
+      <HumanInputCard message={message} title={`Autoriser ${bot} à exécuter une tâche en arrière-plan ?`} input={input}>
+        <div className="space-y-3">
+          <div className="gb-background-box">
+            <p className="gb-background-kind">{backgroundTask.kind}</p>
+            <p className="gb-background-summary">{backgroundTask.summary}</p>
+          </div>
+          {state && <p className={refused ? "gb-status-alert" : "gb-status-ok"} role="status">{state}</p>}
+          {pending && <div className="flex flex-wrap gap-2">
+            <button type="button" className="gb-retry gb-retry-primary" disabled={disabled} onClick={() => decide("allow_once")}>Autoriser une fois</button>
+            {request.policy?.remember && <button type="button" className="gb-retry" disabled={disabled} data-always-scope="global" onClick={() => decide({ always_allow: { scope: "global" } })}>Toujours autoriser</button>}
+            <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
+          </div>}
+        </div>
+      </HumanInputCard>
+    );
+  }
   if (action.tool === "propose_skill") return <SkillProposal message={message} input={input} disabled={disabled} expired={expired} />;
   const review = request.review;
   const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")

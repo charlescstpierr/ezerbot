@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,22 +79,29 @@ class CleanupTests(unittest.TestCase):
 
     def test_real_home_run_root_is_refused(self) -> None:
         run_root = Path(tempfile.mkdtemp(prefix="verify-ezerbot."))
-        home = run_root / "home"
-        home.mkdir()
-        (home / "sentinel").write_text("keep")
-        evidence = Path(tempfile.mkdtemp(prefix="cleanup-evidence-"))
-        record = {
-            "home": str(home),
-            "run_root": str(run_root),
-            "cleaned": False,
-            "marker_key": "ab" * 32,
-            "marker": "cd" * 32,
-        }
-        (evidence / "run.json").write_text(json.dumps(record))
-        result = run_cleanup(evidence, Path(tempfile.gettempdir()), {"EZERBOT_VERIFY_REAL_HOME": str(run_root)})
-        self.assertTrue((home / "sentinel").is_file(), result.stdout + result.stderr)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dossier personnel", result.stderr + result.stdout)
+        evidence: Path | None = None
+        try:
+            evidence = Path(tempfile.mkdtemp(prefix="cleanup-evidence-"))
+            home = run_root / "home"
+            home.mkdir()
+            (home / "sentinel").write_text("keep")
+            record = {
+                "home": str(home),
+                "run_root": str(run_root),
+                "cleaned": False,
+                "marker_key": "ab" * 32,
+                "marker": "cd" * 32,
+            }
+            (evidence / "run.json").write_text(json.dumps(record))
+            result = run_cleanup(evidence, Path(tempfile.gettempdir()), {"EZERBOT_VERIFY_REAL_HOME": str(run_root)})
+            self.assertTrue((home / "sentinel").is_file(), result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dossier personnel", result.stderr + result.stdout)
+            self.assertTrue(run_root.is_dir())
+        finally:
+            shutil.rmtree(run_root, ignore_errors=True)
+            if evidence is not None:
+                shutil.rmtree(evidence, ignore_errors=True)
 
     def test_signed_run_under_system_tmpdir_is_removed(self) -> None:
         evidence = Path(tempfile.mkdtemp(prefix="cleanup-evidence-"))

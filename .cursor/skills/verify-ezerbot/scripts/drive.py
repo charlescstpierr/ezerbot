@@ -38,12 +38,26 @@ def browser(evidence: Path, *command: str) -> str:
     return result.stdout
 
 
-def eval_js(evidence: Path, source: str):
-    output = browser(evidence, "eval", source)
+def parse_eval_output(output: str):
+    """Decode `result: <json>`. axi often wraps the object in a JSON string."""
     match = re.search(r"^result:\s*(.*)$", output, re.M)
     if not match:
         raise SystemExit(f"résultat navigateur illisible: {output}")
-    return json.loads(match.group(1))
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"résultat navigateur illisible: {output}") from error
+    while isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            break
+        value = decoded
+    return value
+
+
+def eval_js(evidence: Path, source: str):
+    return parse_eval_output(browser(evidence, "eval", source))
 
 
 def wait_js(evidence: Path, source: str, message: str, timeout: float = 20):
@@ -275,6 +289,13 @@ def save_findings(evidence: Path, findings: list[dict]) -> None:
     (evidence / "findings.json").write_text(json.dumps(findings, indent=2, ensure_ascii=False) + "\n")
 
 
+def record_tool_error(evidence: Path, error: BaseException) -> None:
+    """A crash of this driver is not an Ezerbot defect."""
+    message = " ".join(f"{type(error).__name__}: {error}".split())
+    payload = {"kind": "outil", "message": message}
+    (evidence / "tool-error.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+
 def drive_sphere(evidence: Path, sphere: str, findings: list[dict]) -> None:
     for theme in THEMES:
         eval_js(evidence, close_overlays_js())
@@ -334,6 +355,11 @@ def main() -> None:
         )
         save_findings(evidence, findings)
         raise
+    except Exception as error:
+        record_tool_error(evidence, error)
+        save_findings(evidence, findings)
+        print(f"erreur d'outil: {type(error).__name__}: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     save_findings(evidence, findings)
     print(f"drive: ok {', '.join(spheres)}")
 

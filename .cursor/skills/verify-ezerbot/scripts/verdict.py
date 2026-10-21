@@ -21,6 +21,19 @@ def verdict_line(status: str, sha: str, patch: str | None) -> str:
     return line
 
 
+def load_tool_error(evidence: Path) -> str | None:
+    path = evidence / "tool-error.json"
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise SystemExit("refus: tool-error.json illisible")
+    message = payload.get("message") or "erreur d'outil"
+    if not isinstance(message, str) or not message.strip():
+        raise SystemExit("refus: erreur d'outil vide")
+    return " ".join(message.split())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verdict de vérification Ezerbot")
     parser.add_argument("--evidence", type=Path)
@@ -44,8 +57,9 @@ def main() -> None:
         raise SystemExit(2)
     findings_path = evidence / "findings.json"
     findings = json.loads(findings_path.read_text()) if findings_path.is_file() else []
+    tool_message = load_tool_error(evidence)
     blocking = any(item.get("severity") == "bloquant" for item in findings)
-    status = "FIX" if args.status == "fix" or blocking else "PASS"
+    status = "FIX" if args.status == "fix" or blocking or tool_message else "PASS"
     line = verdict_line(status, sha, patch)
     deviations = evidence / "deviations.md"
     deviation_text = deviations.read_text() if deviations.is_file() else "Comparaison non exécutée.\n"
@@ -64,8 +78,21 @@ def main() -> None:
                     "",
                 ]
             )
+    elif tool_message:
+        report.extend(["Aucun défaut d'Ezerbot.", ""])
     else:
         report.extend(["Aucun défaut numéroté.", ""])
+    if tool_message:
+        report.extend(
+            [
+                "## Erreur d'outil",
+                "",
+                tool_message,
+                "",
+                "Ce plantage vient de l'outil de vérification. Ce n'est pas un défaut d'Ezerbot.",
+                "",
+            ]
+        )
     report.extend(["## Écarts de référence", "", deviation_text.rstrip(), "", line, ""])
     (evidence / "report.md").write_text("\n".join(report))
     print(line)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -27,6 +28,21 @@ def run_script(name: str, *args: str) -> None:
     result = subprocess.run([sys.executable, str(script(name)), *args], env=os.environ.copy())
     if result.returncode != 0:
         raise SystemExit(result.returncode)
+
+
+def note_unclassified_drive_failure(evidence: Path) -> None:
+    """A drive crash with no product finding must still show up as a tool error."""
+    if (evidence / "tool-error.json").is_file():
+        return
+    findings_path = evidence / "findings.json"
+    findings = json.loads(findings_path.read_text()) if findings_path.is_file() else []
+    if any(item.get("severity") == "bloquant" for item in findings):
+        return
+    payload = {
+        "kind": "outil",
+        "message": "le pilotage s'est arrêté sans écrire de défaut d'Ezerbot",
+    }
+    (evidence / "tool-error.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def main() -> None:
@@ -78,6 +94,7 @@ def main() -> None:
             run_script("drive.py", "--evidence", str(evidence), "--sphere", args.sphere)
         except SystemExit as error:
             failed = error.code or 1
+            note_unclassified_drive_failure(evidence)
         run_script("compare.py", "--evidence", str(evidence))
         verdict_args = ["--evidence", str(evidence), "--ref", "HEAD", "--status", "fix" if failed else "pass"]
         if args.patch:

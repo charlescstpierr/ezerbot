@@ -1,7 +1,8 @@
 "use strict";
 (() => {
   const panels = window.GrokbotPanels;
-  if (!panels) return;
+  // Voice mode captures and speaks on the Mac. Hide its composer control on iPhone.
+  if (!panels || window.EzerbotIPhone?.remote) return;
   const el = (tag, cls, text) => { const n = document.createElement(tag); n.className = cls || ""; if (text) n.textContent = text; return n; };
   const errors = {
     mic_denied:"Accès au microphone refusé. Autorisez Ezerbot dans Réglages Système, puis réessayez.",

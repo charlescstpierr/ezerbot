@@ -288,3 +288,17 @@ test('a remote network failure keeps the draft without claiming the listener is 
   assert.equal(phone.send.disabled, true);
   assert.equal(phone.thread().some(message => message.body === text && message.state === 'unknown'), true);
 });
+test('iPhone does not mount Mac dictation, voice mode, or meeting capture', () => {
+  for (const file of ['panels/voice.js', 'panels/voice-conversation.js', 'panels/meetings.js']) {
+    let registered = false;
+    const send = { id: 'send-button', parent: { children: [], append(child) { this.children.push(child); } }, before(child) { send.parent.children.push(child); } };
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, file), 'utf8'), {
+      window: { EzerbotIPhone: { remote: true }, GrokbotPanels: { register() { registered = true; } }, addEventListener() {} },
+      document: { createElement: () => ({ className: '', children: [], dataset: {}, setAttribute() {}, append() {}, addEventListener() {} }), createTextNode: () => ({}), getElementById: () => send, querySelector: () => null, addEventListener() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      crypto, setTimeout() {}, clearTimeout() {},
+    });
+    assert.equal(registered, false, file);
+    assert.equal(send.parent.children.length, 0, file);
+  }
+});

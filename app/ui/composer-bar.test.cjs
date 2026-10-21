@@ -988,18 +988,35 @@ test("the real header keeps the title clear of Notifications from 761 to 785", {
   }
 });
 
-test("effort text stays visible from 360 to 500 without speed", { timeout: 180000 }, async () => {
-  const widths = sweep(360, 500, 10, [371, 480, 500]);
+test("effort text stays visible from 360 to 600 without speed", { timeout: 300000 }, async () => {
+  const widths = sweep(360, 600, 10, [371, 400, 480, 500, 501, 509, 600]);
   for (const width of widths) {
-    for (const model of ["GPT-6.1 Sol", CODEX_SPARK_WIDE]) {
+    for (const model of MODELS) {
       const report = await measure(width, 780, "Ezerbot", { model, effort: DEFAULT_EFFORT, speed: "" });
       for (const theme of report.themes) {
-        const where = `${width} ${model} ${theme.theme} effort=${theme.effortClient}/${theme.effortScroll} modelGap=${theme.modelGap} effortGap=${theme.effortGap}`;
+        const where = `${width} ${model} ${theme.theme} effort=${theme.effortClient}/${theme.effortScroll} model=${theme.modelClient}/${theme.modelScroll} modelGap=${theme.modelGap} effortGap=${theme.effortGap} bot=${theme.pieces.bot}`;
         assert.equal(theme.effortFits, true, where);
         assert.ok(theme.effortClient >= 40, where);
+        assert.ok(theme.modelClient >= 40, where);
         assert.ok(theme.effortGap >= 0, where);
         assert.ok(theme.modelGap >= 0, where);
+        assert.equal(theme.nameFits, true, where);
+        assert.equal(theme.chevronInside, true, where);
       }
+    }
+  }
+});
+
+test("Ezerbot stays visible from 761 to 764 beside the wide model and speed", { timeout: 120000 }, async () => {
+  for (let width = 761; width <= 764; width += 1) {
+    const report = await measure(width, 780, "Ezerbot", { model: CODEX_SPARK_WIDE, effort: DEFAULT_EFFORT, speed: "Standard" });
+    for (const theme of report.themes) {
+      const where = `${width} ${theme.theme} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} speedGap=${theme.speedGap} bot=${theme.pieces.bot} nameBox=${JSON.stringify(theme.nameBox)} botBox=${JSON.stringify(theme.botBox)}`;
+      assert.ok(theme.nameClient >= 40, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.chevronInside, true, where);
+      assert.ok(theme.speedGap >= 6, where);
+      assert.ok(Math.abs(theme.speedTop - theme.voiceTop) <= 2, where);
     }
   }
 });

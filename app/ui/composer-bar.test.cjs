@@ -27,7 +27,10 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name) {
+function page(name, { pills = true } = {}) {
+  const tools = pills
+    ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
+    : "";
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">
 <head>
@@ -58,7 +61,7 @@ function page(name) {
             <span class="composer-bot-name" id="composer-bot-name">${name}</span>
             <svg class="icon composer-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
           </button>
-          <span class="composer-tools" id="composer-tools"><button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button></span>
+          <span class="composer-tools" id="composer-tools">${tools}</span>
         </span>
         <div class="voice-controls">
           <button class="voice-session-toggle" type="button" aria-label="Mode voix" title="Mode voix · parler et écouter les réponses sur ce Mac">
@@ -127,6 +130,20 @@ function page(name) {
         nameInside: contained(nameBox, botBox),
         chevronInside: contained(chevronBox, botBox),
         modelLabelWidth: modelBox.width,
+        composerWidth: document.querySelector(".composer").getBoundingClientRect().width,
+        areaWidth: document.querySelector(".composer-area").getBoundingClientRect().width,
+        pieces: {
+          bottom: document.querySelector(".composer-bottom").getBoundingClientRect().width,
+          plus: document.querySelector("#composer-model .attachment-choose:not(.meeting-start)").getBoundingClientRect().width,
+          meeting: document.querySelector(".meeting-start").getBoundingClientRect().width,
+          bot: document.getElementById("composer-bot").getBoundingClientRect().width,
+          tools: document.querySelector(".composer-tools").getBoundingClientRect().width,
+          model: (document.querySelector('[data-picker="model"]') || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width,
+          effort: (document.querySelector('[data-picker="effort"]') || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width,
+          voice: voice.width,
+          send: send.width,
+          mascot: getComputedStyle(document.querySelector(".composer-mascot")).display,
+        },
         nameBox,
         chevronBox,
         botBox,
@@ -143,10 +160,10 @@ function page(name) {
 </html>`;
 }
 
-function measure(width, height, name) {
+function measure(width, height, name, options) {
   const directory = mkdtempSync(join(tmpdir(), "composer-bar-"));
   const file = join(directory, "bar.html");
-  writeFileSync(file, page(name).replace("FRAMES_PLACEHOLDER", "null"));
+  writeFileSync(file, page(name, options).replace("FRAMES_PLACEHOLDER", "null"));
   const chrome = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
@@ -234,6 +251,40 @@ test("a medium composer name stays whole and a 40-character name ellipsizes clea
       assert.equal(theme.clear, true, `40-character name overlaps voice controls or Send at ${width}×${height} ${theme.theme}`);
       assert.equal(theme.toolsClear, true, `model tools overlap voice controls at ${width}×${height} ${theme.theme}`);
     }
+  }
+});
+
+const SHORT_NAMES = ["Ezerbot", "Rédacteur", MEDIUM_NAME];
+
+test("short names stay whole at 500px with and without pills and at 901px", async () => {
+  const cases = [
+    [500, 780, true],
+    [500, 780, false],
+    [901, 780, true],
+  ];
+  for (const label of SHORT_NAMES) {
+    for (const [width, height, pills] of cases) {
+      const report = await measure(width, height, label, { pills });
+      for (const theme of report.themes) {
+        const where = `${label} at ${width}×${height} ${theme.theme} pills=${pills} name=${theme.nameClient}/${theme.nameScroll} area=${theme.areaWidth} composer=${theme.composerWidth} model=${theme.modelLabelWidth} ${JSON.stringify(theme.pieces)}`;
+        assert.equal(theme.nameFits, true, where);
+        assert.equal(theme.nameInside, true, where);
+        assert.equal(theme.chevronInside, true, where);
+        assert.equal(theme.toolsClear, true, where);
+        if (pills) assert.ok(theme.modelLabelWidth >= 40, where);
+      }
+    }
+  }
+});
+
+test("a 40-character name still ellipsizes inside the phone composer", async () => {
+  const report = await measure(500, 780, LONG_NAME, { pills: true });
+  for (const theme of report.themes) {
+    assert.equal(theme.nameEllipsed, true, `${theme.theme} ${theme.nameClient}/${theme.nameScroll}`);
+    assert.equal(theme.nameInside, true);
+    assert.equal(theme.chevronInside, true);
+    assert.equal(theme.clear, true, JSON.stringify(theme.pieces));
+    assert.equal(theme.toolsClear, true, JSON.stringify(theme.pieces));
   }
 });
 

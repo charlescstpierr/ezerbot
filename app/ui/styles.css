@@ -189,8 +189,9 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 0 0 auto; min-width: 0; flex-wrap: nowrap; }
+.composer .composer-tools { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
 .composer [data-picker="model"] { max-width: 150px; }
+.composer [data-picker="model"] b { min-width: 40px; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
@@ -369,7 +370,7 @@ a.secondary-button { text-decoration: none; }
 .bot-link-menu .popover { top: 34px; right: 0; min-width: 165px; }
 .deep-link-target, .deep-link-target:focus, .deep-link-target:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; border-radius: 6px; border-top-color: transparent; }
 .draft-restore { color: var(--accent-ink); text-decoration: underline; font: inherit; font-size: 10px; line-height: 1.2; padding: 0; white-space: nowrap; flex: 0 0 auto; }
-@media (max-width: 900px) {
+@media (max-width: 910px) {
   .composer-bottom { gap: 8px; }
   .composer-tools { gap: 4px; }
   .composer-tools .tool-pill { gap: 3px; padding-inline: 5px; }
@@ -443,7 +444,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .suggestion small { font-size: 8px; }
   .composer .tool-pill small { display: none; }
 }
-@media (max-width: 900px) and (min-width: 761px) {
+@media (max-width: 910px) and (min-width: 761px) {
   .suggestion-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .suggestion { flex-direction: row; align-items: center; gap: 10px; padding: 11px; }
   .suggestion strong { font-size: 10px; }
@@ -485,6 +486,14 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .suggestion small { font-size: 8px; line-height: 1.5; }
   .suggestion-arrow { display: none; }
   .composer-area { width: calc(100% - 26px); padding-top: 9px; padding-bottom: max(15px, env(safe-area-inset-bottom)); }
+  .composer-model { flex: 1 1 auto; min-width: 0; }
+  .composer .composer-mascot,
+  .composer .tool-pill > .icon { display: none; }
+  .composer .tool-pill { padding: 0 5px; }
+  /* Le nom court garde sa largeur ; le plafond ellipse un nom trop long avant les commandes. */
+  .composer .composer-bot { flex-shrink: 0; max-width: calc(100% - 136px); }
+  .composer-tools [data-picker="effort"],
+  .composer-tools [data-picker="speed"] { flex-shrink: 1; }
   .composer { padding: 13px 10px 9px 14px; border-radius: 16px; }
   .composer-caption { padding-top: 9px; justify-content: center; font-size: 8px; }
   .composer-caption > #composer-hint { display: none; }

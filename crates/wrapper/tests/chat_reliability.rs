@@ -130,6 +130,12 @@ impl Fake {
                             _ => { let body=json!({"access_token":token(),"refresh_token":"fake-rotated","expires_in":3600}).to_string(); let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
                         }
                     }
+                    // /api/state polls Codex quota with an empty GET. It is not a chat body.
+                    if path.ends_with("/wham/usage") {
+                        let body = json!({"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":35,"limit_window_seconds":18000,"reset_at":4102444800u64},"secondary_window":{"used_percent":82,"limit_window_seconds":604800,"reset_at":4102531200u64}}}).to_string();
+                        let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                        return;
+                    }
                     let body: Value=serde_json::from_slice(&bytes).unwrap(); b.lock().unwrap().push(body.clone());
                     let instructions=body["instructions"].as_str().unwrap_or("");
                     let internal=instructions.contains("titre") || instructions.starts_with("Extraction") || instructions.contains("description") || body["input"].to_string().contains("input_image");

@@ -10,8 +10,8 @@
 .tpl-import-button .icon, .tpl-file-button .icon { width: 15px; height: 15px; }
 .tpl-intro { margin: 0 0 16px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .tpl-loading, .tpl-empty { color: var(--muted); font-size: 12.5px; padding: 30px 0; text-align: center; }
-.tpl-error, .tpl-status:not(:empty) { color: var(--danger-text); font-size: 12px; }
-.tpl-status { margin: 0; flex: 1; min-width: 0; color: var(--muted); }
+.tpl-error, .tpl-status.error { color: var(--danger-text); }
+.tpl-status { margin: 0; flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
 
 .tpl-search:focus-within { border-color: color-mix(in srgb, var(--accent-ink) 60%, var(--line)); }
 .tpl-search { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 13px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 20px; background: var(--canvas); color: var(--muted); }

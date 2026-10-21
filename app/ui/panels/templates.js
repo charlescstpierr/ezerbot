@@ -37,6 +37,10 @@
   };
   const fold = (text) => String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
   const plural = (count, one, many) => `${count} ${count > 1 ? many : one}`;
+  function setStatus(status, text, error = false) {
+    status.textContent = text;
+    status.classList.toggle("error", Boolean(error));
+  }
   const STARTER_KEY = "ezerbot.template-starter";
 
   // Open the bot's new thread with a starter. A draft the user typed is kept:
@@ -85,11 +89,12 @@
   }
 
   // A template is recommended when one of its connectors is already set up.
+  // The server name must contain the connector name. An empty name matches everything, so it never counts.
   function recommended(template) {
-    const servers = (panels.state.mcp?.servers || []).map((server) => fold(server.name));
+    const servers = (panels.state.mcp?.servers || []).map((server) => fold(server.name)).filter(Boolean);
     return template.connectors.some((id) => {
       const name = fold(connectorInfo(id).name);
-      return servers.some((server) => server.includes(name) || name.includes(server));
+      return Boolean(name) && servers.some((server) => server.includes(name));
     });
   }
 
@@ -302,12 +307,12 @@
     const footer = node("div", "dialog-footer tpl-footer");
     const status = node("p", "tpl-status"); status.setAttribute("role", "status");
     const existing = templateId && existingBot(templateId);
-    if (existing) status.textContent = `Vous avez déjà « ${existing.name} », créé depuis ce modèle.`;
+    if (existing) setStatus(status, `Vous avez déjà « ${existing.name} », créé depuis ce modèle.`);
     const botId = crypto.randomUUID();
     async function make(starter) {
       if (create.disabled) return;
       create.disabled = true;
-      status.textContent = "Création du bot…";
+      setStatus(status, "Création du bot…");
       try {
         const payload = { bot_id: botId, activate_routines: Boolean(activate?.checked) };
         // Schedule descriptions are display-only; the engine reads the schedule itself.
@@ -322,7 +327,7 @@
         const routines = template.routines.length ? (result.routines_enabled ? " Ses routines sont actives." : " Ses routines sont en pause.") : "";
         panels.notify(`« ${result.bot.name} » est prêt. Écrivez-lui dès maintenant.${routines}`);
       } catch (error) {
-        status.textContent = error.message || "Le bot n’a pas pu être créé.";
+        setStatus(status, error.message || "Le bot n’a pas pu être créé.", true);
         create.disabled = false;
       }
     }
@@ -356,8 +361,8 @@
     const actions = node("div", "tpl-footer-actions"); actions.append(read);
     footer.append(status, actions);
     async function decode(value) {
-      if (!value.trim()) { status.textContent = "Collez un lien, un code ou choisissez un fichier."; return; }
-      read.disabled = true; status.textContent = "Lecture…";
+      if (!value.trim()) { setStatus(status, "Collez un lien, un code ou choisissez un fichier.", true); return; }
+      read.disabled = true; setStatus(status, "Lecture…");
       try {
         const result = await panels.api("/api/templates/decode", { text: value });
         if (result.template_id) {
@@ -366,14 +371,14 @@
         }
         renderDetail(result.document, { imported: true });
       } catch (error) {
-        status.textContent = error.message || "Ce contenu n’a pas pu être lu.";
+        setStatus(status, error.message || "Ce contenu n’a pas pu être lu.", true);
         read.disabled = false;
       }
     }
     file.addEventListener("change", async () => {
       const chosen = file.files?.[0];
       if (!chosen) return;
-      if (chosen.size > 4 * 1024 * 1024) { status.textContent = "Ce fichier dépasse 4 Mo."; return; }
+      if (chosen.size > 4 * 1024 * 1024) { setStatus(status, "Ce fichier dépasse 4 Mo.", true); return; }
       await decode(await chosen.text());
       file.value = "";
     });
@@ -402,6 +407,10 @@
 
   function slug(name) {
     return fold(name).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "bot";
+  }
+
+  function shareNotice(warnings, fallback) {
+    panels.notify(warnings?.[0] || fallback);
   }
 
   function shareSection(bot, container) {
@@ -436,27 +445,35 @@
     memories.append(include, node("span", "", "Inclure ses souvenirs (sauf les données sensibles)"));
     const exportFile = button("", async () => {
       try {
-        const { document: exported } = await panels.api("/api/templates/export", { bot_id: bot.id, include_memories: include.checked });
+        const { document: exported, warnings } = await panels.api("/api/templates/export", { bot_id: bot.id, include_memories: include.checked });
         const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: "application/json" }));
         const anchor = node("a"); anchor.href = url; anchor.download = `${slug(bot.name)}.ezerbot.json`;
         document.body.append(anchor); anchor.click(); anchor.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        panels.notify("Bot exporté. Le fichier s’importe depuis Modèles de bots › Importer un bot.");
+        shareNotice(warnings, "Bot exporté. Le fichier s’importe depuis Modèles de bots › Importer un bot.");
       } catch (error) { panels.notify(error.message || "L’export a échoué."); }
     });
     exportFile.append(svg("download"), node("span", "", "Exporter un fichier"));
     const copyLink = button("", async () => {
       try {
-        const { link } = await panels.api("/api/templates/export", { bot_id: bot.id, include_memories: include.checked });
+        const { link, warnings } = await panels.api("/api/templates/export", { bot_id: bot.id, include_memories: include.checked });
         if (!await copy(link)) throw new Error("Le lien n’a pas pu être copié.");
-        panels.notify(link.length > LINK_LIMIT
+        shareNotice(warnings, link.length > LINK_LIMIT
           ? "Lien copié. Il est long : collez-le dans Modèles de bots › Importer un bot."
           : "Lien de partage copié. Il contient le bot, sans aucune conversation.");
       } catch (error) { panels.notify(error.message || "Le lien n’a pas pu être copié."); }
     });
     copyLink.append(svg("copy"), node("span", "", "Copier le lien de partage"));
+    const copyCode = button("", async () => {
+      try {
+        const { code, warnings } = await panels.api("/api/templates/export", { bot_id: bot.id, include_memories: include.checked });
+        if (!await copy(code)) throw new Error("Le code n’a pas pu être copié.");
+        shareNotice(warnings, "Code de partage copié. Collez-le dans Modèles de bots › Importer un bot.");
+      } catch (error) { panels.notify(error.message || "Le code n’a pas pu être copié."); }
+    });
+    copyCode.append(svg("copy"), node("span", "", "Copier le code"));
     const actions = node("div", "tpl-share-actions");
-    actions.append(exportFile, copyLink);
+    actions.append(exportFile, copyLink, copyCode);
     box.append(copyText, memories, actions);
     container.append(box);
   }

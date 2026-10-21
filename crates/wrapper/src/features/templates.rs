@@ -7,7 +7,7 @@
 //! {bot_id, template_id | document, activate_routines} writes the bot and its
 //! content in one transaction; replaying the same bot_id returns the same bot.
 //! POST /api/templates/export {bot_id, include_memories} returns {document, code,
-//! link}; POST /api/templates/decode {text} reads a link, a share code or a file.
+//! link, warnings}; POST /api/templates/decode {text} reads a link, a share code or a file.
 //! Imported documents are untrusted: they pass the route validators, their
 //! routines start paused and their connectors stay suggestions.
 use super::{routines, skills, write_transaction, Context};
@@ -460,7 +460,10 @@ fn create(app: &App, input: CreateInput) -> Result<Value, ApiError> {
         if bot.deleted || bot.template.as_deref() != Some(source.as_str()) {
             return Err(ApiError::new(409, "Ce bot existe déjà."));
         }
-        return Ok(json!({"bot": bot, "replayed": true}));
+        let routines = routine::list(&app.connection, &input.bot_id)?;
+        let routines_enabled =
+            !routines.is_empty() && routines.iter().all(|routine| routine.enabled);
+        return Ok(json!({"bot": bot, "replayed": true, "routines_enabled": routines_enabled}));
     }
     let bot_id = input.bot_id.as_str();
     app.create_bot(bot_id, &plan.fields)?;
@@ -546,23 +549,29 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
             },
         })
         .collect();
+    let mut warnings = Vec::new();
     let routines = routine::list(conn, &bot.id)?
         .into_iter()
         .filter_map(|routine| {
-            let (prompt, skill) = match routine.body {
-                RoutineBody::InlinePrompt { prompt } => (Some(prompt), None),
-                RoutineBody::SkillInvocation { skill_id, .. } => (
-                    None,
-                    Some(
-                        skills
-                            .iter()
-                            .find(|skill| skill.skill_id == skill_id)?
-                            .content
-                            .display_name
-                            .clone(),
-                    ),
-                ),
-            };
+            let prompt;
+            let skill;
+            match routine.body {
+                RoutineBody::InlinePrompt { prompt: text } => {
+                    prompt = Some(text);
+                    skill = None;
+                }
+                RoutineBody::SkillInvocation { skill_id, .. } => {
+                    let Some(found) = skills.iter().find(|skill| skill.skill_id == skill_id) else {
+                        warnings.push(format!(
+                            "La routine « {} » utilise une skill absente et n’a pas été incluse.",
+                            routine.name
+                        ));
+                        return None;
+                    };
+                    prompt = None;
+                    skill = Some(found.content.display_name.clone());
+                }
+            }
             Some(RoutineDocument {
                 name: routine.name,
                 schedule: None,
@@ -617,6 +626,7 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
         "document": document,
         "link": format!("{LINK_PREFIX}data={code}"),
         "code": format!("{CODE_PREFIX}{code}"),
+        "warnings": warnings,
     }))
 }
 
@@ -1044,11 +1054,20 @@ mod tests {
             json!({"bot_id": "bot-wide", "include_memories": true}),
         )
         .unwrap();
-        assert_eq!(exported["document"]["routines"].as_array().unwrap().len(), 11);
-        assert_eq!(exported["document"]["memories"].as_array().unwrap().len(), 51);
+        assert_eq!(
+            exported["document"]["routines"].as_array().unwrap().len(),
+            11
+        );
+        assert_eq!(
+            exported["document"]["memories"].as_array().unwrap().len(),
+            51
+        );
         let mut copy = exported["document"].clone();
         for routine in copy["routines"].as_array_mut().unwrap() {
-            routine.as_object_mut().unwrap().remove("schedule_description");
+            routine
+                .as_object_mut()
+                .unwrap()
+                .remove("schedule_description");
         }
         post(
             &mut app,
@@ -1224,5 +1243,128 @@ mod tests {
         assert!(
             read_document(br#"{"bot":{"name":"x","color":"citron"},"conversations":[]}"#).is_err()
         );
+    }
+
+    #[test]
+    fn replay_reports_whether_routines_are_enabled() {
+        let (path, mut app) = temporary("replay");
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-veille", "template_id": "veille", "activate_routines": true}),
+        )
+        .unwrap();
+        let replay = post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-veille", "template_id": "veille", "activate_routines": false}),
+        )
+        .unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["routines_enabled"], true);
+
+        let mut document = minimal_document();
+        document.routines.push(RoutineDocument {
+            name: "Pause".into(),
+            schedule: Some("0 9 * * *".into()),
+            trigger: None,
+            prompt: Some("Relis.".into()),
+            skill: None,
+        });
+        let created = post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-paused", "document": document, "activate_routines": true}),
+        )
+        .unwrap();
+        assert_eq!(created["routines_enabled"], false);
+        let document = exported_document(&mut app, "bot-paused");
+        let replay = post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-paused", "document": document, "activate_routines": false}),
+        )
+        .unwrap();
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["routines_enabled"], false);
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn exported_document(app: &mut App, bot_id: &str) -> Value {
+        post(app, "/api/templates/export", json!({"bot_id": bot_id})).unwrap()["document"].clone()
+    }
+
+    #[test]
+    fn export_reports_a_routine_whose_skill_is_missing() {
+        let (path, mut app) = temporary("missing-skill");
+        post(
+            &mut app,
+            "/api/bots",
+            json!({"id": "bot-gap", "name": "Gap", "color": "citron"}),
+        )
+        .unwrap();
+        let skill = post(
+            &mut app,
+            "/api/skills",
+            json!({"bot_id": "bot-gap", "name": "Revue", "body": "# Revue"}),
+        )
+        .unwrap()["skill"]
+            .clone();
+        post(
+            &mut app,
+            "/api/routines",
+            json!({
+                "bot_id": "bot-gap",
+                "name": "Bilan",
+                "schedule": "0 9 * * *",
+                "body": {
+                    "kind": "skill_invocation",
+                    "skill_id": skill["skill_id"],
+                    "version": skill["version"],
+                },
+            }),
+        )
+        .unwrap();
+        post(
+            &mut app,
+            "/api/routines",
+            json!({
+                "bot_id": "bot-gap",
+                "name": "Rappel",
+                "schedule": "0 18 * * *",
+                "body": {"kind": "inline_prompt", "prompt": "Dis bonjour."},
+            }),
+        )
+        .unwrap();
+        post(
+            &mut app,
+            "/api/skills/delete",
+            json!({
+                "bot_id": "bot-gap",
+                "skill_id": skill["skill_id"],
+                "expected_version": skill["version"],
+            }),
+        )
+        .unwrap();
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-gap"}),
+        )
+        .unwrap();
+        let names: Vec<_> = exported["document"]["routines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|routine| routine["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(names, vec!["Rappel".to_owned()]);
+        assert_eq!(
+            exported["warnings"],
+            json!(["La routine « Bilan » utilise une skill absente et n’a pas été incluse."])
+        );
+        drop(app);
+        let _ = std::fs::remove_file(path);
     }
 }

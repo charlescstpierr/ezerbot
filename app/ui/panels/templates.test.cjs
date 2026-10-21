@@ -5,7 +5,17 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 class Element {
-  constructor(tag, document) { this.ownerDocument = document; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.listeners = {}; this.style = { setProperty() {} }; this.className = ''; this.open = false; this.isConnected = true; }
+  constructor(tag, document) {
+    this.ownerDocument = document; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.listeners = {}; this.style = { setProperty() {} }; this.className = ''; this.open = false; this.isConnected = true;
+    const el = this;
+    this.classList = {
+      tokens() { return el.className.split(/\s+/).filter(Boolean); },
+      add(...names) { el.className = [...new Set([...this.tokens(), ...names])].join(' '); },
+      remove(...names) { const drop = new Set(names); el.className = this.tokens().filter((name) => !drop.has(name)).join(' '); },
+      contains(name) { return this.tokens().includes(name); },
+      toggle(name, force) { const next = force === undefined ? !this.contains(name) : Boolean(force); if (next) this.add(name); else this.remove(name); return next; },
+    };
+  }
   append(...children) { for (const child of children) { if (child instanceof Element) child.parent = this; } this.children.push(...children); this.changed?.(); }
   prepend(...children) { this.children.unshift(...children); }
   replaceChildren(...children) { this.children = []; this.append(...children); }
@@ -68,9 +78,9 @@ function harness({ draft = '', servers = [], prepare } = {}) {
     selectBot(id, text) { this.selected.push(id); if (typeof text === 'string') this.draftText = text; return true; },
     register(panel) { this.panel = panel; },
   };
-  prepare?.(panels, calls);
   const window = { GrokbotPanels: panels };
   const byId = {};
+  const copied = [];
   const document = {
     createElement: tag => new Element(tag, document),
     createElementNS: (_, tag) => new Element(tag, document),
@@ -79,21 +89,23 @@ function harness({ draft = '', servers = [], prepare } = {}) {
   };
   document.body = new Element('body', document);
   byId['bot-chips'] = new Element('div', document);
+  prepare?.(panels, calls, document);
   const observers = [];
   class MutationObserver { constructor(callback) { this.callback = callback; observers.push(this); } observe(target) { target.changed = () => this.callback(); } }
   const context = vm.createContext({
-    window, document, MutationObserver, structuredClone, console, URL, Blob,
+    window, document, MutationObserver, structuredClone, console, Blob,
+    URL: { createObjectURL: () => 'blob:model', revokeObjectURL() {} },
     crypto: { randomUUID: () => `bot-${calls.length}` },
     matchMedia: () => ({ matches: true }),
     localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) },
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: { clipboard: { writeText: async (text) => { copied.push(text); } } },
     setTimeout,
   });
   const source = fs.readFileSync(`${__dirname}/templates.js`, 'utf8').replace('  window.EzerbotTemplates = { open };', `
   window.EzerbotTemplates = { open };
   window.test = { get body() { return body; }, get dialog() { return dialog; }, useStarter };`);
   vm.runInContext(source, context);
-  return { t: window.test, panels, calls, document, byId, storage, open: window.EzerbotTemplates.open };
+  return { t: window.test, panels, calls, document, byId, storage, copied, open: window.EzerbotTemplates.open };
 }
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -198,6 +210,73 @@ test('creation waits for a refresh that actually contains the new bot', async ()
   const created = calls.find((call) => call[0] === '/api/templates/create');
   assert.equal(refreshes, 2);
   assert.deepEqual(panels.selected, [created[1].bot_id]);
+});
+
+test('progress and an existing bot stay muted; only a failure is an error', async () => {
+  let progress = null;
+  const { t, open } = harness({
+    prepare(panels, _calls, document) {
+      panels.state.bots.push({ id: 'already', name: 'Boîte', template: 'tri-boite' });
+      const api = panels.api.bind(panels);
+      panels.api = async (path, body) => {
+        if (path === '/api/templates/create') {
+          const status = document.body.querySelector('.tpl-status');
+          progress = { text: status.textContent, error: status.classList.contains('error') };
+          throw new Error('Refusé');
+        }
+        return api(path, body);
+      };
+    },
+  });
+  await open({ templateId: 'tri-boite' });
+  const status = t.body.querySelector('.tpl-status');
+  assert.match(status.textContent, /Vous avez déjà/);
+  assert.equal(status.classList.contains('error'), false);
+  await t.body.querySelector('[data-template-create]').click();
+  assert.deepEqual(progress, { text: 'Création du bot…', error: false });
+  assert.equal(status.textContent, 'Refusé');
+  assert.equal(status.classList.contains('error'), true);
+});
+
+test('an empty server name and a shorter name do not recommend a template', async () => {
+  const { t, open } = harness({ servers: [{ name: '' }, { name: 'Git' }] });
+  await open();
+  const titles = t.body.querySelectorAll('h3').map((heading) => heading.textContent);
+  assert.equal(titles.includes('Recommandés pour vous'), false);
+  assert.equal(t.body.querySelector('.tpl-badge'), null);
+});
+
+test('status color is muted unless the status is an error', () => {
+  const css = fs.readFileSync(`${__dirname}/templates.css`, 'utf8');
+  assert.doesNotMatch(css, /\.tpl-status:not\(:empty\)/);
+  assert.match(css, /\.tpl-status\.error/);
+});
+
+test('share buttons copy the EZB1 code and surface a missing skill', async () => {
+  const warning = 'La routine « Bilan » utilise une skill absente et n’a pas été incluse.';
+  const { panels, document, copied } = harness({
+    prepare(panels) {
+      panels.api = async (path) => {
+        if (path !== '/api/templates/export') throw new Error(`unexpected ${path}`);
+        return {
+          document: { bot: { name: 'Dev' } },
+          link: 'ezerbot://app/v1/bot-template?data=abc',
+          code: 'EZB1.payload',
+          warnings: [warning],
+        };
+      };
+    },
+  });
+  const container = new Element('div', document);
+  panels.panel.botSection({ id: 'bot-dev', name: 'Dev' }, container);
+  const buttonBy = (label) => container.querySelectorAll('button').find((button) => button.textContent.includes(label));
+  await buttonBy('Copier le code').click();
+  assert.deepEqual(copied, ['EZB1.payload']);
+  assert.equal(panels.message, warning);
+  await buttonBy('Exporter un fichier').click();
+  assert.equal(panels.message, warning);
+  await buttonBy('Copier le lien de partage').click();
+  assert.equal(panels.message, warning);
 });
 
 test('a starter replaces an untouched starter but never a typed draft', () => {

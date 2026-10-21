@@ -41,6 +41,21 @@
 .memory-edit-label { display: block; font-size: 11px; overflow-wrap: anywhere; }
 .memory-editor textarea { display: block; margin-top: 8px; resize: vertical; }
 .memory-editor button { margin: 8px 8px 0 0; }
+.memory-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.memory-filters input { flex: 1 1 100%; min-width: 0; }
+.memory-filters select { flex: 1 1 140px; width: auto; min-width: 0; font-size: 11px; }
+.memory-saturation { border: 1px solid var(--line); border-left: 3px solid var(--accent-ink); border-radius: 8px; padding: 12px; background: var(--soft); color: var(--text); font-size: 11px; line-height: 1.7; }
+.memory-saturation[hidden] { display: none; }
+.memory-profile { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.memory-profile summary { cursor: pointer; font-size: 12px; color: var(--text); }
+.memory-profile summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
+.gb-memory-share h3 { margin: 0 0 8px; font-size: 14px; }
+.gb-memory-share .memory-note { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.memory-share-choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.memory-share-choice input { accent-color: var(--accent-ink); margin: 4px 0 0; flex-shrink: 0; }
+.memory-share-choice span { min-width: 0; }
+.memory-share-choice small { display: block; color: var(--muted); font-size: 10px; }
+.gb-memory-share .gb-retry { margin-top: 10px; }
 @media (max-width: 480px) {
   .memory-toolbar > button { flex: 1 1 auto; }
   .memory-select-all { width: 100%; }

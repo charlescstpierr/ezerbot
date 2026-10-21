@@ -106,12 +106,13 @@ export function orderThread(messages) {
   }
   const headed = ordered.flatMap((message, index) => headings.has(index) ? [headings.get(index), message] : [message]);
   // Extraction may finish after the next user has already sent a message. Keep
-  // its discreet receipts below their own reply, never under that newer turn.
+  // its discreet receipts and consent cards below their own reply, never under
+  // that newer turn.
   // memory_run_id is deliberately distinct from run_id: it must not move the
   // reply's text behind its receipts in the ordinary tool-fragment algorithm.
   const memories = new Map();
   for (const message of headed) {
-    const runId = message.kind === "memory_auto" && message.payload?.memory_run_id;
+    const runId = (message.kind === "memory_auto" || message.kind === "memory_share") && message.payload?.memory_run_id;
     if (runId) memories.set(runId, [...(memories.get(runId) || []), message]);
   }
   const attached = new Map(), relocated = new Set();

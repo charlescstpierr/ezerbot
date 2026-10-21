@@ -88,6 +88,16 @@
     },
     wantsPolling() { return panels.state?.memory_auto?.pending === true; },
     async onCardAction(message, action, detail) {
+      if (message.kind === "memory_share" && action === "share") {
+        const offered = new Set((message.payload?.facts || []).map((f) => f.fact_id));
+        if (!Array.isArray(detail?.fact_ids) || detail.fact_ids.some((id) => !offered.has(id))) throw new Error("Sélection invalide.");
+        try {
+          const report = await panels.api("/api/memory/promote", { bot_id: message.payload.bot_id, fact_ids: detail.fact_ids });
+          detail.onConfirmed?.(report);
+          return true;
+        }
+        finally { await panels.refresh().catch(() => {}); activeReload?.(); }
+      }
       if (message.kind !== "memory_auto") return false;
       if (!["undo", "correct"].includes(action)) return false;
       try {
@@ -117,13 +127,28 @@
       const processed = new Set();
       const totals = { created: 0, already: 0, kept: 0 };
       let facts = [], alive = true, busy = false, loaded = false, revision = 0;
-      let editingId, reloadTimer;
+      let editingId, reloadTimer, sharingClasses = {};
+      const search = node("input", "text-input");
+      search.type = "search"; search.placeholder = "Rechercher un souvenir…"; search.setAttribute("aria-label", "Rechercher dans la mémoire");
+      const filters = node("div", "memory-filters");
+      const scopeFilter = node("select", "text-input"); scopeFilter.setAttribute("aria-label", "Filtrer la portée");
+      for (const [value, text] of [["", "Toutes les portées"], ["private", "Privé"], ["team", "Équipe"]]) { const opt = node("option", "", text); opt.value = value; scopeFilter.append(opt); }
+      const sourceFilter = node("select", "text-input"); sourceFilter.setAttribute("aria-label", "Filtrer la source");
+      for (const [value, text] of [["", "Toutes les sources"], ["automatic", "Automatique"], ["user_stated", "Déclaré"], ["model_inferred", "Déduit"], ["imported", "Importé"]]) { const opt = node("option", "", text); opt.value = value; sourceFilter.append(opt); }
+      filters.append(search, scopeFilter, sourceFilter);
+      const normalize = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
+      function visible() { return facts.filter((f) => (!scopeFilter.value || f.scope === scopeFilter.value) && (!sourceFilter.value || f.provenance?.source === sourceFilter.value) && normalize(f.text).includes(normalize(search.value.trim()))); }
+      search.addEventListener("input", render); scopeFilter.addEventListener("change", render); sourceFilter.addEventListener("change", render);
+      const saturation = node("p", "memory-saturation"); saturation.hidden = true; saturation.setAttribute("role", "status");
+      const profile = node("details", "memory-profile");
+      const profileTitle = node("summary", "", "Profil consolidé");
+      const profileBody = node("div"); profile.append(profileTitle, profileBody);
       const controls = node("fieldset", "memory-controls");
       const toolbar = node("div", "memory-toolbar");
       const allLabel = node("label", "memory-select-all");
       const all = node("input");
       all.type = "checkbox";
-      allLabel.append(all, document.createTextNode("Tout sélectionner"));
+      allLabel.append(all, document.createTextNode("Sélectionner les faits de travail visibles"));
       const promote = button("Partager la sélection", share, "primary-button");
       const reload = button("Actualiser", () => load());
       toolbar.append(allLabel, promote, reload);
@@ -135,21 +160,27 @@
       const history = node("div", "memory-history");
       const editor = node("div", "memory-editor");
       editor.hidden = true;
-      controls.append(toolbar, list, editor);
-      section.append(node("p", "memory-note", "Privé : ce bot seulement. Équipe : tous les bots de cet espace local. Les faits sensibles restent privés. Oublier n’est pas réinitialiser une conversation."), status, result, controls, history);
+      controls.append(filters, toolbar, list, editor);
+      section.append(node("p", "memory-note", "Privé : ce bot seulement. Équipe : tous les bots de cet espace local. Tri local indicatif : les faits personnels et à vérifier sont exclus de la sélection par défaut. Les faits sensibles restent privés."), saturation, profile, status, result, controls, history);
 
       // Already-shared facts must not replay a cached receipt as a new sharing.
-      function available() { return facts.filter((fact) => fact.scope !== "team" && !processed.has(fact.fact_id)); }
+      function available() { return facts.filter((fact) => fact.scope !== "team" && !fact.sensitive && !processed.has(fact.fact_id)); }
+      function defaultSelection() { return visible().filter((f) => available().includes(f) && sharingClasses[f.fact_id] === "work"); }
+      function visibleSelected() {
+        const shown = new Set(visible().map((fact) => fact.fact_id));
+        return [...selected].filter((id) => shown.has(id));
+      }
       function updateSelection() {
-        const eligible = available();
+        const eligible = defaultSelection();
+        const count = visibleSelected().length;
         all.disabled = !loaded || !eligible.length || bot.deleted;
         all.checked = eligible.length > 0 && eligible.every((fact) => selected.has(fact.fact_id));
-        all.indeterminate = selected.size > 0 && !all.checked;
-        promote.disabled = !loaded || !selected.size || bot.deleted;
-        promote.textContent = `Partager la sélection (${selected.size})`;
+        all.indeterminate = count > 0 && !all.checked;
+        promote.disabled = !loaded || !count || bot.deleted;
+        promote.textContent = `Partager la sélection (${count})`;
       }
       all.addEventListener("change", () => {
-        for (const fact of available()) {
+        for (const fact of defaultSelection()) {
           if (all.checked) selected.add(fact.fact_id); else selected.delete(fact.fact_id);
         }
         render();
@@ -164,15 +195,16 @@
         const ids = new Set(available().map((fact) => fact.fact_id));
         for (const id of selected) if (!ids.has(id)) selected.delete(id);
         list.replaceChildren();
-        if (loaded && !facts.length) list.append(node("p", "memory-note", "Aucun fait actif."));
-        for (const fact of facts) {
+        const shown = visible();
+        if (loaded) list.append(node("p", "memory-note", `${shown.length} sur ${facts.length} faits actifs${shown.length ? "" : " · Aucun résultat"}.`));
+        for (const fact of shown) {
           const row = node("article", "memory-fact");
           row.dataset.factId = fact.fact_id;
           const label = node("label", "memory-fact-choice");
           const check = node("input");
           check.type = "checkbox";
           check.checked = selected.has(fact.fact_id) || processed.has(fact.fact_id);
-          check.disabled = processed.has(fact.fact_id) || fact.scope === "team" || bot.deleted;
+          check.disabled = processed.has(fact.fact_id) || fact.scope === "team" || fact.sensitive || bot.deleted;
           check.addEventListener("change", () => {
             if (check.checked) selected.add(fact.fact_id); else selected.delete(fact.fact_id);
             updateSelection();
@@ -181,7 +213,7 @@
           const owner = panels.state?.bots?.find((item) => item.id === fact.bot_id);
           const scope = fact.scope === "team" ? "Équipe" : "Privé";
           const date = new Date(fact.learned_at);
-          row.append(label, node("p", "memory-meta", `${scope}${fact.provenance?.source === "automatic" ? " · Automatique" : ""}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || "Bot indisponible"}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
+          row.append(label, node("p", "memory-meta", `${scope} · ${{work: "Travail", personal: "Personnel — non présélectionné", review: "À vérifier — non présélectionné"}[sharingClasses[fact.fact_id]] || "À vérifier"}${fact.provenance?.source === "automatic" ? " · Automatique" : ""}${fact.scope === "team" ? " · Déjà en équipe" : ""}${fact.sensitive ? " · Sensible" : ""} · ${owner?.name || "Bot indisponible"}${owner?.deleted ? " (supprimé)" : ""}${Number.isNaN(date.getTime()) ? "" : ` · ${date.toLocaleString("fr")}`}${processed.has(fact.fact_id) ? " · Sélection traitée" : ""}`));
           const actions = node("div", "memory-actions");
           // Models may mutate only their own facts. The user can purge a visible
           // team fact through its owner, including a deleted owner (wrapper r2).
@@ -203,6 +235,26 @@
       async function readFacts() {
         const data = await panels.api("/api/memory", { bot_id: bot.id });
         if (!Array.isArray(data.facts)) throw new Error("La liste mémoire est illisible.");
+        sharingClasses = data.sharing_classes || {};
+        saturation.hidden = !data.automatic?.saturated;
+        saturation.textContent = data.automatic?.saturated ? `Apprentissage automatique en pause : le catalogue dépasse 6 000 caractères (${data.automatic.catalogue_chars.toLocaleString("fr")}). Vos souvenirs restent disponibles via le rappel ciblé. Corrigez ou oubliez les faits devenus inutiles pour reprendre ; aucun souvenir n’est supprimé automatiquement.` : "";
+        const p = data.profile;
+        profileTitle.textContent = `Profil consolidé · v${p?.version || 0} · ${data.facts.length} faits`;
+        profileBody.replaceChildren(node("p", "memory-note", "Résumé local dérivé des faits actifs, mis à jour à chaque modification. Les versions gardent un journal sans copie du texte oublié."));
+        for (const part of p?.sections || []) {
+          profileBody.append(node("h4", "", `${part.title} (${part.count})`));
+          for (const f of part.facts) profileBody.append(node("p", "memory-note", f.text));
+        }
+        const log = node("details"); log.append(node("summary", "", "Journal des versions"));
+        const actions = { baseline: "Profil initial", learned: "Fait ajouté", forgotten: "Fait oublié", corrected: "Fait remplacé", shared: "Fait partagé", updated: "Mise à jour" };
+        for (const item of p?.log || []) {
+          const version = node("details");
+          version.append(node("summary", "", `v${item.version} · ${actions[item.action] || item.action} · ${new Date(item.changed_at).toLocaleString("fr")}`));
+          for (const f of item.summary || []) version.append(node("p", "memory-note", f.text));
+          if (!item.summary?.length) version.append(node("p", "memory-note", "Aucun fait de cette version n’est encore actif."));
+          log.append(version);
+        }
+        profileBody.append(log);
         return data.facts;
       }
       async function load() {
@@ -303,8 +355,8 @@
         }
       }
       async function share() {
-        if (!alive || busy || !selected.size) return;
-        const ids = [...selected];
+        const ids = visibleSelected();
+        if (!alive || busy || !ids.length) return;
         busy = true;
         closeEditor();
         status.textContent = "Partage en cours…";

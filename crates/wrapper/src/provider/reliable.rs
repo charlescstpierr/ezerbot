@@ -722,7 +722,7 @@ mod elapsed_interval {
         io::{BufRead, BufReader, Read, Write},
         net::{SocketAddr, TcpListener},
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         thread,
@@ -920,13 +920,137 @@ mod elapsed_interval {
 
     #[test]
     fn a_stale_closing_tally_does_not_block_when_no_worker_remains() {
-        assert!(super::admission_refused(4, 4));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counting = hits.clone();
+        thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
+                counting.fetch_add(1, Ordering::SeqCst);
+                respond_sse(&mut socket);
+            }
+        });
+        let api = format!("http://{address}/backend-api/codex");
+        let refused = drive_turn(1, 4, &api);
         assert!(
-            !super::admission_refused(0, 7),
-            "closing outlived every transport"
+            refused.iter().any(|event| {
+                matches!(event, grokbot_engine::contracts::ModelEvent::Failed { reason } if reason.contains("ferment"))
+            }),
+            "a live worker with four closing sockets must be refused: {refused:?}"
         );
-        assert!(!super::admission_refused(3, 3));
-        assert!(!super::admission_refused(0, 0));
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "refusal reached the origin");
+        let admitted = drive_turn(0, 7, &api);
+        assert!(
+            admitted.iter().all(|event| {
+                !matches!(event, grokbot_engine::contracts::ModelEvent::Failed { reason } if reason.contains("ferment"))
+            }),
+            "closing outlived every transport: {admitted:?}"
+        );
+        assert!(
+            hits.load(Ordering::SeqCst) >= 1,
+            "the admitted turn never reached the origin"
+        );
+        assert!(
+            admitted
+                .iter()
+                .any(|event| matches!(event, grokbot_engine::contracts::ModelEvent::Completed)),
+            "the admitted turn did not finish: {admitted:?}"
+        );
+    }
+
+    fn drive_turn(
+        live: usize,
+        closing: usize,
+        api: &str,
+    ) -> Vec<grokbot_engine::contracts::ModelEvent> {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-admit-{}-{}-{}",
+            std::process::id(),
+            live,
+            closing
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("app.codex-auth.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "host_id": "admit",
+                "account_id": "admit",
+                "client_id": "admit",
+                "access_token": token(),
+                "refresh_token": "admit-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut inner = sample_inner();
+        inner.file = file;
+        inner.endpoints = Endpoints {
+            api: api.to_owned(),
+            token: format!("{api}/token"),
+            ..Endpoints::default()
+        };
+        inner.transports = AtomicUsize::new(live);
+        inner.closing = AtomicUsize::new(closing);
+        let session = super::super::Session {
+            inner: Arc::new(inner),
+        };
+        let mut events = Vec::new();
+        let cancel = AtomicBool::new(false);
+        let mut metadata = |_: Option<&str>, _: Option<&super::super::Failure>| Ok(());
+        let _ = session.reliable_stream(
+            serde_json::json!({"model":"gpt-test","input":"bonjour"}),
+            &cancel,
+            Some("admit"),
+            &mut metadata,
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        events
+    }
+
+    fn respond_sse(socket: &mut std::net::TcpStream) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let mut length = 0usize;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        if length > 0 {
+            let mut body = vec![0; length];
+            if reader.read_exact(&mut body).is_err() {
+                return;
+            }
+        }
+        let payload = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+        let _ = write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
     }
 
     #[test]

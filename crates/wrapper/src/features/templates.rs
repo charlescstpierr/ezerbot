@@ -51,10 +51,10 @@ const LINK_PREFIX: &str = "ezerbot://app/v1/bot-template?";
 /// The `template` value of a bot created from a file, a code or a link.
 const IMPORTED: &str = "import";
 const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_SKILLS: usize = 20;
-const MAX_ROUTINES: usize = 10;
-const MAX_MEMORIES: usize = 50;
-const MAX_CONNECTORS: usize = 20;
+const MAX_SKILLS: usize = import::MAX_SKILLS_PER_BOT;
+const MAX_ROUTINES: usize = 250;
+const MAX_MEMORIES: usize = 500;
+const MAX_CONNECTORS: usize = 40;
 const MAX_STARTERS: usize = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,6 +192,13 @@ fn plan(document: &Document) -> Result<Plan, ApiError> {
         return Err(invalid(
             "Ce modèle vient d’une version plus récente d’Ezerbot. Mettez l’application à jour.",
         ));
+    }
+    if serde_json::to_vec(document)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
+        > MAX_DOCUMENT_BYTES
+    {
+        return Err(invalid("Ce modèle dépasse 4 Mo."));
     }
     if document.skills.len() > MAX_SKILLS
         || document.routines.len() > MAX_ROUTINES
@@ -558,14 +565,12 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
             connectors.push(name);
         }
     }
-    connectors.truncate(MAX_CONNECTORS);
     // Sensitive and team facts never leave with a bot.
     let memories = if input.include_memories {
         facts::list_active(conn, &bot.id)?
             .into_iter()
             .filter(|fact| fact.bot_id == bot.id && fact.scope == Scope::Private && !fact.sensitive)
             .map(|fact| fact.text)
-            .take(MAX_MEMORIES)
             .collect()
     } else {
         Vec::new()
@@ -588,6 +593,8 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
         memories,
         starters,
     };
+    // The same validation as import: export must not emit a document import would reject.
+    plan(&document)?;
     let code = encode(&document)?;
     Ok(json!({
         "document": document,
@@ -930,6 +937,186 @@ mod tests {
         assert_eq!(revue["body"], body);
         drop(app);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn temporary(label: &str) -> (std::path::PathBuf, App) {
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-templates-{label}-{}-{}.sqlite",
+            std::process::id(),
+            now()
+        ));
+        let app = App::open(&path).unwrap();
+        (path, app)
+    }
+
+    fn minimal_document() -> Document {
+        let mut document = template("dev").unwrap().clone();
+        document.id = None;
+        document.category = None;
+        document.skills.clear();
+        document.routines.clear();
+        document.connectors.clear();
+        document.memories.clear();
+        document.starters.clear();
+        document
+    }
+
+    #[test]
+    fn a_bot_with_twenty_one_skills_round_trips() {
+        let (path, mut app) = temporary("skills");
+        post(
+            &mut app,
+            "/api/bots",
+            json!({"id": "bot-many", "name": "Many", "color": "citron"}),
+        )
+        .unwrap();
+        for index in 0..21 {
+            post(
+                &mut app,
+                "/api/skills",
+                json!({
+                    "bot_id": "bot-many",
+                    "name": format!("Skill {index}"),
+                    "body": format!("# Skill {index}"),
+                }),
+            )
+            .unwrap();
+        }
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-many"}),
+        )
+        .unwrap();
+        assert_eq!(exported["document"]["skills"].as_array().unwrap().len(), 21);
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-copy", "document": exported["document"]}),
+        )
+        .unwrap();
+        let skills = app.api("GET", "/api/skills?bot_id=bot-copy", b"").unwrap();
+        assert_eq!(skills["skills"].as_array().unwrap().len(), 21);
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn eleven_routines_and_fifty_one_memories_round_trip() {
+        let (path, mut app) = temporary("counts");
+        let mut document = minimal_document();
+        document.routines = (0..11)
+            .map(|index| RoutineDocument {
+                name: format!("Routine {index}"),
+                schedule: Some("0 9 * * *".into()),
+                trigger: None,
+                prompt: Some(format!("Consigne {index}")),
+                skill: None,
+            })
+            .collect();
+        document.memories = (0..51).map(|index| format!("Souvenir {index}")).collect();
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-wide", "document": document}),
+        )
+        .unwrap();
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-wide", "include_memories": true}),
+        )
+        .unwrap();
+        assert_eq!(exported["document"]["routines"].as_array().unwrap().len(), 11);
+        assert_eq!(exported["document"]["memories"].as_array().unwrap().len(), 51);
+        let mut copy = exported["document"].clone();
+        for routine in copy["routines"].as_array_mut().unwrap() {
+            routine.as_object_mut().unwrap().remove("schedule_description");
+        }
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-wide-copy", "document": copy}),
+        )
+        .unwrap();
+        let routines = app
+            .api("GET", "/api/routines?bot_id=bot-wide-copy", b"")
+            .unwrap();
+        assert_eq!(routines["routines"].as_array().unwrap().len(), 11);
+        let memories = app
+            .api("GET", "/api/memory?bot_id=bot-wide-copy", b"")
+            .unwrap();
+        assert_eq!(memories["facts"].as_array().unwrap().len(), 51);
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_refuses_a_model_past_the_shared_ceiling() {
+        let (path, mut app) = temporary("ceiling");
+        post(
+            &mut app,
+            "/api/bots",
+            json!({"id": "bot-facts", "name": "Facts", "color": "citron"}),
+        )
+        .unwrap();
+        for index in 0..501 {
+            facts::remember(
+                &app.connection,
+                &Fact {
+                    fact_id: String::new(),
+                    bot_id: "bot-facts".into(),
+                    scope: Scope::Private,
+                    text: format!("Fait {index}"),
+                    provenance: Provenance {
+                        conversation_id: None,
+                        entry_id: None,
+                        source: Source::UserStated,
+                    },
+                    learned_at: index,
+                    status: FactStatus::Active,
+                    sensitive: false,
+                },
+            )
+            .unwrap();
+        }
+        let error = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-facts", "include_memories": true}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(
+            error.message,
+            "Un modèle compte au plus 250 skills, 250 routines, 500 souvenirs, 40 connecteurs et 6 amorces."
+        );
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_document_over_four_mebibytes_is_refused() {
+        let (path, mut app) = temporary("bytes");
+        let mut document = minimal_document();
+        // Each skill stays under the library ceiling; only the whole document exceeds 4 MiB.
+        document.skills = (0..17)
+            .map(|index| SkillDocument {
+                name: format!("Volume {index}"),
+                description: String::new(),
+                body: "x".repeat(250_000),
+            })
+            .collect();
+        let error = post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-huge", "document": document}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "Ce modèle dépasse 4 Mo.");
+        drop(app);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

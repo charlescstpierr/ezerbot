@@ -15,8 +15,8 @@
 
 1. L'ancienne sélection persistée pouvait laisser l'application sur le protocole de partage `/v1`, alors que l'interface proposait aussi « Codex » comme autre connexion. La production utilise désormais une seule session ChatGPT/Codex. L'injection explicite `/v1` sur loopback reste uniquement un harnais de tests de compatibilité.
 2. Le repli de sonde `gpt-5.5` était refusé par un compte ChatGPT ; il utilise désormais `gpt-6.1-sol`. Les champs `tool_choice` et `parallel_tool_calls` sont absents sans outils.
-3. L'attente de sonde de 30 secondes était exécutée dans `launch`, sous le verrou HTTP de l'application : un envoi pendant « Vérification » immobilisait tout. Elle se déroule maintenant dans le worker du tour, hors verrou HTTP et transaction SQLite, avec annulation. L'envoi, l'état et Arrêter restent disponibles.
-4. « Réessayer » régénérait le tour sans relancer une sonde en échec. La relance explicite lance/coalesce la sonde puis le worker attend son résultat avant tout appel de chat.
+3. L'attente de sonde ne retient plus la question. Le badge « ChatGPT » attend toujours une sonde réussie, mais l'envoi part tout de suite : l'état, Arrêter et un second envoi restent disponibles pendant la vérification. Un échec de sonde n'empêche pas le tour ; un refus réel d'OpenAI reste une erreur de fil réessayable.
+4. « Réessayer » relance une sonde en échec en arrière-plan, sans attendre son résultat avant l'appel de chat.
 5. Le flux mélangeait le commentaire Codex et la réponse finale, et ignorait les réponses présentes seulement dans les événements `done`. Les items sont réconciliés sans doublon ; le texte final peut aussi provenir de l'enveloppe `response.completed`. Les résumés de raisonnement ne deviennent pas la réponse. Le forçage global de `text.verbosity: low` est supprimé.
 6. Les sockets abandonnés sont comptés dès l'annulation, pour éviter de dépasser la limite pendant leur fermeture.
 
@@ -30,7 +30,7 @@ Même client public, scopes, PKCE, callback, échange, refresh, endpoint et en-t
 
 Tests : `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, tests Node dans `app/web/src`, `app/ui` et `app/ui/panels`.
 
-Les régressions ciblées couvrent OAuth/PKCE/rotation/0600, choix unique et ancienne sélection ignorée, sonde lente avec envoi/état/arrêt réactifs, relance après échec de sonde, texte complet et effort réel, réconciliation SSE et fermeture des lectures annulées.
+Les régressions ciblées couvrent OAuth/PKCE/rotation/0600, choix unique et ancienne sélection ignorée, sonde lente qui n'empêche ni l'envoi ni la réponse, relance après échec de sonde, texte complet et effort réel, réconciliation SSE et fermeture des lectures annulées.
 
 La preuve avec un véritable compte se lance sur le Mac du propriétaire : `tools/preuve-chatgpt-mac.sh`. Elle exige d’abord un bundle de debug (`EZERBOT_BUILD_DEBUG=1 tools/build-app.sh`). Le script crée un HOME jetable, pose `EZERBOT_TEST_HOME` égal à ce `HOME`, et ouvre uniquement cette copie. Cocoa n’utilise pas forcément `HOME` pour son dossier Application Support : la redirection est explicite et précède toute création de fichier. Charles clique une seule fois sur « Se connecter ». Le script vérifie ensuite le statut 200, une réponse complète, l’acceptation de GPT-6.1 Sol, l’effort transmis, le rafraîchissement du jeton, le quota WHAM et la déconnexion. Il n’affiche ni n’enregistre aucun jeton. `tools/preuve-chatgpt-mac.sh --self-check` contrôle cette censure sans réseau. Notifications et services natifs de debug restent factices. Ne jamais ouvrir la copie dans les données réelles, importer de jetons d’autres outils, afficher un fichier d’authentification, ou enregistrer les codes OAuth.
 

@@ -649,8 +649,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .checked_add(1)
                     .ok_or_else(|| ApiError::new(409, "Trop de relances."))?;
                 stop_run(&app.feature_context(), &old, TurnEnd::Superseded)?;
-                // A failed probe is cached until an explicit retry. Coalesce
-                // with any running probe, then let the new run await it off-thread.
+                // A failed check is only the badge. Relaunch it in the background;
+                // the regenerated turn must not wait for that result.
                 if live && app.provider.status()["connection_test"]["state"] != "ok" {
                     app.provider.test_connection();
                 }
@@ -1274,27 +1274,12 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 bot_id: Some(store::required(&conn, &id)?.bot_id),
                 host_mcp: id.starts_with("mcp-host-"),
             };
-            // The HTTP mutex and SQLite writer are free while OpenAI verifies.
-            // Send/refresh/stop/signout must remain usable during a slow probe.
-            if live {
-                let verified = provider.ensure_service(&cancel);
-                if cancel.load(Ordering::SeqCst) {
-                    return Ok(());
-                }
-                if let Err(error) = verified {
-                    conn.execute(
-                        "UPDATE wrapper_engine_runs SET error=?2,error_kind=?3 WHERE run_id=?1",
-                        params![id, error.message, error.kind],
-                    )?;
-                    fail_host(&conn, &mut services, &id)?;
-                    crate::upstream::turn(
-                        path.parent().unwrap_or(Path::new(".")),
-                        &id,
-                        0,
-                        "connection_unconfirmed",
-                    );
-                    return Ok(());
-                }
+            // The probe updates the badge on its own thread. It must not delay
+            // this turn: the user's message is the OpenAI call. A slow or failed
+            // check leaves send, state and stop free, and the question already
+            // on its way. A real upstream refusal stays a retryable thread error.
+            if live && cancel.load(Ordering::SeqCst) {
+                return Ok(());
             }
             let gateway = RunGateway {
                 path: &path,

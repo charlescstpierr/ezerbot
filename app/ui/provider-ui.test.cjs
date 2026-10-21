@@ -210,14 +210,18 @@ test("only the single ChatGPT sign-in state can hide the banner", () => {
 test("a signed-in account is not shown as Codex until OpenAI answers", () => {
   const failed = mount("codex", false, { signed_in: true, connection_test: { state: "failed", message: "probe refused" } });
   assert.equal(failed.nodes.get("mode-badge-text").textContent, "Non connecté");
-  assert.match(failed.nodes.get("mode-note").textContent, /Aucune réponse n’est produite/);
-  assert.match(failed.nodes.get("provider-section").textContent, /Aucune réponse n’est produite/);
+  assert.match(failed.nodes.get("mode-note").textContent, /Vous pouvez envoyer, ou réessayer le test/);
+  assert.match(failed.nodes.get("provider-section").textContent, /Envoyez votre question, ou réessayez le test/);
+  assert.doesNotMatch(failed.nodes.get("provider-section").textContent, /Aucune réponse/);
   assert.equal(failed.nodes.get("composer-tools").textContent, "Non connecté");
   const retry = failed.nodes.get("provider-section").querySelectorAll("button").find((button) => button.textContent === "Tester la connexion");
   assert.equal(retry.disabled, false);
   const running = mount("codex", false, { signed_in: true, connection_test: { state: "running" } });
   assert.equal(running.nodes.get("mode-badge-text").textContent, "Vérification");
-  assert.match(running.nodes.get("mode-note").textContent, /Aucune réponse tant que ce n’est pas confirmé/);
+  assert.match(running.nodes.get("mode-note").textContent, /Votre question part sans attendre/);
+  assert.match(running.nodes.get("provider-section").textContent, /L’envoi n’est pas bloqué/);
+  assert.doesNotMatch(running.nodes.get("provider-section").textContent, /Aucune réponse/);
+  assert.doesNotMatch(source, /Aucune réponse n’est produite avant cette confirmation|Aucune réponse tant que ce n’est pas confirmé/);
   assert.equal(running.nodes.get("provider-section").querySelectorAll("button").find((button) => /Test/.test(button.textContent)).disabled, true);
   const ready = mount("codex", true, { connection_test: { state: "ok", message: "OK — ChatGPT répond." } });
   assert.equal(ready.nodes.get("mode-badge-text").textContent, "ChatGPT");

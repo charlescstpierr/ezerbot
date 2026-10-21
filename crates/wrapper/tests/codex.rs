@@ -972,7 +972,7 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
 }
 
 #[test]
-fn connected_requires_a_real_openai_call_and_a_failed_probe_never_replies() {
+fn connected_requires_a_real_openai_call_and_a_failed_probe_still_sends() {
     let _serial = OAUTH.lock().unwrap();
     let f = Fixture::new();
     let gate = Arc::new(AtomicBool::new(false));
@@ -1053,15 +1053,23 @@ fn connected_requires_a_real_openai_call_and_a_failed_probe_never_replies() {
         .as_str()
         .unwrap()
         .to_owned();
+    denied.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"bonjour quand même"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
     post(
         &mut app,
         "/api/send",
         json!({"conversation_id":conversation,"message_id":"q2","body":"Dis bonjour"}),
     );
-    wait("échec asynchrone", || {
-        app.api("GET", "/api/state", b"").unwrap()["conversations"]
-            .to_string()
-            .contains("Aucune réponse")
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("réponse malgré la sonde refusée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == "reply-q2" && message["body"] == "bonjour quand même")
     });
     let sent = app.api("GET", "/api/state", b"").unwrap();
     let reply = sent["conversations"][0]["messages"]
@@ -1070,14 +1078,80 @@ fn connected_requires_a_real_openai_call_and_a_failed_probe_never_replies() {
         .iter()
         .find(|message| message["id"] == "reply-q2")
         .unwrap();
-    assert_eq!(reply["state"], "failed");
-    assert_eq!(reply["body"], "");
-    assert!(reply["error"]
+    assert_eq!(reply["state"], "echoed");
+    assert!(reply["error"].is_null());
+    assert!(denied.server.seen.lock().unwrap().bodies[0]["input"]
+        .to_string()
+        .contains("Dis bonjour"));
+    assert_eq!(denied.provider.status()["connected"], false);
+}
+
+#[test]
+fn a_pending_probe_lets_the_message_leave_without_freezing_the_interface() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().probe_gate = Some(gate.clone());
+    f.login();
+    wait("sonde encore en cours", || {
+        f.provider.status()["connection_test"]["state"] == "running"
+    });
+    assert_eq!(f.provider.status()["connected"], false);
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let conversation = post(&mut app, "/api/conversations", json!({}))["conversation"]["id"]
         .as_str()
         .unwrap()
-        .contains("Aucune r\u{00e9}ponse n\u{2019}est produite"));
-    assert!(!sent.to_string().contains("Bien reçu"));
-    assert!(denied.server.seen.lock().unwrap().bodies.is_empty());
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"parti tout de suite"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"now","body":"Question immédiate"}),
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "l'envoi a attendu la sonde"
+    );
+    let start = std::time::Instant::now();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "l'état a gelé pendant la vérification"
+    );
+    assert_eq!(state["provider"]["connection_test"]["state"], "running");
+    assert_eq!(state["provider"]["connected"], false);
+    wait("réponse pendant que la sonde est bloquée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["id"] == "reply-now"
+                    && message["body"] == "parti tout de suite"
+                    && message["state"] == "echoed"
+            })
+    });
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(seen.bodies[0]["input"]
+            .to_string()
+            .contains("Question immédiate"));
+        assert!(!seen.bodies[0]["instructions"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Test de connexion."));
+    }
+    assert_eq!(f.provider.status()["connection_test"]["state"], "running");
+    assert_eq!(f.provider.status()["connected"], false);
+    assert!(
+        !gate.load(Ordering::SeqCst),
+        "la réponse ne doit pas dépendre de la fin de la sonde"
+    );
+    gate.store(true, Ordering::SeqCst);
 }
 
 #[test]
@@ -1110,11 +1184,18 @@ fn sending_during_verification_never_holds_the_app_mutex_and_stop_fences_the_rep
         json!({"conversation_id":c,"message_id":"pending"}),
     );
     assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    assert!(
+        !gate.load(Ordering::SeqCst),
+        "Arrêter a attendu la fin de la sonde"
+    );
     gate.store(true, Ordering::SeqCst);
     wait("arrêt pendant vérification", || {
         app.api("GET", "/api/state", b"").unwrap()["provider"]["titling"] == false
     });
-    assert!(f.server.seen.lock().unwrap().bodies.is_empty());
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    if let Some(body) = bodies.first() {
+        assert!(body["input"].to_string().contains("Question conservée"));
+    }
 }
 
 #[test]
@@ -1199,15 +1280,23 @@ fn retry_relaunches_the_probe_then_returns_the_complete_default_model_reply() {
         "/api/preferences",
         json!({"model":"gpt-6.1-sol","effort":"high"}),
     );
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"premier envoi"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
     post(
         &mut app,
         "/api/send",
         json!({"conversation_id":c,"message_id":"retry","body":"Une réponse complète"}),
     );
-    wait("carte d'échec", || {
-        app.api("GET", "/api/state", b"").unwrap()["conversations"]
-            .to_string()
-            .contains("Aucune réponse")
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("premier envoi malgré la sonde refusée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["body"] == "premier envoi" && m["state"] == "echoed")
     });
     let before = f.server.seen.lock().unwrap().probe_bodies.len();
     f.server.seen.lock().unwrap().fail_probe = false;

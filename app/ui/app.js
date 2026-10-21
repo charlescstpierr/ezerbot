@@ -1100,8 +1100,8 @@
       note.replaceChildren(document.createTextNode("Quota de votre abonnement ChatGPT · "), link);
     } else if (signedIn) {
       note.replaceChildren(document.createTextNode(probe.state === "running"
-        ? "Vérification d’un appel réel à OpenAI. Aucune réponse tant que ce n’est pas confirmé."
-        : "OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite."));
+        ? "Vérification de la connexion en cours. Votre question part sans attendre."
+        : "La vérification a échoué. Vous pouvez envoyer, ou réessayer le test."));
     } else {
       note.replaceChildren(element("span", "simulation-dot"), document.createTextNode(current.simulation ? "Mode développeur · réponses simulées" : "Connexion ChatGPT requise"));
     }
@@ -1115,8 +1115,8 @@
     if (current.connected) heading.prepend(element("span", "status-dot"));
     copy.append(heading, element("p", "", current.connected ? (current.email ? `Compte ChatGPT : ${current.email}` : "Adresse e-mail du compte ChatGPT indisponible.")
       : signedIn ? (probe.state === "running"
-        ? "Ezerbot attend un appel réel réussi vers OpenAI. Aucune réponse n’est produite avant cette confirmation."
-        : "OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite.")
+        ? "La vérification se fait en arrière-plan. L’envoi n’est pas bloqué : votre question part tout de suite."
+        : "OpenAI n’a pas confirmé la vérification. Envoyez votre question, ou réessayez le test.")
       : current.signin === "pending" ? "Terminez la connexion dans votre navigateur. Cette fenêtre se met à jour toute seule."
       : "Utilisez votre abonnement ChatGPT, sans clé API ni autre abonnement. OpenAI autorise Ezerbot dans votre navigateur."));
     const planNames = { plus: "Plus", pro: "Pro", free: "Gratuit", team: "Équipe", business: "Business", enterprise: "Entreprise", edu: "Éducation" };

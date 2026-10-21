@@ -486,10 +486,25 @@ impl FakeOpenAi {
                     )
                 });
                 drop(seen);
+                let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
+                let mut response = tiny_http::Response::from_string(payload)
+                    .with_status_code(status)
+                    .with_header(header);
+                if let Some(id) = request_id {
+                    response = response
+                        .with_header(tiny_http::Header::from_bytes("x-request-id", id).unwrap());
+                }
                 if let Some(gate) = probe_gate {
-                    while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
+                    // A held probe must not occupy the accept loop. The real
+                    // service accepts the user's question while the check runs.
+                    let stopping = stopping.clone();
+                    std::thread::spawn(move || {
+                        while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        let _ = request.respond(response);
+                    });
+                    continue;
                 }
                 if let Some(gate) = gate {
                     while !gate.load(Ordering::SeqCst) && !stopping.load(Ordering::SeqCst) {
@@ -500,14 +515,6 @@ impl FakeOpenAi {
                     std::thread::sleep(delay);
                 }
                 std::thread::sleep(delay);
-                let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
-                let mut response = tiny_http::Response::from_string(payload)
-                    .with_status_code(status)
-                    .with_header(header);
-                if let Some(id) = request_id {
-                    response = response
-                        .with_header(tiny_http::Header::from_bytes("x-request-id", id).unwrap());
-                }
                 let _ = request.respond(response);
             }
         });

@@ -17,14 +17,6 @@ fn probe_model(codex: bool, models: &[Model]) -> String {
         .unwrap_or_else(|| if codex { codex::DEFAULT_MODEL } else { "gpt-5" }.into())
 }
 
-fn service_refusal(status: &Value) -> String {
-    let detail = status["connection_test"]["message"]
-        .as_str()
-        .filter(|message| !message.is_empty())
-        .unwrap_or("OpenAI n’a pas répondu.");
-    format!("OpenAI n’a pas confirmé la connexion. Aucune réponse n’est produite. {detail}")
-}
-
 fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
     let mut body = json!({
         "model": model,
@@ -123,34 +115,6 @@ impl Provider {
         value
     }
 
-    /// Wait only on a run worker, never under the HTTP app mutex or a DB transaction.
-    pub(crate) fn ensure_service(&self, cancel: &AtomicBool) -> Result<(), Failure> {
-        if !self.connected() {
-            return Err(Failure::signin());
-        }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(Failure::other("Vérification interrompue."));
-            }
-            let status = self.status();
-            if status["connected"] == true {
-                return Ok(());
-            }
-            let state = status["connection_test"]["state"]
-                .as_str()
-                .unwrap_or("idle");
-            if state == "failed" || state == "unavailable" {
-                return Err(Failure::other(service_refusal(&status)));
-            }
-            if Instant::now() >= deadline {
-                return Err(Failure::other(
-                    "OpenAI n’a pas confirmé la connexion à temps. Aucune réponse n’est produite.",
-                ));
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
     /// Quota of the selected Ezerbot-owned Codex session only. No credentials
     /// from the CLI, pi, or another application's keychain are consulted.
     pub fn codex_usage(&self, refresh: bool) -> Value {

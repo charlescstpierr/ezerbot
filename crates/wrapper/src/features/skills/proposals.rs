@@ -187,6 +187,7 @@ pub(super) fn save(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError
             _ => library::add(ctx.connection, bot, &content),
         }
         .map_err(skill_error)?;
+        super::super::demonstrations::saved(ctx, &id, &skill.skill_id)?;
         let output = json!({"saved":true,"skill_id":skill.skill_id,"version":skill.version,"name":skill.content.display_name});
         ctx.connection.execute("UPDATE wrapper_forms_calls SET display_json=json_set(display_json,'$.saved',json(?2)) WHERE request_id=?1",
             params![id, output.to_string()])?;

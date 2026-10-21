@@ -428,6 +428,9 @@ pub fn request_tool_approval(
         } else {
             call.arguments.clone()
         };
+        if call.name == "propose_skill" {
+            super::demonstrations::bind_proposal(ctx, run, &id, &mut display)?;
+        }
         if super::screen::is_tool(&call.name) {
             display["session_écran"] = super::screen::approval_session(ctx);
         }
@@ -967,6 +970,18 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 input.decision,
                 clock(&ctx),
             )?;
+            if matches!(request.kind, InputKind::Approval { .. })
+                && requests::get(&tx, &request.id)?
+                    .is_some_and(|r| r.status == RequestStatus::Denied)
+            {
+                super::demonstrations::settled(
+                    &Context {
+                        connection: &tx,
+                        ..ctx
+                    },
+                    &request.id,
+                )?;
+            }
             attach(&tx, &request, receipt)?
         }
         "/api/forms/cancel" => {
@@ -987,6 +1002,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
         _ => unreachable!(),
     };
     tx.commit()?;
+    super::demonstrations::cleanup(&app.feature_context());
     Ok(json!({"accepted":true,"receipt":receipt}))
 }
 
@@ -1010,6 +1026,7 @@ pub(crate) fn cancel_request(
     if changed != 1 {
         return Err(ApiError::new(409, "Request is no longer pending"));
     }
+    super::demonstrations::cancelled(conn, &request.id)?;
     attach(
         conn,
         request,

@@ -475,19 +475,27 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 // Une reprise doit garder son modèle et sa session d’origine, même
                 // quand aucun worker ne tourne pendant l’attente d’un formulaire.
                 for status in [
-                    RunStatus::Queued, RunStatus::Running, RunStatus::Interrupted,
-                    RunStatus::AwaitingApproval, RunStatus::AwaitingHumanInput, RunStatus::AwaitingChildren,
+                    RunStatus::Queued,
+                    RunStatus::Running,
+                    RunStatus::Interrupted,
+                    RunStatus::AwaitingApproval,
+                    RunStatus::AwaitingHumanInput,
+                    RunStatus::AwaitingChildren,
                 ] {
                     for run in store::runs_with_status(&app.connection, status)? {
                         let live: bool = app.connection.query_row(
                             "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
-                            [&run.run_id], |row| row.get(0),
+                            [&run.run_id],
+                            |row| row.get(0),
                         )?;
                         if live {
                             return Err(ApiError::new(409, "Terminez ou arrêtez les réponses, formulaires et sous-tâches en attente avant de changer de connexion."));
                         }
                     }
                 }
+            }
+            if app.provider.status()["backend"] != input.backend {
+                super::demonstrations::account_changed(&app.feature_context())?;
             }
             app.provider
                 .select_backend(&input.backend)
@@ -496,7 +504,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/provider/signin" => {
             let _: Empty = parse(body)?;
-            let url = app.provider
+            let url = app
+                .provider
                 .start_signin()
                 .map_err(|f| ApiError::new(503, f.message))?;
             // Permet de conduire le faux OAuth dans un navigateur isolé, sans ouvrir
@@ -522,6 +531,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         }
         "/api/provider/signout" => {
             let _: Empty = parse(body)?;
+            super::demonstrations::account_changed(&app.feature_context())?;
             for status in [
                 RunStatus::Queued,
                 RunStatus::Running,
@@ -538,7 +548,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     }
                 }
             }
-            let revoked = app.provider
+            let revoked = app
+                .provider
                 .signout()
                 .map_err(|f| ApiError::new(500, f.message))?;
             Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
@@ -2004,6 +2015,7 @@ impl RunGatewayCall<'_> {
                 }
             }
         }
+        super::demonstrations::hydrate(&ctx, &mut request.input);
         if self.no_vision.load(Ordering::SeqCst) {
             for entry in &mut request.input {
                 super::attachments::without_vision(&mut entry.images);

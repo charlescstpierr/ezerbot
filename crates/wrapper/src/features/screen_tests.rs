@@ -4,7 +4,6 @@ use grokbot_engine::{
     contracts::{with_tx, ApprovalCheck, RunBudgets, RunKind, Trigger},
     model::{self, Run, RunStatus},
 };
-static TEST_MAC: Mutex<()> = Mutex::new(());
 #[test]
 fn queued_actions_cannot_outlive_revoke_or_bind_a_new_lease() {
     let _mac = TEST_MAC.lock().unwrap();

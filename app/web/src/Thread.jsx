@@ -3,7 +3,7 @@ import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { BookOpen, Check, Clock, RefreshCw, Square, TriangleAlert } from "lucide-react";
+import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
 import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
@@ -12,7 +12,7 @@ import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
-import { isTeachMessage } from "./teach.js";
+import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
 
 // A capability adds only cards/<name>.jsx exporting `kind` and `Card`.
 // Cards receive message, busy, and onAction(action, detail), routed by the shell.
@@ -162,9 +162,10 @@ function DelegationInstruction({ message, createMascot, botName }) {
 }
 
 function UserMessage({ message, busy, onCopy, onRetry }) {
-  if (isTeachMessage(message)) return (
-    <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label="Apprentissage depuis cette conversation">
-      <div className="gb-meta"><BookOpen aria-hidden="true" /><span>Apprendre ceci comme skill</span><Timestamp value={message.created_at} /></div>
+  const demonstration = isDemonstrationMessage(message);
+  if (isTeachMessage(message) || demonstration) return (
+    <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
+      <div className="gb-meta">{demonstration ? <Monitor aria-hidden="true" /> : <BookOpen aria-hidden="true" />}<span>{demonstration ? "Démonstration terminée — apprendre la tâche" : "Apprendre ceci comme skill"}</span><Timestamp value={message.created_at} /></div>
       {pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
       {message.state === "refused" && <p className="gb-status-alert">Demande d’apprentissage non envoyée.</p>}
     </article>

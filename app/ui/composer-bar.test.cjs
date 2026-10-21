@@ -397,6 +397,20 @@ test("Notifications, Créer un groupe and Membres keep their height at 820px", a
   }
 });
 
+test("GPT-5.6 Terra keeps a medium bot name whole at 820px", async () => {
+  const report = await measure(820, 560, MEDIUM_NAME, { model: TERRA_MODEL, effort: "medium" });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} effort=${theme.effortClient}/${theme.effortScroll} ${JSON.stringify(theme.pieces)}`;
+    assert.equal(theme.modelText, TERRA_MODEL, where);
+    assert.equal(theme.nameFits, true, where);
+    assert.equal(theme.modelFits, true, where);
+    assert.equal(theme.effortFits, true, where);
+    assert.equal(theme.chevronInside, true, where);
+    assert.equal(theme.toolsClear, true, where);
+    assert.ok(theme.modelLabelWidth >= 40, where);
+  }
+});
+
 test("a medium bot name keeps a width floor at 500px beside the real model", async () => {
   const report = await measure(500, 780, MEDIUM_NAME, { model: "GPT-6.1 Sol", effort: "medium" });
   for (const theme of report.themes) {

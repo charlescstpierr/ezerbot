@@ -381,6 +381,7 @@ a.secondary-button { text-decoration: none; }
   .composer-bottom { gap: 8px; }
   .composer-tools { gap: 2px; }
   .composer-tools .tool-pill { gap: 2px; padding-inline: 3px; }
+  .composer .composer-bot-name { min-width: 137px; }
   .composer-caption:has(#restore-link-draft:not([hidden])) > #composer-hint:not([data-alert="true"]) { display: none; }
 }
 #bot-form > .dialog-footer { flex-wrap: wrap; }

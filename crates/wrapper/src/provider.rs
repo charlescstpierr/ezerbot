@@ -228,6 +228,7 @@ struct Inner {
     codex: bool,
     deadlines: Mutex<reliable::Deadlines>,
     transports: AtomicUsize,
+    closing: AtomicUsize,
     simulation: AtomicBool,
     probe: Mutex<Value>,
     local_revoked: AtomicBool,
@@ -482,6 +483,7 @@ impl Session {
                 codex,
                 deadlines: Mutex::new(reliable::Deadlines::default()),
                 transports: AtomicUsize::new(0),
+                closing: AtomicUsize::new(0),
                 simulation: AtomicBool::new(
                     cfg!(debug_assertions)
                         && std::env::var_os("GROKBOT_DISABLE_SIMULATION").is_none(),

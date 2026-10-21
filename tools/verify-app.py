@@ -205,6 +205,13 @@ def verify_ui_regressions():
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     for (const theme of ['dark', 'light']) {
       setTheme(theme);
+      choose('Ezerbot');
+      const ezerbotName = $('composer-bot-name');
+      check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1);
+      choose('Rédacteur');
+      const writerName = $('composer-bot-name');
+      check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1);
+      choose(longName);
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
     }

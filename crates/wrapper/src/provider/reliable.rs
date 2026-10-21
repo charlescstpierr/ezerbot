@@ -6,7 +6,7 @@ use super::*;
 use grokbot_engine::contracts::{Error, ModelEvent, Result};
 use std::cell::RefCell;
 use std::io::{ErrorKind, Read};
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 
 /// Bytes below this never refresh the read deadline. A drip of a few octets
@@ -203,14 +203,50 @@ fn parse_target(head: &[u8]) -> std::io::Result<RelayTarget> {
     })
 }
 
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
+const CONNECT_BUDGET: Duration = Duration::from_secs(15);
+
 fn connect_host(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    let addr = (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "hôte introuvable"))?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(15))?;
-    let _ = stream.set_nodelay(true);
-    Ok(stream)
+    let addrs = (host, port).to_socket_addrs()?.collect::<Vec<_>>();
+    connect_addrs(&addrs, CONNECT_ATTEMPT, CONNECT_BUDGET)
+}
+
+/// Tries every resolved address. One unreachable AAAA must not skip the IPv4
+/// that follows. Each attempt is capped, and the whole dial stays inside `budget`.
+fn connect_addrs(
+    addrs: &[SocketAddr],
+    per_attempt: Duration,
+    budget: Duration,
+) -> std::io::Result<TcpStream> {
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(ErrorKind::NotFound, "hôte introuvable"));
+    }
+    let started = Instant::now();
+    let mut last = std::io::Error::new(ErrorKind::NotFound, "hôte introuvable");
+    for addr in addrs {
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        // A lone address keeps the whole budget. Several addresses share it,
+        // so a blackholed AAAA cannot spend the 15s before IPv4 is tried.
+        let timeout = if addrs.len() == 1 {
+            remaining
+        } else {
+            per_attempt.min(remaining)
+        };
+        if timeout.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(addr, timeout) {
+            Ok(stream) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(err) => last = err,
+        }
+    }
+    Err(last)
 }
 
 fn pump(
@@ -644,7 +680,7 @@ mod elapsed_interval {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use std::{
         io::{BufRead, BufReader, Read, Write},
-        net::TcpListener,
+        net::{SocketAddr, TcpListener},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -809,6 +845,36 @@ mod elapsed_interval {
             socket,
             "HTTP/1.1 200 OK\r\nContent-Type: {content}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
+        );
+    }
+
+    #[test]
+    fn connect_reaches_the_second_address_when_the_first_is_dead() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = listener.local_addr().unwrap();
+        // TEST-NET-1 (RFC 5737): packets are discarded, so the dial waits out
+        // the per-attempt budget instead of failing immediately.
+        let dead = SocketAddr::from(([192, 0, 2, 1], 9));
+        let started = Instant::now();
+        let connected = super::connect_addrs(
+            &[dead, live],
+            Duration::from_millis(400),
+            Duration::from_secs(2),
+        );
+        let elapsed = started.elapsed();
+        connected.expect("the live address must be reached after the dead one");
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "the dead address was skipped: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "the dead address consumed the global budget: {elapsed:?}"
+        );
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            listener.accept().is_ok(),
+            "the live listener saw no connection"
         );
     }
 

@@ -4,6 +4,7 @@
   const panels = window.GrokbotPanels;
   if (!panels) return;
   const kinds = new Set(["form", "approval", "secret"]);
+  const STALE_FORM = "Ce formulaire n\u2019a pas \u00e9t\u00e9 accept\u00e9.";
   const activity = new Map();
   const changed = () => window.dispatchEvent(new Event("grokbot:forms-change"));
   // Only non-sensitive delivery metadata lives here. Never cache values, arguments,
@@ -380,7 +381,8 @@
           "La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible.",
         ].includes(error?.message);
         activity.set(request.entry_id, { ...previous, busy: false,
-          error: uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
+          error: error?.message === STALE_FORM ? STALE_FORM
+            : uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
         delete body.value;

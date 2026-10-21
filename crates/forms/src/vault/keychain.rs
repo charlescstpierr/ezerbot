@@ -180,17 +180,13 @@ impl Backend for Native {
         for item in items {
             let attrs = item.simplify_dict().ok_or_else(unavailable)?;
             let name = attrs.get("acct").ok_or_else(unavailable)?;
-            if canonical_secret_name(name)? != *name {
-                return Err(unavailable());
-            }
             let (bytes, _) = self
                 .keychain
                 .find_generic_password(&self.service, name)
                 .map_err(|_| unavailable())?;
             let secret: StoredSecret =
                 serde_json::from_slice(bytes.as_ref()).map_err(|_| unavailable())?;
-            validate_purpose(&secret.purpose)?;
-            validate_value(&secret.value)?;
+            validate_stored(name, &secret).map_err(|_| unavailable())?;
             secrets.insert(name.clone(), secret);
         }
         Ok(secrets)

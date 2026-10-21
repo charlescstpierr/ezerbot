@@ -160,6 +160,7 @@ def verify_ui_regressions():
   await until(() => !formHost.querySelector('[data-card-kind]'));
   formHost.remove();
   // Composer bot menu: a 40-character name stays inside at both welcome sizes and themes.
+  // Focus survives a refresh, arrows/Home/End move, and Escape returns to the trigger.
   const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
   await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
   await window.GrokbotPanels.refresh();
@@ -210,7 +211,23 @@ def verify_ui_regressions():
   }
   document.getElementById('qa-menu-frame')?.remove();
   setTheme('dark');
-  if (!$('bot-menu').hidden) $('composer-bot').click();
+  openMenu();
+  check('opened bot menu focuses the chosen bot', document.activeElement?.getAttribute('aria-checked') === 'true');
+  await window.GrokbotPanels.refresh();
+  check('bot menu refresh keeps focus on the same option', !$('bot-menu').hidden && document.activeElement?.getAttribute('aria-checked') === 'true');
+  const menuItems = () => [...$('bot-menu').querySelectorAll('button')];
+  const before = menuItems().indexOf(document.activeElement);
+  const press = key => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles:true, cancelable:true}));
+  press('ArrowDown');
+  check('ArrowDown moves to the next menu item', menuItems().indexOf(document.activeElement) === (before + 1) % menuItems().length);
+  press('ArrowUp');
+  check('ArrowUp returns to the previous menu item', menuItems().indexOf(document.activeElement) === before);
+  press('Home');
+  check('Home moves to the first menu item', document.activeElement === menuItems()[0]);
+  press('End');
+  check('End moves to the last menu item', document.activeElement === menuItems().at(-1));
+  press('Escape');
+  check('Escape closes the bot menu and returns focus to its trigger', $('bot-menu').hidden && document.activeElement === $('composer-bot'));
   choose('Ezerbot');
   const first = await send('Qui me répond ?');
   check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');

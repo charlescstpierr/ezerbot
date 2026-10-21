@@ -481,3 +481,31 @@ test("a maximal bot name and its edit action stay inside an ellipsis rule", asyn
   const action = [...app.document.querySelectorAll("#bot-menu .bot-menu-action span")].find((node) => node.textContent.includes(longName));
   assert.equal(action?.textContent, `Modifier ${longName}`);
 });
+
+test("the bot menu keeps focus across refresh, moves with the keyboard, and returns it on Escape", async () => {
+  const app = boot();
+  await ready(app);
+  const menu = app.document.getElementById("bot-menu");
+  const trigger = app.document.getElementById("composer-bot");
+  trigger.click();
+  assert.equal(menu.hidden, false);
+  assert.equal(app.document.activeElement?.getAttribute("aria-checked"), "true");
+  const focusedId = app.document.activeElement.dataset.menuKey;
+  menu.querySelector(".bot-menu-list").scrollTop = 48;
+
+  await app.window.GrokbotPanels.refresh();
+  assert.equal(menu.hidden, false);
+  assert.equal(app.document.activeElement?.dataset.menuKey, focusedId);
+  assert.equal(app.document.activeElement?.getAttribute("aria-checked"), "true");
+  assert.equal(menu.querySelector(".bot-menu-list").scrollTop, 48);
+
+  const items = () => [...menu.querySelectorAll("button")];
+  const before = items().indexOf(app.document.activeElement);
+  app.document.activeElement.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() {} });
+  assert.equal(items().indexOf(app.document.activeElement), (before + 1) % items().length);
+  app.document.activeElement.dispatchEvent({ type: "keydown", key: "End", preventDefault() {} });
+  assert.equal(app.document.activeElement, items().at(-1));
+  app.document.activeElement.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {} });
+  assert.equal(menu.hidden, true);
+  assert.equal(app.document.activeElement, trigger);
+});

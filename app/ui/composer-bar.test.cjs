@@ -73,7 +73,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium" } =
         </span>
         <div class="voice-controls">
           <button class="voice-session-toggle" type="button" aria-label="Mode voix" title="Mode voix · parler et écouter les réponses sur ce Mac">
-            <span class="voice-session-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M4 10v4m4-7v10m4-14v18m4-14v10m4-7v4"/></svg></span>
+            <span class="voice-session-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg></span>
             <span class="voice-session-label">Mode voix</span>
           </button>
           <label class="voice-mode" title="Mémo vocal"><input type="checkbox">Mémo vocal</label>

@@ -1101,7 +1101,13 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
         .to_string();
         let cost = line.chars().count() + 1;
         if used + cost > CONTEXT_CHARS {
-            continue;
+            // A record larger than the whole preview cannot start the newest
+            // prefix. Any smaller record that misses the remainder ends it,
+            // so an older fact is not pulled in behind a newer one.
+            if cost > CONTEXT_CHARS {
+                continue;
+            }
+            break;
         }
         text.push_str(&line);
         text.push('\n');

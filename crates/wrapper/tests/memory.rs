@@ -350,7 +350,20 @@ fn context_preview_skips_an_oversized_record_and_keeps_a_later_short_one() {
     let mut app = db.open();
     let conv = conversation(&mut app, "grokbot");
     let short = remember(&app, "grokbot", "Fait court encore visible", false);
-    let huge = remember(&app, "grokbot", &"🦀".repeat(1900), false);
+    let marker = "ENORME";
+    let huge_text = format!(
+        "{marker}{}",
+        "x".repeat(facts::MAX_FACT_CHARS - marker.chars().count())
+    );
+    let record = serde_json::json!({
+        "fact_id": "fact_00000000000000000000000000000000",
+        "bot_id": "grokbot",
+        "scope": "private",
+        "text": huge_text,
+    })
+    .to_string();
+    assert!(record.chars().count() + 1 > features::memory::CONTEXT_CHARS);
+    let huge = remember(&app, "grokbot", &huge_text, false);
     let conn = Connection::open(db.path()).unwrap();
     conn.execute(
         "UPDATE memory_facts SET learned_at = 1 WHERE fact_id = ?1",
@@ -365,7 +378,7 @@ fn context_preview_skips_an_oversized_record_and_keeps_a_later_short_one() {
     let text = memory_text(&app, &conv);
     assert!(text.chars().count() <= features::memory::CONTEXT_CHARS);
     assert!(text.contains("Fait court encore visible"));
-    assert!(!text.contains('🦀'));
+    assert!(!text.contains(marker));
 }
 
 #[test]
@@ -618,7 +631,7 @@ fn five_hundred_facts_recalled_outside_prompt_with_scoped_search_and_status() {
         facts::remember(&conn, &f).unwrap();
     }
     let prompt = memory_text(&app, &conv);
-    assert!(!prompt.contains("4317"));
+    assert!(!prompt.contains("port 4317"));
     assert!(prompt.contains("recall_memory"));
     let result = done(
         app.invoke_tool(

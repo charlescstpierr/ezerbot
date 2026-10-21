@@ -250,7 +250,8 @@ def verify_ui_regressions():
       tools.append(button);
     }
   };
-  for (const [width, height] of [[1140, 780], [820, 560]]) {
+  window.__qaRunFrame = async (width, height) => {
+    if (innerWidth !== width || innerHeight !== height) throw new Error(`viewport is ${innerWidth}×${innerHeight}, expected ${width}×${height}`);
     applyFrame(width);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     for (const theme of ['dark', 'light']) {
@@ -279,7 +280,8 @@ def verify_ui_regressions():
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
     }
-  }
+  };
+  window.__qaFinish = async () => {
   document.getElementById('qa-menu-frame')?.remove();
   setTheme('dark');
   openMenu();
@@ -456,7 +458,15 @@ def verify_ui_regressions():
   document.querySelector('.attachment-remove').click(); choose('Rédacteur');
   check('explicit image removal permits changing the bot', !document.querySelector('.attachment-chip') && chip() === 'Rédacteur' && $('workspace-label').textContent === 'Rédacteur');
   return {scope:'Real app.js, bundled Tiptap editor and isolated simulated wrapper', checks};
+  };
+  return true;
 }''')
+                for width, height in ((1140, 780), (820, 560)):
+                    chrome('resize', str(width), str(height))
+                    frame = chrome('eval', f'async () => {{ await window.__qaRunFrame({width}, {height}); return true; }}')
+                    if not re.search(r'^result: ', frame, re.MULTILINE):
+                        raise AssertionError(frame)
+                result = chrome('eval', 'async () => window.__qaFinish()')
                 value = re.search(r'^result: (.+)$', result, re.MULTILINE)
                 if not value:
                     raise AssertionError(result)

@@ -15,6 +15,7 @@
   --warning-text: #7a5a00;
   --warning-line: #7a5a0030;
   --ok: #1f9d55;
+  --ok-text: #157a41;
   --danger: #d93a26;
   --danger-text: #c42d1a;
   --scrim: #0f101266;
@@ -48,6 +49,7 @@
   --warning-text: #f0c869;
   --warning-line: #f0c86930;
   --ok: #35c58a;
+  --ok-text: #35c58a;
   --danger-text: #ff7a68;
   --scrim: #000000a6;
   --accent-ink: var(--accent);
@@ -230,7 +232,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .provider-card h3 { display: flex; align-items: center; gap: 7px; }
 .provider-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .provider-card p.provider-error { margin-top: 6px; color: var(--danger-text); }
-.provider-card p.provider-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--ok); font-weight: 600; }
+.provider-card p.provider-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--ok-text); font-weight: 600; }
 .provider-card p.provider-legacy-note { margin-top: 12px; }
 .provider-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .provider-actions-legacy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

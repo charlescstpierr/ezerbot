@@ -138,6 +138,28 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             if bots.is_empty() || bots.len() > 6 {
                 return Err(ApiError::new(400, "Choisissez de un à six bots."));
             }
+            if bots.len() < 2 && (input.description.is_some() || input.avatar.is_some()) {
+                return Err(ApiError::new(
+                    400,
+                    "La description et l’avatar concernent un groupe.",
+                ));
+            }
+            let description = input
+                .description
+                .as_deref()
+                .map(valid_group_description)
+                .transpose()?
+                .unwrap_or_default();
+            let avatar = input
+                .avatar
+                .as_ref()
+                .map(valid_group_avatar)
+                .transpose()?
+                .map(|value| serde_json::to_string(&value))
+                .transpose()
+                .map_err(|_| {
+                    ApiError::new(500, "L’avatar du groupe n’a pas pu être enregistré.")
+                })?;
             for id in &bots {
                 validate_id(id)?;
                 app.require_bot(id)?;
@@ -148,7 +170,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
             let timestamp = now();
             let tx = super::write_transaction(&app.connection)?;
-            tx.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id])?;
+            tx.execute("INSERT INTO wrapper_conversations (account_id, id, title, title_customized, created_at, updated_at, bot_id, group_description, group_avatar) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8)", params![ACCOUNT, id, title, input.title.is_some(), timestamp, bot_id, description, avatar])?;
             super::multibot::initialize(&tx, &id, &bots)?;
             tx.commit()?;
             app.conversation_response(&id)
@@ -158,13 +180,43 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             validate_conversation_id(&input.id)?;
             app.require_conversation(&input.id)?;
             let title = input.title.as_deref().map(valid_title).transpose()?;
-            if title.is_none() && input.favorite.is_none() {
+            let kind: String = app.connection.query_row(
+                "SELECT kind FROM wrapper_conversations WHERE account_id = ?1 AND id = ?2",
+                params![ACCOUNT, input.id],
+                |row| row.get(0),
+            )?;
+            if kind != "group" && (input.description.is_some() || input.avatar.is_some()) {
+                return Err(ApiError::new(
+                    400,
+                    "La description et l’avatar concernent un groupe.",
+                ));
+            }
+            let description = input
+                .description
+                .as_deref()
+                .map(valid_group_description)
+                .transpose()?;
+            let avatar = input
+                .avatar
+                .as_ref()
+                .map(valid_group_avatar)
+                .transpose()?
+                .map(|value| serde_json::to_string(&value))
+                .transpose()
+                .map_err(|_| {
+                    ApiError::new(500, "L’avatar du groupe n’a pas pu être enregistré.")
+                })?;
+            if title.is_none()
+                && input.favorite.is_none()
+                && description.is_none()
+                && avatar.is_none()
+            {
                 return Err(ApiError::new(
                     400,
                     "Choisis un titre ou un favori à modifier.",
                 ));
             }
-            app.connection.execute("UPDATE wrapper_conversations SET title = COALESCE(?3, title), title_customized = CASE WHEN ?3 IS NOT NULL THEN 1 ELSE title_customized END, favorite = COALESCE(?4, favorite), updated_at = ?5 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, title, input.favorite, now()])?;
+            app.connection.execute("UPDATE wrapper_conversations SET title = COALESCE(?3, title), title_customized = CASE WHEN ?3 IS NOT NULL THEN 1 ELSE title_customized END, favorite = COALESCE(?4, favorite), group_description = COALESCE(?6, group_description), group_avatar = COALESCE(?7, group_avatar), updated_at = ?5 WHERE account_id = ?1 AND id = ?2", params![ACCOUNT, input.id, title, input.favorite, now(), description, avatar])?;
             app.conversation_response(&input.id)
         }
         "/api/conversations/delete" => {
@@ -266,7 +318,7 @@ impl App {
         let mut conversations = BTreeMap::new();
         let mut hidden = HashSet::new();
         let mut created = BTreeMap::new();
-        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id, kind, parent_id FROM wrapper_conversations WHERE account_id = ?1")?;
+        let mut statement = self.connection.prepare("SELECT id, title, favorite, deleted, created_at, updated_at, bot_id, kind, parent_id, group_description, group_avatar FROM wrapper_conversations WHERE account_id = ?1")?;
         let rows = statement.query_map([ACCOUNT], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -278,11 +330,24 @@ impl App {
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         for row in rows {
-            let (id, title, favorite, deleted, created_at, updated_at, bot_id, kind, parent_id) =
-                row?;
+            let (
+                id,
+                title,
+                favorite,
+                deleted,
+                created_at,
+                updated_at,
+                bot_id,
+                kind,
+                parent_id,
+                description,
+                avatar,
+            ) = row?;
             if deleted {
                 hidden.insert(id);
                 continue;
@@ -299,6 +364,8 @@ impl App {
                     updated_at,
                     kind,
                     parent_id,
+                    description,
+                    avatar: stored_group_avatar(avatar),
                     messages: Vec::new(),
                 },
             );
@@ -324,6 +391,8 @@ impl App {
                     updated_at: created_at,
                     kind: "chat".into(),
                     parent_id: None,
+                    description: String::new(),
+                    avatar: None,
                     messages: Vec::new(),
                 });
             conversation.updated_at = conversation.updated_at.max(created_at);

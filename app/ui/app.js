@@ -42,6 +42,7 @@
   let pollTimer;
   let pickerKind = null;
   let revealedBotId = null;
+  let renameAvatarColor = "citron";
   function usageUrl() {
     return provider().backend === "codex"
       ? "https://chatgpt.com/codex/settings/usage"
@@ -628,7 +629,7 @@
     const items = state.conversations
       .filter((item) => item.kind !== "task" && item.kind !== "routine")
       .filter((item) => !favoriteOnly || item.favorite)
-      .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => window.GrokbotChat.searchableMessageText(message).toLocaleLowerCase("fr").includes(query)))
+      .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || (item.description || "").toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => window.GrokbotChat.searchableMessageText(message).toLocaleLowerCase("fr").includes(query)))
       .sort((a, b) => timestamp(b.updated_at) - timestamp(a.updated_at));
     if (!items.length) {
       const text = query ? "Aucune conversation trouvée." : favoriteOnly ? "Ajoutez une conversation aux favoris pour la retrouver ici." : "Vos conversations apparaîtront ici.";
@@ -646,9 +647,17 @@
       const button = element("button", `conversation-item${conversation.id === selectedId ? " active" : ""}`);
       button.type = "button";
       button.dataset.conversationId = conversation.id;
-      button.title = `${conversation.title} · ${conversation.kind === "group" ? `Groupe : ${groupMembers(conversation).map((b) => b.name).join(", ")}` : botName(conversation.bot_id)}`;
+      button.title = conversation.kind === "group"
+        ? `${conversation.title}${conversation.description ? ` — ${conversation.description}` : ""} · Groupe : ${groupMembers(conversation).map((b) => b.name).join(", ")}`
+        : `${conversation.title} · ${botName(conversation.bot_id)}`;
       if (conversation.id === selectedId) button.setAttribute("aria-current", "page");
-      button.append(conversation.kind === "group" ? groupAvatars(conversation) : botAvatar(bot), element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
+      button.append(conversation.kind === "group" ? groupMark(conversation) : botAvatar(bot));
+      if (conversation.kind === "group") {
+        const copy = element("span", "conversation-copy");
+        copy.append(element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
+        if (conversation.description) copy.append(element("small", "conversation-description", conversation.description));
+        button.append(copy);
+      } else button.append(element("span", "conversation-name", conversation.title || "Nouvelle conversation"));
       if (conversation.messages.some((message) => message.state === "unknown")) button.append(element("span", "pending-indicator"));
       if (conversation.favorite) button.append(icon("star", "icon favorite-indicator"));
       button.addEventListener("click", () => { if (!busy) selectConversation(conversation.id); });
@@ -672,6 +681,13 @@
     return Number.isNaN(date.getTime()) ? "Bot personnel" : `Créé le ${date.toLocaleString("fr-CA", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   }
   function groupMembers(conversation) { return (conversation.member_ids || []).map(botById).filter(Boolean); }
+  function groupMark(conversation) {
+    const mark = element("span", "group-mark");
+    if (conversation.avatar?.color) mark.dataset.botColor = conversation.avatar.color;
+    mark.textContent = conversation.avatar?.mark || Array.from((conversation.title || "G").trim() || "G")[0] || "G";
+    mark.setAttribute("aria-hidden", "true");
+    return mark;
+  }
   function groupAvatars(conversation) {
     const stack = element("span", "group-avatar-stack");
     stack.setAttribute("aria-hidden", "true");
@@ -1576,9 +1592,43 @@
   }));
   systemTheme.addEventListener("change", () => { if (themeChoice === "system") applyTheme("system"); });
   $("simulate-loss").addEventListener("change", (event) => { simulateLoss = event.target.checked; });
+  function selectRenameColor(accent) {
+    renameAvatarColor = accents.includes(accent) ? accent : "citron";
+    document.querySelectorAll("#rename-avatar-colors button").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.avatarColor === renameAvatarColor));
+    });
+  }
+  function ensureRenameColors(selected) {
+    const box = $("rename-avatar-colors");
+    if (!box) return;
+    if (!box.querySelector("button")) {
+      const labels = { citron: "Jaune citron", orange: "Orange vif", ambre: "Ambre", menthe: "Vert menthe", cyan: "Cyan", magenta: "Rose magenta", vermillon: "Rouge vermillon", violet: "Violet", blanc: "Sans couleur" };
+      box.replaceChildren(...accents.map((accent) => {
+        const button = element("button");
+        button.type = "button";
+        button.dataset.avatarColor = accent;
+        button.dataset.botColor = accent;
+        button.setAttribute("aria-label", labels[accent] || accent);
+        button.setAttribute("aria-pressed", "false");
+        button.addEventListener("click", () => selectRenameColor(accent));
+        return button;
+      }));
+    }
+    selectRenameColor(selected);
+  }
   $("rename-button").addEventListener("click", () => {
     closeMenu();
-    $("rename-input").value = currentConversation()?.title || "";
+    const conversation = currentConversation();
+    const group = conversation?.kind === "group";
+    $("rename-input").value = conversation?.title || "";
+    if ($("rename-label")) $("rename-label").textContent = group ? "Nom" : "Nom de la conversation";
+    if ($("rename-title")) $("rename-title").textContent = group ? "Renommer le groupe" : "Renommer la conversation";
+    for (const node of document.querySelectorAll(".group-rename")) node.hidden = !group;
+    if (group && $("rename-description")) {
+      $("rename-description").value = conversation.description || "";
+      $("rename-mark").value = conversation.avatar?.mark || "";
+      ensureRenameColors(conversation.avatar?.color || "citron");
+    }
     $("rename-dialog").showModal();
     $("rename-input").select();
   });
@@ -1586,7 +1636,16 @@
     event.preventDefault();
     const title = $("rename-input").value.trim();
     if (!title) { $("rename-input").focus(); return; }
-    if (await updateConversation({ title })) $("rename-dialog").close();
+    const changes = { title };
+    const conversation = currentConversation();
+    if (conversation?.kind === "group" && $("rename-description")) {
+      const description = $("rename-description").value.trim();
+      if (!description) { $("rename-description").focus(); return; }
+      changes.description = description;
+      const mark = ($("rename-mark").value || "").trim();
+      if (mark) changes.avatar = { color: renameAvatarColor, mark };
+    }
+    if (await updateConversation(changes)) $("rename-dialog").close();
   });
   $("favorite-button").addEventListener("click", async () => {
     closeMenu();

@@ -2,6 +2,7 @@
 mod support;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use grokbot_attachments::documents;
 use grokbot_engine::contracts::ContextSource;
 use grokbot_wrapper::{ApiError, App, Provider};
 use serde_json::{json, Value};
@@ -532,6 +533,80 @@ fn removal_hides_the_file_from_the_next_thread() {
     assert_eq!(huge.status, 400);
     assert_eq!(huge.message, "Le document dépasse la limite de 20 Mo.");
     assert!(f.listed("bot-a").is_empty());
+}
+
+#[test]
+fn truncation_warning_is_kept_and_the_model_does_not_deny_the_cut() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    let mut text = "Début visible du tarif.\n".to_string();
+    text.push_str(&"x".repeat(documents::MAX_TEXT));
+    text.push_str("FIN_NON_TRANSMISE");
+    let saved = f.deposit("bot-a", "long.txt", text.as_bytes());
+    let note = saved["files"][0]["note"].as_str().unwrap();
+    assert!(
+        note.contains("Texte tronqué"),
+        "la liste annonce la coupure : {saved}"
+    );
+    assert!(
+        !saved.to_string().contains("FIN_NON_TRANSMISE"),
+        "la liste ne contient pas la suite coupée"
+    );
+    f.reopen();
+    let kept = f.listed("bot-a");
+    assert!(
+        kept[0]["note"].as_str().unwrap().contains("Texte tronqué"),
+        "la note survit au redémarrage : {kept:?}"
+    );
+
+    let conversation = f.conversation("bot-a");
+    let prompt = f.library_prompt(&conversation);
+    assert!(
+        prompt.contains("Texte tronqué"),
+        "le rappel porte l’avertissement : {prompt}"
+    );
+    assert!(
+        prompt.contains("ne niez pas un passage"),
+        "le rappel interdit de nier au-delà de la coupure : {prompt}"
+    );
+    assert!(
+        !prompt.contains("FIN_NON_TRANSMISE"),
+        "la suite coupée n’est pas dans le rappel"
+    );
+
+    f.server.seen.lock().unwrap().reply_for = Some(Arc::new(|body: &Value| {
+        let instructions = body["instructions"].as_str().unwrap_or("");
+        if instructions.starts_with("Extraction de mémoire automatique.")
+            || instructions.contains("Tu écris le titre")
+        {
+            return None;
+        }
+        let blob = body.to_string();
+        let answer = if blob.contains("Texte tronqué") && blob.contains("ne niez pas un passage") {
+            "La suite du document n’a pas été transmise."
+        } else {
+            "Je n’ai pas ce passage."
+        };
+        Some(ScriptedResponse::events(&[
+            json!({"type": "response.created"}),
+            json!({"type": "response.output_text.delta", "delta": answer}),
+            json!({"type": "response.completed"}),
+        ]))
+    }));
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "question-coupure",
+            "body": "Que devient FIN_NON_TRANSMISE ?"
+        }),
+    );
+    let reply = f.reply(&conversation, "question-coupure");
+    assert!(
+        reply.contains("n’a pas été transmise") && !reply.contains("Je n’ai pas"),
+        "le modèle ne nie pas le passage coupé : {reply}"
+    );
 }
 
 fn stored_zip(parts: &[(&str, &[u8])]) -> Vec<u8> {

@@ -89,6 +89,28 @@ async function mount(bot, initial = []) {
   return { root, requests, bodies, cleanup };
 }
 
+test("a truncated file shows the extraction warning in the list", async () => {
+  const panel = await mount({ id: "bot-a", name: "Alpha" }, [
+    {
+      id: "document_long",
+      name: "long.txt",
+      format: "txt",
+      byte_length: 120,
+      added_at: ADDED,
+      note: "Texte tronqué : environ 25 pages sur 26 transmises. Lecture limitée aux 100\u202f000 premiers caractères. La suite du document n’a pas été transmise.",
+    },
+  ]);
+  try {
+    const row = byClass(panel.root, "library-row");
+    assert.match(row.textContent, /long\.txt/);
+    assert.match(row.textContent, /Texte tronqué/);
+    assert.match(row.textContent, /n’a pas été transmise/);
+    assert.doesNotMatch(row.textContent, /xxxxx/);
+  } finally {
+    panel.cleanup();
+  }
+});
+
 test("an unsaved bot asks to be saved and still announces the ceiling", async () => {
   const panel = await mount(null);
   assert.match(panel.root.textContent, /Enregistrez d’abord ce bot/);

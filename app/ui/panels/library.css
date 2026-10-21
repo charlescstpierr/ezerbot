@@ -28,6 +28,7 @@
 .library-row strong, .library-row small { display: block; overflow-wrap: anywhere; }
 .library-row strong { font-size: 12px; }
 .library-row small { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.library-row small.library-warning { color: var(--danger-text); }
 .library-row button { flex: 0 0 auto; }
 .library-confirm { margin-top: 10px; padding: 12px; background: var(--soft); border-radius: 7px; }
 .library-confirm[hidden] { display: none; }

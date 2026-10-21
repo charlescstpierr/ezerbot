@@ -100,6 +100,8 @@
           const format = String(file.format || "").toUpperCase();
           const when = dateLabel(file.added_at);
           copy.append(node("strong", "", file.name), node("small", "", `${format} · ${sizeLabel(file.byte_length)}${when ? ` · ${when}` : ""}`));
+          const warning = String(file.note || "").trim();
+          if (warning) copy.append(node("small", "library-warning", warning));
           const remove = button("Retirer", () => askRemove(file));
           remove.setAttribute("aria-label", `Retirer ${file.name}`);
           row.append(copy, remove);

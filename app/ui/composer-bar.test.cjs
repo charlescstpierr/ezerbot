@@ -5,6 +5,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { existsSync, mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { test } = require("node:test");
 
 const UI = __dirname;
@@ -216,6 +217,70 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
 </html>`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --window-size fixes the window, not the layout viewport. Headless Chrome keeps
+// its own chrome, so innerHeight is short by a platform-specific amount: about
+// 87px here, 143px on macOS (a requested 560px window is 417px tall). Device
+// metrics emulation is what the page and the media queries actually see.
+async function debuggingPort(directory, chrome) {
+  const portFile = join(directory, "profile", "DevToolsActivePort");
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if (chrome.exitCode !== null) throw new Error("chrome exited before the debugging port");
+    if (existsSync(portFile)) {
+      const port = Number(readFileSync(portFile, "utf8").split(/\s/)[0]);
+      if (port) return port;
+    }
+    await sleep(20);
+  }
+  throw new Error("chrome did not open a debugging port");
+}
+
+function connectCdp(url) {
+  const ws = new WebSocket(url);
+  const pending = new Map();
+  let next = 0;
+  ws.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data));
+    if (!message.id || !pending.has(message.id)) return;
+    const { resolve, reject } = pending.get(message.id);
+    pending.delete(message.id);
+    if (message.error) reject(new Error(message.error.message));
+    else resolve(message.result || {});
+  });
+  ws.addEventListener("close", () => {
+    for (const { reject } of pending.values()) reject(new Error("devtools closed"));
+    pending.clear();
+  });
+  return new Promise((resolve, reject) => {
+    ws.addEventListener("open", () => resolve({
+      send(method, params = {}) {
+        return new Promise((resolveSend, rejectSend) => {
+          const id = ++next;
+          pending.set(id, { resolve: resolveSend, reject: rejectSend });
+          ws.send(JSON.stringify({ id, method, params }));
+        });
+      },
+      close() { ws.close(); },
+    }));
+    ws.addEventListener("error", () => reject(new Error("devtools websocket failed")));
+  });
+}
+
+async function pageTarget(port) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
+    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    if (found) return found;
+    await sleep(20);
+  }
+  throw new Error("chrome did not open a page target");
+}
+
 function measure(width, height, name, options) {
   const directory = mkdtempSync(join(tmpdir(), "composer-bar-"));
   const file = join(directory, "bar.html");
@@ -226,32 +291,69 @@ function measure(width, height, name, options) {
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--force-device-scale-factor=1",
+    "--remote-allow-origins=*",
+    `--remote-debugging-port=0`,
     `--user-data-dir=${join(directory, "profile")}`,
-    "--virtual-time-budget=2000",
     `--window-size=${width},${height}`,
-    "--dump-dom",
-    `file://${file}`,
-  ], { stdio: ["ignore", "pipe", "ignore"] });
-  let dom = "";
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  chrome.on("error", () => {});
+  let stderr = "";
+  chrome.stderr.on("data", (chunk) => {
+    if (stderr.length < 4000) stderr += chunk;
+  });
+  const stop = () => {
+    if (chrome.exitCode === null) chrome.kill("SIGKILL");
+  };
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.kill("SIGKILL");
-      reject(new Error(`chrome did not report layout at ${width}×${height}`));
-    }, 20000);
-    chrome.stdout.on("data", (chunk) => {
-      dom += chunk;
-      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
-      if (!match) return;
+    let settled = false;
+    const finish = (error, report) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      chrome.kill("SIGKILL");
-      resolve(JSON.parse(match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")));
-    });
-    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
-    chrome.on("exit", () => {
-      if (!dom.includes("qa-result")) {
-        clearTimeout(timer);
-        reject(new Error(`chrome exited without a layout report at ${width}×${height}`));
+      stop();
+      if (error) reject(error);
+      else resolve(report);
+    };
+    const timer = setTimeout(() => finish(new Error(`chrome did not report layout at ${width}×${height}`)), 20000);
+    (async () => {
+      const port = await debuggingPort(directory, chrome);
+      const target = await pageTarget(port);
+      const cdp = await connectCdp(target.webSocketDebuggerUrl);
+      try {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height,
+          deviceScaleFactor: 1,
+          mobile: false,
+          screenWidth: width,
+          screenHeight: height,
+        });
+        await cdp.send("Page.enable");
+        await cdp.send("Page.navigate", { url: pathToFileURL(file).href });
+        let text = "";
+        for (let attempt = 0; attempt < 50 && !text; attempt += 1) {
+          const evaluated = await cdp.send("Runtime.evaluate", {
+            expression: "document.getElementById('qa-result')?.textContent || ''",
+            returnByValue: true,
+          });
+          text = evaluated.result?.value || "";
+          if (!text) await sleep(40);
+        }
+        if (!text) throw new Error(`missing layout report at ${width}×${height}`);
+        const report = JSON.parse(text);
+        for (const theme of report.themes) {
+          if (theme.viewport[0] !== width || theme.viewport[1] !== height) {
+            throw new Error(`viewport is ${theme.viewport.join("×")}, expected ${width}×${height}`);
+          }
+        }
+        finish(null, report);
+      } finally {
+        cdp.close();
       }
+    })().catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      finish(new Error(`${detail}${stderr ? `\n${stderr.trim()}` : ""}`));
     });
   });
 }

@@ -238,6 +238,19 @@ function measure(width, height, name, options) {
   });
 }
 
+test("composer rules do not restate a min-width of zero", () => {
+  const css = readFileSync(`${UI}/styles.css`, "utf8");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  const body = (selector) => rules.find(([, found]) => found.trim() === selector)?.[2] || "";
+  assert.equal(body(".tool-pill").includes("min-width: 0"), true);
+  assert.equal(body(".composer-tools").includes("min-width: 0"), true);
+  assert.equal(body(".composer .tool-pill b").includes("min-width: 0"), true);
+  assert.doesNotMatch(body(".composer .tool-pill"), /min-width:\s*0/);
+  assert.doesNotMatch(body(".composer .composer-tools"), /min-width:\s*0/);
+  assert.equal(body('.composer [data-picker="model"] b'), "");
+  assert.match(body(".composer .composer-bot"), /min-width:\s*0/);
+});
+
 test("CHROME_BIN selects the browser and otherwise falls back to an installed Chrome", () => {
   const previous = process.env.CHROME_BIN;
   process.env.CHROME_BIN = "/opt/chrome/custom";

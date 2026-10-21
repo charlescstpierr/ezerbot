@@ -184,14 +184,13 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .tool-pill .icon { width: 12px; height: 12px; color: var(--subtle); }
 .tool-pill:hover:enabled, .tool-pill[aria-expanded="true"] { box-shadow: inset 0 0 0 1px var(--accent-ink); }
 /* Dans la barre d'écriture, les menus Modèle / Effort restent sans fond, comme dans Codex. */
-.composer .tool-pill { height: 32px; min-width: 0; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
+.composer .tool-pill { height: 32px; padding: 0 8px; border-radius: 8px; background: none; font-size: 12px; transition: background .15s; }
 .composer .tool-pill small { font-size: 11px; }
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
+.composer .composer-tools { flex: 1 1 auto; flex-wrap: nowrap; }
 .composer [data-picker="model"] { flex: 0 0 auto; max-width: 220px; }
-.composer [data-picker="model"] b { min-width: 0; }
 .composer-tools [data-picker="effort"] b,
 .composer-tools [data-picker="speed"] b { flex: 0 0 auto; min-width: 40px; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }

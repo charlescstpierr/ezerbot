@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import selectors
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,7 @@ from verify_lib import (
     save_run,
     session_id,
     sha256_file,
+    sign_run_directory,
 )
 
 
@@ -74,6 +76,28 @@ def read_line(process: subprocess.Popen[str], timeout: float) -> str:
     return process.stdout.readline().strip()
 
 
+def allocate_run_root(evidence: Path) -> tuple[Path, Path, dict[str, str]]:
+    """Validate the temp parent before mkdtemp. A refusal must not create a directory."""
+    parent = Path(tempfile.gettempdir())
+    assert_throwaway(parent, "TMPDIR")
+    assert_outside_repo(parent / "verify-ezerbot.preview", "répertoire jetable")
+    run_root = Path(tempfile.mkdtemp(prefix="verify-ezerbot."))
+    try:
+        assert_throwaway(run_root, "run_root")
+        home = run_root / "home"
+        home.mkdir()
+        (home / "tmp").mkdir()
+        assert_throwaway(home, "HOME")
+        assert_outside_repo(run_root, "répertoire jetable")
+        assert_not_under(evidence, home, "preuves")
+        assert_not_under(evidence, run_root, "preuves")
+        signature = sign_run_directory(run_root)
+    except BaseException:
+        shutil.rmtree(run_root, ignore_errors=True)
+        raise
+    return run_root, home, signature
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lance un Ezerbot isolé pour la vérification")
     parser.add_argument("--evidence", type=Path)
@@ -102,13 +126,7 @@ def main() -> None:
     binary = repo / "target/debug/grokbot-wrapper"
     if not binary.is_file() or "Ezerbot.app" in str(binary):
         raise SystemExit(f"binaire de vérification introuvable: {binary}")
-    run_root = Path(tempfile.mkdtemp(prefix="verify-ezerbot."))
-    home = run_root / "home"
-    home.mkdir()
-    (home / "tmp").mkdir()
-    assert_throwaway(home, "HOME")
-    assert_outside_repo(run_root, "répertoire jetable")
-    assert_not_under(evidence, home, "preuves")
+    run_root, home, signature = allocate_run_root(evidence)
     db = home / "workspace.sqlite"
     assert_throwaway(db, "db")
     write_fake_token(db)
@@ -136,6 +154,7 @@ def main() -> None:
         "fake_pid": fake.pid,
         "fake_identity": proc_identity(fake.pid),
         "wrapper_pid": None,
+        **signature,
     }
     save_run(evidence, record)
     try:

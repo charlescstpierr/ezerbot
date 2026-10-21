@@ -135,11 +135,11 @@ Le verdict résout le commit avec `git rev-parse --verify <ref>^{commit}` et `gi
 bash .cursor/skills/verify-ezerbot/scripts/verdict.sh --evidence <preuves> --ref HEAD --status pass
 ```
 
-Dernière ligne de la sortie et de `report.md` : `PASS <sha>` ou `FIX <sha>`. Un `patch` passé par l’appelant est recopié tel quel : `PASS <sha> patch=<id>`. Un finding `bloquant` force `FIX`.
+Dernière ligne de la sortie et de `report.md` : `PASS <sha>` ou `FIX <sha>`. Un `patch` d’appelant n’est accepté que s’il est un patch-id git : 40 hexadécimaux minuscules, sans caractère de contrôle. Il est alors recopié tel quel : `PASS <sha> patch=<id>`. Un finding `bloquant` force `FIX`.
 
 ## Cleanup
 
-Ne jamais tuer par nom de processus. Le nettoyage ne signale `SIGTERM` puis `SIGKILL` qu’aux PID dont l’identité (instant de démarrage et ligne de commande) est encore celle enregistrée : wrapper, faux OpenAI, et Chrome seulement si ce run l’a lancé. Il supprime le `HOME` jetable et le répertoire `verify-ezerbot.*`. Il garde le dossier de preuves, y compris `report.md` et les PNG.
+Ne jamais tuer par nom de processus. Le nettoyage ne signale `SIGTERM` puis `SIGKILL` qu’aux PID dont l’identité (instant de démarrage et ligne de commande) est encore celle enregistrée : wrapper, faux OpenAI, et Chrome seulement si ce run l’a lancé. Le groupe de processus n’est tué que si `os.getpgid` confirme le pgid enregistré et que ce n’est pas le groupe de l’appelant. Un `HOME` ou un `run_root` vide est refusé (ce n’est pas le répertoire courant). La suppression ne vise qu’un répertoire `verify-ezerbot.*` créé par ce run : marqueur HMAC dans `run.json` et sur le disque, sous le `TMPDIR` du système, et `assert_throwaway` sur `run_root` comme sur `HOME`. Le dossier de preuves, y compris `report.md` et les PNG, reste.
 
 ```bash
 bash .cursor/skills/verify-ezerbot/scripts/cleanup.sh --evidence <preuves>

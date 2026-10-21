@@ -8,14 +8,18 @@ Grokbot application-support directory. Evidence stays outside the repo.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import pwd
+import re
+import secrets
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -59,56 +63,49 @@ def app_support_root() -> Path:
     return Path(os.environ.get("EZERBOT_VERIFY_APP_SUPPORT", MAC_APP_SUPPORT)).expanduser()
 
 
+GROKBOT_PARTS = ("library", "application support", "grokbot")
+MARKER_FILE = ".verify-ezerbot-marker"
+PATCH_ID = re.compile(r"^[0-9a-f]{40}$")
+
+
+def path_key(path: Path | str) -> tuple[str, ...]:
+    """Case-folded parts. APFS compares paths without regard to case."""
+    return tuple(part.casefold() for part in Path(path).parts)
+
+
+def identity_keys(path: Path) -> set[tuple[str, ...]]:
+    """Absolute, resolved and realpath forms, so a symlink cannot hide the target."""
+    raw = os.path.abspath(os.fspath(path))
+    texts = {raw}
+    try:
+        texts.add(os.path.realpath(raw))
+    except OSError:
+        pass
+    try:
+        texts.add(str(Path(raw).resolve()))
+    except OSError:
+        pass
+    return {path_key(text) for text in texts}
+
+
 def touches_grokbot_support(path: Path) -> bool:
     """True when a path is the captain's Grokbot support dir, not Grokbot Local."""
-    candidates = [path]
-    try:
-        candidates.append(path.resolve())
-    except OSError:
-        pass
-    forbidden = app_support_root()
-    forbidden_resolved = forbidden
-    try:
-        forbidden_resolved = forbidden.resolve()
-    except OSError:
-        pass
-    for candidate in candidates:
-        parts = candidate.parts
+    forbidden = identity_keys(app_support_root())
+    for parts in identity_keys(path):
         for index in range(len(parts) - 2):
-            if (
-                parts[index] == "Library"
-                and parts[index + 1] == "Application Support"
-                and parts[index + 2] == "Grokbot"
-            ):
+            if parts[index : index + 3] == GROKBOT_PARTS:
                 return True
-        for root in (forbidden, forbidden_resolved):
-            try:
-                candidate.resolve().relative_to(root)
+        for root in forbidden:
+            if len(parts) >= len(root) and parts[: len(root)] == root:
                 return True
-            except (OSError, ValueError):
-                try:
-                    candidate.relative_to(root)
-                    return True
-                except ValueError:
-                    continue
-    raw = str(path)
-    needle = f"{os.sep}Application Support{os.sep}Grokbot{os.sep}"
-    alt = f"{os.sep}Application Support{os.sep}Grokbot"
-    return needle in raw or raw.endswith(alt)
+    return False
 
 
 def is_real_home(path: Path) -> bool:
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path
+    keys = identity_keys(path)
     for home in real_homes():
-        try:
-            if resolved == home.resolve():
-                return True
-        except OSError:
-            if resolved == home:
-                return True
+        if keys & identity_keys(home):
+            return True
     return False
 
 
@@ -215,6 +212,26 @@ def sha256_file(path: Path) -> str:
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform != "darwin":
+        stat_path = Path(f"/proc/{pid}/stat")
+        try:
+            stat = stat_path.read_text()
+        except OSError:
+            stat = ""
+        if stat:
+            end = stat.rfind(")")
+            fields = stat[end + 2 :].split()
+            if fields and fields[0] == "Z":
+                return False
+    else:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip().startswith("Z"):
+            return False
     try:
         os.kill(pid, 0)
     except OSError:
@@ -315,34 +332,47 @@ def listening_pids(port: int) -> set[int]:
     return owners
 
 
+def _recorded_pgid(recorded: dict | None) -> int:
+    if not recorded or recorded.get("pgid") in (None, ""):
+        return 0
+    try:
+        return int(recorded["pgid"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def signal_recorded(pid: int, recorded: dict | None, sig: int) -> None:
+    """Kill the process group only when it is still the recorded one, and not ours."""
+    try:
+        actual = os.getpgid(pid)
+    except OSError:
+        os.kill(pid, sig)
+        return
+    caller = os.getpgrp()
+    recorded_pgid = _recorded_pgid(recorded)
+    if recorded_pgid and actual == recorded_pgid and actual != caller:
+        os.killpg(actual, sig)
+    else:
+        os.kill(pid, sig)
+
+
 def terminate_recorded(pid: int, recorded: dict | None) -> str:
     """Kill one process we started, only if its identity still matches."""
     if not pid_alive(pid):
         return "deja-arrete"
     if not identity_matches(pid, recorded):
         return "identite-differente-non-tue"
-    sigterm = signal.SIGTERM
-    sigkill = signal.SIGKILL
-    pgid = recorded.get("pgid") if recorded else None
-    if pgid and sys.platform != "win32":
-        try:
-            os.killpg(int(pgid), sigterm)
-        except OSError:
-            os.kill(pid, sigterm)
-    else:
-        os.kill(pid, sigterm)
+    signal_recorded(pid, recorded, signal.SIGTERM)
     deadline = time.time() + 3
     while time.time() < deadline and pid_alive(pid):
         time.sleep(0.1)
     if pid_alive(pid) and identity_matches(pid, recorded):
-        if pgid and sys.platform != "win32":
-            try:
-                os.killpg(int(pgid), sigkill)
-            except OSError:
-                os.kill(pid, sigkill)
-        else:
-            os.kill(pid, sigkill)
+        signal_recorded(pid, recorded, signal.SIGKILL)
         time.sleep(0.2)
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
     return "arrete" if not pid_alive(pid) else "toujours-vivant"
 
 
@@ -371,6 +401,77 @@ def build_env() -> dict[str, str]:
     return env
 
 
+def canonical_path(path: Path) -> str:
+    return os.path.realpath(os.path.abspath(os.fspath(path))).casefold()
+
+
+def sign_run_directory(run_root: Path) -> dict[str, str]:
+    """Bind a random key to this exact directory. The digest is also stored on disk."""
+    key = secrets.token_bytes(32)
+    digest = hmac.new(key, canonical_path(run_root).encode(), hashlib.sha256).hexdigest()
+    marker = run_root / MARKER_FILE
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(digest + "\n")
+    return {"marker_key": key.hex(), "marker": digest}
+
+
+def assert_created_run_root(run_root: Path, record: dict) -> Path:
+    """Refuse anything this run did not create under the system temp directory."""
+    assert_throwaway(run_root, "run_root")
+    resolved = run_root.resolve()
+    system_tmp = Path(os.path.realpath(tempfile.gettempdir()))
+    if not (path_key(resolved)[: len(path_key(system_tmp))] == path_key(system_tmp)):
+        raise SystemExit(f"refus: run_root hors du TMPDIR système ({resolved})")
+    if not resolved.name.casefold().startswith("verify-ezerbot."):
+        raise SystemExit(f"refus: run_root n'est pas verify-ezerbot.* ({resolved.name})")
+    key = record.get("marker_key")
+    marker = record.get("marker")
+    if not isinstance(key, str) or not isinstance(marker, str) or not key or not marker:
+        raise SystemExit("refus: marqueur signé absent de run.json")
+    try:
+        expected = hmac.new(bytes.fromhex(key), canonical_path(resolved).encode(), hashlib.sha256).hexdigest()
+    except ValueError as error:
+        raise SystemExit("refus: marqueur signé illisible") from error
+    if not hmac.compare_digest(expected, marker):
+        raise SystemExit("refus: marqueur signé invalide")
+    marker_path = resolved / MARKER_FILE
+    if not marker_path.is_file():
+        raise SystemExit("refus: marqueur absent du répertoire du run")
+    if not hmac.compare_digest(marker_path.read_text().strip(), expected):
+        raise SystemExit("refus: marqueur sur disque invalide")
+    return resolved
+
+
+def assert_created_home(home: Path, run_root: Path) -> Path:
+    assert_throwaway(home, "HOME")
+    resolved = home.resolve()
+    root = run_root.resolve()
+    if resolved == root or path_key(resolved)[: len(path_key(root))] != path_key(root):
+        raise SystemExit(f"refus: HOME hors du répertoire du run ({resolved})")
+    return resolved
+
+
+def require_absolute(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip() or value.strip() in (".",):
+        raise SystemExit(f"refus: {label} vide")
+    path = Path(value)
+    if not path.is_absolute():
+        raise SystemExit(f"refus: {label} n'est pas un chemin absolu")
+    return path
+
+
+def validate_patch(patch: str | None) -> str | None:
+    """A caller patch-id is a git patch-id: 40 lowercase hex digits, nothing else."""
+    if patch is None or patch == "":
+        return None
+    if not isinstance(patch, str) or any(ord(char) < 32 or ord(char) == 127 for char in patch):
+        raise SystemExit("refus: patch-id contient un caractère de contrôle")
+    if PATCH_ID.fullmatch(patch) is None:
+        raise SystemExit("refus: patch-id doit être 40 hexadécimaux minuscules")
+    return patch
+
+
 def self_check() -> None:
     repo = repo_root()
     throwaway = Path("/tmp/verify-ezerbot-self-check")
@@ -392,6 +493,18 @@ def self_check() -> None:
     local = Path("/tmp/verify-ezerbot-self-check/Library/Application Support/Grokbot Local/workspace.sqlite")
     if touches_grokbot_support(local):
         raise SystemExit("Grokbot Local a été confondu avec Grokbot")
+    folded = Path("/tmp/verify-ezerbot-self-check/library/application support/grokbot/workspace.sqlite")
+    if not touches_grokbot_support(folded):
+        raise SystemExit("la casse de Application Support/Grokbot n'est pas refusée")
+    folded_local = Path("/tmp/verify-ezerbot-self-check/library/application support/grokbot local/db")
+    if touches_grokbot_support(folded_local):
+        raise SystemExit("Grokbot Local a été confondu une fois la casse ignorée")
+    try:
+        validate_patch("ab\ncd")
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("un patch-id avec saut de ligne n'a pas été refusé")
     try:
         assert_outside_repo(repo / "target", "preuves")
     except SystemExit:

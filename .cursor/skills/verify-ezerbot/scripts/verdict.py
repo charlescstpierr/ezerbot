@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from verify_lib import commit_exists, evidence_dir, load_run, repo_root, resolve_commit, session_id
+from verify_lib import commit_exists, evidence_dir, load_run, repo_root, resolve_commit, session_id, validate_patch
 
 
 def verdict_line(status: str, sha: str, patch: str | None) -> str:
@@ -28,6 +28,7 @@ def main() -> None:
     parser.add_argument("--status", choices=("pass", "fix"), default="pass")
     parser.add_argument("--patch", default=os.environ.get("EZERBOT_VERIFY_PATCH_ID"))
     args = parser.parse_args()
+    patch = validate_patch(args.patch if args.patch else None)
     evidence = args.evidence or evidence_dir(session_id())
     try:
         run = load_run(evidence)
@@ -45,7 +46,6 @@ def main() -> None:
     findings = json.loads(findings_path.read_text()) if findings_path.is_file() else []
     blocking = any(item.get("severity") == "bloquant" for item in findings)
     status = "FIX" if args.status == "fix" or blocking else "PASS"
-    patch = args.patch if args.patch else None
     line = verdict_line(status, sha, patch)
     deviations = evidence / "deviations.md"
     deviation_text = deviations.read_text() if deviations.is_file() else "Comparaison non exécutée.\n"

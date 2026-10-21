@@ -12,11 +12,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from verify_lib import (
+    assert_created_home,
+    assert_created_run_root,
     assert_not_under,
-    assert_throwaway,
     identity_matches,
     load_run,
     pid_alive,
+    require_absolute,
     run_path,
     save_run,
     terminate_recorded,
@@ -52,6 +54,12 @@ def main() -> None:
     if run.get("cleaned"):
         print("cleanup: déjà fait")
         return
+    home = require_absolute(run.get("home"), "HOME")
+    run_root = require_absolute(run.get("run_root"), "run_root")
+    verified_root = assert_created_run_root(run_root, run)
+    verified_home = assert_created_home(home, verified_root)
+    assert_not_under(evidence, verified_home, "preuves")
+    assert_not_under(evidence, verified_root, "preuves")
     results = {}
     for name in ("wrapper", "fake"):
         pid = int(run.get(f"{name}_pid") or 0)
@@ -63,25 +71,17 @@ def main() -> None:
             identity = dict(identity)
             identity["pgid"] = identity.get("pgid") or pid
         results[name] = terminate_recorded(pid, identity) if pid else "absent"
-    if run.get("run_root"):
-        results["chrome"] = kill_chrome(run)
-    home = Path(str(run.get("home") or ""))
+    results["chrome"] = kill_chrome(run)
     removed_home = False
-    if home and home.exists():
-        assert_throwaway(home, "HOME")
-        assert_not_under(evidence, home, "preuves")
-        shutil.rmtree(home)
+    if verified_home.is_dir():
+        shutil.rmtree(verified_home)
         removed_home = True
-    run_root = Path(str(run.get("run_root") or ""))
-    if run_root.is_dir():
-        for name in ("wrapper.log", "chrome.log"):
-            log = run_root / name
-            if log.is_file():
-                tail = log.read_text(errors="replace").splitlines()[-200:]
-                (evidence / name).write_text("\n".join(tail) + ("\n" if tail else ""))
-        assert_not_under(evidence, run_root, "preuves")
-        if run_root.name.startswith("verify-ezerbot."):
-            shutil.rmtree(run_root, ignore_errors=True)
+    for name in ("wrapper.log", "chrome.log"):
+        log = verified_root / name
+        if log.is_file():
+            tail = log.read_text(errors="replace").splitlines()[-200:]
+            (evidence / name).write_text("\n".join(tail) + ("\n" if tail else ""))
+    shutil.rmtree(verified_root)
     still = {
         name: pid_alive(int(run.get(f"{name}_pid") or 0)) and identity_matches(int(run.get(f"{name}_pid") or 0), run.get(f"{name}_identity"))
         for name in ("wrapper", "fake")
@@ -90,7 +90,7 @@ def main() -> None:
         "cleaned": True,
         "killed": results,
         "removed_home": removed_home,
-        "home_still_present": home.exists() if home else False,
+        "home_still_present": verified_home.exists(),
         "processes_still_ours": still,
         "evidence": str(evidence),
         "build_sha": run.get("build_sha"),

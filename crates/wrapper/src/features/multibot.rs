@@ -706,6 +706,9 @@ fn drive(ctx: &super::Context<'_>) -> Result<(), ApiError> {
         // The catalogue loads asynchronously after startup. A turn which has
         // never contacted the provider remains durable and queued until ready.
         if live && super::engine::resolve_model(conn, ctx.provider)?.is_none() {
+            if ctx.provider.status()["models_ready"] == true {
+                conn.execute("UPDATE wrapper_group_turns SET status='failed',error=?2 WHERE id=?1", params![id,"Aucun modèle ChatGPT n’est disponible pour cette connexion. Vérifiez la connexion dans les paramètres puis envoyez un nouveau message."])?;
+            }
             continue;
         }
         let local = super::Context {
@@ -999,9 +1002,13 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
     message.payload["root_id"] = json!(root);
     message.payload["parent_turn_id"] = json!(parent);
     message.payload["turn_status"] = json!(if waiting { "queued" } else { &status });
+    let live: bool = ctx.connection.query_row("SELECT live FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,root],|r|r.get(0)).unwrap_or(false);
+    if never_started && status == "failed" && live && !ctx.provider.connected() {
+        message.error_kind = Some("signin".into());
+        message.payload["wait_reason"] = json!("signin");
+    }
     if waiting {
         message.notice = Some("Tour en file d’attente".into());
-        let live: bool = ctx.connection.query_row("SELECT live FROM wrapper_group_inputs WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,conversation,root],|r|r.get(0)).unwrap_or(false);
         if live && !ctx.provider.connected() {
             message.payload["wait_reason"] = json!("signin");
         } else if live && ctx.provider.models().is_empty() {

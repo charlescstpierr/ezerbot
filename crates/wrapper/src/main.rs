@@ -228,7 +228,18 @@ fn provider(db: &std::path::Path) -> Provider {
             api: format!("{base}/backend-api/codex"),
             ..endpoints.clone()
         };
-        return Provider::with_backends(db, endpoints, codex, false);
+        let provider = Provider::with_backends(db, endpoints, codex, false);
+        if let Some(ms) = std::env::var("GROKBOT_FAKE_CHAT_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|ms| (100..=60000).contains(ms))
+        {
+            provider.configure_fake_chat(
+                std::time::Duration::from_millis(ms),
+                std::env::var_os("GROKBOT_DISABLE_SIMULATION").is_none(),
+            );
+        }
+        return provider;
     }
     Provider::new(db)
 }

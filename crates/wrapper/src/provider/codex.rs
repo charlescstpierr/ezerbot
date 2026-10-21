@@ -117,6 +117,7 @@ impl Session {
         self.write(&credentials).map_err(|_| {
             Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
         })?;
+        self.reset_probe();
         self.inner.local_revoked.store(false, Ordering::SeqCst);
         *lock(&self.inner.catalog) = Catalog::default();
         self.reset_quota();
@@ -129,7 +130,13 @@ impl Session {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::signin());
         }
-        let mut request = agent()
+        let limits = *lock(&self.inner.deadlines);
+        let mut request = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_write(Duration::from_secs(15))
+            .timeout_read(limits.stall)
+            .timeout(limits.total)
+            .build()
             .post(&format!("{}/responses", self.inner.endpoints.api))
             .set("Authorization", &format!("Bearer {token}"));
         if self.inner.codex {

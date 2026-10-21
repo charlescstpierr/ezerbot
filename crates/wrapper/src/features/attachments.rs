@@ -607,7 +607,7 @@ fn vision(
     };
     request["input"][0]["content"][1]["image_url"] = Value::String(image_url);
     let model = request["model"].as_str().unwrap_or_default().to_owned();
-    let response = match provider.responses(request) {
+    let response = match provider.responses_background(request) {
         Ok(response) => response,
         // Unsupported images and explicit provider refusals are Skipped. Network,
         // authentication and usage failures stay retryable without leaking bodies.

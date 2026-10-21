@@ -175,7 +175,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer-input { min-height: 24px; }
 .composer { position: relative; }
 .composer-tools { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
-.composer-tools [data-picker="effort"], .composer-tools [data-picker="speed"] { flex-shrink: 0; }
+.composer-tools [data-picker="effort"], .composer-tools [data-picker="speed"] { flex: 0 1 auto; min-width: max-content; }
 .composer-local { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--subtle); font-size: 11px; font-weight: 400; }
 .composer-local::before { content: ""; width: 6px; height: 6px; border-radius: 50%; box-shadow: inset 0 0 0 1.2px var(--subtle); }
 .tool-pill { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 190px; padding: 5px 8px; border-radius: 7px; background: var(--soft); color: var(--text); font-size: 11px; white-space: nowrap; transition: box-shadow .15s; }
@@ -192,6 +192,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .composer-tools { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
 .composer [data-picker="model"] { flex: 0 0 auto; max-width: 220px; }
 .composer [data-picker="model"] b { min-width: 0; }
+.composer-tools [data-picker="effort"] b,
+.composer-tools [data-picker="speed"] b { flex: 0 0 auto; min-width: 40px; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
@@ -502,7 +504,7 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer .composer-bot-name { min-width: 45px; }
   .composer .attachment-choose { width: 26px; }
   .composer-tools [data-picker="effort"],
-  .composer-tools [data-picker="speed"] { flex-shrink: 1; }
+  .composer-tools [data-picker="speed"] { flex: 0 1 auto; min-width: max-content; }
   .composer { padding: 13px 10px 9px 14px; border-radius: 16px; }
   .composer-caption { padding-top: 9px; justify-content: center; font-size: 8px; }
   .composer-caption > #composer-hint { display: none; }

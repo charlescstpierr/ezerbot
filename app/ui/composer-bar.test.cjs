@@ -128,6 +128,7 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
       const modelButton = document.querySelector('[data-picker="model"]');
       const effortButton = document.querySelector('[data-picker="effort"]');
       const effortLabel = document.querySelector('[data-picker="effort"] b');
+      const speedLabel = document.querySelector('[data-picker="speed"] b');
       const modelBox = modelLabel ? boxOf(modelLabel) : { width: 0 };
       const modelButtonBox = modelButton ? boxOf(modelButton) : null;
       const effortButtonBox = effortButton ? boxOf(effortButton) : null;
@@ -151,6 +152,12 @@ function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", sp
         modelClient: modelLabel ? modelLabel.clientWidth : 0,
         modelScroll: modelLabel ? modelLabel.scrollWidth : 0,
         modelFits: !modelLabel || modelLabel.scrollWidth <= modelLabel.clientWidth + 1,
+        effortClient: effortLabel ? effortLabel.clientWidth : 0,
+        effortScroll: effortLabel ? effortLabel.scrollWidth : 0,
+        effortFits: !effortLabel || effortLabel.scrollWidth <= effortLabel.clientWidth + 1,
+        speedClient: speedLabel ? speedLabel.clientWidth : 0,
+        speedScroll: speedLabel ? speedLabel.scrollWidth : 0,
+        speedFits: !speedLabel || speedLabel.scrollWidth <= speedLabel.clientWidth + 1,
         modelInside: !modelLabel || contained(modelBox, modelButtonBox),
         modelBeforeEffort: !modelButtonBox || !effortButtonBox || modelButtonBox.right <= effortButtonBox.left + 0.5,
         headerHeights: [...document.querySelectorAll(".topbar-actions .tool-pill")].map((node) => ({
@@ -387,6 +394,32 @@ test("Notifications, Créer un groupe and Membres keep their height at 820px", a
         );
       }
     }
+  }
+});
+
+test("effort and speed labels keep a 40px floor at 500px", async () => {
+  const crowded = await measure(500, 780, "Ezerbot", { model: "GPT-6.1 Sol", effort: "Moyen", speed: "Standard" });
+  const long = await measure(500, 780, LONG_NAME, { model: "GPT-6.1 Sol", effort: "medium", speed: "Standard" });
+  for (const theme of crowded.themes) {
+    const where = `${theme.theme} effort=${theme.effortClient}/${theme.effortScroll} speed=${theme.speedClient}/${theme.speedScroll} name=${theme.nameClient}/${theme.nameScroll}`;
+    assert.equal(theme.effortText, "Moyen", where);
+    assert.ok(theme.effortClient >= 40, where);
+    assert.equal(theme.effortFits, true, where);
+    assert.ok(theme.speedClient >= 40, where);
+    assert.equal(theme.speedFits, true, where);
+    assert.equal(theme.nameFits, true, where);
+    assert.equal(theme.toolsClear, true, where);
+    assert.equal(theme.chevronInside, true, where);
+  }
+  for (const theme of long.themes) {
+    const where = `${theme.theme} effort=${theme.effortClient}/${theme.effortScroll} speed=${theme.speedClient}/${theme.speedScroll} name=${theme.nameClient}/${theme.nameScroll}`;
+    assert.equal(theme.nameEllipsed, true, where);
+    assert.ok(theme.effortClient >= 40, where);
+    assert.equal(theme.effortFits, true, where);
+    assert.equal(theme.speedFits, true, where);
+    assert.equal(theme.modelFits, true, where);
+    assert.equal(theme.toolsClear, true, where);
+    assert.equal(theme.chevronInside, true, where);
   }
 });
 

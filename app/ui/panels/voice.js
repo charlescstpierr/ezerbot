@@ -1,7 +1,8 @@
 "use strict";
 (() => {
   const panels = window.GrokbotPanels;
-  if (!panels) return;
+  // The Mac speech bridge does not run in the phone. iOS dictation stays on the keyboard.
+  if (!panels || window.EzerbotIPhone?.remote) return;
   const errors = {
     mic_denied: "Accès au microphone refusé. Autorisez Ezerbot dans Réglages Système, puis réessayez.",
     speech_denied: "Reconnaissance vocale refusée. Autorisez Ezerbot dans Réglages Système, puis réessayez.",

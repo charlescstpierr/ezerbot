@@ -395,7 +395,16 @@
       let data;
       try { data = await response.json(); }
       catch (error) { showConnectionError(error); throw new Error("Le moteur local a renvoyé une réponse illisible."); }
-      if (!response.ok) throw new Error(data.error || "L’action n’a pas pu être terminée.");
+      if (!response.ok) {
+        const error = new Error(data.error || "L’action n’a pas pu être terminée.");
+        // A disabled listener is not a dropped network call, and not every 403
+        // (a Mac-only action, for example) means the phone was turned off.
+        if (remoteAccessDisabled(response.status, data)) {
+          error.accessDisabled = true;
+          showConnectionError(error);
+        }
+        throw error;
+      }
       return data;
     } finally { clearTimeout(timeout); }
   }
@@ -452,14 +461,26 @@
             schedulePoll();
           }
         }
-      } catch { schedulePoll(); }
+      } catch (error) {
+        // Idle /api/ping used to swallow the new 403, so the phone still looked
+        // connected and Send stayed enabled. Surface a disabled listener here.
+        if (error?.accessDisabled) showConnectionError(error);
+        schedulePoll();
+      }
     }, !connected ? 1500 : live ? 200 : waiting || panelWaiting ? 800 : 5000);
+  }
+
+  function remoteAccessDisabled(status, data) {
+    const message = String(data?.error || "").replaceAll("'", "’");
+    return Boolean(window.EzerbotIPhone?.remote && status === 403 && message === "L’accès iPhone est désactivé sur le Mac.");
   }
 
   function showConnectionError(error) {
     connected = false;
-    connectionStatus = "offline";
-    ui.bannerText.textContent = window.EzerbotIPhone?.remote
+    connectionStatus = error?.accessDisabled ? "disabled" : "offline";
+    ui.bannerText.textContent = error?.accessDisabled
+      ? "L’accès iPhone est désactivé sur le Mac. Réactivez-le dans Paramètres › iPhone. Reconnexion automatique…"
+      : window.EzerbotIPhone?.remote
       ? "Mac injoignable. Vérifiez que le Mac est allumé, Ezerbot ouvert et Tailscale connecté. Reconnexion automatique…"
       : "Le moteur local ne répond plus. Vos conversations enregistrées sont conservées.";
     ui.banner.hidden = false;
@@ -1191,7 +1212,17 @@
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (optimisticMessage) optimisticMessage.state = "unknown";
+          const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
+          // The server state that arrives later replaces this optimistic bubble.
+          // Put the text back first, or a refused send disappears with no trace.
+          if (!confirmed) {
+            if (error.accessDisabled) {
+              const owner = state.conversations.find((item) => item.messages.some((message) => message.id === messageId));
+              if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
+              pendingSends.delete(messageId);
+            } else if (optimisticMessage) optimisticMessage.state = "unknown";
+            restoreDraft();
+          }
           render();
           showConnectionError(error);
         }

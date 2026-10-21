@@ -725,10 +725,30 @@ fn sse_incomplete_failed_error_and_early_eof_never_cache_partial_text() {
         );
     }
     let log = std::fs::read_to_string(fixture.directory.join("logs/engine.log")).unwrap();
-    assert_eq!(log.lines().count(), 2); // Only response.failed/error, not incomplete/EOF.
-    assert!(log
+    let refusals: Vec<_> = log
         .lines()
+        .filter(|line| line.contains("OpenAI refus"))
+        .collect();
+    let requests: Vec<_> = log
+        .lines()
+        .filter(|line| line.starts_with("OpenAI request "))
+        .collect();
+    // response.failed and error only. Incomplete and early EOF stay silent.
+    assert_eq!(refusals.len(), 2, "{log}");
+    assert_eq!(requests.len(), 4, "{log}");
+    assert_eq!(
+        log.lines().count(),
+        refusals.len() + requests.len(),
+        "{log}"
+    );
+    assert!(refusals
+        .iter()
         .all(|line| line.ends_with("statut=200 code=- param=- request_id=-")));
+    assert!(requests.iter().all(|line| {
+        line.starts_with("OpenAI request model=gpt-test effort=")
+            && !line.contains("partial")
+            && !line.contains("data:")
+    }));
     assert!(!log.contains("partial"));
     fixture.reply(ScriptedResponse::events(&[
         json!({"type": "response.output_text.delta", "delta": "delta only"}),

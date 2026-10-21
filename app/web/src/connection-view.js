@@ -18,12 +18,12 @@ export function composerConnectionState({ offline = false, live = false, busy = 
 
 function signInCopy({ providerConnected, expired, group, isTask }) {
   if (providerConnected) return group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse.";
-  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez-vous via Codex, puis envoyez un nouveau message."
-    : isTask ? "Votre session ChatGPT a expiré. Reconnectez-vous via Codex, puis poursuivez dans la conversation principale."
-      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez-vous via Codex, puis réessayez.";
-  return group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
-    : isTask ? "Connectez votre compte ChatGPT via Codex, puis poursuivez dans la conversation principale."
-      : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.";
+  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis envoyez un nouveau message."
+    : isTask ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
+      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez votre compte ChatGPT, puis réessayez.";
+  return group ? "Connectez votre compte ChatGPT, puis envoyez un nouveau message."
+    : isTask ? "Connectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
+      : "Votre question est conservée. Connectez votre compte ChatGPT, puis réessayez.";
 }
 
 export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = false }) {
@@ -32,10 +32,10 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
     copy: signInCopy({ providerConnected, expired, group, isTask }),
-    signInLabel: expired ? "Se reconnecter via Codex" : "Se connecter via Codex",
+    signInLabel: expired ? "Se reconnecter" : "Se connecter",
     showRetry: !group && !isTask,
     retryDisabled: !providerConnected || !engineConnected,
-    retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez-vous via Codex avant de réessayer." : "Réessayer cette réponse",
+    retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez votre compte ChatGPT avant de réessayer." : "Réessayer cette réponse",
     signInDisabled: !engineConnected,
     showSignIn: !providerConnected,
     alert: !providerConnected,

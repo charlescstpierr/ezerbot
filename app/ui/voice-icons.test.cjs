@@ -164,3 +164,120 @@ test("voice mode and voice memo icons differ and keep accessible names", async (
   assert.ok(overlap.memoInk > 40, `mémo vocal icon is empty (${overlap.memoInk})`);
   assert.ok(overlap.iou < 0.35, `icons still overlap (IoU ${overlap.iou.toFixed(2)}, ink ${overlap.modeInk}/${overlap.memoInk})`);
 });
+
+function paintIcon(markup, size) {
+  return markup
+    .replace(/\sclass="icon"/, "")
+    .replace("<svg ", `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" fill="none" stroke="black" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" `);
+}
+
+function paintMemo(markup, size) {
+  const svg = markup.startsWith("<svg") ? markup : markup;
+  return svg.replace("<svg ", `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" `);
+}
+
+function glyphPage(icons) {
+  return `<!doctype html>
+<meta charset="utf-8">
+<pre id="qa-result"></pre>
+<script>
+  const icons = ${JSON.stringify(icons)};
+  function ink(svg, size) {
+    return new Promise((resolve, reject) => {
+      const scale = 8;
+      const image = new Image();
+      image.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = size * scale;
+        canvas.height = size * scale;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1;
+        for (let y = 0; y < canvas.height; y += 1) {
+          for (let x = 0; x < canvas.width; x += 1) {
+            if (data[(y * canvas.width + x) * 4 + 3] <= 40) continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+        const width = (maxX - minX + 1) / scale;
+        const height = (maxY - minY + 1) / scale;
+        resolve({
+          width,
+          height,
+          dx: (minX + maxX) / 2 / scale - size / 2,
+          dy: (minY + maxY) / 2 / scale - size / 2,
+        });
+      };
+      image.onerror = () => reject(new Error("svg"));
+      image.src = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    });
+  }
+  Promise.all(icons.map((icon) => ink(icon.svg, icon.size).then((box) => ({ name: icon.name, size: icon.size, ...box }))))
+    .then((glyphs) => { document.getElementById("qa-result").textContent = JSON.stringify({ glyphs }); })
+    .catch((error) => { document.getElementById("qa-result").textContent = JSON.stringify({ error: String(error) }); });
+</script>`;
+}
+
+function measureGlyphs(icons) {
+  const directory = mkdtempSync(join(tmpdir(), "voice-glyphs-"));
+  const file = join(directory, "glyphs.html");
+  writeFileSync(file, glyphPage(icons));
+  const chrome = spawn(chromeBinary(), [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--force-device-scale-factor=1",
+    `--user-data-dir=${join(directory, "profile")}`,
+    "--virtual-time-budget=2000",
+    "--window-size=200,200",
+    "--dump-dom",
+    `file://${file}`,
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  let dom = "";
+  let err = "";
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.kill("SIGKILL");
+      reject(new Error(`chrome did not measure glyphs\n${err.slice(-400)}`));
+    }, 20000);
+    chrome.stdout.on("data", (chunk) => {
+      dom += chunk;
+      const match = dom.match(/<pre id="qa-result">([\s\S]*?)<\/pre>/);
+      if (!match || match[1].trim() === "") return;
+      clearTimeout(timer);
+      chrome.kill("SIGKILL");
+      resolve(JSON.parse(match[1].replaceAll("&quot;", "\"").replaceAll("&amp;", "&")));
+    });
+    chrome.stderr.on("data", (chunk) => { err += chunk; });
+    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
+test("voice memo glyph is centered and as large as the neighbouring icons", async () => {
+  const voice = readFileSync(join(UI, "panels/voice.js"), "utf8");
+  const session = readFileSync(join(UI, "panels/voice-conversation.js"), "utf8");
+  const voiceCss = readFileSync(join(UI, "panels/voice.css"), "utf8");
+  const memoRule = voiceCss.match(/\.voice-mode::before \{([^}]*)\}/);
+  assert.ok(memoRule, "memo icon rule");
+  assert.match(memoRule[1], /width:\s*16px/);
+  assert.match(memoRule[1], /height:\s*16px/);
+  const mic = voice.match(/<svg class="icon" aria-hidden="true" viewBox="0 0 24 24">[\s\S]*?<\/svg>/);
+  assert.ok(mic, "dictation microphone");
+  const report = await measureGlyphs([
+    { name: "memo", size: 16, svg: paintMemo(memoSvg(voiceCss), 16) },
+    { name: "mode", size: 16, svg: paintIcon(modeMarkup(session), 16) },
+    { name: "mic", size: 19, svg: paintIcon(mic[0], 19) },
+  ]);
+  assert.equal(report.error, undefined, report.error);
+  const glyphs = Object.fromEntries(report.glyphs.map((glyph) => [glyph.name, glyph]));
+  const memo = glyphs.memo;
+  const mode = glyphs.mode;
+  assert.ok(Math.abs(memo.dx) <= 0.5 && Math.abs(memo.dy) <= 0.5, `mémo décentré de ${memo.dx.toFixed(2)} px, ${memo.dy.toFixed(2)} px`);
+  assert.ok(memo.width >= mode.width * 0.9 && memo.height >= mode.height * 0.9, `mémo ${memo.width.toFixed(2)}×${memo.height.toFixed(2)} plus petit que le casque ${mode.width.toFixed(2)}×${mode.height.toFixed(2)}`);
+  assert.ok(Math.max(memo.width, memo.height) >= Math.min(glyphs.mic.width, glyphs.mic.height), `mémo ${memo.width.toFixed(2)}×${memo.height.toFixed(2)} plus petit que le micro ${glyphs.mic.width.toFixed(2)}×${glyphs.mic.height.toFixed(2)}`);
+});

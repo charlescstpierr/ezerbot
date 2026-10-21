@@ -189,9 +189,9 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; }
-.composer [data-picker="model"] { max-width: 150px; }
-.composer [data-picker="model"] b { min-width: 40px; }
+.composer .composer-tools { flex: 0 0 auto; min-width: 0; flex-wrap: nowrap; }
+.composer [data-picker="model"] { max-width: 220px; }
+.composer [data-picker="model"] b { min-width: 0; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
 .picker { top: auto; right: auto; left: 12px; bottom: 54px; width: min(300px, calc(100% - 24px)); max-height: min(440px, 60vh); overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--subtle) var(--soft); }
@@ -452,7 +452,9 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-area { width: calc(100% - 28px); }
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
-  .tool-pill { padding: 0 5px; }
+  .composer .tool-pill { padding: 0 5px; }
+  .composer-bottom { gap: 6px; }
+  .composer .attachment-choose { width: 26px; }
 }
 @media (max-width: 760px) {
   body { display: block; background: var(--canvas); }
@@ -490,8 +492,9 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
   .composer .tool-pill { padding: 0 5px; }
-  /* Le nom court garde sa largeur ; le plafond ellipse un nom trop long avant les commandes. */
-  .composer .composer-bot { flex-shrink: 0; max-width: calc(100% - 136px); }
+  /* Le bouton du bot cède seulement quand le nom dépasse ; le plus reste compact. */
+  .composer .composer-bot { flex-shrink: 1; max-width: none; }
+  .composer .attachment-choose { width: 26px; }
   .composer-tools [data-picker="effort"],
   .composer-tools [data-picker="speed"] { flex-shrink: 1; }
   .composer { padding: 13px 10px 9px 14px; border-radius: 16px; }

@@ -27,9 +27,9 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium" } = {}) {
   const tools = pills
-    ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>GPT-6 Sol</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>Moyen</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
+    ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
     : "";
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">
@@ -51,6 +51,14 @@ function page(name, { pills = true } = {}) {
   </svg>
   <aside class="sidebar"></aside>
   <main class="main-panel">
+    <header class="topbar">
+      <div class="topbar-title"><h1 id="conversation-title">Nouvelle conversation</h1></div>
+      <div class="topbar-actions">
+        <button class="tool-pill notifications-button" type="button">Notifications</button>
+        <button class="tool-pill" type="button">Créer un groupe</button>
+        <button class="tool-pill" type="button">Membres</button>
+      </div>
+    </header>
     <div class="composer-dock"><div class="composer-area"><form class="composer" id="composer-form">
       <div class="composer-bottom">
         <span class="composer-model" id="composer-model">
@@ -114,7 +122,12 @@ function page(name, { pills = true } = {}) {
       const botBox = boxOf(document.getElementById("composer-bot"));
       const chevronBox = boxOf(document.querySelector("#composer-bot .composer-chevron"));
       const modelLabel = document.querySelector('[data-picker="model"] b');
+      const modelButton = document.querySelector('[data-picker="model"]');
+      const effortButton = document.querySelector('[data-picker="effort"]');
+      const effortLabel = document.querySelector('[data-picker="effort"] b');
       const modelBox = modelLabel ? boxOf(modelLabel) : { width: 0 };
+      const modelButtonBox = modelButton ? boxOf(modelButton) : null;
+      const effortButtonBox = effortButton ? boxOf(effortButton) : null;
       return {
         theme,
         viewport: [innerWidth, innerHeight],
@@ -130,6 +143,17 @@ function page(name, { pills = true } = {}) {
         nameInside: contained(nameBox, botBox),
         chevronInside: contained(chevronBox, botBox),
         modelLabelWidth: modelBox.width,
+        modelText: modelLabel ? modelLabel.textContent : "",
+        effortText: effortLabel ? effortLabel.textContent : "",
+        modelClient: modelLabel ? modelLabel.clientWidth : 0,
+        modelScroll: modelLabel ? modelLabel.scrollWidth : 0,
+        modelFits: !modelLabel || modelLabel.scrollWidth <= modelLabel.clientWidth + 1,
+        modelInside: !modelLabel || contained(modelBox, modelButtonBox),
+        modelBeforeEffort: !modelButtonBox || !effortButtonBox || modelButtonBox.right <= effortButtonBox.left + 0.5,
+        headerHeights: [...document.querySelectorAll(".topbar-actions .tool-pill")].map((node) => ({
+          text: node.textContent,
+          height: node.getBoundingClientRect().height,
+        })),
         composerWidth: document.querySelector(".composer").getBoundingClientRect().width,
         areaWidth: document.querySelector(".composer-area").getBoundingClientRect().width,
         pieces: {
@@ -256,7 +280,7 @@ test("a medium composer name stays whole and a 40-character name ellipsizes clea
 
 const SHORT_NAMES = ["Ezerbot", "Rédacteur", MEDIUM_NAME];
 
-test("short names stay whole at 500px with and without pills and at 901px", async () => {
+test("short names stay whole at 901px and at 500px, except a medium name beside the real model", async () => {
   const cases = [
     [500, 780, true],
     [500, 780, false],
@@ -266,12 +290,19 @@ test("short names stay whole at 500px with and without pills and at 901px", asyn
     for (const [width, height, pills] of cases) {
       const report = await measure(width, height, label, { pills });
       for (const theme of report.themes) {
-        const where = `${label} at ${width}×${height} ${theme.theme} pills=${pills} name=${theme.nameClient}/${theme.nameScroll} area=${theme.areaWidth} composer=${theme.composerWidth} model=${theme.modelLabelWidth} ${JSON.stringify(theme.pieces)}`;
-        assert.equal(theme.nameFits, true, where);
+        const where = `${label} at ${width}×${height} ${theme.theme} pills=${pills} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} area=${theme.areaWidth} composer=${theme.composerWidth} ${JSON.stringify(theme.pieces)}`;
+        // À 500 px, GPT-6.1 Sol et medium tiennent en entier : le nom moyen s'ellipse dans son bouton.
+        const phoneWithRealModel = width === 500 && pills && label === MEDIUM_NAME;
+        if (!phoneWithRealModel) assert.equal(theme.nameFits, true, where);
         assert.equal(theme.nameInside, true, where);
         assert.equal(theme.chevronInside, true, where);
         assert.equal(theme.toolsClear, true, where);
-        if (pills) assert.ok(theme.modelLabelWidth >= 40, where);
+        if (pills) {
+          assert.equal(theme.modelFits, true, where);
+          assert.equal(theme.modelInside, true, where);
+          assert.equal(theme.modelBeforeEffort, true, where);
+          assert.ok(theme.modelLabelWidth >= 40, where);
+        }
       }
     }
   }
@@ -285,6 +316,9 @@ test("a 40-character name still ellipsizes inside the phone composer", async () 
     assert.equal(theme.chevronInside, true);
     assert.equal(theme.clear, true, JSON.stringify(theme.pieces));
     assert.equal(theme.toolsClear, true, JSON.stringify(theme.pieces));
+    assert.equal(theme.modelFits, true, `${theme.theme} model=${theme.modelClient}/${theme.modelScroll}`);
+    assert.equal(theme.modelInside, true);
+    assert.equal(theme.modelBeforeEffort, true);
   }
 });
 
@@ -296,6 +330,58 @@ test("the bot name and chevron stay inside the bot button and the model label st
         assert.equal(theme.nameInside, true, `name leaves #composer-bot at ${width}×${height} ${theme.theme} (${label}): ${JSON.stringify({ name: theme.nameBox, bot: theme.botBox })}`);
         assert.equal(theme.chevronInside, true, `chevron leaves #composer-bot at ${width}×${height} ${theme.theme} (${label}): ${JSON.stringify({ chevron: theme.chevronBox, bot: theme.botBox })}`);
         assert.ok(theme.modelLabelWidth >= 40, `model label is ${theme.modelLabelWidth}px at ${width}×${height} ${theme.theme} (${label})`);
+      }
+    }
+  }
+});
+
+const DEFAULT_MODEL = "GPT-6.1 Sol";
+const TERRA_MODEL = "GPT-5.6 Terra";
+const DEFAULT_EFFORT = "medium";
+
+test("GPT-6.1 Sol and medium stay whole inside the model button, left of the effort", async () => {
+  const cases = [
+    [820, 560, MEDIUM_NAME, DEFAULT_MODEL],
+    [820, 560, LONG_NAME, DEFAULT_MODEL],
+    [1140, 780, MEDIUM_NAME, DEFAULT_MODEL],
+    [1140, 780, LONG_NAME, DEFAULT_MODEL],
+    [1140, 780, MEDIUM_NAME, TERRA_MODEL],
+    [901, 780, MEDIUM_NAME, DEFAULT_MODEL],
+    [901, 780, LONG_NAME, DEFAULT_MODEL],
+  ];
+  for (const [width, height, bot, model] of cases) {
+    const report = await measure(width, height, bot, { model, effort: DEFAULT_EFFORT });
+    for (const theme of report.themes) {
+      const where = `${bot} / ${model} / ${DEFAULT_EFFORT} at ${width}×${height} ${theme.theme} viewport=${theme.viewport} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} ${JSON.stringify(theme.pieces)}`;
+      assert.equal(theme.modelText, model, where);
+      assert.equal(theme.effortText, DEFAULT_EFFORT, where);
+      assert.equal(theme.modelFits, true, where);
+      assert.equal(theme.modelInside, true, where);
+      assert.equal(theme.modelBeforeEffort, true, where);
+      assert.equal(theme.nameInside, true, where);
+      assert.equal(theme.toolsClear, true, where);
+      if (bot === MEDIUM_NAME) assert.equal(theme.nameFits, true, where);
+    }
+  }
+});
+
+test("Notifications, Créer un groupe and Membres keep their height at 820px", async () => {
+  const wide = await measure(1140, 780, "Ezerbot");
+  const band = await measure(820, 560, "Ezerbot");
+  const edge = await measure(901, 780, "Ezerbot");
+  const phone = await measure(500, 780, "Ezerbot");
+  for (const theme of ["dark", "light"]) {
+    const reference = wide.themes.find((item) => item.theme === theme);
+    for (const report of [band, edge, phone]) {
+      const actual = report.themes.find((item) => item.theme === theme);
+      assert.deepEqual(actual.headerHeights.map((item) => item.text), ["Notifications", "Créer un groupe", "Membres"]);
+      for (let index = 0; index < actual.headerHeights.length; index += 1) {
+        const seen = actual.headerHeights[index];
+        const expected = reference.headerHeights[index];
+        assert.ok(
+          Math.abs(seen.height - expected.height) <= 0.5,
+          `${seen.text} is ${seen.height}px at ${actual.viewport[0]}px and ${expected.height}px at ${reference.viewport[0]}px (${theme})`,
+        );
       }
     }
   }

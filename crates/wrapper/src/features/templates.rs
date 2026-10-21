@@ -175,8 +175,25 @@ fn invalid(message: impl Into<String>) -> ApiError {
 }
 
 fn short_text(value: &str, limit: usize, what: &str) -> Result<String, ApiError> {
+    bounded_text(value, limit, what, false)
+}
+
+/// Memories follow the memory editor: line breaks and tabs are text, other controls are not.
+fn memory_text(value: &str) -> Result<String, ApiError> {
+    bounded_text(value, facts::MAX_FACT_CHARS, "Un souvenir", true)
+}
+
+fn bounded_text(
+    value: &str,
+    limit: usize,
+    what: &str,
+    allow_breaks: bool,
+) -> Result<String, ApiError> {
     let value = value.trim();
-    if value.is_empty() || value.chars().count() > limit || value.chars().any(char::is_control) {
+    let forbidden = value.chars().any(|character| {
+        character.is_control() && !(allow_breaks && matches!(character, '\n' | '\r' | '\t'))
+    });
+    if value.is_empty() || value.chars().count() > limit || forbidden {
         return Err(invalid(format!(
             "{what} doit contenir entre 1 et {limit} caractères."
         )));
@@ -286,7 +303,7 @@ fn plan(document: &Document) -> Result<Plan, ApiError> {
     let memories = document
         .memories
         .iter()
-        .map(|memory| short_text(memory, facts::MAX_FACT_CHARS, "Un souvenir"))
+        .map(|memory| memory_text(memory))
         .collect::<Result<_, _>>()?;
     let starters = document
         .starters
@@ -1115,6 +1132,74 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.status, 400);
         assert_eq!(error.message, "Ce modèle dépasse 4 Mo.");
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_multiline_memory_round_trips() {
+        let (path, mut app) = temporary("lines");
+        let memory = "Première ligne\r\nDeuxième\tligne";
+        let mut document = minimal_document();
+        document.memories = vec![memory.into()];
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-lines", "document": document}),
+        )
+        .unwrap();
+        let stored = app.api("GET", "/api/memory?bot_id=bot-lines", b"").unwrap();
+        assert_eq!(stored["facts"][0]["text"], memory);
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-lines", "include_memories": true}),
+        )
+        .unwrap();
+        assert_eq!(exported["document"]["memories"][0], memory);
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-lines-copy", "document": exported["document"]}),
+        )
+        .unwrap();
+        let copied = app
+            .api("GET", "/api/memory?bot_id=bot-lines-copy", b"")
+            .unwrap();
+        assert_eq!(copied["facts"][0]["text"], memory);
+
+        let mut control = minimal_document();
+        control.memories = vec!["ligne\u{0001}".into()];
+        let error = post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-bad", "document": control}),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 400);
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        assert!(state["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|bot| bot["id"] != "bot-bad"));
+
+        let mut connector = minimal_document();
+        connector.connectors = vec!["Gmail\nPerso".into()];
+        assert!(post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-conn", "document": connector}),
+        )
+        .is_err());
+        let mut starter = minimal_document();
+        starter.starters = vec!["Bonjour\nle bot".into()];
+        assert!(post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-start", "document": starter}),
+        )
+        .is_err());
         drop(app);
         let _ = std::fs::remove_file(path);
     }

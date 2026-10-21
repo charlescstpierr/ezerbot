@@ -210,6 +210,9 @@ impl Session {
         loop {
             if cancel.load(Ordering::SeqCst) {
                 log(http, "cancelled");
+                if tool_notice {
+                    metadata(Some(&previous_notice), None)?;
+                }
                 return Err(Error::InvalidInput("run cancelled".into()));
             }
             let timeout = if started.elapsed() >= limits.total {
@@ -284,7 +287,14 @@ impl Session {
                     log(http, "transport_closed");
                     let failure =
                         Failure::other("La connexion à OpenAI a été interrompue. Réessayez.");
-                    metadata(None, Some(&failure))?;
+                    metadata(
+                        if tool_notice {
+                            Some(&previous_notice)
+                        } else {
+                            None
+                        },
+                        Some(&failure),
+                    )?;
                     return emit(ModelEvent::Failed {
                         reason: failure.message,
                     });

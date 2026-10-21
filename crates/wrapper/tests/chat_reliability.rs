@@ -512,6 +512,40 @@ fn pending_tool_is_visible_then_times_out_without_dispatch() {
     assert_eq!(calls, 0);
 }
 #[test]
+fn stopping_tool_preparation_clears_the_durable_notice() {
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    f.send(Fault::ToolStall);
+    until(|| {
+        f.reply()["notice"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Préparation d’un outil"))
+    });
+    let run = f.reply()["payload"]["run_id"].clone();
+    post(
+        &mut f.app,
+        "/api/stop",
+        json!({"conversation_id":f.chat,"message_id":"question"}),
+    );
+    until(|| {
+        f.reply()["state"] == "stopped"
+            && !f.provider.status()["running"].as_bool().unwrap_or(false)
+    });
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    until(|| {
+        let notice: Option<String> = conn
+            .query_row(
+                "SELECT notice FROM wrapper_engine_runs WHERE run_id=?1",
+                [run.as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        !notice
+            .unwrap_or_default()
+            .starts_with("Préparation d’un outil")
+    });
+}
+
+#[test]
 fn slow_compaction_is_foreground_work_and_logs_the_user_run() {
     use sha2::{Digest, Sha256};
     let mut f = Fixture::with_deadline(true, Duration::from_secs(25));

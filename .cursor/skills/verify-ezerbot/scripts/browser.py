@@ -369,22 +369,27 @@ def command_open(cdp: Cdp, url: str) -> None:
     if not url.startswith("http://127.0.0.1:"):
         raise SystemExit("refus: navigation hors du wrapper de bouclage")
     cdp.call("Page.navigate", {"url": url})
-    expression = (
-        "({state: document.readyState, href: location.href, "
-        "ready: !!document.getElementById('home-link')})"
-    )
-    deadline = time.time() + 20
+    expression = """() => ({
+      state: document.readyState,
+      href: location.href,
+      ready: !!document.getElementById("home-link"),
+      editor: !!document.querySelector(".gb-editor"),
+      badge: document.getElementById("mode-badge-text")?.textContent || "",
+      pending: performance.getEntriesByType("resource").filter((entry) => entry.responseEnd === 0).map((entry) => entry.name).slice(0, 8)
+    })"""
+    deadline = time.time() + 25
     last = None
     while time.time() < deadline:
         result = cdp.call(
             "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True},
+            {"expression": eval_expression(expression), "returnByValue": True},
             timeout=5,
         )
         last = result.get("result", {}).get("value")
-        if isinstance(last, dict) and str(last.get("href", "")).startswith(url) and last.get("ready") and last.get("state") in ("interactive", "complete"):
+        href = str(last.get("href", "")) if isinstance(last, dict) else ""
+        if href.startswith(url) and isinstance(last, dict) and last.get("editor") and last.get("badge") == "ChatGPT":
             return
-        time.sleep(0.1)
+        time.sleep(0.15)
     raise SystemExit(f"la page n'a pas fini de charger: {last}")
 
 

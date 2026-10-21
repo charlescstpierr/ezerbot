@@ -783,6 +783,13 @@ const ACCENTS: [&str; 9] = [
 const DEFAULT_SHAPE: &str = "galet";
 const SHAPES: [&str; 6] = ["galet", "goutte", "nuage", "carre", "fantome", "etoile"];
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
+        features::local::shutdown(&self.connection, &self.db_path);
+    }
+}
+
 pub struct App {
     db_path: PathBuf,
     connection: Connection,
@@ -881,6 +888,7 @@ impl App {
         seed_default_bot(&connection)?;
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
+        features::local::startup(&connection)?;
         features::screen::startup(path);
         features::demonstrations::startup(&connection, path)?;
         features::engine::startup(&connection)?;

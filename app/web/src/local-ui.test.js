@@ -297,3 +297,13 @@ test("granted paths remain text and cancellation uses the existing run stop rout
   assert.equal(await registration.onCardAction({kind:"tool",payload:{run_id:"run-local"}},"local.stop",{}, {conversation:{id:"chat"}}),true);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/stop",body:{conversation_id:"chat",message_id:"run-local"}}]);
 });
+
+test("Arrêter targets one background task and the thread keeps polling while it runs",async()=>{
+  const {requests,registration}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  assert.equal(registration.wantsPolling({conversation:{messages:[message]}}),true);
+  assert.equal(await registration.onCardAction(message,"local.task.stop",{},{conversation:{id:"chat"}}),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/local/tasks/stop",body:{run_id:"run-bg",call_id:"call-bg"}}]);
+  message.payload.outcome.output.status="arrêtée";
+  assert.equal(registration.wantsPolling({conversation:{messages:[message]}}),false);
+});

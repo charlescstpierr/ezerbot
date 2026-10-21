@@ -1881,6 +1881,14 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
     // replay_items coalesces each completed response before this defense-in-depth
     // redaction, including legacy events written by a pre-cutover generator.
     let vault = event_vault(conn)?;
+    let mut tool_names = HashMap::new();
+    for item in &items {
+        for tool in &item.tool_items {
+            if let ToolItem::Call { call } = tool {
+                tool_names.insert(call.call_id.clone(), call.name.clone());
+            }
+        }
+    }
     for item in &mut items {
         item.text = redact::redact(&vault, &item.text)?;
         for tool in &mut item.tool_items {
@@ -1888,6 +1896,22 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
                 if output["status"] == "suspend" {
                     if let Some(value) = resolution(conn, run, call_id)? {
                         *output = json!({"status":"resolved","value":value});
+                    }
+                } else if tool_names
+                    .get(call_id)
+                    .is_some_and(|name| super::local::is_tool(name))
+                {
+                    // The journal is updated after the turn: a background shell
+                    // finishes, or a cancellation drains, without a second event.
+                    let stored: Option<String> = conn
+                        .query_row(
+                            "SELECT outcome FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
+                            params![run.run_id, call_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(value) = stored.and_then(|raw| serde_json::from_str(&raw).ok()) {
+                        *output = value;
                     }
                 }
             }

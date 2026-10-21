@@ -156,6 +156,41 @@ impl Fixture {
     fn shell(&self, command: &str) -> Value {
         json!({"command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
     }
+    fn reply(&self, text: &str) {
+        self.script(vec![
+            json!({"type":"response.output_text.delta","delta":text}),
+            json!({"type":"response.completed"}),
+        ]);
+    }
+    fn messages(&mut self) -> Vec<Value> {
+        self.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|conversation| conversation["id"] == self.chat)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+    fn tool_output(&mut self, call_id: &str) -> Value {
+        self.messages()
+            .into_iter()
+            .find(|message| {
+                message["kind"] == "tool" && message["payload"]["call"]["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("carte absente pour {call_id}"))["payload"]["outcome"]
+            ["output"]
+            .clone()
+    }
+}
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -1138,4 +1173,199 @@ fn file_error_and_bot_isolation_are_per_call_failures() {
     f.send("disabled", "read_file", json!({"path":f.path}));
     f.finish("disabled");
     assert_eq!(f.outcome("disabled")["status"], "failed");
+}
+
+#[test]
+fn background_shell_answers_before_the_command_finishes_then_the_card_shows_the_code() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let marker = f.root().join("fini.txt");
+    let mut args = f.shell("sleep 2 && echo fini && touch fini.txt");
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(100);
+    f.send("long", "run_shell", args);
+    let request = f.request("long");
+    assert!(f
+        .messages()
+        .iter()
+        .any(|message| message["kind"] == "approval"));
+    f.reply("bonjour");
+    let started = std::time::Instant::now();
+    f.decide(&request, json!("allow_once"));
+    loop {
+        f.app.tick(now());
+        let replied = f.messages().iter().any(|message| {
+            message["role"] == "assistant"
+                && message["body"].as_str().unwrap_or("").contains("bonjour")
+        });
+        if replied {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "le tour est resté bloqué par la commande"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !marker.exists(),
+        "la commande a fini avant la réponse du bot"
+    );
+    assert_eq!(f.tool_output("long")["status"], "en cours");
+    assert!(f.tool_output("long")["exit_code"].is_null());
+    f.finish("long");
+    assert_eq!(f.outcome("long")["output"]["status"], "en cours");
+    let mut output = Value::Null;
+    for _ in 0..150 {
+        output = f.tool_output("long");
+        if output["status"] == "terminé" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert_eq!(output["status"], "terminé");
+    assert_eq!(output["exit_code"], json!(0));
+    assert!(output["stdout"].as_str().unwrap_or("").contains("fini"));
+    assert!(marker.exists());
+}
+
+#[test]
+fn stop_kills_only_that_group_and_quitting_marks_the_other_stopped() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    for (id, file) in [("one", "one"), ("two", "two")] {
+        let mut args = f.shell(&format!(
+            "echo $$ > {file}.pid; sleep 12; touch {file}.done"
+        ));
+        args["background"] = json!(true);
+        args["timeout_ms"] = json!(100);
+        f.send(id, "run_shell", args);
+        let request = f.request(id);
+        f.reply("ok");
+        f.decide(&request, json!("allow_once"));
+        f.finish(id);
+    }
+    let read_pid = |f: &Fixture, name: &str| -> u32 {
+        let path = f.root().join(format!("{name}.pid"));
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("pid absent : {name}");
+    };
+    let one = read_pid(&f, "one");
+    let two = read_pid(&f, "two");
+    assert!(process_alive(one) && process_alive(two));
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("one").run_id, "call_id": "one"}),
+    );
+    for _ in 0..100 {
+        if !process_alive(one) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!process_alive(one));
+    assert!(process_alive(two));
+    let mut stopped = Value::Null;
+    for _ in 0..100 {
+        stopped = f.tool_output("one");
+        if stopped["status"] == "arrêtée" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(stopped["status"], "arrêtée");
+    assert!(stopped["exit_code"].is_null());
+    assert_eq!(f.tool_output("two")["status"], "en cours");
+    f.reopen();
+    for _ in 0..150 {
+        if !process_alive(two) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!process_alive(two), "quitter l’app laisse le processus");
+    let mut other = Value::Null;
+    for _ in 0..50 {
+        other = f.tool_output("two");
+        if other["status"] == "arrêtée" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(other["status"], "arrêtée");
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!f.root().join("one.done").exists());
+    assert!(!f.root().join("two.done").exists());
+    assert_eq!(f.tool_output("one")["status"], "arrêtée");
+    assert_eq!(f.tool_output("two")["status"], "arrêtée");
+}
+
+#[test]
+fn foreground_shell_keeps_its_timeout_ceiling_and_background_shows_a_nonzero_code() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let mut args = f.shell("touch trop-long");
+    args["timeout_ms"] = json!(120_001);
+    f.send("ceiling", "run_shell", args);
+    f.reply("non");
+    f.finish("ceiling");
+    assert_eq!(f.outcome("ceiling")["status"], "failed");
+    assert!(f.outcome("ceiling")["reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("120"));
+    assert!(requests::list_for_run(&f.db(), &f.run("ceiling").run_id)
+        .unwrap()
+        .is_empty());
+    assert!(!f.root().join("trop-long").exists());
+    let mut args = f.shell("echo raté >&2; exit 3");
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(120_001);
+    f.send("code", "run_shell", args);
+    let request = f.request("code");
+    f.reply("vu");
+    f.decide(&request, json!("allow_once"));
+    f.finish("code");
+    let mut output = Value::Null;
+    for _ in 0..80 {
+        output = f.tool_output("code");
+        if output["status"] == "échec" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(output["status"], "échec");
+    assert_eq!(output["exit_code"], json!(3));
+    assert!(output["stderr"].as_str().unwrap_or("").contains("raté"));
+}
+
+#[test]
+fn background_output_cap_is_marked_on_the_card() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let mut args = f.shell("yes x | head -c 8000");
+    args["background"] = json!(true);
+    args["output_limit"] = json!(1024);
+    f.send("cap", "run_shell", args);
+    let request = f.request("cap");
+    f.reply("vu");
+    f.decide(&request, json!("allow_once"));
+    f.finish("cap");
+    let mut output = Value::Null;
+    for _ in 0..100 {
+        output = f.tool_output("cap");
+        if output["truncated"] == true {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(output["truncated"], true);
+    assert!(output["stdout"].as_str().unwrap_or("").len() <= 1024);
 }

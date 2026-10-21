@@ -66,6 +66,7 @@ test("failures distinguish refusal, missing files and unknown external effects",
   assert.equal(unknown.label,"Résultat inconnu");assert.equal(unknown.tone,"warning");assert.match(unknown.message,/Vérifiez/);
   assert.equal(localLimits({timeout_ms:100,output_limit:1024}),"Délai : 0,1 s · Sortie cumulée : 1 Kio maximum");
   assert.equal(localLimits({}),"Délai : 30 s · Sortie cumulée : 128 Kio maximum");
+  assert.equal(localLimits({background:true,timeout_ms:100,output_limit:1024}),"Tâche de fond · sans plafond de temps · Sortie cumulée : 1 Kio maximum");
 });
 test("manual denial is concise while standing-rule and reviewer provenance stay useful",()=>{
   for(const reason of ["L’action a été refusée.","La demande a été refusée, a expiré ou a été annulée.","L’approbation a été refusée","Approval was denied"]){
@@ -84,6 +85,7 @@ test("creation excerpts omit technical hunk headers, replacements keep styled co
 });
 
 test("all shell status labels are consistent French headings",()=>{
-  for(const status of ["terminé","échec","annulé","délai dépassé"]) assert.match(localStatusLabel(status),/^[A-ZÉ]/);
+  for(const status of ["terminé","échec","annulé","délai dépassé","en cours","arrêtée"]) assert.match(localStatusLabel(status),/^[A-ZÉ]/);
   assert.equal(localStatusLabel("annulé"),"Annulée");assert.equal(localStatusLabel("délai dépassé"),"Délai dépassé");
+  assert.equal(localStatusLabel("en cours"),"En cours");assert.equal(localStatusLabel("arrêtée"),"Arrêtée");
 });

@@ -205,14 +205,14 @@ Le juge regarde le Mac : panneau Routines, historique, fil de la routine, Param�
 
 Le rapport d’architecture cite d’autres genres de déclencheurs récupérés chez Grok Bot (Slack, Teams, Linear, Sentry, PagerDuty, Origin, cron flexible). Cette spec livre le sous-ensemble du grill. Un genre supplémentaire pourra suivre le même chemin qu’un déclencheur simple, plus tard.
 
-Tranches verticales, dans l’ordre de dépendance. Le détail et les liens vivent dans les issues.
+Tranches verticales. Les issues portent le détail, les critères du juge et les arêtes de blocage.
 
-1. Rattrapage au réveil. Aucun prérequis. Première tranche.
-2. Webhook Bearer publié par Tailscale Funnel. Aucun prérequis dans cette spec.
-3. Groupe. Après le webhook, pour composer horaire et webhook.
-4. GitHub. Après le groupe, et après le connecteur GitHub de `docs/specs/connecteurs.md`.
-5. Courriel. Après le groupe, et après le connecteur courriel.
-6. Calendrier. Après le rattrapage et le groupe, et après le connecteur calendrier.
+1. Rattrapage au réveil. Aucun prérequis. Première tranche. [#53](https://github.com/charlescstpierr/ezerbot/issues/53)
+2. Webhook Bearer publié par Tailscale Funnel. Aucun prérequis dans cette spec. [#54](https://github.com/charlescstpierr/ezerbot/issues/54)
+3. Groupe. Bloqué par le webhook. [#57](https://github.com/charlescstpierr/ezerbot/issues/57)
+4. GitHub. Bloqué par le groupe, et par le connecteur GitHub de `docs/specs/connecteurs.md`. [#58](https://github.com/charlescstpierr/ezerbot/issues/58)
+5. Courriel. Bloqué par le groupe, et par le connecteur courriel. [#59](https://github.com/charlescstpierr/ezerbot/issues/59)
+6. Calendrier. Bloqué par le rattrapage et le groupe, et par le connecteur calendrier. [#60](https://github.com/charlescstpierr/ezerbot/issues/60)
 
 ```mermaid
 flowchart TD

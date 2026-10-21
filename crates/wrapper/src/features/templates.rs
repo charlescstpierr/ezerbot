@@ -897,6 +897,42 @@ mod tests {
     }
 
     #[test]
+    fn a_model_larger_than_64_kib_round_trips() {
+        let mut document = template("dev").unwrap().clone();
+        let body = "x".repeat(70_000);
+        document.id = None;
+        document.category = None;
+        document.skills[0].body = body.clone();
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-templates-large-{}-{}.sqlite",
+            std::process::id(),
+            now()
+        ));
+        let mut app = App::open(&path).unwrap();
+        let payload = json!({"bot_id": "bot-large", "document": document});
+        assert!(serde_json::to_vec(&payload).unwrap().len() > crate::BODY_LIMIT);
+        let created = post(&mut app, "/api/templates/create", payload).unwrap();
+        assert_eq!(created["bot"]["name"], "Dev");
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-large"}),
+        )
+        .unwrap();
+        let text = serde_json::to_string(&exported["document"]).unwrap();
+        assert!(text.len() > crate::BODY_LIMIT);
+        let decoded = post(&mut app, "/api/templates/decode", json!({"text": text})).unwrap();
+        let skills = decoded["document"]["skills"].as_array().unwrap();
+        let revue = skills
+            .iter()
+            .find(|skill| skill["name"] == "Revue de code")
+            .unwrap();
+        assert_eq!(revue["body"], body);
+        drop(app);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn untrusted_documents_are_validated() {
         let mut document = template("dev").unwrap().clone();
         document.bot.color = "fuchsia".into();

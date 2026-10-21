@@ -37,6 +37,9 @@ use serde_json::{json, Value};
 pub const BODY_LIMIT: usize = 64 * 1024;
 pub const ATTACHMENT_BODY_LIMIT: usize = 20 * 1024 * 1024;
 pub const SKILL_IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
+/// A template document is 4 MiB. Create and decode wrap that JSON, and decode
+/// accepts text up to twice the document size.
+pub const TEMPLATE_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
 pub(crate) struct AttachmentUpload {
     draft_id: String,
@@ -124,6 +127,7 @@ pub fn body_limit(path: &str) -> usize {
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
         // 2 × 20 rules × 1,000 Unicode characters, including JSON escapes.
         "/api/approvals/reviewer" => 256 * 1024,
+        "/api/templates/create" | "/api/templates/decode" => TEMPLATE_BODY_LIMIT,
         _ => BODY_LIMIT,
     }
 }

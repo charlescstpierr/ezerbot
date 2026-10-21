@@ -19,7 +19,10 @@ pub mod features;
 // to its feature module (including the offline simulated reply).
 pub(crate) use features::engine::demo_reply;
 
-pub use provider::{Endpoints, Provider, ToolCall};
+pub use provider::{
+    apply_in_app_update, database_path_from_home, default_database_path, Endpoints, Provider,
+    ToolCall,
+};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;

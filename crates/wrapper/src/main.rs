@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
-    body_limit, header_safe, too_large, validate_headers_for_path, ApiError, ApiResponse, App,
-    Provider,
+    body_limit, default_database_path, header_safe, too_large, validate_headers_for_path, ApiError,
+    ApiResponse, App, Provider,
 };
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
@@ -34,10 +34,7 @@ fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut port = 0;
     let mut routine_wake = false;
-    let mut db = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/Application Support/Grokbot Local/workspace.sqlite");
+    let mut db = default_database_path();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--routine-wake" | "--headless-routines" => routine_wake = true,

@@ -324,7 +324,13 @@ fn each_unauthorized_attempt_is_logged_including_a_recovered_failure() {
             json!({"error":{"code":"expired"}}),
         ));
     }
-    assert_eq!(fixture.raw().unwrap_err().kind, "signin");
+    assert_eq!(fixture.raw().unwrap_err().kind, "other");
+    assert!(fixture.provider.connected());
+    let saved: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.directory.join("workspace.chatgpt-auth.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(saved["refresh_token"].is_string());
     assert_eq!(fixture.log().lines().count(), 3);
     assert!(fixture
         .log()

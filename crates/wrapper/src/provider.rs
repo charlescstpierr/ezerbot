@@ -6,6 +6,7 @@ mod reliable;
 pub use connection::Provider;
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,34 @@ const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 const REFRESH_MARGIN: u64 = 300;
+const REFRESH_LOCK_STALE: Duration = Duration::from_secs(25);
+const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(20);
+
+/// Dossier SQLite hors application Cocoa. Le nom « Grokbot Local » reste distinct
+/// de `Application Support/Grokbot` : un essai ne doit pas ouvrir les données réelles.
+///
+/// Les jetons ChatGPT restent dans le JSON propriétaire voisin de ce fichier
+/// (`workspace.chatgpt-auth.json`, mode 0600). Ils ne vont pas dans le trousseau.
+/// L’ACL par défaut suit l’exigence de signature : une signature ad hoc change de
+/// cdhash à chaque compilation et le lancement suivant lirait un trousseau vide.
+/// L’épingle certificat n’admet que le coffre des formulaires.
+pub fn database_path_from_home(home: Option<&OsStr>, fixed: Option<&OsStr>) -> PathBuf {
+    fn usable(value: Option<&OsStr>) -> Option<&Path> {
+        let path = Path::new(value?);
+        (path.is_absolute() && path != Path::new("/")).then_some(path)
+    }
+    usable(home)
+        .or_else(|| usable(fixed))
+        .unwrap_or_else(|| Path::new("."))
+        .join("Library/Application Support/Grokbot Local/workspace.sqlite")
+}
+
+pub fn default_database_path() -> PathBuf {
+    database_path_from_home(
+        std::env::var_os("HOME").as_deref(),
+        std::env::var_os("CFFIXED_USER_HOME").as_deref(),
+    )
+}
 
 #[derive(Clone)]
 pub struct Endpoints {
@@ -236,7 +265,9 @@ struct Inner {
     file: PathBuf,
     endpoints: Endpoints,
     open_browser: bool,
-    // Sérialise les lectures, les écritures et les renouvellements : le jeton de renouvellement tourne.
+    // Mutex du processus. Le fichier `*.lock` voisin couvre l’application et
+    // l’agent de routines : sans lui, un `invalid_grant` tardif effaçait la paire
+    // déjà tournée par l’autre processus (ou par le binaire de mise à jour).
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -466,6 +497,135 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+fn preserved_scope(codex: bool, stored: &str, granted: String) -> String {
+    let drops_plan = !codex
+        && stored.split_whitespace().any(|scope| scope == PLAN_SCOPE)
+        && !granted.split_whitespace().any(|scope| scope == PLAN_SCOPE);
+    if drops_plan {
+        stored.to_owned()
+    } else {
+        granted
+    }
+}
+
+/// Verrou fichier entre processus. `create_new` évite `flock` (pas de dépendance, pas d’unsafe).
+struct AuthLock {
+    path: PathBuf,
+    token: String,
+}
+
+impl AuthLock {
+    fn acquire(auth_file: &Path) -> Option<Self> {
+        let path = auth_file.with_extension("lock");
+        let token = random_token(16);
+        let started = Instant::now();
+        loop {
+            match create_lock(&path, &token) {
+                Ok(()) => return Some(Self { path, token }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let age = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+                    let stale = age
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > REFRESH_LOCK_STALE);
+                    if stale || started.elapsed() > REFRESH_LOCK_WAIT {
+                        let _ = fs::remove_file(&path);
+                    }
+                    thread::sleep(Duration::from_millis(15));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Drop for AuthLock {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn create_lock(path: &Path, token: &str) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(token.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Copie une arborescence installée sans jamais effacer la session.
+/// Un fichier `*-auth.json`, la base SQLite et `provider.json` restent en place,
+/// même si l’archive en contient une copie. Même règle quand le dossier
+/// d’installation est le dossier de données : seul le binaire est remplacé.
+pub fn apply_in_app_update(
+    install_dir: &Path,
+    staged: &Path,
+    data_dir: &Path,
+) -> std::io::Result<()> {
+    if install_dir.as_os_str().is_empty()
+        || staged.as_os_str().is_empty()
+        || data_dir.as_os_str().is_empty()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "chemins de mise à jour vides",
+        ));
+    }
+    let install = fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+    let data = fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    copy_update_tree(staged, install_dir, &data, install != data)
+}
+
+fn session_file_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.ends_with("-auth.json")
+        || name.ends_with(".sqlite")
+        || name.ends_with(".sqlite-wal")
+        || name.ends_with(".sqlite-shm")
+        || name == "provider.json"
+}
+
+fn inside_data(path: &Path, data: &Path) -> bool {
+    path.starts_with(data)
+        || fs::canonicalize(path).is_ok_and(|canonical| canonical.starts_with(data))
+}
+
+fn copy_update_tree(
+    source: &Path,
+    dest: &Path,
+    data: &Path,
+    separate_data: bool,
+) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = dest.join(entry.file_name());
+        if session_file_name(&entry.file_name()) || (separate_data && inside_data(&target, data)) {
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_update_tree(&entry.path(), &target, data, separate_data)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn page(title: &str, detail: &str) -> String {
     let escape = |s: &str| {
         s.replace('&', "&amp;")
@@ -481,6 +641,7 @@ fn page(title: &str, detail: &str) -> String {
 impl Session {
     fn with_endpoints(db: &Path, endpoints: Endpoints, open_browser: bool, codex: bool) -> Self {
         let directory = db.parent().filter(|parent| !parent.as_os_str().is_empty());
+        // Session ChatGPT : JSON propriétaire, jamais le trousseau lié à la signature.
         let file = directory.unwrap_or(Path::new(".")).join(format!(
             "{}.{}-auth.json",
             db.file_stem()
@@ -560,7 +721,45 @@ impl Session {
     }
 
     fn read(&self) -> Option<Credentials> {
+        if !self.inner.file.is_file() {
+            self.import_legacy_session();
+        }
         serde_json::from_slice(&fs::read(&self.inner.file).ok()?).ok()
+    }
+
+    /// Copie une session utilisable depuis le dossier frère (Grokbot ↔ Grokbot Local)
+    /// quand le fichier principal manque. L’original reste : l’autre binaire peut encore le lire.
+    fn import_legacy_session(&self) {
+        let primary = &self.inner.file;
+        if primary.is_file() {
+            return;
+        }
+        let Some(parent) = primary.parent() else {
+            return;
+        };
+        let Some(folder) = parent.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let sibling = match folder {
+            "Grokbot" => "Grokbot Local",
+            "Grokbot Local" => "Grokbot",
+            _ => return,
+        };
+        let Some(name) = primary.file_name() else {
+            return;
+        };
+        let Some(legacy) = parent.parent().map(|grand| grand.join(sibling).join(name)) else {
+            return;
+        };
+        let Some(credentials): Option<Credentials> = fs::read(&legacy)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        else {
+            return;
+        };
+        if credentials.usable(self.inner.codex) {
+            let _ = self.write(&credentials);
+        }
     }
 
     /// Écriture atomique, lisible par le seul propriétaire.
@@ -967,6 +1166,7 @@ impl Session {
             }
         }
         let _guard = lock(&self.inner.credentials);
+        let _refresh_lock = AuthLock::acquire(&self.inner.file);
         if self.inner.local_revoked.load(Ordering::SeqCst) {
             return Err(Failure::signin());
         }
@@ -1000,7 +1200,7 @@ impl Session {
                 .into_json()
                 .map_err(|_| Failure::other("La réponse d’OpenAI est illisible."))?,
             Err(error) => {
-                let (status, code, _, _, failure) = self.request_failure(error);
+                let (status, code, _, _, _) = self.request_failure(error);
                 if status == 0 {
                     // Une panne de réseau ne prouve rien : le jeton en place reste peut-être valide.
                     return if credentials.expires_at > seconds() {
@@ -1018,11 +1218,17 @@ impl Session {
                         | "refresh_token_invalidated"
                         | "refresh_token_reused"
                 ) {
-                    credentials.clear_tokens();
-                    let _ = self.write(&credentials);
-                    return Err(Failure::expired());
+                    return self.rejected_refresh(&refresh);
                 }
-                return Err(failure);
+                // 401 ou 5xx du point de jeton ne sont pas un refus de session.
+                // `failure()` transformerait un 401 en demande de reconnexion.
+                return if credentials.expires_at > seconds() {
+                    Ok(access)
+                } else {
+                    Err(Failure::other(
+                        "Le renouvellement de la session ChatGPT a échoué. Réessayez. La connexion reste enregistrée sur ce Mac.",
+                    ))
+                };
             }
         };
         // Le jeton d'accès, son échéance, ses permissions et le jeton de renouvellement changent ensemble.
@@ -1035,7 +1241,7 @@ impl Session {
             credentials.refresh_token = Some(refresh);
         }
         if let Some(scope) = tokens.scope {
-            credentials.scopes = scope;
+            credentials.scopes = preserved_scope(self.inner.codex, &credentials.scopes, scope);
         }
         if let Some(id_token) = tokens.id_token {
             credentials.id_token = Some(id_token);
@@ -1044,6 +1250,26 @@ impl Session {
         self.write(&credentials)
             .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
         Ok(tokens.access_token)
+    }
+
+    /// Le serveur a refusé le jeton envoyé. Si un autre processus a déjà enregistré
+    /// une nouvelle paire, elle reste. On n’efface que le jeton encore présent.
+    fn rejected_refresh(&self, sent: &str) -> Result<String, Failure> {
+        match self.read() {
+            Some(stored) if stored.refresh_token.as_deref() != Some(sent) => {
+                if stored.usable(self.inner.codex) {
+                    stored.access_token.clone().ok_or_else(Failure::signin)
+                } else {
+                    Err(Failure::signin())
+                }
+            }
+            Some(mut stored) => {
+                stored.clear_tokens();
+                let _ = self.write(&stored);
+                Err(Failure::expired())
+            }
+            None => Err(Failure::signin()),
+        }
     }
 
     fn reset_probe(&self) {
@@ -1383,6 +1609,12 @@ impl Session {
             if status == 401 && !refreshed {
                 refreshed = true;
                 token = self.bearer(true)?;
+            } else if status == 401 {
+                // Le renouvellement a déjà eu lieu, ou le jeton renvoyé est encore refusé
+                // par l’API. Ce n’est pas un refus du refresh_token : la session reste.
+                return Err(Failure::other(
+                    "OpenAI a refusé la demande après le renouvellement de la session. Réessayez. La connexion reste enregistrée.",
+                ));
             } else if capability_fallback
                 && !self.inner.codex
                 && status == 400
@@ -1522,6 +1754,7 @@ impl<R: BufRead> BufRead for Cancellable<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn pkce_challenge_matches_rfc_7636_example() {
@@ -1587,5 +1820,38 @@ mod tests {
                 && models[1].tiers.is_empty()
                 && models[1].default_effort.is_none()
         );
+    }
+
+    #[test]
+    fn database_path_prefers_an_absolute_home_and_keeps_grokbot_local() {
+        let fixed = Path::new("/Users/charles");
+        let from_root =
+            database_path_from_home(Some(Path::new("/").as_os_str()), Some(fixed.as_os_str()));
+        assert_eq!(
+            from_root,
+            fixed.join("Library/Application Support/Grokbot Local/workspace.sqlite")
+        );
+        let home = database_path_from_home(
+            Some(Path::new("/Users/ada").as_os_str()),
+            Some(fixed.as_os_str()),
+        );
+        assert_eq!(
+            home,
+            PathBuf::from("/Users/ada/Library/Application Support/Grokbot Local/workspace.sqlite")
+        );
+        let relative =
+            database_path_from_home(Some(OsStr::new("relative")), Some(fixed.as_os_str()));
+        assert_eq!(relative, from_root);
+        assert_eq!(
+            database_path_from_home(None, None),
+            PathBuf::from("./Library/Application Support/Grokbot Local/workspace.sqlite")
+        );
+    }
+
+    #[test]
+    fn in_app_update_rejects_empty_paths() {
+        let error =
+            apply_in_app_update(Path::new(""), Path::new("staged"), Path::new("data")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

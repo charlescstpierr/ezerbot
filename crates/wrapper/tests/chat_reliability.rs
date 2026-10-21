@@ -116,7 +116,7 @@ impl Fake {
                     let mut length=0; loop { line.clear(); if reader.read_line(&mut line).expect("fake request-header read failed")==0 || line=="\r\n" { break; }
                         if let Some((name,v))=line.split_once(':') { if name.eq_ignore_ascii_case("content-length") { length=v.trim().parse().unwrap(); } } }
                     let mut bytes=vec![0;length]; if reader.read_exact(&mut bytes).is_err() { return; }
-                    if path.ends_with("/models") { let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{\"models\":[]}}"); return; }
+                    if path.split('?').next().unwrap_or("").ends_with("/models") { let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{\"models\":[]}}"); return; }
                     if path=="/token" {
                         let refresh = *r.lock().unwrap();
                         match refresh {
@@ -249,10 +249,13 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        // Populate the static catalogue before launching a turn.
+        // Settle the initial probe before queueing the chat's transport fault.
+        // Account-scoped catalogue discovery is a GET, never a Responses fault.
         until(|| {
-            app.api("GET", "/api/state", b"").unwrap()["provider"]["models_ready"] == true
-                || !signed
+            let state = app.api("GET", "/api/state", b"").unwrap();
+            !signed
+                || (state["provider"]["models_ready"] == true
+                    && state["provider"]["connected"] == true)
         });
         Self {
             fake,
@@ -388,6 +391,9 @@ fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
 #[test]
 fn refresh_hang_never_blocks_state_or_dispatches_after_cancellation() {
     let mut f = Fixture::new(true);
+    // Opening the app confirms OpenAI once. That probe is not the hung refresh.
+    until(|| f.provider.status()["connected"] == true);
+    f.fake.seen.lock().unwrap().clear();
     save_token(&f.db, true);
     *f.fake.refresh.lock().unwrap() = Some(Fault::RefreshHang);
     f.send(Fault::Happy);
@@ -449,7 +455,8 @@ fn group_without_signin_gets_a_card_and_an_empty_catalogue_cannot_queue_forever(
         let mut f = Fixture::new(signed);
         if signed {
             std::fs::write(f.db.with_extension("chatgpt-auth.json"),json!({"host_id":"fake","client_id":"fake","access_token":"fake","refresh_token":"fake","expires_at":4102444800u64,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
-            f.provider.select_backend("sharing").unwrap();
+            f.provider = Provider::with_endpoints(&f.db, f.fake.endpoints(), false);
+            f.app = App::open_with(&f.db, f.provider.clone()).unwrap();
             until(|| f.provider.status()["models_ready"] == true);
         }
         post(
@@ -705,23 +712,23 @@ fn sharing_connection_probe_does_not_impose_a_sixteen_token_reasoning_limit() {
 }
 
 #[test]
-fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
+fn incomplete_reasoning_probe_is_reachable_but_not_a_confirmed_connection() {
     let mut f = Fixture::new(true);
     f.fake.queue.lock().unwrap().push_back(Fault::Incomplete);
     post(&mut f.app, "/api/provider/test", json!({}));
-    until(|| f.provider.status()["connection_test"]["state"] == "ok");
-    assert_eq!(
-        f.provider.status()["connection_test"]["message"],
-        "OK — ChatGPT répond."
-    );
+    until(|| f.provider.status()["connection_test"]["state"] == "failed");
+    assert_eq!(f.provider.status()["connected"], false);
 }
 
 #[test]
 fn signing_out_fences_an_inflight_connection_test_result() {
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    // The automatic open probe must finish before this test arms a partial reply.
+    until(|| f.provider.status()["connected"] == true);
+    let before = f.fake.seen.lock().unwrap().len();
     f.fake.queue.lock().unwrap().push_back(Fault::Partial);
     post(&mut f.app, "/api/provider/test", json!({}));
-    until(|| !f.fake.seen.lock().unwrap().is_empty());
+    until(|| f.fake.seen.lock().unwrap().len() > before);
     assert_eq!(f.provider.status()["connection_test"]["state"], "running");
     f.provider.signout().unwrap();
     f.fake.partial_released.store(true, Ordering::SeqCst);
@@ -745,7 +752,7 @@ fn connection_test_without_an_account_explains_the_required_action_without_netwo
     );
     assert_eq!(
         result["provider"]["connection_test"]["message"],
-        "Aucun compte connecté. Connectez-vous via Codex ci-dessus."
+        "Aucun compte connecté. Connectez votre compte ChatGPT ci-dessus."
     );
     assert!(f.fake.seen.lock().unwrap().is_empty());
 }

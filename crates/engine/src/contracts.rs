@@ -370,6 +370,10 @@ pub struct SelectedContext {
     pub entry_ids: Vec<String>,
     pub fact_ids: Vec<String>,
     pub skill_ids: Vec<String>,
+    /// Attachment ids from the origin thread. The child receives the bytes or
+    /// the local path and MIME type; a file name is not an image.
+    #[serde(default)]
+    pub selected_images: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

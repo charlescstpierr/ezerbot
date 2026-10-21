@@ -43,7 +43,12 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
 }
 
 export function presentedFailureText(error, { retry = true, replacement = "Envoyez un nouveau message." } = {}) {
-  const text = error || "";
+  let text = error || "";
+  // Keepalive pings are not a session renewal. Say that no event arrived.
+  text = text.replaceAll(
+    "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.",
+    "OpenAI n’a envoyé aucun événement à temps. Réessayez.",
+  );
   if (!retry && /Réessayez\.\s*$/.test(text)) return text.replace(/Réessayez\.\s*$/, replacement);
   return text;
 }

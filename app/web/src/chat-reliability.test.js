@@ -140,6 +140,20 @@ test("a group failure does not tell the reader to retry when no retry button is 
   assert.ok(!source.includes("<p>{message.error}</p>"));
 });
 
+test("pings without an event are not described as a session renewal", () => {
+  const raw = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
+  const direct = replyProblemState({ error_kind: "other", error: raw });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
+  assert.doesNotMatch(direct.error, /renouvellement de session/);
+  const group = replyProblemState({ error_kind: "other", error: raw }, { isGroup: true });
+  assert.equal(group.retry, false);
+  assert.equal(group.error, "OpenAI n’a envoyé aucun événement à temps. Envoyez un nouveau message.");
+  assert.doesNotMatch(group.error, /Réessayez|renouvellement/);
+  const stalled = replyProblemState({ error_kind: "other", error: "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez." });
+  assert.equal(stalled.error, "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.");
+});
+
 test("deduplicating group advice does not accidentally enable forbidden regeneration", () => {
   const group = replyProblemState({ error_kind: "other", error: "Reconnectez-vous et envoyez un nouveau message." }, { isGroup: true });
   assert.equal(group.advice, null);

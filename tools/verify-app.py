@@ -199,6 +199,13 @@ def verify_ui_regressions():
     style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
   };
   const setTheme = theme => { document.documentElement.dataset.theme = theme; };
+  const paintedIcon = node => {
+    if (!node) return false;
+    const box = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return box.width >= 8 && box.height >= 8 && style.display !== 'none' && style.visibility !== 'hidden'
+      && Number.parseFloat(style.opacity) > 0 && style.stroke !== 'none' && (Number.parseFloat(style.strokeWidth) || 0) > 0;
+  };
   const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
   const clearOfControls = (label) => {
     const nameBox = label.getBoundingClientRect();
@@ -212,6 +219,9 @@ def verify_ui_regressions():
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     for (const theme of ['dark', 'light']) {
       setTheme(theme);
+      const plus = document.querySelector('#composer-model .attachment-choose:not(.meeting-start) .icon');
+      const chevron = document.querySelector('.composer-chevron');
+      check(`attach plus and composer chevron stay visible at ${width}×${height} ${theme}`, paintedIcon(plus) && paintedIcon(chevron));
       choose('Ezerbot');
       const ezerbotName = $('composer-bot-name');
       check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1 && clearOfControls(ezerbotName));

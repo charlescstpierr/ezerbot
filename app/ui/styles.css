@@ -231,8 +231,6 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 a.secondary-button { text-decoration: none; }
 .composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; }
 .composer-model { display: flex; align-items: center; gap: 2px; min-width: 0; margin-left: -6px; }
-.composer-model .icon { color: var(--accent); width: 18px; height: 18px; stroke: none; }
-.composer-model .tool-pill .icon { width: 12px; height: 12px; color: var(--subtle); stroke: currentColor; }
 .composer-bot { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 32px; padding: 0 8px 0 6px; border-radius: 8px; color: var(--text); font-size: 12px; font-weight: 550; transition: background .15s; }
 .composer-bot:hover:enabled, .composer-bot[aria-expanded="true"] { background: var(--soft); }
 .composer-bot:disabled { cursor: default; }

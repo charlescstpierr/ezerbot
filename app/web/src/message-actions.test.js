@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { messageActions, toggleReaction } from "./message-actions.js";
+import { messageActions, messageMenuOpenId, toggleReaction } from "./message-actions.js";
 
 const delivered = { role: "user", kind: "message", state: "echoed", body: "Déjà livré", payload: {} };
 const pending = { role: "user", kind: "message", state: "unknown", body: "Coupure", payload: {} };
@@ -51,4 +51,11 @@ test("l’envoi en cours ne propose pas encore Renvoyer", () => {
   assert.equal(menu.resend, false);
   assert.equal(menu.delete, false);
   assert.equal(menu.status, null);
+});
+
+test("ouvrir un menu de message ferme celui qui était déjà ouvert", () => {
+  assert.equal(messageMenuOpenId(null, "un", true), "un");
+  assert.equal(messageMenuOpenId("un", "deux", true), "deux");
+  assert.equal(messageMenuOpenId("deux", "deux", false), null);
+  assert.equal(messageMenuOpenId("deux", "un", false), "deux");
 });

@@ -3318,18 +3318,35 @@ fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
         return Err(ApiError::new(409, "Un message livré ne se supprime pas."));
     }
     app.session.discard_undelivered(&conversation, &message)?;
-    app.connection.execute(
+    // Les liens de pièces jointes comptent comme des racines de stockage. Les
+    // retirer avec le message non livré laisse l’objet en place s’il est encore
+    // référencé ailleurs, et le rend orphelin sinon.
+    let tx = super::write_transaction(&app.connection)?;
+    tx.execute(
         "DELETE FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
         params![ACCOUNT, conversation_id, message_id],
     )?;
-    app.connection.execute(
+    tx.execute(
         "DELETE FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
         params![ACCOUNT, conversation_id, message_id],
     )?;
-    app.connection.execute(
+    tx.execute(
         "DELETE FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
         params![ACCOUNT, conversation_id, message_id],
     )?;
+    tx.execute(
+        "DELETE FROM attachments_message_links WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM attachments_document_links WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM wrapper_attachment_order WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.commit()?;
     app.conversation_response(&conversation_id)
 }
 

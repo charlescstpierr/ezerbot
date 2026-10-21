@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import { createElement as h } from "react";
+import { createElement as h, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { messageMenuOpenId } from "./message-actions.js";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -37,6 +38,19 @@ test("le menu d’un message livré copie et réagit, sans Renvoyer, Supprimer n
   assert.doesNotMatch(html, /Supprimer/);
   assert.doesNotMatch(html, /Modifier|Éditer/);
   assert.match(html, /aria-pressed="true"/);
+});
+
+test("un seul menu de message est ouvert à la fois", () => {
+  const undelivered = (id) => ({ id, role: "user", state: "unknown", body: id, payload: {} });
+  let openId = messageMenuOpenId(null, "un", true);
+  openId = messageMenuOpenId(openId, "deux", true);
+  const html = renderToStaticMarkup(h(Fragment, null,
+    h(MessageMenu, { message: undelivered("un"), expanded: openId === "un", onOpenChange: () => {} }),
+    h(MessageMenu, { message: undelivered("deux"), expanded: openId === "deux", onOpenChange: () => {} }),
+  ));
+  assert.equal((html.match(/role="menu"/g) || []).length, 1);
+  assert.match(html, /data-message-id="deux"[^>]*data-open="true"/);
+  assert.match(html, /data-message-id="un"[^>]*data-open="false"/);
 });
 
 test("le menu d’un envoi non livré propose Renvoyer et Supprimer sans confirmation", () => {

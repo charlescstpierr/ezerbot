@@ -9,6 +9,12 @@ export function toggleReaction(current, emoji) {
   return current === emoji ? null : emoji;
 }
 
+// Un seul menu à la fois : l’ouvrir remplace l’autre, le refermer ne touche que le sien.
+export function messageMenuOpenId(openId, messageId, open) {
+  if (open) return messageId;
+  return openId === messageId ? null : openId;
+}
+
 export function messageReaction(message) {
   const value = message?.payload?.reaction ?? message?.reaction ?? null;
   return typeof value === "string" && value ? value : null;

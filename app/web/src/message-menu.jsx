@@ -2,18 +2,24 @@ import { useState } from "react";
 import { Ellipsis } from "lucide-react";
 import { messageActions, REACTIONS } from "./message-actions.js";
 
-export function MessageMenu({ message, busy = false, text = "", open = false, onCopy, onReact, onResend, onDelete }) {
+export function MessageMenu({ message, busy = false, text = "", open = false, expanded, onOpenChange, onCopy, onReact, onResend, onDelete }) {
   const actions = messageActions(message, { busy });
-  const [expanded, setExpanded] = useState(open);
-  const close = () => setExpanded(false);
+  const [localOpen, setLocalOpen] = useState(open);
+  const controlled = expanded !== undefined;
+  const isOpen = controlled ? expanded : localOpen;
+  const setOpen = (next) => {
+    if (controlled) onOpenChange?.(next);
+    else setLocalOpen(next);
+  };
+  const close = () => setOpen(false);
   return (
-    <div className="gb-message-menu">
+    <div className="gb-message-menu" data-message-id={message.id} data-open={isOpen ? "true" : "false"}>
       {actions.reaction && <span className="gb-reaction" aria-label="Réaction">{actions.reaction}</span>}
       {actions.status && <span className="gb-status gb-status-alert" role="status">{actions.status}</span>}
-      <button type="button" className="gb-icon-button" aria-label="Actions du message" aria-haspopup="menu" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <button type="button" className="gb-icon-button" aria-label="Actions du message" aria-haspopup="menu" aria-expanded={isOpen} onClick={() => setOpen(!isOpen)}>
         <Ellipsis />
       </button>
-      {expanded && (
+      {isOpen && (
         <div className="gb-message-menu-panel" role="menu" aria-label="Actions du message">
           <div className="gb-reaction-row" role="group" aria-label="Réaction">
             {REACTIONS.map((emoji) => (

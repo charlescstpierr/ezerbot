@@ -189,8 +189,8 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .composer .tool-pill b { min-width: 0; }
 .composer .tool-pill .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .composer .tool-pill:hover:enabled, .composer .tool-pill[aria-expanded="true"] { background: var(--soft); box-shadow: none; }
-.composer .composer-tools { flex: 0 0 auto; min-width: 0; flex-wrap: nowrap; }
-.composer [data-picker="model"] { max-width: 220px; }
+.composer .composer-tools { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
+.composer [data-picker="model"] { flex: 0 0 auto; max-width: 220px; }
 .composer [data-picker="model"] b { min-width: 0; }
 .composer .composer-bot { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .tool-pill:disabled { opacity: .55; }
@@ -377,8 +377,8 @@ a.secondary-button { text-decoration: none; }
 .draft-restore { color: var(--accent-ink); text-decoration: underline; font: inherit; font-size: 10px; line-height: 1.2; padding: 0; white-space: nowrap; flex: 0 0 auto; }
 @media (max-width: 910px) {
   .composer-bottom { gap: 8px; }
-  .composer-tools { gap: 4px; }
-  .composer-tools .tool-pill { gap: 3px; padding-inline: 5px; }
+  .composer-tools { gap: 2px; }
+  .composer-tools .tool-pill { gap: 2px; padding-inline: 3px; }
   .composer-caption:has(#restore-link-draft:not([hidden])) > #composer-hint:not([data-alert="true"]) { display: none; }
 }
 #bot-form > .dialog-footer { flex-wrap: wrap; }
@@ -496,9 +496,10 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   .composer-model { flex: 1 1 auto; min-width: 0; }
   .composer .composer-mascot,
   .composer .tool-pill > .icon { display: none; }
-  .composer .tool-pill { padding: 0 5px; }
+  .composer .tool-pill { padding: 0 3px; }
   /* Le bouton du bot cède seulement quand le nom dépasse ; le plus reste compact. */
   .composer .composer-bot { flex-shrink: 1; max-width: none; }
+  .composer .composer-bot-name { min-width: 45px; }
   .composer .attachment-choose { width: 26px; }
   .composer-tools [data-picker="effort"],
   .composer-tools [data-picker="speed"] { flex-shrink: 1; }

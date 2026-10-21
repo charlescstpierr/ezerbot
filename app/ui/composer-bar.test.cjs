@@ -27,9 +27,12 @@ function chromeBinary() {
   return CHROME_CANDIDATES.find(chromeOnPath) || "google-chrome";
 }
 
-function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium" } = {}) {
+function page(name, { pills = true, model = "GPT-6.1 Sol", effort = "medium", speed = "" } = {}) {
+  const speedPill = speed
+    ? `<button class="tool-pill" type="button" data-picker="speed"><small>Vitesse</small><b>${speed}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
+    : "";
   const tools = pills
-    ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>`
+    ? `<button class="tool-pill" type="button" data-picker="model"><small>Modèle</small><b>${model}</b><svg class="icon"><use href="#i-chevron"/></svg></button><button class="tool-pill" type="button" data-picker="effort"><small>Effort</small><b>${effort}</b><svg class="icon"><use href="#i-chevron"/></svg></button>${speedPill}`
     : "";
   return `<!doctype html>
 <html lang="fr" data-theme="dark" data-accent="citron">
@@ -384,6 +387,20 @@ test("Notifications, Créer un groupe and Membres keep their height at 820px", a
         );
       }
     }
+  }
+});
+
+test("pills yield before a short bot name at 500px", async () => {
+  const report = await measure(500, 780, "Ezerbot", { model: "GPT-6.1 Sol", effort: "Moyen", speed: "Standard" });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} ${JSON.stringify(theme.pieces)}`;
+    assert.equal(theme.name, "Ezerbot", where);
+    assert.equal(theme.nameFits, true, where);
+    assert.ok(theme.nameClient >= 45, where);
+    assert.equal(theme.chevronInside, true, where);
+    assert.equal(theme.toolsClear, true, where);
+    assert.equal(theme.modelFits, true, where);
+    assert.ok(theme.modelLabelWidth >= 40, where);
   }
 });
 

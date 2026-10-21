@@ -815,7 +815,7 @@
   const thread = {
     createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
-    onRegenerate: (message) => message.error_kind === "local_connection" || (message.payload?.wait_reason === "signin" && currentConversation()?.kind === "group") ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
+    onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => signInCodex(),
     onCardAction: cardAction,
     get usageUrl() { return usageUrl(); },
@@ -868,7 +868,7 @@
     ui.welcome.hidden = hasMessages;
     document.querySelector(".bot-picker").hidden = conversation?.kind === "group";
     ui.messages.hidden = !hasMessages;
-    window.GrokbotChat.renderThread(ui.messages, { messages: window.GrokbotChat.connectionMessages(conversation?.messages || [], connected), busy: busy && connected, botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
+    window.GrokbotChat.renderThread(ui.messages, { messages: window.GrokbotChat.connectionMessages(conversation?.messages || [], connected), busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, ...thread });
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();

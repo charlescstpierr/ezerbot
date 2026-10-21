@@ -553,13 +553,8 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
     let routines = routine::list(conn, &bot.id)?
         .into_iter()
         .filter_map(|routine| {
-            let prompt;
-            let skill;
-            match routine.body {
-                RoutineBody::InlinePrompt { prompt: text } => {
-                    prompt = Some(text);
-                    skill = None;
-                }
+            let (prompt, skill) = match routine.body {
+                RoutineBody::InlinePrompt { prompt: text } => (Some(text), None),
                 RoutineBody::SkillInvocation { skill_id, .. } => {
                     let Some(found) = skills.iter().find(|skill| skill.skill_id == skill_id) else {
                         warnings.push(format!(
@@ -568,10 +563,9 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
                         ));
                         return None;
                     };
-                    prompt = None;
-                    skill = Some(found.content.display_name.clone());
+                    (None, Some(found.content.display_name.clone()))
                 }
-            }
+            };
             Some(RoutineDocument {
                 name: routine.name,
                 schedule: None,

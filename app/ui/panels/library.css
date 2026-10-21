@@ -23,9 +23,16 @@
 .library-error:empty { display: none; }
 .library-list { list-style: none; margin: 8px 0 0; padding: 0; }
 .library-empty { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
-.library-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); min-width: 0; }
-.library-row strong { font-size: 12px; overflow-wrap: anywhere; }
-.library-row small { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.library-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.library-copy { min-width: 0; }
+.library-row strong, .library-row small { display: block; overflow-wrap: anywhere; }
+.library-row strong { font-size: 12px; }
+.library-row small { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.library-row button { flex: 0 0 auto; }
+.library-confirm { margin-top: 10px; padding: 12px; background: var(--soft); border-radius: 7px; }
+.library-confirm[hidden] { display: none; }
+.library-confirm button { margin: 4px 8px 0 0; }
+.library-confirm button:disabled { opacity: .6; }
 @media (prefers-reduced-motion: reduce) {
   .library-drop { transition: none; }
 }

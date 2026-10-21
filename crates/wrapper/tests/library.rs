@@ -106,6 +106,42 @@ impl Fixture {
         )
     }
 
+    fn remove(&mut self, bot: &str, id: &str) -> Value {
+        self.remove_result(bot, id).unwrap()
+    }
+
+    fn remove_result(&mut self, bot: &str, id: &str) -> Result<Value, ApiError> {
+        self.app.api(
+            "POST",
+            "/api/library/remove",
+            &serde_json::to_vec(&json!({"bot_id": bot, "id": id})).unwrap(),
+        )
+    }
+
+    fn cite_present(&self) {
+        self.server.seen.lock().unwrap().reply_for = Some(Arc::new(|body: &Value| {
+            let instructions = body["instructions"].as_str().unwrap_or("");
+            if instructions.starts_with("Extraction de mémoire automatique.")
+                || instructions.contains("Tu écris le titre")
+            {
+                return None;
+            }
+            let blob = body.to_string();
+            let text = if blob.contains(FILE_NAME) && blob.contains("99 euros") {
+                "D’après tarifs.md, le tarif X est de 99 euros."
+            } else if blob.contains(FILE_NAME) && blob.contains("42 euros") {
+                "D’après tarifs.md, le tarif X est de 42 euros."
+            } else {
+                "Je n’ai plus cette information."
+            };
+            Some(ScriptedResponse::events(&[
+                json!({"type": "response.created"}),
+                json!({"type": "response.output_text.delta", "delta": text}),
+                json!({"type": "response.completed"}),
+            ]))
+        }));
+    }
+
     fn listed(&mut self, bot: &str) -> Vec<Value> {
         self.app
             .api("GET", &format!("/api/library?bot_id={bot}"), b"")
@@ -390,6 +426,112 @@ fn a_hostile_library_fence_is_escaped_once() {
         1,
         "{prompt}"
     );
+}
+
+#[test]
+fn catalogue_lists_name_size_and_date() {
+    let mut f = Fixture::new();
+    f.bot("bot-a", "Alpha");
+    let bytes = "Le tarif X est de 42 euros.".as_bytes();
+    let saved = f.deposit("bot-a", FILE_NAME, bytes);
+    let file = &saved["files"][0];
+    assert_eq!(file["name"], FILE_NAME);
+    assert_eq!(file["byte_length"], bytes.len());
+    assert!(
+        file["added_at"].as_i64().is_some_and(|stamp| stamp > 0),
+        "la liste doit donner la date : {saved}"
+    );
+    assert!(!saved.to_string().contains("42 euros"));
+}
+
+#[test]
+fn replacement_cites_the_new_tariff_and_leaves_the_other_bot() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    f.bot("bot-b", "Bravo");
+    f.deposit("bot-a", FILE_NAME, "Le tarif X est de 42 euros.".as_bytes());
+    f.deposit("bot-b", FILE_NAME, "Le tarif X est de 7 euros.".as_bytes());
+    let replaced = "Le tarif X est de 99 euros.";
+    let saved = f.deposit("bot-a", FILE_NAME, replaced.as_bytes());
+    let files = saved["files"].as_array().unwrap();
+    assert_eq!(
+        files.len(),
+        1,
+        "le même nom remplace l’ancien fichier : {saved}"
+    );
+    assert_eq!(files[0]["name"], FILE_NAME);
+    assert_eq!(files[0]["byte_length"], replaced.len());
+    assert!(!saved.to_string().contains("42 euros"));
+    assert!(!saved.to_string().contains("99 euros"));
+    assert_eq!(f.listed("bot-b").len(), 1);
+
+    let alpha = f.conversation("bot-a");
+    let bravo = f.conversation("bot-b");
+    let alpha_prompt = f.library_prompt(&alpha);
+    let bravo_prompt = f.library_prompt(&bravo);
+    assert!(
+        alpha_prompt.contains("99 euros") && !alpha_prompt.contains("42 euros"),
+        "Alpha cite la nouvelle version : {alpha_prompt}"
+    );
+    assert!(
+        bravo_prompt.contains("7 euros") && !bravo_prompt.contains("99 euros"),
+        "Bravo garde son propre fichier : {bravo_prompt}"
+    );
+    f.cite_present();
+    f.ask(&alpha, "question-replace");
+    let reply = f.reply(&alpha, "question-replace");
+    assert!(
+        reply.contains(FILE_NAME) && reply.contains("99 euros") && !reply.contains("42"),
+        "la citation suit la nouvelle version : {reply}"
+    );
+}
+
+#[test]
+fn removal_hides_the_file_from_the_next_thread() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    f.bot("bot-b", "Bravo");
+    let saved = f.deposit("bot-a", FILE_NAME, "Le tarif X est de 42 euros.".as_bytes());
+    let id = saved["files"][0]["id"].as_str().unwrap().to_owned();
+    f.deposit("bot-b", FILE_NAME, "Le tarif X est de 7 euros.".as_bytes());
+    let removed = f.remove("bot-a", &id);
+    assert!(
+        removed["files"].as_array().unwrap().is_empty(),
+        "le retrait vide la liste de Alpha : {removed}"
+    );
+    assert_eq!(f.listed("bot-b").len(), 1, "le fichier de Bravo reste");
+    let bravo_id = f.listed("bot-b")[0]["id"].as_str().unwrap().to_owned();
+    let foreign = f.remove_result("bot-a", &bravo_id).unwrap_err();
+    assert_eq!(foreign.status, 404);
+    assert_eq!(
+        foreign.message,
+        "Ce fichier n’est pas dans la bibliothèque."
+    );
+    assert_eq!(f.listed("bot-b").len(), 1);
+
+    f.cite_present();
+    let alpha = f.conversation("bot-a");
+    f.ask(&alpha, "question-gone");
+    let reply = f.reply(&alpha, "question-gone");
+    assert!(
+        reply.contains("Je n’ai plus cette information"),
+        "Alpha dit que l’information n’est plus là : {reply}"
+    );
+    assert!(
+        !reply.contains("42") && !reply.contains(FILE_NAME),
+        "Alpha ne cite plus le fichier retiré : {reply}"
+    );
+    assert!(f.library_prompt(&alpha).is_empty() || !f.library_prompt(&alpha).contains("42 euros"));
+
+    let oversized = vec![b'a'; 20 * 1024 * 1024 + 1];
+    let huge = f
+        .deposit_result("bot-a", "gros.txt", &oversized)
+        .unwrap_err();
+    assert_eq!(huge.status, 400);
+    assert_eq!(huge.message, "Le document dépasse la limite de 20 Mo.");
+    assert!(f.listed("bot-a").is_empty());
 }
 
 fn stored_zip(parts: &[(&str, &[u8])]) -> Vec<u8> {

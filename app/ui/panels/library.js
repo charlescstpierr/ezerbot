@@ -13,6 +13,23 @@
     if (text !== undefined) el.textContent = text;
     return el;
   };
+  const button = (text, action, className = "secondary-button") => {
+    const el = node("button", className, text);
+    el.type = "button";
+    el.addEventListener("click", action);
+    return el;
+  };
+  function sizeLabel(bytes) {
+    const value = Number(bytes) || 0;
+    if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo`;
+    if (value >= 1024) return `${(value / 1024).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Ko`;
+    return `${value.toLocaleString("fr-FR")} octets`;
+  }
+  function dateLabel(stamp) {
+    const date = new Date(stamp);
+    if (!Number.isFinite(Number(stamp)) || Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString("fr-CA", { dateStyle: "medium", timeStyle: "short" });
+  }
   function extension(name) {
     const base = String(name || "").split(/[\\/]/).pop();
     const dot = base.lastIndexOf(".");
@@ -40,6 +57,8 @@
         return;
       }
       let alive = true;
+      let shown = [];
+      let pending = null;
       const drop = node("div", "library-drop");
       drop.tabIndex = 0;
       drop.setAttribute("role", "button");
@@ -55,20 +74,61 @@
       const error = node("p", "library-error");
       error.setAttribute("role", "alert");
       const list = node("ul", "library-list");
-      section.append(drop, fileInput, status, error, list);
+      const confirm = node("div", "library-confirm");
+      confirm.hidden = true;
+      const confirmText = node("p", "library-note");
+      const confirmRemove = button("Retirer le fichier", () => { void commitRemove(); }, "danger-button");
+      const cancel = button("Annuler", () => { pending = null; confirm.hidden = true; });
+      confirm.append(confirmText, confirmRemove, cancel);
+      section.append(drop, fileInput, status, error, list, confirm);
 
       function render(files) {
         if (!alive) return;
+        shown = Array.isArray(files) ? files : [];
+        if (pending && !shown.some((file) => file.id === pending.id)) {
+          pending = null;
+          confirm.hidden = true;
+        }
         list.replaceChildren();
-        if (!files.length) {
+        if (!shown.length) {
           list.append(node("li", "library-empty", "Aucun fichier pour l’instant."));
           return;
         }
-        for (const file of files) {
+        for (const file of shown) {
           const row = node("li", "library-row");
+          const copy = node("div", "library-copy");
           const format = String(file.format || "").toUpperCase();
-          row.append(node("strong", "", file.name), node("small", "", `${format} · ${file.byte_length} octets`));
+          const when = dateLabel(file.added_at);
+          copy.append(node("strong", "", file.name), node("small", "", `${format} · ${sizeLabel(file.byte_length)}${when ? ` · ${when}` : ""}`));
+          const remove = button("Retirer", () => askRemove(file));
+          remove.setAttribute("aria-label", `Retirer ${file.name}`);
+          row.append(copy, remove);
           list.append(row);
+        }
+      }
+      function askRemove(file) {
+        pending = file;
+        confirmText.textContent = `Retirer ${file.name} ? Les nouveaux fils de ce bot ne le citeront plus.`;
+        confirm.hidden = false;
+      }
+      async function commitRemove() {
+        if (!pending) return;
+        const file = pending;
+        confirmRemove.disabled = true;
+        try {
+          const saved = await panels.api("/api/library/remove", { bot_id: bot.id, id: file.id });
+          if (!alive) return;
+          pending = null;
+          confirm.hidden = true;
+          render(saved.files || []);
+          error.textContent = "";
+          status.textContent = `${file.name} a été retiré.`;
+        } catch (failure) {
+          if (!alive) return;
+          error.textContent = failure.message;
+          panels.notify(failure.message);
+        } finally {
+          confirmRemove.disabled = false;
         }
       }
       async function ingest(file) {
@@ -91,11 +151,14 @@
           error.textContent = "Lecture du fichier impossible.";
           return;
         }
+        const replacing = shown.some((item) => item.name === file.name);
         try {
           const saved = await panels.api("/api/library", { bot_id: bot.id, name: file.name, data });
           if (!alive) return;
           render(saved.files || []);
-          status.textContent = `${file.name} est dans la bibliothèque.`;
+          status.textContent = replacing
+            ? `${file.name} remplace la version précédente.`
+            : `${file.name} est dans la bibliothèque.`;
         } catch (failure) {
           if (!alive) return;
           status.textContent = "";

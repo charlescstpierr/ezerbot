@@ -1,5 +1,5 @@
 //! Fichiers de contexte d’un bot. Le texte extrait reste local, sans index distant.
-//! Un autre bot ne reçoit pas ces fichiers. Le retrait et le remplacement sont ailleurs.
+//! Un autre bot ne reçoit pas ces fichiers. Le même nom remplace la version précédente.
 
 use super::{write_transaction, Context};
 use crate::{now, parse, validate_id, ApiError, ApiResponse, App, ACCOUNT};
@@ -39,6 +39,7 @@ struct Stored {
     extension: String,
     byte_length: i64,
     text: String,
+    added_at: i64,
 }
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
@@ -53,7 +54,18 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             text TEXT NOT NULL,
             added_at INTEGER NOT NULL,
             PRIMARY KEY (account_id, bot_id, file_id)
-        );",
+        );
+        DELETE FROM bot_library
+        WHERE EXISTS (
+            SELECT 1 FROM bot_library AS newer
+            WHERE newer.account_id = bot_library.account_id
+              AND newer.bot_id = bot_library.bot_id
+              AND newer.name = bot_library.name
+              AND (newer.added_at > bot_library.added_at
+                OR (newer.added_at = bot_library.added_at AND newer.file_id > bot_library.file_id))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS bot_library_bot_name
+            ON bot_library(account_id, bot_id, name);",
     )?;
     Ok(())
 }
@@ -65,15 +77,19 @@ pub fn routes(
     body: &[u8],
 ) -> Option<Result<ApiResponse, ApiError>> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
-    if !matches!((method, route), ("GET" | "POST", "/api/library")) {
+    if !matches!(
+        (method, route),
+        ("GET" | "POST", "/api/library") | ("POST", "/api/library/remove")
+    ) {
         return None;
     }
-    Some(dispatch(app, method, query, body))
+    Some(dispatch(app, method, route, query, body))
 }
 
 fn dispatch(
     app: &mut App,
     method: &str,
+    route: &str,
     query: &str,
     body: &[u8],
 ) -> Result<ApiResponse, ApiError> {
@@ -90,6 +106,9 @@ fn dispatch(
             400,
             "Utilisez le corps JSON pour cette action.",
         ));
+    }
+    if route == "/api/library/remove" {
+        return remove_file(app, body);
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -117,10 +136,14 @@ fn dispatch(
     let document =
         documents::prepare(&app.connection, &input.name, &bytes).map_err(document_error)?;
     let tx = write_transaction(&app.connection)?;
+    // The same display name is one file: the new extraction replaces the old one.
+    tx.execute(
+        "DELETE FROM bot_library WHERE account_id = ?1 AND bot_id = ?2 AND name = ?3",
+        params![ACCOUNT, input.bot_id, document.name],
+    )?;
     tx.execute(
         "INSERT INTO bot_library (account_id, bot_id, file_id, name, format, byte_length, text, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT (account_id, bot_id, file_id) DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             ACCOUNT,
             input.bot_id,
@@ -157,6 +180,35 @@ fn document_error(error: grokbot_engine::contracts::Error) -> ApiError {
     }
 }
 
+fn remove_file(app: &mut App, body: &[u8]) -> Result<ApiResponse, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Remove {
+        bot_id: String,
+        id: String,
+    }
+    let input: Remove = parse(body)?;
+    validate_id(&input.bot_id)?;
+    validate_id(&input.id)?;
+    app.require_bot(&input.bot_id)?;
+    let tx = write_transaction(&app.connection)?;
+    let deleted = tx.execute(
+        "DELETE FROM bot_library WHERE account_id = ?1 AND bot_id = ?2 AND file_id = ?3",
+        params![ACCOUNT, input.bot_id, input.id],
+    )?;
+    if deleted == 0 {
+        return Err(ApiError::new(
+            404,
+            "Ce fichier n’est pas dans la bibliothèque.",
+        ));
+    }
+    tx.commit()?;
+    Ok(ApiResponse::Json(catalogue(
+        &app.connection,
+        &input.bot_id,
+    )?))
+}
+
 fn catalogue(conn: &Connection, bot: &str) -> Result<Value, ApiError> {
     let files = list(conn, bot)?
         .iter()
@@ -166,6 +218,7 @@ fn catalogue(conn: &Connection, bot: &str) -> Result<Value, ApiError> {
                 "name": file.name,
                 "format": file.extension,
                 "byte_length": file.byte_length,
+                "added_at": file.added_at,
             })
         })
         .collect::<Vec<_>>();
@@ -174,7 +227,7 @@ fn catalogue(conn: &Connection, bot: &str) -> Result<Value, ApiError> {
 
 fn list(conn: &Connection, bot: &str) -> Result<Vec<Stored>, ApiError> {
     let mut statement = conn.prepare(
-        "SELECT file_id, name, format, byte_length, text FROM bot_library
+        "SELECT file_id, name, format, byte_length, text, added_at FROM bot_library
          WHERE account_id = ?1 AND bot_id = ?2 ORDER BY added_at, file_id",
     )?;
     let rows = statement.query_map(params![ACCOUNT, bot], |row| {
@@ -184,6 +237,7 @@ fn list(conn: &Connection, bot: &str) -> Result<Vec<Stored>, ApiError> {
             extension: row.get(2)?,
             byte_length: row.get(3)?,
             text: row.get(4)?,
+            added_at: row.get(5)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(ApiError::from)

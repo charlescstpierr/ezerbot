@@ -119,6 +119,7 @@ impl Session {
         })?;
         self.inner.local_revoked.store(false, Ordering::SeqCst);
         *lock(&self.inner.catalog) = Catalog::default();
+        self.reset_quota();
         Ok(())
     }
 
@@ -157,6 +158,204 @@ impl Session {
                 "application/json"
             },
         ))
+    }
+}
+
+/// Only typed, validated quota fields ever leave this module. Never return the
+/// upstream body (which may contain account information or diagnostics).
+#[derive(Clone, Serialize)]
+struct UsageWindow {
+    used_percent: f64,
+    remaining_percent: f64,
+    limit_window_seconds: u64,
+    reset_at: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+struct Quota {
+    plan: Option<String>,
+    primary: Option<UsageWindow>,
+    secondary: Option<UsageWindow>,
+    checked_at: u64,
+}
+
+#[derive(Default)]
+pub(super) struct UsageCache {
+    generation: u64,
+    loading: bool,
+    attempted: Option<Instant>,
+    quota: Option<Quota>,
+    error: Option<Failure>,
+}
+
+fn quota_window(value: &Value, now: u64) -> Result<Option<UsageWindow>, Failure> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let invalid = || Failure::other("Le quota Codex reçu est incomplet ou illisible.");
+    let used = value["used_percent"].as_f64().ok_or_else(invalid)?;
+    let duration = value["limit_window_seconds"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or_else(invalid)?;
+    if !used.is_finite() || !(0.0..=100.0).contains(&used) {
+        return Err(invalid());
+    }
+    let reset = if value["reset_at"].is_null() {
+        value["reset_after_seconds"]
+            .as_u64()
+            .and_then(|n| now.checked_add(n))
+    } else {
+        Some(value["reset_at"].as_u64().ok_or_else(invalid)?)
+    };
+    if reset.is_some_and(|n| n == 0 || n > 253_402_300_799) {
+        return Err(invalid());
+    }
+    Ok(Some(UsageWindow {
+        used_percent: used,
+        remaining_percent: 100.0 - used,
+        limit_window_seconds: duration,
+        reset_at: reset,
+    }))
+}
+
+impl Session {
+    pub(super) fn reset_quota(&self) {
+        let mut cache = lock(&self.inner.quota);
+        let generation = cache.generation.wrapping_add(1);
+        *cache = UsageCache {
+            generation,
+            ..UsageCache::default()
+        };
+    }
+
+    fn read_quota(&self) -> Result<Quota, Failure> {
+        // Derive the sibling WHAM route from the injected Codex endpoint, never
+        // from an arbitrary URL supplied by a model or by the web UI.
+        let base = self
+            .inner
+            .endpoints
+            .api
+            .trim_end_matches('/')
+            .strip_suffix("/codex")
+            .ok_or_else(|| Failure::other("Le point d’accès au quota Codex est indisponible."))?;
+        for attempt in 0..2 {
+            let token = self.bearer(attempt > 0)?;
+            let access = claims(&token).ok_or_else(Failure::signin)?;
+            let account = access[AUTH_CLAIM]["chatgpt_account_id"]
+                .as_str()
+                .ok_or_else(Failure::signin)?;
+            if self.inner.local_revoked.load(Ordering::SeqCst) {
+                return Err(Failure::signin());
+            }
+            let response = ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(5))
+                .timeout(Duration::from_secs(12))
+                .redirects(0)
+                .build()
+                .get(&format!("{base}/wham/usage"))
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("chatgpt-account-id", account)
+                .set("User-Agent", "ezerbot/0.1.0")
+                .set("Accept", "application/json")
+                .call();
+            let response = match response {
+                Ok(response) => response,
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => continue,
+                Err(ureq::Error::Status(401 | 403, _)) => return Err(Failure::signin()),
+                Err(_) => {
+                    return Err(Failure::other(
+                        "Impossible de lire le quota Codex. Réessayez dans un instant.",
+                    ))
+                }
+            };
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            response
+                .into_reader()
+                .take(65_537)
+                .read_to_end(&mut bytes)
+                .map_err(|_| Failure::other("Lecture du quota Codex interrompue."))?;
+            let value: Value = if bytes.len() <= 65_536 {
+                serde_json::from_slice(&bytes).ok()
+            } else {
+                None
+            }
+            .ok_or_else(|| Failure::other("Le quota Codex reçu est illisible."))?;
+            let now = seconds();
+            let primary = quota_window(&value["rate_limit"]["primary_window"], now)?;
+            let secondary = quota_window(&value["rate_limit"]["secondary_window"], now)?;
+            if primary.is_none() && secondary.is_none() {
+                return Err(Failure::other(
+                    "Ce forfait ne fournit pas de jauge de quota Codex.",
+                ));
+            }
+            return Ok(Quota {
+                plan: value["plan_type"]
+                    .as_str()
+                    .filter(|s| s.len() <= 64)
+                    .map(str::to_owned),
+                primary,
+                secondary,
+                checked_at: now,
+            });
+        }
+        Err(Failure::signin())
+    }
+
+    /// Nonblocking, coalesced and throttled: ordinary /api/state polling must
+    /// never wait on OpenAI or repeatedly consume the provider's rate limit.
+    pub(super) fn quota_status(&self, refresh: bool) -> Value {
+        if !self.connected() {
+            return json!({"status":"signin"});
+        }
+        let mut cache = lock(&self.inner.quota);
+        let age = cache.attempted.map(|t| t.elapsed());
+        if !cache.loading
+            && age.is_none_or(|age| age >= Duration::from_secs(if refresh { 5 } else { 60 }))
+        {
+            cache.loading = true;
+            cache.attempted = Some(Instant::now());
+            let session = self.clone();
+            let generation = cache.generation;
+            thread::spawn(move || {
+                let result = session.read_quota();
+                let mut cache = lock(&session.inner.quota);
+                // A late read must not restore a signed-out/replaced session.
+                if cache.generation != generation {
+                    return;
+                }
+                cache.loading = false;
+                match result {
+                    Ok(quota) => {
+                        cache.quota = Some(quota);
+                        cache.error = None;
+                    }
+                    Err(error) => {
+                        cache.quota = None;
+                        cache.error = Some(error);
+                    }
+                }
+            });
+        }
+        if let Some(quota) = &cache.quota {
+            // An expired window is unknown until OpenAI confirms the reset;
+            // never manufacture a fresh 100% quota locally.
+            let expired = [&quota.primary, &quota.secondary]
+                .into_iter()
+                .flatten()
+                .any(|w| w.reset_at.is_some_and(|reset| reset <= seconds()));
+            if !expired {
+                return json!({"status":"ready", "quota":quota, "refreshing":cache.loading});
+            }
+        }
+        if let Some(error) = &cache.error {
+            json!({"status":"unavailable", "message":error.message, "kind":error.kind, "refreshing":cache.loading})
+        } else if cache.quota.is_some() {
+            json!({"status":"unavailable", "message":"Réinitialisation attendue : actualisez pour confirmer le nouveau quota chez OpenAI.", "refreshing":cache.loading})
+        } else {
+            json!({"status":"loading", "refreshing":cache.loading})
+        }
     }
 }
 

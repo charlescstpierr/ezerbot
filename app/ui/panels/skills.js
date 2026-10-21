@@ -152,7 +152,8 @@
     const add = button("Nouvelle skill", () => void openEditor(null));
     const chooseFiles = button("Importer des fichiers", () => fileInput.click());
     const chooseDirectory = button("Importer un dossier", () => directoryInput.click());
-    actions.append(add, chooseFiles, chooseDirectory, fileInput, directoryInput);
+    const demonstrate = button("Montrer au bot", () => window.EzerbotDemonstration?.open(bot.id));
+    actions.append(add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput);
     section.append(node("p", "skills-note", "Import par paquets de 8 Mio. Chaque paquet est indépendant : des fichiers de même nom de frontmatter dans des paquets différents peuvent mettre à jour la même skill (historique conservé)."));
 
     // Dialogs live outside #bot-form: nested forms would submit bot settings.
@@ -319,10 +320,13 @@
     function render() {
       if (!alive) return;
       const locked = job.running || job.mutating;
-      for (const control of [add, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
+      const recording = panels.state.demonstrations?.session;
+      demonstrate.textContent = recording?.status === "recording" && recording.bot_id === bot.id ? "Démonstration en cours…" : "Montrer au bot";
+      demonstrate.title = recording?.status === "recording" && recording.bot_id === bot.id ? "Ouvrir les contrôles de la démonstration" : "Montrer une tâche sur votre Mac";
+      for (const control of [add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
       const skills = panels.state.skills?.by_bot?.[bot.id] || [];
       add.disabled = locked || skills.length >= 250;
-      const next = JSON.stringify([skills, locked, panels.state.skills?.error]);
+      const next = JSON.stringify([skills, locked, panels.state.skills?.error, panels.state.demonstrations?.links]);
       if (signature !== next) {
         signature = next;
         list.replaceChildren();
@@ -337,7 +341,13 @@
           const edit = button("Modifier / historique", () => void openEditor(skill.skill_id));
           edit.setAttribute("aria-label", `Modifier / historique : ${displayName(skill)}`); edit.disabled = locked;
           edit.dataset.skillId = skill.skill_id;
-          row.append(copy, edit); list.append(row);
+          const rowActions = node("div", "skills-row-actions"); rowActions.append(edit);
+          const demonstration = panels.state.demonstrations?.links?.find(link => link.skill_id === skill.skill_id);
+          if (demonstration) {
+            const view = button("Voir la démonstration", () => window.EzerbotDemonstration?.showSummary(demonstration.id));
+            view.setAttribute("aria-label", `Voir la démonstration : ${displayName(skill)}`); rowActions.append(view);
+          }
+          row.append(copy, rowActions); list.append(row);
         }
       }
       if (focusPending && !locked && !dialog.open) {

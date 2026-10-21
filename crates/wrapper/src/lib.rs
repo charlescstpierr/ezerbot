@@ -882,6 +882,7 @@ impl App {
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
         features::screen::startup(path);
+        features::demonstrations::startup(&connection, path)?;
         features::engine::startup(&connection)?;
         features::screen::reconcile(&connection, path)?;
         if let Err(error) = features::storage::startup(&connection, path, now() as i64) {

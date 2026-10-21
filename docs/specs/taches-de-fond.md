@@ -26,6 +26,8 @@ Il peut envoyer une ligne sur l’entrée standard d’une tâche En cours. Une 
 
 ## Décisions
 
+La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences. La carte, Arrêter et la saisie ne sont pas des symboles du client Grok.
+
 1. **L’arrière-plan est un mode du shell, pas un second outil.** L’approbation déjà livrée précède le lancement. Le mode au premier plan garde son délai : 30 s par défaut, 120 s au plus. Le mode arrière-plan n’a pas ce plafond de temps. La carte montre En cours, puis Terminée et le code, y compris un code différent de zéro. La sortie se lit sur la carte. Le plafond de taille de sortie déjà en vigueur reste. S’il est atteint, la carte le dit.
 2. **Arrêter tue le processus.** Le bouton de la carte envoie l’arrêt tout de suite, sans seconde approbation et sans « Toujours ». L’état passe à Arrêtée. Une autre tâche du fil n’est pas touchée. Le code affiché n’est pas un 0 inventé.
 3. **Quitter l’app arrête la tâche.** Le processus ne survit pas à la fermeture. Au retour, la carte dit Arrêtée. Elle ne dit pas En cours. Un arrêt brutal du Mac a le même affichage au rallumage : la tâche n’est pas relancée, et elle n’est pas laissée marquée En cours.
@@ -89,6 +91,15 @@ La tranche commence par un test rouge, puis le code qui le rend vert. Le juge vi
 - **Longue sortie.** Le plafond actuel évite une carte sans fin. La carte doit dire que la sortie est coupée, sinon Charles lit un extrait comme s’il était complet.
 - **Fermeture brutale.** Le processus meurt avec le Mac. Au retour, afficher En cours serait faux. Le parcours 2 couvre la fermeture propre. L’arrêt brutal est la même règle d’affichage : pas En cours, pas de relance.
 - **Le cloud rouvert par accident.** Un mode arrière-plan n’est pas un ordinateur distant. Rien dans cette spec ne fait tourner une commande quand le Mac est éteint.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, `grokbot-rea.md` §b et §f, et `tickets-parite.md` T8, T9, T10, R8. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
+
+- **Le shell exige le Mac.** [P] rea §f range le shell local parmi ce qui exige l’ordinateur. [P] l’erreur Mac absent est « The user's computer stopped serving requests before this one started. Retry it once the computer is back. » dans `local-exec-daemon/main.cjs`.
+- **Carte, Arrêter, saisie.** Aucun symbole client pour la carte d’une commande longue, le bouton Arrêter de cette carte, ni l’écriture sur l’entrée standard, ni dans `tickets-parite.md` ni dans `grokbot-rea.md`. [I] T8 et T9 reprennent le scénario SCR-3 du tableau de parité. Le nom d’un gestionnaire de shell d’arrière-plan qui figurerait ailleurs n’est pas une preuve de ces deux fichiers. Il n’est pas cité ici.
+- **Cloud reporté.** [P] `SandBoxRunState` : `ABSENT`, `HIBERNATED`, `RUNNING`, `STARTING`, dans `electron-main/proto.cjs` (rea §b). [P] « Bots and chats stay on the account's cloud computer and are back when you sign in again. » (rea §f). [P] `GrokBotUserMessageDelivery` : `ACCEPTED_BOX`, `ACCEPTED_TEMPORAL`. [I] fort, rea §f : Mac éteint, le chat, les routines, les réunions, les connecteurs et les images continuent. Ezerbot ne copie pas ce cloud dans ce lot. #63, #53 et la spec des routines disent « Mac seulement, cloud plus tard ». Pas de ticket.
+- **Outils du téléphone.** [P] `SandMachineLocalTool` (`tool_id`, `state`) et drapeau `sand_mobile_local_tools` désactivé par défaut dans `electron-main/main-app.cjs` (R8). [P] la chaîne « Allow Grok Bot to use an on-device tool on your phone? » (rea §f). Hors périmètre, avec T10.
 
 ## Tranches
 

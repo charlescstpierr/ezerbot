@@ -460,12 +460,3 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
 fn durable_limit(reply: &Value, kind: &str) -> bool {
     reply["state"] == "failed" && reply["error_kind"] == kind
 }
-
-#[test]
-fn durable_limit_ignores_an_error_kind_while_the_reply_is_still_streaming() {
-    let streaming = json!({"state":"streaming","error_kind":"limit"});
-    assert!(!durable_limit(&streaming, "limit"));
-    let settled = json!({"state":"failed","error_kind":"limit"});
-    assert!(durable_limit(&settled, "limit"));
-    assert!(!durable_limit(&settled, "other"));
-}

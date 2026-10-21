@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 import { floatingConversations, floatingReply, floatingPendingRequests, floatingHasMore, resizeFloatingInput } from "./floating-view.js";
+import { floatingFailureState } from "./connection-view.js";
 
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.events = {}; this.value = "cmd+option+space"; }
@@ -108,10 +109,79 @@ test("overflow hint disappears at the bottom and tolerates fractional pixel roun
   assert.equal(floatingHasMore(null),false);
 });
 
+test("a reconnected account follows provider.connected instead of the stale sign-in kind", () => {
+  const expired = { state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." };
+  const missing = { state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." };
+  for (const reply of [expired, missing]) {
+    const view = floatingFailureState(reply, { providerConnected: true });
+    assert.equal(view.title, "Compte ChatGPT connecté");
+    assert.equal(view.alert, false);
+    assert.doesNotMatch(`${view.title} ${view.detail}`, /expiré|requise|Reconnectez/);
+  }
+  assert.equal(floatingFailureState(expired, { providerConnected: false }).title, "Votre session ChatGPT a expiré");
+  assert.equal(floatingFailureState(missing).title, "Connexion ChatGPT requise");
+  const other = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" }, { providerConnected: true });
+  assert.equal(other.title, "La réponse a échoué.");
+  assert.equal(other.alert, true);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /provider\?\.connected === true/);
+});
+
+test("a floating detail stays neutral when the notice is not an alert", () => {
+  const styles = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
+  const css = readFileSync(new URL("./floating.css", import.meta.url), "utf8");
+  const vars = Object.fromEntries([...styles.match(/:root\s*\{([^}]+)\}/)[1].matchAll(/(--[-\w]+)\s*:\s*([^;]+);/g)].map(([, name, value]) => [name, value.trim()]));
+  const resolve = (value) => value.replace(/var\((--[-\w]+)\)/g, (_, name) => vars[name]);
+  const notice = resolve(css.match(/\.floating-latest small, \.floating-notice\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
+  const danger = resolve(css.match(/\.floating-error\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });
+  const color = (view) => view.detailClass === "floating-error" ? danger : notice;
+  assert.equal(expired.alert, false);
+  assert.equal(expired.detailClass, "");
+  assert.equal(color(expired), vars["--muted"]);
+  assert.notEqual(color(expired), vars["--danger-text"]);
+  assert.equal(failed.detailClass, "floating-error");
+  assert.equal(color(failed), vars["--danger-text"]);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /className=\{failure\.detailClass \|\| undefined\}/);
+});
+
+test("a floating ping points at Ouvrir le fil instead of a missing retry button", () => {
+  const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
+  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
+  assert.doesNotMatch(ping.detail, /Réessayez/);
+  const delayed = floatingFailureState({ state: "failed", error_kind: "other", error: "Les connexions précédentes se ferment encore. Réessayez dans une minute." });
+  assert.equal(delayed.detail, "Les connexions précédentes se ferment encore. Ouvrez le fil dans une minute.");
+  assert.doesNotMatch(delayed.detail, /Réessayez/);
+});
+
+test("a floating panel without a session is not titled as a failed answer", () => {
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  assert.equal(expired.alert, false);
+  assert.equal(expired.title, "Votre session ChatGPT a expiré");
+  assert.equal(expired.detail, "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.");
+  const missing = floatingFailureState({ state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." });
+  assert.equal(missing.alert, false);
+  assert.equal(missing.title, "Connexion ChatGPT requise");
+  const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });
+  assert.equal(failed.alert, true);
+  assert.equal(failed.title, "La réponse a échoué.");
+  assert.equal(failed.detail, "Panne");
+  const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
+  assert.equal(ping.alert, true);
+  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
+  assert.equal(floatingFailureState({ state: "echoed", error_kind: "signin" }), null);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /floatingFailureState\(reply, \{ providerConnected: state\?\.provider\?\.connected === true \}\)/);
+  assert.match(source, /failure\.alert \? " floating-failure" : ""/);
+  assert.match(source, /<strong>\{failure\.title\}<\/strong>/);
+});
+
 test("compact layout keeps decisions outside the scroll region and disabled actions visibly muted", () => {
   const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
   assert.match(source, /<\/div>\s*\{requests\.map\(\(request\) => <div className="floating-notice"/);
-  assert.match(source, /floating-notice floating-failure/);
+  assert.match(source, /floating-notice\$\{failure\.alert \? " floating-failure" : ""\}/);
   assert.match(source, /!inNativePanel && <button className="icon-button floating-close"/);
   assert.ok(!source.includes("reply?.body || reply?.error"));
   assert.match(source, /live && reply\?\.body && <small>/);

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./floating.css";
 
 import { floatingConversations, floatingReply, floatingPendingRequests, floatingHasMore, resizeFloatingInput } from "./floating-view.js";
+import { floatingFailureState } from "./connection-view.js";
 
 async function api(path, body) {
   const controller = new AbortController();
@@ -45,6 +46,7 @@ function Floating() {
   const displayReply = requests.length ? floatingReply(conversation, true) : reply;
   const question = conversation?.messages.filter((m) => m.role === "user").at(-1)?.body;
   const failed = reply?.state === "failed";
+  const failure = floatingFailureState(reply, { providerConnected: state?.provider?.connected === true });
   const live = conversation?.messages.some((m) => ["streaming", "generating", "queued", "dispatching", "unknown"].includes(m.state));
   const unavailable = Boolean(target && !conversation);
 
@@ -164,7 +166,7 @@ function Floating() {
       {overflowing && <span className="floating-overflow-hint">↓ Faites défiler pour lire la suite</span>}
     </div>
     {requests.map((request) => <div className="floating-notice" key={request.id} role="status"><p>Votre décision est attendue dans Ezerbot.</p><button type="button" className="secondary-button" onClick={() => full(request.route.target_conversation_id)}>Voir la demande</button></div>)}
-    {failed && <div className="floating-notice floating-failure" role="alert"><div><strong>La réponse a échoué.</strong><p className="floating-error">{reply.error || "Ouvrez le fil pour reprendre la réponse."}</p></div><button type="button" className="secondary-button" onClick={() => full(target)}>Ouvrir le fil</button></div>}
+    {failure && <div className={`floating-notice${failure.alert ? " floating-failure" : ""}`} role={failure.alert ? "alert" : "status"}><div><strong>{failure.title}</strong><p className={failure.detailClass || undefined}>{failure.detail}</p></div><button type="button" className="secondary-button" onClick={() => full(target)}>Ouvrir le fil</button></div>}
     {error && <p className="floating-error" role="alert">{error}</p>}
     <form className="floating-composer" onSubmit={send}>
       <textarea ref={input} id="floating-message" name="message" aria-label="Message au bot" placeholder="Qu’avez-vous en tête ?" value={draft} maxLength={16384} readOnly={busy || uncertain} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit(); } }} />

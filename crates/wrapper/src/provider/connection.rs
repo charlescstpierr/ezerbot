@@ -370,6 +370,27 @@ impl Provider {
     pub(crate) fn title_finished(&self) {
         self.sharing.title_finished();
     }
+
+    /// API base of the selected session. Image calls derive their host from this.
+    pub(crate) fn image_api_base(&self) -> String {
+        self.session().inner.endpoints.api.clone()
+    }
+
+    /// Connected account bearer, when usable. Callers must not log or debug-print it.
+    pub(crate) fn account_access_token(&self) -> Option<String> {
+        let session = self.session();
+        if session.inner.local_revoked.load(Ordering::SeqCst) {
+            return None;
+        }
+        let _guard = lock(&session.inner.credentials);
+        if session.inner.local_revoked.load(Ordering::SeqCst) {
+            return None;
+        }
+        session
+            .read()
+            .filter(|credentials| credentials.usable(session.inner.codex))
+            .and_then(|credentials| credentials.access_token)
+    }
 }
 
 fn storage_failure(_: std::io::Error) -> Failure {

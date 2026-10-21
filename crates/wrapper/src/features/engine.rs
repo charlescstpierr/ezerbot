@@ -558,6 +558,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 .provider
                 .signout()
                 .map_err(|f| ApiError::new(500, f.message))?;
+            super::images::forget_account_key(&app.db_path);
             Ok(json!({"provider":app.provider.status(),"revoked":revoked}))
         }
         "/api/stop" | "/api/regenerate" => {
@@ -1599,6 +1600,7 @@ impl RunServices for Services<'_> {
         super::local::is_tool(&call.name)
             || super::screen::is_tool(&call.name)
             || super::generated::is_external(&call.name)
+            || super::images::is_external(&call.name)
     }
     fn external_unavailable_reason(
         &self,
@@ -1625,6 +1627,8 @@ impl RunServices for Services<'_> {
             super::screen::execute(&ctx, call, self.cancel.clone())
         } else if super::generated::is_external(&call.name) {
             super::generated::execute(&ctx, call, self.cancel.clone())
+        } else if super::images::is_external(&call.name) {
+            super::images::execute(&ctx, call)
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };
@@ -2781,17 +2785,27 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         // Keep canonical skill content in its lazy approval, not every state row.
         display_call.as_object_mut()?.remove("arguments");
     }
-    Some(card(
+    let mut message = card(
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome,
+        json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome.clone(),
             "authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
         run.started_at.max(0) as u64,
-    ))
+    );
+    if call.name == super::images::TOOL {
+        super::images::present(
+            ctx,
+            &run.conversation_id,
+            id,
+            outcome.as_ref(),
+            &mut message,
+        );
+    }
+    Some(message)
 }
 fn card(id: &str, kind: &str, body: String, payload: Value, created_at: u64) -> Message {
     Message {

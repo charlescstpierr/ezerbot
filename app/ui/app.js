@@ -130,6 +130,10 @@
     return handled;
   }
   async function cardAction(message, action, detail) {
+    if (action === "provider.signin") {
+      await signIn();
+      return true;
+    }
     for (const panel of panels.values()) {
       if (!panel.onCardAction) continue;
       try {

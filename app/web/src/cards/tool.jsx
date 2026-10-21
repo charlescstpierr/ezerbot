@@ -3,6 +3,7 @@ import { localCallView, localStatusLabel, localFailureView, localLimits, localTo
 import { LocalResult } from "../local-result.js";
 import { ScreenCard, screenTools } from "../screen.jsx";
 import { GeneratedDocument, DocumentTool } from "../generated-document.jsx";
+import { GeneratedImage } from "../generated-image.jsx";
 
 export const kind = "tool";
 
@@ -113,6 +114,7 @@ export function Card({ message, onAction, busy }) {
   if (screenTools[call.name]) return <ScreenCard message={message} />;
   if (call.name === "create_document" && outcome?.status === "done" && outcome.output?.id?.startsWith("generated_")) return <GeneratedDocument file={outcome.output} message={message} />;
   if (["create_document", "document_action"].includes(call.name)) return <DocumentTool message={message} run={run} />;
+  if (call.name === "generate_image") return <GeneratedImage message={message} onAction={onAction} />;
   if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const background = call.name === "routines_background_configure";
   const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);

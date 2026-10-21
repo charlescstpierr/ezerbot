@@ -49,6 +49,12 @@ pub struct Seen {
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
     /// Test-only delay before sending Responses headers (without holding Seen).
     pub response_delay: Option<Duration>,
+    /// Image generations are a separate host call from chat Responses.
+    pub image_calls: Vec<Value>,
+    pub image_authorization: Vec<String>,
+    pub image_reply: VecDeque<ScriptedResponse>,
+    /// Held without the Seen lock so a test can observe the in-flight call.
+    pub image_gate: Option<Arc<AtomicBool>>,
 }
 
 pub struct ScriptedResponse {
@@ -374,6 +380,18 @@ impl FakeOpenAi {
                             (200, "text/event-stream".into(), stream)
                         }
                     }
+                    "/v1/images/generations" => {
+                        seen.image_authorization.push(bearer);
+                        let request_body = serde_json::from_str(&body).unwrap_or(Value::Null);
+                        seen.image_calls.push(request_body);
+                        let reply = seen.image_reply.pop_front().unwrap_or_else(|| {
+                            ScriptedResponse::json(
+                                200,
+                                json!({"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII="}]}),
+                            )
+                        });
+                        (reply.status, reply.content_type, reply.body)
+                    }
                     _ => (404, "text/plain".into(), String::new()),
                 };
                 let gate = match request.url() {
@@ -383,6 +401,7 @@ impl FakeOpenAi {
                         .as_ref()
                         .filter(|(at, _)| *at == seen.bodies.len())
                         .map(|(_, gate)| gate.clone()),
+                    "/v1/images/generations" => seen.image_gate.clone(),
                     _ => None,
                 };
                 let gate = if request.url() == "/token" {

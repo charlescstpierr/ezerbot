@@ -2,6 +2,7 @@
 //! Small, deterministic writers reuse the bounded ZIP dependency already used by
 //! the reader. No macros, formulas, remote assets, scripts or shell execution.
 use crate::documents;
+use crate::pdf_font;
 use grokbot_engine::contracts::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write};
@@ -117,15 +118,31 @@ pub fn generate(request: &Request) -> Result<Generated> {
     let mut preview_lines = lines.clone();
     let mut table = None;
     let mut pages = lines.len().div_ceil(48);
+    let mut rich = None;
     let bytes = match format {
         "md" => request.content.as_bytes().to_vec(),
-        "pdf" => pdf(&lines)?,
-        "docx" => docx(&normalized)?,
+        "pdf" => {
+            let (bytes, n) = pdf(&normalized, &lines)?;
+            pages = n;
+            if document_rich(&normalized) {
+                rich = Some(blocks_preview("pdf", &blocks(&normalized)));
+            }
+            bytes
+        }
+        "docx" => {
+            if document_rich(&normalized) {
+                rich = Some(blocks_preview("docx", &blocks(&normalized)));
+            }
+            docx(&normalized)?
+        }
         "pptx" => {
-            let slides = slides(&request.content)?;
-            pages = slides.len();
-            preview_lines = slides[0].clone();
-            pptx(&slides)?
+            let deck = slides(&request.content)?;
+            pages = deck.len();
+            preview_lines = deck[0].lines();
+            if deck[0].rich() {
+                rich = Some(blocks_preview("pptx", &deck[0].as_blocks()));
+            }
+            pptx(&deck)?
         }
         "csv" | "xlsx" => {
             let rows: Vec<Vec<String>> = serde_json::from_str(&request.content).map_err(|_| invalid("Pour CSV ou Excel, content doit être un tableau JSON de lignes de chaînes : [[\"Nom\",\"Valeur\"],[\"Été\",\"12\"]]."))?;
@@ -162,7 +179,8 @@ pub fn generate(request: &Request) -> Result<Generated> {
     if bytes.len() > documents::MAX_BYTES {
         return Err(invalid("Le fichier généré dépasse 20 Mo."));
     }
-    let preview = table.unwrap_or_else(|| text_preview(&preview_lines, format));
+    let preview =
+        rich.unwrap_or_else(|| table.unwrap_or_else(|| text_preview(&preview_lines, format)));
     Ok(Generated {
         name,
         format: format.into(),
@@ -215,10 +233,12 @@ fn text_preview(lines: &[String], format: &str) -> String {
     } else {
         lines
     };
-    // Thumbnails use the file's own family: Courier for PDF and plain text,
-    // the sans-serif Office font for DOCX and PPTX.
-    let family = if matches!(format, "docx" | "pptx") {
-        "Arial,Helvetica,sans-serif"
+    // Thumbnails use the file's own family. PDF embeds DejaVu Sans; an emoji
+    // font is only a fallback so 🎉 is visible in the card.
+    let family = if format == "pdf" {
+        "DejaVu Sans,Noto Color Emoji,Apple Color Emoji,Segoe UI Emoji,sans-serif"
+    } else if matches!(format, "docx" | "pptx") {
+        "Arial,Helvetica,Noto Color Emoji,sans-serif"
     } else {
         "Courier New,Courier,monospace"
     };
@@ -283,37 +303,388 @@ fn heading(line: &str) -> (usize, &str) {
     }
     (0, line)
 }
-// Standard PDF font with explicit WinAnsi encoding: all French letters, œ/Œ,
-// guillemets and typographic punctuation. Unsupported glyphs fail, never vanish.
-fn winansi(c: char) -> Result<u8> {
-    Ok(match c {
-        '\u{20}'..='\u{7e}'|'\u{a0}'..='\u{ff}' => c as u8,
-        '\u{202f}'=>160,'€'=>128,'‚'=>130,'ƒ'=>131,'„'=>132,'…'=>133,'†'=>134,'‡'=>135,'ˆ'=>136,'‰'=>137,'Š'=>138,'‹'=>139,'Œ'=>140,'Ž'=>142,'‘'=>145,'’'=>146,'“'=>147,'”'=>148,'•'=>149,'–'=>150,'—'=>151,'˜'=>152,'™'=>153,'š'=>154,'›'=>155,'œ'=>156,'ž'=>158,'Ÿ'=>159,
-        _=> return Err(invalid(&format!("Ce PDF contient « {c} » (U+{:04X}), non pris en charge par Courier. Remplacez-le ou utilisez DOCX (les accents français sont pris en charge en PDF).", c as u32))),
-    })
+// WinAnsi repertoire already accepted for French, plus the party emoji drawn
+// as an image. Anything else fails in French: a missing glyph is never painted.
+fn unsupported_pdf(c: char) -> Error {
+    invalid(&format!(
+        "Ce PDF contient « {c} » (U+{:04X}), hors de la police embarquée. Aucun fichier n’est produit.",
+        c as u32
+    ))
 }
-fn pdf(lines: &[String]) -> Result<Vec<u8>> {
+fn pdf_byte(c: char) -> Result<u8> {
+    let Some(b) = pdf_font::encode(c) else {
+        return Err(unsupported_pdf(c));
+    };
+    if pdf_font::face().glyphs[b as usize] == 0 {
+        return Err(unsupported_pdf(c));
+    }
+    Ok(b)
+}
+enum Block {
+    Text(String),
+    Table(Vec<Vec<String>>),
+}
+enum Item {
+    Line(String),
+    Table(Vec<Vec<String>>),
+}
+struct Slide {
+    items: Vec<Item>,
+}
+impl Slide {
+    fn lines(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Line(line) => Some(line.clone()),
+                Item::Table(_) => None,
+            })
+            .collect()
+    }
+    fn rich(&self) -> bool {
+        self.items.iter().any(|item| match item {
+            Item::Table(_) => true,
+            Item::Line(line) => line.contains(pdf_font::PARTY),
+        })
+    }
+    fn as_blocks(&self) -> Vec<Block> {
+        self.items
+            .iter()
+            .map(|item| match item {
+                Item::Line(line) => Block::Text(line.clone()),
+                Item::Table(rows) => Block::Table(rows.clone()),
+            })
+            .collect()
+    }
+}
+fn document_rich(content: &str) -> bool {
+    content.contains(pdf_font::PARTY)
+        || blocks(content).iter().any(|b| matches!(b, Block::Table(_)))
+}
+fn row_cells(line: &str) -> Option<Vec<String>> {
+    let t = line.trim();
+    if !t.contains('|') {
+        return None;
+    }
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    Some(t.split('|').map(|c| c.trim().to_string()).collect())
+}
+fn is_separator(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let t = c.trim().trim_matches(':');
+            t.len() >= 3 && t.chars().all(|ch| ch == '-')
+        })
+}
+fn table_len(lines: &[&str], i: usize) -> Option<usize> {
+    let header = row_cells(lines[i])?;
+    if is_separator(&header) {
+        return None;
+    }
+    let separator = row_cells(lines.get(i + 1)?)?;
+    if !is_separator(&separator) {
+        return None;
+    }
+    let mut n = 2;
+    while let Some(cells) = lines.get(i + n).and_then(|line| row_cells(line)) {
+        if cells.is_empty() || is_separator(&cells) {
+            break;
+        }
+        n += 1;
+    }
+    Some(n)
+}
+fn blocks(content: &str) -> Vec<Block> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < lines.len() {
+        if let Some(n) = table_len(&lines, i) {
+            let mut rows = vec![row_cells(lines[i]).unwrap_or_default()];
+            for line in lines.iter().take(i + n).skip(i + 2) {
+                rows.push(row_cells(line).unwrap_or_default());
+            }
+            let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            for row in &mut rows {
+                row.resize(cols, String::new());
+            }
+            out.push(Block::Table(rows));
+            i += n;
+        } else {
+            out.push(Block::Text(lines[i].to_string()));
+            i += 1;
+        }
+    }
+    if out.is_empty() {
+        out.push(Block::Text(String::new()));
+    }
+    out
+}
+fn blocks_preview(format: &str, blocks: &[Block]) -> String {
+    let slide = format == "pptx";
+    let (w, page_h) = if slide {
+        (960, 540)
+    } else if format == "pdf" {
+        (595, 842)
+    } else {
+        (640, 480)
+    };
+    let family = if format == "pdf" {
+        "DejaVu Sans,Noto Color Emoji,Apple Color Emoji,Segoe UI Emoji,sans-serif"
+    } else {
+        "Arial,Helvetica,Noto Color Emoji,sans-serif"
+    };
+    let mut body = format!(
+        "<g fill=\"#172033\" font-family=\"{family}\" font-size=\"12\" xml:space=\"preserve\">"
+    );
+    let mut y = 28i32;
+    for block in blocks {
+        if y > page_h - 28 {
+            break;
+        }
+        match block {
+            Block::Text(line) => {
+                y += 18;
+                let mut shown: String = line.chars().take(90).collect();
+                if !shown.contains(pdf_font::PARTY) && line.contains(pdf_font::PARTY) {
+                    shown.push(pdf_font::PARTY);
+                }
+                body.push_str(&format!("<text x=\"42\" y=\"{y}\">{}</text>", xml(&shown)));
+            }
+            Block::Table(rows) => {
+                let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                let shown_rows = rows.len().min(12);
+                let cw = (w - 84) / cols as i32;
+                for (r, row) in rows.iter().take(shown_rows).enumerate() {
+                    for c in 0..cols {
+                        let x = 42 + c as i32 * cw;
+                        let fill = if r == 0 { "#f1f5f9" } else { "#ffffff" };
+                        let cell = row.get(c).map(String::as_str).unwrap_or("");
+                        let text: String = cell.chars().take(40).collect();
+                        body.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{cw}\" height=\"22\" fill=\"{fill}\" stroke=\"#e2e8f0\"/><text x=\"{}\" y=\"{}\">{}</text>", x + 6, y + 15, xml(&text)));
+                    }
+                    y += 22;
+                    if y > page_h - 28 {
+                        break;
+                    }
+                }
+                y += 10;
+            }
+        }
+    }
+    let h = if format == "pdf" {
+        page_h
+    } else {
+        (y + 28).clamp(120, page_h)
+    };
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\"><rect width=\"{w}\" height=\"{h}\" fill=\"#fff\"/>{body}</g></svg>")
+}
+const PAGE_TOP: f32 = 786.0;
+const PAGE_BOTTOM: f32 = 42.0;
+const PAGE_LEFT: f32 = 42.0;
+const CONTENT_W: f32 = 511.0;
+fn char_width(c: char, size: f32) -> Result<f32> {
+    if c == pdf_font::PARTY {
+        return Ok(size + 1.5);
+    }
+    let b = pdf_byte(c)?;
+    Ok(pdf_font::face().widths[b as usize] as f32 * size / 1000.0)
+}
+fn measure(text: &str, size: f32) -> Result<f32> {
+    text.chars()
+        .try_fold(0.0, |sum, c| Ok(sum + char_width(c, size)?))
+}
+fn wrap_width(line: &str, max: f32, size: f32) -> Result<Vec<String>> {
+    let chars: Vec<char> = line.replace('\t', "    ").chars().collect();
+    if chars.is_empty() {
+        return Ok(vec![String::new()]);
+    }
+    let widths: Vec<f32> = chars
+        .iter()
+        .map(|c| char_width(*c, size))
+        .collect::<Result<_>>()?;
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut end = start;
+        let mut used = 0.0;
+        while end < chars.len() && used + widths[end] <= max {
+            used += widths[end];
+            end += 1;
+        }
+        if end == start {
+            end = start + 1;
+        } else if end < chars.len() {
+            if let Some(rel) = chars[start..end].iter().rposition(|c| *c == ' ') {
+                if start + rel > start {
+                    end = start + rel;
+                }
+            }
+        }
+        lines.push(
+            chars[start..end]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string(),
+        );
+        start = end;
+        while start < chars.len() && chars[start] == ' ' {
+            start += 1;
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    Ok(lines)
+}
+fn draw_text(ops: &mut Vec<u8>, text: &str, x: f32, y: f32, size: f32) -> Result<f32> {
+    if text.is_empty() {
+        return Ok(0.0);
+    }
+    let face = pdf_font::face();
+    let mut encoded = Vec::new();
+    let mut width = 0u32;
+    for c in text.chars() {
+        let b = pdf_byte(c)?;
+        width += face.widths[b as usize] as u32;
+        if matches!(b, b'(' | b')' | b'\\') {
+            encoded.push(b'\\');
+        }
+        encoded.push(b);
+    }
+    ops.extend(format!("BT /F1 {size:.2} Tf 1 0 0 1 {x:.2} {y:.2} Tm (").as_bytes());
+    ops.extend(encoded);
+    ops.extend(b") Tj ET\n");
+    Ok(width as f32 * size / 1000.0)
+}
+fn draw_line(ops: &mut Vec<u8>, line: &str, mut x: f32, baseline: f32, size: f32) -> Result<()> {
+    let mut buf = String::new();
+    for c in line.chars() {
+        if c == pdf_font::PARTY {
+            if !buf.is_empty() {
+                x += draw_text(ops, &buf, x, baseline, size)?;
+                buf.clear();
+            }
+            let y = baseline - size * 0.2;
+            ops.extend(
+                format!("q {size:.2} 0 0 {size:.2} {x:.2} {y:.2} cm /Im1 Do Q\n").as_bytes(),
+            );
+            x += size + 1.5;
+        } else {
+            buf.push(c);
+        }
+    }
+    if !buf.is_empty() {
+        draw_text(ops, &buf, x, baseline, size)?;
+    }
+    Ok(())
+}
+struct Painter {
+    pages: Vec<Vec<u8>>,
+    y: f32,
+}
+impl Painter {
+    fn new() -> Self {
+        Self {
+            pages: vec![b"0.090 0.125 0.200 rg\n".to_vec()],
+            y: PAGE_TOP,
+        }
+    }
+    fn ops(&mut self) -> &mut Vec<u8> {
+        self.pages.last_mut().unwrap()
+    }
+    fn ensure(&mut self, height: f32) {
+        if self.y - height < PAGE_BOTTOM && self.y < PAGE_TOP - 0.5 {
+            self.pages.push(b"0.090 0.125 0.200 rg\n".to_vec());
+            self.y = PAGE_TOP;
+        }
+    }
+}
+fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
+    let cols = rows.first().map(Vec::len).unwrap_or(1).max(1);
+    let mut pref = vec![48.0f32; cols];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            pref[i] = pref[i].max(measure(cell, 10.0)?.min(280.0) + 8.0);
+        }
+    }
+    let sum: f32 = pref.iter().sum();
+    let scale = if sum > CONTENT_W {
+        CONTENT_W / sum
+    } else {
+        1.0
+    };
+    let extra = (CONTENT_W - pref.iter().map(|w| w * scale).sum::<f32>()).max(0.0) / cols as f32;
+    let widths: Vec<f32> = pref.iter().map(|w| w * scale + extra).collect();
+    for (r, row) in rows.iter().enumerate() {
+        let mut cell_lines = Vec::new();
+        let mut row_h = 16.0f32;
+        for (c, cell) in row.iter().enumerate() {
+            let lines = wrap_width(cell, (widths[c] - 8.0).max(12.0), 10.0)?;
+            row_h = row_h.max(8.0 + lines.len() as f32 * 13.0);
+            cell_lines.push(lines);
+        }
+        page.ensure(row_h);
+        let bottom = page.y - row_h;
+        let mut x = PAGE_LEFT;
+        for (c, lines) in cell_lines.iter().enumerate() {
+            let w = widths[c];
+            if r == 0 {
+                page.ops().extend(
+                    format!("0.945 0.961 0.976 rg {x:.2} {bottom:.2} {w:.2} {row_h:.2} re f\n")
+                        .as_bytes(),
+                );
+            }
+            page.ops().extend(
+                format!("0.796 0.835 0.882 RG {x:.2} {bottom:.2} {w:.2} {row_h:.2} re S\n")
+                    .as_bytes(),
+            );
+            page.ops().extend(b"0.090 0.125 0.200 rg\n");
+            let mut baseline = page.y - 12.0;
+            for line in lines {
+                draw_line(page.ops(), line, x + 4.0, baseline, 10.0)?;
+                baseline -= 13.0;
+            }
+            x += w;
+        }
+        page.y = bottom;
+    }
+    page.y -= 8.0;
+    Ok(())
+}
+fn paint_rich(content: &str) -> Result<Vec<Vec<u8>>> {
+    let mut page = Painter::new();
+    for block in blocks(content) {
+        match block {
+            Block::Text(line) => {
+                for visual in wrap_width(&line, CONTENT_W, 12.0)? {
+                    page.ensure(16.0);
+                    let baseline = page.y;
+                    draw_line(page.ops(), &visual, PAGE_LEFT, baseline, 12.0)?;
+                    page.y -= 16.0;
+                }
+            }
+            Block::Table(rows) => paint_table(&mut page, &rows)?,
+        }
+    }
+    Ok(page.pages)
+}
+fn pdf(content: &str, lines: &[String]) -> Result<(Vec<u8>, usize)> {
+    if document_rich(content) {
+        let pages = paint_rich(content)?;
+        let n = pages.len();
+        return Ok((assemble(&pages, content.contains(pdf_font::PARTY))?, n));
+    }
     let chunks: Vec<_> = lines.chunks(48).collect();
-    let mut objects: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        format!(
-            "<< /Type /Pages /Count {} /Kids [{}] >>",
-            chunks.len(),
-            (0..chunks.len())
-                .map(|i| format!("{} 0 R", 4 + i * 2))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-        .into_bytes(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".to_vec(),
-    ];
-    for (i, chunk) in chunks.iter().enumerate() {
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",5+i*2).into_bytes());
+    let mut contents = Vec::new();
+    for chunk in &chunks {
         let mut stream = b"BT /F1 12 Tf 15 TL 42 786 Td\n".to_vec();
         for line in *chunk {
             stream.push(b'(');
             for c in line.chars() {
-                let b = winansi(c)?;
+                let b = pdf_byte(c)?;
                 if matches!(b, b'(' | b')' | b'\\') {
                     stream.push(b'\\');
                 }
@@ -322,11 +693,88 @@ fn pdf(lines: &[String]) -> Result<Vec<u8>> {
             stream.extend_from_slice(b") Tj T*\n");
         }
         stream.extend_from_slice(b"ET\n");
-        let mut obj = format!("<< /Length {} >>\nstream\n", stream.len()).into_bytes();
-        obj.extend(stream);
-        obj.extend_from_slice(b"endstream");
-        objects.push(obj);
+        contents.push(stream);
     }
+    let n = contents.len();
+    Ok((assemble(&contents, false)?, n))
+}
+fn stream_object(data: &[u8], extra: &str) -> Vec<u8> {
+    let mut obj = format!("<< /Length {}{extra} >>\nstream\n", data.len()).into_bytes();
+    obj.extend(data);
+    obj.extend(b"\nendstream");
+    obj
+}
+fn assemble(contents: &[Vec<u8>], emoji: bool) -> Result<Vec<u8>> {
+    let face = pdf_font::face();
+    let widths = (32..=255)
+        .map(|b| face.widths[b].to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let font = format!("<< /Type /Font /Subtype /TrueType /BaseFont /DejaVuSans /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 /Widths [{widths}] /FontDescriptor 4 0 R /ToUnicode 6 0 R >>");
+    let descriptor = format!(
+        "<< /Type /FontDescriptor /FontName /DejaVuSans /Flags 32 /FontBBox [{} {} {} {}] /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 5 0 R >>",
+        face.bbox[0], face.bbox[1], face.bbox[2], face.bbox[3], face.ascent, face.descent, face.cap_height
+    );
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        Vec::new(),
+        font.into_bytes(),
+        descriptor.into_bytes(),
+        stream_object(face.bytes, &format!(" /Length1 {}", face.bytes.len())),
+        stream_object(tounicode(face).as_bytes(), ""),
+    ];
+    if emoji {
+        let pixels = pdf_font::party_popper();
+        objects.push(stream_object(pixels, &format!(" /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8", pdf_font::PARTY_PX, pdf_font::PARTY_PX)));
+    }
+    let resources = if emoji {
+        "/Resources << /Font << /F1 3 0 R >> /XObject << /Im1 7 0 R >> >>"
+    } else {
+        "/Resources << /Font << /F1 3 0 R >> >>"
+    };
+    let first = objects.len() + 1;
+    let mut kids = Vec::new();
+    for (i, content) in contents.iter().enumerate() {
+        let page_number = first + i * 2;
+        let content_number = page_number + 1;
+        kids.push(page_number);
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] {resources} /Contents {content_number} 0 R >>").into_bytes());
+        objects.push(stream_object(content, ""));
+    }
+    objects[1] = format!(
+        "<< /Type /Pages /Count {} /Kids [{}] >>",
+        kids.len(),
+        kids.iter()
+            .map(|n| format!("{n} 0 R"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .into_bytes();
+    Ok(finish_pdf(objects))
+}
+fn tounicode(face: &pdf_font::Face) -> String {
+    let mut maps = Vec::new();
+    for b in 32..=255 {
+        let scalar = face.unicode[b];
+        if scalar != 0 && face.glyphs[b] != 0 {
+            maps.push(format!("<{b:02X}> <{scalar:04X}>"));
+        }
+    }
+    let mut chars = String::new();
+    let mut i = 0;
+    while i < maps.len() {
+        let n = (maps.len() - i).min(100);
+        chars.push_str(&format!("{n} beginbfchar\n"));
+        for line in &maps[i..i + n] {
+            chars.push_str(line);
+            chars.push('\n');
+        }
+        chars.push_str("endbfchar\n");
+        i += n;
+    }
+    format!("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Ezerbot-WinAnsi-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<20> <FF>\nendcodespacerange\n{chars}endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n")
+}
+fn finish_pdf(objects: Vec<Vec<u8>>) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
     let mut offsets = vec![0];
     for (i, obj) in objects.iter().enumerate() {
@@ -347,7 +795,7 @@ fn pdf(lines: &[String]) -> Result<Vec<u8>> {
         )
         .as_bytes(),
     );
-    Ok(out)
+    out
 }
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
@@ -376,30 +824,62 @@ fn package(
         .into_inner())
 }
 // One Word paragraph per source line, so Word reflows the text itself. Markdown
-// headings and "- " bullets become formatting; other markers stay literal text.
-fn docx(content: &str) -> Result<Vec<u8>> {
-    let paragraphs = content
-        .lines()
-        .map(|line| {
-            let (level, text) = heading(line);
-            let bullet = level == 0
-                && (line.trim_start().starts_with("- ") || line.trim_start().starts_with("* "));
-            let text = if bullet { &line.trim_start()[2..] } else { text };
-            let (size, bold, after) = match level {
-                1 => (36, true, 160),
-                2 => (30, true, 120),
-                3 => (26, true, 100),
-                _ => (22, false, 80),
-            };
-            format!("<w:p><w:pPr><w:spacing w:before=\"{}\" w:after=\"{after}\"/>{}</w:pPr><w:r><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Arial\"/>{}<w:sz w:val=\"{size}\"/></w:rPr><w:t xml:space=\"preserve\">{}{}</w:t></w:r></w:p>",
-                if level > 0 { 240 } else { 0 },
-                if bullet { "<w:ind w:left=\"360\" w:hanging=\"240\"/>" } else { "" },
-                if bold { "<w:b/>" } else { "" },
-                if bullet { "•\u{a0}" } else { "" },
-                xml(text))
+// headings and "- " bullets become formatting; a pipe table becomes a real table.
+fn docx_paragraph(line: &str) -> String {
+    let (level, text) = heading(line);
+    let bullet =
+        level == 0 && (line.trim_start().starts_with("- ") || line.trim_start().starts_with("* "));
+    let text = if bullet {
+        &line.trim_start()[2..]
+    } else {
+        text
+    };
+    let (size, bold, after) = match level {
+        1 => (36, true, 160),
+        2 => (30, true, 120),
+        3 => (26, true, 100),
+        _ => (22, false, 80),
+    };
+    format!("<w:p><w:pPr><w:spacing w:before=\"{}\" w:after=\"{after}\"/>{}</w:pPr><w:r><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Arial\"/>{}<w:sz w:val=\"{size}\"/></w:rPr><w:t xml:space=\"preserve\">{}{}</w:t></w:r></w:p>",
+        if level > 0 { 240 } else { 0 },
+        if bullet { "<w:ind w:left=\"360\" w:hanging=\"240\"/>" } else { "" },
+        if bold { "<w:b/>" } else { "" },
+        if bullet { "•\u{a0}" } else { "" },
+        xml(text))
+}
+fn docx_table(rows: &[Vec<String>]) -> String {
+    let borders = ["top", "left", "bottom", "right", "insideH", "insideV"]
+        .iter()
+        .map(|edge| {
+            format!("<w:{edge} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"CBD5E1\"/>")
         })
         .collect::<String>();
-    package(vec![("word/document.xml".into(),format!("{XML}<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{paragraphs}<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1134\" w:right=\"1134\" w:bottom=\"1134\" w:left=\"1134\"/></w:sectPr></w:body></w:document>"))],vec![("word/document.xml".into(),"wordprocessingml.document.main".into())],"word/document.xml")
+    let body = rows
+        .iter()
+        .enumerate()
+        .map(|(r, row)| {
+            let cells = row
+                .iter()
+                .map(|cell| {
+                    let shade = if r == 0 { "<w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F1F5F9\"/></w:tcPr>" } else { "" };
+                    let bold = if r == 0 { "<w:b/>" } else { "" };
+                    format!("<w:tc>{shade}<w:p><w:r><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:cs=\"Arial\"/>{bold}<w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p></w:tc>", xml(cell))
+                })
+                .collect::<String>();
+            format!("<w:tr>{cells}</w:tr>")
+        })
+        .collect::<String>();
+    format!("<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/><w:tblBorders>{borders}</w:tblBorders></w:tblPr>{body}</w:tbl>")
+}
+fn docx(content: &str) -> Result<Vec<u8>> {
+    let body = blocks(content)
+        .iter()
+        .map(|block| match block {
+            Block::Text(line) => docx_paragraph(line),
+            Block::Table(rows) => docx_table(rows),
+        })
+        .collect::<String>();
+    package(vec![("word/document.xml".into(),format!("{XML}<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{body}<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1134\" w:right=\"1134\" w:bottom=\"1134\" w:left=\"1134\"/></w:sectPr></w:body></w:document>"))],vec![("word/document.xml".into(),"wordprocessingml.document.main".into())],"word/document.xml")
 }
 fn csv(rows: &[Vec<String>]) -> Vec<u8> {
     // Text cells, not executable spreadsheet formulas. BOM helps Excel detect UTF-8.
@@ -476,29 +956,128 @@ fn xlsx(rows: &[Vec<String>]) -> Result<Vec<u8>> {
         ("xl/worksheets/sheet1.xml".into(),format!("{XML}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{data}</sheetData></worksheet>"))],
         vec![("xl/workbook.xml".into(),"spreadsheetml.sheet.main".into()),("xl/worksheets/sheet1.xml".into(),"spreadsheetml.worksheet".into())],"xl/workbook.xml")
 }
-fn slides(content: &str) -> Result<Vec<Vec<String>>> {
-    let mut slides = vec![String::new()];
+fn slides(content: &str) -> Result<Vec<Slide>> {
+    let mut raw = vec![String::new()];
     for line in content.lines() {
         if line.trim() == "---" {
-            slides.push(String::new());
+            raw.push(String::new());
         } else {
-            let last = slides.last_mut().unwrap();
+            let last = raw.last_mut().unwrap();
             last.push_str(line);
             last.push('\n');
         }
     }
-    if slides.len() > 50 || slides.iter().any(|s| s.trim().is_empty()) {
+    if raw.len() > 50 || raw.iter().any(|s| s.trim().is_empty()) {
         return Err(invalid("La présentation doit contenir 1 à 50 diapositives non vides, séparées par une ligne --- ."));
     }
-    slides.iter().map(|s| {
-        let mut input=s.lines();
-        let mut lines=wrap(input.next().unwrap_or(""), 50);
-        lines.extend(wrap(&input.collect::<Vec<_>>().join("\n"), 80));
-        if lines.len()>16 { Err(invalid("Une diapositive dépasse 16 lignes. Répartissez son contenu avec une ligne --- .")) } else { Ok(lines) }
-    }).collect()
+    raw.iter().map(|source| slide_from(source)).collect()
+}
+fn slide_from(source: &str) -> Result<Slide> {
+    let mut items = Vec::new();
+    let mut text_lines = 0;
+    let mut first = true;
+    for block in blocks(source) {
+        match block {
+            Block::Text(line) => {
+                let width = if first { 50 } else { 80 };
+                first = false;
+                for wrapped in wrap(&line, width) {
+                    text_lines += 1;
+                    items.push(Item::Line(wrapped));
+                }
+            }
+            Block::Table(rows) => items.push(Item::Table(rows)),
+        }
+    }
+    if text_lines > 16 {
+        return Err(invalid(
+            "Une diapositive dépasse 16 lignes. Répartissez son contenu avec une ligne --- .",
+        ));
+    }
+    Ok(Slide { items })
 }
 const GROUP:&str="<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>";
-fn pptx(slides: &[Vec<String>]) -> Result<Vec<u8>> {
+fn text_shape(lines: &[String], y: i64, h: i64, id: i32, title: bool) -> String {
+    let paragraphs = lines
+        .iter()
+        .enumerate()
+        .map(|(j, line)| {
+            let size = if title && j == 0 { 2800 } else { 1800 };
+            format!("<a:p><a:pPr><a:lnSpc><a:spcPts val=\"2800\"/></a:lnSpc><a:spcBef><a:spcPts val=\"0\"/></a:spcBef><a:spcAft><a:spcPts val=\"0\"/></a:spcAft></a:pPr><a:r><a:rPr lang=\"fr-CA\" sz=\"{size}\"><a:solidFill><a:srgbClr val=\"172033\"/></a:solidFill><a:latin typeface=\"Arial\"/></a:rPr><a:t>{}</a:t></a:r></a:p>", xml(line))
+        })
+        .collect::<String>();
+    format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Contenu\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"500000\" y=\"{y}\"/><a:ext cx=\"11192000\" cy=\"{h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>{paragraphs}</p:txBody></p:sp>")
+}
+fn table_border(tag: &str) -> String {
+    format!("<a:{tag} w=\"6350\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:srgbClr val=\"CBD5E1\"/></a:solidFill><a:prstDash val=\"solid\"/></a:{tag}>")
+}
+fn table_shape(rows: &[Vec<String>], y: i64, id: i32) -> (String, i64) {
+    let cols = rows.first().map(Vec::len).unwrap_or(1).max(1);
+    let width = 11_192_000i64;
+    let col_w = width / cols as i64;
+    let row_h = 400_000i64;
+    let height = row_h * rows.len() as i64;
+    let grid = (0..cols)
+        .map(|_| format!("<a:gridCol w=\"{col_w}\"/>"))
+        .collect::<String>();
+    let borders = ["lnL", "lnR", "lnT", "lnB"]
+        .into_iter()
+        .map(table_border)
+        .collect::<String>();
+    let body = rows
+        .iter()
+        .enumerate()
+        .map(|(r, row)| {
+            let cells = (0..cols)
+                .map(|c| {
+                    let text = row.get(c).map(String::as_str).unwrap_or("");
+                    let bold = if r == 0 { " b=\"1\"" } else { "" };
+                    let fill = if r == 0 { "F1F5F9" } else { "FFFFFF" };
+                    format!("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"fr-CA\" sz=\"1400\"{bold}><a:solidFill><a:srgbClr val=\"172033\"/></a:solidFill><a:latin typeface=\"Arial\"/></a:rPr><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr>{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>", xml(text))
+                })
+                .collect::<String>();
+            format!("<a:tr h=\"{row_h}\">{cells}</a:tr>")
+        })
+        .collect::<String>();
+    let frame = format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"Tableau\"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"500000\" y=\"{y}\"/><a:ext cx=\"{width}\" cy=\"{height}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr/><a:tblGrid>{grid}</a:tblGrid>{body}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>");
+    (frame, height)
+}
+fn slide_tree(slide: &Slide) -> String {
+    let mut parts = Vec::new();
+    let mut y = 400_000i64;
+    let mut id = 2i32;
+    let mut pending = Vec::new();
+    let mut title = true;
+    for item in &slide.items {
+        match item {
+            Item::Line(line) => pending.push(line.clone()),
+            Item::Table(rows) => {
+                if !pending.is_empty() {
+                    let h = 360_000 * pending.len() as i64 + 200_000;
+                    parts.push(text_shape(&pending, y, h, id, title));
+                    y += h;
+                    id += 1;
+                    title = false;
+                    pending.clear();
+                }
+                let (frame, h) = table_shape(rows, y, id);
+                parts.push(frame);
+                y += h + 60_000;
+                id += 1;
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let h = if parts.is_empty() {
+            6_000_000
+        } else {
+            360_000 * pending.len() as i64 + 200_000
+        };
+        parts.push(text_shape(&pending, y, h, id, title));
+    }
+    format!("{GROUP}{}", parts.concat())
+}
+fn pptx(slides: &[Slide]) -> Result<Vec<u8>> {
     let ns=format!("xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"{REL}\"");
     let mut files = vec![];
     let mut types = vec![];
@@ -508,7 +1087,7 @@ fn pptx(slides: &[Vec<String>]) -> Result<Vec<u8>> {
         "slideMasters/slideMaster1.xml".to_string(),
     )];
     let mut ids = String::new();
-    for (i, lines) in slides.iter().enumerate() {
+    for (i, slide) in slides.iter().enumerate() {
         let n = i + 1;
         ids.push_str(&format!(
             "<p:sldId id=\"{}\" r:id=\"rId{}\"/>",
@@ -520,10 +1099,10 @@ fn pptx(slides: &[Vec<String>]) -> Result<Vec<u8>> {
             "slide".into(),
             format!("slides/slide{n}.xml"),
         ));
-        let paragraphs=lines.iter().enumerate().map(|(j,l)|format!("<a:p><a:pPr><a:lnSpc><a:spcPts val=\"2800\"/></a:lnSpc><a:spcBef><a:spcPts val=\"0\"/></a:spcBef><a:spcAft><a:spcPts val=\"0\"/></a:spcAft></a:pPr><a:r><a:rPr lang=\"fr-CA\" sz=\"{}\"><a:solidFill><a:srgbClr val=\"172033\"/></a:solidFill><a:latin typeface=\"Arial\"/></a:rPr><a:t>{}</a:t></a:r></a:p>",if j==0{2800}else{1800},xml(l))).collect::<String>();
+        let tree = slide_tree(slide);
         let path = format!("ppt/slides/slide{n}.xml");
         types.push((path.clone(), "presentationml.slide".into()));
-        files.push((path,format!("{XML}<p:sld {ns}><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FFFFFF\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>{GROUP}<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Contenu\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"500000\" y=\"400000\"/><a:ext cx=\"11192000\" cy=\"6000000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")));
+        files.push((path,format!("{XML}<p:sld {ns}><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FFFFFF\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>{tree}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")));
         files.push((
             format!("ppt/slides/_rels/slide{n}.xml.rels"),
             rels(&[(
@@ -1286,6 +1865,232 @@ fn render(graph: &Graph) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SHOWCASE: &str =
+        "Été, ça va 🎉\n\n| Nom | Coût |\n| --- | --- |\n| Thé | 12 € |\n| Ça | 3 |\n";
+
+    fn winansi_char(b: u8) -> char {
+        match b {
+            0x20..=0x7e | 0xa0..=0xff => b as char,
+            0x80 => '€',
+            0x82 => '‚',
+            0x83 => 'ƒ',
+            0x84 => '„',
+            0x85 => '…',
+            0x86 => '†',
+            0x87 => '‡',
+            0x88 => 'ˆ',
+            0x89 => '‰',
+            0x8a => 'Š',
+            0x8b => '‹',
+            0x8c => 'Œ',
+            0x8e => 'Ž',
+            0x91 => '‘',
+            0x92 => '’',
+            0x93 => '“',
+            0x94 => '”',
+            0x95 => '•',
+            0x96 => '–',
+            0x97 => '—',
+            0x98 => '˜',
+            0x99 => '™',
+            0x9a => 'š',
+            0x9b => '›',
+            0x9c => 'œ',
+            0x9e => 'ž',
+            0x9f => 'Ÿ',
+            _ => '\u{FFFD}',
+        }
+    }
+
+    fn content_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut rest = bytes;
+        while let Some(i) = rest.windows(7).position(|w| w == b"stream\n") {
+            let start = i + 7;
+            let Some(j) = rest[start..].windows(9).position(|w| w == b"endstream") else {
+                break;
+            };
+            let stream = &rest[start..start + j];
+            if stream.windows(2).any(|w| w == b"Tj") || stream.windows(4).any(|w| w == b" re ") {
+                out.push(stream.to_vec());
+            }
+            rest = &rest[start + j..];
+        }
+        out
+    }
+
+    /// Text actually shown by Tj operators, decoded as WinAnsi (the PDF encoding).
+    fn pdf_shown(bytes: &[u8]) -> String {
+        let mut text = String::new();
+        for stream in content_streams(bytes) {
+            let mut i = 0;
+            while i < stream.len() {
+                if stream[i] != b'(' {
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+                let mut raw = Vec::new();
+                while i < stream.len() {
+                    match stream[i] {
+                        b'\\' => {
+                            i += 1;
+                            if i < stream.len() {
+                                raw.push(stream[i]);
+                                i += 1;
+                            }
+                        }
+                        b')' => {
+                            i += 1;
+                            break;
+                        }
+                        c => {
+                            raw.push(c);
+                            i += 1;
+                        }
+                    }
+                }
+                let mut j = i;
+                while j < stream.len() && stream[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if stream.get(j..j + 2) == Some(b"Tj") {
+                    text.extend(raw.iter().copied().map(winansi_char));
+                    text.push('\n');
+                }
+            }
+        }
+        text
+    }
+
+    fn office_part(bytes: &[u8], name: &str) -> String {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(name).unwrap(), &mut xml).unwrap();
+        xml
+    }
+
+    #[test]
+    fn pdf_docx_and_pptx_show_accents_emoji_and_a_real_table() {
+        let pdf = generate(&Request {
+            name: "Bilan".into(),
+            format: "pdf".into(),
+            content: SHOWCASE.into(),
+        })
+        .unwrap_or_else(|e| panic!("pdf: {e:?}"));
+        let shown = pdf_shown(&pdf.bytes);
+        for piece in ["Été", "ça", "Nom", "Coût", "Thé", "12 €", "Ça", "3"] {
+            assert!(shown.contains(piece), "extraction « {piece} » : {shown}");
+        }
+        assert!(
+            !shown.contains('\u{FFFD}'),
+            "glyphe manquant dans le texte : {shown}"
+        );
+        assert!(
+            !shown.contains("| --- |"),
+            "le tableau est encore du Markdown : {shown}"
+        );
+        let streams = content_streams(&pdf.bytes);
+        let rects: usize = streams
+            .iter()
+            .map(|s| s.windows(4).filter(|w| *w == b" re ").count())
+            .sum();
+        assert!(rects >= 6, "cellules dessinées : {rects}");
+        assert!(
+            pdf.bytes.windows(15).any(|w| w == b"/Subtype /Image"),
+            "l’emoji doit être dessiné, pas absent"
+        );
+        assert!(
+            pdf.bytes.windows(10).any(|w| w == b"/FontFile2"),
+            "police embarquée"
+        );
+        assert!(!pdf.bytes.windows(17).any(|w| w == b"/BaseFont /Courier"));
+        assert!(pdf.preview.contains('🎉'), "{}", pdf.preview);
+        assert!(!pdf.preview.contains('\u{FFFD}') && !pdf.preview.contains('□'));
+
+        let docx = generate(&Request {
+            name: "Bilan".into(),
+            format: "docx".into(),
+            content: SHOWCASE.into(),
+        })
+        .unwrap();
+        let document = office_part(&docx.bytes, "word/document.xml");
+        assert!(
+            document.contains("<w:tbl>") && document.contains("<w:tc>"),
+            "{document}"
+        );
+        for piece in ["Été", "ça", "🎉", "Nom", "Coût", "Thé", "12 €", "Ça"] {
+            assert!(document.contains(piece), "docx « {piece} »");
+        }
+        assert!(!document.contains("| --- |"));
+        assert!(docx.preview.contains('🎉') && !docx.preview.contains('\u{FFFD}'));
+
+        let pptx = generate(&Request {
+            name: "Bilan".into(),
+            format: "pptx".into(),
+            content: SHOWCASE.into(),
+        })
+        .unwrap();
+        let slide = office_part(&pptx.bytes, "ppt/slides/slide1.xml");
+        assert!(
+            slide.contains("<a:tbl>") && slide.contains("<a:tc>"),
+            "{slide}"
+        );
+        for piece in ["Été", "ça", "🎉", "Nom", "Coût", "Thé", "12 €", "Ça"] {
+            assert!(slide.contains(piece), "pptx « {piece} »");
+        }
+        assert!(!slide.contains("| --- |"));
+        assert!(pptx.preview.contains('🎉'));
+
+        let classic = generate(&Request {
+            name: "Accent".into(),
+            format: "pdf".into(),
+            content: "Été à Québec — Cœur, coût : 12 €".into(),
+        })
+        .unwrap();
+        let classic_text = pdf_shown(&classic.bytes);
+        assert!(
+            classic_text.contains("Été") && classic_text.contains("Cœur"),
+            "{classic_text}"
+        );
+        assert!(!classic_text.contains('\u{FFFD}'));
+        assert!(classic.bytes.starts_with(b"%PDF-"));
+        assert!(classic.bytes.windows(7).any(|w| w == b") Tj T*"));
+        assert!(!classic.bytes.windows(15).any(|w| w == b"/Subtype /Image"));
+
+        let Err(Error::InvalidInput(message)) = generate(&Request {
+            name: "Hors".into(),
+            format: "pdf".into(),
+            content: "Été → suite".into(),
+        }) else {
+            panic!("un caractère hors couverture doit échouer");
+        };
+        assert!(message.contains("« → » (U+2192)"), "{message}");
+        assert!(
+            message.contains("n’est pas produit") || message.contains("hors"),
+            "{message}"
+        );
+
+        let long = "ç".repeat(90);
+        let deck = format!(
+            "{}🎉\n| Nom | Détail |\n| --- | --- |\n| Thé | {long} |\n",
+            "a".repeat(50)
+        );
+        let slides = generate(&Request {
+            name: "Long".into(),
+            format: "pptx".into(),
+            content: deck,
+        })
+        .unwrap();
+        let slide = office_part(&slides.bytes, "ppt/slides/slide1.xml");
+        assert!(slide.contains('🎉'), "l’emoji de fin de titre doit rester");
+        assert!(
+            slide.split("<a:tc>").any(|cell| cell.contains(&long)),
+            "la cellule ne doit pas être coupée"
+        );
+    }
+
     #[test]
     fn all_formats_are_readable_with_french_accents() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

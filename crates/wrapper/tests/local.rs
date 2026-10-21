@@ -1139,3 +1139,110 @@ fn file_error_and_bot_isolation_are_per_call_failures() {
     f.finish("disabled");
     assert_eq!(f.outcome("disabled")["status"], "failed");
 }
+
+fn approval_policy(f: &mut Fixture, id: &str) -> Value {
+    let run = f.run(id).run_id;
+    f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == f.chat)
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .find(|m| m["kind"] == "approval" && m["payload"]["run_id"] == run)
+        .expect("carte d’approbation")["payload"]["policy"]
+        .clone()
+}
+
+#[test]
+fn always_allow_same_command_skips_the_card_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("first", "run_shell", f.shell("printf oui"));
+    let card = f.request("first");
+    let policy = approval_policy(&mut f, "first");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    assert_eq!(policy["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("first");
+    assert_eq!(f.outcome("first")["output"]["stdout"], "oui");
+    let other_cwd = f.root().join("ailleurs");
+    std::fs::create_dir(&other_cwd).unwrap();
+    let mut same = f.shell("printf oui");
+    same["cwd"] = json!(other_cwd);
+    same["timeout_ms"] = json!(1500);
+    f.send("same", "run_shell", same);
+    f.finish("same");
+    assert!(requests::list_for_run(&f.db(), &f.run("same").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("same")["output"]["stdout"], "oui");
+    f.reopen();
+    f.send("restarted", "run_shell", f.shell("printf oui"));
+    f.finish("restarted");
+    assert!(requests::list_for_run(&f.db(), &f.run("restarted").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("restarted")["output"]["stdout"], "oui");
+    let rules = f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"run_shell",
+            "args_digest":"printf oui","scope":"pattern"
+        }),
+    );
+    assert_eq!(rules["rules"], json!([]));
+    f.send("revoked", "run_shell", f.shell("printf oui"));
+    let again = f.request("revoked");
+    assert!(matches!(
+        again.status,
+        grokbot_forms::requests::RequestStatus::Pending
+    ));
+    f.decide(&again, json!("deny"));
+    f.finish("revoked");
+    assert_eq!(f.outcome("revoked")["status"], "failed");
+}
+
+#[test]
+fn destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    f.send("rm", "run_shell", f.shell("rm victime.txt"));
+    wait("rm asked or finished", || {
+        let status = f.run("rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(
+        f.run("rm").status,
+        RunStatus::AwaitingApproval,
+        "une suppression ne suit pas la règle permanente"
+    );
+    assert!(target.exists());
+    let card = f.request("rm");
+    let policy = approval_policy(&mut f, "rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    let refused = f.app.api(
+        "POST",
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card.entry_id,
+            "submission_id": "always-rm",
+            "conversation_id": card.route.target_conversation_id,
+            "decision": {"always_allow":{"scope":"global"}}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    assert!(refused.is_err());
+    assert!(target.exists());
+    f.decide(&card, json!("allow_once"));
+    f.finish("rm");
+    assert!(!target.exists());
+}

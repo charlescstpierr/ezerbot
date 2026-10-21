@@ -97,6 +97,18 @@ pub fn evaluate(
     tool: &str,
     arguments: &Value,
 ) -> Result<Option<(bool, String)>> {
+    evaluate_named(conn, route, tool, arguments, None)
+}
+
+/// `remote_name` is the connector tool behind a namespaced MCP id. Protected
+/// actions match no standing rule, allow or block: the card still has to appear.
+pub fn evaluate_named(
+    conn: &Connection,
+    route: &ApprovalRoute,
+    tool: &str,
+    arguments: &Value,
+    remote_name: Option<&str>,
+) -> Result<Option<(bool, String)>> {
     if route.requesting_bot_id.trim().is_empty()
         || route.target_bot_id.trim().is_empty()
         || route.target_conversation_id.trim().is_empty()
@@ -106,14 +118,24 @@ pub fn evaluate(
     if !arguments.is_object() {
         return Err(invalid("invalid arguments"));
     }
+    if crate::policy::protected(tool, arguments, remote_name).is_some() {
+        return Ok(None);
+    }
     let digest = approvals::args_digest(tool, arguments)?;
+    let pattern = crate::policy::command_pattern(tool, arguments).unwrap_or_default();
     let matched: Option<(bool, String, String)> = conn
         .query_row(
             "SELECT allow, args_digest, scope FROM forms_approval_rules
              WHERE requesting_bot_id=?1 AND target_bot_id=?2 AND tool=?3
-               AND (args_digest=?4 OR scope='\"global\"')
+               AND (args_digest=?4 OR scope='\"global\"' OR (scope='\"pattern\"' AND args_digest=?5))
              ORDER BY allow ASC, scope, args_digest LIMIT 1",
-            params![route.requesting_bot_id, route.target_bot_id, tool, digest],
+            params![
+                route.requesting_bot_id,
+                route.target_bot_id,
+                tool,
+                digest,
+                pattern
+            ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -667,5 +689,96 @@ mod tests {
             assert_eq!(evaluate(&conn, &route, "write", &args).unwrap(), None);
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn command_pattern_matches_only_that_command_and_protected_actions_ignore_rules() {
+        let conn = connection();
+        let route = route();
+        let first = json!({"command":"printf oui","cwd":"/tmp","timeout_ms":1000});
+        let same = json!({"command":"printf   oui","cwd":"/elsewhere","timeout_ms":50});
+        let other = json!({"command":"printf non","cwd":"/tmp"});
+        with_tx(&conn, |conn| -> Result<()> {
+            let digest = approvals::args_digest("run_shell", &first)?;
+            requests::create(
+                conn,
+                &HumanInputRequest {
+                    id: "shell".into(),
+                    run_id: "run-shell".into(),
+                    entry_id: "entry-shell".into(),
+                    route: route.clone(),
+                    kind: InputKind::Approval {
+                        tool: "run_shell".into(),
+                        args_digest: digest,
+                        expires_at: 100,
+                    },
+                    status: RequestStatus::Pending,
+                },
+            )?;
+            approvals::decide_with_pattern(
+                conn,
+                "shell",
+                &route.target_conversation_id,
+                "submit-shell",
+                ApprovalDecision::AlwaysAllow {
+                    scope: RuleScope::Pattern,
+                },
+                1,
+                Some("printf oui"),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            evaluate(&conn, &route, "run_shell", &same)
+                .unwrap()
+                .unwrap()
+                .0
+        );
+        assert!(evaluate(&conn, &route, "run_shell", &other)
+            .unwrap()
+            .is_none());
+        decide(
+            &conn,
+            "broad",
+            &route,
+            "run_shell",
+            &other,
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
+        );
+        let removal = json!({"command":"rm note","cwd":"/tmp"});
+        assert!(evaluate(&conn, &route, "run_shell", &removal)
+            .unwrap()
+            .is_none());
+        decide(
+            &conn,
+            "mail",
+            &route,
+            "send_email",
+            &json!({"to":"a"}),
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
+        );
+        assert!(evaluate_named(
+            &conn,
+            &route,
+            "mcp_hash",
+            &json!({"to":"a"}),
+            Some("send_email")
+        )
+        .unwrap()
+        .is_none());
+        assert!(evaluate_named(
+            &conn,
+            &route,
+            "mcp_hash",
+            &json!({"id":"1"}),
+            Some("delete_file")
+        )
+        .unwrap()
+        .is_none());
     }
 }

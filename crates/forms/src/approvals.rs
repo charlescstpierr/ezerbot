@@ -27,13 +27,15 @@ pub enum ApprovalDecision {
 
 /// PS01 policy scope: Call is one-use, Subject binds the exact digest (no local
 /// subject extractor exists), Global covers the tool for this requesting/main bot
-/// pair. Each resulting execution grant still binds its own exact action digest.
+/// pair. Pattern binds one normalized shell command. Each resulting execution
+/// grant still binds its own exact action digest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleScope {
     Call,
     Subject,
     Global,
+    Pattern,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +143,28 @@ pub fn decide(
     decision: ApprovalDecision,
     now_ms: i64,
 ) -> Result<ResumeReceipt> {
+    decide_with_pattern(
+        conn,
+        id,
+        deciding_conversation_id,
+        submission_id,
+        decision,
+        now_ms,
+        None,
+    )
+}
+
+/// `pattern_key` is the server-derived command text for [`RuleScope::Pattern`].
+/// A missing or invalid key degrades to a one-shot decision, same as Call.
+pub fn decide_with_pattern(
+    conn: &Connection,
+    id: &str,
+    deciding_conversation_id: &str,
+    submission_id: &str,
+    decision: ApprovalDecision,
+    now_ms: i64,
+    pattern_key: Option<&str>,
+) -> Result<ResumeReceipt> {
     let request = approval(conn, id)?;
     if deciding_conversation_id != request.route.target_conversation_id {
         return Err(invalid(
@@ -169,7 +193,9 @@ pub fn decide(
     }
     let effective = match decision {
         ApprovalDecision::AlwaysAllow { scope } => {
-            if scope == RuleScope::Call || save_rule(conn, &request, scope, true).is_err() {
+            if !can_persist(scope, pattern_key)
+                || save_rule(conn, &request, scope, true, pattern_key).is_err()
+            {
                 requests::require_transaction(conn)?;
                 ApprovalDecision::AllowOnce
             } else {
@@ -177,7 +203,9 @@ pub fn decide(
             }
         }
         ApprovalDecision::Never { scope } => {
-            if scope == RuleScope::Call || save_rule(conn, &request, scope, false).is_err() {
+            if !can_persist(scope, pattern_key)
+                || save_rule(conn, &request, scope, false, pattern_key).is_err()
+            {
                 requests::require_transaction(conn)?;
                 ApprovalDecision::Deny
             } else {
@@ -206,11 +234,20 @@ pub fn decide(
     Ok(receipt)
 }
 
+fn can_persist(scope: RuleScope, pattern_key: Option<&str>) -> bool {
+    match scope {
+        RuleScope::Call => false,
+        RuleScope::Pattern => pattern_key.is_some_and(crate::policy::valid_pattern_key),
+        RuleScope::Subject | RuleScope::Global => true,
+    }
+}
+
 fn save_rule(
     conn: &Connection,
     request: &HumanInputRequest,
     scope: RuleScope,
     allow: bool,
+    pattern_key: Option<&str>,
 ) -> Result<()> {
     let InputKind::Approval {
         tool, args_digest, ..
@@ -218,6 +255,14 @@ fn save_rule(
     else {
         return Err(invalid("not an approval"));
     };
+    let stored = match scope {
+        RuleScope::Global => "",
+        RuleScope::Pattern => pattern_key.unwrap_or(""),
+        RuleScope::Call | RuleScope::Subject => args_digest.as_str(),
+    };
+    if scope == RuleScope::Pattern && !crate::policy::valid_pattern_key(stored) {
+        return Err(invalid("pattern key is required"));
+    }
     let route = &request.route;
     conn.execute(
         "INSERT INTO forms_approval_rules
@@ -230,7 +275,7 @@ fn save_rule(
             route.target_bot_id,
             route.target_conversation_id,
             tool,
-            if scope == RuleScope::Global { "" } else { args_digest.as_str() },
+            stored,
             serde_json::to_string(&scope)?,
             allow
         ],
@@ -288,6 +333,17 @@ pub fn auto_review(
     submission_id: &str,
     now_ms: i64,
 ) -> Result<Option<ResumeReceipt>> {
+    auto_review_matching(conn, id, submission_id, now_ms, None)
+}
+
+/// `pattern_key` matches a command rule in addition to subject and global rules.
+pub fn auto_review_matching(
+    conn: &Connection,
+    id: &str,
+    submission_id: &str,
+    now_ms: i64,
+    pattern_key: Option<&str>,
+) -> Result<Option<ResumeReceipt>> {
     let request = approval(conn, id)?;
     if let Some(receipt) = requests::replay(conn, &request.entry_id, submission_id)? {
         return Ok(Some(receipt));
@@ -302,15 +358,18 @@ pub fn auto_review(
     else {
         unreachable!()
     };
+    let pattern = pattern_key.unwrap_or("");
     let allow: Option<bool> = conn
         .query_row(
             "SELECT allow FROM forms_approval_rules WHERE requesting_bot_id=?1 AND target_bot_id=?2
-             AND tool=?3 AND (args_digest=?4 OR scope='\"global\"') ORDER BY allow ASC LIMIT 1",
+             AND tool=?3 AND (args_digest=?4 OR scope='\"global\"' OR (scope='\"pattern\"' AND args_digest=?5))
+             ORDER BY allow ASC LIMIT 1",
             params![
                 route.requesting_bot_id,
                 route.target_bot_id,
                 tool,
-                args_digest
+                args_digest,
+                pattern
             ],
             |row| row.get(0),
         )

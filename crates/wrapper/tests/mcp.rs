@@ -1117,6 +1117,77 @@ fn model_tools_are_bot_scoped_approved_namespaced_and_secret_safe() {
     .any(|t| t.name == tool));
 }
 #[test]
+fn outbound_and_destructive_connector_actions_ignore_permanent_rules() {
+    let mut f = Fixture::new();
+    let id = f.add("protected");
+    f.connect(&id);
+    for name in [
+        "send_email",
+        "post_message",
+        "create_comment",
+        "delete_file",
+    ] {
+        let tool = f.tool(name);
+        let first_id = format!("ask-{name}");
+        let run = f.send(&tool, json!({"text":"bonjour"}), &first_id);
+        assert_eq!(run.status, RunStatus::AwaitingApproval, "{name}");
+        let card = f.request(&run.run_id);
+        let state = f.state();
+        let payload = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["messages"].as_array().unwrap().clone())
+            .find(|m| m["id"] == card.entry_id)
+            .expect("carte")["payload"]
+            .clone();
+        assert_eq!(payload["policy"]["remember"], false, "{name}");
+        let expected = if name == "delete_file" {
+            "destructive"
+        } else {
+            "outbound"
+        };
+        assert_eq!(payload["policy"]["protection"], expected, "{name}");
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{name}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{name}");
+        f.db().execute(
+            "INSERT INTO forms_approval_rules VALUES ('grokbot','grokbot',?1,?2,'','\"global\"',1)",
+            rusqlite::params![f.conversation, tool],
+        ).unwrap();
+        f.script(vec![json!({"type":"response.completed"})]);
+        f.decide(&run.run_id, json!("allow_once"));
+        assert!(
+            matches!(f.outcome(&run.run_id), ToolOutcome::Done { .. }),
+            "{name}"
+        );
+        let second_id = format!("again-{name}");
+        let again = f.send(&tool, json!({"text":"encore"}), &second_id);
+        assert_eq!(
+            again.status,
+            RunStatus::AwaitingApproval,
+            "{name} reste protégé"
+        );
+        assert!(store::events(&f.db(), &again.run_id, 0)
+            .unwrap()
+            .iter()
+            .all(|e| e.kind != RunEventKind::ToolResult));
+        f.script(vec![json!({"type":"response.completed"})]);
+        f.decide(&again.run_id, json!("deny"));
+    }
+}
+
+#[test]
 fn crash_and_launch_errors_are_french_and_restartable() {
     let mut f = Fixture::new();
     let id = f.add("crash");

@@ -333,6 +333,10 @@ fn create_request(
             return Err(ApiError::new(400, "Invalid secret request name"));
         }
     }
+    let policy = match &kind {
+        InputKind::Approval { tool, .. } => Some(approval_policy(ctx, tool, &display)),
+        _ => None,
+    };
     let sanitized_display = redact_value(&vault, &display)?;
     if matches!(&kind, InputKind::Approval { tool, .. } if tool == "propose_skill")
         && sanitized_display != display
@@ -368,12 +372,17 @@ fn create_request(
     )?;
     ctx.connection.execute("UPDATE wrapper_conversations SET updated_at=MAX(updated_at,?3) WHERE account_id=?1 AND id=?2", params![ACCOUNT,target,ctx.now_ms])?;
     // Defense in depth if a standing rule appears between gate check and request.
-    if approval
-        && !matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "propose_skill" || super::mcp::is_lifecycle(tool) || super::local::is_read(tool) || super::screen::is_tool(tool))
-    {
-        if let Some(receipt) =
-            approvals::auto_review(ctx.connection, id, &format!("auto:{id}"), clock(ctx))?
-        {
+    // Protected sends and deletions, and anything the host refuses to remember,
+    // stay on the card even when a stored rule would otherwise match.
+    if let Some(policy) = policy.filter(|policy| policy.remember) {
+        let key = (policy.scope == "pattern").then_some(policy.pattern.as_str());
+        if let Some(receipt) = approvals::auto_review_matching(
+            ctx.connection,
+            id,
+            &format!("auto:{id}"),
+            clock(ctx),
+            key,
+        )? {
             attach(ctx.connection, &request, receipt)?;
         }
     }
@@ -523,6 +532,13 @@ pub fn check_tool_approval(
             }),
         };
     }
+    // A standing allow or deny never covers an outbound send or a deletion.
+    if approval_policy(ctx, &call.name, &call.arguments)
+        .protection
+        .is_some()
+    {
+        return Ok(ApprovalCheck::Ask);
+    }
     if super::mcp::is_lifecycle(&call.name) || super::screen::is_tool(&call.name) {
         return Ok(ApprovalCheck::Ask);
     }
@@ -543,7 +559,14 @@ pub fn check_tool_approval(
         target_bot_id: DEFAULT_BOT.id.into(),
         target_conversation_id: run.conversation_id.clone(),
     };
-    let standing = rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?;
+    let remote = remote_tool_name(ctx, &call.name);
+    let standing = rules::evaluate_named(
+        ctx.connection,
+        &route,
+        &call.name,
+        &call.arguments,
+        remote.as_deref(),
+    )?;
     if matches!(standing, Some((false, _))) {
         return Ok(ApprovalCheck::Denied {
             reason: "Une autorisation permanente refuse cette action.".into(),
@@ -599,14 +622,25 @@ pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result
         if admitted && matches!(request.status, RequestStatus::Resolved { .. }) {
             return Ok(());
         }
-    } else if !super::mcp::is_lifecycle(&call.name) {
+    } else if !super::mcp::is_lifecycle(&call.name)
+        && approval_policy(ctx, &call.name, &call.arguments)
+            .protection
+            .is_none()
+    {
         let route = ApprovalRoute {
             requesting_bot_id: run.bot_id,
             target_bot_id: DEFAULT_BOT.id.into(),
             target_conversation_id: run.conversation_id,
         };
+        let remote = remote_tool_name(ctx, &call.name);
         if matches!(
-            rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?,
+            rules::evaluate_named(
+                ctx.connection,
+                &route,
+                &call.name,
+                &call.arguments,
+                remote.as_deref(),
+            )?,
             Some((true, _))
         ) {
             return Ok(());
@@ -929,6 +963,18 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             else {
                 return Err(ApiError::new(400, "Request is not an approval"));
             };
+            let policy = policy_for_request(&ctx, &request)?;
+            if policy.protection.is_some()
+                && matches!(
+                    input.decision,
+                    ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
+                )
+            {
+                return Err(ApiError::new(
+                    400,
+                    "Un envoi sous votre nom ou une suppression demande une confirmation à chaque fois.",
+                ));
+            }
             if (super::mcp::is_lifecycle(tool) || super::screen::is_tool(tool))
                 && matches!(
                     input.decision,
@@ -962,13 +1008,15 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     ))
                 }
             }
-            let receipt = approvals::decide(
+            let pattern = (policy.scope == "pattern").then_some(policy.pattern.as_str());
+            let receipt = approvals::decide_with_pattern(
                 &tx,
                 &request.id,
                 &input.conversation_id,
                 &submission,
                 input.decision,
                 clock(&ctx),
+                pattern,
             )?;
             if matches!(request.kind, InputKind::Approval { .. })
                 && requests::get(&tx, &request.id)?
@@ -1119,8 +1167,109 @@ fn request_value(
         if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
         }
+        value["policy"] = json!(policy_for_request(ctx, request)?);
     }
     Ok(value)
+}
+
+/// One classifier for the gate, the card and the decision route.
+fn approval_policy(
+    ctx: &Context<'_>,
+    tool: &str,
+    arguments: &Value,
+) -> grokbot_forms::policy::Policy {
+    let remote = remote_tool_name(ctx, tool);
+    let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
+    if super::screen::is_tool(tool)
+        || super::mcp::is_lifecycle(tool)
+        || tool == "propose_skill"
+        || super::local::is_read(tool)
+    {
+        policy.remember = false;
+        policy.protection = None;
+        policy.scope = "none".into();
+        policy.pattern.clear();
+        return policy;
+    }
+    if policy.scope == "pattern" {
+        if let Ok(secrets) = vault(ctx) {
+            let visible = json!(policy.pattern);
+            if grokbot_forms::redact::redact_value(&secrets, &visible)
+                .ok()
+                .as_ref()
+                != Some(&visible)
+            {
+                policy.remember = false;
+                policy.scope = "none".into();
+                policy.pattern.clear();
+            }
+        }
+    }
+    policy
+}
+
+fn remote_tool_name(ctx: &Context<'_>, tool: &str) -> Option<String> {
+    if tool.starts_with("mcp_") && !super::mcp::is_lifecycle(tool) {
+        super::mcp::display(ctx, tool)
+            .and_then(|label| label.get("tool").and_then(Value::as_str).map(str::to_owned))
+    } else {
+        None
+    }
+}
+
+fn stored_call_arguments(
+    ctx: &Context<'_>,
+    run_id: &str,
+    tool: &str,
+    digest: &str,
+) -> Result<Option<Value>, ApiError> {
+    let mut statement = ctx.connection.prepare(
+        "SELECT payload FROM engine_run_events WHERE run_id=?1 AND kind='tool_call' ORDER BY seq",
+    )?;
+    let rows = statement.query_map(params![run_id], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let payload: Value = serde_json::from_str(&row?)
+            .map_err(|_| ApiError::new(500, "Appel d’outil illisible."))?;
+        if payload.get("name").and_then(Value::as_str) != Some(tool) {
+            continue;
+        }
+        let arguments = payload.get("arguments").cloned().unwrap_or(Value::Null);
+        if approvals::args_digest(tool, &arguments).ok().as_deref() == Some(digest) {
+            return Ok(Some(arguments));
+        }
+    }
+    Ok(None)
+}
+
+fn display_arguments(ctx: &Context<'_>, request_id: &str) -> Result<Value, ApiError> {
+    let display: Option<String> = ctx
+        .connection
+        .query_row(
+            "SELECT display_json FROM wrapper_forms_calls WHERE request_id=?1",
+            [request_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(display
+        .map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(|_| ApiError::new(500, "Invalid approval display metadata"))?
+        .unwrap_or(Value::Null))
+}
+
+fn policy_for_request(
+    ctx: &Context<'_>,
+    request: &HumanInputRequest,
+) -> Result<grokbot_forms::policy::Policy, ApiError> {
+    let InputKind::Approval {
+        tool, args_digest, ..
+    } = &request.kind
+    else {
+        return Ok(grokbot_forms::policy::describe("", &Value::Null, None));
+    };
+    let arguments = stored_call_arguments(ctx, &request.run_id, tool, args_digest)?
+        .unwrap_or(display_arguments(ctx, &request.id)?);
+    Ok(approval_policy(ctx, tool, &arguments))
 }
 // Presentation metadata only: the digest remains the sole binding of a subject
 // rule. Do not change the persisted approval contract to add a human label.

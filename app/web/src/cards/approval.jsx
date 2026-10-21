@@ -47,8 +47,15 @@ export function Card({ message, busy, onAction }) {
     </article>
   );
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
+  const policy = request.policy;
+  const outbound = policy?.protection === "outbound";
+  const destructive = policy?.protection === "destructive";
+  const title = outbound ? "Envoi sous votre nom" : destructive ? "Confirmation d’une suppression" : "Approbation demandée";
+  const showRemember = policy
+    ? Boolean(policy.remember) && !screen && !lifecycle
+    : !screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool);
   return (
-    <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background && !lifecycle}>
+    <HumanInputCard message={message} title={title} input={input} showDelivery={!background && !lifecycle}>
       <div className="space-y-3" data-follow-actions={background || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
@@ -79,9 +86,12 @@ export function Card({ message, busy, onAction }) {
         {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>{screen ? "Autoriser une fois et reprendre" : "Autoriser une fois"}</button>
+            {policy?.remember && <button type="button" className="gb-retry" disabled={blocked} data-always-scope={policy.scope} onClick={() => decide({ always_allow: { scope: policy.scope } })}>Toujours autoriser</button>}
             <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
           </div>
-          {!screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool) && <details>
+          {outbound && <p className="text-sm">Cet envoi part sous votre nom. Chaque envoi demande cette confirmation.</p>}
+          {destructive && <p className="text-sm">Cette suppression demande une confirmation à chaque fois.</p>}
+          {showRemember && <details>
             <summary className="text-sm">Mémoriser une règle…</summary>
             <label className="mt-2 block space-y-1 text-sm"><span>Portée pour ce bot et cet outil</span><select className={inputClass} id={`${message.id}-approval-scope`} value={scope} onChange={(event) => setScope(event.target.value)}><option value="subject">Seulement ces arguments identiques</option><option value="global">Toutes les actions de cet outil</option></select></label>
             <p className="my-2 text-xs text-muted-foreground">Les prochaines demandes correspondantes seront traitées automatiquement. Vous pouvez retirer la règle dans les réglages.</p>

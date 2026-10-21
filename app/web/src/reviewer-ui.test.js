@@ -389,6 +389,60 @@ test("generic approval retains its code identifier instead of a local-action lab
   assert.ok(!html.includes("data-follow-actions"));
 });
 
+test("a remembered shell command is listed by its text and revoked as that pattern", async () => {
+  const rule = { ...standingRule("run_shell", true, "pattern"), args_digest: "printf oui" };
+  const f = settingsPanel({ rules: [rule] });
+  assert.match(ruleRows(f.root)[0].textContent, /Terminal sur votre Mac · Toujours autoriser · Cette commande · printf oui/);
+  await button(ruleRows(f.root)[0], "Retirer la règle").listeners.click();
+  assert.equal(f.requests[0].path, "/api/approvals/rules/revoke");
+  assert.equal(f.requests[0].body.tool, "run_shell");
+  assert.equal(f.requests[0].body.args_digest, "printf oui");
+  assert.equal(f.requests[0].body.scope, "pattern");
+});
+
+function cardWithPolicy(policy, tool, args) {
+  globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(Card, { message: {
+      id: "approval-policy", kind: "approval", payload: {
+        entry_id: "approval-policy", status: { status: "pending" }, route: { requesting_bot_id: "grokbot" },
+        kind: { kind: "approval", tool, expires_at: Date.now() + 60000 }, arguments: args, policy,
+      },
+    } }));
+  } finally { delete globalThis.window; }
+}
+
+test("the approval card offers Toujours autoriser for a rememberable command", () => {
+  const html = cardWithPolicy(
+    { remember: true, scope: "pattern", pattern: "printf oui", label: "printf oui" },
+    "run_shell",
+    { command: "printf oui", cwd: "/tmp" },
+  );
+  assert.ok(html.includes('data-always-scope="pattern"'));
+  assert.ok(html.indexOf("Toujours autoriser") >= 0);
+  assert.ok(html.indexOf("Toujours autoriser") < html.indexOf("Mémoriser une règle"));
+  assert.ok(html.includes("Autoriser une fois"));
+});
+
+test("outbound sends and deletions stay on a confirmation card without Toujours autoriser", () => {
+  const outbound = cardWithPolicy(
+    { remember: false, protection: "outbound", scope: "none", pattern: "", label: "Envoi sous votre nom" },
+    "mcp_gmail_send",
+    { to: "a@exemple.fr" },
+  );
+  assert.ok(outbound.includes("Envoi sous votre nom"));
+  assert.ok(outbound.includes("Cet envoi part sous votre nom."));
+  assert.ok(!outbound.includes("Toujours autoriser"));
+  const removal = cardWithPolicy(
+    { remember: false, protection: "destructive", scope: "none", pattern: "", label: "Suppression à confirmer" },
+    "run_shell",
+    { command: "rm note", cwd: "/tmp" },
+  );
+  assert.ok(removal.includes("Confirmation d’une suppression"));
+  assert.ok(removal.includes("Cette suppression demande une confirmation à chaque fois."));
+  assert.ok(!removal.includes("Toujours autoriser"));
+});
+
 test("human fallback is attributed to the reviewer; pending review has decorative progress without disabling decisions", () => {
   const fallback = card("pending", "ask");
   assert.ok(fallback.includes("Relecteur : "));

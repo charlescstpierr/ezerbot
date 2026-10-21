@@ -228,13 +228,27 @@ pub(super) fn complete(
     let lifecycle = matches!(&request.kind, InputKind::Approval {tool,..} if super::super::mcp::is_lifecycle(tool));
     let local_tool = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_tool(tool) || super::super::screen::is_tool(tool) || super::super::generated::is_external(tool));
     let local_read = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_read(tool));
-    let standing = if !lifecycle
+    let tx_ctx = Context {
+        connection: &tx,
+        provider: ctx.provider,
+        db_path: ctx.db_path,
+        now_ms: ctx.now_ms,
+        bot_id: ctx.bot_id,
+        conversation_id: ctx.conversation_id,
+        run_id: ctx.run_id,
+    };
+    let policy = policy_for_request(&tx_ctx, &request).ok();
+    let standing = if policy.as_ref().is_some_and(|item| item.remember)
+        && !lifecycle
         && !local_read
         && request.status == RequestStatus::Pending
         && matches!(&request.kind, InputKind::Approval { expires_at, .. } if clock(ctx) < *expires_at)
         && store::required(&tx, &request.run_id)?.status == RunStatus::AwaitingApproval
     {
-        approvals::auto_review(&tx, id, &format!("auto:standing:{id}"), clock(ctx))?
+        let key = policy
+            .as_ref()
+            .and_then(|item| (item.scope == "pattern").then_some(item.pattern.as_str()));
+        approvals::auto_review_matching(&tx, id, &format!("auto:standing:{id}"), clock(ctx), key)?
     } else {
         None
     };

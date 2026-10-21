@@ -197,9 +197,11 @@ def verify_ui_regressions():
   window.fetch = originalFetch;
   const inFlightConversation = (await saved()).conversations.find(item => item.id === localStorage.getItem('grokbot.selected'));
   check('in-flight send keeps the original recipient', inFlightConversation.bot_id === 'grokbot');
-  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null);
+  check('text typed during creation remains a saved unsent draft', editor().getText() === 'Suite tapée pendant la création' && localStorage.getItem(`grokbot.draft.${inFlightConversation.id}`) === editor().getText() && localStorage.getItem('grokbot.draft.new') === null && localStorage.getItem('grokbot.draft.new.document') === null);
   check('in-flight edits are not appended to the submitted message', inFlightConversation.messages.some(item => item.role === 'user' && item.body === 'Choix figé pendant l’envoi'));
-  cmdN(); await type('Message à restaurer');
+  cmdN();
+  check('a draft transferred to its thread does not reappear in a new conversation', empty() && localStorage.getItem('grokbot.draft.new.document') === null);
+  await type('Message à restaurer');
   const beforeFailure = (await saved()).conversations.length;
   let failCreation;
   const failureGate = new Promise(resolve => { failCreation = resolve; });

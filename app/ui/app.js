@@ -493,8 +493,11 @@
   }
   function restoreDraftDocument() {
     try {
+      const text = readPreference(draftKey(), null);
+      // A rich document without its text twin is an orphan from an earlier transfer.
+      if (text === null) { removePreference(`${draftKey()}.document`); return; }
       const document = JSON.parse(readPreference(`${draftKey()}.document`, "null"));
-      if (document && readPreference(draftKey(), "") === ui.input.value) ui.input.document = document;
+      if (document && text === ui.input.value) ui.input.document = document;
     } catch { /* Plain text remains usable when an older draft has no rich document. */ }
   }
 
@@ -1234,6 +1237,7 @@
       pendingSends.set(messageId, { extras, consumed: false });
       conversation.messages.push({ ...extras, ...(conversation.kind === "task" ? { payload: { source: "follow_up" } } : {}), id: messageId, role: "user", body, state: "queued", created_at: new Date().toISOString() });
       removePreference(previousDraftKey);
+      removePreference(`${previousDraftKey}.document`);
       saveDraft(); // Keep any text typed while conversation creation was in flight.
       render(scrollGeneration === submittedScrollGeneration);
       const response = await sendRequest(conversation, messageId, body, extras, simulateLoss);

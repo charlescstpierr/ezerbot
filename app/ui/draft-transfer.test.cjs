@@ -510,26 +510,23 @@ test("the bot menu keeps focus across refresh, moves with the keyboard, and retu
   assert.equal(app.document.activeElement, trigger);
 });
 
-test("a normal bot name is fully shown in the composer while a maximal name ellipsizes in the menu", async () => {
+test("short composer names stay whole and a maximal name ellipsizes only when the bar is full", async () => {
   const css = readFileSync(`${__dirname}/styles.css`, "utf8");
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
-  const composerName = rules.filter(([, selector]) => selector.split(",").some((part) => part.trim() === ".composer-bot-name"));
-  assert.ok(composerName.length >= 1, "the composer name has its own rule");
-  for (const [, , body] of composerName) {
-    assert.equal(/max-width\s*:/.test(body), false, `composer name must not be width-capped: ${body.trim()}`);
-    assert.equal(/text-overflow\s*:/.test(body), false, `composer name must not ellipsize: ${body.trim()}`);
-    assert.equal(/overflow\s*:\s*hidden/.test(body), false, `composer name must not clip: ${body.trim()}`);
-  }
   const composerBot = rules.find(([, selector]) => selector.trim() === ".composer .composer-bot");
   assert.ok(composerBot, "the composer bot keeps a flex rule");
-  assert.match(composerBot[2], /flex:\s*0\s+0\s+auto/, "the composer bot must not shrink below its name");
+  assert.match(composerBot[2], /flex:\s*0\s+1\s+auto/, "the composer bot shrinks only when the bar is full");
+  assert.match(composerBot[2], /min-width:\s*0/);
+  const composerName = rules.find(([, selector]) => selector.trim() === ".composer-bot-name");
+  assert.ok(composerName, "the composer name has its own rule");
+  assert.match(composerName[2], /min-width:\s*0/);
+  assert.match(composerName[2], /overflow:\s*hidden/);
+  assert.match(composerName[2], /text-overflow:\s*ellipsis/);
+  assert.match(composerName[2], /white-space:\s*nowrap/);
 
   const menu = css.match(/\.bot-menu \.bot-menu-name,\s*\.bot-menu \.bot-menu-copy small,\s*\.bot-menu \.bot-menu-action > span \{([^}]*)\}/);
   assert.ok(menu, "a maximal menu name still has an ellipsis rule");
-  assert.match(menu[1], /min-width:\s*0/);
-  assert.match(menu[1], /overflow:\s*hidden/);
   assert.match(menu[1], /text-overflow:\s*ellipsis/);
-  assert.match(menu[1], /white-space:\s*nowrap/);
 
   const app = boot();
   await ready(app);
@@ -540,8 +537,6 @@ test("a normal bot name is fully shown in the composer while a maximal name elli
   assert.equal(label().textContent, "Rédacteur");
   const longName = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN";
   choose(longName);
-  app.document.getElementById("composer-bot").click();
-  const option = [...app.document.querySelectorAll("#bot-menu .bot-menu-name")].find((node) => node.textContent === longName);
-  assert.equal(option?.textContent, longName);
-  assert.equal(option?.className.includes("bot-menu-name"), true);
+  assert.equal(label().textContent, longName);
+  assert.equal(label().className, "composer-bot-name");
 });

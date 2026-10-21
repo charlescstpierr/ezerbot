@@ -200,6 +200,13 @@ def verify_ui_regressions():
   };
   const setTheme = theme => { document.documentElement.dataset.theme = theme; };
   const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
+  const clearOfControls = (label) => {
+    const nameBox = label.getBoundingClientRect();
+    const voice = document.querySelector('.voice-controls')?.getBoundingClientRect();
+    const send = $('send-button').getBoundingClientRect();
+    if (!voice || voice.width === 0) throw new Error('voice controls missing');
+    return nameBox.width > 0 && nameBox.right <= voice.left + 0.5 && nameBox.right <= send.left + 0.5;
+  };
   for (const [width, height] of [[1140, 780], [820, 560]]) {
     applyFrame(width);
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -207,11 +214,14 @@ def verify_ui_regressions():
       setTheme(theme);
       choose('Ezerbot');
       const ezerbotName = $('composer-bot-name');
-      check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1);
+      check(`composer shows the full Ezerbot name at ${width}×${height} ${theme}`, ezerbotName.textContent === 'Ezerbot' && ezerbotName.scrollWidth <= ezerbotName.clientWidth + 1 && clearOfControls(ezerbotName));
       choose('Rédacteur');
       const writerName = $('composer-bot-name');
-      check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1);
+      check(`composer shows the full Rédacteur name at ${width}×${height} ${theme}`, writerName.textContent === 'Rédacteur' && writerName.scrollWidth <= writerName.clientWidth + 1 && clearOfControls(writerName));
       choose(longName);
+      const longLabel = $('composer-bot-name');
+      check(`maximal composer name stays left of the voice controls and send button at ${width}×${height} ${theme}`, longLabel.textContent === longName && clearOfControls(longLabel));
+      if (width <= 820) check(`maximal composer name ellipsizes when the bar is full at ${width}×${height} ${theme}`, longLabel.scrollWidth > longLabel.clientWidth + 1);
       openMenu();
       check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
     }

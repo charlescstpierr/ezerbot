@@ -397,6 +397,20 @@ test("Notifications, Créer un groupe and Membres keep their height at 820px", a
   }
 });
 
+test("a medium bot name keeps a width floor at 500px beside the real model", async () => {
+  const report = await measure(500, 780, MEDIUM_NAME, { model: "GPT-6.1 Sol", effort: "medium" });
+  for (const theme of report.themes) {
+    const where = `${theme.theme} name=${theme.nameClient}/${theme.nameScroll} model=${theme.modelClient}/${theme.modelScroll} ${JSON.stringify(theme.pieces)}`;
+    assert.ok(theme.nameClient >= 110, where);
+    assert.equal(theme.nameEllipsed, true, where);
+    assert.equal(theme.nameInside, true, where);
+    assert.equal(theme.chevronInside, true, where);
+    assert.equal(theme.toolsClear, true, where);
+    assert.equal(theme.modelFits, true, where);
+    assert.ok(theme.modelLabelWidth >= 40, where);
+  }
+});
+
 test("effort and speed labels keep a 40px floor at 500px", async () => {
   const crowded = await measure(500, 780, "Ezerbot", { model: "GPT-6.1 Sol", effort: "Moyen", speed: "Standard" });
   const long = await measure(500, 780, LONG_NAME, { model: "GPT-6.1 Sol", effort: "medium", speed: "Standard" });

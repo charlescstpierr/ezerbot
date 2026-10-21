@@ -88,6 +88,7 @@ pub mod delegation;
 pub mod engine;
 pub mod forms;
 pub mod generated;
+pub mod iphone;
 pub mod local;
 pub mod mcp;
 pub mod meetings;
@@ -143,6 +144,7 @@ registry!(
     mcp,
     storage,
     notifications,
+    iphone,
     local,
     voice,
     meetings,

@@ -1,7 +1,8 @@
 "use strict";
 (() => {
   const panels = window.GrokbotPanels;
-  if (!panels) return;
+  // Meeting capture uses the Mac microphone. It must not take space in the phone composer.
+  if (!panels || window.EzerbotIPhone?.remote) return;
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const button = (text, action, cls = "secondary-button") => { const el = node("button", cls, text); el.type = "button"; el.onclick = action; return el; };
   const errors = {

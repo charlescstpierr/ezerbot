@@ -14,12 +14,13 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 empty_hooks!(state, tick, context, entry, on_run_event, link_attachments);
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

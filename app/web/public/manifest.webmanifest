@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "Ezerbot",
+  "short_name": "Ezerbot",
+  "description": "Votre Ezerbot sur le Mac, accessible en privé par Tailscale.",
+  "lang": "fr-CA",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#14161a",
+  "theme_color": "#14161a",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

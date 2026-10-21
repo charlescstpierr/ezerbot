@@ -1208,7 +1208,15 @@
           notify(error.message);
         } catch {
           const optimisticMessage = currentConversation()?.messages.find((message) => message.id === messageId);
-          if (optimisticMessage) optimisticMessage.state = "unknown";
+          const confirmed = optimisticMessage && ["accepted", "echoed"].includes(optimisticMessage.state);
+          if (!confirmed) {
+            if (error.accessDisabled) {
+              const owner = state.conversations.find((item) => item.messages.some((message) => message.id === messageId));
+              if (owner) owner.messages = owner.messages.filter((message) => message.id !== messageId);
+              pendingSends.delete(messageId);
+            } else if (optimisticMessage) optimisticMessage.state = "unknown";
+            restoreDraft();
+          }
           render();
           showConnectionError(error);
         }

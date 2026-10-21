@@ -1305,8 +1305,12 @@ mod tests {
             if format == "svg" {
                 assert!(result.preview.contains("Cœur"));
             } else if format == "pdf" && !cfg!(target_os = "macos") {
-                // The text reader is PDFKit. Off macOS, still require a real PDF file.
+                // Text extraction uses PDFKit. Off macOS, still prove a real PDF was produced.
                 assert!(result.bytes.starts_with(b"%PDF-"), "{format}");
+                assert!(
+                    result.bytes.windows(b") Tj T*".len()).any(|window| window == b") Tj T*"),
+                    "{format}"
+                );
             } else {
                 let doc = documents::prepare(&conn, &result.name, &result.bytes)
                     .unwrap_or_else(|e| panic!("{format}: {e:?}"));
@@ -1357,6 +1361,7 @@ mod tests {
         })
         .unwrap();
         assert!(decomposed.bytes.starts_with(b"%PDF-"));
+        // PDFKit is what proves the composed accent round-trips as readable text.
         #[cfg(target_os = "macos")]
         {
             let conn = rusqlite::Connection::open_in_memory().unwrap();

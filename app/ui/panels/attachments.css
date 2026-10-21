@@ -1,11 +1,13 @@
-.attachments-panel { margin: 0 0 8px; min-width: 0; }
+.attachments-panel { min-width: 0; }
+.attachments-panel:has(.attachment-list:not(:empty), p:not([hidden])) { margin-bottom: 8px; }
 /* Compact the introduction consistently for images and documents. */
 .main-panel:has(.attachment-chip) .welcome { padding: 8px 0; }
 .main-panel:has(.attachment-chip) .welcome :is(.mascot-stage, .welcome-eyebrow, .welcome-description, .suggestion-grid) { display: none; }
 @media (max-height: 650px) { .main-panel:has(.attachment-chip) .welcome h2 { display: none; } }
 .main-panel:has(.attachment-chip) .gb-editor { max-height: min(14vh, 140px); }
 .main-panel:has(.attachment-limit:not([hidden])) .welcome { display: none; }
-.attachment-choose { padding: 5px 8px; border-radius: 6px; color: var(--muted); font-size: 12px; }
+.attachment-choose { display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border-radius: 8px; color: var(--muted); transition: background .15s, color .15s; }
+.attachment-choose .icon { width: 18px; height: 18px; }
 .attachment-choose:hover { background: var(--soft); color: var(--text); }
 .attachment-picker { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .attachment-list { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin: 6px 0 0; padding: 0; list-style: none; max-height: min(30vh, 300px); overflow-y: auto; }

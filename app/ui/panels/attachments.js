@@ -373,8 +373,12 @@
         picker.accept = [...types, ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ...Array.from(documentExtensions, (ext) => `.${ext}`)].join(",");
         picker.tabIndex = -1;
         picker.setAttribute("aria-label", "Choisir des images ou des documents");
-        const choose = node("button", "attachment-choose", "+ Joindre un fichier");
+        // Le « + » ouvre la barre d'écriture, comme dans Codex.
+        const choose = node("button", "attachment-choose");
         choose.type = "button";
+        choose.title = "Joindre un fichier";
+        choose.setAttribute("aria-label", "Joindre un fichier");
+        choose.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>';
         choose.addEventListener("click", () => picker.click());
         picker.addEventListener("change", () => { onFiles(Array.from(picker.files), null, context); picker.value = ""; });
         // One controller-wide notice, read in document order and referenced by
@@ -388,7 +392,9 @@
         limitNotice.hidden = true;
         list = node("ul", "attachment-list");
         list.setAttribute("aria-label", "Pièces jointes à envoyer");
-        tray.append(choose, picker, pause, limitNotice, list);
+        tray.append(picker, pause, limitNotice, list);
+        const bar = document.getElementById("composer-model");
+        bar.insertBefore(choose, bar.firstChild);
         container.append(tray);
         const form = document.getElementById("composer-form");
         form.addEventListener("input", () => sync());

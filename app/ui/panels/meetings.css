@@ -1,4 +1,7 @@
 .meeting-start { white-space: nowrap; }
+/* Dans la barre d'écriture : un point d'enregistrement compact, le libellé reste dans l'infobulle et l'aria-label. */
+.composer-model .meeting-start { display: inline-flex; align-items: center; justify-content: center; font-size: 0; }
+.composer-model .meeting-start::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .meeting-start:disabled, .meeting-dialog .primary-button:disabled { opacity: .45; cursor: default; }
 .meeting-bar, .meeting-interrupted { flex: 0 0 auto; border-bottom: 1px solid var(--line); padding: 10px 18px; background: var(--pane); font-size: 11px; line-height: 1.5; max-height: 48vh; overflow: auto; }
 .meeting-bar[hidden], .meeting-interrupted[hidden] { display: none; }

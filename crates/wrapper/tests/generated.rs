@@ -188,6 +188,7 @@ fn all_formats_are_persistent_valid_attachments_and_counted_by_storage() {
             assert!(svg.starts_with("<svg") && svg.contains(">Été<") && svg.contains(">puis<"));
         } else if format == "pdf" && !cfg!(target_os = "macos") {
             assert!(bytes.starts_with(b"%PDF-"));
+            assert!(bytes.windows(b") Tj T*".len()).any(|window| window == b") Tj T*"));
         } else {
             let conn = f.db();
             let doc = grokbot_attachments::documents::prepare(

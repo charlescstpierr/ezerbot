@@ -1,7 +1,13 @@
-.voice-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
-.voice-mode { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
-.voice-mode input { accent-color: var(--accent); margin: 0; }
-.voice-mic { width: 32px; height: 32px; }
+.voice-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
+/* Mémo vocal : la case reste la commande, présentée comme un bouton bascule à onde sonore. */
+/* Icône seule dans le compositeur : le libellé reste dans aria-label, title et le texte, pour laisser le nom du bot. */
+.voice-mode { position: relative; display: flex; align-items: center; justify-content: center; gap: 0; width: 32px; height: 32px; padding: 0; border-radius: 8px; font-size: 0; color: var(--muted); cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
+.voice-mode::before { content: ""; width: 16px; height: 16px; flex: 0 0 auto; background: currentColor; -webkit-mask: var(--voice-wave) center / contain no-repeat; mask: var(--voice-wave) center / contain no-repeat; --voice-wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2'/%3E%3C/svg%3E"); }
+.voice-mode input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.voice-mode:hover { background: var(--soft); color: var(--text); }
+.voice-mode:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); }
+.voice-mode:has(input:focus-visible) { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.voice-mic { width: 32px; height: 32px; border-radius: 8px; }
 .voice-mic[aria-pressed=true] { background: var(--accent); color: var(--accent-on); border-radius: 50%; }
 .voice-region { margin: 0 16px 10px; padding: 10px 12px; background: var(--pane); border: 1px solid var(--line); border-radius: 12px; font-size: 11px; }
 .voice-status-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -20,8 +26,7 @@
 .voice-region .attachment-retry { font-size: 11px; align-self: center; }
 .voice-status-row[hidden] { display: none; }
 @media (max-width: 900px) {
-  .voice-mode { font-size: 10px; }
-  .voice-controls { gap: 4px; }
+  .voice-controls { gap: 0; }
   .voice-region { margin-left: 10px; margin-right: 10px; }
 }
 @media (max-height: 640px) {

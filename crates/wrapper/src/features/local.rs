@@ -32,7 +32,18 @@ empty_hooks!(tick, call_tool, entry, on_run_event, link_attachments);
 pub fn migrate(conn: &rusqlite::Connection) -> Result<(), ApiError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_local_bots(bot_id TEXT PRIMARY KEY, shell INTEGER NOT NULL DEFAULT 0, files INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS wrapper_local_folders(path TEXT PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, PRIMARY KEY (run_id, call_id));")?;
+        CREATE TABLE IF NOT EXISTS wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pgid INTEGER, PRIMARY KEY (run_id, call_id));")?;
+    let has_pgid: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_shell_tasks') WHERE name = 'pgid')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_pgid {
+        conn.execute(
+            "ALTER TABLE wrapper_shell_tasks ADD COLUMN pgid INTEGER",
+            [],
+        )?;
+    }
     Ok(())
 }
 pub fn startup(conn: &rusqlite::Connection) -> Result<(), ApiError> {
@@ -723,6 +734,29 @@ fn write(ctx: &Context<'_>, call: &ToolCall, a: WriteArgs) -> Result<Value, ApiE
     result
 }
 
+fn absorb_output(
+    bytes: &mut Vec<u8>,
+    quota: &AtomicUsize,
+    chunk: &[u8],
+    truncated: &mut bool,
+    allocated: &mut usize,
+) -> bool {
+    let n = chunk.len();
+    let remaining = quota
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            Some(remaining.saturating_sub(n))
+        })
+        .expect("quota update always succeeds");
+    let keep = n.min(remaining);
+    let changed = keep > 0;
+    if changed {
+        bytes.extend_from_slice(&chunk[..keep]);
+        *allocated += keep;
+    }
+    *truncated |= keep < n;
+    changed
+}
+
 #[cfg(unix)]
 fn shell(
     ctx: &Context<'_>,
@@ -829,18 +863,21 @@ fn shell(
                 match pipe.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let remaining = quota
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                                Some(remaining.saturating_sub(n))
-                            })
-                            .expect("quota update always succeeds");
-                        let keep = n.min(remaining);
-                        allocated += keep;
-                        bytes.extend_from_slice(&buffer[..keep]);
-                        truncated |= keep < n;
-                        if let Ok(mut piece) = slot.lock() {
-                            piece.text = String::from_utf8_lossy(&bytes).into_owned();
-                            piece.truncated = truncated;
+                        let was_truncated = truncated;
+                        let changed = absorb_output(
+                            &mut bytes,
+                            &quota,
+                            &buffer[..n],
+                            &mut truncated,
+                            &mut allocated,
+                        );
+                        if changed || truncated != was_truncated {
+                            if let Ok(mut piece) = slot.lock() {
+                                if changed {
+                                    piece.text = String::from_utf8_lossy(&bytes).into_owned();
+                                }
+                                piece.truncated = truncated;
+                            }
                         }
                     }
                     Err(e)
@@ -894,7 +931,8 @@ fn shell(
             ));
         }
         let call_id = call.call_id.clone();
-        if let Err(error) = super::shell_tasks::insert(ctx.connection, &run_id, &call_id) {
+        let pgid = group.0.id();
+        if let Err(error) = super::shell_tasks::insert(ctx.connection, &run_id, &call_id, pgid) {
             finished.store(true, Ordering::SeqCst);
             drop(group);
             let _ = child.wait();
@@ -902,7 +940,6 @@ fn shell(
             let _ = err.join();
             return Err(error);
         }
-        let pgid = group.0.id();
         let control = super::shell_tasks::register(ctx.db_path, &run_id, &call_id, pgid);
         let db = ctx.db_path.to_path_buf();
         let stop = control.stop.clone();
@@ -930,12 +967,22 @@ fn shell(
                     Err(_) => break,
                 }
                 if let (Ok(stdout), Ok(stderr)) = (stdout_piece.lock(), stderr_piece.lock()) {
-                    let _ = super::shell_tasks::publish(
+                    match super::shell_tasks::publish(
                         &db,
                         &run_id,
                         &call_id,
                         &live(&stdout, &stderr),
-                    );
+                    ) {
+                        Ok(super::shell_tasks::Publish::Terminal)
+                        | Ok(super::shell_tasks::Publish::Closed)
+                            if !stop.load(Ordering::SeqCst) =>
+                        {
+                            stop.store(true, Ordering::SeqCst);
+                            super::shell_tasks::kill_group(pgid);
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
@@ -978,7 +1025,9 @@ fn shell(
             for _ in 0..100 {
                 match super::shell_tasks::publish(&db, &run_id, &call_id, &snap) {
                     Ok(
-                        super::shell_tasks::Publish::Updated | super::shell_tasks::Publish::Closed,
+                        super::shell_tasks::Publish::Updated
+                        | super::shell_tasks::Publish::Closed
+                        | super::shell_tasks::Publish::Terminal,
                     ) => break,
                     _ => std::thread::sleep(Duration::from_millis(20)),
                 }
@@ -1158,5 +1207,57 @@ mod tests {
         }
         drop(app);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exhausted_output_cap_does_not_rebuild_retained_bytes() {
+        use std::sync::atomic::AtomicUsize;
+        let quota = AtomicUsize::new(4);
+        let mut bytes = Vec::new();
+        let mut truncated = false;
+        let mut allocated = 0usize;
+        assert!(super::absorb_output(
+            &mut bytes,
+            &quota,
+            b"abcdef",
+            &mut truncated,
+            &mut allocated
+        ));
+        assert_eq!(bytes, b"abcd");
+        assert!(truncated);
+        assert_eq!(allocated, 4);
+        let retained = bytes.clone();
+        assert!(!super::absorb_output(
+            &mut bytes,
+            &quota,
+            b"zzzzzzzz",
+            &mut truncated,
+            &mut allocated
+        ));
+        assert_eq!(bytes, retained);
+        assert_eq!(allocated, 4);
+        assert!(truncated);
+        let quota = AtomicUsize::new(6);
+        let mut bytes = Vec::new();
+        let mut truncated = false;
+        let mut allocated = 0usize;
+        assert!(super::absorb_output(
+            &mut bytes,
+            &quota,
+            b"abcd",
+            &mut truncated,
+            &mut allocated
+        ));
+        assert!(!truncated);
+        assert!(super::absorb_output(
+            &mut bytes,
+            &quota,
+            b"EFGH",
+            &mut truncated,
+            &mut allocated
+        ));
+        assert_eq!(bytes, b"abcdEF");
+        assert!(truncated);
+        assert_eq!(allocated, 6);
     }
 }

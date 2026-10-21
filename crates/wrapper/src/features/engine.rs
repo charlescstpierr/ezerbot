@@ -1921,14 +1921,17 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
                 {
                     // The journal is updated after the turn: a background shell
                     // finishes, or a cancellation drains, without a second event.
-                    let stored: Option<String> = conn
+                    let stored: Option<Option<String>> = conn
                         .query_row(
                             "SELECT outcome FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
                             params![run.run_id, call_id.as_str()],
                             |row| row.get(0),
                         )
                         .optional()?;
-                    if let Some(value) = stored.and_then(|raw| serde_json::from_str(&raw).ok()) {
+                    if let Some(value) = stored
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                    {
                         *output = value;
                     }
                 }

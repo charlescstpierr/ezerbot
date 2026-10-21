@@ -39,6 +39,8 @@ pub(crate) enum Publish {
     Pending,
     Updated,
     Closed,
+    /// The vault replaced the live outcome. The worker must kill the group.
+    Terminal,
 }
 
 pub(crate) struct TaskControl {
@@ -69,10 +71,15 @@ fn key(db: &Path, run_id: &str, call_id: &str) -> String {
     format!("{}\n{run_id}\n{call_id}", db.display())
 }
 
-pub(crate) fn insert(conn: &Connection, run_id: &str, call_id: &str) -> Result<(), ApiError> {
+pub(crate) fn insert(
+    conn: &Connection,
+    run_id: &str,
+    call_id: &str,
+    pgid: u32,
+) -> Result<(), ApiError> {
     conn.execute(
-        "INSERT INTO wrapper_shell_tasks(run_id, call_id, status, exit_code) VALUES (?1, ?2, 'en cours', NULL)",
-        params![run_id, call_id],
+        "INSERT INTO wrapper_shell_tasks(run_id, call_id, status, exit_code, pgid) VALUES (?1, ?2, 'en cours', NULL, ?3)",
+        params![run_id, call_id, i64::from(pgid)],
     )?;
     Ok(())
 }
@@ -127,18 +134,46 @@ pub(crate) fn publish(
     let conn = Connection::open(db)?;
     conn.busy_timeout(Duration::from_secs(3))?;
     let tx = write_transaction(&conn)?;
-    let raw: Option<String> = tx
+    // A missing row and a SQL NULL are the same window: the admission exists,
+    // but the initial result is not durable yet.
+    let raw: Option<Option<String>> = tx
         .query_row(
             "SELECT outcome FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
             params![run_id, call_id],
             |row| row.get(0),
         )
         .optional()?;
-    let Some(raw) = raw else {
+    let Some(raw) = raw.flatten() else {
         tx.commit()?;
         return Ok(Publish::Pending);
     };
     let mut value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    if value["output"]["status"] == "arrêtée" && snap.status == "arrêtée" {
+        value["output"]["stdout"] = json!(snap.stdout);
+        value["output"]["stderr"] = json!(snap.stderr);
+        value["output"]["truncated"] = json!(snap.truncated);
+        value["output"]["output_incomplete"] = json!(snap.incomplete);
+        value["output"]["exit_code"] = Value::Null;
+        value["output"]["signal"] = Value::Null;
+        value["output"]["background"] = json!(true);
+        let redacted = redact_outcome(db, value);
+        if redacted["status"] != "failed" {
+            let updated = tx.execute(
+                "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='arrêtée'",
+                params![run_id, call_id, redacted.to_string()],
+            )?;
+            if updated == 1 {
+                tx.execute(
+                    "UPDATE wrapper_shell_tasks SET status='arrêtée', exit_code=NULL WHERE run_id=?1 AND call_id=?2",
+                    params![run_id, call_id],
+                )?;
+                tx.commit()?;
+                return Ok(Publish::Updated);
+            }
+        }
+        tx.commit()?;
+        return Ok(Publish::Closed);
+    }
     if value["output"]["status"] != "en cours" {
         let status = value["output"]["status"].as_str().unwrap_or("arrêtée");
         tx.execute(
@@ -157,11 +192,9 @@ pub(crate) fn publish(
     value["output"]["signal"] = snap.signal.map_or(Value::Null, |signal| json!(signal));
     value["output"]["background"] = json!(true);
     let redacted = redact_outcome(db, value);
-    let task_status = if redacted["status"] == "failed" {
-        "arrêtée"
-    } else {
-        snap.status
-    };
+    let terminal = redacted["status"] == "failed";
+    let task_status = if terminal { "arrêtée" } else { snap.status };
+    let exit_code = if terminal { None } else { snap.exit_code };
     let updated = tx.execute(
         "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='en cours'",
         params![run_id, call_id, redacted.to_string()],
@@ -169,14 +202,33 @@ pub(crate) fn publish(
     if updated == 1 {
         tx.execute(
             "UPDATE wrapper_shell_tasks SET status=?3, exit_code=?4 WHERE run_id=?1 AND call_id=?2 AND status='en cours'",
-            params![run_id, call_id, task_status, snap.exit_code],
+            params![run_id, call_id, task_status, exit_code],
         )?;
     }
     tx.commit()?;
+    if terminal && updated == 1 {
+        return Ok(Publish::Terminal);
+    }
     Ok(if updated == 1 {
         Publish::Updated
     } else {
         Publish::Closed
+    })
+}
+
+fn interrupted_outcome() -> Value {
+    json!({
+        "status": "done",
+        "output": {
+            "status": "arrêtée",
+            "exit_code": Value::Null,
+            "signal": Value::Null,
+            "stdout": "",
+            "stderr": "",
+            "truncated": false,
+            "output_incomplete": false,
+            "background": true
+        }
     })
 }
 
@@ -194,7 +246,7 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
         if only.is_some_and(|(run, call)| run != run_id || call != call_id) {
             continue;
         }
-        let raw: Option<String> = tx
+        let raw: Option<Option<String>> = tx
             .query_row(
                 "SELECT outcome FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
                 params![run_id, call_id],
@@ -203,24 +255,33 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
             .optional()?;
         let mut stored = "arrêtée".to_string();
         let mut clear_code = true;
-        if let Some(raw) = raw {
-            if let Ok(mut value) = serde_json::from_str::<Value>(&raw) {
-                if value["output"]["status"] == "en cours" {
-                    value["output"]["status"] = json!("arrêtée");
-                    value["output"]["exit_code"] = Value::Null;
-                    value["output"]["signal"] = Value::Null;
-                    tx.execute(
-                        "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='en cours'",
-                        params![run_id, call_id, value.to_string()],
-                    )?;
-                } else if let Some(status) = value["output"]["status"].as_str() {
-                    stored = match status {
-                        "terminé" | "échec" | "arrêtée" => status.to_string(),
-                        _ => "arrêtée".to_string(),
-                    };
-                    clear_code = stored == "arrêtée";
+        match raw {
+            Some(None) => {
+                tx.execute(
+                    "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND outcome IS NULL",
+                    params![run_id, call_id, interrupted_outcome().to_string()],
+                )?;
+            }
+            Some(Some(raw)) => {
+                if let Ok(mut value) = serde_json::from_str::<Value>(&raw) {
+                    if value["output"]["status"] == "en cours" {
+                        value["output"]["status"] = json!("arrêtée");
+                        value["output"]["exit_code"] = Value::Null;
+                        value["output"]["signal"] = Value::Null;
+                        tx.execute(
+                            "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='en cours'",
+                            params![run_id, call_id, value.to_string()],
+                        )?;
+                    } else if let Some(status) = value["output"]["status"].as_str() {
+                        stored = match status {
+                            "terminé" | "échec" | "arrêtée" => status.to_string(),
+                            _ => "arrêtée".to_string(),
+                        };
+                        clear_code = stored == "arrêtée";
+                    }
                 }
             }
+            None => {}
         }
         if clear_code {
             tx.execute(
@@ -239,6 +300,21 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
 }
 
 pub(crate) fn startup(conn: &Connection) -> Result<(), ApiError> {
+    // The in-memory registry died with the host. Kill groups that were still
+    // starting, then mark those tasks interrupted. A NULL journal outcome is
+    // that crash window, not a running card.
+    let mut statement = conn.prepare(
+        "SELECT pgid FROM wrapper_shell_tasks WHERE status='en cours' AND pgid IS NOT NULL AND pgid > 0",
+    )?;
+    let pgids = statement
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for pgid in pgids {
+        if let Ok(pgid) = u32::try_from(pgid) {
+            kill_group(pgid);
+        }
+    }
     mark_stopped(conn, None)
 }
 
@@ -301,4 +377,132 @@ pub(crate) fn stop(conn: &Connection, db: &Path, body: &[u8]) -> Result<Value, A
     }
     mark_stopped(conn, Some((&input.run_id, &input.call_id)))?;
     Ok(json!({"status":"arrêtée"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grokbot_forms::vault::Vault;
+    use std::path::PathBuf;
+
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn db() -> (Temp, Connection) {
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-shell-task-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("workspace.sqlite");
+        let conn = Connection::open(&file).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE engine_external_tools(run_id TEXT NOT NULL, call_id TEXT NOT NULL, outcome TEXT, PRIMARY KEY(run_id, call_id));
+             CREATE TABLE wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pgid INTEGER, PRIMARY KEY(run_id, call_id));",
+        )
+        .unwrap();
+        Vault::open_app(&file.with_extension("secrets.json")).unwrap();
+        (Temp(path), conn)
+    }
+
+    #[test]
+    fn stopped_publish_keeps_the_drained_output_and_a_null_exit_code() {
+        let (temp, conn) = db();
+        let file = temp.0.join("workspace.sqlite");
+        let initial = json!({
+            "status": "done",
+            "output": {
+                "status": "arrêtée",
+                "stdout": "ancien",
+                "stderr": "",
+                "truncated": false,
+                "output_incomplete": false,
+                "exit_code": null,
+                "signal": null,
+                "background": true
+            }
+        });
+        conn.execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,outcome) VALUES ('run','call',?1)",
+            [initial.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code) VALUES ('run','call','arrêtée',NULL)",
+            [],
+        )
+        .unwrap();
+        let result = publish(
+            &file,
+            "run",
+            "call",
+            &Snap {
+                status: "arrêtée",
+                stdout: "queue complète".into(),
+                stderr: "err".into(),
+                truncated: true,
+                incomplete: false,
+                exit_code: Some(9),
+                signal: Some(15),
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, Publish::Updated));
+        let raw: String = conn
+            .query_row(
+                "SELECT outcome FROM engine_external_tools WHERE call_id='call'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["output"]["status"], "arrêtée");
+        assert_eq!(value["output"]["stdout"], "queue complète");
+        assert_eq!(value["output"]["stderr"], "err");
+        assert_eq!(value["output"]["truncated"], true);
+        assert!(value["output"]["exit_code"].is_null());
+        assert!(value["output"]["signal"].is_null());
+        let exit_code: Option<i64> = conn
+            .query_row(
+                "SELECT exit_code FROM wrapper_shell_tasks WHERE call_id='call'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exit_code.is_none());
+        let late = publish(
+            &file,
+            "run",
+            "call",
+            &Snap {
+                status: "en cours",
+                stdout: "trop tard".into(),
+                stderr: String::new(),
+                truncated: false,
+                incomplete: false,
+                exit_code: None,
+                signal: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(late, Publish::Closed));
+        let raw: String = conn
+            .query_row(
+                "SELECT outcome FROM engine_external_tools WHERE call_id='call'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["output"]["stdout"], "queue complète");
+        assert_eq!(value["output"]["status"], "arrêtée");
+    }
 }

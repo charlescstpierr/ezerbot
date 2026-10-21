@@ -10,6 +10,7 @@ use grokbot_wrapper::{App, Provider};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
+    os::unix::process::CommandExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1368,4 +1369,156 @@ fn background_output_cap_is_marked_on_the_card() {
     }
     assert_eq!(output["truncated"], true);
     assert!(output["stdout"].as_str().unwrap_or("").len() <= 1024);
+}
+
+#[test]
+fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("seed", "run_shell", f.shell("echo seed"));
+    let request = f.request("seed");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("seed");
+    let run_id = f.run("seed").run_id.clone();
+    let marker = f.root().join("orphan.done");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", &format!("sleep 30; touch {}", marker.display())])
+        .current_dir(f.root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = child.id();
+    f.db()
+        .execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,'crash','null',NULL)",
+            [&run_id],
+        )
+        .unwrap();
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid) VALUES (?1,'crash','en cours',NULL,?2)",
+            params![run_id, pgid],
+        )
+        .unwrap();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    let mut reaped = false;
+    for _ in 0..100 {
+        if child.try_wait().unwrap().is_some() {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(reaped, "le processus orphelin tourne encore");
+    assert!(!marker.exists(), "la commande interrompue a continué");
+    let (status, exit_code): (String, Option<i64>) = f
+        .db()
+        .query_row(
+            "SELECT status, exit_code FROM wrapper_shell_tasks WHERE call_id='crash'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    assert!(exit_code.is_none());
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM engine_external_tools WHERE call_id='crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
+    assert_eq!(outcome["output"]["status"], "arrêtée");
+    assert!(outcome["output"]["exit_code"].is_null());
+    f.reopen();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    let stop = f.app.api(
+        "POST",
+        "/api/local/tasks/stop",
+        serde_json::to_vec(&json!({"run_id": run_id, "call_id": "crash"}))
+            .unwrap()
+            .as_slice(),
+    );
+    assert_eq!(stop.unwrap_err().status, 409);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn unreadable_vault_stops_the_background_process() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let marker = f.root().join("vault.done");
+    let mut args = f.shell(&format!(
+        "echo $$ > vault.pid; sleep 30; touch {}",
+        marker.display()
+    ));
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(100);
+    f.send("vault", "run_shell", args);
+    let request = f.request("vault");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("vault");
+    let pid = {
+        let path = f.root().join("vault.pid");
+        let mut found = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    found = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        found.expect("pid absent")
+    };
+    assert!(process_alive(pid));
+    std::fs::write(f.path.with_extension("secrets.json"), b"coffre illisible").unwrap();
+    let mut dead = false;
+    for _ in 0..150 {
+        if !process_alive(pid) {
+            dead = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        dead,
+        "le processus continue alors que la tâche n’est plus arrêtable"
+    );
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='vault'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(status, "en cours");
+    let stop = f.app.api(
+        "POST",
+        "/api/local/tasks/stop",
+        serde_json::to_vec(&json!({"run_id": f.run("vault").run_id, "call_id": "vault"}))
+            .unwrap()
+            .as_slice(),
+    );
+    assert_eq!(stop.unwrap_err().status, 409);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!marker.exists());
 }

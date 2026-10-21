@@ -283,6 +283,8 @@ pub enum ContextSource {
     ToolResult,
     ImageCaption,
     DelegatedContext,
+    /// Fichiers de contexte déposés dans la bibliothèque du bot.
+    Library,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

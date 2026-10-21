@@ -122,7 +122,7 @@ pub fn body_limit(path: &str) -> usize {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
         // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
         // retain the same 20 MiB limit as images.
-        "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
+        "/api/documents" | "/api/library" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/voice/memos" => features::voice::MAX_WAV_BYTES.div_ceil(3) * 4 + 128 * 1024,
         "/api/meetings/finalize" => features::meetings::MAX_WAV_BYTES.div_ceil(3) * 4 + 256 * 1024,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
@@ -135,7 +135,7 @@ pub fn body_limit(path: &str) -> usize {
 
 /// Shared size error for direct API calls, declared lengths and chunked bodies.
 pub fn too_large(path: &str) -> ApiError {
-    if path == "/api/documents" {
+    if path == "/api/documents" || path == "/api/library" {
         return ApiError::new(413, "Le document dépasse la limite de 20 Mo.");
     }
     let limit = body_limit(path);

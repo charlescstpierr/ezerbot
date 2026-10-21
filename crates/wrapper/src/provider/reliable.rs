@@ -77,8 +77,8 @@ impl Session {
         let session = self.clone();
         let mut limits = *lock(&self.inner.deadlines);
         if turn.is_none() {
-            // Titles/compaction helpers are best-effort bounded internal work,
-            // not another ten-minute foreground turn.
+            // Titles are best-effort bounded work, not another foreground turn.
+            // Compaction carries its run identity and keeps normal turn deadlines.
             limits.first = limits.first.min(Duration::from_secs(10));
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));

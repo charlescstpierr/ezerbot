@@ -39,6 +39,8 @@ struct Fake {
     seen: Arc<Mutex<Vec<Value>>>,
     refresh: Arc<Mutex<Option<Fault>>>,
     side_hang: Arc<AtomicBool>,
+    slow_summary: Arc<AtomicBool>,
+    summaries: Arc<AtomicUsize>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 fn event(stream: &mut TcpStream, value: Value) {
@@ -71,6 +73,9 @@ impl Fake {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let refresh = Arc::new(Mutex::new(None));
         let side_hang = Arc::new(AtomicBool::new(false));
+        let slow_summary = Arc::new(AtomicBool::new(false));
+        let summaries = Arc::new(AtomicUsize::new(0));
+        let (summary_slow, summary_count) = (slow_summary.clone(), summaries.clone());
         let (s, q, b, r, side) = (
             stop.clone(),
             queue.clone(),
@@ -86,6 +91,7 @@ impl Fake {
                     continue;
                 };
                 let (s, q, b, r, side) = (s.clone(), q.clone(), b.clone(), r.clone(), side.clone());
+                let (summary_slow, summary_count) = (summary_slow.clone(), summary_count.clone());
                 workers.push(std::thread::spawn(move || {
                     socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                     let mut reader = BufReader::new(socket.try_clone().unwrap()); let mut line = String::new();
@@ -114,6 +120,18 @@ impl Fake {
                     if matches!(fault,Fault::Headers) { hold(&mut socket,&s,false); return; }
                     if let Fault::Http(code)=fault { let body=json!({"error":{"code":"fake_error","message":"Erreur factice précise"}}).to_string(); let _=write!(socket,"HTTP/1.1 {code} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",body.len(),body); return; }
                     let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); let _=socket.flush();
+                    if instructions.starts_with("Summarize the supplied conversation") {
+                        summary_count.fetch_add(1, Ordering::SeqCst);
+                        if summary_slow.swap(false, Ordering::SeqCst) {
+                            for _ in 0..13 {
+                                if s.load(Ordering::SeqCst) { return; }
+                                event(&mut socket,json!({"type":"response.output_text.delta","delta":"Résumé. "}));
+                                std::thread::sleep(Duration::from_secs(1));
+                            }
+                            event(&mut socket,json!({"type":"response.completed"}));
+                            return;
+                        }
+                    }
                     match fault {
                         Fault::Silent => hold(&mut socket,&s,false),
                         Fault::Partial | Fault::Drop => { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Début conservé."})); if matches!(fault,Fault::Partial) { hold(&mut socket,&s,false); } },
@@ -139,6 +157,8 @@ impl Fake {
             seen,
             refresh,
             side_hang,
+            slow_summary,
+            summaries,
             thread: Some(thread),
         }
     }
@@ -442,6 +462,70 @@ fn pending_tool_is_visible_then_times_out_without_dispatch() {
         .unwrap();
     assert_eq!(calls, 0);
 }
+#[test]
+fn slow_compaction_is_foreground_work_and_logs_the_user_run() {
+    use sha2::{Digest, Sha256};
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(25));
+    post(
+        &mut f.app,
+        "/api/engine/config",
+        json!({"estimated_tokens":12000}),
+    );
+    f.fake.slow_summary.store(true, Ordering::SeqCst);
+    let mut slow_run = None;
+    for n in 0..6 {
+        let id = format!("long-{n}");
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":f.chat,"message_id":id,"body":format!("{n}{}", "x".repeat(12000))}),
+        );
+        let mut reply = Value::Null;
+        until(|| {
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            reply = state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == f.chat)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == format!("reply-{id}"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            !reply.is_null() && reply["state"] != "streaming"
+        });
+        assert_eq!(reply["state"], "echoed", "{reply}");
+        if f.fake.summaries.load(Ordering::SeqCst) > 0 {
+            slow_run = reply["payload"]["run_id"].as_str().map(str::to_owned);
+            break;
+        }
+    }
+    let run = slow_run.expect("long history must compact");
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM engine_summaries WHERE record IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(count > 0);
+    let hash = format!("{:x}", Sha256::digest(run.as_bytes()));
+    let log = std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains(&format!("turn={}", &hash[..16]))
+                && line.contains("code=completed"))
+            .count(),
+        2,
+        "compaction and reply must share the run: {log}"
+    );
+    assert!(!log.contains("code=turn_timeout"));
+}
+
 #[test]
 fn background_memory_and_title_do_not_block_a_second_turn() {
     let mut f = Fixture::new(true);

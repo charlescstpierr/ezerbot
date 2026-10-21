@@ -1,5 +1,7 @@
 //! Binary-level tests: every launchctl call is recorded below a throwaway HOME.
 //! No test invokes launchctl or touches the user's LaunchAgents directory.
+//! The recorded agent is still checked with `/usr/bin/plutil`, which exists only on macOS.
+#![cfg(target_os = "macos")]
 mod support;
 use serde_json::{json, Value};
 use std::{

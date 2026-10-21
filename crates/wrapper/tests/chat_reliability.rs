@@ -688,6 +688,19 @@ fn sharing_connection_probe_does_not_impose_a_sixteen_token_reasoning_limit() {
     let requests = f.fake.seen.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].get("max_output_tokens").is_none());
+    assert!(requests[0].get("reasoning").is_none());
+}
+
+#[test]
+fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
+    let mut f = Fixture::new(true);
+    f.fake.queue.lock().unwrap().push_back(Fault::Incomplete);
+    post(&mut f.app, "/api/provider/test", json!({}));
+    until(|| f.provider.status()["connection_test"]["state"] == "ok");
+    assert_eq!(
+        f.provider.status()["connection_test"]["message"],
+        "OK — ChatGPT répond."
+    );
 }
 
 #[test]
@@ -879,6 +892,7 @@ fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
     });
     assert_eq!(reply["state"], "echoed", "{reply}");
 }
+
 
 #[test]
 fn connection_test_without_an_account_explains_the_required_action_without_network() {

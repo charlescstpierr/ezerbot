@@ -10,6 +10,23 @@ pub struct Provider {
     selection_file: PathBuf,
 }
 
+/// Small streamed probe. No output cap: a reasoning model would spend 16 tokens
+/// before any visible answer and look disconnected. Minimal effort is sent only
+/// when this model advertises it.
+fn connection_probe_body(model: &str, efforts: &[Effort]) -> Value {
+    let mut body = json!({
+        "model": model,
+        "input": [{"role": "user", "content": "Réponds seulement OK."}],
+        "instructions": "Test de connexion. Réponds seulement OK.",
+        "store": false,
+        "stream": true
+    });
+    if efforts.iter().any(|effort| effort.effort == "minimal") {
+        body["reasoning"] = json!({"effort": "minimal"});
+    }
+    body
+}
+
 impl Provider {
     pub fn new(db: &Path) -> Self {
         Self::with_backends(db, Endpoints::default(), Endpoints::codex(), true)
@@ -153,24 +170,23 @@ impl Provider {
         };
         thread::spawn(move || {
             let mut failure = None;
-            let mut completed = false;
-            let model = session
-                .models()
-                .first()
-                .map(|model| model.slug.clone())
-                .unwrap_or_else(|| {
-                    if session.inner.codex {
-                        "gpt-5.5"
-                    } else {
-                        "gpt-5"
-                    }
-                    .into()
-                });
+            let mut responded = false;
+            let mut capped = false;
+            let models = session.models();
+            let chosen = models.first();
+            let model = chosen.map(|model| model.slug.clone()).unwrap_or_else(|| {
+                if session.inner.codex {
+                    "gpt-5.5"
+                } else {
+                    "gpt-5"
+                }
+                .into()
+            });
+            let efforts = chosen
+                .map(|model| model.efforts.clone())
+                .unwrap_or_default();
             let result = session.reliable_stream(
-                json!({"model": model,
-                    "input":[{"role":"user","content":"Réponds seulement OK."}],
-                    "instructions":"Test de connexion. Réponds seulement OK.",
-                    "store":false,"stream":true}),
+                connection_probe_body(&model, &efforts),
                 &AtomicBool::new(false),
                 Some("connection-test"),
                 &mut |_, error| {
@@ -180,10 +196,23 @@ impl Provider {
                     Ok(())
                 },
                 &mut |event| {
-                    completed |= matches!(event, grokbot_engine::contracts::ModelEvent::Completed);
+                    match &event {
+                        grokbot_engine::contracts::ModelEvent::Completed => responded = true,
+                        grokbot_engine::contracts::ModelEvent::Incomplete { reason }
+                            if reason == "max_output_tokens" =>
+                        {
+                            // A reasoning model that spends the cap still proves the service answers.
+                            responded = true;
+                            capped = true;
+                        }
+                        _ => {}
+                    }
                     Ok(())
                 },
             );
+            if capped {
+                failure = None;
+            }
             if !session.connected() {
                 failure = Some(Failure::signin().message);
             }
@@ -191,7 +220,7 @@ impl Provider {
             if session.inner.probe_generation.load(Ordering::SeqCst) != generation {
                 return; // A previous account's result must never label a new session.
             }
-            *probe = if completed && result.is_ok() && failure.is_none() {
+            *probe = if responded && result.is_ok() && failure.is_none() {
                 json!({"state":"ok","message":"OK — ChatGPT répond."})
             } else {
                 json!({"state":"failed","message":failure.unwrap_or_else(|| "La connexion a été interrompue. Réessayez.".into())})
@@ -309,4 +338,43 @@ impl Provider {
 
 fn storage_failure(_: std::io::Error) -> Failure {
     Failure::other("Impossible d’enregistrer le mode de connexion sur ce Mac.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_requests_minimal_reasoning_only_when_the_model_lists_it() {
+        let bare = connection_probe_body("gpt-5", &[]);
+        assert!(bare.get("max_output_tokens").is_none());
+        assert!(bare.get("reasoning").is_none());
+        assert_eq!(
+            bare["instructions"],
+            "Test de connexion. Réponds seulement OK."
+        );
+        let listed = connection_probe_body(
+            "gpt-5",
+            &[
+                Effort {
+                    effort: "minimal".into(),
+                    description: "Court".into(),
+                },
+                Effort {
+                    effort: "high".into(),
+                    description: "Long".into(),
+                },
+            ],
+        );
+        assert_eq!(listed["reasoning"]["effort"], "minimal");
+        assert!(listed.get("max_output_tokens").is_none());
+        let other = connection_probe_body(
+            "gpt-5.5",
+            &[Effort {
+                effort: "low".into(),
+                description: "Léger".into(),
+            }],
+        );
+        assert!(other.get("reasoning").is_none());
+    }
 }

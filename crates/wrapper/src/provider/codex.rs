@@ -131,11 +131,12 @@ impl Session {
             return Err(Failure::signin());
         }
         let limits = *lock(&self.inner.deadlines);
+        // ureq 2.12.1 applies `.timeout()` on every body read and ignores
+        // `.timeout_read()`. The session loop already enforces `limits.total`.
         let mut request = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
             .timeout_write(Duration::from_secs(15))
             .timeout_read(limits.stall)
-            .timeout(limits.total)
             .build()
             .post(&format!("{}/responses", self.inner.endpoints.api))
             .set("Authorization", &format!("Bearer {token}"));

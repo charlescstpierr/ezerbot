@@ -88,7 +88,7 @@ impl Session {
         // abandoned — and still blocked in a read — can pile up.
         if self.inner.closing.load(Ordering::SeqCst) >= 4 {
             let failure = Failure::other(
-                "Les connexions précédentes se ferment encore. Réessayez dans quelques instants.",
+                "Les connexions précédentes se ferment encore. Réessayez dans une minute.",
             );
             log(0, "transport_busy");
             metadata(None, Some(&failure))?;

@@ -222,6 +222,13 @@ impl Fixture {
     fn new(signed: bool) -> Self {
         Self::with_deadline(signed, Duration::from_secs(2))
     }
+    fn with_deadlines(signed: bool, first: Duration, stall: Duration, total: Duration) -> Self {
+        let fixture = Self::with_deadline(signed, first);
+        fixture
+            .provider
+            .configure_fake_deadlines(first, stall, total);
+        fixture
+    }
     fn with_deadline(signed: bool, deadline: Duration) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -799,7 +806,9 @@ fn five_concurrent_chats_are_not_mistaken_for_abandoned_connections() {
 
 #[test]
 fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
-    let mut f = Fixture::with_deadline(true, Duration::from_secs(2));
+    // Stall stays longer than this case. The read timeout must not close the
+    // sockets before the immediate refusal is observed; the next byte does.
+    let mut f = Fixture::with_deadline(true, Duration::from_secs(15));
     let mut held = vec![];
     for n in 0..4 {
         let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
@@ -879,10 +888,11 @@ fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
     assert_eq!(refusal["state"], "failed", "{refusal}");
     assert_eq!(
         refusal["error"],
-        "Les connexions précédentes se ferment encore. Réessayez dans quelques instants."
+        "Les connexions précédentes se ferment encore. Réessayez dans une minute."
     );
     f.fake.partial_released.store(true, Ordering::SeqCst);
-    // The abandoned read ends on the next byte or the 2s stall deadline.
+    // The abandoned read ends on the next byte. Stall is 15s, so this wait
+    // does not depend on the read timeout.
     std::thread::sleep(Duration::from_secs(3));
     let resumed = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
         .as_str()
@@ -912,6 +922,138 @@ fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
         !reply.is_null() && reply["state"] != "streaming"
     });
     assert_eq!(reply["state"], "echoed", "{reply}");
+}
+
+#[test]
+fn four_blocked_reads_accept_another_turn_once_the_read_timeout_elapses() {
+    // ureq 2.12.1 lets `.timeout()` replace `.timeout_read()` on each body
+    // read. The overall deadline stays at the production 10 minutes; only the
+    // read timeout may release these abandoned sockets.
+    let read = Duration::from_secs(3);
+    let mut f = Fixture::with_deadlines(true, read, read, Duration::from_secs(600));
+    let mut held = vec![];
+    for n in 0..4 {
+        let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let message = format!("blocked-read-{n}");
+        f.fake.queue.lock().unwrap().push_back(Fault::Partial);
+        post(
+            &mut f.app,
+            "/api/send",
+            json!({"conversation_id":chat,"message_id":message,"body":"Lecture bloquée"}),
+        );
+        held.push((chat, message));
+    }
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        held.iter().all(|(chat, message)| {
+            state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == *chat)
+                .unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == format!("reply-{message}") && m["body"] == "Début conservé.")
+        })
+    });
+    for (chat, message) in &held {
+        post(
+            &mut f.app,
+            "/api/stop",
+            json!({"conversation_id":chat,"message_id":message}),
+        );
+    }
+    let blocked = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let refused_at = Instant::now();
+    post(
+        &mut f.app,
+        "/api/send",
+        json!({"conversation_id":blocked,"message_id":"still-closing","body":"Doit être refusé"}),
+    );
+    let mut refusal = Value::Null;
+    until(|| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        refusal = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == blocked)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "reply-still-closing")
+            .cloned()
+            .unwrap_or(Value::Null);
+        !refusal.is_null() && refusal["state"] != "streaming"
+    });
+    assert!(
+        refused_at.elapsed() < Duration::from_secs(2),
+        "refusal must not wait for a network deadline: {refusal}"
+    );
+    assert_eq!(refusal["state"], "failed", "{refusal}");
+    // The server never sends another byte. Later turns stay refused until
+    // ureq's read timeout closes the sockets — well before the 10 minute
+    // overall deadline.
+    let recover = Instant::now();
+    let mut attempt = 0u32;
+    let mut chat = String::new();
+    let mut message = String::new();
+    let mut reply = Value::Null;
+    loop {
+        assert!(
+            recover.elapsed() < Duration::from_secs(8),
+            "fifth turn still blocked after {:?} (read timeout {read:?}, overall deadline 600s): {reply}",
+            recover.elapsed()
+        );
+        let in_flight = !reply.is_null() && reply["state"] == "streaming";
+        if !in_flight && reply["state"] != "echoed" {
+            attempt += 1;
+            chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            message = format!("after-read-timeout-{attempt}");
+            f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+            post(
+                &mut f.app,
+                "/api/send",
+                json!({"conversation_id":chat,"message_id":message,"body":"Nouvelle question"}),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        reply = state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == chat)
+            .and_then(|c| {
+                c["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["id"] == format!("reply-{message}"))
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        if reply["state"] == "echoed" {
+            break;
+        }
+    }
+    assert!(
+        recover.elapsed() < Duration::from_secs(8),
+        "recovery took {:?}, not the read timeout",
+        recover.elapsed()
+    );
 }
 
 #[test]

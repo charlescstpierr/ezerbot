@@ -165,14 +165,24 @@ impl Provider {
     /// Debug-only local fake control; never changes production deadlines.
     #[cfg(debug_assertions)]
     pub fn configure_fake_chat(&self, timeout: Duration, simulation: bool) {
+        self.configure_fake_deadlines(timeout, timeout, timeout * 5);
+        for session in [&self.sharing, &self.codex] {
+            if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
+                session.inner.simulation.store(simulation, Ordering::SeqCst);
+            }
+        }
+    }
+    /// Loopback only. A test can keep the production overall deadline while
+    /// shortening the read timeout that ureq must actually apply.
+    #[cfg(debug_assertions)]
+    pub fn configure_fake_deadlines(&self, first: Duration, stall: Duration, total: Duration) {
         for session in [&self.sharing, &self.codex] {
             if session.inner.endpoints.api.starts_with("http://127.0.0.1:") {
                 *lock(&session.inner.deadlines) = super::reliable::Deadlines {
-                    first: timeout,
-                    stall: timeout,
-                    total: timeout * 5,
+                    first,
+                    stall,
+                    total,
                 };
-                session.inner.simulation.store(simulation, Ordering::SeqCst);
             }
         }
     }

@@ -1,0 +1,9 @@
+.updates-title { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.updates-title h3 { margin: 0; }
+.updates-dot { box-shadow: none; }
+.update-badge { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; box-shadow: 0 0 0 2px var(--sidebar); }
+.updates-version { color: var(--text); font-variant-numeric: tabular-nums; }
+.updates-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.updates-status { margin: 0 0 10px; min-height: 1.2em; }
+.updates-status[data-tone="error"] { color: var(--danger-text); }
+.updates-log { margin: 0; max-height: 9.5rem; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--soft); color: var(--text); font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }

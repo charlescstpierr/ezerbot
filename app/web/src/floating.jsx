@@ -166,7 +166,7 @@ function Floating() {
       {overflowing && <span className="floating-overflow-hint">↓ Faites défiler pour lire la suite</span>}
     </div>
     {requests.map((request) => <div className="floating-notice" key={request.id} role="status"><p>Votre décision est attendue dans Ezerbot.</p><button type="button" className="secondary-button" onClick={() => full(request.route.target_conversation_id)}>Voir la demande</button></div>)}
-    {failure && <div className={`floating-notice${failure.alert ? " floating-failure" : ""}`} role={failure.alert ? "alert" : "status"}><div><strong>{failure.title}</strong><p className="floating-error">{failure.detail}</p></div><button type="button" className="secondary-button" onClick={() => full(target)}>Ouvrir le fil</button></div>}
+    {failure && <div className={`floating-notice${failure.alert ? " floating-failure" : ""}`} role={failure.alert ? "alert" : "status"}><div><strong>{failure.title}</strong><p className={failure.detailClass || undefined}>{failure.detail}</p></div><button type="button" className="secondary-button" onClick={() => full(target)}>Ouvrir le fil</button></div>}
     {error && <p className="floating-error" role="alert">{error}</p>}
     <form className="floating-composer" onSubmit={send}>
       <textarea ref={input} id="floating-message" name="message" aria-label="Message au bot" placeholder="Qu’avez-vous en tête ?" value={draft} maxLength={16384} readOnly={busy || uncertain} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit(); } }} />

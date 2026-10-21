@@ -72,9 +72,11 @@ export function floatingFailureState(reply, { providerConnected = false } = {}) 
   const expired = reply.error_kind === "signin_expired";
   const signin = expired || reply.error_kind === "signin";
   const reconnected = signin && providerConnected;
+  const alert = !signin;
   return {
     title: reconnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
-    alert: !signin,
+    alert,
+    detailClass: alert ? "floating-error" : "",
     detail: reconnected ? "Votre question est conservée. Ouvrez le fil pour reprendre la réponse."
       : presentedFailureText(reply.error) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
   };

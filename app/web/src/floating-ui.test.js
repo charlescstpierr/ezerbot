@@ -127,6 +127,26 @@ test("a reconnected account follows provider.connected instead of the stale sign
   assert.match(source, /provider\?\.connected === true/);
 });
 
+test("a floating detail stays neutral when the notice is not an alert", () => {
+  const styles = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
+  const css = readFileSync(new URL("./floating.css", import.meta.url), "utf8");
+  const vars = Object.fromEntries([...styles.match(/:root\s*\{([^}]+)\}/)[1].matchAll(/(--[-\w]+)\s*:\s*([^;]+);/g)].map(([, name, value]) => [name, value.trim()]));
+  const resolve = (value) => value.replace(/var\((--[-\w]+)\)/g, (_, name) => vars[name]);
+  const notice = resolve(css.match(/\.floating-latest small, \.floating-notice\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
+  const danger = resolve(css.match(/\.floating-error\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });
+  const color = (view) => view.detailClass === "floating-error" ? danger : notice;
+  assert.equal(expired.alert, false);
+  assert.equal(expired.detailClass, "");
+  assert.equal(color(expired), vars["--muted"]);
+  assert.notEqual(color(expired), vars["--danger-text"]);
+  assert.equal(failed.detailClass, "floating-error");
+  assert.equal(color(failed), vars["--danger-text"]);
+  const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+  assert.match(source, /className=\{failure\.detailClass \|\| undefined\}/);
+});
+
 test("a floating panel without a session is not titled as a failed answer", () => {
   const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
   assert.equal(expired.alert, false);

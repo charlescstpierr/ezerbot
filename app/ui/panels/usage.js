@@ -59,7 +59,7 @@
     if (!ready) {
       const text = {
         signin: "Connectez votre compte ChatGPT dans Ezerbot pour lire votre quota Codex.",
-        unsupported: "La jauge est disponible avec la connexion Codex. Le partage d’abonnement ne fournit pas ce quota.",
+        unsupported: "Le quota de votre abonnement est indisponible. Reconnectez votre compte ChatGPT.",
         loading: "Lecture du quota Codex…",
       }[data?.status] || data?.message || "Quota Codex indisponible.";
       const empty = node("div", "usage-empty");
@@ -96,7 +96,7 @@
     const total = localData.total;
     const heading = node("div", "usage-local-heading");
     const title = node("div");
-    title.append(node("h3", "", "Tokens dans Ezerbot"), node("p", "", "Historique local · toutes les connexions"));
+    title.append(node("h3", "", "Tokens dans Ezerbot"), node("p", "", "Historique local · Ezerbot"));
     heading.append(title, node("strong", "usage-total", `${count(total.input_tokens + total.output_tokens)} tokens`));
     const tabs = node("div", "usage-breakdown-tabs");
     tabs.setAttribute("role", "group"); tabs.setAttribute("aria-label", "Ventilation des tokens");
@@ -170,7 +170,7 @@
       refresh = button("Actualiser", "secondary-button", () => load(true));
       heading.append(title, refresh);
       quotaArea = node("div", "usage-quota");
-      const manage = node("a", "usage-manage", "Gérer l’utilisation dans Codex ↗");
+      const manage = node("a", "usage-manage", "Gérer le quota de votre abonnement ↗");
       manage.href = "https://chatgpt.com/codex/settings/usage"; manage.target = "_blank"; manage.rel = "noreferrer";
       localArea = node("div", "usage-local");
       notice = node("p", "usage-error"); notice.setAttribute("role", "status");

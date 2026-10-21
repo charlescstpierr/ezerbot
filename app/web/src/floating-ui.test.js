@@ -110,8 +110,8 @@ test("overflow hint disappears at the bottom and tolerates fractional pixel roun
 });
 
 test("a reconnected account follows provider.connected instead of the stale sign-in kind", () => {
-  const expired = { state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." };
-  const missing = { state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." };
+  const expired = { state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT." };
+  const missing = { state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT." };
   for (const reply of [expired, missing]) {
     const view = floatingFailureState(reply, { providerConnected: true });
     assert.equal(view.title, "Compte ChatGPT connecté");
@@ -134,7 +134,7 @@ test("a floating detail stays neutral when the notice is not an alert", () => {
   const resolve = (value) => value.replace(/var\((--[-\w]+)\)/g, (_, name) => vars[name]);
   const notice = resolve(css.match(/\.floating-latest small, \.floating-notice\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
   const danger = resolve(css.match(/\.floating-error\s*\{([^}]+)\}/)[1].match(/color:\s*([^;]+);/)[1].trim());
-  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT." });
   const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });
   const color = (view) => view.detailClass === "floating-error" ? danger : notice;
   assert.equal(expired.alert, false);
@@ -157,11 +157,11 @@ test("a floating ping points at Ouvrir le fil instead of a missing retry button"
 });
 
 test("a floating panel without a session is not titled as a failed answer", () => {
-  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex." });
+  const expired = floatingFailureState({ state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT." });
   assert.equal(expired.alert, false);
   assert.equal(expired.title, "Votre session ChatGPT a expiré");
-  assert.equal(expired.detail, "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.");
-  const missing = floatingFailureState({ state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex." });
+  assert.equal(expired.detail, "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT.");
+  const missing = floatingFailureState({ state: "failed", error_kind: "signin", error: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT." });
   assert.equal(missing.alert, false);
   assert.equal(missing.title, "Connexion ChatGPT requise");
   const failed = floatingFailureState({ state: "failed", error_kind: "other", error: "Panne" });

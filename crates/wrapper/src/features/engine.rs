@@ -64,6 +64,12 @@ struct ConnectionChoice {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectionTest {
+    #[serde(default)]
+    refresh: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Empty {}
 
 empty_hooks!(tools, call_tool, link_attachments);
@@ -477,8 +483,8 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
         "/api/messages/resend" => resend(app, body),
         "/api/messages/delete" => delete_undelivered(app, body),
         "/api/provider/test" => {
-            let _: Empty = parse(body)?;
-            app.provider.test_connection();
+            let input: ConnectionTest = parse(body)?;
+            app.provider.test_connection_with_refresh(input.refresh);
             Ok(json!({"provider":app.provider.status()}))
         }
         "/api/provider/select" => {
@@ -649,6 +655,11 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     .checked_add(1)
                     .ok_or_else(|| ApiError::new(409, "Trop de relances."))?;
                 stop_run(&app.feature_context(), &old, TurnEnd::Superseded)?;
+                // A failed check is only the badge. Relaunch it in the background;
+                // the regenerated turn must not wait for that result.
+                if live && app.provider.status()["connection_test"]["state"] != "ok" {
+                    app.provider.test_connection();
+                }
                 app.start_message(&input.conversation_id, &input.message_id, next)?;
             }
             app.conversation_response(&input.conversation_id)
@@ -1269,6 +1280,13 @@ pub(crate) fn launch(ctx: &super::Context<'_>, run: &Run) -> Result<(), ApiError
                 bot_id: Some(store::required(&conn, &id)?.bot_id),
                 host_mcp: id.starts_with("mcp-host-"),
             };
+            // The probe updates the badge on its own thread. It must not delay
+            // this turn: the user's message is the OpenAI call. A slow or failed
+            // check leaves send, state and stop free, and the question already
+            // on its way. A real upstream refusal stays a retryable thread error.
+            if live && cancel.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let gateway = RunGateway {
                 path: &path,
                 provider: &provider,

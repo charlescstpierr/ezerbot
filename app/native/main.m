@@ -235,8 +235,23 @@
     [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local… Une routine en cours enregistre son état avant l’ouverture." failed:NO];
     NSFileManager *files = [NSFileManager defaultManager];
     NSError *error = nil;
-    NSURL *applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
-                                    appropriateForURL:nil create:YES error:&error];
+    NSURL *applicationSupport = nil;
+#if !defined(EZERBOT_RELEASE)
+    // HOME alone does not redirect Cocoa's Application Support lookup. A test
+    // copy must opt in before any file is created in the owner's real space.
+    NSString *testHome = NSProcessInfo.processInfo.environment[@"EZERBOT_TEST_HOME"];
+    if (testHome.length) {
+        if (![testHome isAbsolutePath] || ![testHome isEqual:NSProcessInfo.processInfo.environment[@"HOME"]]) {
+            [self failStartup:@"Le HOME jetable du test est invalide." generation:generation];
+            return;
+        }
+        applicationSupport = [NSURL fileURLWithPath:[testHome stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
+    } else
+#endif
+    {
+        applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
+                                  appropriateForURL:nil create:YES error:&error];
+    }
     if (!applicationSupport) {
         [self failStartup:error.localizedDescription generation:generation];
         return;

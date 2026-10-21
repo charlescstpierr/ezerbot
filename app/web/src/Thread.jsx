@@ -10,6 +10,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
+import { clearFindMarks, highlightOccurrence } from "./thread-find.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
@@ -234,7 +235,7 @@ function TurnLabel({ message }) {
   return message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>;
 }
 
-function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
+function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
   const toolPreparing = preparingTool(message);
@@ -282,6 +283,8 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
+            {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
+            {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
             {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
@@ -300,18 +303,41 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onRateGood, onRateBad }) {
   const appearance = useAppearance();
   const overlay = useRef(null);
+  const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
   const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
-  useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
+  useLayoutEffect(() => {
+    const root = threadRoot.current;
+    let attempts = 0;
+    let frame = 0;
+    const apply = () => {
+      clearFindMarks(root);
+      if (!find?.query || !find.messageId || !root) return null;
+      const escape = (value) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, ""));
+      const article = root.querySelector(`[data-message-id="${escape(find.messageId)}"]`);
+      return article ? highlightOccurrence(article, find.query, find.indexInMessage || 0) : null;
+    };
+    const reveal = () => {
+      const mark = apply();
+      if (mark) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
+      else if (find?.query && attempts < 8) {
+        attempts += 1;
+        frame = requestAnimationFrame(reveal);
+      }
+    };
+    reveal();
+    onLayout?.();
+    return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
+  }, [ordered, onLayout, find]);
   return (
     <Tooltip.Provider delayDuration={350}>
-      <div className="gb-thread">
+      <div className="gb-thread" ref={threadRoot}>
         {ordered.map((message) => {
           const delegated = message.payload?.source === "delegation";
           const author = bots.find((bot) => bot.id === (delegated ? message.payload.from_bot : message.payload?.bot_id));
@@ -342,7 +368,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
           if (Card) return <div className="gb-card-slot" key={message.id} data-notification-card={message.id} data-run-id={message.payload?.run_id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} />;
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

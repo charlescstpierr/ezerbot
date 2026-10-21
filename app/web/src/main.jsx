@@ -8,6 +8,8 @@ import { mentionMenu, readMentions } from "./mentions.js";
 import { pendingReply } from "./thread-order.js";
 import { connectionMessages, composerConnectionState } from "./connection-view.js";
 import { TEACH_PROMPT, isTeachMessage, searchableMessageText, exportMessage } from "./teach.js";
+import { findInThread, cycleFind, findCountLabel } from "./thread-find.js";
+import { createRatingTable } from "./thread-rating.js";
 import { createApprovalFollow, revealPendingApproval } from "./approval-follow.js";
 import { createDeepLinkQueue } from "./deep-links.js";
 import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
@@ -26,6 +28,10 @@ window.GrokbotChat = {
   isTeachMessage,
   searchableMessageText,
   exportMessage,
+  findInThread,
+  cycleFind,
+  findCountLabel,
+  createRatingTable,
   createApprovalFollow,
   revealPendingApproval,
   formatAttachmentSize,

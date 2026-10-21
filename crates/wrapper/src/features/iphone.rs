@@ -267,6 +267,7 @@ pub fn remote(
                 "screen",
                 "voice",
                 "routines_background",
+                "updates",
             ] {
                 value.as_object_mut().unwrap().remove(key);
             }

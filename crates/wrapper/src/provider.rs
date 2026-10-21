@@ -5,6 +5,7 @@ mod connection;
 mod reliable;
 pub use connection::Provider;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -34,25 +35,47 @@ const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 const REFRESH_MARGIN: u64 = 300;
 const REFRESH_LOCK_STALE: Duration = Duration::from_secs(25);
-const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(20);
+/// Attente courte : un verrou vivant n’est pas volé. L’appelant réessaie.
+const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
+/// Dernier recours absolu si le dossier personnel est inconnu. Jamais le répertoire courant.
+const FALLBACK_HOME: &str = "/var/empty";
 
-/// Dossier SQLite hors application Cocoa. Le nom « Grokbot Local » reste distinct
-/// de `Application Support/Grokbot` : un essai ne doit pas ouvrir les données réelles.
+thread_local! {
+    static HOLDING_AUTH_LOCK: Cell<bool> = const { Cell::new(false) };
+}
+
+fn auth_lock_held() -> bool {
+    HOLDING_AUTH_LOCK.with(Cell::get)
+}
+
+/// Même dossier que l’application Cocoa : `Application Support/Grokbot`.
+/// `Grokbot Local` n’est plus une destination. Une session déjà là n’est lue
+/// qu’une fois, par déplacement, pour ne jamais dupliquer un `refresh_token`.
 ///
-/// Les jetons ChatGPT restent dans le JSON propriétaire voisin de ce fichier
-/// (`workspace.chatgpt-auth.json`, mode 0600). Ils ne vont pas dans le trousseau.
-/// L’ACL par défaut suit l’exigence de signature : une signature ad hoc change de
-/// cdhash à chaque compilation et le lancement suivant lirait un trousseau vide.
-/// L’épingle certificat n’admet que le coffre des formulaires.
+/// Les jetons restent dans le JSON propriétaire voisin de la base
+/// (`workspace.codex-auth.json` ou `workspace.chatgpt-auth.json`, mode 0600).
+/// Ils ne vont pas dans le trousseau : une signature ad hoc change de cdhash
+/// à chaque compilation et le lancement suivant lirait un trousseau vide.
 pub fn database_path_from_home(home: Option<&OsStr>, fixed: Option<&OsStr>) -> PathBuf {
     fn usable(value: Option<&OsStr>) -> Option<&Path> {
         let path = Path::new(value?);
-        (path.is_absolute() && path != Path::new("/")).then_some(path)
+        (path.is_absolute() && path != Path::new("/") && path.as_os_str().len() > 1).then_some(path)
     }
-    usable(home)
+    let root = usable(home)
         .or_else(|| usable(fixed))
-        .unwrap_or_else(|| Path::new("."))
-        .join("Library/Application Support/Grokbot Local/workspace.sqlite")
+        .map(Path::to_path_buf)
+        .or_else(passwd_home)
+        .unwrap_or_else(|| PathBuf::from(FALLBACK_HOME));
+    root.join("Library/Application Support/Grokbot/workspace.sqlite")
+}
+
+/// `getpwuid_r` via l’API sûre de `nix`. Un dossier `/` ou relatif est ignoré.
+fn passwd_home() -> Option<PathBuf> {
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+        .ok()
+        .flatten()?;
+    let dir = user.dir;
+    (dir.is_absolute() && dir != Path::new("/") && dir.as_os_str().len() > 1).then_some(dir)
 }
 
 pub fn default_database_path() -> PathBuf {
@@ -265,9 +288,7 @@ struct Inner {
     file: PathBuf,
     endpoints: Endpoints,
     open_browser: bool,
-    // Mutex du processus. Le fichier `*.lock` voisin couvre l’application et
-    // l’agent de routines : sans lui, un `invalid_grant` tardif effaçait la paire
-    // déjà tournée par l’autre processus (ou par le binaire de mise à jour).
+    // Mutex du processus, pris après le verrou fichier.
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -411,10 +432,11 @@ pub(crate) fn failure(status: u16, code: &str, message: &str) -> Failure {
         },
         "subscription_sharing_user_not_eligible" => Failure::other("Ce compte ou cet espace de travail ne permet pas d’utiliser l’abonnement ChatGPT dans Ezerbot."),
         "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => Failure::other("Le service d’OpenAI est indisponible pour le moment. Réessayez dans quelques minutes."),
-        "subscription_sharing_invalid_user" => Failure::signin(),
+        "subscription_sharing_invalid_user" => Failure::other("OpenAI a refusé cet utilisateur pour cette demande. La session enregistrée sur ce Mac est conservée."),
+        // Ces codes, hors refus explicite du refresh_token stocké, ne demandent pas de reconnexion.
         "invalid_grant" | "invalid_refresh_token" | "token_expired" | "refresh_token_expired"
-        | "refresh_token_invalidated" | "refresh_token_reused" => Failure::expired(),
-        _ if status == 401 => Failure::signin(),
+        | "refresh_token_invalidated" | "refresh_token_reused" => Failure::other("OpenAI a refusé la demande. La session enregistrée sur ce Mac est conservée."),
+        _ if status == 401 => Failure::other("OpenAI a refusé la demande (erreur 401). La session enregistrée sur ce Mac est conservée."),
         _ if status == 503 => Failure::other(format!("Le service d’OpenAI est indisponible (HTTP 503). Réessayez dans quelques minutes.{}", if message.is_empty() { String::new() } else { format!(" Détail : {}", message.chars().take(300).collect::<String>()) })),
         _ if status == 400 && message.to_ascii_lowercase().contains("model is not supported") => {
             let model = message.split('\'').nth(1)
@@ -497,6 +519,18 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+fn explicit_refresh_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_grant"
+            | "invalid_refresh_token"
+            | "token_expired"
+            | "refresh_token_expired"
+            | "refresh_token_invalidated"
+            | "refresh_token_reused"
+    )
+}
+
 fn preserved_scope(codex: bool, stored: &str, granted: String) -> String {
     let drops_plan = !codex
         && stored.split_whitespace().any(|scope| scope == PLAN_SCOPE)
@@ -515,20 +549,40 @@ struct AuthLock {
 }
 
 impl AuthLock {
+    /// `None` : le verrou est tenu par un autre processus encore vivant.
+    /// Aucun renouvellement ne part. Un verrou plus vieux que 25 s est retiré.
     fn acquire(auth_file: &Path) -> Option<Self> {
+        if auth_lock_held() {
+            return None;
+        }
+        if let Some(parent) = auth_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            if fs::create_dir_all(parent).is_err() {
+                return None;
+            }
+        }
         let path = auth_file.with_extension("lock");
         let token = random_token(16);
         let started = Instant::now();
         loop {
             match create_lock(&path, &token) {
-                Ok(()) => return Some(Self { path, token }),
+                Ok(()) => {
+                    HOLDING_AUTH_LOCK.with(|flag| flag.set(true));
+                    return Some(Self { path, token });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let age = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
                     let stale = age
                         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                         .is_some_and(|age| age > REFRESH_LOCK_STALE);
-                    if stale || started.elapsed() > REFRESH_LOCK_WAIT {
+                    if stale {
                         let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if started.elapsed() > REFRESH_LOCK_WAIT {
+                        return None;
                     }
                     thread::sleep(Duration::from_millis(15));
                 }
@@ -543,6 +597,7 @@ impl Drop for AuthLock {
         if fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
             let _ = fs::remove_file(&self.path);
         }
+        HOLDING_AUTH_LOCK.with(|flag| flag.set(false));
     }
 }
 
@@ -557,72 +612,6 @@ fn create_lock(path: &Path, token: &str) -> std::io::Result<()> {
     let mut file = options.open(path)?;
     file.write_all(token.as_bytes())?;
     file.sync_all()?;
-    Ok(())
-}
-
-/// Copie une arborescence installée sans jamais effacer la session.
-/// Un fichier `*-auth.json`, la base SQLite et `provider.json` restent en place,
-/// même si l’archive en contient une copie. Même règle quand le dossier
-/// d’installation est le dossier de données : seul le binaire est remplacé.
-pub fn apply_in_app_update(
-    install_dir: &Path,
-    staged: &Path,
-    data_dir: &Path,
-) -> std::io::Result<()> {
-    if install_dir.as_os_str().is_empty()
-        || staged.as_os_str().is_empty()
-        || data_dir.as_os_str().is_empty()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "chemins de mise à jour vides",
-        ));
-    }
-    let install = fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
-    let data = fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    copy_update_tree(staged, install_dir, &data, install != data)
-}
-
-fn session_file_name(name: &OsStr) -> bool {
-    let name = name.to_string_lossy();
-    name.ends_with("-auth.json")
-        || name.ends_with(".sqlite")
-        || name.ends_with(".sqlite-wal")
-        || name.ends_with(".sqlite-shm")
-        || name == "provider.json"
-}
-
-fn inside_data(path: &Path, data: &Path) -> bool {
-    path.starts_with(data)
-        || fs::canonicalize(path).is_ok_and(|canonical| canonical.starts_with(data))
-}
-
-fn copy_update_tree(
-    source: &Path,
-    dest: &Path,
-    data: &Path,
-    separate_data: bool,
-) -> std::io::Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        let target = dest.join(entry.file_name());
-        if session_file_name(&entry.file_name()) || (separate_data && inside_data(&target, data)) {
-            continue;
-        }
-        if file_type.is_dir() {
-            copy_update_tree(&entry.path(), &target, data, separate_data)?;
-        } else if file_type.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), &target)?;
-        }
-    }
     Ok(())
 }
 
@@ -724,12 +713,27 @@ impl Session {
         if !self.inner.file.is_file() {
             self.import_legacy_session();
         }
+        self.read_raw()
+    }
+
+    fn read_raw(&self) -> Option<Credentials> {
         serde_json::from_slice(&fs::read(&self.inner.file).ok()?).ok()
     }
 
-    /// Copie une session utilisable depuis le dossier frère (Grokbot ↔ Grokbot Local)
-    /// quand le fichier principal manque. L’original reste : l’autre binaire peut encore le lire.
+    /// Déplace une fois `Grokbot Local/<fichier>` vers `Grokbot/<fichier>`.
+    /// Jamais l’inverse, jamais une copie : un seul `refresh_token` reste sur le disque.
     fn import_legacy_session(&self) {
+        if auth_lock_held() {
+            self.migrate_assuming_locked();
+            return;
+        }
+        let Some(_lock) = AuthLock::acquire(&self.inner.file) else {
+            return;
+        };
+        self.migrate_assuming_locked();
+    }
+
+    fn migrate_assuming_locked(&self) {
         let primary = &self.inner.file;
         if primary.is_file() {
             return;
@@ -737,28 +741,45 @@ impl Session {
         let Some(parent) = primary.parent() else {
             return;
         };
-        let Some(folder) = parent.file_name().and_then(|name| name.to_str()) else {
+        if parent.file_name().and_then(|name| name.to_str()) != Some("Grokbot") {
             return;
-        };
-        let sibling = match folder {
-            "Grokbot" => "Grokbot Local",
-            "Grokbot Local" => "Grokbot",
-            _ => return,
-        };
+        }
         let Some(name) = primary.file_name() else {
             return;
         };
-        let Some(legacy) = parent.parent().map(|grand| grand.join(sibling).join(name)) else {
+        let Some(legacy) = parent
+            .parent()
+            .map(|grand| grand.join("Grokbot Local").join(name))
+        else {
             return;
         };
+        if !legacy.is_file() || primary.is_file() {
+            return;
+        }
         let Some(credentials): Option<Credentials> = fs::read(&legacy)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         else {
             return;
         };
-        if credentials.usable(self.inner.codex) {
-            let _ = self.write(&credentials);
+        if !credentials.usable(self.inner.codex) {
+            return;
+        }
+        if let Some(directory) = primary.parent() {
+            if fs::create_dir_all(directory).is_err() {
+                return;
+            }
+        }
+        if primary.is_file() {
+            return;
+        }
+        if fs::rename(&legacy, primary).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(primary, fs::Permissions::from_mode(0o600));
         }
     }
 
@@ -790,7 +811,12 @@ impl Session {
 
     /// L'identifiant d'hôte doit exister et rester stable avant la première connexion.
     fn load_or_create(&self) -> std::io::Result<Credentials> {
-        if let Some(credentials) = self.read() {
+        let _lock = self.lock_auth()?;
+        if let Some(credentials) = self.read_raw() {
+            return Ok(credentials);
+        }
+        self.migrate_assuming_locked();
+        if let Some(credentials) = self.read_raw() {
             return Ok(credentials);
         }
         let credentials = Credentials {
@@ -799,6 +825,22 @@ impl Session {
         };
         self.write(&credentials)?;
         Ok(credentials)
+    }
+
+    /// Verrou déjà pris par l’appelant : `Ok(None)`. Sinon le garde doit vivre
+    /// jusqu’à la fin de l’écriture. Échec = ne rien écrire et ne rien renouveler.
+    fn lock_auth(&self) -> std::io::Result<Option<AuthLock>> {
+        if auth_lock_held() {
+            return Ok(None);
+        }
+        AuthLock::acquire(&self.inner.file)
+            .map(Some)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "verrou d’authentification occupé",
+                )
+            })
     }
 
     pub fn connected(&self) -> bool {
@@ -844,6 +886,7 @@ impl Session {
     }
 
     pub fn mark_welcomed(&self) -> std::io::Result<()> {
+        let _lock = self.lock_auth()?;
         let _guard = lock(&self.inner.credentials);
         let mut credentials = self.load_or_create()?;
         credentials.welcomed = true;
@@ -1059,6 +1102,9 @@ impl Session {
             }
             (Some(saved), _) => saved.clone(),
         };
+        let before = self
+            .read()
+            .and_then(|credentials| credentials.refresh_token);
         let endpoints = &self.inner.endpoints;
         let response = agent()
             .post(&endpoints.token)
@@ -1098,23 +1144,27 @@ impl Session {
         if attempt.cancel.load(Ordering::SeqCst) {
             return Err(Failure::other("Connexion annulée."));
         }
-        let _guard = lock(&self.inner.credentials);
-        let mut credentials = self
-            .load_or_create()
-            .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
-        credentials.client_id = Some(client_id);
-        credentials.email = claims.email;
-        credentials.subject = Some(claims.sub);
-        credentials.id_token = Some(id_token.to_owned());
-        credentials.access_token = Some(tokens.access_token);
-        credentials.refresh_token = tokens.refresh_token;
-        credentials.expires_at = seconds() + tokens.expires_in;
-        credentials.scopes = scopes;
-        credentials.saved_at = seconds();
-        let granted = credentials.connected();
-        self.write(&credentials)
-            .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
-        if granted {
+        let email = claims.email;
+        let subject = claims.sub;
+        let id_token = id_token.to_owned();
+        let access_token = tokens.access_token;
+        let refresh_token = tokens.refresh_token;
+        let expires_at = seconds() + tokens.expires_in;
+        let mut granted = false;
+        let kept = self.store_signin(before.as_deref(), |credentials| {
+            credentials.client_id = Some(client_id);
+            credentials.email = email;
+            credentials.subject = Some(subject);
+            credentials.id_token = Some(id_token);
+            credentials.access_token = Some(access_token);
+            credentials.refresh_token = refresh_token;
+            credentials.expires_at = expires_at;
+            credentials.scopes = scopes;
+            credentials.saved_at = seconds();
+            granted = credentials.connected();
+            Ok(())
+        })?;
+        if kept || granted {
             self.reset_probe();
             self.inner.local_revoked.store(false, Ordering::SeqCst);
             Ok(())
@@ -1122,6 +1172,34 @@ impl Session {
             // Une identité valide ne suffit pas : sans cette permission, aucune demande ne part.
             Err(Failure::other("Vous êtes identifié, mais l’utilisation de l’abonnement ChatGPT n’a pas été accordée à Ezerbot."))
         }
+    }
+
+    /// Écriture de connexion sous le verrou, après relecture. `true` si une paire
+    /// plus récente est déjà sur le disque : elle n’est pas écrasée.
+    fn store_signin(
+        &self,
+        before: Option<&str>,
+        apply: impl FnOnce(&mut Credentials) -> Result<(), Failure>,
+    ) -> Result<bool, Failure> {
+        let Some(_lock) = AuthLock::acquire(&self.inner.file) else {
+            return Err(Failure::other(
+                "L’enregistrement de la session est déjà en cours. Réessayez.",
+            ));
+        };
+        let _guard = lock(&self.inner.credentials);
+        let current = self.read();
+        if current.as_ref().and_then(|c| c.refresh_token.as_deref()) != before
+            && current.as_ref().is_some_and(|c| c.usable(self.inner.codex))
+        {
+            return Ok(true);
+        }
+        let mut credentials = self
+            .load_or_create()
+            .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
+        apply(&mut credentials)?;
+        self.write(&credentials)
+            .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
+        Ok(false)
     }
 
     fn verify_identity(
@@ -1162,30 +1240,47 @@ impl Session {
                 .read()
                 .filter(|c| c.usable(self.inner.codex) && c.expires_at > seconds() + REFRESH_MARGIN)
             {
-                return credentials.access_token.ok_or_else(Failure::signin);
+                return credentials.access_token.ok_or_else(|| {
+                    Failure::other("Aucune session ChatGPT enregistrée sur ce Mac.")
+                });
             }
         }
+        let Some(_refresh_lock) = AuthLock::acquire(&self.inner.file) else {
+            return Err(Failure::other(
+                "Le renouvellement de la session est déjà en cours. Réessayez. La connexion reste enregistrée sur ce Mac.",
+            ));
+        };
         let _guard = lock(&self.inner.credentials);
-        let _refresh_lock = AuthLock::acquire(&self.inner.file);
+        self.bearer_locked(force, false)
+    }
+
+    fn bearer_locked(&self, force: bool, retried: bool) -> Result<String, Failure> {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
-            return Err(Failure::signin());
+            return Err(Failure::other(
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.",
+            ));
         }
-        let mut credentials = self
-            .read()
-            .filter(|c| c.usable(self.inner.codex))
-            .ok_or_else(Failure::signin)?;
+        let Some(credentials) = self.read().filter(|c| c.usable(self.inner.codex)) else {
+            return Err(Failure::other(
+                "Aucune session ChatGPT enregistrée sur ce Mac.",
+            ));
+        };
         let access = credentials
             .access_token
             .clone()
-            .expect("vérifié par connected");
+            .ok_or_else(|| Failure::other("Aucune session ChatGPT enregistrée sur ce Mac."))?;
         if !force && credentials.expires_at > seconds() + REFRESH_MARGIN {
             return Ok(access);
         }
-        let client_id = credentials.client_id.clone().ok_or_else(Failure::signin)?;
+        let Some(client_id) = credentials.client_id.clone() else {
+            return Err(Failure::other(
+                "Aucune session ChatGPT enregistrée sur ce Mac.",
+            ));
+        };
         let refresh = credentials
             .refresh_token
             .clone()
-            .expect("vérifié par connected");
+            .ok_or_else(|| Failure::other("Aucune session ChatGPT enregistrée sur ce Mac."))?;
         let mut fields = vec![
             ("grant_type", "refresh_token"),
             ("client_id", &client_id),
@@ -1202,26 +1297,15 @@ impl Session {
             Err(error) => {
                 let (status, code, _, _, _) = self.request_failure(error);
                 if status == 0 {
-                    // Une panne de réseau ne prouve rien : le jeton en place reste peut-être valide.
                     return if credentials.expires_at > seconds() {
                         Ok(access)
                     } else {
                         Err(network_failure())
                     };
                 }
-                if matches!(
-                    code.as_str(),
-                    "invalid_grant"
-                        | "invalid_refresh_token"
-                        | "token_expired"
-                        | "refresh_token_expired"
-                        | "refresh_token_invalidated"
-                        | "refresh_token_reused"
-                ) {
-                    return self.rejected_refresh(&refresh);
+                if explicit_refresh_refusal(&code) {
+                    return self.rejected_refresh(&refresh, retried);
                 }
-                // 401 ou 5xx du point de jeton ne sont pas un refus de session.
-                // `failure()` transformerait un 401 en demande de reconnexion.
                 return if credentials.expires_at > seconds() {
                     Ok(access)
                 } else {
@@ -1231,7 +1315,14 @@ impl Session {
                 };
             }
         };
-        // Le jeton d'accès, son échéance, ses permissions et le jeton de renouvellement changent ensemble.
+        let Some(mut credentials) = self.read() else {
+            return Err(Failure::other(
+                "Impossible d’enregistrer les identifiants sur ce Mac. La connexion reste enregistrée.",
+            ));
+        };
+        if credentials.refresh_token.as_deref() != Some(refresh.as_str()) {
+            return self.use_disk_session(&credentials, retried);
+        }
         if self.inner.codex {
             codex::update_profile(&mut credentials, &tokens)?;
         }
@@ -1247,29 +1338,50 @@ impl Session {
             credentials.id_token = Some(id_token);
         }
         credentials.saved_at = seconds();
-        self.write(&credentials)
-            .map_err(|_| Failure::other("Impossible d’enregistrer les identifiants sur ce Mac."))?;
+        if self.write(&credentials).is_err() {
+            return Err(Failure::other(
+                "Impossible d’enregistrer les identifiants sur ce Mac. La connexion reste enregistrée.",
+            ));
+        }
         Ok(tokens.access_token)
     }
 
-    /// Le serveur a refusé le jeton envoyé. Si un autre processus a déjà enregistré
-    /// une nouvelle paire, elle reste. On n’efface que le jeton encore présent.
-    fn rejected_refresh(&self, sent: &str) -> Result<String, Failure> {
-        match self.read() {
-            Some(stored) if stored.refresh_token.as_deref() != Some(sent) => {
-                if stored.usable(self.inner.codex) {
-                    stored.access_token.clone().ok_or_else(Failure::signin)
-                } else {
-                    Err(Failure::signin())
-                }
-            }
-            Some(mut stored) => {
-                stored.clear_tokens();
-                let _ = self.write(&stored);
-                Err(Failure::expired())
-            }
-            None => Err(Failure::signin()),
+    fn use_disk_session(&self, stored: &Credentials, retried: bool) -> Result<String, Failure> {
+        if !stored.usable(self.inner.codex) {
+            return Err(Failure::other(
+                "La session enregistrée sur ce Mac est conservée. Réessayez.",
+            ));
         }
+        if stored.expires_at > seconds() + REFRESH_MARGIN || retried {
+            return stored.access_token.clone().ok_or_else(|| {
+                Failure::other("La session enregistrée sur ce Mac est conservée. Réessayez.")
+            });
+        }
+        self.bearer_locked(true, true)
+    }
+
+    /// Un seul refus ne suffit pas. On relit, on réessaie le jeton encore sur le
+    /// disque, et on n’efface qu’après un second refus de ce même jeton.
+    fn rejected_refresh(&self, sent: &str, retried: bool) -> Result<String, Failure> {
+        let Some(stored) = self.read() else {
+            return Err(Failure::other(
+                "La session enregistrée sur ce Mac est conservée. Réessayez.",
+            ));
+        };
+        if stored.refresh_token.as_deref() != Some(sent) {
+            return self.use_disk_session(&stored, retried);
+        }
+        if !retried {
+            return self.bearer_locked(true, true);
+        }
+        let mut cleared = stored;
+        cleared.clear_tokens();
+        if self.write(&cleared).is_err() {
+            return Err(Failure::other(
+                "Impossible d’enregistrer les identifiants sur ce Mac. La connexion reste enregistrée.",
+            ));
+        }
+        Err(Failure::expired())
     }
 
     fn reset_probe(&self) {
@@ -1282,14 +1394,26 @@ impl Session {
     pub fn signout(&self) -> Result<bool, Failure> {
         self.cancel_signin();
         self.reset_probe();
-        self.inner.local_revoked.store(true, Ordering::SeqCst);
         self.reset_quota();
-        // The engine route durably stops only provider-consuming runs. A blanket
-        // signal here could cancel an already-suspended form during owner release.
+        let snapshot = self
+            .read()
+            .and_then(|credentials| credentials.refresh_token);
+        let Some(_lock) = AuthLock::acquire(&self.inner.file) else {
+            return Err(Failure::other(
+                "La déconnexion est déjà en cours. Réessayez. La connexion reste enregistrée sur ce Mac.",
+            ));
+        };
         let _guard = lock(&self.inner.credentials);
         let Some(mut credentials) = self.read() else {
+            self.inner.local_revoked.store(true, Ordering::SeqCst);
             return Ok(true);
         };
+        if credentials.refresh_token != snapshot {
+            return Ok(true);
+        }
+        // L’effacement a été demandé. Tant que l’écriture échoue, les jetons
+        // restent sur le disque mais aucune requête ne part.
+        self.inner.local_revoked.store(true, Ordering::SeqCst);
         let refresh_token = credentials.refresh_token.clone();
         let client_id = credentials.client_id.clone();
         credentials.clear_tokens();
@@ -1298,6 +1422,7 @@ impl Session {
                 "Impossible d’effacer la connexion sur ce Mac. Réessayez avant de fermer Ezerbot.",
             )
         })?;
+        self.inner.local_revoked.store(true, Ordering::SeqCst);
         *lock(&self.inner.catalog) = Catalog::default();
         // Comme pi, Codex déconnecte localement; aucune révocation distante n’est documentée.
         let revoked = self.inner.codex
@@ -1408,8 +1533,10 @@ impl Session {
             .read()
             .filter(|c| c.usable(self.inner.codex))
             .filter(|c| c.expires_at > seconds() + 15)
-            .ok_or_else(Failure::signin)?;
-        let token = credentials.access_token.ok_or_else(Failure::signin)?;
+            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
+        let token = credentials
+            .access_token
+            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
         let response = self
             .request(&token, &mut body)?
             .timeout(Duration::from_secs(12))
@@ -1461,8 +1588,10 @@ impl Session {
         let credentials = self
             .read()
             .filter(|c| c.usable(self.inner.codex) && c.expires_at > seconds())
-            .ok_or_else(Failure::signin)?;
-        let token = credentials.access_token.ok_or_else(Failure::signin)?;
+            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
+        let token = credentials
+            .access_token
+            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
         self.request(&token, &mut body)?
             .timeout(Duration::from_secs(12))
             .send_json(body)
@@ -1823,35 +1952,25 @@ mod tests {
     }
 
     #[test]
-    fn database_path_prefers_an_absolute_home_and_keeps_grokbot_local() {
+    fn database_path_matches_cocoa_and_never_falls_back_to_a_relative_directory() {
         let fixed = Path::new("/Users/charles");
+        let suffix = Path::new("Library/Application Support/Grokbot/workspace.sqlite");
         let from_root =
             database_path_from_home(Some(Path::new("/").as_os_str()), Some(fixed.as_os_str()));
-        assert_eq!(
-            from_root,
-            fixed.join("Library/Application Support/Grokbot Local/workspace.sqlite")
-        );
+        assert_eq!(from_root, fixed.join(suffix));
         let home = database_path_from_home(
             Some(Path::new("/Users/ada").as_os_str()),
             Some(fixed.as_os_str()),
         );
-        assert_eq!(
-            home,
-            PathBuf::from("/Users/ada/Library/Application Support/Grokbot Local/workspace.sqlite")
-        );
-        let relative =
-            database_path_from_home(Some(OsStr::new("relative")), Some(fixed.as_os_str()));
-        assert_eq!(relative, from_root);
-        assert_eq!(
-            database_path_from_home(None, None),
-            PathBuf::from("./Library/Application Support/Grokbot Local/workspace.sqlite")
-        );
-    }
-
-    #[test]
-    fn in_app_update_rejects_empty_paths() {
-        let error =
-            apply_in_app_update(Path::new(""), Path::new("staged"), Path::new("data")).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(home, PathBuf::from("/Users/ada").join(suffix));
+        let empty = database_path_from_home(Some(OsStr::new("")), Some(fixed.as_os_str()));
+        assert_eq!(empty, from_root);
+        let relative = database_path_from_home(Some(OsStr::new("relative")), Some(OsStr::new("/")));
+        assert!(relative.is_absolute());
+        assert!(!relative.starts_with("."));
+        assert_eq!(relative, database_path_from_home(None, None));
+        let passwd = passwd_home().unwrap_or_else(|| PathBuf::from(FALLBACK_HOME));
+        assert_eq!(relative, passwd.join(suffix));
+        assert!(!relative.to_string_lossy().contains("Grokbot Local"));
     }
 }

@@ -235,8 +235,23 @@
     [self showStatus:@"Ezerbot" detail:@"Ouverture de votre espace local… Une routine en cours enregistre son état avant l’ouverture." failed:NO];
     NSFileManager *files = [NSFileManager defaultManager];
     NSError *error = nil;
-    NSURL *applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
-                                    appropriateForURL:nil create:YES error:&error];
+    NSURL *applicationSupport = nil;
+#if !defined(EZERBOT_RELEASE)
+    // HOME alone does not redirect Cocoa's Application Support lookup. A test
+    // copy must opt in before any file is created in the owner's real space.
+    NSString *testHome = NSProcessInfo.processInfo.environment[@"EZERBOT_TEST_HOME"];
+    if (testHome.length) {
+        if (![testHome isAbsolutePath] || ![testHome isEqual:NSProcessInfo.processInfo.environment[@"HOME"]]) {
+            [self failStartup:@"Le HOME jetable du test est invalide." generation:generation];
+            return;
+        }
+        applicationSupport = [NSURL fileURLWithPath:[testHome stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
+    } else
+#endif
+    {
+        applicationSupport = [files URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
+                                  appropriateForURL:nil create:YES error:&error];
+    }
     if (!applicationSupport) {
         [self failStartup:error.localizedDescription generation:generation];
         return;
@@ -282,14 +297,24 @@
     task.standardOutput = output;
     task.standardError = self.logHandle;
     task.currentDirectoryURL = [NSURL fileURLWithPath:self.supportPath isDirectory:YES];
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+#ifdef EZERBOT_RELEASE
+    // Recherche discrète au lancement. Le bouton des Réglages reste disponible sans cette variable.
+    environment[@"EZERBOT_QUIET_UPDATE_CHECK"] = @"1";
+#endif
+    task.environment = environment;
     __weak GrokbotApplication *weakSelf = self;
     task.terminationHandler = ^(NSTask *finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GrokbotApplication *strongSelf = weakSelf;
-            if (strongSelf && strongSelf.backendTask == finished && !strongSelf.terminating) {
-                [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
-                              generation:generation];
+            if (!strongSelf || strongSelf.backendTask != finished || strongSelf.terminating) return;
+            // 86 : le moteur a installé une nouvelle application et demande le redémarrage.
+            if (finished.terminationReason == NSTaskTerminationReasonExit && finished.terminationStatus == 86) {
+                [strongSelf relaunchUpdatedApplication];
+                return;
             }
+            [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
+                          generation:generation];
         });
     };
     self.backendTask = task;
@@ -655,6 +680,26 @@
     (void)sender;
     if (self.supportPath) [[NSWorkspace sharedWorkspace] openURL:
                           [NSURL fileURLWithPath:[self.supportPath stringByAppendingPathComponent:@"logs"] isDirectory:YES]];
+}
+
+- (void)relaunchUpdatedApplication {
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    NSTask *relaunch = [[NSTask alloc] init];
+    relaunch.executableURL = [NSURL fileURLWithPath:@"/bin/bash"];
+    // $0 est le nom, $1 le pid, $2 le bundle. on ignore SIGHUP pour survivre à la fermeture.
+    relaunch.arguments = @[
+        @"-c",
+        @"trap '' HUP; while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$2\"",
+        @"ezerbot-relaunch",
+        [NSString stringWithFormat:@"%d", getpid()],
+        bundle
+    ];
+    relaunch.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    relaunch.standardError = [NSFileHandle fileHandleWithNullDevice];
+    if ([relaunch launchAndReturnError:nil]) {
+        self.terminating = YES;
+        [NSApp terminate:nil];
+    }
 }
 
 - (void)stopBackend {

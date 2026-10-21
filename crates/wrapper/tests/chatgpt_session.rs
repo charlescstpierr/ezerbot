@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use grokbot_wrapper::{apply_in_app_update, Provider};
+use grokbot_wrapper::Provider;
 use serde_json::{json, Value};
-use support::{wait, FakeOpenAi, Seen, CLIENT};
+use support::{form, wait, FakeOpenAi, Seen, CLIENT};
 
 fn scratch(label: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -204,7 +204,7 @@ fn a_refused_refresh_does_not_delete_a_token_saved_by_the_other_process() {
 }
 
 #[test]
-fn legacy_sibling_folder_is_copied_once_and_left_in_place() {
+fn legacy_sibling_folder_is_renamed_once_and_not_duplicated() {
     let root = scratch("legacy").join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
     write_auth(
@@ -213,12 +213,18 @@ fn legacy_sibling_folder_is_copied_once_and_left_in_place() {
     );
     let db = root.join("Grokbot/workspace.sqlite");
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let server = FakeOpenAi::new(seen);
+    let server = FakeOpenAi::new(seen.clone());
     let session = provider(&db, &server);
     assert!(session.connected());
     let imported = root.join("Grokbot/workspace.chatgpt-auth.json");
     assert_eq!(saved(&imported)["refresh_token"], "legacy-refresh");
-    assert_eq!(saved(&legacy)["refresh_token"], "legacy-refresh");
+    assert!(!legacy.exists());
+    assert_eq!(seen.lock().unwrap().forms.len(), 0);
+
+    let again = provider(&db, &server);
+    assert!(again.connected());
+    assert!(!legacy.exists());
+    assert_eq!(saved(&imported)["refresh_token"], "legacy-refresh");
 
     let unrelated = scratch("unrelated");
     write_auth(
@@ -230,79 +236,286 @@ fn legacy_sibling_folder_is_copied_once_and_left_in_place() {
     assert!(!unrelated
         .join("NotGrokbot/workspace.chatgpt-auth.json")
         .exists());
+
+    let backwards = scratch("backwards").join("Library/Application Support");
+    write_auth(
+        &backwards.join("Grokbot/workspace.chatgpt-auth.json"),
+        &auth("real-refresh", now().saturating_add(86_400)),
+    );
+    let local_db = backwards.join("Grokbot Local/workspace.sqlite");
+    let local = provider(&local_db, &server);
+    assert!(!local.connected());
+    assert!(!backwards
+        .join("Grokbot Local/workspace.chatgpt-auth.json")
+        .exists());
+    assert_eq!(
+        saved(&backwards.join("Grokbot/workspace.chatgpt-auth.json"))["refresh_token"],
+        "real-refresh"
+    );
 }
 
 #[test]
-fn in_app_update_replaces_the_binary_and_keeps_the_auth_file() {
-    let install = scratch("install");
-    let data = scratch("data");
-    let staged = scratch("staged");
-    let auth_path = data.join("workspace.chatgpt-auth.json");
-    let original = auth("kept-refresh", now().saturating_add(86_400));
-    write_auth(&auth_path, &original);
-    fs::write(data.join("workspace.sqlite"), b"sqlite-bytes").unwrap();
-    fs::write(data.join("provider.json"), b"{\"codex\":false}").unwrap();
-    fs::write(install.join("Ezerbot"), b"old-binary").unwrap();
-    fs::create_dir_all(staged.join("MacOS")).unwrap();
-    fs::write(staged.join("MacOS/Ezerbot"), b"new-binary").unwrap();
-    fs::write(staged.join("notes.txt"), b"release-notes").unwrap();
-    fs::write(
-        staged.join("workspace.chatgpt-auth.json"),
-        b"{\"refresh_token\":null}",
-    )
-    .unwrap();
-    fs::write(staged.join("workspace.sqlite"), b"wiped").unwrap();
-    fs::write(staged.join("provider.json"), b"wiped").unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("Ezerbot", staged.join("MacOS/linked")).unwrap();
-
-    apply_in_app_update(&install, &staged, &data).unwrap();
-    assert_eq!(
-        fs::read(install.join("MacOS/Ezerbot")).unwrap(),
-        b"new-binary"
+fn charles_codex_file_in_application_support_is_found_without_reconnect() {
+    let root = scratch("charles").join("Library/Application Support/Grokbot");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.codex-auth.json");
+    write_auth(
+        &auth_path,
+        &json!({
+            "host_id": "host-charles",
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "access_token": "access-charles",
+            "refresh_token": "refresh-charles",
+            "account_id": "account-charles",
+            "expires_at": now().saturating_add(86_400),
+            "scopes": "",
+            "saved_at": 1
+        }),
     );
-    assert_eq!(
-        fs::read(install.join("notes.txt")).unwrap(),
-        b"release-notes"
-    );
-    assert!(!install.join("MacOS/linked").exists());
-    assert!(!install.join("workspace.chatgpt-auth.json").exists());
-    assert!(!install.join("workspace.sqlite").exists());
-    assert_eq!(
-        fs::read(&auth_path).unwrap(),
-        original.to_string().into_bytes()
-    );
-    assert_eq!(
-        fs::read(data.join("workspace.sqlite")).unwrap(),
-        b"sqlite-bytes"
-    );
-    assert_eq!(
-        fs::read(data.join("provider.json")).unwrap(),
-        b"{\"codex\":false}"
-    );
-
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let server = FakeOpenAi::new(seen);
-    let session = provider(&data.join("workspace.sqlite"), &server);
+    let server = FakeOpenAi::new(seen.clone());
+    let session = Provider::with_backends(
+        &db,
+        server.endpoints(),
+        grokbot_wrapper::Endpoints {
+            api: format!("{}/backend-api/codex", server.base),
+            ..server.endpoints()
+        },
+        false,
+    );
+    assert!(session.connected());
+    assert_eq!(session.status()["signin"], "idle");
+    assert_eq!(session.status()["connections"]["codex"], true);
+    assert!(seen.lock().unwrap().forms.is_empty());
+    assert_eq!(saved(&auth_path)["refresh_token"], "refresh-charles");
+    assert!(session.status()["error"].is_null());
+}
+
+#[test]
+fn a_single_invalid_grant_retries_the_stored_token_before_clearing() {
+    let root = scratch("once");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("stale-refresh", 1));
+    let seen = Arc::new(Mutex::new(Seen {
+        refresh_refusals: 1,
+        ..Seen::default()
+    }));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let outcome = ask(&session);
+    assert!(outcome.ok, "{}", outcome.message);
+    assert_ne!(outcome.kind, "signin_expired");
+    assert_ne!(outcome.kind, "signin");
+    assert!(session.connected());
+    assert_eq!(session.status()["signin"], "idle");
+    assert!(saved(&auth_path)["refresh_token"].is_string());
+    assert_ne!(saved(&auth_path)["refresh_token"], "stale-refresh");
+    let refreshes = seen
+        .lock()
+        .unwrap()
+        .forms
+        .iter()
+        .filter(|form| form.get("grant_type").map(String::as_str) == Some("refresh_token"))
+        .count();
+    assert_eq!(refreshes, 2);
+}
+
+#[test]
+fn two_explicit_refusals_of_the_stored_token_ask_to_sign_in() {
+    let root = scratch("twice");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("stale-refresh", 1));
+    let seen = Arc::new(Mutex::new(Seen {
+        refresh_error: true,
+        ..Seen::default()
+    }));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let error = ask(&session);
+    assert_eq!(error.kind, "signin_expired");
+    assert!(!session.connected());
+    assert!(saved(&auth_path)["refresh_token"].is_null());
+    let sent: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .forms
+        .iter()
+        .filter(|form| form.get("grant_type").map(String::as_str) == Some("refresh_token"))
+        .map(|form| form.get("refresh_token").cloned().unwrap_or_default())
+        .collect();
+    assert_eq!(sent, ["stale-refresh", "stale-refresh"]);
+}
+
+#[test]
+fn a_busy_lock_does_not_refresh_or_clear() {
+    let root = scratch("locked");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("kept-refresh", 1));
+    fs::write(auth_path.with_extension("lock"), b"other-process").unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let error = ask(&session);
+    assert!(!error.ok);
+    assert_eq!(error.kind, "other");
+    assert_ne!(error.kind, "signin");
+    assert_ne!(error.kind, "signin_expired");
     assert!(session.connected());
     assert_eq!(saved(&auth_path)["refresh_token"], "kept-refresh");
+    assert!(seen.lock().unwrap().forms.is_empty());
+}
 
-    let same = scratch("same");
-    let same_auth = same.join("workspace.chatgpt-auth.json");
-    write_auth(&same_auth, &original);
-    fs::write(same.join("Ezerbot"), b"old-binary").unwrap();
-    let staged_same = scratch("staged-same");
-    fs::write(staged_same.join("Ezerbot"), b"replaced-binary").unwrap();
-    fs::write(
-        staged_same.join("workspace.chatgpt-auth.json"),
-        b"{\"refresh_token\":null}",
-    )
-    .unwrap();
-    apply_in_app_update(&same, &staged_same, &same).unwrap();
-    assert_eq!(fs::read(same.join("Ezerbot")).unwrap(), b"replaced-binary");
-    assert_eq!(
-        fs::read(&same_auth).unwrap(),
-        original.to_string().into_bytes()
+#[test]
+fn a_failed_write_after_rotation_does_not_clear_the_saved_token() {
+    let root = scratch("write-fail");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("kept-refresh", 1));
+    let gate = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Seen {
+        token_gate: Some(gate.clone()),
+        ..Seen::default()
+    }));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let worker = session.clone();
+    let handle = std::thread::spawn(move || ask(&worker));
+    wait("jeton en cours", || seen.lock().unwrap().forms.len() == 1);
+    let original = fs::read(&auth_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    gate.store(true, Ordering::SeqCst);
+    let outcome = handle.join().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(!outcome.ok);
+    assert_eq!(outcome.kind, "other");
+    assert_ne!(outcome.kind, "signin_expired");
+    assert_eq!(fs::read(&auth_path).unwrap(), original);
+    assert!(session.connected());
+}
+
+#[test]
+fn refresh_success_does_not_overwrite_a_newer_pair() {
+    let root = scratch("newer");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("stale-refresh", 1));
+    let gate = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Seen {
+        token_gate: Some(gate.clone()),
+        ..Seen::default()
+    }));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let worker = session.clone();
+    let handle = std::thread::spawn(move || ask(&worker));
+    wait("renouvellement en cours", || {
+        seen.lock().unwrap().forms.len() == 1
+    });
+    let winner = auth("winner-refresh", now().saturating_add(86_400));
+    write_auth(&auth_path, &winner);
+    let bytes = fs::read(&auth_path).unwrap();
+    gate.store(true, Ordering::SeqCst);
+    let outcome = handle.join().unwrap();
+    assert!(outcome.ok, "{}", outcome.message);
+    assert_eq!(fs::read(&auth_path).unwrap(), bytes);
+    assert_eq!(saved(&auth_path)["refresh_token"], "winner-refresh");
+    assert!(session.connected());
+    assert_eq!(session.status()["signin"], "idle");
+}
+
+#[test]
+fn sign_out_waits_for_the_lock_and_does_not_clear_a_newer_session() {
+    let root = scratch("signout");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(
+        &auth_path,
+        &auth("old-refresh", now().saturating_add(86_400)),
     );
-    assert!(provider(&same.join("workspace.sqlite"), &server).connected());
+    let lock_path = auth_path.with_extension("lock");
+    fs::write(&lock_path, b"held").unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let server = FakeOpenAi::new(seen);
+    let session = provider(&db, &server);
+    let blocked = session.clone();
+    let auth_for_worker = auth_path.clone();
+    let handle = std::thread::spawn(move || blocked.signout());
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    write_auth(
+        &auth_for_worker,
+        &auth("new-refresh", now().saturating_add(86_400)),
+    );
+    fs::remove_file(&lock_path).unwrap();
+    let result = handle.join().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(saved(&auth_path)["refresh_token"], "new-refresh");
+    assert!(session.connected());
+
+    fs::write(&lock_path, b"held-again").unwrap();
+    let refused = session.signout();
+    assert!(refused.is_err());
+    assert_eq!(refused.unwrap_err().kind, "other");
+    assert_eq!(saved(&auth_path)["refresh_token"], "new-refresh");
+    assert!(session.connected());
+}
+
+fn callback(redirect: &str, state: &str) -> String {
+    ureq::get(&format!(
+        "{redirect}?code=good-code&state={state}&client_id={CLIENT}"
+    ))
+    .call()
+    .unwrap()
+    .into_string()
+    .unwrap()
+}
+
+#[test]
+fn sign_in_write_requires_the_lock_and_keeps_a_newer_pair() {
+    let root = scratch("signin");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let url = session.start_signin().unwrap();
+    let query = form(url.split_once('?').unwrap().1);
+    seen.lock().unwrap().nonce = query["nonce"].clone();
+    fs::write(auth_path.with_extension("lock"), b"held").unwrap();
+    let page = callback(&query["redirect_uri"], &query["state"]);
+    assert!(page.contains("Connexion non terminée"));
+    assert!(saved(&auth_path)["refresh_token"].is_null());
+    assert!(!session.connected());
+    wait("verrou", || session.status()["signin"] == "failed");
+    fs::remove_file(auth_path.with_extension("lock")).unwrap();
+
+    let gate = Arc::new(AtomicBool::new(false));
+    seen.lock().unwrap().token_gate = Some(gate.clone());
+    let url = session.start_signin().unwrap();
+    let query = form(url.split_once('?').unwrap().1);
+    seen.lock().unwrap().nonce = query["nonce"].clone();
+    let redirect = query["redirect_uri"].clone();
+    let state = query["state"].clone();
+    let handle = std::thread::spawn(move || callback(&redirect, &state));
+    wait("échange", || seen.lock().unwrap().forms.len() == 2);
+    let winner = auth("signin-winner", now().saturating_add(86_400));
+    write_auth(&auth_path, &winner);
+    let bytes = fs::read(&auth_path).unwrap();
+    gate.store(true, Ordering::SeqCst);
+    let page = handle.join().unwrap();
+    assert!(page.contains("Connexion réussie"), "{page}");
+    assert_eq!(fs::read(&auth_path).unwrap(), bytes);
+    assert_eq!(saved(&auth_path)["refresh_token"], "signin-winner");
+    assert!(session.connected());
+    assert_ne!(session.status()["signin"], "failed");
 }

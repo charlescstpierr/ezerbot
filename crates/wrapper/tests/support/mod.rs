@@ -24,6 +24,8 @@ pub struct Seen {
     pub refresh_error: bool,
     /// HTTP 503 from the token endpoint: the refresh token is still good.
     pub refresh_transient: bool,
+    /// Nombre de refus explicites avant un renouvellement réussi.
+    pub refresh_refusals: u32,
     /// Replaces the scope string on a successful refresh. `None` keeps the fixture scope.
     pub refresh_scope: Option<String>,
     pub invalid_codex_account: bool,
@@ -260,6 +262,13 @@ impl FakeOpenAi {
                                 json!({"error":{"code":"temporarily_unavailable"}}).to_string(),
                             )
                         } else if refresh && seen.refresh_error {
+                            (
+                                400,
+                                "application/json".into(),
+                                json!({"error":{"code":"invalid_grant"}}).to_string(),
+                            )
+                        } else if refresh && seen.refresh_refusals > 0 {
+                            seen.refresh_refusals -= 1;
                             (
                                 400,
                                 "application/json".into(),

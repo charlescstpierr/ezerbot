@@ -15,14 +15,14 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod features;
 
+/// Mise à jour locale depuis `main`. Le dossier des conversations n’est pas le dépôt de travail.
+pub mod updates;
+
 // The model gateway keeps the root compatibility name while generation belongs
 // to its feature module (including the offline simulated reply).
 pub(crate) use features::engine::demo_reply;
 
-pub use provider::{
-    apply_in_app_update, database_path_from_home, default_database_path, Endpoints, Provider,
-    ToolCall,
-};
+pub use provider::{database_path_from_home, default_database_path, Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -892,6 +892,7 @@ impl App {
             // Keep the app usable; the Stockage panel exposes the actionable error.
             eprintln!("Nettoyage automatique interrompu : {error}");
         }
+        features::updates::remember_database(path);
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,

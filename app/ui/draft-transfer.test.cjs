@@ -459,3 +459,25 @@ test("a refused creation keeps both the submitted text and the text typed while 
   assert.equal(stored(app, "grokbot.draft.new"), "Message à restaurer\nSuite à conserver");
   assert.equal(app.state.conversations.length, 0);
 });
+
+test("a maximal bot name and its edit action stay inside an ellipsis rule", async () => {
+  const css = readFileSync(`${__dirname}/styles.css`, "utf8");
+  const rule = css.match(/\.bot-menu \.bot-menu-name,\s*\.bot-menu \.bot-menu-copy small,\s*\.bot-menu \.bot-menu-action > span \{([^}]*)\}/);
+  assert.ok(rule, "the name and the Modifier action share one ellipsis rule");
+  for (const declaration of ["min-width: 0", "overflow: hidden", "text-overflow: ellipsis", "white-space: nowrap"]) {
+    assert.ok(rule[1].includes(declaration), declaration);
+  }
+  assert.match(css, /\.bot-menu button > \.icon \{[^}]*flex:\s*0 0 auto/);
+  assert.match(css, /\.bot-menu button \{[^}]*min-width:\s*0/);
+  assert.match(css, /\.bot-menu-list \{[^}]*overflow-x:\s*hidden/);
+
+  const app = boot();
+  await ready(app);
+  const longName = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN";
+  [...app.document.querySelectorAll(".sidebar-bot")].find((node) => node.textContent.includes(longName)).click();
+  app.document.getElementById("composer-bot").click();
+  const option = [...app.document.querySelectorAll("#bot-menu button")].find((button) => button.getAttribute("role") === "menuitemradio" && button.textContent.includes(longName));
+  assert.equal(option?.querySelector(".bot-menu-name")?.textContent, longName);
+  const action = [...app.document.querySelectorAll("#bot-menu .bot-menu-action span")].find((node) => node.textContent.includes(longName));
+  assert.equal(action?.textContent, `Modifier ${longName}`);
+});

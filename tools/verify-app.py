@@ -159,6 +159,59 @@ def verify_ui_regressions():
   window.GrokbotChat.renderThread(formHost, {messages:[]});
   await until(() => !formHost.querySelector('[data-card-kind]'));
   formHost.remove();
+  // Composer bot menu: a 40-character name stays inside at both welcome sizes and themes.
+  const longName = 'ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN';
+  await api('/api/bots', {id:'qa-long', name:longName, color:'cyan', shape:'galet', description:'', instructions:''});
+  await window.GrokbotPanels.refresh();
+  choose(longName);
+  const menuFits = () => {
+    const menu = $('bot-menu');
+    const menuBox = menu.getBoundingClientRect();
+    const list = menu.querySelector('.bot-menu-list');
+    const buttons = [...menu.querySelectorAll('button')];
+    const inside = buttons.every(button => {
+      const box = button.getBoundingClientRect();
+      const childrenInside = [...button.children].every(child => {
+        const childBox = child.getBoundingClientRect();
+        return childBox.right <= box.right + 0.5 && childBox.left >= box.left - 0.5;
+      });
+      const label = button.querySelector('.bot-menu-name, .bot-menu-action > span');
+      const readable = Boolean(label && label.clientWidth > 12 && label.textContent.trim());
+      const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return box.width > 0 && box.right <= menuBox.right + 0.5 && box.left >= menuBox.left - 0.5
+        && childrenInside && readable && (point === button || button.contains(point));
+    });
+    const checkedIcon = menu.querySelector('[aria-checked="true"] .icon')?.getBoundingClientRect();
+    const iconInside = Boolean(checkedIcon && checkedIcon.width > 0 && checkedIcon.right <= menuBox.right + 0.5 && checkedIcon.left >= menuBox.left - 0.5);
+    const actionText = menu.querySelector('.bot-menu-action span')?.textContent || '';
+    const noHorizontalScroll = !list || list.scrollWidth <= list.clientWidth + 1;
+    return inside && iconInside && noHorizontalScroll && menuBox.right <= innerWidth + 0.5
+      && actionText.startsWith('Modifier ') && actionText.includes(longName);
+  };
+  // Largeur réelle du composeur à 1140×780 (720 px) et à 820×560 (~516 px).
+  const applyFrame = (width) => {
+    let style = document.getElementById('qa-menu-frame');
+    if (!style) { style = document.createElement('style'); style.id = 'qa-menu-frame'; document.head.append(style); }
+    const sidebar = width <= 1100 ? 244 : 270;
+    const main = width - sidebar - 16;
+    const area = width <= 1100 ? main - 44 : Math.min(720, main - 54);
+    style.textContent = `.composer-area{width:${area}px!important;max-width:none!important}`;
+  };
+  const setTheme = theme => { document.documentElement.dataset.theme = theme; };
+  const openMenu = () => { if (!$('bot-menu').hidden) $('composer-bot').click(); $('composer-bot').click(); };
+  for (const [width, height] of [[1140, 780], [820, 560]]) {
+    applyFrame(width);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const theme of ['dark', 'light']) {
+      setTheme(theme);
+      openMenu();
+      check(`bot menu keeps a maximal name inside at ${width}×${height} ${theme}`, menuFits());
+    }
+  }
+  document.getElementById('qa-menu-frame')?.remove();
+  setTheme('dark');
+  if (!$('bot-menu').hidden) $('composer-bot').click();
+  choose('Ezerbot');
   const first = await send('Qui me répond ?');
   check('R → Cmd+N → E sends to E', first.bot_id === 'grokbot' && $('workspace-label').textContent === 'Ezerbot');
   check('reply and conversation page title use Ezerbot', $('messages').innerText.includes('Ezerbot') && document.title.endsWith(' · Ezerbot'));

@@ -680,8 +680,8 @@
       button.type = "button";
       button.setAttribute("role", "menuitemradio");
       button.setAttribute("aria-checked", String(bot.id === chosen?.id));
-      const copy = element("span", "", bot.name);
-      copy.append(element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
+      const copy = element("span", "bot-menu-copy");
+      copy.append(element("span", "bot-menu-name", bot.name), element("small", "", bot.description || (bot.is_default ? "Le bot par défaut." : "Bot personnel")));
       button.append(botAvatar(bot), copy, icon("check"));
       button.addEventListener("click", () => chooseBot(bot));
       return button;

@@ -240,6 +240,9 @@ test("launching a skill sends it and checks the usable-annex point", async () =>
     state: { skills: { by_bot: { bot: [{ skill_id: "skill_internal_123", version: 1, name: "modele", display_name: "Modèle", description: "Suit le modèle.", file_count: 1 }] } }, demonstrations: { links: [] }, conversations: [{ id: "conv-1", bot_id: "bot", kind: "chat" }] },
     api(path, body) {
       if (path === "/api/send") return { conversation: { id: body.conversation_id, messages: [{ id: body.message_id, role: "user", body: body.body }, { id: "reply", role: "assistant", body: "Le modèle annexe est suivi." }] } };
+      if (String(path).startsWith("/api/skills/versions")) {
+        return { versions: [{ version: 1, deleted: false, content: { files: [{ path: "modele.md", content: "Réponds exactement : Le modèle annexe est suivi." }] } }] };
+      }
       return { versions: [] };
     },
   });
@@ -255,6 +258,51 @@ test("launching a skill sends it and checks the usable-annex point", async () =>
   assert.equal(open?.known, true);
   assert.equal(open.body, "conv-1");
   assert.equal(descendants(root).find((el) => el.dataset.point === "annex").dataset.done, "true");
+});
+
+test("the usable-annex point follows the reply, not only a successful send", async () => {
+  const annex = "Réponds exactement : Le modèle annexe est suivi.";
+  const { root } = mount({
+    state: { skills: { by_bot: { bot: [{ skill_id: "skill_internal_123", version: 1, name: "modele", display_name: "Modèle", description: "Suit le modèle.", file_count: 1 }] } }, demonstrations: { links: [] }, conversations: [{ id: "conv-1", bot_id: "bot", kind: "chat" }] },
+    api(path) {
+      if (String(path).startsWith("/api/skills/versions")) {
+        return { versions: [{ version: 1, deleted: false, content: { files: [{ path: "modele.md", content: annex }] } }] };
+      }
+      if (path === "/api/send") {
+        return { conversation: { id: "conv-1", messages: [{ role: "assistant", body: "Bien reçu. Ton message est conservé dans cette conversation." }] } };
+      }
+      return { versions: [] };
+    },
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Lancer").listeners.click();
+  await flushImport();
+  assert.equal(descendants(root).find((el) => el.dataset.point === "annex").dataset.done, "false");
+});
+
+test("a folder import skips a symlink and a path that leaves the folder", async () => {
+  const requests = [];
+  const { root } = mount({
+    api(path, body) {
+      if (path === "/api/skills/import") requests.push(body.files.map((file) => file.path));
+      return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
+    },
+  });
+  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const link = textFile("dossier/lien.md", "secret hors dossier");
+  link.symlink = true;
+  input.files = [
+    textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+    textFile("dossier/modele.md", "annexe"),
+    link,
+    textFile("dossier/../secret.md", "échappé"),
+  ];
+  input.listeners.change();
+  await flushImport();
+  const sent = requests.flat();
+  assert.ok(sent.includes("dossier/SKILL.md"));
+  assert.ok(sent.includes("dossier/modele.md"));
+  assert.equal(sent.includes("dossier/lien.md"), false);
+  assert.equal(sent.includes("dossier/../secret.md"), false);
 });
 
 test("launching a skill reveals the reply once the new conversation is loaded", async () => {

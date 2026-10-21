@@ -310,6 +310,54 @@ fn applied_skill_puts_the_annex_in_context_and_the_reply_follows_it() {
 }
 
 #[test]
+fn a_long_body_does_not_push_the_annex_out_of_the_reply() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content": format!("---\nname: Modèle\n---\n{}", "x".repeat(20_000))},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let sent = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-long",
+            "body": "Lance la skill.",
+            "apply_skill_id": id
+        }),
+    );
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert_eq!(
+        reply["body"], "Le modèle annexe est suivi.",
+        "un corps long ne doit pas chasser l'annexe du contexte de 16 000 caractères"
+    );
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .unwrap();
+    assert!(applied.text.contains(annex));
+    assert!(
+        applied.text.contains("corps tronqué"),
+        "le corps doit annoncer sa troncature"
+    );
+    assert!(!applied.text.contains(&"x".repeat(20_000)));
+}
+
+#[test]
 fn accented_titles_survive_import_edit_history_and_restart() {
     let db = Database::new();
     let mut app = db.open();

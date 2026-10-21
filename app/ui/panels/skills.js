@@ -6,6 +6,16 @@
   const BATCH_BYTES = 8 * 1024 * 1024;
   const EXTENSIONS = ["txt", "md", "markdown", "csv", "json", "yaml", "yml"];
   const displayName = (skill) => skill.display_name || skill.name;
+  function replyFollowsAnnex(reply, annex) {
+    const marker = "Réponds exactement : ";
+    const at = String(annex).indexOf(marker);
+    if (at >= 0) {
+      const phrase = annex.slice(at + marker.length).split("\n")[0].trim();
+      return phrase.length > 0 && String(reply).trim() === phrase;
+    }
+    const text = String(annex).trim();
+    return text.length > 0 && String(reply).includes(text);
+  }
   function supportedText(path) {
     const base = path.split(/[\\/]/).pop();
     const dot = base.lastIndexOf(".");
@@ -28,7 +38,7 @@
     el.addEventListener("click", action);
     return el;
   };
-  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "combined-too-large": "Le contenu et les annexes conservées dépassent ensemble 256 000 caractères", "too-many-annexes": "Une skill accepte au plus 20 fichiers texte annexes.", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre." }[value] || value);
+  const reason = (value) => ({ unsupported: "Format non accepté", empty: "Fichier vide", "too-large": "Texte trop volumineux", "combined-too-large": "Le contenu et les annexes conservées dépassent ensemble 256 000 caractères", "too-many-annexes": "Une skill accepte au plus 20 fichiers texte annexes.", "too-many-skills": "Limite de 250 skills atteinte", "name-too-large": "Le nom ne doit pas dépasser 128 caractères.", "description-too-large": "La description ne doit pas dépasser 1 024 caractères.", "skill name must contain a letter or digit": "Le nom doit contenir une lettre latine (accents acceptés) ou un chiffre.", "invalid-path": "Ce chemin sort du dossier de la skill ou le nom d’annexe est invalide.", symlink: "Un lien symbolique n’est pas importé.", "duplicate-path": "Ce nom d’annexe est déjà utilisé." }[value] || value);
   function session(botId) {
     if (!sessions.has(botId)) sessions.set(botId, { running: false, mutating: false, generation: 0, rows: [], message: "", points: { import: false, annex: false, restore: false, shortcut: false } });
     return sessions.get(botId);
@@ -49,9 +59,22 @@
   // extensions before reading. Conversion, UTF-8/binary checks and naming remain
   // authoritative on the server; preserve serial partial success.
   // Budget SERIALIZED JSON, not raw bytes (skills-wrapper review r1 #6).
-  const pathParts = (path) => String(path).replaceAll("\\", "/").split("/").filter((part) => part && part !== ".");
-  const parentDir = (path) => { const parts = pathParts(path); return parts.length < 2 ? "" : parts.slice(0, -1).join("/"); };
-  const baseName = (path) => { const parts = pathParts(path); return parts[parts.length - 1] || path; };
+  function normalizedParts(path) {
+    const parts = [];
+    for (const part of String(path).replaceAll("\\", "/").split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (!parts.length) return null;
+        parts.pop();
+        continue;
+      }
+      parts.push(part);
+    }
+    return parts.length ? parts : null;
+  }
+  const parentDir = (path) => { const parts = normalizedParts(path); return !parts || parts.length < 2 ? "" : parts.slice(0, -1).join("/"); };
+  const baseName = (path) => { const parts = normalizedParts(path); return parts ? parts[parts.length - 1] : ""; };
+  const climbsOut = (path) => String(path).split(/[\\/]/).includes("..");
   function skillFolders(files) {
     const members = new Map();
     files.forEach((file, index) => {
@@ -111,6 +134,11 @@
     }
     async function prepare(index) {
       const row = job.rows[index], file = files[index];
+      if (file.symlink) { Object.assign(row, { status: "skipped", reason: "symlink" }); return null; }
+      if (!normalizedParts(row.path) || (climbsOut(row.path) && !folders.has(parentDir(row.path)))) {
+        Object.assign(row, { status: "skipped", reason: "invalid-path" });
+        return null;
+      }
       if (!supportedText(row.path)) { Object.assign(row, { status: "skipped", reason: "unsupported" }); return null; }
       // No file this large can fit a batch, even before base64 expansion.
       if (file.size > BATCH_BYTES) { Object.assign(row, { status: "skipped", reason: "too-large" }); return null; }
@@ -362,13 +390,17 @@
           const created = await panels.api("/api/conversations", { bot_id: bot.id });
           conversation = created.conversation;
         }
-        await panels.api("/api/send", {
+        const versions = await panels.api(`/api/skills/versions?bot_id=${encodeURIComponent(bot.id)}&skill_id=${encodeURIComponent(skill.skill_id)}`);
+        const latest = (versions.versions || []).slice().sort((a, b) => b.version - a.version).find((item) => !item.deleted);
+        const annexes = (latest?.content?.files || []).map((file) => file.content).filter((content) => content);
+        const sent = await panels.api("/api/send", {
           conversation_id: conversation.id,
           message_id: crypto.randomUUID(),
           body: `Lance la skill « ${displayName(skill)} ».`,
           apply_skill_id: skill.skill_id,
         });
-        job.points.annex = true;
+        const reply = [...(sent.conversation?.messages ?? [])].reverse().find((message) => message.role === "assistant")?.body ?? "";
+        job.points.annex = annexes.some((annex) => replyFollowsAnnex(reply, annex));
         // A just-created thread is absent from state until refresh. Opening
         // first leaves the welcome screen up and hides the annex reply.
         await refresh();

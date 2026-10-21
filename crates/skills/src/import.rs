@@ -10,7 +10,9 @@
 //! A `SKILL.md` keeps the text files that share its directory: those siblings are
 //! companion files, not extra skills. Nested files stay independent. Importing
 //! `SKILL.md` alone keeps the companions already stored; a folder that includes
-//! siblings replaces them, even when every sibling is invalid.
+//! siblings replaces them, even when every sibling is invalid. Paths are
+//! normalized (`.` and `..`); a path that climbs out of the relative root or out
+//! of its skill folder is refused. Annex names use the same rules as a proposal.
 use crate::library::{self, Origin, Skill, SkillContent, SkillFile};
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::Connection;
@@ -70,13 +72,14 @@ fn convert_parts(file: &ImportFile) -> Result<(ImportedSkill, Option<String>)> {
     if !matches!(
         extension.to_ascii_lowercase().as_str(),
         ".txt" | ".md" | ".markdown" | ".csv" | ".json" | ".yaml" | ".yml"
-    ) || file.bytes.iter().take(8192).any(|&b| b == 0)
-    {
+    ) {
         return Err(invalid("unsupported"));
     }
-    let text = std::str::from_utf8(&file.bytes).map_err(|_| invalid("unsupported"))?;
-    // TextDecoder("utf-8") consumes a leading BOM.
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // TextDecoder("utf-8") consumes a leading BOM. A NUL anywhere is binary.
+    // Other control characters stay allowed in a skill body (U+0085 is a
+    // documented text upload); annexes refuse them in `plain_text`.
+    let owned = decoded_text(&file.bytes)?;
+    let text = owned.as_str();
     if text.trim_matches(js_space).is_empty() {
         return Err(invalid("empty"));
     }
@@ -185,16 +188,52 @@ struct SkillFolder {
     annexes: Vec<usize>,
 }
 
-fn path_parts(path: &str) -> Vec<String> {
-    path.replace('\\', "/")
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .map(str::to_owned)
-        .collect()
+/// Same path rule as a skill proposal: length 240, no `:`, `\`, or control
+/// characters, no empty/`.`/`..` segment, and a text extension.
+pub fn valid_companion_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.chars().count() <= 240
+        && !path.contains(['\\', ':'])
+        && !path.chars().any(char::is_control)
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && path.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "txt" | "md" | "markdown" | "csv" | "json" | "yaml" | "yml"
+            )
+        })
+}
+
+fn normalized_parts(path: &str) -> Option<Vec<String>> {
+    if path.contains(['\\', ':']) || path.chars().any(char::is_control) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop()?;
+            continue;
+        }
+        parts.push(part.to_owned());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+fn climbs(path: &str) -> bool {
+    path.split(['/', '\\']).any(|part| part == "..")
 }
 
 fn parent_dir(path: &str) -> Option<String> {
-    let parts = path_parts(path);
+    let parts = normalized_parts(path)?;
     if parts.len() < 2 {
         None
     } else {
@@ -205,7 +244,9 @@ fn parent_dir(path: &str) -> Option<String> {
 fn skill_folders(files: &[ImportFile]) -> HashMap<String, SkillFolder> {
     let mut folders: HashMap<String, SkillFolder> = HashMap::new();
     for (index, file) in files.iter().enumerate() {
-        let parts = path_parts(&file.path);
+        let Some(parts) = normalized_parts(&file.path) else {
+            continue;
+        };
         if parts.last().map(String::as_str) == Some("SKILL.md") {
             if let Some(dir) = parent_dir(&file.path) {
                 folders
@@ -235,35 +276,47 @@ fn skill_folders(files: &[ImportFile]) -> HashMap<String, SkillFolder> {
 }
 
 fn parts_are_skill_md(path: &str) -> bool {
-    path_parts(path).last().map(String::as_str) == Some("SKILL.md")
+    normalized_parts(path)
+        .and_then(|parts| parts.last().cloned())
+        .as_deref()
+        == Some("SKILL.md")
 }
 
-fn annex_text(file: &ImportFile) -> Result<String> {
-    let file_name = path_parts(&file.path)
-        .last()
-        .cloned()
-        .ok_or_else(|| invalid("empty-path"))?;
-    let dot = file_name
-        .rfind('.')
-        .filter(|&index| index > 0)
-        .ok_or_else(|| invalid("unsupported"))?;
-    let extension = file_name[dot..].to_ascii_lowercase();
-    if !matches!(
-        extension.as_str(),
-        ".txt" | ".md" | ".markdown" | ".csv" | ".json" | ".yaml" | ".yml"
-    ) || file.bytes.iter().take(8192).any(|&byte| byte == 0)
+fn decoded_text(bytes: &[u8]) -> Result<String> {
+    // A NUL anywhere, including past the historical 8192-byte probe, is binary.
+    if bytes.contains(&0) {
+        return Err(invalid("unsupported"));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid("unsupported"))?;
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(text).to_owned())
+}
+
+fn plain_text(bytes: &[u8]) -> Result<String> {
+    let text = decoded_text(bytes)?;
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
     {
         return Err(invalid("unsupported"));
     }
-    let text = std::str::from_utf8(&file.bytes).map_err(|_| invalid("unsupported"))?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    Ok(text)
+}
+
+fn annex_text(file: &ImportFile) -> Result<String> {
+    let file_name = normalized_parts(&file.path)
+        .and_then(|parts| parts.last().cloned())
+        .ok_or_else(|| invalid("invalid-path"))?;
+    if !valid_companion_path(&file_name) {
+        return Err(invalid("invalid-path"));
+    }
+    let text = plain_text(&file.bytes)?;
     if text.trim_matches(js_space).is_empty() {
         return Err(invalid("empty"));
     }
     if text.encode_utf16().count() > MAX_SKILL_CHARACTERS {
         return Err(invalid("too-large"));
     }
-    Ok(text.to_owned())
+    Ok(text)
 }
 
 fn same_files(left: &[SkillFile], right: &[SkillFile]) -> bool {
@@ -282,17 +335,29 @@ fn chosen_annexes(
     let mut order: Vec<(usize, String)> = annexes
         .iter()
         .copied()
-        .map(|index| (index, path_parts(&files[index].path).join("/")))
+        .filter_map(|index| {
+            normalized_parts(&files[index].path).map(|parts| (index, parts.join("/")))
+        })
         .collect();
-    order.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    order.sort_by(|a, b| {
+        a.1.to_lowercase()
+            .cmp(&b.1.to_lowercase())
+            .then(a.0.cmp(&b.0))
+    });
     let mut attached = Vec::new();
     let mut decisions = Vec::new();
     for (index, _) in order {
-        let name = path_parts(&files[index].path)
-            .last()
-            .cloned()
+        let name = normalized_parts(&files[index].path)
+            .and_then(|parts| parts.last().cloned())
             .unwrap_or_default();
-        if attached.iter().any(|file: &SkillFile| file.path == name) {
+        if !valid_companion_path(&name) {
+            decisions.push((index, Err("invalid-path".into())));
+            continue;
+        }
+        if attached
+            .iter()
+            .any(|file: &SkillFile| file.path.eq_ignore_ascii_case(&name))
+        {
             decisions.push((index, Err("duplicate-path".into())));
             continue;
         }
@@ -335,6 +400,12 @@ fn import_files(
         if report[index].is_some() {
             continue;
         }
+        if normalized_parts(&files[index].path).is_none()
+            || (climbs(&files[index].path) && parent_dir(&files[index].path).is_none())
+        {
+            report[index] = Some(skipped_item(&files[index].path, "invalid-path".into()));
+            continue;
+        }
         if let Some(dir) = parent_dir(&files[index].path) {
             if let Some(folder) = folders.get(&dir) {
                 let primary = folder.skills[0];
@@ -351,6 +422,10 @@ fn import_files(
                     continue;
                 }
             }
+        }
+        if climbs(&files[index].path) {
+            report[index] = Some(skipped_item(&files[index].path, "invalid-path".into()));
+            continue;
         }
         report[index] = Some(import_standalone(
             &files[index],
@@ -1729,6 +1804,140 @@ mod tests {
         assert_eq!(writes, 2);
         assert!(conn.is_autocommit());
         assert!(library::list(&conn, "bot").unwrap().is_empty());
+    }
+
+    fn status_of<'a>(report: &'a [ImportItem], path: &str) -> &'a ImportStatus {
+        &report
+            .iter()
+            .find(|item| item.file_name == path)
+            .unwrap_or_else(|| panic!("rapport sans {path}"))
+            .status
+    }
+
+    #[test]
+    fn annex_paths_stay_inside_the_skill_folder_and_names_match_proposals() {
+        let conn = database();
+        let long_name = format!("dossier/{}.md", "n".repeat(238));
+        let report = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+                file("dossier/sub/../modele.md", "annexe interne"),
+                file("dossier/../secret.md", "hors dossier"),
+                file("dossier/Modele.md", "doublon de casse"),
+                file("dossier/foo:bar.md", "deux-points"),
+                file(&long_name, "nom trop long"),
+                file("dossier/bad\u{0001}.md", "contrôle"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                status_of(&report, "dossier/sub/../modele.md"),
+                ImportStatus::Annex { .. }
+            ),
+            "un chemin normalisé doit rester dans le dossier de la skill"
+        );
+        for path in [
+            "dossier/../secret.md",
+            "dossier/foo:bar.md",
+            &long_name,
+            "dossier/bad\u{0001}.md",
+        ] {
+            assert!(
+                matches!(status_of(&report, path), ImportStatus::Skipped { reason } if reason == "invalid-path"),
+                "{path} doit être refusé, statut {:?}",
+                status_of(&report, path)
+            );
+        }
+        assert!(
+            matches!(status_of(&report, "dossier/Modele.md"), ImportStatus::Skipped { reason } if reason == "duplicate-path"),
+            "Modele.md et modele.md sont le même nom"
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(
+            saved.len(),
+            1,
+            "un chemin qui sort du dossier ne devient pas une skill"
+        );
+        assert_eq!(saved[0].content.files.len(), 1);
+        assert_eq!(saved[0].content.files[0].path, "modele.md");
+        assert_eq!(saved[0].content.files[0].content, "annexe interne");
+    }
+
+    #[test]
+    fn the_twenty_first_annex_and_a_combined_overflow_are_refused() {
+        let conn = database();
+        let mut files = vec![file("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps")];
+        for index in 0..21 {
+            files.push(file(
+                &format!("dossier/f{index:02}.md"),
+                &format!("annexe {index}"),
+            ));
+        }
+        let report = import_batch(&conn, "bot", &files).unwrap();
+        assert!(
+            matches!(status_of(&report, "dossier/f20.md"), ImportStatus::Skipped { reason } if reason == "too-many-annexes")
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved[0].content.files.len(), 20);
+        assert!(saved[0]
+            .content
+            .files
+            .iter()
+            .all(|item| item.path != "f20.md"));
+
+        let heavy = format!("---\nname: Large\n---\n{}", "a".repeat(255_000));
+        let overflow = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("autre/SKILL.md", &heavy),
+                file("autre/modele.md", &"b".repeat(2_000)),
+            ],
+        )
+        .unwrap();
+        assert!(
+            matches!(status_of(&overflow, "autre/modele.md"), ImportStatus::Skipped { reason } if reason == "combined-too-large")
+        );
+        let large = library::list(&conn, "bot")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.content.display_name == "Large")
+            .unwrap();
+        assert!(large.content.files.is_empty());
+    }
+
+    #[test]
+    fn a_nul_after_8192_bytes_and_any_control_character_are_refused() {
+        let conn = database();
+        let mut late_nul = vec![b'a'; 8192];
+        late_nul.push(0);
+        late_nul.extend_from_slice(b"suite");
+        let report = import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
+                ImportFile {
+                    path: "dossier/tardif.md".into(),
+                    bytes: late_nul,
+                },
+                file("dossier/controle.md", "bonjour\u{0001}fin"),
+            ],
+        )
+        .unwrap();
+        for path in ["dossier/tardif.md", "dossier/controle.md"] {
+            assert!(
+                matches!(status_of(&report, path), ImportStatus::Skipped { reason } if reason == "unsupported"),
+                "{path} doit être refusé, statut {:?}",
+                status_of(&report, path)
+            );
+        }
+        let saved = library::list(&conn, "bot").unwrap();
+        assert!(saved.iter().all(|item| item.content.files.is_empty()));
+        assert_eq!(saved.len(), 1);
     }
 
     #[test]

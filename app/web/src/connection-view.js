@@ -16,14 +16,22 @@ export function composerConnectionState({ offline = false, live = false, busy = 
     label: offline ? "Envoyer le message — moteur local indisponible" : active ? title : busy ? "Envoi en cours" : title };
 }
 
+function signInCopy({ providerConnected, expired, group, isTask }) {
+  if (providerConnected) return group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse.";
+  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez-vous via Codex, puis envoyez un nouveau message."
+    : isTask ? "Votre session ChatGPT a expiré. Reconnectez-vous via Codex, puis poursuivez dans la conversation principale."
+      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez-vous via Codex, puis réessayez.";
+  return group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
+    : isTask ? "Connectez votre compte ChatGPT via Codex, puis poursuivez dans la conversation principale."
+      : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.";
+}
+
 export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = true }) {
   const expired = message.error_kind === "signin_expired";
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: providerConnected ? group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse." : group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
-      : isTask ? "Connectez votre compte ChatGPT via Codex, puis poursuivez dans la conversation principale."
-        : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.",
+    copy: signInCopy({ providerConnected, expired, group, isTask }),
     signInLabel: expired ? "Se reconnecter via Codex" : "Se connecter via Codex",
     showRetry: !group && !isTask,
     retryDisabled: !providerConnected || !engineConnected,

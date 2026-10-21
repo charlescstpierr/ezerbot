@@ -142,3 +142,14 @@ test("Mode voix, Mémo vocal and Dictée have no border at rest in both themes",
     }
   }
 });
+
+test("voice controls keep at least 2px between them at 500, 820, 901 and 1140px in both themes", async () => {
+  for (const width of WIDTHS) {
+    const report = await measure(width, 780);
+    for (const theme of report.themes) {
+      for (const { between, gap } of theme.gaps) {
+        assert.ok(gap >= 2, `${between} are ${gap}px apart at ${width}px ${theme.theme}`);
+      }
+    }
+  }
+});

@@ -26,7 +26,6 @@
 .voice-region .attachment-retry { font-size: 11px; align-self: center; }
 .voice-status-row[hidden] { display: none; }
 @media (max-width: 900px) {
-  .voice-controls { gap: 0; }
   .voice-region { margin-left: 10px; margin-right: 10px; }
 }
 @media (max-height: 640px) {

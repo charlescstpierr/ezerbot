@@ -109,15 +109,15 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
     Ok(id)
 }
 
-/// The GitHub read tool: a native adapter, run outside any SQLite writer.
+/// The GitHub read tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_github_tool(name: &str) -> bool {
-    name == catalogue::github::TOOL || is_github_comment(name)
+    catalogue::github::is_tool(name) || is_github_comment(name)
 }
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     if is_github_comment(&call.name) {
         catalogue::github::comment::call(ctx, call)
     } else {
-        catalogue::github::call(ctx, &call.arguments)
+        catalogue::github::call(ctx, &call.name, &call.arguments)
     }
 }
 /// The one publishing tool of the connection: it opens a draft card and sends nothing

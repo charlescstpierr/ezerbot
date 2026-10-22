@@ -809,6 +809,8 @@ const SHAPES: [&str; 6] = ["galet", "goutte", "nuage", "carre", "fantome", "etoi
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Fermer l’app avec l’agent désactivé est une absence voulue des routines.
+        features::routines::depart(&self.feature_context());
         // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
         features::local::shutdown(&self.connection, &self.db_path);
     }

@@ -44,7 +44,10 @@ struct GithubScript {
     renewals: u32,
     refresh: &'static str,
     issues: &'static str,
+    /// `ok`, or `missing` for a repository the account cannot see.
+    repo: &'static str,
     more: bool,
+    long_readme: bool,
     token_times: Vec<std::time::Instant>,
     authorization: Vec<(String, String)>,
     /// Bodies of the comments the provider accepted, in order.
@@ -63,7 +66,9 @@ impl Default for GithubScript {
             renewals: 0,
             refresh: "ok",
             issues: "ok",
+            repo: "ok",
             more: false,
+            long_readme: false,
             token_times: Vec::new(),
             authorization: Vec::new(),
             comments: Vec::new(),
@@ -213,6 +218,72 @@ impl OAuth {
                                         ]),
                                     )
                                 }
+                            }
+                        }
+                    } else if url.starts_with("/github/api/repos/charles/essai")
+                        && !url.starts_with("/github/api/repos/charles/essai/issues")
+                    {
+                        let live = format!("Bearer {}", g.live_access);
+                        let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
+                        let path = url
+                            .trim_start_matches("/github/api/repos/charles/essai")
+                            .split('?')
+                            .next()
+                            .unwrap()
+                            .to_owned();
+                        let file = |text: &str, name: &str| {
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+                            let wrapped: Vec<&str> = encoded
+                                .as_bytes()
+                                .chunks(60)
+                                .map(|c| std::str::from_utf8(c).unwrap())
+                                .collect();
+                            json!({"type":"file","name":name,"path":name,"encoding":"base64","size":text.len(),"content":wrapped.join("\n")+"\n"})
+                        };
+                        if !known {
+                            (401, json!({"message":"Bad credentials"}))
+                        } else if g.repo == "missing" {
+                            (404, json!({"message":"Not Found"}))
+                        } else {
+                            match path.as_str() {
+                                "" => (
+                                    200,
+                                    json!({"full_name":"charles/essai","description":"Dépôt d’essai d’Ezerbot","default_branch":"trunk"}),
+                                ),
+                                "/pulls/7" => (
+                                    200,
+                                    json!({"number":7,"title":"Ajouter le <i>guide</i>","state":"open","merged":false,"user":{"login":"alice"},"base":{"ref":"trunk"},"head":{"ref":"guide"}}),
+                                ),
+                                "/pulls/8" => (
+                                    200,
+                                    json!({"number":8,"title":"Corriger la faute","state":"closed","merged":true,"user":{"login":"bob"},"base":{"ref":"trunk"}}),
+                                ),
+                                "/pulls" => (
+                                    200,
+                                    json!([{"number":9,"title":"La plus récente","state":"open","user":{"login":"alice"},"base":{"ref":"trunk"}}]),
+                                ),
+                                "/readme" if g.long_readme => (
+                                    200,
+                                    file(
+                                        &format!("# Essai\n{}", "ligne du fichier\n".repeat(2000)),
+                                        "README.md",
+                                    ),
+                                ),
+                                "/readme" => (
+                                    200,
+                                    file("# Essai\nBonjour depuis le README.\n", "README.md"),
+                                ),
+                                "/contents/docs/guide.md" => {
+                                    (200, file("# Guide\nPremière ligne du guide.\n", "guide.md"))
+                                }
+                                "/contents/docs" => {
+                                    (200, json!([{"type":"file","name":"guide.md"}]))
+                                }
+                                "/contents/logo.png" => (
+                                    200,
+                                    json!({"type":"file","name":"logo.png","encoding":"base64","size":4,"content":"/9j/4A=="}),
+                                ),
+                                _ => (404, json!({"message":"Not Found"})),
                             }
                         }
                     } else {
@@ -856,6 +927,8 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
 }
 
 const GITHUB_TOOL: &str = "github_list_issues";
+const GITHUB_PULL: &str = "github_get_pull_request";
+const GITHUB_REPO: &str = "github_read_repository";
 const GITHUB_SECRETS: [&str; 5] = [
     "ghu_access-secret",
     "ghr_refresh-secret",
@@ -923,19 +996,23 @@ impl Fixture {
             .filter(|(url, _)| url.contains(part))
             .count()
     }
-    /// One chat turn that asks the bot to list issues. Both model replies are queued
-    /// first: nothing here waits for a human decision.
+    /// One chat turn that asks the bot to list issues.
     fn github_list(&mut self, id: &str, repository: &str) -> String {
+        self.github_call(id, GITHUB_TOOL, json!({"repository":repository}))
+    }
+    /// One chat turn that makes the model call a GitHub tool. Both model replies are
+    /// queued first: nothing here waits for a human decision.
+    fn github_call(&mut self, id: &str, tool: &str, arguments: Value) -> String {
         let conversation = self.post("/api/conversations", json!({"title":"GitHub"}))
             ["conversation"]["id"]
             .as_str()
             .unwrap()
             .to_owned();
-        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GITHUB_TOOL,"arguments":json!({"repository":repository}).to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
         self.script(vec![json!({"type":"response.completed"})]);
         self.post(
             "/api/send",
-            json!({"conversation_id":conversation,"message_id":id,"body":format!("Liste les issues de {repository}.")}),
+            json!({"conversation_id":conversation,"message_id":id,"body":format!("Lis {arguments}.")}),
         );
         let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
         wait("github run", || {
@@ -1233,6 +1310,306 @@ fn github_lists_one_page_of_issues_without_an_approval_card_and_names_the_accoun
         assert!(!inputs.contains(secret));
         assert!(!f.state().to_string().contains(secret));
     }
+}
+
+fn done(f: &Fixture, run: &str) -> Value {
+    match f.outcome(run) {
+        ToolOutcome::Done { output } => output,
+        other => panic!("{other:?}"),
+    }
+}
+fn failed(f: &Fixture, run: &str) -> String {
+    match f.outcome(run) {
+        ToolOutcome::Failed { reason } => reason,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn github_reads_a_pull_request_without_a_card_and_names_the_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let before = f.github_requests("/pulls/7");
+    let run = f.github_call(
+        "pull-7",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":7}),
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["numero"], 7);
+    assert_eq!(output["titre"], "Ajouter le <i>guide</i>");
+    assert_eq!(output["etat"], "open");
+    assert_eq!(output["auteur"], "alice");
+    assert_eq!(output["branche_base"], "trunk");
+    let text = output["texte"].as_str().unwrap();
+    for part in [
+        "compte GitHub : charles-test",
+        "#7",
+        "Ajouter le <i>guide</i>",
+        "État : ouverte",
+        "Auteur : alice",
+        "Branche de base : trunk",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert_eq!(f.github_requests("/pulls/7"), before + 1);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .github
+            .authorization
+            .iter()
+            .rev()
+            .find(|(u, _)| u.contains("/pulls/7"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.github.live_access));
+    }
+    // A merged pull request says so; without a number, the latest one is read.
+    let run = f.github_call(
+        "pull-8",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":8}),
+    );
+    let merged = done(&f, &run);
+    assert_eq!(merged["etat"], "merged");
+    assert!(merged["texte"]
+        .as_str()
+        .unwrap()
+        .contains("État : fusionnée"));
+    let run = f.github_call(
+        "pull-latest",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai"}),
+    );
+    let latest = done(&f, &run);
+    assert_eq!(latest["numero"], 9);
+    assert_eq!(latest["titre"], "La plus récente");
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("charles-test") && inputs.contains("Branche de base : trunk"));
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_reads_a_repository_readme_or_a_named_file_and_truncates_a_long_one() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let run = f.github_call("readme", GITHUB_REPO, json!({"repository":"charles/essai"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["description"], "Dépôt d’essai d’Ezerbot");
+    assert_eq!(output["branche_par_defaut"], "trunk");
+    assert_eq!(output["fichier"], "README.md");
+    assert_eq!(output["tronque"], false);
+    assert_eq!(output["extrait"], "# Essai\nBonjour depuis le README.\n");
+    let text = output["texte"].as_str().unwrap();
+    for part in [
+        "compte GitHub : charles-test",
+        "Dépôt d’essai d’Ezerbot",
+        "Branche par défaut : trunk",
+        "README.md",
+        "Bonjour depuis le README.",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert!(!text.contains("tronqué"));
+    // A named file, in a folder.
+    let run = f.github_call(
+        "guide",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai","path":"docs/guide.md"}),
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["fichier"], "docs/guide.md");
+    assert!(output["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("Première ligne du guide."));
+    assert_eq!(f.github_requests("/contents/docs/guide.md"), 1);
+    // A long file is cut, and the bubble says so.
+    f.oauth.seen.lock().unwrap().github.long_readme = true;
+    let run = f.github_call("long", GITHUB_REPO, json!({"repository":"charles/essai"}));
+    let output = done(&f, &run);
+    assert_eq!(output["tronque"], true);
+    let excerpt = output["extrait"].as_str().unwrap();
+    assert!(excerpt.starts_with("# Essai\nligne du fichier"));
+    assert!(
+        excerpt.chars().count() <= 4000,
+        "{}",
+        excerpt.chars().count()
+    );
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("Le fichier est trop long : seul le début est affiché"),
+        "{text}"
+    );
+    assert!(text.chars().count() < 4600);
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_pull_request_and_repository_tools_are_reads_without_approval() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    for name in [GITHUB_TOOL, GITHUB_PULL, GITHUB_REPO] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        assert!(!tool.requires_approval, "{name}");
+    }
+    assert_eq!(
+        tools
+            .iter()
+            .filter(|t| t.name.starts_with("github_"))
+            .count(),
+        4,
+        "the list of GitHub tools is closed: three reads and one comment on a draft card"
+    );
+    let writes: Vec<_> = tools
+        .iter()
+        .filter(|t| t.name.starts_with("github_") && t.requires_approval)
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(writes, [GITHUB_COMMENT_TOOL]);
+    // The closed list is also what the connection card reports.
+    let listed = f.item("github")["server"]["tools"].to_string();
+    for name in [
+        "list_issues",
+        "get_pull_request",
+        "read_repository",
+        "add_issue_comment",
+    ] {
+        assert!(listed.contains(name), "{name}: {listed}");
+    }
+}
+
+#[test]
+fn github_pull_request_and_file_failures_are_french_sentences_without_a_retry_loop() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    // A missing pull request: one call, one sentence.
+    let before = f.github_requests("/pulls/404");
+    let run = f.github_call(
+        "pull-missing",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":404}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("introuvable") && reason.contains("404"),
+        "{reason}"
+    );
+    assert_eq!(f.github_requests("/pulls/404"), before + 1);
+    // A missing file: the repository is read once, the file once.
+    let repo_calls = f.github_requests("/repos/charles/essai");
+    let before = f.github_requests("/contents/absent.md");
+    let run = f.github_call(
+        "file-missing",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai","path":"absent.md"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("absent.md") && reason.contains("introuvable"),
+        "{reason}"
+    );
+    assert_eq!(f.github_requests("/contents/absent.md"), before + 1);
+    assert_eq!(f.github_requests("/repos/charles/essai"), repo_calls + 2);
+    // A folder and a binary file are not excerpts.
+    for (id, path, words) in [
+        ("folder", "docs", "dossier"),
+        ("binary", "logo.png", "texte"),
+    ] {
+        let run = f.github_call(
+            id,
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":path}),
+        );
+        let reason = failed(&f, &run);
+        assert!(reason.contains(words), "{path}: {reason}");
+    }
+    // A missing repository is named once, and the file is never asked for.
+    f.oauth.seen.lock().unwrap().github.repo = "missing";
+    let repo_calls = f.github_requests("/repos/charles/essai");
+    let files = f.github_requests("/contents");
+    let run = f.github_call(
+        "repo-missing",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("introuvable") && reason.contains("charles/essai"),
+        "{reason}"
+    );
+    assert!(reason.contains("charles-test"), "{reason}");
+    assert_eq!(f.github_requests("/repos/charles/essai"), repo_calls + 1);
+    assert_eq!(f.github_requests("/contents"), files);
+    let run = f.github_call(
+        "pull-no-repo",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":7}),
+    );
+    assert!(failed(&f, &run).contains("introuvable"));
+    f.oauth.seen.lock().unwrap().github.repo = "ok";
+    // Bad arguments never reach GitHub.
+    let calls = f.oauth.seen.lock().unwrap().requests.len();
+    for (id, tool, arguments) in [
+        (
+            "bad-pull-name",
+            GITHUB_PULL,
+            json!({"repository":"../etc/passwd","number":1}),
+        ),
+        (
+            "bad-pull-number",
+            GITHUB_PULL,
+            json!({"repository":"charles/essai","number":0}),
+        ),
+        (
+            "bad-repo-name",
+            GITHUB_REPO,
+            json!({"repository":"charles"}),
+        ),
+        (
+            "bad-path",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":"../secret"}),
+        ),
+        (
+            "abs-path",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":"/etc/passwd"}),
+        ),
+        (
+            "extra",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","ref":"main"}),
+        ),
+    ] {
+        let run = f.github_call(id, tool, arguments);
+        let reason = failed(&f, &run);
+        assert!(!reason.contains("ghu_") && !reason.is_empty(), "{id}");
+    }
+    assert_eq!(f.oauth.seen.lock().unwrap().requests.len(), calls);
+    // The issue listing of the first slice still works beside them.
+    let run = f.github_list("still-lists", "charles/essai");
+    assert_eq!(done(&f, &run)["issues"].as_array().unwrap().len(), 2);
 }
 
 #[test]

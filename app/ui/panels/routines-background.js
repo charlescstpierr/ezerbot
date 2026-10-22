@@ -40,7 +40,7 @@
     if (!data.available) section.append(node("p", data.unavailable_reason || "Installation indisponible."));
     const detail = error || data.error;
     if (detail) { const warning = node("p", detail, "notification-warning"); warning.role = "alert"; section.append(warning); }
-    section.append(node("p", "Les résultats et les échecs se retrouvent dans Routines et Notifications. Les alertes macOS suivent vos réglages Notifications. En veille ou hors connexion, le prochain réveil applique la même fenêtre de rattrapage que l’app ; une demande d’autorisation attend votre retour."));
+    section.append(node("p", "Les résultats et les échecs se retrouvent dans Routines et Notifications. Les alertes macOS suivent vos réglages Notifications. À son premier passage après le réveil, l’agent rattrape les créneaux dus pendant l’extinction ou la veille du Mac, dans l’ordre, même si Ezerbot est resté fermé. Une demande d’autorisation attend votre retour."));
   }
   host.register({ id: "routines-background", settingsSection(container) { section = container; section.className = "setting-section routines-background-settings"; render(); }, onState(state) { render(state); } });
 })();

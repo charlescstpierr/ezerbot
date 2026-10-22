@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
@@ -285,6 +286,41 @@ fn audio_range(value: &str, length: usize) -> Option<(usize, usize)> {
     (start < length && start <= end).then_some((start, end))
 }
 
+static QUIT: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_quit(_: nix::libc::c_int) {
+    QUIT.store(true, Ordering::SeqCst);
+}
+
+/// The shell stops the app with SIGTERM and gives it a second. Record that the
+/// app is going away, so routines know whether anything was asked to run while
+/// it was closed, then leave as the default action would have.
+fn leave_on_quit(db: PathBuf) {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(on_quit),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    for signal in [Signal::SIGTERM, Signal::SIGINT] {
+        // SAFETY: the handler only stores into an atomic, which is async-signal-safe.
+        if unsafe { sigaction(signal, &action) }.is_err() {
+            return;
+        }
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(25));
+        if QUIT.load(Ordering::SeqCst) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            grokbot_wrapper::features::routines::depart_database(&db, now);
+            std::process::exit(0);
+        }
+    });
+}
+
 fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use grokbot_wrapper::features::routines_background::{self, Owner};
     // Acquire BEFORE App::open: its crash recovery must not interrupt a peer.
@@ -317,6 +353,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         // Retain Owner until process death; idle provider threads cannot outlive it.
         std::process::exit(code);
     }
+    leave_on_quit(options.db.clone());
     let server = Server::http(("127.0.0.1", options.port))?;
     let port = server
         .server_addr()

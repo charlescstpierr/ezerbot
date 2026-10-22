@@ -136,17 +136,15 @@ pub(crate) fn kill_group(pgid: u32) {
         .status();
 }
 
-fn redact_outcome(db: &Path, mut value: Value, live: bool) -> Value {
-    match Vault::open_app(&db.with_extension("secrets.json")).and_then(|vault| {
-        if live {
-            for field in ["stdout", "stderr"] {
-                if let Some(text) = value["output"][field].as_str() {
-                    value["output"][field] = json!(redact::redact_live(&vault, text)?);
-                }
-            }
-        }
-        redact::redact_value(&vault, &value)
-    }) {
+fn redact_outcome(
+    db: &Path,
+    redactor: &mut redact::SnapshotRedactor,
+    value: Value,
+    live: bool,
+) -> Value {
+    match Vault::open_app(&db.with_extension("secrets.json"))
+        .and_then(|vault| redactor.redact(&vault, &value, live))
+    {
         Ok(value) => value,
         Err(_) => json!({"status":"failed","reason":"Sortie locale indisponible."}),
     }
@@ -183,6 +181,7 @@ pub(crate) fn publish(
     run_id: &str,
     call_id: &str,
     snap: &Snap,
+    redactor: &mut redact::SnapshotRedactor,
 ) -> Result<Publish, ApiError> {
     let conn = Connection::open(db)?;
     conn.busy_timeout(Duration::from_secs(3))?;
@@ -209,7 +208,7 @@ pub(crate) fn publish(
         value["output"]["exit_code"] = Value::Null;
         value["output"]["signal"] = Value::Null;
         value["output"]["background"] = json!(true);
-        let redacted = redact_outcome(db, value, snap.status == "en cours");
+        let redacted = redact_outcome(db, redactor, value, snap.status == "en cours");
         let serialized = redacted.to_string();
         if redacted["status"] != "failed" {
             let updated = tx.execute(
@@ -248,7 +247,7 @@ pub(crate) fn publish(
     value["output"]["exit_code"] = snap.exit_code.map_or(Value::Null, |code| json!(code));
     value["output"]["signal"] = snap.signal.map_or(Value::Null, |signal| json!(signal));
     value["output"]["background"] = json!(true);
-    let redacted = redact_outcome(db, value, snap.status == "en cours");
+    let redacted = redact_outcome(db, redactor, value, snap.status == "en cours");
     let serialized = redacted.to_string();
     let terminal = redacted["status"] == "failed";
     let task_status = if terminal { "arrêtée" } else { snap.status };
@@ -614,6 +613,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_keep_masking_secrets_after_vault_changes() {
+        for final_status in ["en cours", "terminé", "arrêtée"] {
+            let (temp, conn) = db();
+            let file = temp.0.join("workspace.sqlite");
+            let vault = Vault::open_app(&file.with_extension("secrets.json")).unwrap();
+            vault.set("TOKEN", "", "old-private-token").unwrap();
+            let mut redactor = redact::SnapshotRedactor::default();
+            conn.execute(
+                "INSERT INTO engine_external_tools VALUES ('run','call',?1)",
+                [json!({"status":"done","output":{"status":"en cours"}}).to_string()],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", []).unwrap();
+            let mut snap = Snap {
+                status: "en cours",
+                stdout: format!("old-private-token {}", "ordinary output ".repeat(8)),
+                stderr: format!("old-private-token {}", "ordinary error ".repeat(8)),
+                truncated: false,
+                incomplete: false,
+                exit_code: None,
+                signal: None,
+            };
+            for change in 0..3 {
+                if change == 1 {
+                    vault.set("TOKEN", "", "new-private-token").unwrap();
+                    snap.stdout.push_str(" new-private-token");
+                    snap.stderr.push_str(" new-private-token");
+                } else if change == 2 {
+                    vault.remove("TOKEN").unwrap();
+                    snap.status = final_status;
+                    if final_status == "arrêtée" {
+                        mark_stopped(&conn, Some(("run", "call"))).unwrap();
+                    }
+                }
+                assert!(matches!(
+                    publish(&file, "run", "call", &snap, &mut redactor).unwrap(),
+                    Publish::Updated
+                ));
+                let raw: String = conn
+                    .query_row("SELECT outcome FROM engine_external_tools", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert!(!raw.contains("old-private-token"));
+                assert!(!raw.contains("new-private-token"));
+                assert!(raw.contains("[...]"));
+            }
+        }
+    }
+
+    #[test]
     fn live_snapshots_withhold_secret_suffixes_and_final_snapshots_flush_safely() {
         let (temp, conn) = db();
         let file = temp.0.join("workspace.sqlite");
@@ -643,7 +693,14 @@ mod tests {
                 snap.exit_code = Some(0);
             }
             assert!(matches!(
-                publish(&file, "run", "call", &snap).unwrap(),
+                publish(
+                    &file,
+                    "run",
+                    "call",
+                    &snap,
+                    &mut redact::SnapshotRedactor::default()
+                )
+                .unwrap(),
                 Publish::Updated
             ));
             let raw: String = conn
@@ -729,7 +786,14 @@ mod tests {
                 mark_stopped(&conn, Some(("run", "call"))).unwrap();
             } else {
                 assert!(matches!(
-                    publish(&file, "run", "call", &snap).unwrap(),
+                    publish(
+                        &file,
+                        "run",
+                        "call",
+                        &snap,
+                        &mut redact::SnapshotRedactor::default()
+                    )
+                    .unwrap(),
                     Publish::Updated
                 ));
             }
@@ -793,6 +857,7 @@ mod tests {
                 exit_code: Some(9),
                 signal: Some(15),
             },
+            &mut redact::SnapshotRedactor::default(),
         )
         .unwrap();
         assert!(matches!(result, Publish::Updated));
@@ -831,6 +896,7 @@ mod tests {
                 exit_code: None,
                 signal: None,
             },
+            &mut redact::SnapshotRedactor::default(),
         )
         .unwrap();
         assert!(matches!(late, Publish::Closed));

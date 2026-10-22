@@ -779,6 +779,7 @@ mod tests {
             "r\\m note",
             "eval 'rm note'",
             "git rm -f note",
+            "git -c alias.wipe=rm wipe note",
             "gh issue comment 123 --repo owner/repo --body hello",
             "gh pr comment 7 -b hi",
             "perl -e'unlink \"note\"'",

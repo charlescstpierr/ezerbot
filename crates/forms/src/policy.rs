@@ -318,6 +318,11 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
     if is_mailer(base) {
         scan.outbound = true;
     }
+    if base == "git" && git_rewrites_commands(&tokens, index) {
+        // An inline alias or config can turn any word into another program.
+        scan.unproven = true;
+        scan_loosely(&tokens, index + 1, scan);
+    }
     if matches!(base, "gh" | "glab") {
         classify_forge_cli(&tokens[index + 1..], scan);
     }
@@ -569,6 +574,22 @@ fn destructive_at(tokens: &[String], index: usize) -> bool {
         return true;
     }
     false
+}
+
+/// `git -c alias.x=rm x`, `--config-env`, or a `GIT_CONFIG*` assignment in
+/// front of the command can redefine what a subcommand runs.
+fn git_rewrites_commands(tokens: &[String], index: usize) -> bool {
+    tokens[..index]
+        .iter()
+        .any(|token| token.starts_with("GIT_CONFIG") || token.starts_with("GIT_EXEC_PATH"))
+        || tokens[index + 1..]
+            .iter()
+            .take_while(|token| token.starts_with('-'))
+            .any(|token| {
+                token.starts_with("-c")
+                    || token.starts_with("--config-env")
+                    || token == "--exec-path"
+            })
 }
 
 /// Git operations that delete files, branches or stashed work, or overwrite
@@ -1003,6 +1024,22 @@ mod tests {
             let policy = describe("run_shell", &json!({"command": command}), None);
             assert!(policy.remember, "{command}");
         }
+    }
+
+    #[test]
+    fn git_inline_aliases_cannot_hide_a_deletion() {
+        for command in [
+            "git -c alias.wipe=rm wipe note",
+            "git -calias.wipe=rm wipe note",
+            "git -C . -c alias.wipe=rm wipe note",
+            "git --config-env=alias.wipe=X wipe note",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=rm git wipe note",
+            "git -c core.pager=cat status",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+        }
+        assert!(describe("run_shell", &json!({"command": "git -C . status"}), None).remember);
     }
 
     #[test]

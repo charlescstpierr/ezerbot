@@ -13,7 +13,7 @@
 //! A body is {kind:inline_prompt,prompt} or {kind:skill_invocation,skill_id,version};
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
-use super::{routine_webhooks, write_transaction, Context};
+use super::{mcp, routine_github, routine_webhooks, write_transaction, Context};
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
     contracts::{
@@ -82,6 +82,20 @@ fn refuse_model_webhook(model: bool, trigger: &Schedule) -> Result<(), ApiError>
         ));
     }
     Ok(())
+}
+/// A GitHub trigger is saved only while the connector can deliver its events: a
+/// trigger that cannot receive anything would look as if it already listened.
+fn require_github(ctx: &Context<'_>, trigger: &Schedule) -> Result<(), ApiError> {
+    if !trigger.has_github() {
+        return Ok(());
+    }
+    match mcp::github_routine_gap(ctx)? {
+        None => Ok(()),
+        Some(why) => Err(ApiError::new(
+            400,
+            format!("{why} La routine n’a pas été enregistrée avec ce déclencheur GitHub."),
+        )),
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -479,6 +493,7 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
     prompt(ctx.connection, &input.bot_id, &body)?;
     let trigger = schedule(input.trigger, input.schedule)?;
     refuse_model_webhook(origin == Origin::Model, &trigger)?;
+    require_github(ctx, &trigger)?;
     let trigger = name_members(ctx.connection, trigger, None)?;
     let id = format!("routine-{}", random(ctx.connection)?);
     let conversation = format!("routine-{}", random(ctx.connection)?);
@@ -547,6 +562,9 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
     if input.trigger.is_some() || input.schedule.is_some() {
         r.trigger = schedule(input.trigger, input.schedule)?;
         refuse_model_webhook(model, &r.trigger)?;
+        if r.trigger != previous {
+            require_github(ctx, &r.trigger)?;
+        }
         r.trigger = name_members(ctx.connection, r.trigger, Some(&previous))?;
     }
     if let Some(zone) = input.time_zone {
@@ -586,7 +604,7 @@ fn enable(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     require_bot(ctx.connection, &r.bot_id)?;
     prompt(ctx.connection, &r.bot_id, &r.body)?;
     if !r.enabled
-        && !r.trigger.has_webhook()
+        && !r.trigger.starts_on_event()
         && cron::next_after(&r.trigger, &r.time_zone, clock(ctx)?)?.is_none()
     {
         return Err(ApiError::new(
@@ -716,7 +734,7 @@ pub fn routes(
                 let existing: Option<String> = tx.query_row("SELECT occurrence_id FROM wrapper_routine_launches WHERE routine_id=?1 AND nonce=?2",params![input.routine_id,input.nonce],|r|r.get(0)).optional()?;
                 let existing = match existing {
                     Some(id) => Some(id),
-                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (manual_nonce IS NULL OR manual_nonce NOT LIKE 'webhook:%') AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND manual_nonce NOT LIKE 'scheduler-error:%' AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
+                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (manual_nonce IS NULL OR manual_nonce NOT LIKE 'webhook:%' AND manual_nonce NOT LIKE 'github:%') AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND manual_nonce NOT LIKE 'scheduler-error:%' AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
                 };
                 let occurrence = match existing {
                     Some(id) => occurrences::get(&tx, &id)?
@@ -824,7 +842,11 @@ fn history(
             [&occurrence.occurrence_id],
             |r| r.get(0),
         )?;
-        if let Some(trigger) = routine_webhooks::history_trigger(&tx, &occurrence.occurrence_id)? {
+        if let Some(trigger) =
+            routine_webhooks::history_trigger(&tx, &occurrence.occurrence_id)?.or(
+                routine_github::history_trigger(&tx, &occurrence.occurrence_id)?,
+            )
+        {
             value["trigger"] = trigger;
         }
         if let Some(routine) = &routine {
@@ -870,16 +892,21 @@ fn name_trigger(
     .or_else(|| current.map(|m| m.trigger.clone())) else {
         return Ok(());
     };
+    // What kind of simple trigger it is: the schedule, a webhook, or GitHub.
+    let family = |trigger: &Schedule| match trigger {
+        Schedule::Webhook => 1,
+        Schedule::Github { .. } => 2,
+        _ => 0,
+    };
     let webhook = made_by == Schedule::Webhook;
-    let base = if webhook { "Webhook" } else { "Horaire" };
+    let event = family(&made_by) != 0;
+    let base = ["Horaire", "Webhook", "GitHub"][family(&made_by)];
     // The place among its siblings only exists while the member is in the group.
     let label = match current {
         Some(member) => {
             let same: Vec<&cron::Member> = members
                 .iter()
-                .filter(|m| {
-                    (m.trigger == Schedule::Webhook) == (member.trigger == Schedule::Webhook)
-                })
+                .filter(|m| family(&m.trigger) == family(&member.trigger))
                 .collect();
             match same.iter().position(|m| m.id == member.id) {
                 Some(place) if same.len() > 1 => format!("{base} {}", place + 1),
@@ -888,17 +915,17 @@ fn name_trigger(
         }
         None => base.to_owned(),
     };
-    let mut trigger = if webhook {
+    let mut trigger = if event {
         value["trigger"].take()
     } else {
         json!({"kind":"schedule"})
     };
     if !trigger.is_object() {
-        trigger = json!({"kind":"webhook"});
+        trigger = json!({"kind":if webhook {"webhook"} else {"github"}});
     }
     trigger["label"] = json!(label);
     trigger["trigger_id"] = json!(occurrence.member_id);
-    if !webhook {
+    if !event {
         trigger["description"] = json!(cron::describe_fr(&made_by, &routine.time_zone).ok());
     }
     value["trigger"] = trigger;
@@ -1271,7 +1298,7 @@ fn react(conn: &Connection, run: &Run) -> Result<(), ApiError> {
         let webhook = o
             .manual_nonce
             .as_deref()
-            .is_some_and(routine_webhooks::is_call_nonce);
+            .is_some_and(occurrences::is_event_nonce);
         let current = occurrences::is_current(conn, &o)?;
         let runnable: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE routine_id=?1 AND deleted=0 AND (?2 OR (enabled=1 AND ?3 AND (?5 OR active_since<?4))))",params![o.routine_id,o.manual_nonce.is_some() && !webhook,current,o.scheduled_at_utc,webhook],|row|row.get(0))?;
         if !runnable && run.status == RunStatus::Queued {
@@ -1339,7 +1366,7 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
     // The host tick is serial with HTTP mutations. Recheck dispatchability after
     // materialization so pause/edit/delete cannot launch stale scheduled intent.
     // A webhook call is automatic intent: pause and edit cut it off, unlike a manual launch.
-    let webhook = routine_webhooks::is_call_nonce(o.manual_nonce.as_deref().unwrap_or_default());
+    let webhook = occurrences::is_event_nonce(o.manual_nonce.as_deref().unwrap_or_default());
     if (o.manual_nonce.is_none() || webhook)
         && (!r.enabled || !occurrences::is_current(ctx.connection, o)?)
     {
@@ -1358,6 +1385,9 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
     }
     let mut text = prompt(ctx.connection, &r.bot_id, &r.body)?;
     if let Some(context) = routine_webhooks::run_context(ctx.connection, &o.occurrence_id)? {
+        text.push_str(&context);
+    }
+    if let Some(context) = routine_github::run_context(ctx.connection, &o.occurrence_id)? {
         text.push_str(&context);
     }
     let mut launch = Context {
@@ -1464,8 +1494,8 @@ pub fn tick(ctx: &Context<'_>) {
         tx.execute(&format!("UPDATE scheduler_occurrences AS o SET status='missed' WHERE o.status='pending' AND o.catch_up=1 AND o.manual_nonce IS NULL AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR r.enabled=0 OR {version}!=o.schedule_version))"),[])?;
         // Retire suppressed intent immediately instead of holding an idle write
         // lock every tick until the one-hour late window elapses.
-        tx.execute(&format!("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR {version}!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error"),[])?;
-        tx.execute(&format!("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR {version}!=o.schedule_version))))"),[])?;
+        tx.execute(&format!("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%' OR o.manual_nonce LIKE 'github:%') AND (r.enabled=0 OR {version}!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error"),[])?;
+        tx.execute(&format!("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%' OR o.manual_nonce LIKE 'github:%') AND (r.enabled=0 OR {version}!=o.schedule_version))))"),[])?;
         let now = clock(ctx)?;
         occurrences::materialize(&tx, now, &CatchUpPolicy::default())?;
         // After materializing, which read the previous tick: this one ends any

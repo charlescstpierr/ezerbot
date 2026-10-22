@@ -2080,3 +2080,31 @@ fn forge_cli_sends_still_ask_when_a_permanent_shell_rule_exists() {
         assert_eq!(f.outcome(id)["status"], "failed", "{command}");
     }
 }
+
+#[test]
+fn background_destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    let mut args = f.shell("rm victime.txt");
+    args["background"] = json!(true);
+    f.send("bg-rm", "run_shell", args);
+    wait("background rm asked or finished", || {
+        let status = f.run("bg-rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(f.run("bg-rm").status, RunStatus::AwaitingApproval);
+    assert!(target.exists());
+    let card = f.request("bg-rm");
+    let policy = approval_policy(&mut f, "bg-rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    f.decide(&card, json!("deny"));
+    f.finish("bg-rm");
+    assert!(target.exists());
+}

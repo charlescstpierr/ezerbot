@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -60,6 +60,9 @@ struct Live {
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     pgid: u32,
+    /// Redaction patterns seen for this task. Deleting or replacing a vault
+    /// secret must not unmask output that was already masked.
+    retained: BTreeSet<String>,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Live>> {
@@ -107,6 +110,11 @@ pub(crate) fn insert(
 pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> TaskControl {
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
+    let retained = Vault::open_app(&db.with_extension("secrets.json"))
+        .and_then(|vault| redact::patterns(&vault))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     let mut tasks = registry().lock().unwrap_or_else(|error| error.into_inner());
     tasks.insert(
         key(db, run_id, call_id),
@@ -115,6 +123,7 @@ pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> Tas
             stop: stop.clone(),
             done: done.clone(),
             pgid,
+            retained,
         },
     );
     TaskControl { stop, done }
@@ -136,17 +145,31 @@ pub(crate) fn kill_group(pgid: u32) {
         .status();
 }
 
-fn redact_outcome(db: &Path, mut value: Value, live: bool) -> Value {
-    match Vault::open_app(&db.with_extension("secrets.json")).and_then(|vault| {
-        if live {
-            for field in ["stdout", "stderr"] {
-                if let Some(text) = value["output"][field].as_str() {
-                    value["output"][field] = json!(redact::redact_live(&vault, text)?);
+fn retained_patterns(db: &Path, run_id: &str, call_id: &str, current: Vec<String>) -> Vec<String> {
+    let mut tasks = registry().lock().unwrap_or_else(|error| error.into_inner());
+    match tasks.get_mut(&key(db, run_id, call_id)) {
+        Some(task) => {
+            task.retained.extend(current);
+            task.retained.iter().cloned().collect()
+        }
+        None => current,
+    }
+}
+
+fn redact_outcome(db: &Path, run_id: &str, call_id: &str, mut value: Value, live: bool) -> Value {
+    match Vault::open_app(&db.with_extension("secrets.json"))
+        .and_then(|vault| redact::patterns(&vault))
+        .and_then(|current| {
+            let patterns = retained_patterns(db, run_id, call_id, current);
+            if live {
+                for field in ["stdout", "stderr"] {
+                    if let Some(text) = value["output"][field].as_str() {
+                        value["output"][field] = json!(redact::redact_live_with(&patterns, text));
+                    }
                 }
             }
-        }
-        redact::redact_value(&vault, &value)
-    }) {
+            redact::redact_value_with(&patterns, &value)
+        }) {
         Ok(value) => value,
         Err(_) => json!({"status":"failed","reason":"Sortie locale indisponible."}),
     }
@@ -209,7 +232,7 @@ pub(crate) fn publish(
         value["output"]["exit_code"] = Value::Null;
         value["output"]["signal"] = Value::Null;
         value["output"]["background"] = json!(true);
-        let redacted = redact_outcome(db, value, snap.status == "en cours");
+        let redacted = redact_outcome(db, run_id, call_id, value, snap.status == "en cours");
         let serialized = redacted.to_string();
         if redacted["status"] != "failed" {
             let updated = tx.execute(
@@ -248,7 +271,7 @@ pub(crate) fn publish(
     value["output"]["exit_code"] = snap.exit_code.map_or(Value::Null, |code| json!(code));
     value["output"]["signal"] = snap.signal.map_or(Value::Null, |signal| json!(signal));
     value["output"]["background"] = json!(true);
-    let redacted = redact_outcome(db, value, snap.status == "en cours");
+    let redacted = redact_outcome(db, run_id, call_id, value, snap.status == "en cours");
     let serialized = redacted.to_string();
     let terminal = redacted["status"] == "failed";
     let task_status = if terminal { "arrêtée" } else { snap.status };
@@ -591,13 +614,11 @@ mod tests {
     }
 
     fn db() -> (Temp, Connection) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "ezerbot-shell-task-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&path).unwrap();
         let file = path.join("workspace.sqlite");
@@ -844,5 +865,46 @@ mod tests {
         let value: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["output"]["stdout"], "queue complète");
         assert_eq!(value["output"]["status"], "arrêtée");
+    }
+
+    #[test]
+    fn a_secret_removed_from_the_vault_stays_masked_for_the_task_lifetime() {
+        let (temp, conn) = db();
+        let file = temp.0.join("workspace.sqlite");
+        let vault = Vault::open_app(&file.with_extension("secrets.json")).unwrap();
+        vault.set("TOKEN", "", "private-token-retained-42").unwrap();
+        let initial = json!({"status":"done","output":{"status":"en cours"}});
+        conn.execute(
+            "INSERT INTO engine_external_tools VALUES ('run','call',?1)",
+            [initial.to_string()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", []).unwrap();
+        register(&file, "run", "call", 0);
+        vault.remove("TOKEN").unwrap();
+        let snap = |status, exit_code| Snap {
+            status,
+            stdout: "début private-token-retained-42 fin du flux sûr".into(),
+            stderr: String::new(),
+            truncated: false,
+            incomplete: false,
+            exit_code,
+            signal: None,
+        };
+        for snap in [snap("en cours", None), snap("terminé", Some(0))] {
+            assert!(matches!(
+                publish(&file, "run", "call", &snap).unwrap(),
+                Publish::Updated
+            ));
+            let raw: String = conn
+                .query_row("SELECT outcome FROM engine_external_tools", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(!raw.contains("private-token-retained-42"), "{raw}");
+            // A live snapshot withholds the tail; only the final one shows the mask.
+            assert_eq!(raw.contains("[...]"), raw.contains("terminé"), "{raw}");
+        }
+        finish(&file, "run", "call");
     }
 }

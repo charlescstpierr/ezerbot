@@ -17,15 +17,19 @@ use std::collections::BTreeSet;
 const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
-    let values = known_patterns(vault)?;
+    let values = patterns(vault)?;
     Ok(mask(text, &values))
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
 /// Publish the complete text with `redact` once the stream finishes.
 pub fn redact_live(vault: &Vault, text: &str) -> Result<String> {
-    let values = known_patterns(vault)?;
-    let mut output = mask(text, &values);
+    Ok(redact_live_with(&patterns(vault)?, text))
+}
+/// `redact_live` against patterns the caller retained, so a value removed from
+/// the vault after it was seen stays masked for the rest of the stream.
+pub fn redact_live_with(values: &[String], text: &str) -> String {
+    let mut output = mask(text, values);
     let tail = values
         .iter()
         .map(|value| value.chars().count())
@@ -37,17 +41,21 @@ pub fn redact_live(vault: &Vault, text: &str) -> Result<String> {
         .nth(count)
         .map_or(output.len(), |(index, _)| index);
     output.truncate(end);
-    Ok(output)
+    output
 }
 
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.
-    let values = known_patterns(vault)?;
-    mask_value(value, &values)
+    mask_value(value, &patterns(vault)?)
+}
+/// `redact_value` against patterns the caller retained across vault changes.
+pub fn redact_value_with(values: &[String], value: &Value) -> Result<Value> {
+    mask_value(value, values)
 }
 
-fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
+/// The exact strings (raw and JSON-escaped) the vault currently masks.
+pub fn patterns(vault: &Vault) -> Result<Vec<String>> {
     let mut patterns = BTreeSet::new();
     for value in vault.known_values()? {
         let encoded = serde_json::to_string(&value)?;

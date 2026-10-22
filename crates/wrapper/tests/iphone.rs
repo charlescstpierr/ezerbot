@@ -213,6 +213,19 @@ fn off_by_default_confirmation_refusal_restart_and_revocation() {
     for path in ["/api/approvals/resolve", "/api/forms/submit"] {
         assert!(f.remote("POST", path, json!({}), Some(&token)).is_err());
     }
+    // A paired phone reaches the task card's Arrêter route (an unknown task is
+    // a 409 from the handler, not the 403 of the remote allowlist).
+    assert_eq!(
+        f.remote(
+            "POST",
+            "/api/local/tasks/stop",
+            json!({"run_id":"run-absent","call_id":"call-absent"}),
+            Some(&token)
+        )
+        .unwrap_err()
+        .status,
+        409
+    );
     let replacement = App::open(&f.path).unwrap();
     f.app = replacement;
     assert!(iphone::enabled(&f.app));

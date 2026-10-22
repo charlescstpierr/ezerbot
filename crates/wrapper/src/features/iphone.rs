@@ -238,6 +238,7 @@ pub fn remote(
                     | "/api/reconcile"
                     | "/api/regenerate"
                     | "/api/stop"
+                    | "/api/local/tasks/stop"
                     | "/api/delegation/cancel"
                     | "/api/provider/welcomed"
                     | "/api/storage/drafts"

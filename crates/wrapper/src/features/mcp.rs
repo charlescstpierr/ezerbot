@@ -109,12 +109,12 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
     Ok(id)
 }
 
-/// The GitHub read tool: a native adapter, run outside any SQLite writer.
+/// The GitHub read tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_github_tool(name: &str) -> bool {
-    name == catalogue::github::TOOL
+    catalogue::github::is_tool(name)
 }
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
-    catalogue::github::call(ctx, &call.arguments)
+    catalogue::github::call(ctx, &call.name, &call.arguments)
 }
 pub(crate) fn is_lifecycle(name: &str) -> bool {
     name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")

@@ -175,7 +175,8 @@
 .gb-actions { display: flex; align-items: center; gap: 6px; min-height: 26px; margin-top: 6px; color: var(--subtle); font-size: 11px; }
 .gb-message-menu { position: relative; display: inline-flex; align-items: center; gap: 6px; }
 .gb-reaction { display: inline-flex; align-items: center; min-height: 22px; padding: 0 7px; border-radius: 999px; background: var(--soft); color: var(--text); font-size: 14px; line-height: 1; }
-.gb-message-menu-panel { position: absolute; z-index: 6; top: calc(100% + 4px); left: 0; display: grid; gap: 4px; min-width: 196px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); box-shadow: 0 10px 28px color-mix(in srgb, var(--text) 14%, transparent); }
+.gb-message-menu-panel { position: fixed; z-index: 60; display: grid; gap: 4px; min-width: 196px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); box-shadow: 0 10px 28px color-mix(in srgb, var(--text) 14%, transparent); visibility: hidden; }
+.gb-message-menu-panel[data-placed="true"] { visibility: visible; }
 .gb-reaction-row { display: flex; gap: 2px; }
 .gb-reaction-row button, .gb-message-menu-panel [role="menuitem"] { border-radius: 6px; color: var(--text); font-size: 13px; text-align: left; }
 .gb-reaction-row button { width: 28px; height: 28px; font-size: 16px; }

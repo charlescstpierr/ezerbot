@@ -20,6 +20,26 @@ pub fn redact(vault: &Vault, text: &str) -> Result<String> {
     let values = known_patterns(vault)?;
     Ok(mask(text, &values))
 }
+/// Redact a cumulative live snapshot and withhold enough trailing characters
+/// to cover a secret split across reads, including its JSON-escaped form.
+/// Publish the complete text with `redact` once the stream finishes.
+pub fn redact_live(vault: &Vault, text: &str) -> Result<String> {
+    let values = known_patterns(vault)?;
+    let mut output = mask(text, &values);
+    let tail = values
+        .iter()
+        .map(|value| value.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count = output.chars().count().saturating_sub(tail);
+    let end = output
+        .char_indices()
+        .nth(count)
+        .map_or(output.len(), |(index, _)| index);
+    output.truncate(end);
+    Ok(output)
+}
+
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.

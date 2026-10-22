@@ -136,13 +136,46 @@ pub(crate) fn kill_group(pgid: u32) {
         .status();
 }
 
-fn redact_outcome(db: &Path, value: Value) -> Value {
-    match Vault::open_app(&db.with_extension("secrets.json"))
-        .and_then(|vault| redact::redact_value(&vault, &value))
-    {
+fn redact_outcome(db: &Path, mut value: Value, live: bool) -> Value {
+    match Vault::open_app(&db.with_extension("secrets.json")).and_then(|vault| {
+        if live {
+            for field in ["stdout", "stderr"] {
+                if let Some(text) = value["output"][field].as_str() {
+                    value["output"][field] = json!(redact::redact_live(&vault, text)?);
+                }
+            }
+        }
+        redact::redact_value(&vault, &value)
+    }) {
         Ok(value) => value,
         Err(_) => json!({"status":"failed","reason":"Sortie locale indisponible."}),
     }
+}
+
+// Replay uses the ToolResult event's entry ID but reads this mutable journal.
+// Invalidate its covering summaries in the same transaction as each change;
+// the revision also rejects an in-flight summary made from the old result.
+fn invalidate_result(conn: &Connection, run_id: &str, call_id: &str) -> Result<(), ApiError> {
+    let kind = serde_json::to_value(grokbot_engine::contracts::RunEventKind::ToolResult)
+        .expect("event kind serializes");
+    let mut statement = conn.prepare(
+        "SELECT r.conversation_id, e.seq FROM engine_run_events e
+         JOIN engine_runs r USING(run_id)
+         WHERE e.run_id=?1 AND json_extract(e.payload,'$.call_id')=?2 AND e.kind=?3",
+    )?;
+    let entries = statement
+        .query_map(params![run_id, call_id, kind.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (conversation, seq) in entries {
+        grokbot_engine::compaction::invalidate_covering(
+            conn,
+            &conversation,
+            &format!("{run_id}:{seq}"),
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn publish(
@@ -176,13 +209,17 @@ pub(crate) fn publish(
         value["output"]["exit_code"] = Value::Null;
         value["output"]["signal"] = Value::Null;
         value["output"]["background"] = json!(true);
-        let redacted = redact_outcome(db, value);
+        let redacted = redact_outcome(db, value, snap.status == "en cours");
+        let serialized = redacted.to_string();
         if redacted["status"] != "failed" {
             let updated = tx.execute(
                 "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='arrêtée'",
-                params![run_id, call_id, redacted.to_string()],
+                params![run_id, call_id, serialized],
             )?;
             if updated == 1 {
+                if raw != serialized {
+                    invalidate_result(&tx, run_id, call_id)?;
+                }
                 tx.execute(
                     "UPDATE wrapper_shell_tasks SET status='arrêtée', exit_code=NULL WHERE run_id=?1 AND call_id=?2",
                     params![run_id, call_id],
@@ -211,15 +248,19 @@ pub(crate) fn publish(
     value["output"]["exit_code"] = snap.exit_code.map_or(Value::Null, |code| json!(code));
     value["output"]["signal"] = snap.signal.map_or(Value::Null, |signal| json!(signal));
     value["output"]["background"] = json!(true);
-    let redacted = redact_outcome(db, value);
+    let redacted = redact_outcome(db, value, snap.status == "en cours");
+    let serialized = redacted.to_string();
     let terminal = redacted["status"] == "failed";
     let task_status = if terminal { "arrêtée" } else { snap.status };
     let exit_code = if terminal { None } else { snap.exit_code };
     let updated = tx.execute(
         "UPDATE engine_external_tools SET outcome=?3 WHERE run_id=?1 AND call_id=?2 AND json_extract(outcome,'$.output.status')='en cours'",
-        params![run_id, call_id, redacted.to_string()],
+        params![run_id, call_id, serialized],
     )?;
     if updated == 1 {
+        if raw != serialized {
+            invalidate_result(&tx, run_id, call_id)?;
+        }
         tx.execute(
             "UPDATE wrapper_shell_tasks SET status=?3, exit_code=?4 WHERE run_id=?1 AND call_id=?2 AND status='en cours'",
             params![run_id, call_id, task_status, exit_code],
@@ -285,6 +326,7 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
             Some(Some(raw)) => {
                 if let Ok(mut value) = serde_json::from_str::<Value>(&raw) {
                     if value["output"]["status"] == "en cours" {
+                        invalidate_result(&tx, &run_id, &call_id)?;
                         value["output"]["status"] = json!("arrêtée");
                         value["output"]["exit_code"] = Value::Null;
                         value["output"]["signal"] = Value::Null;
@@ -565,8 +607,150 @@ mod tests {
              CREATE TABLE wrapper_shell_tasks(run_id TEXT NOT NULL, call_id TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pgid INTEGER, PRIMARY KEY(run_id, call_id));",
         )
         .unwrap();
+        grokbot_engine::store::migrate(&conn).unwrap();
+        grokbot_engine::compaction::migrate(&conn).unwrap();
         Vault::open_app(&file.with_extension("secrets.json")).unwrap();
         (Temp(path), conn)
+    }
+
+    #[test]
+    fn live_snapshots_withhold_secret_suffixes_and_final_snapshots_flush_safely() {
+        let (temp, conn) = db();
+        let file = temp.0.join("workspace.sqlite");
+        let vault = Vault::open_app(&file.with_extension("secrets.json")).unwrap();
+        vault.set("TOKEN", "", "private-token-é🔒123").unwrap();
+        let initial = json!({"status":"done","output":{"status":"en cours"}});
+        conn.execute(
+            "INSERT INTO engine_external_tools VALUES ('run','call',?1)",
+            [initial.to_string()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", []).unwrap();
+        let mut snap = Snap {
+            status: "en cours",
+            stdout: "ordinary output before private-token-é🔒12".into(),
+            stderr: "ordinary error before private-token-é🔒12".into(),
+            truncated: false,
+            incomplete: false,
+            exit_code: None,
+            signal: None,
+        };
+        for finished in [false, true] {
+            if finished {
+                snap.status = "terminé";
+                snap.stdout.push_str("3 fin");
+                snap.stderr.push_str("3 fin");
+                snap.exit_code = Some(0);
+            }
+            assert!(matches!(
+                publish(&file, "run", "call", &snap).unwrap(),
+                Publish::Updated
+            ));
+            let raw: String = conn
+                .query_row("SELECT outcome FROM engine_external_tools", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            for field in ["stdout", "stderr"] {
+                let text = value["output"][field].as_str().unwrap();
+                assert!(!text.contains("private-token"), "{field}: {text}");
+                assert!(text.starts_with("ordinary"));
+                if finished {
+                    assert!(text.ends_with("[...] fin"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changed_task_results_invalidate_covering_summaries_and_their_descendants() {
+        for (stored, status) in [
+            ("en cours", "terminé"),
+            ("en cours", "stop"),
+            ("arrêtée", "arrêtée"),
+        ] {
+            let (temp, conn) = db();
+            let file = temp.0.join("workspace.sqlite");
+            conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('run','bot','chat','user','ref',0,'completed','{}')", []).unwrap();
+            conn.execute(
+                "INSERT INTO engine_run_events VALUES ('run',2,?1,?2)",
+                params![
+                    serde_json::to_value(grokbot_engine::contracts::RunEventKind::ToolResult)
+                        .unwrap()
+                        .as_str(),
+                    json!({"call_id":"call"}).to_string()
+                ],
+            )
+            .unwrap();
+            let initial = json!({"status":"done","output":{"status":stored}});
+            conn.execute(
+                "INSERT INTO engine_external_tools VALUES ('run','call',?1)",
+                [initial.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call',?1)",
+                [stored],
+            )
+            .unwrap();
+            for (id, parent) in [
+                ("covering", None),
+                ("child", Some("covering")),
+                ("unrelated", None),
+            ] {
+                let summary = grokbot_engine::contracts::Summary {
+                    summary_id: id.into(),
+                    conversation_id: "chat".into(),
+                    text: "still running".into(),
+                    truncation_last_entry_inclusive: "run:2".into(),
+                    resume_from_entry_inclusive: "later".into(),
+                    previous_summary_id: parent.map(str::to_owned),
+                    includes_tool_results: true,
+                    strategy: "test".into(),
+                };
+                conn.execute("INSERT INTO engine_summaries(summary_id,conversation_id,previous_summary_id,record,segment_start_entry_id,coverage_complete) VALUES (?1,'chat',?2,?3,?1,1)", params![id,parent,serde_json::to_string(&summary).unwrap()]).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO engine_summary_entries VALUES ('covering','run:2')",
+                [],
+            )
+            .unwrap();
+            let snap = Snap {
+                status,
+                stdout: "final output".into(),
+                stderr: String::new(),
+                truncated: false,
+                incomplete: false,
+                exit_code: Some(7),
+                signal: None,
+            };
+            if status == "stop" {
+                mark_stopped(&conn, Some(("run", "call"))).unwrap();
+            } else {
+                assert!(matches!(
+                    publish(&file, "run", "call", &snap).unwrap(),
+                    Publish::Updated
+                ));
+            }
+
+            assert!(
+                grokbot_engine::compaction::latest_in_segment(&conn, "chat", "covering")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                grokbot_engine::compaction::latest_in_segment(&conn, "chat", "child")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                grokbot_engine::compaction::latest_in_segment(&conn, "chat", "unrelated")
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(grokbot_engine::compaction::revision(&conn, "chat").unwrap() > 0);
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ struct SeenRecall {
     code: String,
     create_status: u16,
     leave_status: u16,
+    create_delay: Duration,
 }
 struct Recall {
     base: String,
@@ -44,6 +45,7 @@ impl Recall {
             code: "joining_call".into(),
             create_status: 201,
             leave_status: 200,
+            create_delay: Duration::ZERO,
         }));
         let captured = seen.clone();
         let stop = Arc::new(AtomicBool::new(false));
@@ -67,6 +69,10 @@ impl Recall {
                 let (status, data) = if method == "POST" && url == "/api/v1/bot/" {
                     seen.creates
                         .push((auth, serde_json::from_str(&body).unwrap_or(Value::Null)));
+                    let delay = seen.create_delay;
+                    drop(seen);
+                    std::thread::sleep(delay);
+                    seen = captured.lock().unwrap();
                     (
                         seen.create_status,
                         json!({"id":"bot-1","status_changes":[]}),
@@ -587,4 +593,77 @@ fn a_bot_asked_in_the_thread_follows_the_same_gate_and_can_be_told_to_leave() {
         .unwrap();
     assert!(!journal.contains(KEY));
     assert!(!format!("{:?}", f.ai.seen.lock().unwrap().bodies).contains(KEY));
+}
+
+#[test]
+fn a_clean_close_waits_for_an_invitation_still_awaiting_recall() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.recall.seen.lock().unwrap().create_delay = Duration::from_millis(1500);
+    let run = f.join(MEET);
+    let request = f.request(&run);
+    f.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id,"submission_id":"accept","decision":"allow_once"}));
+    f.app.tick(0);
+    // La réunion existe (Connexion) mais Recall n'a pas encore répondu : pas d'identifiant de bot.
+    wait("meeting row", || {
+        f.db().query_row("SELECT count(*) FROM wrapper_recall_meetings WHERE state='joining' AND bot_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
+    });
+    let left = f.post("/api/recall/shutdown", json!({}));
+    assert_eq!(left["left"], 1);
+    // Le bot créé après coup est bien retiré, la réunion est Terminée.
+    assert_eq!(f.recall.leaves(), 1);
+    assert_eq!(f.item()["meeting"]["label"], "Terminée");
+}
+
+#[test]
+fn an_unknown_state_still_asks_recall_once_to_remove_the_bot() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.joined();
+    f.recall.code("nouvel_etat_inconnu");
+    f.sync();
+    assert_eq!(f.item()["meeting"]["label"], "Échec");
+    assert_eq!(f.recall.leaves(), 0);
+    f.sync();
+    f.sync();
+    assert_eq!(f.recall.leaves(), 1);
+}
+
+#[test]
+fn the_consent_card_shows_the_result_of_its_own_call_not_the_latest_of_the_run() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.script_call(recall::JOIN, "join-own", json!({"lien":MEET}));
+    f.script_done();
+    let run = f.say("own-result");
+    let request = f.request(&run);
+    f.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id,"submission_id":"accept","decision":"allow_once"}));
+    f.app.tick(0);
+    wait("join", || f.recall.creates() == 1);
+    wait("result", || {
+        store::events(&f.db(), &run, 0)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult)
+    });
+    // Un autre outil du même tour échoue ensuite : la carte de l'invitation ne change pas.
+    f.db()
+        .execute(
+            "INSERT INTO engine_run_events(run_id,seq,kind,payload) SELECT ?1,max(seq)+1,'tool_result',?2 FROM engine_run_events WHERE run_id=?1",
+            rusqlite::params![run, json!({"call_id":"another-call","outcome":{"status":"failed","reason":"Autre outil en échec."}}).to_string()],
+        )
+        .unwrap();
+    let state = f.state();
+    let card = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    assert_eq!(card["configuration_result"]["status"], "done");
+    assert!(card["configuration_result"]["output"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Le bot rejoint la réunion"));
 }

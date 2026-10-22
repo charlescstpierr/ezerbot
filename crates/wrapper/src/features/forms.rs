@@ -1394,10 +1394,27 @@ fn request_value(
             || super::mcp::is_lifecycle(tool)
             || super::recall::is_consent(tool)
         {
-            let result: Option<String> = ctx.connection.query_row(
-                "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
-                [&request.run_id], |r| r.get(0),
-            ).optional()?;
+            // Une invitation dans le fil partage son tour avec d’autres outils : seul le
+            // résultat de l’appel approuvé compte, pas le dernier résultat du tour.
+            let call_id = if super::recall::is_consent(tool) {
+                approved_call_id(ctx, request)?
+            } else {
+                None
+            };
+            let result: Option<String> = if super::recall::is_consent(tool) {
+                match call_id {
+                    Some(call_id) => ctx.connection.query_row(
+                        "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND json_extract(payload,'$.call_id')=?2 ORDER BY seq DESC LIMIT 1",
+                        params![&request.run_id, call_id], |r| r.get(0),
+                    ).optional()?,
+                    None => None,
+                }
+            } else {
+                ctx.connection.query_row(
+                    "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
+                    [&request.run_id], |r| r.get(0),
+                ).optional()?
+            };
             value["configuration_result"] = result
                 .map(|s| serde_json::from_str::<Value>(&s))
                 .transpose()
@@ -1430,6 +1447,29 @@ fn request_value(
         value["policy"] = json!(policy);
     }
     Ok(value)
+}
+
+/// Identifiant d’appel que cette carte d’approbation lie : l’identité de la carte
+/// est un condensat de (run, appel, empreinte), retrouvé parmi les appels du run.
+fn approved_call_id(
+    ctx: &Context<'_>,
+    request: &HumanInputRequest,
+) -> Result<Option<String>, ApiError> {
+    let mut q = ctx
+        .connection
+        .prepare("SELECT payload FROM engine_run_events WHERE run_id=?1 AND kind='tool_call'")?;
+    let payloads = q
+        .query_map([&request.run_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(call) = serde_json::from_str::<ToolCall>(&payload) else {
+            continue;
+        };
+        if approval_identity(&request.run_id, &call).is_ok_and(|(id, _)| id == request.id) {
+            return Ok(Some(call.call_id));
+        }
+    }
+    Ok(None)
 }
 
 /// One classifier for the gate, the card and the decision route.

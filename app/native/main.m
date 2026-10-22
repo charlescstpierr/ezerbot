@@ -756,7 +756,7 @@ static void shell_task_reap(const ShellChild *child) {
 
 // Réunions : un bot Recall invité doit sortir de l'appel avant que le moteur
 // ne soit arrêté. Le moteur n'a que SIGTERM puis une seconde, trop peu pour le réseau.
-// Sans réunion, la réponse est immédiate ; un moteur muet ne retient pas la fermeture plus de 4 s.
+// Sans réunion, la réponse est immédiate ; la route attend au plus 12 s une invitation sans réponse, et un moteur muet ne retient pas la fermeture plus de 16 s.
 - (void)leaveRecallMeetings {
     NSURL *base = self.backendURL;
     if (!base || !self.backendTask.running) return;
@@ -768,14 +768,14 @@ static void shell_task_reap(const ShellChild *child) {
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:@"local" forHTTPHeaderField:@"X-Grokbot-Request"];
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-    configuration.timeoutIntervalForRequest = 4;
+    configuration.timeoutIntervalForRequest = 15;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
     [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         (void)data; (void)response; (void)error;
         dispatch_semaphore_signal(finished);
     }] resume];
-    dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_SEC));
     [session invalidateAndCancel];
 }
 

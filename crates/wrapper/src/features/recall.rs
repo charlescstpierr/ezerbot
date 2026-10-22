@@ -50,6 +50,9 @@ const POLL_MS: u64 = 4_000;
 const MAX_FAILURES: i64 = 3;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: u64 = 1 << 20;
+/// Invitations dont la réponse de Recall est attendue : la fermeture les attend.
+static CREATING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const CREATION_WAIT: Duration = Duration::from_secs(12);
 static POLLING: AtomicBool = AtomicBool::new(false);
 static NEXT_POLL: AtomicU64 = AtomicU64::new(0);
 
@@ -530,8 +533,24 @@ fn leave(ctx: &Context<'_>, id: Option<&str>) -> Result<Value, ApiError> {
 /// passe à Terminée ; sans confirmation, elle prend l’état d’un arrêt brutal.
 fn shutdown(ctx: &Context<'_>) -> Value {
     let mut left = 0;
+    // Une invitation sans réponse n’a pas encore d’identifiant de bot : sortir sans
+    // l’attendre laisserait Recall créer un bot que personne ne retirera.
+    let waited = std::time::Instant::now();
+    while !CREATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+        && waited.elapsed() < CREATION_WAIT
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     if let Ok(Some(meeting)) = active(ctx.connection) {
-        if leave_meeting(ctx, &meeting, "done").is_ok() {
+        let unresolved = meeting.bot_id.is_none()
+            && CREATING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&meeting.id);
+        if !unresolved && leave_meeting(ctx, &meeting, "done").is_ok() {
             left += 1;
         } else {
             let _ = ctx.connection.execute(
@@ -650,11 +669,28 @@ fn join(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let link = validate_link(call.arguments["lien"].as_str().unwrap_or(""))?;
     let key = key(ctx)?;
     let name = bot_name(ctx, ctx.bot_id.unwrap_or(crate::DEFAULT_BOT.id));
-    let id = {
+    let id: String =
+        ctx.connection
+            .query_row("SELECT 'recall_'||lower(hex(randomblob(16)))", [], |r| {
+                r.get(0)
+            })?;
+    // Inscrite avant la ligne : la fermeture qui voit la réunion attend aussi la réponse de Recall.
+    struct Creating(String);
+    impl Drop for Creating {
+        fn drop(&mut self) {
+            CREATING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|id| *id != self.0);
+        }
+    }
+    CREATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(id.clone());
+    let _creating = Creating(id.clone());
+    {
         let tx = write_transaction(ctx.connection)?;
-        let id: String = tx.query_row("SELECT 'recall_'||lower(hex(randomblob(16)))", [], |r| {
-            r.get(0)
-        })?;
         // L’index unique n’admet qu’une réunion active : la seconde invitation échoue ici.
         tx.execute(
             "INSERT INTO wrapper_recall_meetings(id,link,bot_name,state,created_at,updated_at) VALUES (?1,?2,?3,'joining',?4,?4)",
@@ -662,8 +698,7 @@ fn join(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         )
         .map_err(|_| ApiError::new(409, BUSY))?;
         tx.commit()?;
-        id
-    };
+    }
     // Aucune transaction ouverte pendant l’appel réseau.
     match create_bot(ctx.connection, &key, &link, &name) {
         Ok((region, bot)) => {
@@ -788,7 +823,7 @@ pub fn sync(ctx: &Context<'_>) {
                 if state != meeting.state {
                     // Comparaison avec l’état lu : un état posé entre-temps (Quitter) gagne.
                     let _ = ctx.connection.execute(
-                        "UPDATE wrapper_recall_meetings SET state=?3,message=?4,updated_at=?5,failures=0 WHERE id=?1 AND state=?2",
+                        "UPDATE wrapper_recall_meetings SET state=?3,message=?4,updated_at=?5,failures=0,needs_leave=(?3='failed') WHERE id=?1 AND state=?2",
                         params![meeting.id, meeting.state, state, message, crate::now()],
                     );
                 } else if meeting.failures > 0 {

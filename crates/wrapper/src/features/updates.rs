@@ -32,6 +32,8 @@ struct Job {
     log: String,
     running: bool,
     relaunch_ready: bool,
+    last_attempt: &'static str,
+    last_error: String,
 }
 
 static JOB: Mutex<Job> = Mutex::new(Job {
@@ -43,6 +45,8 @@ static JOB: Mutex<Job> = Mutex::new(Job {
     log: String::new(),
     running: false,
     relaunch_ready: false,
+    last_attempt: "aucune",
+    last_error: String::new(),
 });
 static DATABASE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 static HOLD: AtomicBool = AtomicBool::new(false);
@@ -217,6 +221,8 @@ fn begin_apply() -> Result<Value, ApiError> {
         job.phase = Phase::Telechargement.id();
         job.message = Phase::Telechargement.label().into();
         job.log.clear();
+        job.last_attempt = "en_cours";
+        job.last_error.clear();
     });
     thread::spawn(move || {
         let mut runner = SystemRunner;
@@ -230,6 +236,8 @@ fn begin_apply() -> Result<Value, ApiError> {
                     job.message = "Ezerbot est à jour.".into();
                     job.log.clear();
                     job.relaunch_ready = false;
+                    job.last_attempt = "a_jour";
+                    job.last_error.clear();
                 });
                 return;
             }
@@ -255,17 +263,23 @@ fn begin_apply() -> Result<Value, ApiError> {
             &mut on_progress,
         ) {
             Ok(()) => finish_success(),
-            Err(error) => publish(|job| {
-                job.running = false;
-                job.available = true;
-                job.phase = "erreur";
-                job.message = error.message;
-                job.log = error.log;
-                job.relaunch_ready = false;
-            }),
+            Err(error) => note_failure(error),
         }
     });
     Ok(snapshot())
+}
+
+fn note_failure(error: UpdateError) {
+    publish(|job| {
+        job.running = false;
+        job.available = true;
+        job.phase = "erreur";
+        job.message = error.message.clone();
+        job.log = error.log;
+        job.relaunch_ready = false;
+        job.last_attempt = "echec";
+        job.last_error = error.message;
+    });
 }
 
 fn finish_success() {
@@ -291,6 +305,8 @@ fn observe(restart: &mut Restart, blocked: bool) -> bool {
             job.phase = "attente";
             job.message = "Le redémarrage suivra la fin de l’enregistrement.".into();
             job.relaunch_ready = false;
+            job.last_attempt = "attente";
+            job.last_error.clear();
         });
         return false;
     }
@@ -302,6 +318,8 @@ fn observe(restart: &mut Restart, blocked: bool) -> bool {
             job.phase = Phase::Redemarrage.id();
             job.message = Phase::Redemarrage.label().into();
             job.relaunch_ready = false;
+            job.last_attempt = "reussie";
+            job.last_error.clear();
         });
         return false;
     }
@@ -312,6 +330,8 @@ fn observe(restart: &mut Restart, blocked: bool) -> bool {
         job.phase = Phase::Redemarrage.id();
         job.message = Phase::Redemarrage.label().into();
         job.relaunch_ready = true;
+        job.last_attempt = "reussie";
+        job.last_error.clear();
     });
     true
 }
@@ -332,6 +352,8 @@ fn relaunch_process() {
             job.phase = "attente";
             job.message = "Le redémarrage suivra la fin de l’enregistrement.".into();
             job.relaunch_ready = false;
+            job.last_attempt = "attente";
+            job.last_error.clear();
         });
         return;
     }
@@ -412,6 +434,8 @@ fn snapshot() -> Value {
         "message": job.message,
         "log": job.log,
         "running": job.running,
+        "last_attempt": job.last_attempt,
+        "last_error": job.last_error,
         "relaunch": if job.phase == "attente" {
             json!("attente")
         } else if job.relaunch_ready {
@@ -447,6 +471,8 @@ mod tests {
             job.message.clear();
             job.log.clear();
             job.relaunch_ready = false;
+            job.last_attempt = "aucune";
+            job.last_error.clear();
         });
     }
 
@@ -456,6 +482,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut app = crate::App::open(&root.join("workspace.sqlite")).unwrap();
+        {
+            let mut restart = restart_lock();
+            reset(&mut restart);
+        }
+        note_failure(UpdateError::message(
+            "La compilation a échoué. L’application actuelle est restée en place.",
+        ));
+        let failed = snapshot();
+        assert_eq!(failed["phase"], "erreur");
+        assert_eq!(failed["last_attempt"], "echec");
+        assert_eq!(
+            failed["last_error"],
+            "La compilation a échoué. L’application actuelle est restée en place."
+        );
+        assert_eq!(failed["available"], true);
         {
             let mut restart = restart_lock();
             reset(&mut restart);
@@ -496,6 +537,8 @@ mod tests {
         assert!(!restart.armed);
         let waiting = snapshot();
         assert_eq!(waiting["phase"], "attente");
+        assert_eq!(waiting["last_attempt"], "attente");
+        assert_eq!(waiting["last_error"], "");
         assert_eq!(waiting["relaunch"], "attente");
         assert_eq!(
             waiting["message"],
@@ -520,6 +563,7 @@ mod tests {
         assert!(observe(&mut restart, false));
         assert!(restart.armed);
         assert_eq!(snapshot()["relaunch"], "pret");
+        assert_eq!(snapshot()["last_attempt"], "reussie");
 
         // Une capture qui commence dans l’intervalle annule le départ.
         reset(&mut restart);

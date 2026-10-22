@@ -259,3 +259,51 @@ test("a denied bot selection restores the confirmed check without erasing anothe
   assert.equal(catalogueCard(f.root,"gmail").querySelector("input").checked,false);
   assert.ok(catalogueCard(f.root,"slack")===draft);assert.equal(secret.value,"unsent-private-draft");assert.ok(f.document.activeElement===secret);
 });
+
+const github = {...service,id:"github",name:"GitHub",needs_client:false,has_client:true,configured:true,device_flow:true,device:null,scopes:"",scopes_label:"Permissions de la GitHub App d’Ezerbot, choisies chez GitHub",redirect_uri:null};
+
+test("GitHub offers no client fields and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [github]);
+  const card = catalogueCard(root,"github");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  assert.ok(!card.textContent.includes("Portées OAuth"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github"}});
+});
+
+test("an unconfigured GitHub application is explained on the card and by the refused click", async () => {
+  const { root } = await mount([], {}, [{...github,configured:false,has_client:false}]);
+  const card = catalogueCard(root,"github");
+  assert.match(card.textContent, /n’est pas configurée/);
+  assert.equal(card.all().filter(n => n.tag === "input").length, 0);
+});
+
+test("the device code is shown, copyable and cancellable while GitHub waits", async () => {
+  const expires_at = Date.UTC(2026,9,22,12,15);
+  const item = {...github,status:"authorizing",authorization_url:"https://github.com/login/device",device:{user_code:"WDJB-MJHT",verification_uri:"https://github.com/login/device",expires_at},server:{id:"c1",enabled_bots:[],tools:[]}};
+  const { root, calls, copies } = await mount([], {}, [item]);
+  const card = catalogueCard(root,"github");
+  const code = card.all().find(n => n.tag === "code" && n.textContent === "WDJB-MJHT");
+  assert.ok(code, "the 8-character code is visible");
+  assert.match(card.textContent, /En attente de votre autorisation chez GitHub/);
+  const copy = card.all().find(n => n.attrs["aria-label"] === "Copier le code de connexion — GitHub");
+  await copy.events.click();
+  assert.deepEqual(copies, ["WDJB-MJHT"]);
+  const links = card.all().filter(n => n.tag === "a");
+  assert.equal(links.length, 1, "one page link, not two");
+  assert.equal(links[0].href, "https://github.com/login/device");
+  assert.equal(links[0].rel, "noopener noreferrer");
+  assert.equal(card.all().filter(n => n.tag === "button" && n.textContent === "Déconnecter").length, 0);
+  assert.equal(card.all().filter(n => n.tag === "button" && n.textContent === "Connecter").length, 0);
+  await card.all().find(n => n.tag === "button" && n.textContent === "Annuler").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github"}});
+});
+
+test("only the device flow offers a cancel while other services keep their browser link", async () => {
+  const { root } = await mount([], {}, [{...service,status:"authorizing",authorization_url:"http://127.0.0.1:1234/authorize"}]);
+  assert.equal(root.all().filter(n => n.tag === "button" && n.textContent === "Annuler").length, 0);
+  assert.equal(root.all().filter(n => n.tag === "a").length, 1);
+});

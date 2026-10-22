@@ -45,7 +45,14 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-fn token_fields(env: &HashMap<String, String>) -> Vec<(String, String)> {
+/// What identifies the client at the token and revocation endpoints. Slack's is the public
+/// client of the build and nothing else: no secret is read, so none can be sent.
+fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
+    if m.id == "slack" {
+        return slack::client_id()
+            .map(|client| vec![("client_id".to_owned(), client)])
+            .unwrap_or_default();
+    }
     ["CLIENT_ID", "CLIENT_SECRET"]
         .into_iter()
         .filter_map(|k| env.get(k).map(|v| (k.to_lowercase(), v.clone())))
@@ -82,6 +89,12 @@ fn accept_token(
     if raw.get("error").is_some() || raw["ok"] == false {
         return Err(fail());
     }
+    // Slack names the workspace beside the user token, not inside it.
+    let workspace = raw["team"]["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 100 && !s.chars().any(char::is_control))
+        .map(str::to_owned);
     let raw = if raw["authed_user"]["access_token"].is_string() {
         raw["authed_user"].clone()
     } else {
@@ -124,7 +137,20 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    save(ctx, &server.id, env)?;
+    if m.id == "slack" {
+        // The workspace is the account shown on the card; a renewal keeps the one it had.
+        if let Some(workspace) = workspace {
+            env.insert("EMAIL".into(), workspace);
+        } else {
+            env.entry("EMAIL".into()).or_insert_with(|| "Slack".into());
+        }
+        // A client typed under an earlier version is not carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        slack::write_tokens(ctx, server, env)?;
+    } else {
+        save(ctx, &server.id, env)?;
+    }
     ctx.connection.execute(
         "UPDATE wrapper_connector_catalogue SET expires_at=?2 WHERE server_id=?1",
         params![server.id, expires],
@@ -140,7 +166,7 @@ pub(super) fn refresh(
     if m.id == "github" {
         return super::github::refresh(ctx, server, m, env);
     }
-    let mut fields = token_fields(env);
+    let mut fields = token_fields(m, env);
     fields.push(("grant_type".into(), "refresh_token".into()));
     fields.push((
         "refresh_token".into(),
@@ -176,10 +202,16 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && !env.contains_key("CLIENT_ID") {
+    if fake_base().is_some() && m.id != "slack" && !env.contains_key("CLIENT_ID") {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
+    // Slack's client is the build's, never read from the vault.
+    let client = if m.id == "slack" {
+        slack::client_id().ok_or_else(slack::not_configured)?
+    } else {
+        env.get("CLIENT_ID").ok_or_else(fail)?.clone()
+    };
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
@@ -187,7 +219,7 @@ pub(super) fn begin(
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", env.get("CLIENT_ID").ok_or_else(fail)?)
+            .append_pair("client_id", &client)
             .append_pair("redirect_uri", &redirect)
             .append_pair("state", &state)
             .append_pair(
@@ -292,7 +324,7 @@ pub(super) fn begin(
                         return Err(invalid("Vous avez refusé l’autorisation du service. Aucun nouveau jeton n’a été enregistré."));
                     }
                     let code = value("code").filter(|s| !s.is_empty()).ok_or_else(fail)?;
-                    let mut fields = token_fields(&env);
+                    let mut fields = token_fields(m, &env);
                     fields.extend([
                         ("grant_type".into(), "authorization_code".into()),
                         ("code".into(), code.into()),
@@ -411,7 +443,7 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
         return super::github::revoke(m, env);
     }
     let Some(token) = token else { return true };
-    let mut fields = token_fields(env);
+    let mut fields = token_fields(m, env);
     fields.push(("token".into(), token.clone()));
     if m.id == "notion" {
         fields.push((

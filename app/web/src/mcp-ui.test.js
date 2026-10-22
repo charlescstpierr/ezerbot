@@ -281,6 +281,31 @@ test("an unconfigured GitHub application is explained on the card and by the ref
   assert.equal(card.all().filter(n => n.tag === "input").length, 0);
 });
 
+const slackClient = {...service,id:"slack",name:"Slack",needs_client:false,has_client:true,configured:true,configuration_message:null,scopes_label:"Lecture seule des canaux, choisie pendant le consentement Slack",redirect_uri:null};
+
+test("Slack offers no client fields and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [slackClient]);
+  const card = catalogueCard(root,"slack");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("Secret OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  assert.ok(!card.textContent.includes("Portées OAuth"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"slack"}});
+});
+
+test("a Slack client that is not configured is explained on the card and offers no form", async () => {
+  const said = "Le client Slack d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que le client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...slackClient,configured:false,has_client:false,configuration_message:said}]);
+  const card = catalogueCard(root,"slack");
+  assert.ok(card.textContent.includes(said));
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  const warning = card.all().find(n => n.className === "mcp-warning");
+  assert.equal(warning.textContent, said);
+});
+
 test("the device code is shown, copyable and cancellable while GitHub waits", async () => {
   const expires_at = Date.UTC(2026,9,22,12,15);
   const item = {...github,status:"authorizing",authorization_url:"https://github.com/login/device",device:{user_code:"WDJB-MJHT",verification_uri:"https://github.com/login/device",expires_at},server:{id:"c1",enabled_bots:[],tools:[]}};

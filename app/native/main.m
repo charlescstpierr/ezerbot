@@ -9,7 +9,7 @@
 #import "demonstration.h"
 #import <errno.h>
 #import <poll.h>
-#import <signal.h>
+#include "shell_stop.h"
 #import <sys/stat.h>
 #import <unistd.h>
 
@@ -35,6 +35,16 @@
 @property(nonatomic) BOOL deepLinksFlushing;
 @property(nonatomic) NSUInteger deepLinksEpoch;
 @end
+
+static int shell_task_still_running(const ShellChild *child) {
+    NSTask *task = (__bridge NSTask *)child->context;
+    return task.running ? 1 : 0;
+}
+
+static void shell_task_reap(const ShellChild *child) {
+    NSTask *task = (__bridge NSTask *)child->context;
+    [task waitUntilExit];
+}
 
 @implementation GrokbotApplication
 
@@ -737,11 +747,12 @@
     self.backendTask = nil;
     task.terminationHandler = nil;
     if (task.running) {
-        [task terminate];
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1];
-        while (task.running && deadline.timeIntervalSinceNow > 0) usleep(20000);
-        if (task.running) kill(task.processIdentifier, SIGKILL);
-        [task waitUntilExit];
+        ShellChild child;
+        child.pid = task.processIdentifier;
+        child.context = (__bridge void *)task;
+        child.still_running = shell_task_still_running;
+        child.reap = shell_task_reap;
+        shell_stop_child(&child);
     }
     [self.logHandle closeFile];
     self.logHandle = nil;
@@ -795,6 +806,15 @@ int main(int argc, const char *argv[]) {
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
         GrokbotApplication *delegate = [[GrokbotApplication alloc] init];
         application.delegate = delegate;
+        int quit_fd = -1;
+        if (shell_stop_arm(&quit_fd) != 0) return 1;
+        static dispatch_source_t quit_source = nil;
+        quit_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, quit_fd, 0, dispatch_get_main_queue());
+        if (quit_source == nil) return 1;
+        dispatch_source_set_event_handler(quit_source, ^{
+            if (shell_stop_take_quit(quit_fd) && !delegate.terminating) [NSApp terminate:nil];
+        });
+        dispatch_resume(quit_source);
         [application run];
     }
     return 0;

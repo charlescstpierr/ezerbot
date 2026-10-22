@@ -4,13 +4,18 @@
 //! first connection. Tokens are written once, after Google names the account, and a
 //! vault that refuses the write keeps nothing: there is no file copy. The tools are a
 //! fixed list of reads; a new message is also a normalized event, delivered once.
+//! The same consent also reads the agenda and a named Drive file (`agenda`, `drive`):
+//! they use this account and this vault, and they only ever issue GET requests.
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, sync::Mutex, time::Duration};
+mod agenda;
+mod drive;
+pub use agenda::{CalendarCase, CalendarEvent};
 
 pub(in super::super) const TOOL: &str = "gmail_list_recent_messages";
 pub(in super::super) fn is_tool(name: &str) -> bool {
-    name == TOOL
+    matches!(name, TOOL | agenda::TOOL | drive::TOOL)
 }
 /// Gmail's REST host; the tests reach their own provider through `endpoint`.
 pub(super) const API: &str = "https://gmail.googleapis.com";
@@ -61,12 +66,18 @@ pub(super) fn not_configured() -> ApiError {
     invalid("Le client Google d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion à Gmail reste indisponible tant que ce client n’est pas préparé.")
 }
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    agenda::migrate(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY,since_ms INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));")?;
     Ok(())
 }
 /// What the connection forgets about the mailbox once it is disconnected.
 pub(super) fn forget_mailbox(tx: &rusqlite::Transaction<'_>, server: &str) -> Result<(), ApiError> {
-    for table in ["wrapper_gmail_delivered", "wrapper_gmail_mailbox"] {
+    for table in [
+        "wrapper_gmail_delivered",
+        "wrapper_gmail_mailbox",
+        "wrapper_calendar_delivered",
+        "wrapper_calendar_watch",
+    ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE account_id=(SELECT lower(account_email) FROM wrapper_connector_catalogue WHERE server_id=?1)"),
             [server],
@@ -81,12 +92,23 @@ fn agent() -> ureq::Agent {
         .timeout(Duration::from_secs(12))
         .build()
 }
+/// What a read keeps of an answer: its JSON, or the first bytes of a text.
+#[derive(Clone, Copy)]
+enum Want {
+    Json,
+    Text,
+}
+/// Bytes of a text kept from a file: far more than the excerpt the model gets.
+const TEXT_BYTES: u64 = 32 * 1024;
 struct Reply {
     status: u16,
     body: Value,
+    /// The start of a text answer (`Want::Text`), and whether more followed.
+    text: String,
+    cut: bool,
 }
 /// One authenticated read, no redirect, bounded body. Transport failures carry no detail.
-fn get(url: &str, access: &str) -> Result<Reply, ()> {
+fn get(url: &str, access: &str, want: Want) -> Result<Reply, ()> {
     let response = match agent()
         .get(url)
         .set("Authorization", &format!("Bearer {access}"))
@@ -97,18 +119,42 @@ fn get(url: &str, access: &str) -> Result<Reply, ()> {
         Err(_) => return Err(()),
     };
     let status = response.status();
+    let limit = match want {
+        Want::Json => 2 * 1024 * 1024,
+        Want::Text => TEXT_BYTES,
+    };
     let mut bytes = Vec::new();
     response
         .into_reader()
-        .take(2 * 1024 * 1024 + 1)
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ())?;
-    if bytes.len() > 2 * 1024 * 1024 {
+    let cut = bytes.len() as u64 > limit;
+    if cut && matches!(want, Want::Json) {
         return Err(());
     }
-    Ok(Reply {
-        status,
-        body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    bytes.truncate(limit as usize);
+    Ok(match want {
+        Want::Json => Reply {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            text: String::new(),
+            cut,
+        },
+        Want::Text => Reply {
+            status,
+            body: if status == 200 {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            },
+            text: if status == 200 {
+                String::from_utf8_lossy(&bytes).into_owned()
+            } else {
+                String::new()
+            },
+            cut,
+        },
     })
 }
 fn unreachable_google() -> ApiError {
@@ -121,7 +167,7 @@ fn unreachable_google() -> ApiError {
 /// The profile of the account that just signed in: its address is what the card shows.
 pub(super) fn profile_email(m: Manifest, access: &str) -> Result<String, ApiError> {
     let url = format!("{}/gmail/v1/users/me/profile", endpoint(m, "api"));
-    let reply = get(&url, access).map_err(|_| unreachable_google())?;
+    let reply = get(&url, access, Want::Json).map_err(|_| unreachable_google())?;
     reply.body["emailAddress"]
         .as_str()
         .filter(|s| reply.status == 200 && s.len() < 254 && s.contains('@') && !s.chars().any(char::is_control))
@@ -145,18 +191,27 @@ fn schema() -> Value {
     }})
 }
 /// Model-facing tools, advertised only while Gmail is connected and enabled for the bot.
+/// All of them read; none sends, deletes or writes in the agenda or in Drive.
 pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec> {
-    vec![grokbot_engine::contracts::ToolSpec {
-        name: TOOL.into(),
-        description: MODEL.into(),
-        schema: schema(),
+    let read = |name: &str, description: &str, schema: Value| grokbot_engine::contracts::ToolSpec {
+        name: name.into(),
+        description: description.into(),
+        schema,
         requires_approval: false,
-    }]
+    };
+    vec![
+        read(TOOL, MODEL, schema()),
+        read(agenda::TOOL, agenda::MODEL, agenda::schema()),
+        read(drive::TOOL, drive::MODEL, drive::schema()),
+    ]
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
 pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiError> {
-    let tools =
-        json!([{"name":"list_recent_messages","description":SUMMARY,"inputSchema":schema()}]);
+    let tools = json!([
+        {"name":"list_recent_messages","description":SUMMARY,"inputSchema":schema()},
+        {"name":"list_events","description":agenda::SUMMARY,"inputSchema":agenda::schema()},
+        {"name":"read_file","description":drive::SUMMARY,"inputSchema":drive::schema()}
+    ]);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
         params![server.id, tools.to_string()],
@@ -168,7 +223,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         "Connecté. Activez les outils pour les bots de votre choix.",
     )?;
     Ok(
-        json!({"message":"Gmail est connecté. Activez ses outils pour un bot : la lecture des derniers courriels part sans carte d’approbation.","outils":tools}),
+        json!({"message":"Gmail est connecté, avec l’agenda et Drive en lecture. Activez ses outils pour un bot : la lecture des derniers courriels, des rendez-vous d’un jour et d’un fichier Drive nommé part sans carte d’approbation.","outils":tools}),
     )
 }
 
@@ -230,10 +285,16 @@ pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
 
 /// One authenticated read. An access past its expiry is renewed first, and a 401 renews
 /// once more and calls again: a rejected call has not touched the mailbox.
-fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiError> {
+fn read(
+    ctx: &Context<'_>,
+    account: &Account,
+    api: &str,
+    route: &str,
+    want: Want,
+) -> Result<Reply, ApiError> {
     let (server, m) = (&account.server, account.m);
     super::ensure(ctx, server)?;
-    let url = format!("{}/{route}", endpoint(m, "api"));
+    let url = format!("{}/{route}", endpoint(m, api));
     let attempt = || -> Result<(String, Reply), ApiError> {
         // A sign-in replaces the account and its tokens under this lock: the read of the
         // credentials sees one account, and the call below keeps that token.
@@ -251,7 +312,7 @@ fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiE
                 .and_then(|env| env.get("ACCESS_TOKEN").cloned())
                 .ok_or_else(|| invalid(RECONNECT))?
         };
-        let reply = get(&url, &access).map_err(|_| unreachable_google())?;
+        let reply = get(&url, &access, want).map_err(|_| unreachable_google())?;
         Ok((access, reply))
     };
     let (used, mut reply) = attempt()?;
@@ -276,10 +337,14 @@ fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiE
 }
 /// The statuses that say nothing about one message are already a sentence here.
 fn refused(reply: &Reply, email: &str) -> Option<ApiError> {
+    refused_for(reply, email, "la boîte")
+}
+/// The same sentences for what is read: `what` is "la boîte", "l’agenda" or "le Drive".
+fn refused_for(reply: &Reply, email: &str, what: &str) -> Option<ApiError> {
     match reply.status {
         200 | 404 => None,
         429 => Some(invalid(&format!("Google limite le débit des requêtes pour le compte {email}. Réessayez dans quelques minutes."))),
-        403 => Some(invalid(&format!("Google a refusé l’accès à la boîte du compte {email}. Reconnectez Gmail et accordez les trois autorisations demandées."))),
+        403 => Some(invalid(&format!("Google a refusé l’accès à {what} du compte {email}. Reconnectez Gmail et accordez toutes les autorisations demandées : courriel, agenda et Drive."))),
         500..=599 => Some(ApiError::new(503, "Gmail est indisponible pour le moment. Réessayez plus tard.")),
         code => Some(invalid(&format!("Gmail a répondu de façon inattendue (code {code}). Réessayez plus tard."))),
     }
@@ -302,6 +367,9 @@ fn clean(text: &str, limit: usize) -> String {
 }
 /// Printable text, cut to the excerpt: only tabs and line breaks survive.
 fn excerpt(text: &str) -> String {
+    excerpt_of(text, EXCERPT)
+}
+fn excerpt_of(text: &str, limit: usize) -> String {
     text.chars()
         .filter(|c| *c != '\r')
         .map(|c| {
@@ -311,7 +379,7 @@ fn excerpt(text: &str) -> String {
                 c
             }
         })
-        .take(EXCERPT)
+        .take(limit)
         .collect::<String>()
         .trim()
         .to_owned()
@@ -371,7 +439,9 @@ fn latest_ids(ctx: &Context<'_>, account: &Account, count: u32) -> Result<Vec<St
     let reply = read(
         ctx,
         account,
+        "api",
         &format!("gmail/v1/users/me/messages?labelIds=INBOX&maxResults={count}"),
+        Want::Json,
     )?;
     if let Some(error) = refused(&reply, &account.email) {
         return Err(error);
@@ -398,7 +468,9 @@ fn message(
     let reply = read(
         ctx,
         account,
+        "api",
         &format!("gmail/v1/users/me/messages/{id}?format=full"),
+        Want::Json,
     )?;
     if let Some(error) = refused(&reply, &account.email) {
         return Err(error);
@@ -413,10 +485,15 @@ fn message(
 
 pub(in super::super) fn call(
     ctx: &Context<'_>,
-    _name: &str,
+    name: &str,
     arguments: &Value,
 ) -> grokbot_engine::contracts::ToolOutcome {
-    match list_recent(ctx, arguments) {
+    let result = match name {
+        agenda::TOOL => agenda::list(ctx, arguments),
+        drive::TOOL => drive::read_file(ctx, arguments),
+        _ => list_recent(ctx, arguments),
+    };
+    match result {
         Ok(output) => grokbot_engine::contracts::ToolOutcome::Done { output },
         Err(error) => grokbot_engine::contracts::ToolOutcome::Failed {
             reason: error.message,
@@ -555,4 +632,10 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
     )?;
     tx.commit()?;
     Ok(events)
+}
+
+/// The agenda events that happened since the last call: created, modified, cancelled or
+/// begun, each version once. The first call only learns the agenda.
+pub(in super::super) fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
+    agenda::new_events(ctx)
 }

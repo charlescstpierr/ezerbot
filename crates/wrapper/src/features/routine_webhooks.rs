@@ -1,7 +1,8 @@
 //! Webhook trigger of a routine (docs/specs/routines.md, « Webhook et NAT »).
 //!
-//! A webhook routine has the scheduler trigger `Webhook`: it is never due by the
-//! clock. An authenticated `POST` on the loopback listener becomes a manual-style
+//! A webhook routine has the scheduler trigger `Webhook`, or a group holding
+//! webhook members (each with its own URL and token): it is never due by the
+//! clock for those. An authenticated `POST` on the loopback listener becomes a manual-style
 //! occurrence whose nonce is the occurrence identity (trigger, idempotency key,
 //! or a fresh value per call). The listener lives with the open app: a call
 //! received while it is closed is lost, never invented at wake-up.
@@ -32,6 +33,9 @@ const MOUNT: &str = "/hooks";
 pub const BODY_LIMIT: usize = 256_000;
 pub(crate) const ACTION: &str = "routines_webhook_publish";
 const ENTRY: &str = "routine_webhook";
+/// A token row answers only while its trigger is still in the routine: the lone
+/// webhook, or a webhook member of its group.
+const LIVE: &str = "(json_extract(r.trigger,'$.kind')='webhook' OR EXISTS(SELECT 1 FROM json_each(r.trigger,'$.members') x WHERE json_extract(x.value,'$.id')=w.trigger_id AND json_extract(x.value,'$.trigger.kind')='webhook'))";
 
 /// Debug builds accept GROKBOT_WEBHOOK_PORT so tests never collide with an
 /// installed app already listening on the default port.
@@ -97,20 +101,29 @@ fn same_token(left: &str, right: &str) -> bool {
         == 0
 }
 
-/// Create the routine's webhook trigger, or return the existing one. The token
-/// is returned only when it was just created.
-pub(crate) fn ensure(conn: &Connection, routine_id: &str, now: i64) -> Result<Value, ApiError> {
+/// Create a webhook trigger of the routine, or return the existing one. A lone
+/// webhook is the routine's only row; a group member is named by its own ID.
+/// The token is returned only when it was just created.
+pub(crate) fn ensure(
+    conn: &Connection,
+    routine_id: &str,
+    now: i64,
+    member: Option<&str>,
+) -> Result<Value, ApiError> {
     let existing: Option<String> = conn
         .query_row(
-            "SELECT trigger_id FROM wrapper_routine_webhooks WHERE routine_id=?1",
-            [routine_id],
+            "SELECT trigger_id FROM wrapper_routine_webhooks WHERE routine_id=?1 AND (?2 IS NULL OR trigger_id=?2) LIMIT 1",
+            params![routine_id, member],
             |r| r.get(0),
         )
         .optional()?;
     if let Some(trigger_id) = existing {
         return Ok(json!({"trigger_id":trigger_id}));
     }
-    let trigger_id = format!("trigger-{}", random_hex(conn)?);
+    let trigger_id = match member {
+        Some(id) => id.to_owned(),
+        None => format!("trigger-{}", random_hex(conn)?),
+    };
     let token = new_token()?;
     conn.execute(
         "INSERT INTO wrapper_routine_webhooks VALUES (?1,?2,?3,?4,?4)",
@@ -118,13 +131,48 @@ pub(crate) fn ensure(conn: &Connection, routine_id: &str, now: i64) -> Result<Va
     )?;
     Ok(json!({"trigger_id":trigger_id,"token":token}))
 }
-/// Keep the trigger row in step with the routine's trigger kind.
-pub(crate) fn sync(conn: &Connection, r: &Routine, now: i64) -> Result<Option<Value>, ApiError> {
-    if r.trigger == Schedule::Webhook {
-        return ensure(conn, &r.routine_id, now).map(Some);
+/// Keep the trigger rows in step with the routine's triggers: one per webhook
+/// trigger, none for the others.
+pub(crate) fn sync(conn: &Connection, r: &Routine, now: i64) -> Result<Vec<Value>, ApiError> {
+    match &r.trigger {
+        Schedule::Webhook => Ok(vec![ensure(conn, &r.routine_id, now, None)?]),
+        Schedule::Group { members } => members
+            .iter()
+            .filter(|m| m.trigger == Schedule::Webhook)
+            .map(|m| ensure(conn, &r.routine_id, now, Some(&m.id)))
+            .collect(),
+        _ => {
+            forget(conn, &r.routine_id)?;
+            Ok(vec![])
+        }
     }
-    forget(conn, &r.routine_id)?;
-    Ok(None)
+}
+/// After an edit, revoke the token of every webhook that left the routine,
+/// whoever edited (panel or bot). Nothing is created here.
+pub(crate) fn prune(conn: &Connection, previous: &Schedule, r: &Routine) -> Result<(), ApiError> {
+    match (previous, &r.trigger) {
+        (Schedule::Webhook, Schedule::Webhook) => Ok(()),
+        (Schedule::Group { .. }, Schedule::Group { members }) => {
+            let kept: Vec<&str> = members
+                .iter()
+                .filter(|m| m.trigger == Schedule::Webhook)
+                .map(|m| m.id.as_str())
+                .collect();
+            let rows = conn
+                .prepare("SELECT trigger_id FROM wrapper_routine_webhooks WHERE routine_id=?1")?
+                .query_map([&r.routine_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for id in rows.iter().filter(|id| !kept.contains(&id.as_str())) {
+                conn.execute(
+                    "DELETE FROM wrapper_routine_webhooks WHERE trigger_id=?1",
+                    [id],
+                )?;
+            }
+            Ok(())
+        }
+        // From a lone webhook to a group, or back: the tokens are not carried over.
+        _ => forget(conn, &r.routine_id),
+    }
 }
 /// The token dies with the trigger. Past calls stay in the history.
 pub(crate) fn forget(conn: &Connection, routine_id: &str) -> Result<(), ApiError> {
@@ -134,14 +182,20 @@ pub(crate) fn forget(conn: &Connection, routine_id: &str) -> Result<(), ApiError
     )?;
     Ok(())
 }
-fn trigger_of(conn: &Connection, routine_id: &str) -> Result<(String, String), ApiError> {
-    conn.query_row(
-        "SELECT trigger_id,token FROM wrapper_routine_webhooks WHERE routine_id=?1",
-        [routine_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?
-    .ok_or_else(|| bad(404, "Cette routine n’a pas de webhook."))
+fn trigger_of(
+    conn: &Connection,
+    routine_id: &str,
+    member: Option<&str>,
+) -> Result<(String, String), ApiError> {
+    let rows = conn
+        .prepare("SELECT trigger_id,token FROM wrapper_routine_webhooks WHERE routine_id=?1 AND (?2 IS NULL OR trigger_id=?2)")?
+        .query_map(params![routine_id, member], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+    match <[(String, String); 1]>::try_from(rows) {
+        Ok([row]) => Ok(row),
+        Err(rows) if rows.is_empty() => Err(bad(404, "Cette routine n’a pas de webhook.")),
+        Err(_) => Err(bad(400, "Précisez le webhook du groupe.")),
+    }
 }
 
 /// Webhook occurrences reuse the manual-nonce identity but, unlike a manual
@@ -167,9 +221,16 @@ pub(crate) fn history_trigger(
     conn: &Connection,
     occurrence_id: &str,
 ) -> Result<Option<Value>, ApiError> {
-    Ok(call_of(conn, occurrence_id)?.map(
-        |(received_at, _)| json!({"kind":"webhook","label":"Webhook","received_at":received_at}),
-    ))
+    Ok(conn
+        .query_row(
+            "SELECT received_at,trigger_id FROM wrapper_routine_webhook_calls WHERE occurrence_id=?1",
+            [occurrence_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .map(|(received_at, trigger_id)| {
+            json!({"kind":"webhook","label":"Webhook","received_at":received_at,"trigger_id":trigger_id})
+        }))
 }
 /// Appended to the routine prompt. The body is data sent by a caller, never policy.
 pub(crate) fn run_context(
@@ -228,7 +289,7 @@ pub fn authorize(
     let row: Option<String> = app
         .connection
         .query_row(
-            "SELECT w.token FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook' WHERE w.trigger_id=?1 AND w.routine_id=?2",
+            &format!("SELECT w.token FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND {LIVE} WHERE w.trigger_id=?1 AND w.routine_id=?2"),
             params![trigger_id, routine_id],
             |r| r.get(0),
         )
@@ -299,9 +360,17 @@ fn record(
     if fingerprint(&current) != call.fingerprint {
         return Ok(Reply::error(401, "Jeton absent ou invalide."));
     }
-    if routine.trigger != Schedule::Webhook {
-        return Ok(Reply::error(404, "Webhook introuvable."));
-    }
+    let member = match &routine.trigger {
+        Schedule::Webhook => String::new(),
+        Schedule::Group { members }
+            if members
+                .iter()
+                .any(|m| m.id == call.trigger_id && m.trigger == Schedule::Webhook) =>
+        {
+            call.trigger_id.clone()
+        }
+        _ => return Ok(Reply::error(404, "Webhook introuvable.")),
+    };
     if !routine.enabled {
         return Ok(Reply::error(409, "La routine est en pause."));
     }
@@ -321,7 +390,7 @@ fn record(
         ));
     }
     let received = i64::try_from(crate::now()).map_err(|_| bad(500, "Horloge invalide."))?;
-    let occurrence = occurrences::run_now(&tx, &call.routine_id, &nonce, received)?;
+    let occurrence = occurrences::run_member(&tx, &call.routine_id, &member, &nonce, received)?;
     tx.execute(
         "INSERT INTO wrapper_routine_webhook_calls VALUES (?1,?2,?3,?4)",
         params![occurrence.occurrence_id, call.trigger_id, received, text],
@@ -646,7 +715,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
 pub fn wanted(app: &App) -> bool {
     app.connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook')",
+            &format!("SELECT EXISTS(SELECT 1 FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND {LIVE})"),
             [],
             |r| r.get(0),
         )
@@ -665,6 +734,9 @@ pub fn listener(app: &App, error: Option<&str>) {
 struct Target {
     bot_id: String,
     routine_id: String,
+    /// Which webhook of a group; a lone webhook needs none.
+    #[serde(default)]
+    trigger_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -719,9 +791,12 @@ pub fn routes(
         let tx = write_transaction(&app.connection)?;
         let owned = grokbot_scheduler::routine::get(&tx, &input.routine_id)?
             .filter(|r| r.bot_id == input.bot_id)
-            .filter(|r| r.trigger == Schedule::Webhook)
+            .filter(|r| r.trigger.has_webhook())
             .ok_or_else(|| bad(404, "Routine introuvable."))?;
-        let (trigger_id, token) = trigger_of(&tx, &owned.routine_id)?;
+        if let Some(id) = &input.trigger_id {
+            validate_id(id)?;
+        }
+        let (trigger_id, token) = trigger_of(&tx, &owned.routine_id, input.trigger_id.as_deref())?;
         let value = if path == "/api/routines/webhook/token" {
             json!({"trigger_id":trigger_id,"token":token})
         } else {
@@ -750,19 +825,28 @@ pub fn state(ctx: &Context<'_>) -> Value {
             )?;
         let published = (state == "published").then_some(base.clone()).flatten();
         let mut items = serde_json::Map::new();
-        let mut stmt = ctx.connection.prepare(
-            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook'",
-        )?;
+        let mut stmt = ctx.connection.prepare(&format!(
+            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND {LIVE} ORDER BY w.rowid",
+        ))?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (routine, trigger) in rows {
-            items.insert(
-                routine.clone(),
-                json!({"trigger_id":trigger,
-                    "url":published.as_ref().map(|base| format!("{base}/{routine}/{trigger}")),
-                    "local_url":format!("http://127.0.0.1:{}{MOUNT}/{routine}/{trigger}", port())}),
-            );
+            let entry = json!({"trigger_id":trigger,
+                "url":published.as_ref().map(|base| format!("{base}/{routine}/{trigger}")),
+                "local_url":format!("http://127.0.0.1:{}{MOUNT}/{routine}/{trigger}", port())});
+            // A lone webhook is described by the entry itself; a group lists its webhooks.
+            match items.get_mut(&routine) {
+                Some(item) => item["webhooks"]
+                    .as_array_mut()
+                    .expect("webhooks")
+                    .push(entry),
+                None => {
+                    let mut item = entry.clone();
+                    item["webhooks"] = json!([entry]);
+                    items.insert(routine, item);
+                }
+            }
         }
         Ok(json!({
             "listener":{"port":port(),"listening":listening,"error":error},

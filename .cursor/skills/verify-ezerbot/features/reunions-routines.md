@@ -8,6 +8,7 @@ Les réunions règlent la durée de conservation de l’audio gardé. Les routin
 - `routines-ouvrir` ouvre le dialogue Routines du bot par défaut.
 - `routines-liste` montre le titre Routines et le choix du bot, sans créer de routine.
 - `routines-regle` montre, sous le choix du bot, la règle de rattrapage : extinction ou veille rattrapées dans l’ordre, fenêtre de 60 minutes sinon, une pause ne se rattrape pas.
+- `routines-groupe` (hors parcours groupé) : une routine au déclencheur Groupe (horaire plus webhook) montre ses déclencheurs dans l’éditeur, un bloc Webhook avec son propre jeton, et un historique qui nomme le déclencheur de chaque run (« Horaire », « Webhook »). Voir « Gotchas ».
 - `routines-webhook` (hors parcours groupé) : une routine au déclencheur Webhook montre, dans le dialogue Routines, la publication Tailscale Funnel (URL `https`, rappel Bearer, jeton masqué) ou la raison sans URL. Voir « Gotchas ».
 
 ## How to get to it (user POV)
@@ -39,3 +40,4 @@ Preconditions:
 - Le dialogue Routines couvre Paramètres. Le fermer par son bouton « Fermer » avant de revenir à l’accueil.
 - Sous 560 px de haut, les deux sections ne tiennent pas ensemble. D’où deux captures, pas une capture unique déclarée suffisante.
 - `routines-webhook` crée une routine : le parcours groupé ne la touche pas. Pour la voir, lancer le wrapper de debug avec `GROKBOT_FAKE_TAILSCALE` (script dans le `HOME` jetable) et `GROKBOT_WEBHOOK_PORT` (port libre) ; un debug n'appelle jamais le vrai Tailscale. Le faux script répond à `status --json`, `funnel …` et `serve status --json`. L'approbation de la publication est une carte dans la conversation Approbations.
+- `routines-groupe` crée une routine : le parcours groupé ne la touche pas. Même lancement que `routines-webhook` (`GROKBOT_FAKE_TAILSCALE`, `GROKBOT_WEBHOOK_PORT`). Créer le groupe par `POST /api/routines` avec `{"kind":"group","members":[{"trigger":{"kind":"every","interval_ms":60000,"phase_ms":null}},{"trigger":{"kind":"webhook"}}]}`, puis un `POST` Bearer sur l’URL locale du webhook pour la seconde occurrence.

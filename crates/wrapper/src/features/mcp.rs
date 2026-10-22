@@ -149,6 +149,24 @@ pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome
         catalogue::github::call(ctx, &call.name, &call.arguments)
     }
 }
+/// The Gmail read tool: a native adapter, run outside any SQLite writer.
+pub(crate) fn is_gmail_tool(name: &str) -> bool {
+    catalogue::gmail::is_tool(name)
+}
+/// Why the Gmail tool a bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn gmail_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::gmail::unavailable(ctx)
+}
+pub(crate) fn run_gmail_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    catalogue::gmail::call(ctx, &call.name, &call.arguments)
+}
+pub use catalogue::gmail::MailEvent;
+/// The messages that arrived in the connected Gmail inbox since the last call, the oldest
+/// first, each identifier once: the normalized event a routine reads. It never carries a
+/// token. The first call only learns what the inbox already holds.
+pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
+    catalogue::gmail::new_messages(ctx)
+}
 /// The publishing tools of the connection: each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_github_draft(name: &str) -> bool {

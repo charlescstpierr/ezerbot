@@ -45,12 +45,17 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-/// What identifies the client at the token and revocation endpoints. Slack's is the public
-/// client of the build and nothing else: no secret is read, so none can be sent.
+/// What identifies the client at the token and revocation endpoints. Gmail's and Slack's is
+/// the public client of the build and nothing else: no secret is read, so none can be sent.
 fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
-    if m.id == "slack" {
-        return slack::client_id()
-            .map(|client| vec![("client_id".to_owned(), client)])
+    let public = match m.id {
+        "gmail" => Some(gmail::client_id()),
+        "slack" => Some(slack::client_id()),
+        _ => None,
+    };
+    if let Some(client) = public {
+        return client
+            .map(|id| vec![("client_id".into(), id)])
             .unwrap_or_default();
     }
     ["CLIENT_ID", "CLIENT_SECRET"]
@@ -123,7 +128,12 @@ fn accept_token(
                 .min(i64::MAX as u64) as i64
         })
         .unwrap_or(0);
-    if m.endpoint.is_empty() {
+    if m.id == "gmail" {
+        // A renewal keeps the account it already named; a sign-in learns it from Google.
+        if !env.contains_key("EMAIL") {
+            env.insert("EMAIL".into(), gmail::profile_email(m, access)?);
+        }
+    } else if m.endpoint.is_empty() {
         let user = read_json(
             agent()
                 .get(&endpoint(m, "userinfo"))
@@ -156,12 +166,24 @@ fn accept_token(
         env.remove("CLIENT_SECRET");
         slack::write_tokens(ctx, server, env)?;
     } else {
-        save(ctx, &server.id, env)?;
+        save(ctx, &server.id, env).map_err(|error| {
+            if m.id == "gmail" {
+                gmail::refused_write(ctx)
+            } else {
+                error
+            }
+        })?;
     }
     ctx.connection.execute(
         "UPDATE wrapper_connector_catalogue SET expires_at=?2 WHERE server_id=?1",
         params![server.id, expires],
     )?;
+    if m.id == "gmail" {
+        ctx.connection.execute(
+            "UPDATE wrapper_connector_catalogue SET account_id=lower(account_email) WHERE server_id=?1",
+            [&server.id],
+        )?;
+    }
     Ok(())
 }
 pub(super) fn refresh(
@@ -209,18 +231,19 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && m.id != "slack" && !env.contains_key("CLIENT_ID") {
+    if fake_base().is_some() && !matches!(m.id, "gmail" | "slack") && !env.contains_key("CLIENT_ID")
+    {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
-    // Slack's client is the build's, never read from the vault.
-    let client = if m.id == "slack" {
-        slack::client_id().ok_or_else(slack::not_configured)?
-    } else {
-        env.get("CLIENT_ID").ok_or_else(fail)?.clone()
-    };
+    // Gmail's and Slack's client is the build's, never read from the vault.
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
+    let client = match m.id {
+        "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
+        "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
+        _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
+    };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
     {
         let mut query = url.query_pairs_mut();
@@ -236,9 +259,14 @@ pub(super) fn begin(
             .append_pair("code_challenge_method", "S256")
             .append_pair("scope", m.scopes);
         if m.endpoint.is_empty() {
-            query
-                .append_pair("access_type", "offline")
-                .append_pair("prompt", "consent");
+            query.append_pair("access_type", "offline").append_pair(
+                "prompt",
+                if m.id == "gmail" {
+                    "select_account consent"
+                } else {
+                    "consent"
+                },
+            );
         }
         if m.id == "notion" {
             query.append_pair("resource", m.endpoint);
@@ -356,7 +384,14 @@ pub(super) fn begin(
                         [format!("mcp_{}_*", server.id)],
                     )?;
                     tx.commit()?;
-                    attach(&ctx, &server, m, &env)?;
+                    let attached = attach(&ctx, &server, m, &env);
+                    if attached.is_err() && m.id == "gmail" {
+                        // A connection that did not come up keeps no token.
+                        if let Ok(vault) = crate::features::forms::vault(&ctx) {
+                            let _ = vault.remove(&secret_name(&server.id));
+                        }
+                    }
+                    attached?;
                     Ok(())
                 })();
                 match completion {

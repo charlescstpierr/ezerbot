@@ -4,6 +4,7 @@
 use super::*;
 use std::sync::Mutex;
 pub(super) mod github;
+pub(super) mod gmail;
 mod oauth;
 pub(super) mod slack;
 
@@ -18,15 +19,14 @@ fn scopes_label(m: Manifest) -> &'static str {
         _ => m.scopes,
     }
 }
-/// GitHub and Slack are native: no process, one closed list of tools, a client that is the
-/// build's own and never typed.
-fn is_native_service(id: &str) -> bool {
-    matches!(id, "github" | "slack")
-}
 pub(super) fn id_for_server(ctx: &Context<'_>, id: &str) -> Option<&'static str> {
     record(ctx, id).ok().flatten().map(|(m, _, _, _)| m.id)
 }
-/// A connection with no process: GitHub and Slack are native adapters, connected or not.
+/// A service that Ezerbot talks to itself, with no process and no client to type.
+fn is_native_service(id: &str) -> bool {
+    matches!(id, "github" | "gmail" | "slack")
+}
+/// A connection with no process: GitHub, Gmail and Slack are native adapters, connected or not.
 pub(super) fn native_status(ctx: &Context<'_>, server: &str) -> Option<&'static str> {
     let (m, phase, _, _) = record(ctx, server).ok().flatten()?;
     is_native_service(m.id).then(|| {
@@ -52,9 +52,9 @@ pub(super) fn native_tools(
         return Vec::new();
     }
     match native_service(ctx, &server.id) {
-        Some("github") => github::tool_specs(),
+        Some("gmail") => gmail::tool_specs(),
         Some("slack") => slack::tool_specs(),
-        _ => Vec::new(),
+        _ => github::tool_specs(),
     }
 }
 #[derive(Clone, Copy)]
@@ -71,7 +71,7 @@ pub(super) struct Manifest {
 }
 const GOOGLE_SETUP: &str = "Prérequis : uv installé sur ce Mac. Dans Google Cloud, activez l’API du service, configurez l’écran de consentement et créez un client OAuth « Application de bureau ». Saisissez son identifiant et son secret ci-dessous. Aucun compte Google n’est fourni par Ezerbot.";
 pub(super) const MANIFESTS: &[Manifest] = &[
-    Manifest { id:"gmail", name:"Gmail", description:"Rechercher et lire vos courriels, préparer et envoyer des messages.", permissions:"Lecture et modification des messages, envoi de courriels ; adresse du compte. Chaque outil reste soumis à vos approbations.", scopes:"openid email https://www.googleapis.com/auth/gmail.modify", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
+    Manifest { id:"gmail", name:"Gmail", description:"Lire vos derniers courriels depuis le chat, avec votre compte Google.", permissions:"Lecture de la boîte de réception, brouillons et modification des messages, adresse du compte. Seule la lecture des derniers courriels est offerte aux bots, sans carte d’approbation ; aucun courriel n’est envoyé ni supprimé.", scopes:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify", source:"https://developers.google.com/gmail/api/auth/scopes", license:"Service Google · client Google d’Ezerbot, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre la page de connexion de Google dans le navigateur : vous choisissez votre compte et acceptez les autorisations Gmail.", endpoint:"" },
     Manifest { id:"calendar", name:"Google Calendar", description:"Consulter vos agendas et gérer vos événements.", permissions:"Lecture et modification des agendas et événements ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/calendar", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
     Manifest { id:"drive", name:"Google Drive", description:"Rechercher, lire et organiser les fichiers de votre Drive.", permissions:"Lecture et modification de tous les fichiers Drive accessibles au compte ; adresse du compte.", scopes:"openid email https://www.googleapis.com/auth/drive", source:"https://github.com/taylorwilsdon/google_workspace_mcp", license:"MIT · workspace-mcp 2.1.1 (communautaire)", setup:GOOGLE_SETUP, endpoint:"" },
     Manifest { id:"slack", name:"Slack", description:"Lire les derniers messages d’un canal Slack depuis le chat, avec votre compte Slack.", permissions:"Lecture des messages des canaux publics et privés que votre compte voit, et des noms des personnes ; rien n’est envoyé ni modifié dans Slack.", scopes:"channels:history groups:history channels:read groups:read users:read", source:"https://docs.slack.dev/authentication/installing-with-oauth/", license:"Service Slack · client public Ezerbot, PKCE, aucun logiciel redistribué", setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre Slack dans le navigateur : vous choisissez l’espace de travail et autorisez le client Slack d’Ezerbot à lire vos canaux.", endpoint:"https://slack.com/api" },
@@ -134,6 +134,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
     github::migrate(conn)?;
     github::comment::migrate(conn)?;
     github::issue::migrate(conn)?;
+    gmail::migrate(conn)?;
     conn.execute_batch("UPDATE wrapper_connector_catalogue SET phase='reconnect',message='La connexion a été interrompue. Reconnectez le service.',authorization_url=NULL,device_user_code=NULL,device_expires_at=0,generation=generation+1 WHERE phase='authorizing';")?;
     Ok(())
 }
@@ -188,9 +189,11 @@ fn item_of(
     } else {
         HashMap::new()
     };
-    // GitHub and Slack have no client to type: it is configured by the build, or not at all.
+    // GitHub, Gmail and Slack have no client to type: it is configured by the build, or not at all.
     let has_client = if m.id == "github" {
         github::client_id().is_some()
+    } else if m.id == "gmail" {
+        gmail::client_id().is_some()
     } else if m.id == "slack" {
         slack::client_id().is_some()
     } else {
@@ -251,7 +254,7 @@ fn item_of(
         .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
         .unwrap_or(Value::Null);
     Ok(
-        json!({"device":device,"device_flow":m.id=="github","configured":!matches!(m.id,"github"|"slack")||has_client,"configuration_message":if m.id=="slack"&&!has_client{json!(slack::NOT_CONFIGURED)}else{Value::Null},"id":m.id,"slot":row_id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"slack"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
+        json!({"device":device,"device_flow":m.id=="github","configured":!matches!(m.id,"github"|"gmail"|"slack")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
     )
 }
 #[derive(Deserialize)]
@@ -348,11 +351,22 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
             return Err(invalid("GitHub n’utilise ni identifiant ni secret saisis ici. Cliquez simplement sur Connecter."));
         }
     }
-    if m.id == "slack" {
+    if matches!(m.id, "gmail" | "slack") {
         // Nothing typed here is ever read: the client is the build's.
-        slack::client_id().ok_or_else(slack::not_configured)?;
+        let (name, client) = if m.id == "gmail" {
+            (
+                "Gmail",
+                gmail::client_id().ok_or_else(gmail::not_configured),
+            )
+        } else {
+            (
+                "Slack",
+                slack::client_id().ok_or_else(slack::not_configured),
+            )
+        };
+        client?;
         if !input.client_id.is_empty() || !input.client_secret.is_empty() {
-            return Err(invalid("Slack n’utilise ni identifiant ni secret saisis ici. Cliquez simplement sur Connecter."));
+            return Err(invalid(&format!("{name} n’utilise ni identifiant ni secret saisis ici. Cliquez simplement sur Connecter.")));
         }
     }
     if input.client_id.len() > 512
@@ -402,14 +416,14 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         if !input.client_secret.is_empty() {
             env.insert("CLIENT_SECRET".into(), input.client_secret);
         }
-        if !matches!(m.id, "notion" | "github" | "slack")
+        if !matches!(m.id, "notion" | "github" | "gmail" | "slack")
             && (!env.contains_key("CLIENT_ID") || !env.contains_key("CLIENT_SECRET"))
             && fake_base().is_none()
         {
             return Err(invalid("Saisissez l’identifiant et le secret de l’application OAuth. Ils seront conservés dans le coffre, jamais réaffichés."));
         }
         let tx = write_transaction(ctx.connection)?;
-        tx.execute("INSERT OR IGNORE INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json) VALUES (?1,?2,?3,?4,?5)",params![id,m.name,if m.endpoint.is_empty(){"uvx · workspace-mcp 2.1.1"}else{m.endpoint},json!([]).to_string(),if is_native_service(m.id){json!(["ACCESS_TOKEN","REFRESH_TOKEN"])}else{json!(["ACCESS_TOKEN","REFRESH_TOKEN","CLIENT_ID","CLIENT_SECRET"])}.to_string()])?;
+        tx.execute("INSERT OR IGNORE INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json) VALUES (?1,?2,?3,?4,?5)",params![id,m.name,if m.id=="gmail"{gmail::API}else if m.endpoint.is_empty(){"uvx · workspace-mcp 2.1.1"}else{m.endpoint},json!([]).to_string(),if is_native_service(m.id){json!(["ACCESS_TOKEN","REFRESH_TOKEN"])}else{json!(["ACCESS_TOKEN","REFRESH_TOKEN","CLIENT_ID","CLIENT_SECRET"])}.to_string()])?;
         tx.execute("INSERT INTO wrapper_connector_catalogue(id,server_id) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET generation=generation+1,authorization_url=NULL,phase=CASE WHEN phase='authorizing' THEN 'reconnect' ELSE phase END",params![row,id])?;
         // A native connection has no setup to keep before its tokens exist.
         if !is_native_service(m.id) {
@@ -459,6 +473,23 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
                 json!(format!("Le compte GitHub {login} sera déconnecté : ses jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à GitHub de révoquer le jeton ; sans le secret d’une application, GitHub peut refuser, et le message le dira. Retirez alors l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."))
             }
             None => json!("Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à GitHub de révoquer le jeton ; sans le secret d’une application, GitHub peut refuser, et le message le dira."),
+        };
+        return Some(card);
+    }
+    if m.id == "gmail" {
+        let connection = if remove {
+            ""
+        } else {
+            "Le navigateur s’ouvre sur la page de connexion de Google. Seul l’identifiant public du client Google d’Ezerbot est envoyé, avec une preuve PKCE ; le retour se fait sur ce Mac (127.0.0.1) et aucun secret n’existe dans Ezerbot. Les jetons reçus sont conservés dans le trousseau macOS : s’il refuse l’écriture, la connexion échoue et rien n’est conservé. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
+        };
+        let mut card = json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":scopes_label(m),"source":m.source,"licence":m.license,"révision":revision,"connexion":connection});
+        card["déconnexion"] = match private.get("EMAIL").filter(|_| remove) {
+            // The confirmation names the account it would disconnect.
+            Some(email) => {
+                card["compte"] = json!(email);
+                json!(format!("Le compte Gmail {email} sera déconnecté : ses jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à Google de révoquer le jeton ; si Google ne le confirme pas, le message le dira. Retirez alors l’accès d’Ezerbot dans les réglages de votre compte Google."))
+            }
+            None => json!("Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à Google de révoquer le jeton ; si Google ne le confirme pas, le message le dira."),
         };
         return Some(card);
     }
@@ -557,6 +588,7 @@ fn endpoint(m: Manifest, kind: &str) -> String {
         .into();
     }
     match kind {
+        "api" if m.id == "gmail" => gmail::API.into(),
         "mcp" => m.endpoint.into(),
         "authorize" if m.endpoint.is_empty() => {
             "https://accounts.google.com/o/oauth2/v2/auth".into()
@@ -581,6 +613,9 @@ fn attach(
 ) -> Result<Value, ApiError> {
     if m.id == "github" {
         return github::attach(ctx, server);
+    }
+    if m.id == "gmail" {
+        return gmail::attach(ctx, server);
     }
     if m.id == "slack" {
         return slack::attach(ctx, server);
@@ -779,6 +814,8 @@ pub(super) fn ensure(ctx: &Context<'_>, server: &Server) -> Result<(), ApiError>
             "reconnect",
             if m.id == "github" {
                 "La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub."
+            } else if m.id == "gmail" {
+                gmail::RECONNECT
             } else {
                 crate::mcp::AUTH_REQUIRED
             },
@@ -786,6 +823,8 @@ pub(super) fn ensure(ctx: &Context<'_>, server: &Server) -> Result<(), ApiError>
         super::execution::retire(ctx, &server.id);
         return Err(if m.id == "github" {
             invalid("La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub dans Paramètres › Connecteurs.")
+        } else if m.id == "gmail" {
+            invalid(gmail::RECONNECT)
         } else {
             invalid(crate::mcp::AUTH_REQUIRED)
         });
@@ -841,8 +880,10 @@ pub(super) fn remove(
             format!("mcp_remove_{}", server.id)
         ],
     )?;
-    let message = if m.id == "github" && !had_tokens {
+    let message = if is_native_service(m.id) && !had_tokens {
         "Déconnecté. Aucun jeton n’était conservé ; les règles de ce connecteur ont été supprimées."
+    } else if revoked && m.id == "gmail" {
+        "Déconnecté. Google a confirmé la révocation ; les jetons et règles de ce connecteur ont été supprimés."
     } else if revoked && m.id == "github" {
         "Déconnecté. GitHub a confirmé la révocation ; les jetons et règles de ce connecteur ont été supprimés."
     } else if revoked && m.id == "slack" {
@@ -854,6 +895,9 @@ pub(super) fn remove(
     };
     // A conversation that had chosen this account is asked again, never sent to another.
     tx.execute("DELETE FROM wrapper_github_account_choice WHERE account_id=(SELECT account_id FROM wrapper_connector_catalogue WHERE server_id=?1)",[&server.id])?;
+    if m.id == "gmail" {
+        gmail::forget_mailbox(&tx, &server.id)?;
+    }
     tx.execute("UPDATE wrapper_connector_catalogue SET phase='disconnected',message=?2,expires_at=0,account_email=NULL,account_id=NULL,device_user_code=NULL,device_expires_at=0 WHERE server_id=?1",params![server.id,message])?;
     tx.commit()?;
     super::execution::retire(ctx, &server.id);

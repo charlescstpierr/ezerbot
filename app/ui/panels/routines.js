@@ -124,6 +124,8 @@
   function describe(r) {
     if (r.schedule_description) return r.schedule_description;
     try {
+      if (r.trigger.kind === "group") return `Groupe, dès que l’un part : ${r.trigger.members.map((m) => describe({ trigger: m.trigger, time_zone: r.time_zone })).join(" · ")}`;
+      if (r.trigger.kind === "webhook") return "Webhook : démarre à chaque appel authentifié";
       if (r.trigger.kind === "once") return `Une fois : ${date(r.trigger.at, r.time_zone)} · ${r.time_zone}`;
       const t = r.trigger;
       const expression = t.kind === "cron" ? t.expression : `@every ${t.interval_ms}ms${t.phase_ms === null || t.phase_ms === undefined ? "" : `/${t.phase_ms}ms`}`;
@@ -132,6 +134,8 @@
     } catch { return "Horaire illisible — consultez ou corrigez cette routine."; }
   }
 
+  // A group's triggers each have their own ranges, which can share a version and a start.
+  const rangeKey = (range) => `${range.member_id ? `${range.member_id}.` : ""}${range.schedule_version}.${range.from_inclusive}`;
   let dialog, botSelect, content, status, toolbar, view = "list", current = null;
   let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
@@ -271,6 +275,11 @@
     void reload(); void loadFunnel();
   }
   const webhookItems = () => panels.state.routine_webhooks?.items || {};
+  // A group holds one webhook per webhook member, each with its own URL and token.
+  const hasWebhook = (trigger) => trigger?.kind === "webhook" || (trigger?.kind === "group" && trigger.members.some((m) => m.trigger.kind === "webhook"));
+  const hooksOf = (r) => { const info = webhookItems()[r.routine_id]; return !info ? [] : r.trigger?.kind === "group" ? info.webhooks || [] : [info]; };
+  const secretKey = (r, info) => r.trigger?.kind === "group" ? info.trigger_id : r.routine_id;
+  const hookBody = (r, info) => r.trigger?.kind === "group" ? { ...idBody(r), trigger_id: info.trigger_id } : idBody(r);
   // A publication stays managed after its last webhook is gone: it must stay withdrawable.
   const publicationOn = () => Boolean(panels.state.routine_webhooks?.funnel?.enabled);
   async function loadFunnel() {
@@ -325,31 +334,31 @@
     } catch (error) { message(`Publication impossible : ${error.message}`, true); }
     finally { funnelBusy = false; signature = ""; renderList(); }
   }
-  function webhookBlock(r) {
-    const info = webhookItems()[r.routine_id], box = node("div", "routines-webhook");
-    box.append(node("h4", "", "Webhook"));
+  function webhookBlock(r, info, title = "Webhook") {
+    const box = node("div", "routines-webhook"), key = secretKey(r, info);
+    box.append(node("h4", "", title));
     const url = funnel?.state === "published" && funnel.public_base && info ? `${funnel.public_base}/${r.routine_id}/${info.trigger_id}` : "";
     if (url) {
       const line = node("p", "routines-webhook-url"); line.append(node("code", "", url));
       box.append(node("p", "routines-note", "URL publique (HTTPS)"), line, button("Copier l’URL", () => copy(url, "URL copiée.")));
     } else box.append(node("p", "routines-warning", funnel ? `Pas d’URL publique : ${funnel.reason || "publication non confirmée."}` : "Aucune URL publique n’est affichée avant la confirmation de Tailscale."));
     box.append(node("p", "routines-note", "Appelez l’URL en POST avec l’en-tête Authorization: Bearer <jeton>. Le jeton n’est pas dans l’URL. Le corps JSON est transmis au bot ; une clé Idempotency-Key évite un second départ lors d’un nouvel essai."));
-    const secret = revealed.get(r.routine_id), token = node("p", "routines-webhook-token");
+    const secret = revealed.get(key), token = node("p", "routines-webhook-token");
     token.append(node("span", "", "Jeton Bearer : "), node("code", "", secret || "••••••••••••••••"));
     box.append(token);
     if (secret) box.append(node("p", "routines-warning", "Copiez ce jeton maintenant. Il sera masqué ensuite, mais il restera copiable."));
     const actions = node("div", "routines-actions");
     actions.append(button("Copier le jeton", async () => {
-      try { const reply = await panels.api("/api/routines/webhook/token", idBody(r)); await copy(reply.token, "Jeton copié."); }
+      try { const reply = await panels.api("/api/routines/webhook/token", hookBody(r, info)); await copy(reply.token, "Jeton copié."); }
       catch (error) { message(`Copie impossible : ${error.message}`, true); }
     }));
-    if (secret) actions.append(button("Masquer le jeton", () => { revealed.delete(r.routine_id); signature = ""; renderList(); }));
-    actions.append(button("Régénérer le jeton…", () => { regenerating = r.routine_id; signature = ""; renderList(); }));
+    if (secret) actions.append(button("Masquer le jeton", () => { revealed.delete(key); signature = ""; renderList(); }));
+    actions.append(button("Régénérer le jeton…", () => { regenerating = key; signature = ""; renderList(); }));
     box.append(actions);
-    if (regenerating === r.routine_id) {
+    if (regenerating === key) {
       const confirm = node("div", "routines-delete");
       confirm.append(node("p", "routines-warning", "Régénérer le jeton ? L’ancien jeton cesse de fonctionner tout de suite : mettez à jour l’appelant."), button("Régénérer", async () => {
-        try { const reply = await panels.api("/api/routines/webhook/regenerate", idBody(r)); revealed.set(r.routine_id, reply.token); regenerating = null; message("Jeton régénéré. L’ancien jeton est refusé."); }
+        try { const reply = await panels.api("/api/routines/webhook/regenerate", hookBody(r, info)); revealed.set(key, reply.token); regenerating = null; message("Jeton régénéré. L’ancien jeton est refusé."); }
         catch (error) { message(`Régénération impossible : ${error.message}`, true); }
         signature = ""; renderList();
       }, "danger-button"), button("Garder le jeton", () => { regenerating = null; signature = ""; renderList(); }));
@@ -365,7 +374,7 @@
     signature = next; toolbar.hidden = false; content.replaceChildren();
     if (panels.state.routines?.error) content.append(node("p", "routines-error", panels.state.routines.error));
     if (!list.length) content.append(node("p", "routines-note", "Aucune routine pour ce bot."));
-    if (list.some((item) => item.routine.trigger?.kind === "webhook") || publicationOn()) content.append(funnelPanel());
+    if (list.some((item) => hasWebhook(item.routine.trigger)) || publicationOn()) content.append(funnelPanel());
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
@@ -374,7 +383,8 @@
         waiting.dataset.queue = String(item.queue.waiting); waiting.setAttribute("role", "status"); row.append(waiting);
       }
       if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
-      if (r.trigger?.kind === "webhook") row.append(webhookBlock(r));
+      const hooks = hooksOf(r);
+      hooks.forEach((info, index) => row.append(webhookBlock(r, info, r.trigger?.kind === "group" && hooks.length > 1 ? `Webhook ${index + 1}` : "Webhook")));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error }, true)}`));
       const actions = node("div", "routines-actions");
@@ -418,7 +428,7 @@
   function editor(r, resume, pinned) {
     content.replaceChildren(button("Retour à la liste", back));
     const form = node("form", "routines-editor"), fields = node("fieldset", "routines-fields");
-    function field(label, tag = "input") { const wrap = node("label", "form-label", label), input = node(tag, "text-input"); input.id = input.name = `routine-field-${++fieldId}`; wrap.append(input); fields.append(wrap); return input; }
+    function field(label, tag = "input", parent = fields) { const wrap = node("label", "form-label", label), input = node(tag, "text-input"); input.id = input.name = `routine-field-${++fieldId}`; wrap.append(input); parent.append(wrap); return input; }
     const name = field("Nom"); name.value = r?.name || ""; name.maxLength = 80;
     const kind = field("Contenu", "select");
     for (const [value, label] of [["inline_prompt", "Prompt libre"], ["skill_invocation", "Skill · version épinglée"]]) { const opt = node("option", "", label); opt.value = value; kind.append(opt); }
@@ -441,36 +451,78 @@
     const skillHint = node("p", "routines-note", availableSkills.length ? "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions." : "Aucune skill pour ce bot : créez-en une dans Modifier le bot › Skills."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
-    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
-    mode.value = r?.trigger.kind === "once" ? "once" : r?.trigger.kind === "webhook" ? "webhook" : "schedule";
+    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["group", "Groupe · part dès que l’un de ses déclencheurs part"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
+    mode.value = r?.trigger.kind === "once" ? "once" : r?.trigger.kind === "webhook" ? "webhook" : r?.trigger.kind === "group" ? "group" : "schedule";
     const expression = field("Cron (5 champs), alias ou @every");
     expression.value = r?.trigger.kind === "cron" ? r.trigger.expression : r?.trigger.kind === "every" ? `@every ${r.trigger.interval_ms}ms${r.trigger.phase_ms === null || r.trigger.phase_ms === undefined ? "" : `/${r.trigger.phase_ms}ms`}` : "0 9 * * *";
     const once = field("Date et heure UTC"); once.type = "datetime-local"; once.step = "0.001";
     once.value = r?.trigger.kind === "once" ? new Date(r.trigger.at).toISOString().slice(0, -1) : "";
     const zone = field("Fuseau IANA"); zone.value = r?.trigger.time_zone || r?.time_zone || localZone; zone.placeholder = "America/Montreal";
+    // A group is a flat list of simple triggers: there is no group kind to pick inside it.
+    const groupBox = node("div", "routines-group"), groupRows = node("div", "routines-group-rows"), rows = [];
+    const expressionOf = (trigger) => trigger.kind === "cron" ? `${trigger.time_zone ? `CRON_TZ=${trigger.time_zone} ` : ""}${trigger.expression}` : trigger.kind === "every" ? `@every ${trigger.interval_ms}ms${trigger.phase_ms === null || trigger.phase_ms === undefined ? "" : `/${trigger.phase_ms}ms`}` : "0 9 * * *";
+    function renderRows() {
+      groupRows.replaceChildren();
+      rows.forEach((row, index) => {
+        const box = node("div", "routines-group-row"); row.box = box;
+        box.append(node("h4", "", `Déclencheur ${index + 1}`));
+        row.kind = field("Genre", "select", box); row.expression = field("Cron (5 champs), alias ou @every", "input", box); row.once = field("Date et heure UTC", "input", box); row.once.type = "datetime-local"; row.once.step = "0.001";
+        for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"]]) { const opt = node("option", "", label); opt.value = value; row.kind.append(opt); }
+        row.kind.value = row.value.kind; row.expression.value = row.value.expression; row.once.value = row.value.once;
+        for (const key of ["kind", "expression", "once"]) row[key].addEventListener("input", () => { row.value[key] = row[key].value; });
+        // While reviewing an activation nothing here may change: only what is read gets activated.
+        if (!resume) box.append(button("Retirer ce déclencheur", () => { rows.splice(index, 1); renderRows(); update(); }));
+        groupRows.append(box);
+      });
+    }
+    const addRow = (value) => { rows.push({ id: value.id || "", stored: { kind: value.kind, once: value.once }, value: { kind: value.kind, expression: value.expression, once: value.once } }); };
+    const memberValue = (member) => ({ id: member.id, kind: member.trigger.kind === "once" ? "once" : member.trigger.kind === "webhook" ? "webhook" : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "" });
+    if (r?.trigger.kind === "group") { for (const member of r.trigger.members) addRow(memberValue(member)); renderRows(); }
+    groupBox.append(node("h4", "", "Déclencheurs du groupe"), node("p", "routines-note", "Au moins deux déclencheurs simples, sans groupe dans un groupe. La routine part dès que l’un d’eux part ; chaque départ est une occurrence nommée dans l’historique."), groupRows);
+    const groupActions = node("div", "routines-actions");
+    if (!resume) groupActions.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
+    groupBox.append(groupActions);
+    fields.append(groupBox);
     fields.append(node("p", "routines-note", "Exemples : 0 9 * * 1-5, @daily, @every 1h30m, @every 1h/10m. Un préfixe TZ= prime sur le champ Fuseau. Pour une seule fois, saisissez l’UTC ; l’aperçu le convertit dans le fuseau choisi. Le serveur valide l’horaire ; cet aperçu ne prédit pas le prochain départ."));
     const preview = node("p", "routines-preview"); preview.setAttribute("role", "status"); fields.append(preview);
     const enabled = r ? null : field("Activer à la création");
     if (enabled) { enabled.type = "checkbox"; enabled.checked = true; enabled.className = ""; enabled.parentElement.classList.add("routines-enabled"); }
-    function parsed() {
-      if (mode.value === "once") {
-        const at = Date.parse(`${once.value}Z`);
-        if (!once.value || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
-        if (at <= Date.now()) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
+    function simple(genre, expressionText, onceText, spent = false) {
+      if (genre === "once") {
+        const at = Date.parse(`${onceText}Z`);
+        if (!onceText || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
+        // A one-shot of the group that already fired and is left as it was does not block an edit of the rest.
+        if (at <= Date.now() && !spent) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
         validZone(zone.value.trim());
         return { trigger: { kind: "once", at }, zone: zone.value.trim(), text: `Une fois : ${date(at, zone.value.trim())}` };
       }
-      if (mode.value === "webhook") return { trigger: { kind: "webhook" }, zone: validZone(zone.value.trim() || localZone), text: "Webhook : démarre à chaque appel authentifié par le jeton Bearer. Le jeton et l’URL s’affichent après l’enregistrement." };
-      return schedule(expression.value, zone.value.trim());
+      if (genre === "webhook") return { trigger: { kind: "webhook" }, zone: validZone(zone.value.trim() || localZone), text: "Webhook : démarre à chaque appel authentifié par le jeton Bearer. Le jeton et l’URL s’affichent après l’enregistrement." };
+      return schedule(expressionText, zone.value.trim());
+    }
+    function parsed() {
+      if (mode.value === "group") {
+        if (rows.length < 2) throw new Error("Un groupe contient au moins deux déclencheurs. Ajoutez-en un autre ou choisissez un déclencheur simple.");
+        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once, Boolean(row.id) && row.value.kind === "once" && row.value.once === row.stored.once && row.stored.kind === "once"));
+        const members = parts.map((part, index) => {
+          // A TZ= prefix on one trigger belongs to that trigger, not to the whole routine.
+          // Only an explicit TZ= prefix pins that trigger, even to the zone the routine has too.
+          const own = part.trigger.kind === "cron" && /^(?:CRON_TZ|TZ)=\S+\s/.test(rows[index].value.expression.trim()) ? { ...part.trigger, time_zone: part.zone } : part.trigger;
+          return rows[index].id ? { id: rows[index].id, trigger: own } : { trigger: own };
+        });
+        return { trigger: { kind: "group", members }, zone: validZone(zone.value.trim() || localZone), text: `Groupe : ${parts.map((part) => part.text).join(" · ")}` };
+      }
+      return simple(mode.value, expression.value, once.value);
     }
     function update() {
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
-      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = mode.value === "webhook";
+      if (mode.value === "group" && !rows.length) { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); addRow({ kind: "webhook", expression: "0 9 * * *", once: "" }); renderRows(); }
+      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = mode.value === "webhook"; groupBox.hidden = mode.value !== "group";
+      for (const row of rows) { row.expression.parentElement.hidden = row.value.kind !== "schedule"; row.once.parentElement.hidden = row.value.kind !== "once"; }
       try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
-    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value });
+    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value, group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
     const initial = baseline();
     form.addEventListener("input", update); form.addEventListener("change", update); update();
     const actions = node("div", "routines-actions");
@@ -491,7 +543,7 @@
               payload.body = { kind: "skill_invocation", skill_id: skill.value.trim(), version: Number(version.value) };
             }
           }
-          if (!r || ["mode", "expression", "once", "zone"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
+          if (!r || ["mode", "expression", "once", "zone", "group"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
           if (r) Object.assign(payload, { routine_id: r.routine_id, modified_at: r.modified_at, schedule_version: r.schedule_version });
           else payload.enabled = enabled.checked;
           if (r && Object.keys(payload).length === 4) { back(); return; }
@@ -523,10 +575,13 @@
       }
       sent = true;
       const reply = await panels.api(path, payload);
-      if (reply?.webhook?.token && reply.routine) revealed.set(reply.routine.routine_id, reply.webhook.token);
+      if (reply?.routine) {
+        const grouped = reply.routine.trigger?.kind === "group";
+        for (const hook of grouped ? reply.webhooks || [] : [reply.webhook]) if (hook?.token) revealed.set(grouped ? hook.trigger_id : reply.routine.routine_id, hook.token);
+      }
       if (active(token)) { view = "list"; current = null; signature = ""; message(success); }
       try { await panels.refresh(); } catch { if (active(token)) message(`${success} Liste à actualiser.`, true); }
-      if (reply?.webhook) void loadFunnel();
+      if (reply?.webhook || reply?.webhooks?.length) void loadFunnel();
     } catch (error) {
       if (active(token)) {
         const conflict = /Stale routine edit|changé depuis votre lecture|Routine changed|409/i.test(error.message);
@@ -563,7 +618,7 @@
   }
   function mergePage(h, remember = true) {
     for (const o of h.occurrences) historyView.occurrences.set(o.occurrence_id, o);
-    for (const range of h.missed_ranges) historyView.ranges.set(`${range.schedule_version}.${range.from_inclusive}`, range);
+    for (const range of h.missed_ranges) historyView.ranges.set(`${rangeKey(range)}`, range);
     if (remember) historyView.pages.set(`${h.cursor}/${h.ranges_cursor}`, [h.cursor, h.ranges_cursor]);
   }
   function emptyHistory() {
@@ -598,12 +653,12 @@
     try {
       const h = await readHistory(r, cursor, rangesCursor); settleLaunch(r);
       if (active(token)) {
-        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${range.schedule_version}.${range.from_inclusive}`));
+        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${rangeKey(range)}`));
         mergePage(h);
         if (!more || more === "occurrences") historyView.next = h.next_cursor;
         if (!more || more === "ranges") historyView.nextRanges = h.next_ranges_cursor;
         historyView.failures[more || "initial"] = null;
-        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${newItems[0].schedule_version}.${newItems[0].from_inclusive}`;
+        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${rangeKey(newItems[0])}`;
         if (!more) message("");
       }
     } catch (error) {
@@ -659,7 +714,7 @@
   function renderHistory(r) {
     renderNotices();
     const occurrences = [...historyView.occurrences.values()].sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || (a.occurrence_id < b.occurrence_id ? 1 : -1));
-    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version);
+    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version || (a.member_id || "") .localeCompare(b.member_id || ""));
     const next = JSON.stringify([r.routine_id, occurrences, visibleRanges, historyView.next, historyView.nextRanges, historyView.failures]);
     if (historySignature === next) return;
     historySignature = next;
@@ -674,7 +729,7 @@
     if (!visibleRanges.length) ranges.append(node("p", "routines-note", "Aucune plage manquée."));
     for (const range of visibleRanges) {
       const row = node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`);
-      row.tabIndex = -1; row.dataset.historyFocus = `range-${range.schedule_version}.${range.from_inclusive}`; ranges.append(row);
+      row.tabIndex = -1; row.dataset.historyFocus = `range-${rangeKey(range)}`; ranges.append(row);
     }
     pageControls(ranges, r, "ranges");
     content.append(ranges, node("h4", "", `${occurrences.length} ${occurrences.length > 1 ? "occurrences chargées" : "occurrence chargée"}${historyView.next ? " · d’autres plus anciennes disponibles" : ""} · plus récentes en premier`));
@@ -683,7 +738,7 @@
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status; row.dataset.occurrenceId = o.occurrence_id;
       row.tabIndex = -1; row.dataset.historyFocus = `occurrence-${o.occurrence_id}`;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
+      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
       if (o.conversation_id) {
         const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));

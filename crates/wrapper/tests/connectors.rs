@@ -43,6 +43,7 @@ struct SeenOAuth {
     sse: bool,
     token_scope: Option<String>,
     github: GithubScript,
+    gmail: GmailScript,
     slack: SlackScript,
 }
 /// Scripted Slack provider: the PKCE exchange, the Web API reads and the revocation.
@@ -114,6 +115,31 @@ impl Default for GithubScript {
             created: Vec::new(),
             create_status: 201,
         }
+    }
+}
+/// Scripted Google provider for Gmail: the token endpoint, the profile and two REST routes.
+#[derive(Default)]
+struct GmailScript {
+    /// Messages of the inbox, newest first: id, from, subject, date and text.
+    inbox: Vec<Value>,
+    serial: u32,
+    renewals: u32,
+    /// Every access token the provider still accepts.
+    live_tokens: Vec<String>,
+    /// Form fields of every token request, in order.
+    token_posts: Vec<std::collections::HashMap<String, String>>,
+    authorization: Vec<(String, String)>,
+    /// Runs while the provider answers a listing: what happens to the app meanwhile.
+    during_listing: Option<Box<dyn Fn() + Send>>,
+}
+impl GmailScript {
+    /// One message as Gmail's `format=full` returns it: a text part and an HTML part.
+    fn message(entry: &Value) -> Value {
+        let encoded = |text: &str| URL_SAFE_NO_PAD.encode(text);
+        // Messages are received in the order of their number: m7 after m6.
+        let number: i64 = entry["id"].as_str().unwrap()[1..].parse().unwrap();
+        let received = (1_790_000_000_000 + number * 1000).to_string();
+        json!({"id":entry["id"],"threadId":entry["id"],"snippet":"Extrait court","internalDate":received,"payload":{"mimeType":"multipart/alternative","headers":[{"name":"From","value":entry["from"]},{"name":"Subject","value":entry["subject"]},{"name":"Date","value":entry["date"]}],"parts":[{"mimeType":"text/plain","body":{"data":encoded(entry["text"].as_str().unwrap())}},{"mimeType":"text/html","body":{"data":encoded("<p>Version HTML</p>")}}]}})
     }
 }
 struct OAuth {
@@ -381,6 +407,92 @@ impl OAuth {
                     } else {
                         (404, json!({}))
                     }
+                } else if url.starts_with("/gmail/") {
+                    let challenge = seen.challenge.clone();
+                    let g = &mut seen.gmail;
+                    if let Some(auth) = auth {
+                        g.authorization.push((url.clone(), auth));
+                    }
+                    let live = |g: &GmailScript| {
+                        g.authorization.last().is_some_and(|(_, a)| {
+                            g.live_tokens.iter().any(|t| *a == format!("Bearer {t}"))
+                        })
+                    };
+                    if url == "/gmail/token" {
+                        g.token_posts.push(fields.clone());
+                        match fields.get("grant_type").map(String::as_str) {
+                            Some("authorization_code") => {
+                                let verifier = fields.get("code_verifier").expect("PKCE verifier");
+                                assert_eq!(
+                                    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                                    challenge
+                                );
+                                g.serial += 1;
+                                let access =
+                                    format!("gmail-access-secret-never-visible-{}", g.serial);
+                                g.live_tokens.push(access.clone());
+                                (
+                                    200,
+                                    json!({"access_token":access,"refresh_token":"gmail-refresh-secret-never-visible","expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
+                                )
+                            }
+                            Some("refresh_token")
+                                if fields.get("refresh_token").map(String::as_str)
+                                    == Some("gmail-refresh-secret-never-visible") =>
+                            {
+                                g.renewals += 1;
+                                let access = format!("gmail-renewed-secret-{}", g.renewals);
+                                g.live_tokens.clear();
+                                g.live_tokens.push(access.clone());
+                                (
+                                    200,
+                                    json!({"access_token":access,"expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
+                                )
+                            }
+                            _ => (400, json!({"error":"invalid_grant"})),
+                        }
+                    } else if url == "/gmail/revoke" {
+                        (200, json!({}))
+                    } else if !live(g) {
+                        (
+                            401,
+                            json!({"error":{"code":401,"message":"Invalid Credentials"}}),
+                        )
+                    } else if url == "/gmail/api/gmail/v1/users/me/profile" {
+                        (
+                            200,
+                            json!({"emailAddress":"charles@example.test","messagesTotal":6}),
+                        )
+                    } else if let Some(listing) =
+                        url.strip_prefix("/gmail/api/gmail/v1/users/me/messages?")
+                    {
+                        let query: std::collections::HashMap<_, _> =
+                            url::form_urlencoded::parse(listing.as_bytes())
+                                .into_owned()
+                                .collect();
+                        let wanted: usize = query["maxResults"].parse().unwrap();
+                        assert_eq!(query["labelIds"], "INBOX");
+                        if let Some(during) = &g.during_listing {
+                            during();
+                        }
+                        let ids: Vec<Value> = g
+                            .inbox
+                            .iter()
+                            .take(wanted)
+                            .map(|m| json!({"id":m["id"],"threadId":m["id"]}))
+                            .collect();
+                        (200, json!({"messages":ids,"resultSizeEstimate":ids.len()}))
+                    } else if let Some(one) = url
+                        .strip_prefix("/gmail/api/gmail/v1/users/me/messages/")
+                        .and_then(|rest| rest.strip_suffix("?format=full"))
+                    {
+                        match g.inbox.iter().find(|m| m["id"] == one) {
+                            Some(entry) => (200, GmailScript::message(entry)),
+                            None => (404, json!({"error":{"code":404}})),
+                        }
+                    } else {
+                        (404, json!({}))
+                    }
                 } else if url.starts_with("/slack/") {
                     let challenge = seen.challenge.clone();
                     let slack = &mut seen.slack;
@@ -635,7 +747,7 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        let body = if !matches!(id, "notion" | "github" | "slack")
+        let body = if !matches!(id, "notion" | "github" | "gmail" | "slack")
             && self.item(id)["has_client"] != true
         {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
@@ -750,6 +862,7 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         std::env::remove_var("GROKBOT_FAKE_CONNECTORS");
         std::env::remove_var("EZERBOT_GITHUB_CLIENT_ID");
+        std::env::remove_var("EZERBOT_GOOGLE_CLIENT_ID");
         std::env::remove_var("EZERBOT_SLACK_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
@@ -782,25 +895,25 @@ fn google_server_adapter_keeps_only_an_access_snapshot_in_memory() {
 #[test]
 fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconnect_is_denied() {
     let mut f = Fixture::new();
-    let start = f.connect("gmail");
+    let start = f.connect("calendar");
     f.decide(&start, json!("allow_once"));
-    assert_eq!(f.callback("gmail", false, false), 200);
-    let server = f.item("gmail")["server"].clone();
+    assert_eq!(f.callback("calendar", false, false), 200);
+    let server = f.item("calendar")["server"].clone();
     f.post(
         "/api/mcp/select",
         json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
     );
-    assert_eq!(f.item("gmail")["has_tokens"], true);
-    let pending = f.connect("gmail");
+    assert_eq!(f.item("calendar")["has_tokens"], true);
+    let pending = f.connect("calendar");
     let key = format!("MCP_{}_ENV", server["id"].as_str().unwrap()).to_uppercase();
     let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
     let original = vault.get(&key).unwrap().unwrap();
     let revokes = f.oauth.count("/revoke");
     let token_calls = f.oauth.count("/token");
     for body in [
-        json!({"id":"gmail","client_id":"other-oauth-application","client_secret":"another-application-secret"}),
-        json!({"id":"gmail","client_id":"fixture-oauth-client","client_secret":"changed-secret"}),
-        json!({"id":"gmail","client_secret":"changed-secret"}),
+        json!({"id":"calendar","client_id":"other-oauth-application","client_secret":"another-application-secret"}),
+        json!({"id":"calendar","client_id":"fixture-oauth-client","client_secret":"changed-secret"}),
+        json!({"id":"calendar","client_secret":"changed-secret"}),
     ] {
         let error = f
             .app
@@ -816,7 +929,7 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
             "Déconnectez d’abord le service pour changer d’application OAuth."
         );
         assert_eq!(vault.get(&key).unwrap().unwrap(), original);
-        assert_eq!(f.item("gmail")["status"], "connected");
+        assert_eq!(f.item("calendar")["status"], "connected");
     }
     f.decide(&pending, json!("deny"));
     let after = vault.get(&key).unwrap().unwrap();
@@ -827,10 +940,10 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
     assert_eq!(f.oauth.count("/revoke"), revokes);
     assert_eq!(f.oauth.count("/token"), token_calls);
     assert_eq!(
-        f.item("gmail")["server"]["enabled_bots"],
+        f.item("calendar")["server"]["enabled_bots"],
         json!(["grokbot"])
     );
-    assert_eq!(f.item("gmail")["status"], "connected");
+    assert_eq!(f.item("calendar")["status"], "connected");
     assert!(!f.state().to_string().contains("other-oauth-application"));
     for removed in ["ACCESS_TOKEN", "REFRESH_TOKEN"] {
         let mut single: Value = serde_json::from_str(&original).unwrap();
@@ -848,11 +961,11 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
             .api(
                 "POST",
                 "/api/connectors/connect",
-                br#"{"id":"gmail","client_id":"other-oauth-application"}"#,
+                br#"{"id":"calendar","client_id":"other-oauth-application"}"#,
             )
             .unwrap_err();
         assert_eq!(error.status, 409);
-        assert_eq!(f.item("gmail")["has_tokens"], true);
+        assert_eq!(f.item("calendar")["has_tokens"], true);
         assert_eq!(vault.get(&key).unwrap().unwrap(), before);
     }
     vault
@@ -873,14 +986,14 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         .app
         .api("POST", "/api/connectors/connect", br#"{"id":"unknown"}"#)
         .is_err());
-    let denied = f.connect("gmail");
+    let denied = f.connect("calendar");
     assert_eq!(f.oauth.count("/token"), 0);
-    assert_eq!(f.item("gmail")["authorization_url"], Value::Null);
+    assert_eq!(f.item("calendar")["authorization_url"], Value::Null);
     f.decide(&denied, json!("deny"));
-    assert_eq!(f.item("gmail")["has_client"], true);
+    assert_eq!(f.item("calendar")["has_client"], true);
     assert_eq!(f.oauth.count("/token"), 0);
-    assert_eq!(f.item("gmail")["status"], "disconnected");
-    let run = f.connect("gmail");
+    assert_eq!(f.item("calendar")["status"], "disconnected");
+    let run = f.connect("calendar");
     f.decide(&run, json!("allow_once"));
     let state = f.state();
     let request = state["forms"]["requests"]
@@ -889,17 +1002,17 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         .iter()
         .find(|r| r["run_id"] == run)
         .unwrap();
-    assert_eq!(request["connector"]["tool"], "Connecter Gmail");
-    assert_eq!(request["connector"]["catalogue_id"], "gmail");
+    assert_eq!(request["connector"]["tool"], "Connecter Google Calendar");
+    assert_eq!(request["connector"]["catalogue_id"], "calendar");
     assert!(request["configuration_result"]["output"]["message"]
         .as_str()
         .unwrap()
         .contains("navigateur"));
-    assert_eq!(f.callback("gmail", false, true), 400);
+    assert_eq!(f.callback("calendar", false, true), 400);
     assert_eq!(f.oauth.count("/token"), 0);
-    assert_eq!(f.callback("gmail", true, false), 400);
-    assert_eq!(f.item("gmail")["status"], "reconnect");
-    for id in ["gmail", "calendar", "drive", "notion"] {
+    assert_eq!(f.callback("calendar", true, false), 400);
+    assert_eq!(f.item("calendar")["status"], "reconnect");
+    for id in ["calendar", "drive", "notion"] {
         f.oauth.seen.lock().unwrap().token_scope = if id == "notion" {
             Some(String::new())
         } else {
@@ -919,7 +1032,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         assert!(!item.to_string().contains("access-secret"));
     }
     f.oauth.seen.lock().unwrap().token_scope = None;
-    let server = f.item("gmail")["server"].clone();
+    let server = f.item("calendar")["server"].clone();
     f.post(
         "/api/mcp/select",
         json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
@@ -937,20 +1050,20 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     // within that admitted call, never during state polling or app startup.
     f.db()
         .execute(
-            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='gmail'",
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='calendar'",
             [],
         )
         .unwrap();
     let before = f.oauth.count("/token");
-    assert_eq!(f.item("gmail")["status"], "connected");
-    assert_eq!(f.item("gmail")["can_refresh"], true);
-    assert_eq!(f.item("gmail")["account"], "personne@example.test");
-    assert!(f.item("gmail")["message"]
+    assert_eq!(f.item("calendar")["status"], "connected");
+    assert_eq!(f.item("calendar")["can_refresh"], true);
+    assert_eq!(f.item("calendar")["account"], "personne@example.test");
+    assert!(f.item("calendar")["message"]
         .as_str()
         .unwrap()
         .contains("prochain appel autorisé"));
     assert_eq!(
-        f.item("gmail")["server"]["enabled_bots"],
+        f.item("calendar")["server"]["enabled_bots"],
         json!(["grokbot"])
     );
     // Expiry without a refresh token, unlike normal expiry, requires a sign-in.
@@ -969,7 +1082,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
             &without_refresh.to_string(),
         )
         .unwrap();
-    assert_eq!(f.item("gmail")["status"], "reconnect");
+    assert_eq!(f.item("calendar")["status"], "reconnect");
     vault
         .set(&key, grokbot_forms::vault::MCP_ENV_PURPOSE, &original)
         .unwrap();
@@ -984,12 +1097,12 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     f.script(vec![json!({"type":"response.completed"})]);
     f.finish(&run);
     assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
-    assert_eq!(f.item("gmail")["status"], "reconnect");
+    assert_eq!(f.item("calendar")["status"], "reconnect");
     f.oauth.seen.lock().unwrap().tools_error = false;
     let before = f.oauth.count("/token");
-    let recovery = f.connect("gmail");
+    let recovery = f.connect("calendar");
     f.decide(&recovery, json!("allow_once"));
-    assert_eq!(f.item("gmail")["status"], "connected");
+    assert_eq!(f.item("calendar")["status"], "connected");
     assert_eq!(
         f.oauth.count("/token"),
         before + 1,
@@ -1241,7 +1354,7 @@ fn github_card_has_no_client_fields_and_explains_a_missing_application() {
     assert_eq!(github["needs_client"], false);
     assert_eq!(github["configured"], false);
     assert_eq!(github["redirect_uri"], Value::Null);
-    for other in ["gmail", "calendar", "drive"] {
+    for other in ["calendar", "drive"] {
         assert_eq!(f.item(other)["needs_client"], true);
         assert_eq!(f.item(other)["configured"], true);
     }
@@ -1378,9 +1491,9 @@ fn github_device_flow_shows_a_copyable_code_paces_polling_and_never_sends_a_secr
             .windows(secret.len())
             .any(|w| w == secret.as_bytes()));
     }
-    // The other services keep their client: Gmail still asks for one.
-    assert_eq!(f.item("gmail")["needs_client"], true);
-    assert_eq!(f.item("gmail")["has_client"], false);
+    // The other services keep their client: Google Calendar still asks for one.
+    assert_eq!(f.item("calendar")["needs_client"], true);
+    assert_eq!(f.item("calendar")["has_client"], false);
 }
 
 #[test]
@@ -2105,10 +2218,10 @@ fn github_disconnect_removes_the_local_secret_even_when_github_does_not_confirm_
 fn a_tool_classed_as_a_deletion_never_runs_alone_and_no_always_rule_covers_it() {
     let mut f = Fixture::new();
     f.oauth.seen.lock().unwrap().deleting_tool = true;
-    let run = f.connect("gmail");
+    let run = f.connect("calendar");
     f.decide(&run, json!("allow_once"));
-    assert_eq!(f.callback("gmail", false, false), 200);
-    let server = f.item("gmail")["server"].clone();
+    assert_eq!(f.callback("calendar", false, false), 200);
+    let server = f.item("calendar")["server"].clone();
     assert_eq!(server["tools"][0]["name"], "delete_note");
     f.post(
         "/api/mcp/select",
@@ -3220,6 +3333,588 @@ fn github_conversation_choice_is_not_replaced_by_another_account_when_it_needs_r
     );
 }
 
+const GMAIL_TOOL: &str = "gmail_list_recent_messages";
+const GMAIL_SECRETS: [&str; 3] = [
+    "gmail-access-secret",
+    "gmail-refresh-secret",
+    "gmail-renewed-secret",
+];
+const GMAIL_SCOPES: [&str; 3] = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.modify",
+];
+
+impl Fixture {
+    /// The public Google client of Ezerbot is build configuration, never a form field.
+    fn with_google_client(&self) {
+        std::env::set_var(
+            "EZERBOT_GOOGLE_CLIENT_ID",
+            "123456-fixturepublic.apps.googleusercontent.com",
+        );
+    }
+    /// Six messages, the newest first: only the five newest are ever read.
+    fn gmail_inbox(&self) {
+        let inbox = (1..=6)
+            .rev()
+            .map(|n| {
+                json!({
+                    "id":format!("m{n}"),
+                    "from":format!("Alice <alice{n}@example.test>"),
+                    "subject":format!("Courriel {n} <b>important</b>"),
+                    "date":format!("Tue, 20 Oct 2026 09:0{n}:00 +0000"),
+                    "text":format!("Bonjour, ceci est le texte du courriel {n}."),
+                })
+            })
+            .collect();
+        self.oauth.seen.lock().unwrap().gmail.inbox = inbox;
+    }
+    fn gmail_start(&mut self) {
+        self.with_google_client();
+        let run = self.connect("gmail");
+        self.decide(&run, json!("allow_once"));
+    }
+    fn gmail_connect(&mut self) {
+        self.gmail_inbox();
+        self.gmail_start();
+        let code = self.callback("gmail", false, false);
+        assert_eq!(code, 200, "{}", self.item("gmail")["message"]);
+        wait("gmail connected", || {
+            self.item("gmail")["status"] == "connected"
+        });
+        let server = self.item("gmail")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn gmail_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='gmail'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn assert_no_gmail_token_kept(&self) {
+        let kept = self.gmail_secret().unwrap_or_default();
+        assert!(kept.get("ACCESS_TOKEN").is_none() && kept.get("REFRESH_TOKEN").is_none());
+    }
+    fn gmail_requests(&self, part: &str) -> usize {
+        self.github_requests(part)
+    }
+    fn new_mail(&self) -> Vec<grokbot_wrapper::features::mcp::MailEvent> {
+        grokbot_wrapper::features::mcp::gmail_new_messages(&self.app.feature_context()).unwrap()
+    }
+    fn add_mail(&self, id: &str, subject: &str) {
+        self.oauth.seen.lock().unwrap().gmail.inbox.insert(
+            0,
+            json!({
+                "id":id,
+                "from":"Bruno <bruno@example.test>",
+                "subject":subject,
+                "date":"Wed, 21 Oct 2026 10:00:00 +0000",
+                "text":format!("Texte de {subject}."),
+            }),
+        );
+    }
+}
+
+#[test]
+fn gmail_card_has_no_client_fields_and_explains_a_missing_google_client() {
+    let mut f = Fixture::new();
+    let gmail = f.item("gmail");
+    assert_eq!(gmail["needs_client"], false);
+    assert_eq!(gmail["configured"], false);
+    assert!(gmail["unconfigured_message"]
+        .as_str()
+        .unwrap()
+        .contains("client Google d’Ezerbot n’est pas configuré"));
+    for other in ["calendar", "drive"] {
+        assert_eq!(f.item(other)["needs_client"], true, "{other}");
+    }
+    assert_eq!(f.item("notion")["needs_client"], false);
+    assert_eq!(f.item("github")["needs_client"], false);
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    for body in [
+        br#"{"id":"gmail"}"#.as_slice(),
+        br#"{"id":"gmail","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(
+            error
+                .message
+                .contains("client Google d’Ezerbot n’est pas configuré"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("fixture-oauth-secret"));
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.item("gmail")["status"], "disconnected");
+    assert_eq!(f.oauth.count("/token"), 0);
+    // Even with the client configured, a typed identifier or secret is refused, not stored.
+    f.with_google_client();
+    assert_eq!(f.item("gmail")["configured"], true);
+    assert_eq!(f.item("gmail")["unconfigured_message"], Value::Null);
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"gmail","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(f.gmail_secret().is_none());
+}
+
+#[test]
+fn gmail_connects_with_the_public_client_and_pkce_and_never_sends_a_secret() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    f.gmail_start();
+    let url = f.item("gmail")["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let query: std::collections::HashMap<_, _> = url::Url::parse(&url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    assert_eq!(
+        query["client_id"],
+        "123456-fixturepublic.apps.googleusercontent.com"
+    );
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["response_type"], "code");
+    assert_eq!(query["access_type"], "offline");
+    assert_eq!(query["prompt"], "select_account consent");
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert_eq!(
+        query["scope"].split(' ').collect::<Vec<_>>(),
+        GMAIL_SCOPES,
+        "Gmail asks for its three scopes and nothing else"
+    );
+    assert!(!url.contains("client_secret"));
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    let item = f.item("gmail");
+    assert_eq!(item["account"], "charles@example.test");
+    assert_eq!(item["has_client"], true);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let exchange = &seen.gmail.token_posts[0];
+        assert_eq!(
+            exchange["client_id"],
+            "123456-fixturepublic.apps.googleusercontent.com"
+        );
+        assert_eq!(exchange["grant_type"], "authorization_code");
+        assert!(exchange["redirect_uri"].starts_with("http://127.0.0.1:"));
+        assert!(!exchange["code_verifier"].is_empty());
+        assert!(!exchange.contains_key("client_secret"));
+        for (_, body) in &seen.requests {
+            assert!(!body.contains("client_secret"), "{body}");
+        }
+    }
+    // The vault of this connection holds the tokens, and no client at all.
+    let kept = f.gmail_secret().unwrap();
+    assert!(kept["ACCESS_TOKEN"]
+        .as_str()
+        .unwrap()
+        .starts_with("gmail-access-secret"));
+    assert!(kept["REFRESH_TOKEN"].is_string());
+    assert!(kept.get("CLIENT_ID").is_none() && kept.get("CLIENT_SECRET").is_none());
+    for secret in GMAIL_SECRETS {
+        assert!(!f.state().to_string().contains(secret));
+        assert!(!std::fs::read(&f.path)
+            .unwrap()
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+    }
+}
+
+#[test]
+fn gmail_refusal_or_cancellation_leaves_no_token_behind() {
+    let mut f = Fixture::new();
+    f.gmail_start();
+    // The browser came back with another state, then with a refusal.
+    assert_eq!(f.callback("gmail", false, true), 400);
+    assert_eq!(f.callback("gmail", true, false), 400);
+    assert_eq!(f.item("gmail")["status"], "reconnect");
+    assert_eq!(f.oauth.count("/gmail/token"), 0);
+    f.assert_no_gmail_token_kept();
+    // A sign-in cancelled by a disconnect cannot be completed by a late callback.
+    let run = f.connect("gmail");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("gmail")["status"], "authorizing");
+    let url = f.item("gmail")["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"gmail"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    assert_eq!(f.item("gmail")["status"], "disconnected");
+    let query: std::collections::HashMap<_, _> = url::Url::parse(&url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    let mut late = url::Url::parse(&query["redirect_uri"]).unwrap();
+    late.query_pairs_mut()
+        .append_pair("state", &query["state"])
+        .append_pair("code", "late-code");
+    let _ = ureq::get(late.as_str()).call();
+    assert_eq!(f.oauth.count("/gmail/token"), 0);
+    assert_eq!(f.item("gmail")["status"], "disconnected");
+    f.assert_no_gmail_token_kept();
+}
+
+#[test]
+fn gmail_reads_the_five_latest_messages_without_a_card_and_without_a_token() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let run = f.github_call("read-mail", GMAIL_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles@example.test");
+    let mails = output["courriels"].as_array().unwrap();
+    assert_eq!(mails.len(), 5, "five latest messages, not six");
+    assert_eq!(mails[0]["id"], "m6");
+    assert_eq!(mails[0]["expediteur"], "Alice <alice6@example.test>");
+    assert_eq!(mails[0]["objet"], "Courriel 6 <b>important</b>");
+    assert_eq!(mails[0]["date"], "Tue, 20 Oct 2026 09:06:00 +0000");
+    assert_eq!(
+        mails[0]["texte"],
+        "Bonjour, ceci est le texte du courriel 6."
+    );
+    assert_eq!(mails[4]["id"], "m2");
+    let text = output["texte"].as_str().unwrap();
+    assert!(text.contains("compte Gmail : charles@example.test"));
+    assert!(text.contains("Courriel 6 <b>important</b>") && text.contains("Courriel 2"));
+    assert!(!text.contains("Courriel 1 "));
+    assert!(!text.contains("Version HTML"));
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .gmail
+            .authorization
+            .iter()
+            .rev()
+            .find(|(url, _)| url.contains("/messages/m6"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.gmail.live_tokens[0]));
+    }
+    assert_eq!(f.gmail_requests("/messages?labelIds=INBOX&maxResults=5"), 1);
+    // The model saw the messages, never a token.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Courriel 6") && inputs.contains("alice6@example.test"));
+    for secret in GMAIL_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+    // A smaller count is honoured; a larger one is refused rather than read.
+    let run = f.github_call("read-two", GMAIL_TOOL, json!({"count":2}));
+    assert_eq!(done(&f, &run)["courriels"].as_array().unwrap().len(), 2);
+    let run = f.github_call("read-many", GMAIL_TOOL, json!({"count":500}));
+    assert!(failed(&f, &run).contains("entre 1 et 10"));
+}
+
+#[test]
+fn gmail_tools_are_offered_only_while_connected_and_enabled() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    f.gmail_start();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    // Connected, but not given to the bot: a sentence, and the provider hears nothing.
+    let before = f.gmail_requests("/messages");
+    let run = f.github_call("not-enabled", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("Activez-le"), "not enabled");
+    assert_eq!(f.gmail_requests("/messages"), before);
+    // GitHub, when connected next to it, keeps its own tools.
+    f.github_connect();
+    let run = f.github_list("github-beside-gmail", "charles/essai");
+    assert_eq!(done(&f, &run)["compte"], "charles-test");
+}
+
+#[test]
+fn gmail_new_message_is_one_event_with_its_fields_and_only_once_per_identifier() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    // The first look only learns what is already in the box: nothing is "new" yet.
+    assert!(f.new_mail().is_empty());
+    assert!(f.new_mail().is_empty());
+    f.add_mail("m7", "Rendez-vous demain");
+    let events = f.new_mail();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.id, "m7");
+    assert_eq!(event.expediteur, "Bruno <bruno@example.test>");
+    assert_eq!(event.objet, "Rendez-vous demain");
+    assert_eq!(event.date, "Wed, 21 Oct 2026 10:00:00 +0000");
+    assert_eq!(event.texte, "Texte de Rendez-vous demain.");
+    // The same identifier does not come out again, even when the box lists it again.
+    assert!(f.new_mail().is_empty());
+    assert!(f.new_mail().is_empty());
+    // Two messages arrive: each comes out once, the older first.
+    f.add_mail("m8", "Facture");
+    f.add_mail("m9", "Relance");
+    let events = f.new_mail();
+    assert_eq!(
+        events.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["m8", "m9"]
+    );
+    assert!(f.new_mail().is_empty());
+    // The event is data of the mail: it carries no token.
+    let shown = format!("{events:?}");
+    for secret in GMAIL_SECRETS {
+        assert!(!shown.contains(secret));
+    }
+}
+
+#[test]
+fn gmail_events_stop_when_the_account_is_not_connected() {
+    let mut f = Fixture::new();
+    let error =
+        grokbot_wrapper::features::mcp::gmail_new_messages(&f.app.feature_context()).unwrap_err();
+    assert!(
+        error.message.contains("Gmail n’est pas connecté"),
+        "{}",
+        error.message
+    );
+    f.gmail_connect();
+    assert!(f.new_mail().is_empty());
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"gmail"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    assert_eq!(f.item("gmail")["status"], "disconnected");
+    f.assert_no_gmail_token_kept();
+    assert_eq!(f.item("gmail")["has_tokens"], false);
+    assert!(grokbot_wrapper::features::mcp::gmail_new_messages(&f.app.feature_context()).is_err());
+    // A new connection starts again from what the box holds, not from old identifiers.
+    f.gmail_start();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail reconnected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    assert!(f.new_mail().is_empty());
+}
+
+#[test]
+fn gmail_renews_an_expired_access_before_reading_and_a_dead_refresh_asks_to_reconnect() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let before = f.oauth.count("/gmail/token");
+    let run = f.github_call("renewed-read", GMAIL_TOOL, json!({}));
+    assert_eq!(done(&f, &run)["courriels"].as_array().unwrap().len(), 5);
+    assert_eq!(f.oauth.count("/gmail/token"), before + 1);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let refresh = seen.gmail.token_posts.last().unwrap();
+        assert_eq!(refresh["grant_type"], "refresh_token");
+        assert_eq!(
+            refresh["client_id"],
+            "123456-fixturepublic.apps.googleusercontent.com"
+        );
+        assert!(!refresh.contains_key("client_secret"));
+    }
+    // Revoked at Google: the refresh token no longer works, so the card asks to reconnect.
+    f.oauth.seen.lock().unwrap().gmail.live_tokens.clear();
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let vault_id: String = f
+        .db()
+        .query_row(
+            "SELECT server_id FROM wrapper_connector_catalogue WHERE id='gmail'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    let key = format!("MCP_{vault_id}_ENV").to_uppercase();
+    let mut kept: Value = serde_json::from_str(&vault.get(&key).unwrap().unwrap()).unwrap();
+    kept["variables"]["REFRESH_TOKEN"] = json!("gmail-dead-refresh-secret");
+    vault
+        .set(
+            &key,
+            grokbot_forms::vault::MCP_ENV_PURPOSE,
+            &kept.to_string(),
+        )
+        .unwrap();
+    let run = f.github_call("dead-read", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("Reconnectez"), "reconnect");
+    assert_eq!(f.item("gmail")["status"], "reconnect");
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[test]
+fn gmail_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_copy() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    f.with_google_client();
+    let missing = std::env::temp_dir().join("ezerbot-absent-keychain-for-gmail.keychain-db");
+    std::env::set_var("GROKBOT_TEST_KEYCHAIN", &missing);
+    grokbot_forms::vault::enable_os_vault(true);
+    let run = f.connect("gmail");
+    f.decide(&run, json!("allow_once"));
+    // The browser is told the connection did not come through.
+    assert_eq!(f.callback("gmail", false, false), 400);
+    wait("keychain refusal", || {
+        f.item("gmail")["status"] == "reconnect"
+    });
+    let message = f.item("gmail")["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("trousseau"), "{message}");
+    assert!(f.item("gmail")["has_tokens"] == false);
+    let vault_file = f.path.with_extension("secrets.json");
+    let file = std::fs::read(&vault_file).unwrap_or_default();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in GMAIL_SECRETS {
+        assert!(!file.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        assert!(!database
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+        assert!(!f.state().to_string().contains(secret));
+    }
+    std::env::remove_var("GROKBOT_TEST_KEYCHAIN");
+    grokbot_forms::vault::enable_os_vault(false);
+}
+
+#[test]
+fn gmail_read_in_flight_never_uses_a_replacement_account_or_a_bot_that_lost_gmail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let path = f.path.clone();
+    let swap = move || {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.busy_timeout(Duration::from_secs(4)).unwrap();
+        c.execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    };
+    f.oauth.seen.lock().unwrap().gmail.during_listing = Some(Box::new(swap));
+    let before = f.gmail_requests("/messages/m");
+    let run = f.github_call("swap-account", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("a changé"), "account changed");
+    assert_eq!(
+        f.gmail_requests("/messages/m"),
+        before,
+        "no message of the replacement mailbox was read"
+    );
+    // The bot loses Gmail while the listing is answered.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let path = f.path.clone();
+    let revoke = move || {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.busy_timeout(Duration::from_secs(4)).unwrap();
+        c.execute("DELETE FROM wrapper_mcp_bots", []).unwrap();
+    };
+    f.oauth.seen.lock().unwrap().gmail.during_listing = Some(Box::new(revoke));
+    let run = f.github_call("lose-activation", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("a changé"), "activation lost");
+    assert_eq!(f.gmail_requests("/messages/m"), before);
+}
+
+#[test]
+fn gmail_older_mail_entering_the_watched_window_is_not_a_new_message() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    // Thirty messages: the watch only looks at the newest 25.
+    {
+        let mut seen = f.oauth.seen.lock().unwrap();
+        let inbox = (1..=30)
+            .rev()
+            .map(|n| json!({"id":format!("m{n}"),"from":"Alice <alice@example.test>","subject":format!("Courriel {n}"),"date":"Tue, 20 Oct 2026 09:00:00 +0000","text":"Texte."}))
+            .collect();
+        seen.gmail.inbox = inbox;
+    }
+    f.gmail_start();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    assert!(f.new_mail().is_empty());
+    // One message is archived: the 26th enters the window, and it is old mail.
+    f.oauth.seen.lock().unwrap().gmail.inbox.remove(0);
+    assert!(f.new_mail().is_empty());
+    // A genuine arrival still comes out, once.
+    f.add_mail("m31", "Vraie nouveauté");
+    let events = f.new_mail();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "m31");
+    assert!(f.new_mail().is_empty());
+}
+
+#[test]
+fn gmail_watch_survives_the_disconnection_of_another_google_service_with_the_same_address() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(f.new_mail().is_empty());
+    let run = f.connect("calendar");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("calendar", false, false), 200);
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='calendar'",
+            [],
+        )
+        .unwrap();
+    f.add_mail("m7", "Arrivé avant la déconnexion de l’agenda");
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"calendar"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    assert_eq!(f.item("calendar")["status"], "disconnected");
+    assert_eq!(f.item("gmail")["status"], "connected");
+    let events = f.new_mail();
+    assert_eq!(
+        events.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["m7"],
+        "Gmail's baseline was not reset by another service"
+    );
+}
+
 const SLACK_READ: &str = "slack_read_channel";
 
 impl Fixture {
@@ -3294,7 +3989,7 @@ fn slack_card_has_no_client_fields_and_explains_a_missing_client() {
     assert_eq!(slack["needs_client"], false);
     assert_eq!(slack["configured"], false);
     assert_eq!(slack["redirect_uri"], Value::Null);
-    let said = slack["configuration_message"].as_str().unwrap();
+    let said = slack["unconfigured_message"].as_str().unwrap();
     assert!(
         said.contains("client Slack d’Ezerbot n’est pas configuré"),
         "{said}"
@@ -3329,7 +4024,7 @@ fn slack_card_has_no_client_fields_and_explains_a_missing_client() {
     f.with_slack_client();
     let slack = f.item("slack");
     assert_eq!(slack["configured"], true);
-    assert_eq!(slack["configuration_message"], Value::Null);
+    assert_eq!(slack["unconfigured_message"], Value::Null);
     assert_eq!(slack["needs_client"], false);
     let error = f
         .app

@@ -274,6 +274,33 @@ test("GitHub offers no client fields and connects in one click", async () => {
   assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github"}});
 });
 
+const gmail = {...service,id:"gmail",name:"Gmail",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify",scopes_label:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify",redirect_uri:null};
+
+test("Gmail offers no client fields, shows its account and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [{...gmail,status:"connected",account:"charles@example.test",has_tokens:true,server:{id:"g1",enabled_bots:[],tools:[{name:"list_recent_messages"}]}}]);
+  const card = catalogueCard(root,"gmail");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input" && n.type !== "checkbox").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("Secret OAuth"));
+  assert.ok(!card.textContent.includes("Portées OAuth"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  assert.match(card.textContent, /Compte connecté : charles@example.test/);
+  const idle = await mount([], {}, [gmail]);
+  const fresh = catalogueCard(idle.root,"gmail");
+  assert.equal(fresh.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  await fresh.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(idle.calls[0], {path:"/api/connectors/connect",body:{id:"gmail"}});
+});
+
+test("a Gmail card without the Google client of Ezerbot explains it and never shows the form", async () => {
+  const sentence = "Le client Google d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion à Gmail reste indisponible tant que ce client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...gmail,configured:false,has_client:false,unconfigured_message:sentence}]);
+  const card = catalogueCard(root,"gmail");
+  assert.match(card.textContent, /client Google d’Ezerbot n’est pas configuré/);
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+});
+
 test("an unconfigured GitHub application is explained on the card and by the refused click", async () => {
   const { root } = await mount([], {}, [{...github,configured:false,has_client:false}]);
   const card = catalogueCard(root,"github");
@@ -281,7 +308,7 @@ test("an unconfigured GitHub application is explained on the card and by the ref
   assert.equal(card.all().filter(n => n.tag === "input").length, 0);
 });
 
-const slackClient = {...service,id:"slack",name:"Slack",needs_client:false,has_client:true,configured:true,configuration_message:null,scopes_label:"Lecture seule des canaux, choisie pendant le consentement Slack",redirect_uri:null};
+const slackClient = {...service,id:"slack",name:"Slack",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes_label:"Lecture seule des canaux, choisie pendant le consentement Slack",redirect_uri:null};
 
 test("Slack offers no client fields and connects in one click", async () => {
   const { root, calls } = await mount([], {}, [slackClient]);
@@ -298,7 +325,7 @@ test("Slack offers no client fields and connects in one click", async () => {
 
 test("a Slack client that is not configured is explained on the card and offers no form", async () => {
   const said = "Le client Slack d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que le client n’est pas préparé.";
-  const { root } = await mount([], {}, [{...slackClient,configured:false,has_client:false,configuration_message:said}]);
+  const { root } = await mount([], {}, [{...slackClient,configured:false,has_client:false,unconfigured_message:said}]);
   const card = catalogueCard(root,"slack");
   assert.ok(card.textContent.includes(said));
   assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
@@ -388,7 +415,7 @@ test("a search without result says so instead of leaving a blank panel", async (
   assert.equal(emptyState(root), undefined);
 });
 
-test("Gmail keeps its client fields when the search shows it", async () => {
+test("a service that needs a client keeps its client fields when the search shows it", async () => {
   const { root } = await mount([], {}, catalogueServices);
   type(searchField(root), "gmail");
   assert.deepEqual(shown(root), ["gmail"]);

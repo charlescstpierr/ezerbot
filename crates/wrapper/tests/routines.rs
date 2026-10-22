@@ -1686,7 +1686,7 @@ fn history_pages_are_bounded_stable_and_persist_across_restart() {
         // Equal timestamps force the ID tie-breaker; insertion order differs.
         db.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,manual_nonce) VALUES (?1,?2,1,?3,'missed',?1)",params![format!("page-{n:03}"),r.routine_id,n/3]).unwrap();
         db.execute(
-            "INSERT INTO scheduler_missed_ranges VALUES (?1,1,?2,?3,?4,'UTC')",
+            "INSERT INTO scheduler_missed_ranges(routine_id,schedule_version,from_inclusive,until_exclusive,trigger,time_zone) VALUES (?1,1,?2,?3,?4,'UTC')",
             params![
                 r.routine_id,
                 n * 100,
@@ -1707,7 +1707,7 @@ fn history_pages_are_bounded_stable_and_persist_across_restart() {
         db.execute("INSERT INTO scheduler_occurrences(occurrence_id,routine_id,schedule_version,scheduled_at_utc,status,manual_nonce) VALUES (?1,?2,1,?3,'missed',?1)",params![id,r.routine_id,at]).unwrap();
     }
     db.execute(
-        "INSERT INTO scheduler_missed_ranges VALUES (?1,2,0,50,?2,'UTC')",
+        "INSERT INTO scheduler_missed_ranges(routine_id,schedule_version,from_inclusive,until_exclusive,trigger,time_zone) VALUES (?1,2,0,50,?2,'UTC')",
         params![
             r.routine_id,
             json!({"kind":"every","interval_ms":60000,"phase_ms":null}).to_string()
@@ -2456,4 +2456,237 @@ fn a_queued_webhook_call_obeys_pause_and_edit_cutoffs_unlike_a_manual_launch() {
     );
     f.app.tick(now());
     assert_eq!(f.count(), 1);
+}
+
+// ------------------------------------------------------------------ Groupe ----
+
+fn every_minute() -> Value {
+    json!({"trigger":{"kind":"every","interval_ms":60000,"phase_ms":null}})
+}
+fn hook_member() -> Value {
+    json!({"trigger":{"kind":"webhook"}})
+}
+fn group(members: Vec<Value>) -> Value {
+    json!({"kind":"group","members":members})
+}
+/// A routine whose group is the minute schedule plus one webhook per extra member.
+fn group_routine(f: &mut Fixture, members: Vec<Value>) -> (Routine, Value) {
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Groupe","prompt":"Rapport","trigger":group(members),"time_zone":"UTC"}),
+    );
+    let r: Routine = serde_json::from_value(created["routine"].clone()).unwrap();
+    (r, created)
+}
+fn hook_of(created: &Value, index: usize, r: &Routine) -> (String, String) {
+    let hook = &created["webhooks"][index];
+    (
+        format!(
+            "/hooks/{}/{}",
+            r.routine_id,
+            hook["trigger_id"].as_str().unwrap()
+        ),
+        format!("Bearer {}", hook["token"].as_str().unwrap()),
+    )
+}
+fn kinds(history: &Value) -> Vec<String> {
+    history["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["trigger"]["kind"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+#[test]
+fn a_group_names_the_simple_trigger_that_started_each_run() {
+    let mut f = Fixture::new(false);
+    let (r, created) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    let (url, bearer) = hook_of(&created, 0, &r);
+    // The due slot alone: one run, attributed to the schedule.
+    f.tick_due(&r);
+    let history = f.history(&r);
+    assert_eq!(kinds(&history), ["schedule"]);
+    assert_eq!(history["occurrences"][0]["trigger"]["label"], "Horaire");
+    // A POST alone: one more run, attributed to the webhook.
+    let hook = features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).unwrap();
+    assert_eq!(
+        features::routine_webhooks::accept(&mut f.app, &hook, None, b"{}").status,
+        200
+    );
+    f.app.tick((r.modified_at + 60_000) as u64);
+    let mut seen = kinds(&f.history(&r));
+    seen.sort();
+    assert_eq!(seen, ["schedule", "webhook"]);
+    // Both at the same moment: two more occurrences, each named.
+    assert_eq!(
+        features::routine_webhooks::accept(&mut f.app, &hook, None, b"{}").status,
+        200
+    );
+    f.app.tick((r.modified_at + 120_000) as u64);
+    let history = f.history(&r);
+    let mut seen = kinds(&history);
+    seen.sort();
+    assert_eq!(seen, ["schedule", "schedule", "webhook", "webhook"]);
+    assert!(history["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|o| !o["trigger"]["label"].as_str().unwrap().is_empty()));
+}
+
+#[test]
+fn the_editor_refuses_a_group_of_one_trigger_and_a_group_inside_a_group() {
+    let mut f = Fixture::new(false);
+    let body = |trigger: Value| {
+        json!({"bot_id":"grokbot","name":"Groupe","prompt":"Rapport","trigger":trigger,"time_zone":"UTC"})
+            .to_string()
+    };
+    let refused = |f: &mut Fixture, trigger: Value| {
+        f.app
+            .api("POST", "/api/routines", body(trigger).as_bytes())
+            .unwrap_err()
+            .status
+    };
+    assert_eq!(refused(&mut f, group(vec![every_minute()])), 400);
+    assert_eq!(refused(&mut f, group(vec![])), 400);
+    let nested = json!({"trigger":group(vec![every_minute(), hook_member()])});
+    assert_eq!(refused(&mut f, group(vec![every_minute(), nested])), 400);
+    let listed = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert!(listed["routines"].as_array().unwrap().is_empty());
+    // An edit to a one-trigger group is refused too, and the routine is unchanged.
+    let (r, _) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    let edit = json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"trigger":group(vec![every_minute()])});
+    assert_eq!(
+        f.app
+            .api("POST", "/api/routines/update", edit.to_string().as_bytes())
+            .unwrap_err()
+            .status,
+        400
+    );
+    let listed = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert_eq!(
+        listed["routines"][0]["trigger"]["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn an_idempotency_key_belongs_to_one_webhook_of_the_group() {
+    let mut f = Fixture::new(false);
+    let (r, created) = group_routine(&mut f, vec![hook_member(), hook_member()]);
+    let (first_url, first_bearer) = hook_of(&created, 0, &r);
+    let (second_url, second_bearer) = hook_of(&created, 1, &r);
+    assert_ne!(first_url, second_url);
+    let first =
+        features::routine_webhooks::authorize(&f.app, "POST", &first_url, Some(&first_bearer))
+            .unwrap();
+    let second =
+        features::routine_webhooks::authorize(&f.app, "POST", &second_url, Some(&second_bearer))
+            .unwrap();
+    let accept = |f: &mut Fixture, hook| {
+        features::routine_webhooks::accept(&mut f.app, hook, Some("key-1"), b"{}").status
+    };
+    assert_eq!(accept(&mut f, &first), 200);
+    assert_eq!(accept(&mut f, &first), 409);
+    // The same key on the other webhook is its own occurrence and spends nothing of the first.
+    assert_eq!(accept(&mut f, &second), 200);
+    assert_eq!(accept(&mut f, &second), 409);
+    assert_eq!(f.history(&r)["occurrences"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn leaving_the_group_revokes_the_token_of_its_webhook() {
+    let mut f = Fixture::new(false);
+    let (r, created) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    let (url, bearer) = hook_of(&created, 0, &r);
+    assert!(features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).is_ok());
+    let edited = f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"schedule":"@every 1h"}),
+    );
+    assert_eq!(edited["routine"]["trigger"]["kind"], "every");
+    assert_eq!(
+        features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer))
+            .unwrap_err()
+            .status,
+        404
+    );
+}
+
+#[test]
+fn history_keeps_naming_a_trigger_as_it_was_when_the_run_started() {
+    let mut f = Fixture::new(false);
+    let (r, _) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    f.tick_due(&r);
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Autre","prompt":"x","schedule":"@every 1h"}),
+    );
+    assert!(created["routine"]["routine_id"].is_string());
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    let group_now = stored["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let mut members = group_now["trigger"]["members"].clone();
+    members[0]["trigger"] = json!({"kind":"every","interval_ms":120000,"phase_ms":null});
+    f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":group_now["modified_at"],"schedule_version":group_now["schedule_version"],"trigger":{"kind":"group","members":members}}),
+    );
+    let history = f.history(&r);
+    let description = history["occurrences"][0]["trigger"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("Chaque minute"), "{description}");
+    assert!(!description.contains("2 minutes"), "{description}");
+}
+
+#[test]
+fn webhook_cards_follow_the_order_of_the_group_like_history_does() {
+    let mut f = Fixture::new(false);
+    let (r, created) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    let second = created["webhooks"][0]["trigger_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    let now = stored["routines"][0].clone();
+    // The schedule at the head of the group becomes a webhook: its token is created after the other's.
+    let mut members = now["trigger"]["members"].clone();
+    members[0]["trigger"] = json!({"kind":"webhook"});
+    let edited = f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":now["modified_at"],"schedule_version":now["schedule_version"],"trigger":{"kind":"group","members":members}}),
+    );
+    let first = edited["routine"]["trigger"]["members"][0]["id"]
+        .as_str()
+        .unwrap();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let listed: Vec<&str> = state["routine_webhooks"]["items"][&r.routine_id]["webhooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["trigger_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [first, second.as_str()]);
 }

@@ -1635,6 +1635,7 @@ impl RunServices for Services<'_> {
             || super::recall::is_tool(&call.name)
             || super::mcp::is_github_tool(&call.name)
             || super::mcp::is_slack_tool(&call.name)
+            || super::mcp::is_gmail_tool(&call.name)
     }
     fn external_unavailable_reason(
         &self,
@@ -1647,6 +1648,9 @@ impl RunServices for Services<'_> {
         }
         if super::mcp::is_slack_tool(&call.name) {
             return Some(super::mcp::slack_unavailable(&ctx));
+        }
+        if super::mcp::is_gmail_tool(&call.name) {
+            return Some(super::mcp::gmail_unavailable(&ctx));
         }
         let result = if super::screen::is_tool(&call.name) {
             super::screen::validate(&ctx, call)
@@ -1677,6 +1681,8 @@ impl RunServices for Services<'_> {
             super::mcp::run_github_tool(&ctx, call)
         } else if super::mcp::is_slack_tool(&call.name) {
             super::mcp::run_slack_tool(&ctx, call)
+        } else if super::mcp::is_gmail_tool(&call.name) {
+            super::mcp::run_gmail_tool(&ctx, call)
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };

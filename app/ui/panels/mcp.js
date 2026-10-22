@@ -190,7 +190,7 @@
       }
       card.append(setup);
       if (item.device_flow && !item.configured) card.append(node("p", "L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir ici : Connecter restera indisponible tant qu’elle n’est pas préparée.", "mcp-warning"));
-      else if (!item.configured && item.configuration_message) card.append(node("p", item.configuration_message, "mcp-warning"));
+      if (item.unconfigured_message && !item.configured) card.append(node("p", item.unconfigured_message, "mcp-warning"));
       const deviceBlock = (code, name, action = "authorize") => {
         const device = node("div", null, "mcp-device"); device.setAttribute("role", "group"); device.setAttribute("aria-label", "Code de connexion GitHub");
         const until = new Date(code.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});

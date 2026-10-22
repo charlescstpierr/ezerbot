@@ -5,7 +5,7 @@
 use super::Context;
 use crate::{ApiError, ApiResponse, App};
 use grokbot_engine::contracts::{ToolCall, ToolOutcome, ToolSpec};
-use grokbot_scheduler::{cron, routine};
+use grokbot_scheduler::{occurrences, routine};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -449,18 +449,19 @@ pub fn due(db: &Path, now: i64) -> Result<bool, ApiError> {
     if pending {
         return Ok(true);
     }
-    let mut stmt = conn.prepare("SELECT routine_id,materialized_after FROM scheduler_routines WHERE enabled=1 AND deleted=0")?;
+    let mut stmt =
+        conn.prepare("SELECT routine_id FROM scheduler_routines WHERE enabled=1 AND deleted=0")?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, cursor) in rows {
+    for id in rows {
         // Corruption must wake the real scheduler so it can quarantine and
         // publish a failed occurrence instead of silently hiding the error.
         let r = match routine::get(&conn, &id) {
             Ok(Some(r)) => r,
             _ => return Ok(true),
         };
-        match cron::next_after(&r.trigger, &r.time_zone, cursor) {
+        match occurrences::next_slot(&conn, &r) {
             Ok(Some(at)) if at <= now => return Ok(true),
             Err(_) => return Ok(true),
             _ => {}
@@ -574,9 +575,12 @@ fn drive(app: &mut App) -> Result<(), ApiError> {
 fn waiting(ctx: &Context<'_>) -> i64 {
     ctx.connection
         .query_row(
-            "SELECT COUNT(*) FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id
+            &format!(
+                "SELECT COUNT(*) FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id
              WHERE o.status='pending' AND o.manual_nonce IS NULL AND r.enabled=1 AND r.deleted=0
-             AND o.schedule_version=r.schedule_version",
+             AND o.schedule_version={}",
+                occurrences::current_version_sql("o", "r")
+            ),
             [],
             |row| row.get(0),
         )

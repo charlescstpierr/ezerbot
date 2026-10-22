@@ -564,3 +564,34 @@ fn stalled_uploads_are_capped_and_free_their_slot_when_the_client_leaves() {
         host.call(&hook, Some(&hook.token), None, b"{}").0 == 200
     });
 }
+
+#[test]
+fn a_token_regenerated_during_a_slow_upload_cannot_still_start_a_run() {
+    use std::io::Write;
+    let host = Host::new();
+    let hook = host.webhook_routine("Rotation");
+    host.wait_listener();
+    let mut slow = std::net::TcpStream::connect(host.hook.trim_start_matches("http://")).unwrap();
+    write!(
+        slow,
+        "POST /hooks/{}/{} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n{{\"a\r\n",
+        hook.routine_id, hook.trigger_id, hook.token
+    )
+    .unwrap();
+    slow.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    host.post(
+        "/api/routines/webhook/regenerate",
+        json!({"bot_id":"grokbot","routine_id":hook.routine_id}),
+    );
+    slow.write_all(b"4\r\n\":1}\r\n0\r\n\r\n").unwrap();
+    slow.flush().unwrap();
+    slow.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut answer = String::new();
+    std::io::BufReader::new(&slow)
+        .read_line(&mut answer)
+        .unwrap();
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    assert_eq!(host.runs(&hook), 0);
+}

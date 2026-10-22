@@ -82,6 +82,9 @@ fn new_token() -> Result<String, ApiError> {
         .map_err(|_| bad(500, "Le générateur sécurisé est indisponible."))?;
     Ok(format!("ezwh_{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
+fn fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
 /// Hash both sides so the comparison time does not depend on a shared prefix.
 fn same_token(left: &str, right: &str) -> bool {
     let (a, b) = (
@@ -195,6 +198,9 @@ impl Reply {
 pub struct Authorized {
     routine_id: String,
     trigger_id: String,
+    /// Which token authorized the call: a regeneration during a slow upload
+    /// revokes it before the occurrence is recorded.
+    fingerprint: String,
 }
 
 /// First phase, from the request line and headers only: an unauthenticated
@@ -241,6 +247,7 @@ pub fn authorize(
     Ok(Authorized {
         routine_id: routine_id.into(),
         trigger_id: trigger_id.into(),
+        fingerprint: fingerprint(&token),
     })
 }
 
@@ -279,13 +286,18 @@ fn record(
     let tx = write_transaction(&app.connection)?;
     let routine = grokbot_scheduler::routine::get(&tx, &call.routine_id)?
         .ok_or_else(|| bad(404, "Webhook introuvable."))?;
-    let live: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_routine_webhooks WHERE trigger_id=?1 AND routine_id=?2)",
-        params![call.trigger_id, call.routine_id],
-        |r| r.get(0),
-    )?;
-    if !live {
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT token FROM wrapper_routine_webhooks WHERE trigger_id=?1 AND routine_id=?2",
+            params![call.trigger_id, call.routine_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
         return Ok(Reply::error(404, "Webhook introuvable."));
+    };
+    if fingerprint(&current) != call.fingerprint {
+        return Ok(Reply::error(401, "Jeton absent ou invalide."));
     }
     if routine.trigger != Schedule::Webhook {
         return Ok(Reply::error(404, "Webhook introuvable."));

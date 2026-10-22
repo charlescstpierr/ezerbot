@@ -424,3 +424,15 @@ test('a withdrawal Tailscale refused keeps offering the retry and shows no publi
   assert.doesNotMatch(h.t.content.textContent, /Publier avec Tailscale Funnel/);
   assert.doesNotMatch(h.t.content.textContent, /https:\/\//);
 });
+
+test('a publication stays withdrawable after the last webhook routine is gone', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' });
+  h.panels.state.routines.items = [{ routine }];
+  h.panels.state.routine_webhooks = { listener: { port: 47864, listening: true, error: null }, funnel: { enabled: true, state: 'published' }, items: {} };
+  await h.t.loadFunnel();
+  assert.match(h.t.content.textContent, /Publication sur Internet/);
+  assert.match(h.t.content.textContent, /Retirer la publication/);
+  h.panels.state.routine_webhooks.funnel.enabled = false;
+  h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /Publication sur Internet/);
+});

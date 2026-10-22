@@ -271,8 +271,10 @@
     void reload(); void loadFunnel();
   }
   const webhookItems = () => panels.state.routine_webhooks?.items || {};
+  // A publication stays managed after its last webhook is gone: it must stay withdrawable.
+  const publicationOn = () => Boolean(panels.state.routine_webhooks?.funnel?.enabled);
   async function loadFunnel() {
-    if (funnelLoading || !Object.keys(webhookItems()).length) return;
+    if (funnelLoading || !(Object.keys(webhookItems()).length || publicationOn())) return;
     const token = revision; funnelLoading = true;
     try { funnel = await panels.api("/api/routines/funnel"); }
     catch (error) { funnel = { state: "unconfirmed", reason: `Tailscale n’a pas pu être vérifié : ${frenchError(error)}`, public_base: null }; }
@@ -356,12 +358,12 @@
   function renderList() {
     if (!dialog?.open || view !== "list") return;
     const list = items();
-    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories], funnel, funnelBusy, [...revealed.keys()], regenerating, webhookItems(), panels.state.routine_webhooks?.listener]);
+    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories], funnel, funnelBusy, [...revealed.keys()], regenerating, webhookItems(), panels.state.routine_webhooks?.listener, panels.state.routine_webhooks?.funnel?.enabled]);
     if (signature === next) return;
     signature = next; toolbar.hidden = false; content.replaceChildren();
     if (panels.state.routines?.error) content.append(node("p", "routines-error", panels.state.routines.error));
     if (!list.length) content.append(node("p", "routines-note", "Aucune routine pour ce bot."));
-    if (list.some((item) => item.routine.trigger?.kind === "webhook")) content.append(funnelPanel());
+    if (list.some((item) => item.routine.trigger?.kind === "webhook") || publicationOn()) content.append(funnelPanel());
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));

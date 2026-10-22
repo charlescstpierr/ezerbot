@@ -41,3 +41,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Réunions et routines](./reunions-routines.md) couvre la rétention audio et le dialogue Routines.
 - [Mémoire](./memoire.md) couvre la mémoire automatique et la mémoire du bot Ezerbot.
 - [Bibliothèque](./bibliotheque.md) couvre la bibliothèque de fichiers d’un bot : dépôt, liste, retrait et avertissement de troncature.
+- [Images générées](./images.md) couvre la demande d’un dessin, l’image dans la carte et la visionneuse.

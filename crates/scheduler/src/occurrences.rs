@@ -393,7 +393,7 @@ struct Source {
 
 fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>> {
     match &routine.trigger {
-        cron::Schedule::Webhook => Ok(vec![]),
+        cron::Schedule::Webhook | cron::Schedule::Mail => Ok(vec![]),
         cron::Schedule::Group { .. } => {
             let mut query = conn.prepare(
                 "SELECT member_id, version, trigger, materialized_after FROM scheduler_members
@@ -410,7 +410,7 @@ fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>>
             Ok(rows
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|source| source.trigger != cron::Schedule::Webhook)
+                .filter(|source| !source.trigger.is_delivered())
                 .collect())
         }
         trigger => Ok(vec![Source {
@@ -596,9 +596,10 @@ fn insert_slot(
 // closure length or late-window size; no minute-by-minute scan of the backlog.
 fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Result<i64> {
     match schedule {
-        cron::Schedule::Once { .. } | cron::Schedule::Webhook | cron::Schedule::Group { .. } => {
-            Ok(first)
-        }
+        cron::Schedule::Once { .. }
+        | cron::Schedule::Webhook
+        | cron::Schedule::Mail
+        | cron::Schedule::Group { .. } => Ok(first),
         cron::Schedule::Every { interval_ms, .. } => {
             let first = i128::from(first);
             let interval = i128::from(*interval_ms);
@@ -863,7 +864,8 @@ pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
         "SELECT {COLUMNS} FROM scheduler_occurrences WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
                             AND (enabled=1 OR (scheduler_occurrences.manual_nonce IS NOT NULL
-                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'webhook:%')))
+                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'webhook:%'
+                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'mail:%')))
          ORDER BY scheduled_at_utc, occurrence_id"
     ))?;
     let rows = query.query_map([], from_row)?;
@@ -879,7 +881,8 @@ pub fn pending_heads(conn: &Connection) -> Result<Vec<Occurrence>> {
         "SELECT {COLUMNS} FROM scheduler_occurrences o WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
                             AND (enabled=1 OR (o.manual_nonce IS NOT NULL
-                                 AND o.manual_nonce NOT LIKE 'webhook:%')))
+                                 AND o.manual_nonce NOT LIKE 'webhook:%'
+                                 AND o.manual_nonce NOT LIKE 'mail:%')))
          AND (manual_nonce IS NOT NULL OR NOT EXISTS (
             SELECT 1 FROM scheduler_occurrences older WHERE older.routine_id=o.routine_id
             AND older.status='pending' AND older.manual_nonce IS NULL
@@ -2004,6 +2007,30 @@ mod occurrences_tests {
             ],
             [1, 2, 1, 1]
         );
+    }
+
+    #[test]
+    fn a_mail_member_has_no_clock_slot_and_leaves_the_others_alone() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("mail", cron::Schedule::Mail)]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .all(|o| o.member_id == "a"));
+        assert!(missed_ranges(&conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .all(|r| r.member_id == "a"));
+        // A message-only routine is never due, whatever the gap.
+        let (conn, routine) = grouped(vec![
+            ("m1", cron::Schedule::Mail),
+            ("m2", cron::Schedule::Mail),
+        ]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id).unwrap().is_empty());
+        assert!(missed_ranges(&conn, &routine.routine_id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

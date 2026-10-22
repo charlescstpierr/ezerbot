@@ -1007,7 +1007,7 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
-    if name == super::routines_background::ACTION {
+    if name == super::routines_background::ACTION || name == super::routine_webhooks::ACTION {
         let existing: Option<(String, String, String)> = ctx.connection.query_row(
             "SELECT r.conversation_id,r.run_id,e.payload FROM engine_runs r JOIN engine_run_events e ON e.run_id=r.run_id WHERE r.run_id LIKE 'mcp-host-%' AND r.status IN ('queued','running','interrupted','awaiting_approval') AND e.kind='tool_call' AND json_extract(e.payload,'$.name')=?1 AND NOT EXISTS(SELECT 1 FROM forms_requests f WHERE f.run_id=r.run_id AND f.status<>'pending') ORDER BY r.rowid DESC LIMIT 1",
             [name], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
@@ -1046,7 +1046,7 @@ pub(crate) fn queue_approved_action(
     let mut services = Services::new(&local)?;
     run_loop::with_run_events(ctx.connection, &mut services, &run.run_id, |conn, _| {
         model::start(conn, &run)?;
-        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,if name == super::routines_background::ACTION { "Routines quand Ezerbot est fermé".into() } else { "Gestion du connecteur MCP".into() }))?])?;
+        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,if name == super::routines_background::ACTION { "Routines quand Ezerbot est fermé".into() } else if name == super::routine_webhooks::ACTION { "Publication des webhooks de routines".into() } else { "Gestion du connecteur MCP".into() }))?])?;
         model::set_running_at(conn, &run.run_id, now() as i64)?;
         store::append_event(
             conn,
@@ -1565,6 +1565,7 @@ impl RunServices for Services<'_> {
         tools.extend(super::recall::scoped_tools(&ctx));
         if self.host_mcp {
             tools.extend(super::routines_background::host_tools());
+            tools.extend(super::routine_webhooks::host_tools());
         }
         tools
     }
@@ -1614,7 +1615,9 @@ impl RunServices for Services<'_> {
         Ok(serde_json::from_value(value)?)
     }
     fn is_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
-        call.name.starts_with("mcp_") || call.name == super::routines_background::ACTION
+        call.name.starts_with("mcp_")
+            || call.name == super::routines_background::ACTION
+            || call.name == super::routine_webhooks::ACTION
     }
     fn call_external_tool(
         &mut self,

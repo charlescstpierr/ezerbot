@@ -304,7 +304,9 @@ fn materialize_one(
         |row| row.get(0),
     )?;
     // A consumed one-shot is normal exhaustion, not a broken routine.
-    if matches!(routine.trigger, cron::Schedule::Once { at } if at <= cursor) {
+    if matches!(routine.trigger, cron::Schedule::Once { at } if at <= cursor)
+        || routine.trigger == cron::Schedule::Webhook
+    {
         return Ok(());
     }
     routine::validate(&routine, cursor)?;
@@ -421,7 +423,7 @@ fn insert_slot(
 // closure length or late-window size; no minute-by-minute scan of the backlog.
 fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Result<i64> {
     match schedule {
-        cron::Schedule::Once { .. } => Ok(first),
+        cron::Schedule::Once { .. } | cron::Schedule::Webhook => Ok(first),
         cron::Schedule::Every { interval_ms, .. } => {
             let first = i128::from(first);
             let interval = i128::from(*interval_ms);
@@ -660,7 +662,8 @@ pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
     let mut query = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM scheduler_occurrences WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
-                            AND (enabled=1 OR scheduler_occurrences.manual_nonce IS NOT NULL))
+                            AND (enabled=1 OR (scheduler_occurrences.manual_nonce IS NOT NULL
+                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'webhook:%')))
          ORDER BY scheduled_at_utc, occurrence_id"
     ))?;
     let rows = query.query_map([], from_row)?;
@@ -675,7 +678,8 @@ pub fn pending_heads(conn: &Connection) -> Result<Vec<Occurrence>> {
     let mut query = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM scheduler_occurrences o WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
-                            AND (enabled=1 OR o.manual_nonce IS NOT NULL))
+                            AND (enabled=1 OR (o.manual_nonce IS NOT NULL
+                                 AND o.manual_nonce NOT LIKE 'webhook:%')))
          AND (manual_nonce IS NOT NULL OR NOT EXISTS (
             SELECT 1 FROM scheduler_occurrences older WHERE older.routine_id=o.routine_id
             AND older.status='pending' AND older.manual_nonce IS NULL
@@ -989,6 +993,24 @@ mod occurrences_tests {
         assert_eq!(tick(&conn, 7_230_000), runnable);
         attach_run(&conn, &runnable[0].occurrence_id, "catch-up").unwrap();
         assert!(tick(&conn, 7_230_000).is_empty());
+    }
+
+    #[test]
+    fn webhook_routines_never_materialize_a_slot_and_stay_enabled() {
+        let (conn, mut routine) = setup();
+        routine.trigger = cron::Schedule::Webhook;
+        routine::update(&conn, &routine, 0).unwrap();
+        assert!(tick(&conn, 100_000_000_000).is_empty());
+        assert!(list(&conn, &routine.routine_id).unwrap().is_empty());
+        assert!(missed_ranges(&conn, &routine.routine_id)
+            .unwrap()
+            .is_empty());
+        assert!(
+            routine::get(&conn, &routine.routine_id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]

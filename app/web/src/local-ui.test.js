@@ -155,7 +155,7 @@ test("generated-file actions reveal the decision controls at 820×560 without a 
   while(frames.length)frames.shift()();assert.equal(actionMoves,1);
 });
 
-for (const tool of ["mcp_start_fixture", "routines_background_configure"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
+for (const tool of ["mcp_start_fixture", "routines_background_configure", "routines_webhook_publish"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
   const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:521,scrollTop:0});
   let resized,cardMoves=0,actions=0;const frames=[];
   class ResizeObserver {constructor(callback){resized=callback;}observe(){}}

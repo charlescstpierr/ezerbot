@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
@@ -207,6 +207,112 @@ fn payload(
     }
 }
 
+/// tiny_http offers no read timeout, so a body reader lives until its sender
+/// finishes or leaves. It never runs on the host thread; the number of live
+/// readers, hence of sockets and body buffers a stalled sender can hold, is bounded.
+const WEBHOOK_MAX_READERS: usize = 4;
+static WEBHOOK_READERS: AtomicUsize = AtomicUsize::new(0);
+
+/// An authenticated call whose body a reader thread has finished receiving.
+struct WebhookBody {
+    request: Request,
+    call: grokbot_wrapper::features::routine_webhooks::Authorized,
+    key: Option<String>,
+    body: std::io::Result<Vec<u8>>,
+}
+
+/// Answer a webhook call and close its connection: an unread body must not leak
+/// into the next request of a kept-alive socket.
+fn webhook_respond(request: Request, reply: grokbot_wrapper::features::routine_webhooks::Reply) {
+    let mut response = Response::from_data(reply.body.to_string().into_bytes())
+        .with_status_code(StatusCode(reply.status));
+    let mut headers = vec![
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Cache-Control", "no-store"),
+        ("X-Content-Type-Options", "nosniff"),
+    ];
+    if reply.status == 401 {
+        headers.push(("WWW-Authenticate", "Bearer"));
+    }
+    for (name, value) in headers {
+        response.add_header(Header::from_bytes(name, value).expect("webhook response header"));
+    }
+    if let Err(error) = respond_remote(request, response) {
+        eprintln!("Réponse webhook interrompue : {error}");
+    }
+}
+
+/// First half of a webhook call. The caller is authenticated from its headers
+/// alone: a body is read only for a valid token, so an anonymous client cannot
+/// hold anything. The body is read on a bounded reader thread and handed back
+/// to the host loop through `done`, so a stalled upload never freezes the app.
+/// Funnel proxies here; the listener itself is loopback.
+fn webhook(request: Request, app: &App, done: &std::sync::mpsc::Sender<WebhookBody>) {
+    use grokbot_wrapper::features::routine_webhooks as hooks;
+    let header = |name: &str| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+            .map(|h| h.value.to_string())
+    };
+    let (authorization, key) = (header("Authorization"), header("Idempotency-Key"));
+    let method = request.method().as_str().to_owned();
+    let url = request.url().to_owned();
+    let too_big = request.body_length().is_some_and(|n| n > hooks::BODY_LIMIT);
+    let early = |status: u16, text: &str| hooks::Reply {
+        status,
+        body: json!({ "error": text }),
+    };
+    let call = match hooks::authorize(app, &method, &url, authorization.as_deref()) {
+        Err(reply) => {
+            return webhook_respond(request, reply);
+        }
+        Ok(call) => call,
+    };
+    if too_big {
+        let reply = early(413, "Le corps dépasse la borne du prompt d’une routine.");
+        return webhook_respond(request, reply);
+    }
+    if WEBHOOK_READERS.fetch_add(1, Ordering::SeqCst) >= WEBHOOK_MAX_READERS {
+        WEBHOOK_READERS.fetch_sub(1, Ordering::SeqCst);
+        let reply = early(
+            503,
+            "Trop d’envois de corps en cours. Réessayez dans un instant.",
+        );
+        return webhook_respond(request, reply);
+    }
+    let done = done.clone();
+    std::thread::spawn(move || {
+        let mut request = request;
+        let mut body = Vec::new();
+        let read = request
+            .as_reader()
+            .take((hooks::BODY_LIMIT + 1) as u64)
+            .read_to_end(&mut body);
+        WEBHOOK_READERS.fetch_sub(1, Ordering::SeqCst);
+        let _ = done.send(WebhookBody {
+            request,
+            call,
+            key,
+            body: read.map(|_| body),
+        });
+    });
+}
+
+/// Second half, on the host loop: the body is complete, record the call.
+fn webhook_finish(received: WebhookBody, app: &mut App) {
+    use grokbot_wrapper::features::routine_webhooks as hooks;
+    let reply = match received.body {
+        Ok(body) => hooks::accept(app, &received.call, received.key.as_deref(), &body),
+        Err(_) => hooks::Reply {
+            status: 400,
+            body: json!({"error": "Le corps de la requête est illisible."}),
+        },
+    };
+    webhook_respond(received.request, reply);
+}
+
 #[cfg(debug_assertions)]
 mod fake_signin;
 
@@ -364,6 +470,9 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         return Err("Le port 47863 est réservé à l’accès iPhone.".into());
     }
     let mut remote_server: Option<Server> = None;
+    let mut hook_server: Option<Server> = None;
+    let mut hook_retry = std::time::Instant::now();
+    let (hook_sender, hook_bodies) = std::sync::mpsc::channel::<WebhookBody>();
     let mut remote_turn = false;
     println!("{}", json!({"url": format!("http://127.0.0.1:{port}")}));
     std::io::stdout().flush()?;
@@ -380,6 +489,38 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
                     Some("Le port 47863 est occupé. Libérez-le ou désactivez l’accès iPhone."),
                 ),
             }
+        }
+        // The webhook listener lives with the open app, loopback only, and only
+        // while a routine has a webhook. Its bind result gates Funnel publication.
+        if hook_server.is_none()
+            && hook_retry <= std::time::Instant::now()
+            && grokbot_wrapper::features::routine_webhooks::wanted(&app)
+        {
+            match Server::http((
+                "127.0.0.1",
+                grokbot_wrapper::features::routine_webhooks::port(),
+            )) {
+                Ok(listener) => {
+                    hook_server = Some(listener);
+                    grokbot_wrapper::features::routine_webhooks::listener(&app, None);
+                }
+                Err(_) => {
+                    hook_retry = std::time::Instant::now() + Duration::from_secs(3);
+                    grokbot_wrapper::features::routine_webhooks::listener(
+                        &app,
+                        Some("Le port local des webhooks est occupé. Libérez-le avant de publier."),
+                    );
+                }
+            }
+        }
+        while let Ok(received) = hook_bodies.try_recv() {
+            webhook_finish(received, &mut app);
+        }
+        if let Some(request) = hook_server
+            .as_ref()
+            .and_then(|s| s.try_recv().ok().flatten())
+        {
+            webhook(request, &app, &hook_sender);
         }
         // Retain this loopback listener once enabled. Dropping tiny_http::Server
         // strands accepted keep-alive sockets in its old queue; a re-created
@@ -407,7 +548,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
             (local_request, false)
         } else {
             (
-                server.recv_timeout(if remote_server.is_some() {
+                server.recv_timeout(if remote_server.is_some() || hook_server.is_some() {
                     Duration::from_millis(50)
                 } else {
                     TICK_INTERVAL

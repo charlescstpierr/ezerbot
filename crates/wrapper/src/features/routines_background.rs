@@ -445,7 +445,7 @@ pub fn due(db: &Path, now: i64) -> Result<bool, ApiError> {
     if recovery {
         return Ok(true);
     }
-    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id WHERE o.status='pending' AND r.deleted=0 AND (r.enabled=1 OR o.manual_nonce IS NOT NULL))", [], |r|r.get(0))?;
+    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id WHERE o.status='pending' AND r.deleted=0 AND (r.enabled=1 OR (o.manual_nonce IS NOT NULL AND o.manual_nonce NOT LIKE 'webhook:%')))", [], |r|r.get(0))?;
     if pending {
         return Ok(true);
     }

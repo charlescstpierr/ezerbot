@@ -25,6 +25,8 @@ pub enum Schedule {
     Once {
         at: i64,
     },
+    /// Never due by itself: an authenticated webhook call starts the routine.
+    Webhook,
 }
 
 fn invalid(message: impl std::fmt::Display) -> Error {
@@ -101,6 +103,9 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
                 format!("Une fois le {}", date.strftime("%d/%m/%Y à %H:%M:%S")),
                 time_zone,
             )
+        }
+        Schedule::Webhook => {
+            return Ok("Webhook : démarre à chaque appel authentifié".into());
         }
         Schedule::Every {
             interval_ms,
@@ -292,6 +297,7 @@ fn readable_duration(ms: u64) -> String {
 pub fn next_after(schedule: &Schedule, time_zone: &str, reference_ms: i64) -> Result<Option<i64>> {
     match schedule {
         Schedule::Once { at } => Ok((*at > reference_ms).then_some(*at)),
+        Schedule::Webhook => Ok(None),
         Schedule::Every {
             interval_ms,
             phase_ms,
@@ -804,6 +810,24 @@ mod cron_tests {
             Some(ms("2028-02-29T00:00:00Z"))
         );
         assert_eq!(next("0 0 31 2 *", "2025-01-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn webhook_is_never_due_by_the_clock_and_keeps_its_wire_shape() {
+        let webhook = Schedule::Webhook;
+        assert_eq!(
+            serde_json::to_string(&webhook).unwrap(),
+            r#"{"kind":"webhook"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Schedule>(r#"{"kind":"webhook"}"#).unwrap(),
+            webhook
+        );
+        assert_eq!(next_after(&webhook, "UTC", i64::MIN).unwrap(), None);
+        assert_eq!(
+            describe_fr(&webhook, "UTC").unwrap(),
+            "Webhook : démarre à chaque appel authentifié"
+        );
     }
 
     #[test]

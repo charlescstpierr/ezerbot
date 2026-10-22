@@ -120,7 +120,7 @@
     const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
-  const scheduleLabel = (parsed) => parsed.trigger.kind === "every" ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  const scheduleLabel = (parsed) => ["every", "github"].includes(parsed.trigger.kind) ? parsed.text : `${parsed.text} (${parsed.zone})`;
   // The five events a GitHub trigger can listen to, in the order the editor lists them.
   const githubEvents = [["pull_request_opened", "pull request ouverte"], ["pull_request_pushed", "pull request poussée"], ["pull_request_merged", "pull request mergée"], ["comment", "commentaire (pull request, issue ou revue inline)"], ["issue_opened", "issue ouverte"]];
   const githubEventLabel = (event) => (githubEvents.find(([value]) => value === event) || [event, event])[1].replace(/ \(.*\)$/, "");

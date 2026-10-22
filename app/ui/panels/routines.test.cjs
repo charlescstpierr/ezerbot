@@ -657,7 +657,8 @@ test('a GitHub trigger is saved with the chosen repository and events, in the or
   const boxes = eventBoxes(h);
   pick(boxes[3]); pick(boxes[0]);
   editorChanged(h);
-  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /GitHub charles\/essai : pull request ouverte, commentaire/);
+  // The preview names the repository and the events, with no time zone: nothing here is timed.
+  assert.equal(h.t.content.querySelectorAll('.routines-preview')[0].textContent, 'GitHub charles/essai : pull request ouverte, commentaire');
   await submit(h);
   const created = sent.find(s => s.url === '/api/routines');
   assert.deepEqual(created.body.trigger, { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] });

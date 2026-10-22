@@ -1126,6 +1126,9 @@ fn outbound_and_destructive_connector_actions_ignore_permanent_rules() {
         "post_message",
         "create_comment",
         "delete_file",
+        "sendEmail",
+        "deleteFile",
+        "chat.postMessage",
     ] {
         let tool = f.tool(name);
         let first_id = format!("ask-{name}");
@@ -1142,7 +1145,7 @@ fn outbound_and_destructive_connector_actions_ignore_permanent_rules() {
             .expect("carte")["payload"]
             .clone();
         assert_eq!(payload["policy"]["remember"], false, "{name}");
-        let expected = if name == "delete_file" {
+        let expected = if name.to_ascii_lowercase().contains("delete") {
             "destructive"
         } else {
             "outbound"

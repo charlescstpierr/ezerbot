@@ -1248,92 +1248,91 @@ fn destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
 }
 
 #[test]
-fn background_shell_always_persists_across_restart_and_a_deletion_still_asks() {
+fn background_true_is_refused_and_does_not_launch() {
     let mut f = Fixture::new();
     f.settings(true, false);
-    let mut first = f.shell(&format!("printf {}", "z".repeat(180)));
-    first["background"] = json!(true);
-    f.send("bg", "run_shell", first);
-    let card = f.request("bg");
-    let policy = approval_policy(&mut f, "bg");
-    assert_eq!(policy["remember"], true);
-    assert_eq!(policy["scope"], "action");
-    let shown = approval_message(&mut f, "bg");
-    assert_eq!(
-        shown["background_task"]["kind"],
-        "Exécuter une tâche sur l'ordinateur"
-    );
-    assert_eq!(shown["background_task"]["bot_name"], "Ezerbot");
-    assert!(shown["background_task"]["summary"]
-        .as_str()
-        .unwrap()
-        .ends_with("… (raccourci)"));
-    f.decide(&card, json!({"always_allow":{"scope":"global"}}));
+    let shell = grokbot_wrapper::features::local::tools()
+        .into_iter()
+        .find(|tool| tool.name == "run_shell")
+        .unwrap();
+    assert!(shell.schema["properties"].get("background").is_none());
+    assert!(!shell.description.contains("arrière-plan"));
+    let marker = f.root().join("pas-lance.txt");
+    let mut args = f.shell("touch pas-lance.txt");
+    args["background"] = json!(true);
+    f.send("bg", "run_shell", args);
     f.finish("bg");
-    let mut again = f.shell("printf oui");
-    again["background"] = json!(true);
-    f.send("again", "run_shell", again);
-    f.finish("again");
-    assert!(requests::list_for_run(&f.db(), &f.run("again").run_id)
+    let outcome = f.outcome("bg");
+    assert_eq!(outcome["status"], "failed");
+    assert!(outcome["reason"].as_str().unwrap().contains("invalides"));
+    assert!(!marker.exists());
+    assert!(requests::list_for_run(&f.db(), &f.run("bg").run_id)
         .unwrap()
         .is_empty());
-    f.reopen();
-    let mut restarted = f.shell("printf encore");
-    restarted["background"] = json!(true);
-    f.send("restarted", "run_shell", restarted);
-    f.finish("restarted");
-    assert!(requests::list_for_run(&f.db(), &f.run("restarted").run_id)
-        .unwrap()
-        .is_empty());
-    let target = f.root().join("victime-bg.txt");
-    std::fs::write(&target, "garde").unwrap();
-    let mut removal = f.shell("rm victime-bg.txt");
-    removal["background"] = json!(true);
-    f.send("rm-bg", "run_shell", removal);
-    wait("suppression demandée", || {
-        let status = f.run("rm-bg").status;
-        status == RunStatus::AwaitingApproval || status.is_terminal()
-    });
-    assert_eq!(f.run("rm-bg").status, RunStatus::AwaitingApproval);
-    assert!(target.exists());
-    let removal_policy = approval_policy(&mut f, "rm-bg");
-    assert_eq!(removal_policy["remember"], false);
-    assert_eq!(removal_policy["protection"], "destructive");
-    f.decide(&f.request("rm-bg"), json!("deny"));
-    f.finish("rm-bg");
-    assert!(target.exists());
-    let rules = f.post(
-        "/api/approvals/rules/revoke",
-        json!({
-            "requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"background_computer",
-            "args_digest":"","scope":"global"
-        }),
-    );
-    assert!(rules["rules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|rule| rule["tool"] != "background_computer"));
-    let mut revoked = f.shell("printf revenu");
-    revoked["background"] = json!(true);
-    f.send("revoked", "run_shell", revoked);
-    let back = f.request("revoked");
-    assert!(matches!(
-        back.status,
-        grokbot_forms::requests::RequestStatus::Pending
-    ));
-    f.decide(&back, json!("deny"));
-    f.finish("revoked");
+    let rules: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM forms_approval_rules WHERE tool='background_computer'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rules, 0);
 }
 
-fn approval_message(f: &mut Fixture, id: &str) -> Value {
-    let run = f.run(id).run_id;
-    f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|c| c["messages"].as_array().unwrap().clone())
-        .find(|m| m["kind"] == "approval" && m["payload"]["run_id"] == run)
-        .expect("carte d’approbation")["payload"]
-        .clone()
+#[test]
+fn exact_shell_key_and_unproven_commands_stay_on_the_card() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("pattern", "run_shell", f.shell("printf oui"));
+    let card = f.request("pattern");
+    assert_eq!(approval_policy(&mut f, "pattern")["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("pattern");
+    f.send("spaced", "run_shell", f.shell("printf  oui"));
+    let spaced = f.request("spaced");
+    assert_eq!(approval_policy(&mut f, "spaced")["pattern"], "printf  oui");
+    f.decide(&spaced, json!("deny"));
+    f.finish("spaced");
+    f.send("global", "run_shell", f.shell("printf encore"));
+    let global = f.request("global");
+    f.decide(&global, json!({"always_allow":{"scope":"global"}}));
+    f.finish("global");
+    let cases = [
+        ("semi", "printf ok; rm note", Some("destructive")),
+        ("and", "cd /tmp && printf ok", None),
+        ("exec", "find . -exec ls {} +", None),
+        ("git", "git clean -fd", Some("destructive")),
+        ("interp", "bash -c 'printf oui'", None),
+        ("mail", "sendmail someone", Some("outbound")),
+    ];
+    for (id, command, protection) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte obligatoire", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        if let Some(kind) = protection {
+            assert_eq!(policy["protection"], kind, "{command}");
+        }
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+    }
 }

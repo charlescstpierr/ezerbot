@@ -118,7 +118,9 @@ pub fn evaluate_named(
     if !arguments.is_object() {
         return Err(invalid("invalid arguments"));
     }
-    if crate::policy::protected(tool, arguments, remote_name).is_some() {
+    // A standing allow or deny never covers a protected action, nor a shell
+    // command that cannot be remembered exactly.
+    if !crate::policy::describe(tool, arguments, remote_name).remember {
         return Ok(None);
     }
     let digest = approvals::args_digest(tool, arguments)?;
@@ -696,7 +698,8 @@ mod tests {
         let conn = connection();
         let route = route();
         let first = json!({"command":"printf oui","cwd":"/tmp","timeout_ms":1000});
-        let same = json!({"command":"printf   oui","cwd":"/elsewhere","timeout_ms":50});
+        let same = json!({"command":"printf oui","cwd":"/elsewhere","timeout_ms":50});
+        let spaced = json!({"command":"printf   oui","cwd":"/tmp","timeout_ms":50});
         let other = json!({"command":"printf non","cwd":"/tmp"});
         with_tx(&conn, |conn| -> Result<()> {
             let digest = approvals::args_digest("run_shell", &first)?;
@@ -741,6 +744,9 @@ mod tests {
         assert!(evaluate(&conn, &route, "run_shell", &other)
             .unwrap()
             .is_none());
+        assert!(evaluate(&conn, &route, "run_shell", &spaced)
+            .unwrap()
+            .is_none());
         decide(
             &conn,
             "broad",
@@ -755,6 +761,59 @@ mod tests {
         assert!(evaluate(&conn, &route, "run_shell", &removal)
             .unwrap()
             .is_none());
+        for command in [
+            "printf ok; rm note",
+            "cd /tmp && printf ok",
+            "find . -exec ls {} +",
+            "git clean -fd",
+            "bash -c 'printf oui'",
+            "sendmail bob",
+            "printf x\nwhoami",
+        ] {
+            assert!(
+                evaluate(&conn, &route, "run_shell", &json!({"command": command}))
+                    .unwrap()
+                    .is_none(),
+                "{command}"
+            );
+        }
+        for (id, tool) in [("camel-send", "sendEmail"), ("camel-delete", "deleteFile")] {
+            decide(
+                &conn,
+                id,
+                &route,
+                tool,
+                &json!({"text":"bonjour"}),
+                ApprovalDecision::AlwaysAllow {
+                    scope: RuleScope::Global,
+                },
+            );
+            assert!(
+                evaluate(&conn, &route, tool, &json!({"text":"encore"}))
+                    .unwrap()
+                    .is_none(),
+                "{tool}"
+            );
+        }
+        decide(
+            &conn,
+            "dotted-post",
+            &route,
+            "mcp_hash",
+            &json!({"text":"bonjour"}),
+            ApprovalDecision::AlwaysAllow {
+                scope: RuleScope::Global,
+            },
+        );
+        assert!(evaluate_named(
+            &conn,
+            &route,
+            "mcp_hash",
+            &json!({"text":"encore"}),
+            Some("chat.postMessage")
+        )
+        .unwrap()
+        .is_none());
         decide(
             &conn,
             "mail",

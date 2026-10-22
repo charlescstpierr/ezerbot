@@ -48,7 +48,7 @@ for line in sys.stdin:
         if mode == "protected":
             tools = [
                 {"name": name, "description": "Action protégée du connecteur fictif.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}
-                for name in ("send_email", "post_message", "create_comment", "delete_file", "echo")
+                for name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage", "echo")
             ]
         result = {"tools": tools}
         if mode == "change-during-list" and not changed:
@@ -94,7 +94,7 @@ for line in sys.stdin:
                 result["structuredContent"] = {"value": int(os.environ["NUMERIC_TOKEN"])}
         elif name == "addition":
             result = {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}]}
-        elif name in ("send_email", "post_message", "create_comment", "delete_file"):
+        elif name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage"):
             result = {"content": [{"type": "text", "text": f"{name}:{args.get('text', '')}"}]}
         else:
             response["error"] = {"code": -32602, "message": "Outil inconnu"}

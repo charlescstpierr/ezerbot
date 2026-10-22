@@ -1,9 +1,10 @@
 //! One place decides whether a standing approval may cover an action.
 //!
 //! A remembered rule is per requesting bot and per tool. A shell command is
-//! remembered by its normalized command text, and a connector action by that
-//! connector's tool. Sending under the user's name (email, message, comment)
-//! and deletions stay on a confirmation card: a stored rule never covers them.
+//! remembered by its exact command text, and a connector action by that
+//! connector's tool. Sending under the user's name (email, message, comment),
+//! deletions, and any shell that is compound or not proven safe stay on a
+//! confirmation card: a stored rule never covers them.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -86,11 +87,15 @@ pub fn describe(tool: &str, arguments: &Value, remote_name: Option<&str>) -> Pol
 
 pub fn protected(tool: &str, arguments: &Value, remote_name: Option<&str>) -> Option<Protection> {
     if tool == "run_shell" {
-        return arguments
-            .get("command")
-            .and_then(Value::as_str)
-            .filter(|command| shell_is_destructive(command))
-            .map(|_| Protection::Destructive);
+        let command = arguments.get("command").and_then(Value::as_str)?;
+        let scan = scan_shell(command);
+        if scan.destructive {
+            return Some(Protection::Destructive);
+        }
+        if scan.outbound {
+            return Some(Protection::Outbound);
+        }
+        return None;
     }
     for name in [remote_name.unwrap_or(""), tool] {
         if name.is_empty() {
@@ -106,22 +111,21 @@ pub fn protected(tool: &str, arguments: &Value, remote_name: Option<&str>) -> Op
     None
 }
 
-/// Normalized shell command used as the standing-rule key. Empty, huge, or
-/// control-bearing commands are not rememberable.
+/// Exact shell command used as the standing-rule key. Whitespace is kept as
+/// written. Newlines, separators, substitutions, and anything not proven safe
+/// are not rememberable.
 pub fn command_pattern(tool: &str, arguments: &Value) -> Option<String> {
     if tool != "run_shell" {
         return None;
     }
     let command = arguments.get("command").and_then(Value::as_str)?;
-    let pattern = command.split_whitespace().collect::<Vec<_>>().join(" ");
-    valid_pattern_key(&pattern).then_some(pattern)
+    exact_shell_key(command).then(|| command.to_owned())
 }
 
-/// A sub-agent or a shell command explicitly started in the background.
+/// A sub-agent. A shell `background` flag is not a background launch: that
+/// executor is not available here, so the flag is refused by the shell tool.
 pub fn background_launch(tool: &str, arguments: &Value) -> bool {
-    tool == "delegate"
-        || (tool == "run_shell"
-            && arguments.get("background").and_then(Value::as_bool) == Some(true))
+    tool == "delegate" && arguments.is_object()
 }
 
 /// One-line preview. Long text ends with `… (raccourci)`.
@@ -149,15 +153,33 @@ pub fn valid_pattern_key(key: &str) -> bool {
 }
 
 fn normalize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c == '-' {
-                '_'
-            } else {
-                c.to_ascii_lowercase()
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (index, &ch) in chars.iter().enumerate() {
+        if matches!(ch, '-' | '.' | '/' | ':') {
+            if !out.is_empty() && !out.ends_with('_') {
+                out.push('_');
             }
-        })
-        .collect()
+            continue;
+        }
+        if ch.is_ascii_uppercase() {
+            let prev = index.checked_sub(1).map(|at| chars[at]);
+            let next = chars.get(index + 1).copied();
+            let boundary = prev.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                || (prev.is_some_and(|c| c.is_ascii_uppercase())
+                    && next.is_some_and(|c| c.is_ascii_lowercase()));
+            if boundary && !out.is_empty() && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            continue;
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_owned()
 }
 
 fn is_outbound(name: &str) -> bool {
@@ -223,11 +245,189 @@ fn is_destructive_name(name: &str) -> bool {
 }
 
 pub fn shell_is_destructive(command: &str) -> bool {
-    let tokens = shell_tokens(command);
+    scan_shell(command).destructive
+}
+
+#[derive(Default)]
+struct ShellScan {
+    destructive: bool,
+    outbound: bool,
+    unproven: bool,
+}
+
+fn scan_shell(command: &str) -> ShellScan {
+    let mut scan = ShellScan::default();
+    scan_shell_at(command, &mut scan, 0);
+    scan
+}
+
+fn scan_shell_at(command: &str, scan: &mut ShellScan, depth: u8) {
+    if depth > 6 {
+        scan.unproven = true;
+        return;
+    }
+    let (segments, compound, substitutions) = split_shell(command);
+    if compound {
+        scan.unproven = true;
+    }
+    for inner in substitutions {
+        scan_shell_at(&inner, scan, depth + 1);
+    }
+    for segment in segments {
+        classify_segment(&segment, scan, depth);
+    }
+}
+
+fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
+    let tokens = shell_tokens(segment);
+    if let Some(exec_at) = tokens
+        .iter()
+        .position(|token| matches!(token.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+    {
+        scan.unproven = true;
+        if tokens
+            .get(exec_at + 1)
+            .is_some_and(|cmd| matches!(basename(cmd), "rm" | "rmdir" | "unlink" | "shred" | "srm"))
+        {
+            scan.destructive = true;
+        }
+    }
     let Some(index) = command_index(&tokens) else {
-        return false;
+        return;
     };
-    destructive_at(&tokens, index)
+    if destructive_at(&tokens, index) {
+        scan.destructive = true;
+    }
+    let base = basename(&tokens[index]);
+    if is_mailer(base) {
+        scan.outbound = true;
+    }
+    if is_code_interpreter(base) && has_code_flag(base, &tokens[index + 1..]) {
+        scan.unproven = true;
+        if let Some(script) = shell_script(&tokens, index) {
+            scan_shell_at(&script, scan, depth + 1);
+        }
+    }
+}
+
+fn exact_shell_key(command: &str) -> bool {
+    if !valid_pattern_key(command)
+        || command.trim().is_empty()
+        || command_has_shell_metachar(command)
+    {
+        return false;
+    }
+    let scan = scan_shell(command);
+    !scan.destructive && !scan.outbound && !scan.unproven
+}
+
+fn command_has_shell_metachar(command: &str) -> bool {
+    command
+        .chars()
+        .any(|ch| matches!(ch, ';' | '&' | '|' | '`' | '(' | ')') || ch.is_control())
+}
+
+#[allow(clippy::while_let_on_iterator)] // the scan peeks and consumes the next operator
+fn split_shell(command: &str) -> (Vec<String>, bool, Vec<String>) {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut substitutions = Vec::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    let mut compound = false;
+    while let Some(ch) = chars.next() {
+        if let Some(mark) = quote {
+            current.push(ch);
+            if ch == mark {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\\' {
+            current.push(ch);
+            if let Some(next) = chars.next() {
+                current.push(next);
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+        if ch == '`' {
+            compound = true;
+            let mut inner = String::new();
+            for inner_ch in chars.by_ref() {
+                if inner_ch == '`' {
+                    break;
+                }
+                inner.push(inner_ch);
+            }
+            substitutions.push(inner);
+            continue;
+        }
+        if ch == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            compound = true;
+            substitutions.push(take_balanced(&mut chars));
+            continue;
+        }
+        if ch == '\n' || ch == '\r' || ch == ';' || ch == '|' || ch == '&' {
+            compound = true;
+            if (ch == '|' || ch == '&') && chars.peek() == Some(&ch) {
+                chars.next();
+            }
+            push_segment(&mut segments, &mut current);
+            continue;
+        }
+        current.push(ch);
+    }
+    push_segment(&mut segments, &mut current);
+    (segments, compound, substitutions)
+}
+
+fn push_segment(segments: &mut Vec<String>, current: &mut String) {
+    if current.trim().is_empty() {
+        current.clear();
+    } else {
+        segments.push(std::mem::take(current));
+    }
+}
+
+fn take_balanced(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut depth = 1;
+    let mut inner = String::new();
+    let mut quote = None;
+    for ch in chars.by_ref() {
+        if let Some(mark) = quote {
+            inner.push(ch);
+            if ch == mark {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            inner.push(ch);
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+            inner.push(ch);
+            continue;
+        }
+        if ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+            inner.push(ch);
+            continue;
+        }
+        inner.push(ch);
+    }
+    inner
 }
 
 fn destructive_at(tokens: &[String], index: usize) -> bool {
@@ -235,24 +435,82 @@ fn destructive_at(tokens: &[String], index: usize) -> bool {
     if matches!(base, "rm" | "rmdir" | "unlink" | "shred" | "srm") {
         return true;
     }
-    if base == "git" && tokens.get(index + 1).map(String::as_str) == Some("clean") {
+    if base == "git" && git_subcommand(tokens, index) == Some("clean") {
         return true;
     }
     if base == "git"
-        && tokens.get(index + 1).map(String::as_str) == Some("reset")
-        && tokens[index + 2..].iter().any(|token| token == "--hard")
+        && git_subcommand(tokens, index) == Some("reset")
+        && tokens[index + 1..].iter().any(|token| token == "--hard")
     {
         return true;
     }
     if base == "find" && tokens[index + 1..].iter().any(|token| token == "-delete") {
         return true;
     }
-    if matches!(base, "sh" | "bash" | "zsh" | "dash" | "ksh") {
-        if let Some(script) = shell_script(tokens, index) {
-            return shell_is_destructive(&script);
-        }
-    }
     false
+}
+
+fn git_subcommand(tokens: &[String], index: usize) -> Option<&str> {
+    let mut cursor = index + 1;
+    while cursor < tokens.len() {
+        let token = tokens[cursor].as_str();
+        if token == "--" {
+            return tokens.get(cursor + 1).map(String::as_str);
+        }
+        if token.starts_with('-') {
+            if matches!(
+                token,
+                "-C" | "-c"
+                    | "--git-dir"
+                    | "--work-tree"
+                    | "--namespace"
+                    | "--exec-path"
+                    | "--config-env"
+            ) {
+                cursor += 2;
+                continue;
+            }
+            cursor += 1;
+            continue;
+        }
+        return Some(token);
+    }
+    None
+}
+
+fn is_shell(base: &str) -> bool {
+    matches!(base, "sh" | "bash" | "zsh" | "dash" | "ksh")
+}
+
+fn is_code_interpreter(base: &str) -> bool {
+    is_shell(base)
+        || matches!(
+            base,
+            "perl" | "ruby" | "node" | "nodejs" | "php" | "lua" | "deno" | "bun"
+        )
+        || base.starts_with("python")
+        || base.starts_with("node")
+}
+
+fn is_mailer(base: &str) -> bool {
+    matches!(
+        base,
+        "sendmail" | "mail" | "mailx" | "mutt" | "msmtp" | "ssmtp" | "s-nail" | "exim"
+    )
+}
+
+fn has_code_flag(base: &str, tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        token == "-c"
+            || token == "--command"
+            || (matches!(base, "perl" | "ruby" | "node" | "nodejs" | "deno" | "bun")
+                && token == "-e")
+            || (base == "php" && (token == "-r" || token == "-R"))
+            || (is_shell(base)
+                && token.starts_with('-')
+                && !token.starts_with("--")
+                && token.chars().skip(1).any(|ch| ch == 'c'))
+    })
 }
 
 fn shell_script(tokens: &[String], index: usize) -> Option<String> {
@@ -337,12 +595,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn shell_pattern_ignores_spacing_and_keeps_the_command() {
+    fn shell_pattern_keeps_the_exact_command() {
         let args = json!({"command":"  printf   oui  ","cwd":"/tmp"});
         let policy = describe("run_shell", &args, None);
         assert!(policy.remember);
         assert_eq!(policy.scope, "pattern");
-        assert_eq!(policy.pattern, "printf oui");
+        assert_eq!(policy.pattern, "  printf   oui  ");
+        assert_ne!(
+            policy.pattern,
+            describe("run_shell", &json!({"command":"printf oui"}), None).pattern
+        );
         assert!(
             describe("run_shell", &json!({"command":"rm note"}), None).protection
                 == Some(Protection::Destructive)
@@ -350,6 +612,25 @@ mod tests {
         assert!(!describe("run_shell", &json!({"command":"echo rm"}), None)
             .protection
             .is_some());
+        for command in [
+            "printf x\nwhoami",
+            "printf ok; whoami",
+            "printf ok && whoami",
+            "printf ok || whoami",
+            "printf ok | whoami",
+            "printf `whoami`",
+            "printf $(whoami)",
+            "printf (ok)",
+        ] {
+            assert!(
+                command_pattern("run_shell", &json!({"command": command})).is_none(),
+                "{command}"
+            );
+            assert!(
+                !describe("run_shell", &json!({"command": command}), None).remember,
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -365,9 +646,56 @@ mod tests {
         ] {
             assert!(shell_is_destructive(command), "{command}");
         }
-        for command in ["printf oui", "echo rm", "git status", "ls"] {
+        for command in [
+            "cd /tmp && rm note",
+            "printf ok; rm note",
+            "printf ok\nrm note",
+            "find . -exec rm {} +",
+            "git -C /tmp clean -fd",
+        ] {
+            assert!(shell_is_destructive(command), "{command}");
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert_eq!(
+                policy.protection,
+                Some(Protection::Destructive),
+                "{command}"
+            );
+        }
+        for command in [
+            "printf oui",
+            "echo rm",
+            "git status",
+            "ls",
+            "printf ok && echo rm",
+        ] {
             assert!(!shell_is_destructive(command), "{command}");
         }
+    }
+
+    #[test]
+    fn unproven_shells_are_never_remembered() {
+        for command in [
+            "find . -exec ls {} +",
+            "bash -c 'printf oui'",
+            "python3 -c 'print(1)'",
+            "perl -e 'print 1'",
+            "cd /tmp && printf ok",
+            "printf ok || true",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert!(policy.protection.is_none(), "{command}");
+            assert!(
+                command_pattern("run_shell", &json!({"command": command})).is_none(),
+                "{command}"
+            );
+        }
+        let mail = describe("run_shell", &json!({"command":"sendmail bob"}), None);
+        assert!(!mail.remember);
+        assert_eq!(mail.protection, Some(Protection::Outbound));
+        let wrapped = describe("run_shell", &json!({"command":"sudo sendmail bob"}), None);
+        assert_eq!(wrapped.protection, Some(Protection::Outbound));
     }
 
     #[test]
@@ -390,14 +718,38 @@ mod tests {
         );
         assert!(protected("mcp_hash", &json!({}), Some("echo")).is_none());
         assert!(protected("write_file", &json!({}), None).is_none());
-        let background = describe(
+        assert_eq!(
+            protected("sendEmail", &json!({}), None),
+            Some(Protection::Outbound)
+        );
+        assert_eq!(
+            protected("deleteFile", &json!({}), None),
+            Some(Protection::Destructive)
+        );
+        assert_eq!(
+            protected("mcp_hash", &json!({}), Some("chat.postMessage")),
+            Some(Protection::Outbound)
+        );
+        assert_eq!(
+            protected("mcp_hash", &json!({}), Some("SendMessage")),
+            Some(Protection::Outbound)
+        );
+        let flagged = describe(
             "run_shell",
             &json!({"command":"printf oui","background":true}),
             None,
         );
-        assert!(background.remember);
-        assert_eq!(background.scope, "action");
-        assert_eq!(background.label, BACKGROUND_KIND);
+        assert!(flagged.remember);
+        assert_eq!(flagged.scope, "pattern");
+        assert_eq!(flagged.pattern, "printf oui");
+        assert!(!background_launch(
+            "run_shell",
+            &json!({"command":"printf oui","background":true})
+        ));
+        let delegate = describe("delegate", &json!({"objective":"Relire"}), None);
+        assert!(delegate.remember);
+        assert_eq!(delegate.scope, "action");
+        assert_eq!(delegate.label, BACKGROUND_KIND);
         let removal = describe(
             "run_shell",
             &json!({"command":"rm note","background":true}),

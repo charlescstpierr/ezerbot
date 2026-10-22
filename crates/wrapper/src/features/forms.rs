@@ -534,9 +534,10 @@ pub fn check_tool_approval(
             }),
         };
     }
-    // A standing allow or deny never covers an outbound send or a deletion.
+    // A standing allow or deny never covers an outbound send, a deletion, or a
+    // shell command that is compound or not proven safe.
     let policy = approval_policy(ctx, &call.name, &call.arguments);
-    if policy.protection.is_some() {
+    if policy.protection.is_some() || (call.name == "run_shell" && !policy.remember) {
         return Ok(ApprovalCheck::Ask);
     }
     if policy.scope == "action" {
@@ -987,16 +988,17 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 return Err(ApiError::new(400, "Request is not an approval"));
             };
             let policy = policy_for_request(&ctx, &request)?;
-            if policy.protection.is_some()
-                && matches!(
-                    input.decision,
-                    ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
-                )
+            if matches!(
+                input.decision,
+                ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
+            ) && (policy.protection.is_some() || (tool == "run_shell" && !policy.remember))
             {
-                return Err(ApiError::new(
-                    400,
-                    "Un envoi sous votre nom ou une suppression demande une confirmation à chaque fois.",
-                ));
+                let message = if policy.protection.is_some() {
+                    "Un envoi sous votre nom ou une suppression demande une confirmation à chaque fois."
+                } else {
+                    "Cette commande ne peut pas être mémorisée. Elle demande une confirmation à chaque fois."
+                };
+                return Err(ApiError::new(400, message));
             }
             if (super::mcp::is_lifecycle(tool) || super::screen::is_tool(tool))
                 && matches!(

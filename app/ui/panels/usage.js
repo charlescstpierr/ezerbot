@@ -21,8 +21,8 @@
   const sourceRank = (source) => { const rank = Object.keys(labels).indexOf(source); return rank < 0 ? Infinity : rank; };
   const missingBot = "Bot supprimé";
   let dialog, section, quotaArea, localArea, notice, refresh, warning, warningText;
-  let generalTab, usageTab, quotaState, localData, view = "bot", loading = false, request = 0;
-  let providerKey, quotaPoll;
+  let generalTab, usageTab, quotaState, localData, view = "bot", loading = false, queued = false, queuedForce = false, request = 0;
+  let providerKey, quotaPoll, quotaShown, localShown, stateQuota;
   const isUsageOpen = () => dialog?.open && dialog.classList.contains("usage-focus");
 
   function chooseUsage(active) {
@@ -52,10 +52,14 @@
   function renderQuota(data) {
     quotaState = data;
     if (!quotaArea) return;
-    quotaArea.replaceChildren();
     clearTimeout(quotaPoll);
     if (data?.status === "loading" || data?.refreshing) quotaPoll = setTimeout(() => { void load(false); }, 800);
     const ready = data?.status === "ready";
+    // An unchanged reading keeps its nodes: repainting identical content makes the panel flash.
+    const shown = JSON.stringify(ready ? data : { ...data, refreshing: undefined });
+    if (shown === quotaShown) return;
+    quotaShown = shown;
+    quotaArea.replaceChildren();
     const high = ready && windows(data).filter((w) => w.used_percent >= 80).sort((a, b) => b.used_percent - a.used_percent)[0];
     warning.hidden = !high;
     if (high) warningText.textContent = `${percent(high.used_percent)} % du ${windowName(high).toLowerCase()} Codex utilisés. ${percent(high.remaining_percent)} % restants.`;
@@ -95,6 +99,9 @@
   }
   function renderLocal() {
     if (!localArea || !localData) return;
+    const shown = JSON.stringify([localData, view]);
+    if (shown === localShown) return;
+    localShown = shown;
     localArea.replaceChildren();
     const total = localData.total;
     const heading = node("div", "usage-local-heading");
@@ -136,9 +143,14 @@
     localArea.append(node("p", "usage-footnote", "Réponses principales du moteur, depuis le début de l’historique local. Hors titres, mémoire automatique, vision et résumés. Ces tokens ne permettent pas de calculer le quota du forfait."));
   }
   async function load(force) {
-    if (!section || loading) return;
+    if (!section) return;
+    if (loading) {
+      // Refresh stays pressable: the request waits for the read in flight, then runs once.
+      queued = true; queuedForce ||= force;
+      return;
+    }
     const revision = ++request;
-    loading = true; refresh.disabled = true; notice.textContent = "";
+    loading = true; notice.textContent = "";
     section.setAttribute("aria-busy", "true");
     try {
       const data = await panels.api(force ? "/api/usage/refresh" : "/api/usage", force ? {} : undefined);
@@ -147,19 +159,39 @@
     } catch (error) {
       if (revision === request) { notice.textContent = error.message; notice.setAttribute("role", "alert"); }
     } finally {
-      loading = false; refresh.disabled = false; section.setAttribute("aria-busy", "false");
+      loading = false; section.setAttribute("aria-busy", "false");
+      if (queued) {
+        const again = queuedForce;
+        queued = queuedForce = false;
+        void load(again);
+      }
     }
+  }
+  // Background read of the usage alone; it neither disables the panel nor repaints the workspace.
+  async function poll() {
+    if (document.visibilityState === "hidden" || panels.busy || loading) return;
+    const revision = request;
+    try {
+      const data = await panels.api("/api/usage");
+      if (revision !== request) return;
+      localData = data.local; renderQuota(data.codex); renderLocal();
+    } catch { /* The next tick retries; only an explicit load reports the failure. */ }
   }
   panels.register({
     id: "usage",
     onState(state) {
       const key = `${state.provider?.backend}:${state.provider?.connected}:${state.provider?.email || ""}`;
-      if (providerKey !== undefined && key !== providerKey) {
+      const changed = providerKey !== undefined && key !== providerKey;
+      if (changed) {
         // Invalidate an in-flight response on sign-out or backend switch.
-        request++; localData = null; localArea?.replaceChildren();
+        request++; localData = null; localShown = undefined; localArea?.replaceChildren();
+        if (isUsageOpen()) void load(false);
       }
       providerKey = key;
-      if (state.usage?.codex) renderQuota(state.usage.codex);
+      // A workspace render re-sends the cached reading: it must not undo a newer one read by a poll.
+      const reading = JSON.stringify(state.usage?.codex);
+      if (state.usage?.codex && (reading !== stateQuota || changed)) renderQuota(state.usage.codex);
+      stateQuota = reading;
     },
     onSettingsLink(id) {
       chooseUsage(id === "usage");
@@ -187,7 +219,7 @@
       renderQuota(quotaState || { status: "loading" });
       new MutationObserver(() => { if (isUsageOpen()) void load(false); }).observe(dialog, { attributes: true, attributeFilter: ["open"] });
       // Keep the threshold warning current even when the app has no active run.
-      setInterval(() => { if (document.visibilityState !== "hidden") void panels.refresh(); }, 60_000);
+      setInterval(() => { void poll(); }, 60_000);
     },
   });
 })();

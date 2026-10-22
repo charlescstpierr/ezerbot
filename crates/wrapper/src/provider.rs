@@ -1925,10 +1925,9 @@ impl Session {
         capability_fallback: bool,
         notices: &mut Vec<String>,
         abandoned: &AtomicBool,
-        within: Option<Duration>,
+        deadline: Option<Instant>,
         on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
-        let deadline = within.map(|within| Instant::now() + within);
         let mut token = self.bearer(false)?;
         let mut refreshed = false;
         loop {
@@ -1937,12 +1936,9 @@ impl Session {
             }
             let mut request = self.request(&token, &mut body)?;
             if let Some(deadline) = deadline {
-                // The cap bounds the whole call, not only the caller's wait.
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(Failure::other("Réponse annulée."));
-                }
-                request = request.timeout(remaining);
+                // A deadline replaces ureq's per-read timeout, so a stream that
+                // sends a byte before each read timeout cannot hold the socket.
+                request = request.timeout(deadline.saturating_duration_since(Instant::now()));
             }
             let attempt = request.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {

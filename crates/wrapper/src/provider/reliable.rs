@@ -17,7 +17,7 @@ impl Default for Deadlines {
         Self {
             first: Duration::from_secs(25),
             stall: Duration::from_secs(60),
-            total: Duration::from_secs(600),
+            total: Duration::from_secs(60),
         }
     }
 }
@@ -173,7 +173,9 @@ impl Session {
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));
         }
-        let within = turn.is_none().then_some(limits.total);
+        // ureq cuts a blocked read at this instant; the session loop below only
+        // reports the timeout, it cannot close a socket the worker is reading.
+        let deadline = Instant::now() + limits.total;
         thread::spawn(move || {
             let worker = Worker {
                 inner: session.inner.clone(),
@@ -187,7 +189,7 @@ impl Session {
                     true,
                     &mut notices,
                     &abandoned,
-                    within,
+                    Some(deadline),
                     &mut |status| {
                         let _ = send(&tx, Wire::Headers(status));
                     },
@@ -316,7 +318,7 @@ impl Session {
                 }
                 return Err(Error::InvalidInput("run cancelled".into()));
             }
-            let timeout = if started.elapsed() >= limits.total {
+            let timeout = if Instant::now() >= deadline {
                 Some((
                     "turn_timeout",
                     "La réponse a dépassé le délai maximal. Réessayez.",
@@ -364,6 +366,10 @@ impl Session {
                     }
                     metadata(Some(&notice), None)?;
                 }
+                // The worker's read fails at the same instant as the deadline; that
+                // transport error is the timeout, not an interrupted connection.
+                Ok(Wire::Failure(_) | Wire::Event(ModelEvent::Failed { .. }))
+                    if Instant::now() >= deadline => {}
                 Ok(Wire::Failure(failure)) => metadata(None, Some(&failure))?,
                 Ok(Wire::Event(event)) => {
                     let terminal = match &event {
@@ -402,6 +408,17 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod production_deadlines {
+    use super::Deadlines;
+    use std::time::Duration;
+
+    #[test]
+    fn a_response_is_bounded_to_sixty_seconds() {
+        assert_eq!(Deadlines::default().total, Duration::from_secs(60));
     }
 }
 

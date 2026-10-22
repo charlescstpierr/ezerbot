@@ -270,3 +270,161 @@ fn local_tokens_roll_up_once_per_bot_and_source_and_survive_deletion_restart() {
     let mut app = f.app();
     assert_eq!(get(&mut app), data);
 }
+
+fn window(reset: Value) -> Value {
+    json!({"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":reset}}})
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn reset_at_is_accepted_as_an_integer_a_string_of_seconds_or_an_iso_date() {
+    for reset in [
+        json!(4102444800u64),
+        json!("4102444800"),
+        json!("2100-01-01T00:00:00Z"),
+        json!("2100-01-01T00:00:00.000Z"),
+        json!("2100-01-01T01:00:00+01:00"),
+    ] {
+        let f = Fixture::new(ScriptedResponse::json(200, window(reset.clone())));
+        let q = f.quota();
+        assert_eq!(q["status"], "ready", "{reset}");
+        assert_eq!(q["quota"]["primary"]["reset_at"], 4102444800u64, "{reset}");
+    }
+    for reset in [
+        json!("secret-upstream"),
+        json!("2100-01-01"),
+        json!("2100-13-45T00:00:00Z"),
+        json!("-5"),
+        json!(-5),
+        json!(0),
+        json!("0"),
+        json!(1.5),
+        json!(300_000_000_000u64),
+        json!(true),
+    ] {
+        let f = Fixture::new(ScriptedResponse::json(200, window(reset.clone())));
+        let q = f.quota();
+        assert_eq!(q["status"], "unavailable", "{reset}");
+        assert!(q["quota"].is_null(), "{reset}");
+        assert!(!q.to_string().contains("secret-upstream"));
+    }
+}
+
+#[test]
+fn an_expired_window_alone_is_unavailable_the_other_stays_and_the_quota_is_read_again() {
+    let reset = now() + 2;
+    let f = Fixture::new(ScriptedResponse::json(
+        200,
+        json!({"rate_limit":{
+            "primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":reset},
+            "secondary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":4102531200u64}
+        }}),
+    ));
+    let started = std::time::Instant::now();
+    let q = f.quota();
+    assert_eq!(q["status"], "ready");
+    assert!(q["quota"]["primary"]["remaining_percent"].is_number());
+    wait("fenêtre échue", || {
+        f.provider.codex_usage(false)["quota"]["primary"].is_null()
+    });
+    let q = f.provider.codex_usage(false);
+    assert_eq!(q["status"], "ready");
+    assert_eq!(q["quota"]["secondary"]["remaining_percent"], 60.0);
+    assert_eq!(q["quota"]["unavailable"], json!(["primary"]));
+    if started.elapsed() < std::time::Duration::from_secs(4) {
+        assert_eq!(f.server.seen.lock().unwrap().quota_headers.len(), 1); // 5 s between reads
+    }
+    wait("quota relu après l’échéance", || {
+        let q = f.provider.codex_usage(false);
+        q["quota"]["primary"]["remaining_percent"] == 65.0
+    });
+    let q = f.provider.codex_usage(false);
+    assert!(q["quota"].get("unavailable").is_none());
+    assert_eq!(f.server.seen.lock().unwrap().quota_headers.len(), 2);
+}
+
+#[test]
+fn every_window_expired_is_unavailable_and_an_upstream_still_expired_is_not_polled_early() {
+    let f = Fixture::new(ScriptedResponse::json(200, window(json!(1))));
+    assert_eq!(f.quota()["status"], "unavailable");
+    std::thread::sleep(std::time::Duration::from_millis(5600));
+    assert_eq!(f.provider.codex_usage(false)["status"], "unavailable");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(f.server.seen.lock().unwrap().quota_headers.len(), 1); // read after the reset, still expired: wait 60 s
+}
+
+#[test]
+fn quota_reads_are_coalesced_and_an_explicit_refresh_still_waits_five_seconds() {
+    let f = Fixture::new(ScriptedResponse::json(200, valid()));
+    assert_eq!(f.quota()["status"], "ready");
+    for _ in 0..3 {
+        f.provider.codex_usage(false);
+        f.provider.codex_usage(true);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert_eq!(f.provider.codex_usage(true)["status"], "ready");
+    assert_eq!(f.server.seen.lock().unwrap().quota_headers.len(), 1);
+}
+
+#[test]
+fn a_quota_redirect_is_never_followed() {
+    use std::sync::atomic::AtomicUsize;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let target = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let target_base = format!("http://{}", target.server_addr().to_ip().unwrap());
+    let seen = hits.clone();
+    std::thread::spawn(move || {
+        for request in target.incoming_requests() {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let _ = request.respond(tiny_http::Response::from_string(valid().to_string()));
+        }
+    });
+    let origin = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let origin_base = format!("http://{}", origin.server_addr().to_ip().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    let location = format!("{target_base}/wham/usage");
+    std::thread::spawn(move || {
+        for request in origin.incoming_requests() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let redirect = tiny_http::Response::from_string(valid().to_string())
+                .with_status_code(302)
+                .with_header(tiny_http::Header::from_bytes("Location", location.clone()).unwrap());
+            let _ = request.respond(redirect);
+        }
+    });
+    let f = Fixture::new(ScriptedResponse::json(200, valid()));
+    std::fs::copy(
+        f.dir.join("app.codex-auth.json"),
+        f.dir.join("redirect.codex-auth.json"),
+    )
+    .unwrap();
+    let provider = Provider::with_backends(
+        &f.dir.join("redirect.sqlite"),
+        f.server.endpoints(),
+        Endpoints {
+            api: format!("{origin_base}/backend-api/codex"),
+            ..f.server.endpoints()
+        },
+        false,
+    );
+    provider.codex_usage(false);
+    wait("quota redirigé", || {
+        provider.codex_usage(false)["status"] != "loading"
+    });
+    let q = provider.codex_usage(false);
+    assert_eq!(q["status"], "unavailable");
+    assert!(q["quota"].is_null());
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "la redirection a été suivie"
+    );
+}

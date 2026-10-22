@@ -101,6 +101,7 @@ pub mod memory;
 pub mod memory_auto;
 pub mod multibot;
 pub mod notifications;
+pub mod pages;
 pub mod routines;
 pub mod routines_background;
 pub mod screen;
@@ -151,6 +152,7 @@ registry!(
     attachments,
     library,
     generated,
+    pages,
     images,
     mcp,
     storage,

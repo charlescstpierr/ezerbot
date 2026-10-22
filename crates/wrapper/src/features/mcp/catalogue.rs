@@ -860,7 +860,9 @@ pub(super) fn remove(
     };
     // A conversation that had chosen this account is asked again, never sent to another.
     tx.execute("DELETE FROM wrapper_github_account_choice WHERE account_id=(SELECT account_id FROM wrapper_connector_catalogue WHERE server_id=?1)",[&server.id])?;
-    gmail::forget_mailbox(&tx, &server.id)?;
+    if m.id == "gmail" {
+        gmail::forget_mailbox(&tx, &server.id)?;
+    }
     tx.execute("UPDATE wrapper_connector_catalogue SET phase='disconnected',message=?2,expires_at=0,account_email=NULL,account_id=NULL,device_user_code=NULL,device_expires_at=0 WHERE server_id=?1",params![server.id,message])?;
     tx.commit()?;
     super::execution::retire(ctx, &server.id);

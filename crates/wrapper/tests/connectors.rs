@@ -105,12 +105,17 @@ struct GmailScript {
     /// Form fields of every token request, in order.
     token_posts: Vec<std::collections::HashMap<String, String>>,
     authorization: Vec<(String, String)>,
+    /// Runs while the provider answers a listing: what happens to the app meanwhile.
+    during_listing: Option<Box<dyn Fn() + Send>>,
 }
 impl GmailScript {
     /// One message as Gmail's `format=full` returns it: a text part and an HTML part.
     fn message(entry: &Value) -> Value {
         let encoded = |text: &str| URL_SAFE_NO_PAD.encode(text);
-        json!({"id":entry["id"],"threadId":entry["id"],"snippet":"Extrait court","internalDate":"1790000000000","payload":{"mimeType":"multipart/alternative","headers":[{"name":"From","value":entry["from"]},{"name":"Subject","value":entry["subject"]},{"name":"Date","value":entry["date"]}],"parts":[{"mimeType":"text/plain","body":{"data":encoded(entry["text"].as_str().unwrap())}},{"mimeType":"text/html","body":{"data":encoded("<p>Version HTML</p>")}}]}})
+        // Messages are received in the order of their number: m7 after m6.
+        let number: i64 = entry["id"].as_str().unwrap()[1..].parse().unwrap();
+        let received = (1_790_000_000_000 + number * 1000).to_string();
+        json!({"id":entry["id"],"threadId":entry["id"],"snippet":"Extrait court","internalDate":received,"payload":{"mimeType":"multipart/alternative","headers":[{"name":"From","value":entry["from"]},{"name":"Subject","value":entry["subject"]},{"name":"Date","value":entry["date"]}],"parts":[{"mimeType":"text/plain","body":{"data":encoded(entry["text"].as_str().unwrap())}},{"mimeType":"text/html","body":{"data":encoded("<p>Version HTML</p>")}}]}})
     }
 }
 struct OAuth {
@@ -443,6 +448,9 @@ impl OAuth {
                                 .collect();
                         let wanted: usize = query["maxResults"].parse().unwrap();
                         assert_eq!(query["labelIds"], "INBOX");
+                        if let Some(during) = &g.during_listing {
+                            during();
+                        }
                         let ids: Vec<Value> = g
                             .inbox
                             .iter()
@@ -3689,4 +3697,106 @@ fn gmail_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_co
     }
     std::env::remove_var("GROKBOT_TEST_KEYCHAIN");
     grokbot_forms::vault::enable_os_vault(false);
+}
+
+#[test]
+fn gmail_read_in_flight_never_uses_a_replacement_account_or_a_bot_that_lost_gmail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let path = f.path.clone();
+    let swap = move || {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.busy_timeout(Duration::from_secs(4)).unwrap();
+        c.execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    };
+    f.oauth.seen.lock().unwrap().gmail.during_listing = Some(Box::new(swap));
+    let before = f.gmail_requests("/messages/m");
+    let run = f.github_call("swap-account", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("a changé"), "account changed");
+    assert_eq!(
+        f.gmail_requests("/messages/m"),
+        before,
+        "no message of the replacement mailbox was read"
+    );
+    // The bot loses Gmail while the listing is answered.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let path = f.path.clone();
+    let revoke = move || {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.busy_timeout(Duration::from_secs(4)).unwrap();
+        c.execute("DELETE FROM wrapper_mcp_bots", []).unwrap();
+    };
+    f.oauth.seen.lock().unwrap().gmail.during_listing = Some(Box::new(revoke));
+    let run = f.github_call("lose-activation", GMAIL_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("a changé"), "activation lost");
+    assert_eq!(f.gmail_requests("/messages/m"), before);
+}
+
+#[test]
+fn gmail_older_mail_entering_the_watched_window_is_not_a_new_message() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    // Thirty messages: the watch only looks at the newest 25.
+    {
+        let mut seen = f.oauth.seen.lock().unwrap();
+        let inbox = (1..=30)
+            .rev()
+            .map(|n| json!({"id":format!("m{n}"),"from":"Alice <alice@example.test>","subject":format!("Courriel {n}"),"date":"Tue, 20 Oct 2026 09:00:00 +0000","text":"Texte."}))
+            .collect();
+        seen.gmail.inbox = inbox;
+    }
+    f.gmail_start();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    assert!(f.new_mail().is_empty());
+    // One message is archived: the 26th enters the window, and it is old mail.
+    f.oauth.seen.lock().unwrap().gmail.inbox.remove(0);
+    assert!(f.new_mail().is_empty());
+    // A genuine arrival still comes out, once.
+    f.add_mail("m31", "Vraie nouveauté");
+    let events = f.new_mail();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "m31");
+    assert!(f.new_mail().is_empty());
+}
+
+#[test]
+fn gmail_watch_survives_the_disconnection_of_another_google_service_with_the_same_address() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(f.new_mail().is_empty());
+    let run = f.connect("calendar");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("calendar", false, false), 200);
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='calendar'",
+            [],
+        )
+        .unwrap();
+    f.add_mail("m7", "Arrivé avant la déconnexion de l’agenda");
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"calendar"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    assert_eq!(f.item("calendar")["status"], "disconnected");
+    assert_eq!(f.item("gmail")["status"], "connected");
+    let events = f.new_mail();
+    assert_eq!(
+        events.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["m7"],
+        "Gmail's baseline was not reset by another service"
+    );
 }

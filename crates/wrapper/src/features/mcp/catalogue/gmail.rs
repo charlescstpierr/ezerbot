@@ -61,7 +61,7 @@ pub(super) fn not_configured() -> ApiError {
     invalid("Le client Google d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion à Gmail reste indisponible tant que ce client n’est pas préparé.")
 }
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY,since_ms INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));")?;
     Ok(())
 }
 /// What the connection forgets about the mailbox once it is disconnected.
@@ -239,6 +239,14 @@ fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiE
         // credentials sees one account, and the call below keeps that token.
         let access = {
             let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+            // The token of a replacement account is never read for a request that was
+            // bound to another one, nor for a bot that is no longer given Gmail.
+            let current = self::account(ctx)?;
+            if current.email != account.email || !current.enabled {
+                return Err(invalid(
+                    "Le compte Gmail a changé pendant la lecture : rien n’a été lu. Réessayez.",
+                ));
+            }
             credentials(ctx, &server.id)?
                 .and_then(|env| env.get("ACCESS_TOKEN").cloned())
                 .ok_or_else(|| invalid(RECONNECT))?
@@ -336,19 +344,27 @@ fn plain_text(part: &Value, depth: u8, budget: &mut u16) -> Option<String> {
         .iter()
         .find_map(|child| plain_text(child, depth - 1, budget))
 }
-fn mail_of(message: &Value) -> Option<MailEvent> {
+/// A message and the instant Gmail received it, in milliseconds.
+fn mail_of(message: &Value) -> Option<(MailEvent, i64)> {
     let id = message_id(message["id"].as_str()?)?.to_owned();
     let payload = &message["payload"];
     let text = plain_text(payload, 8, &mut 64)
         .or_else(|| message["snippet"].as_str().map(str::to_owned))
         .unwrap_or_default();
-    Some(MailEvent {
-        id,
-        expediteur: clean(header(payload, "From").unwrap_or("inconnu"), 200),
-        objet: clean(header(payload, "Subject").unwrap_or("(sans objet)"), 300),
-        date: clean(header(payload, "Date").unwrap_or(""), 100),
-        texte: excerpt(&text),
-    })
+    let received = message["internalDate"]
+        .as_str()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(0);
+    Some((
+        MailEvent {
+            id,
+            expediteur: clean(header(payload, "From").unwrap_or("inconnu"), 200),
+            objet: clean(header(payload, "Subject").unwrap_or("(sans objet)"), 300),
+            date: clean(header(payload, "Date").unwrap_or(""), 100),
+            texte: excerpt(&text),
+        },
+        received,
+    ))
 }
 /// The newest identifiers of the inbox, newest first.
 fn latest_ids(ctx: &Context<'_>, account: &Account, count: u32) -> Result<Vec<String>, ApiError> {
@@ -374,7 +390,11 @@ fn latest_ids(ctx: &Context<'_>, account: &Account, count: u32) -> Result<Vec<St
         .unwrap_or_default())
 }
 /// One message; `None` when it was deleted since it was listed.
-fn message(ctx: &Context<'_>, account: &Account, id: &str) -> Result<Option<MailEvent>, ApiError> {
+fn message(
+    ctx: &Context<'_>,
+    account: &Account,
+    id: &str,
+) -> Result<Option<(MailEvent, i64)>, ApiError> {
     let reply = read(
         ctx,
         account,
@@ -423,7 +443,7 @@ fn list_recent(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
     let account = usable(ctx)?;
     let mut mails = Vec::new();
     for id in latest_ids(ctx, &account, count)? {
-        mails.extend(message(ctx, &account, &id)?);
+        mails.extend(message(ctx, &account, &id)?.map(|(mail, _)| mail));
     }
     let email = account.email.as_str();
     let text = if mails.is_empty() {
@@ -456,32 +476,60 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
     let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
     let account = account(ctx)?;
     let owner = account.email.to_lowercase();
-    let known: bool = ctx.connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_gmail_mailbox WHERE account_id=?1)",
-        [&owner],
-        |r| r.get(0),
-    )?;
+    let since: Option<i64> = ctx
+        .connection
+        .query_row(
+            "SELECT since_ms FROM wrapper_gmail_mailbox WHERE account_id=?1",
+            [&owner],
+            |r| r.get(0),
+        )
+        .optional()?;
     let listed = latest_ids(ctx, &account, WATCHED)?;
-    let fresh: Vec<String> = if known {
-        let mut stmt = ctx.connection.prepare(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_gmail_delivered WHERE account_id=?1 AND message_id=?2)",
-        )?;
-        let mut fresh = Vec::new();
-        for id in listed.iter().rev() {
-            if !stmt.query_row(params![owner, id], |r| r.get::<_, bool>(0))? {
-                fresh.push(id.clone());
-            }
+    let Some(since) = since else {
+        // The first look learns the box. Its floor is when the newest message arrived: an
+        // older message that only enters the window later (after an archive) is not new.
+        let floor = match listed.first() {
+            Some(id) => message(ctx, &account, id)?.map(|(_, received)| received),
+            None => None,
         }
-        fresh
-    } else {
-        Vec::new()
+        .unwrap_or(ctx.now_ms as i64);
+        let tx = write_transaction(ctx.connection)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO wrapper_gmail_mailbox(account_id,since_ms) VALUES (?1,?2)",
+            params![owner, floor],
+        )?;
+        for id in &listed {
+            tx.execute(
+                "INSERT OR IGNORE INTO wrapper_gmail_delivered(account_id,message_id) VALUES (?1,?2)",
+                params![owner, id],
+            )?;
+        }
+        tx.commit()?;
+        return Ok(Vec::new());
     };
+    let mut stmt = ctx.connection.prepare(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_gmail_delivered WHERE account_id=?1 AND message_id=?2)",
+    )?;
+    let mut fresh = Vec::new();
+    for id in listed.iter().rev() {
+        if !stmt.query_row(params![owner, id], |r| r.get::<_, bool>(0))? {
+            fresh.push(id.clone());
+        }
+    }
+    drop(stmt);
     let mut events = Vec::new();
-    let mut handled = if known { Vec::new() } else { listed };
+    let mut handled = Vec::new();
+    let mut newest = since;
     for id in fresh {
         match message(ctx, &account, &id) {
             Ok(mail) => {
-                events.extend(mail);
+                // A message received before the floor is known mail, not an arrival.
+                if let Some((mail, received)) =
+                    mail.filter(|(_, received)| *received == 0 || *received > since)
+                {
+                    newest = newest.max(received);
+                    events.push(mail);
+                }
                 handled.push(id);
             }
             // What could not be read now is tried again next time; what was read is kept.
@@ -491,8 +539,8 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
     }
     let tx = write_transaction(ctx.connection)?;
     tx.execute(
-        "INSERT OR IGNORE INTO wrapper_gmail_mailbox(account_id) VALUES (?1)",
-        [&owner],
+        "UPDATE wrapper_gmail_mailbox SET since_ms=?2 WHERE account_id=?1",
+        params![owner, newest],
     )?;
     for id in &handled {
         tx.execute(

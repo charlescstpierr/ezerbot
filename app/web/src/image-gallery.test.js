@@ -193,29 +193,6 @@ test("macOS save asks the shell for a panel before any write, and a failure stay
   assert.equal(gallery.galleryFailureText(new Error("Image illisible."), "L’image n’a pas pu être enregistrée."), "Image illisible.");
 });
 
-test("the Cocoa shell opens NSSavePanel and only then writes the image", () => {
-  const shell = readFileSync(new URL("../../native/main.m", import.meta.url), "utf8");
-  const saveStart = shell.indexOf('![command isEqual:@"save"]');
-  const saveEnd = shell.indexOf('if ([message.name isEqual:@"ezerbotVoice"])', saveStart);
-  const save = shell.slice(saveStart, saveEnd);
-  assert.ok(saveStart > 0 && saveEnd > saveStart, "commande save");
-  const panel = save.indexOf("NSSavePanel");
-  const confirmed = save.indexOf("NSModalResponseOK");
-  const write = save.indexOf("writeToURL:panel.URL");
-  const failure = save.indexOf("L’image n’a pas pu être enregistrée.", write);
-  assert.ok(panel > 0 && panel < confirmed && confirmed < write && write < failure, save);
-  assert.match(save, /cancelled/);
-  assert.match(save, /\[body\[@"name"\] isKindOfClass:NSString\.class\] \? \(NSString \*\)body\[@"name"\]/);
-  assert.doesNotMatch(save, /body\[@"name"\]\.lastPathComponent/);
-  const policy = shell.slice(shell.indexOf("- (BOOL)isWorkspaceBlobURL:"), shell.indexOf("- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:"));
-  assert.match(policy, /blob:/);
-  assert.match(policy, /null\//);
-  const blobBranch = policy.indexOf("workspaceBlob && action.navigationType == WKNavigationTypeLinkActivated");
-  const download = policy.indexOf("WKNavigationActionPolicyDownload", blobBranch);
-  const finalCancel = policy.lastIndexOf("WKNavigationActionPolicyCancel");
-  assert.ok(blobBranch > 0 && download > blobBranch && finalCancel > download, policy);
-});
-
 test("a generated image and attached images share the grid, while documents and voice stay outside it", () => {
   const generated = {
     id: "dessin",

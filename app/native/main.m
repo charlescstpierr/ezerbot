@@ -34,7 +34,6 @@
 @property(nonatomic) BOOL deepLinksReady;
 @property(nonatomic) BOOL deepLinksFlushing;
 @property(nonatomic) NSUInteger deepLinksEpoch;
-@property(nonatomic) BOOL downloadWasImage;
 @end
 
 static int shell_task_still_running(const ShellChild *child) {
@@ -644,17 +643,8 @@ static void shell_task_reap(const ShellChild *child) {
 }
 
 - (BOOL)isWorkspaceBlobURL:(NSURL *)url {
-    // A hidden blob anchor on the non-persistent store is blob:null/<uuid>.
-    // The previous check only accepted an inner http://127.0.0.1 URL, so that
-    // navigation was cancelled and NSSavePanel never opened.
-    NSString *absolute = url.absoluteString ?: @"";
-    BOOL blob = [url.scheme.lowercaseString isEqualToString:@"blob"] || (absolute.length >= 5 && [absolute.lowercaseString hasPrefix:@"blob:"]);
-    if (!blob || !self.backendURL) return NO;
-    NSString *rest = [absolute.lowercaseString hasPrefix:@"blob:"] ? [absolute substringFromIndex:5] : absolute;
-    if ([self isWorkspaceURL:[NSURL URLWithString:rest]]) return YES;
-    NSString *origin = self.backendURL.absoluteString ?: @"";
-    if ([origin hasSuffix:@"/"]) origin = [origin substringToIndex:origin.length - 1];
-    return origin.length > 0 && ([rest hasPrefix:origin] || [rest hasPrefix:@"null/"]);
+    return [url.scheme isEqualToString:@"blob"] &&
+           [self isWorkspaceURL:[NSURL URLWithString:[url.absoluteString substringFromIndex:5]]];
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
@@ -665,11 +655,7 @@ static void shell_task_reap(const ShellChild *child) {
         [self receiveDeepLink:url.absoluteString];
         decisionHandler(WKNavigationActionPolicyCancel); return;
     }
-    // blob:null/… used to fail the origin check, so a download click was cancelled
-    // and no save panel appeared. Link clicks on a workspace blob are downloads too.
-    BOOL workspaceBlob = [self isWorkspaceBlobURL:url];
-    if ((action.shouldPerformDownload && ([self isWorkspaceURL:url] || workspaceBlob)) ||
-        (workspaceBlob && action.navigationType == WKNavigationTypeLinkActivated)) {
+    if (action.shouldPerformDownload && ([self isWorkspaceURL:url] || [self isWorkspaceBlobURL:url])) {
         decisionHandler(WKNavigationActionPolicyDownload);
         return;
     }
@@ -724,16 +710,14 @@ static void shell_task_reap(const ShellChild *child) {
  suggestedFilename:(NSString *)suggestedFilename completionHandler:(void (^)(NSURL *))completionHandler {
     (void)download;
     NSString *mime = response.MIMEType.lowercaseString ?: @"";
-    NSString *filename = suggestedFilename.lastPathComponent ?: @"";
-    NSString *extension = filename.pathExtension.lowercaseString;
-    BOOL image = [mime hasPrefix:@"image/"] || [@[@"png", @"jpg", @"jpeg", @"gif", @"webp", @"bmp"] containsObject:extension];
-    self.downloadWasImage = image;
+    NSString *filename = suggestedFilename.lastPathComponent;
+    BOOL image = [mime hasPrefix:@"image/"];
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.canCreateDirectories = YES;
     if (image) {
         panel.title = @"Enregistrer l’image";
         panel.prompt = @"Enregistrer";
-        UTType *type = [mime hasPrefix:@"image/"] ? [UTType typeWithMIMEType:response.MIMEType] : [UTType typeWithFilenameExtension:extension];
+        UTType *type = [UTType typeWithMIMEType:response.MIMEType];
         if (type) panel.allowedContentTypes = @[type];
         panel.nameFieldStringValue = filename.length ? filename : @"image";
     } else {
@@ -753,10 +737,8 @@ static void shell_task_reap(const ShellChild *child) {
     (void)resumeData;
     if (error.code == NSURLErrorCancelled || self.terminating) return;
     NSAlert *alert = [[NSAlert alloc] init];
-    BOOL image = self.downloadWasImage;
-    self.downloadWasImage = NO;
-    alert.messageText = image ? @"L’image n’a pas pu être enregistrée" : @"L’export n’a pas pu être enregistré";
-    alert.informativeText = image ? @"Le fichier n’a pas été écrit." : error.localizedDescription;
+    alert.messageText = @"L’export n’a pas pu être enregistré";
+    alert.informativeText = error.localizedDescription;
     [alert beginSheetModalForWindow:self.window completionHandler:nil];
 }
 

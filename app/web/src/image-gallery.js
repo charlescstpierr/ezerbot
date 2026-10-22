@@ -118,9 +118,6 @@ export function galleryFailureText(error, fallback) {
 export async function saveGalleryImage(image, io = {}) {
   const { bytes, type } = await loadImageBytes(image, io);
   const name = imageFilename(image, type);
-  // WKWebView drops a hidden blob: download (shouldPerformDownload stays false,
-  // blob:null/… fails the origin check) and the click resolves with no panel
-  // and no error. The shell opens NSSavePanel, then writes the bytes.
   if (io.native?.postMessage) {
     let result;
     try {
@@ -157,9 +154,7 @@ export async function saveGalleryImage(image, io = {}) {
   const link = doc.createElement("a");
   link.href = url;
   link.download = name;
-  // hidden / display:none makes WKWebView ignore the download attribute.
-  link.style.position = "fixed";
-  link.style.left = "-10000px";
+  link.hidden = true;
   doc.body.append(link);
   link.click();
   link.remove();

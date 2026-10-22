@@ -50,11 +50,12 @@ fn state_revision(
 ) -> Result<String, ApiError> {
     let external: u64 = connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
     Ok(format!(
-        "{}.{}.{}.{}",
+        "{}.{}.{}.{}.{}",
         std::process::id(),
         external,
         connection.total_changes(),
-        super::screen::revision(path)
+        super::screen::revision(path),
+        super::updates::revision(),
     ))
 }
 

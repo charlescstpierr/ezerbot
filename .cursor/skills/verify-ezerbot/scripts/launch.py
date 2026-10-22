@@ -13,6 +13,7 @@ Run command, with HOME and CFFIXED_USER_HOME on a fresh throwaway directory:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import selectors
@@ -44,14 +45,30 @@ from verify_lib import (
 )
 
 
+def fake_jwt() -> str:
+    def part(data: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data, separators=(",", ":")).encode()).rstrip(b"=").decode()
+
+    claims = {
+        "email": "vous@exemple.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "account-fake",
+            "chatgpt_plan_type": "plus",
+            "chatgpt_data_residency": "eu",
+        },
+    }
+    return f"{part({'alg': 'none', 'typ': 'JWT'})}.{part(claims)}.fake"
+
+
 def write_fake_token(db: Path) -> None:
     payload = {
         "host_id": "urn:uuid:00000000-0000-4000-8000-0000000000e2",
-        "client_id": "oaiapp_test",
-        "access_token": "fake-access-verify",
+        "account_id": "account-fake",
+        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+        "access_token": fake_jwt(),
         "refresh_token": "fake-refresh-verify",
         "expires_at": int(time.time()) + 86400,
-        "scopes": "chatgpt.tokens.use.direct",
+        "scopes": "openid profile email offline_access",
         "email": "vous@exemple.com",
         "plan": "plus",
         "welcomed": True,
@@ -59,7 +76,7 @@ def write_fake_token(db: Path) -> None:
     encoded = json.dumps(payload)
     if "sk-" in encoded or "sess-" in encoded:
         raise SystemExit("refus: le jeton fictif ressemble à un identifiant réel")
-    path = db.with_name(f"{db.stem}.chatgpt-auth.json")
+    path = db.with_name(f"{db.stem}.codex-auth.json")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(encoded)
@@ -173,6 +190,7 @@ def main() -> None:
             "TMPDIR": str(home / "tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
+            # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
             "EZERBOT_FAKE_SIGNIN": "1",
         }
         print(

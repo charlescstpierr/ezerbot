@@ -47,7 +47,7 @@ L’instance est prête quand sa première ligne stdout est `{"url":"http://127.
 
 Le lanceur refuse de démarrer si `HOME` résout vers le vrai dossier personnel (le défaut Mac, le home du compte Unix, ou `HOME` au moment de l’appel) ou si un chemin touche `~/Library/Application Support/Grokbot`. `Grokbot Local` sous le répertoire jetable n’est pas ce dossier. Les preuves sont hors du dépôt et hors de ce `HOME`.
 
-Le faux serveur n’écoute que `127.0.0.1`. `GROKBOT_FAKE_OPENAI` reçoit son URL et `EZERBOT_FAKE_SIGNIN=1` est posé : sans lui, le binaire de debug ne connecte plus la session fictive et le badge reste `Local`. Le fichier `<throwaway>/workspace.chatgpt-auth.json` (mode `0600`) contient uniquement `fake-access-verify` / `fake-refresh-verify`, le scope `chatgpt.tokens.use.direct`, l’e-mail `vous@exemple.com` et `welcomed: true`. Aucune variable d’identifiant du parent n’est transmise au wrapper.
+Le faux serveur n’écoute que `127.0.0.1`. `GROKBOT_FAKE_OPENAI` reçoit son URL ; il sert aussi le catalogue `/backend-api/codex/models`. Le fichier `<throwaway>/workspace.codex-auth.json` (mode `0600`) contient une session factice : un JWT sans signature pour `account-fake`, `fake-refresh-verify`, l’e-mail `vous@exemple.com` et `welcomed: true`. Aucune variable d’identifiant du parent n’est transmise au wrapper.
 
 Invocation :
 

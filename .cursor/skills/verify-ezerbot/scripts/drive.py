@@ -294,6 +294,22 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
         state = wait_js(evidence, done, "image générée absente", timeout=40)
         if state.get("cells") != 1:
             raise SystemExit(f"l’image générée n’a pas son agrandissement: {state}")
+        viewer = eval_js(
+            evidence,
+            """async () => {
+              document.querySelector(".gb-generated-image-card .gb-image-cell").click();
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              const dialog = document.querySelector("dialog.gb-image-viewer");
+              const labels = [...(dialog?.querySelectorAll(".gb-image-action") || [])].map((button) => button.textContent.trim());
+              const open = !!dialog?.open;
+              dialog?.querySelector(".gb-image-close")?.click();
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              return {open, labels};
+            }""",
+        )
+        if not viewer.get("open") or viewer.get("labels") != ["Enregistrer l’image…", "Copier l’image"]:
+            raise SystemExit(f"la visionneuse de l’image générée est incomplète: {viewer}")
+        state["viewer"] = viewer["labels"]
         return state
     raise SystemExit(f"sphère inconnue: {sphere}")
 

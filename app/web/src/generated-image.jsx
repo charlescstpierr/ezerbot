@@ -20,7 +20,7 @@ export function GeneratedImage({ message, onAction }) {
   if (outcome?.status === "done") {
     const image = imageAttachment(message);
     return <article className="gb-message gb-engine-card gb-generated-image-card" data-message-id={message.id} data-card-kind="tool" data-image-state="done">
-      {image ? <MessageAttachments message={message} /> : <p className="gb-image-status">L’image reçue n’est pas utilisable.</p>}
+      {image ? <MessageAttachments message={message} align="start" /> : <p className="gb-image-status">L’image reçue n’est pas utilisable.</p>}
     </article>;
   }
   if (failed) {

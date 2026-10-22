@@ -17,8 +17,6 @@ export function useEngine() {
   return engine();
 }
 
-// Shared presentation only. Never dump whole engine events: they can contain
-// opaque provider reasoning. All external text stays text, never HTML/Markdown.
 export function Data({ value }) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return <pre className="gb-engine-data">{text ?? "Non disponible"}</pre>;
@@ -56,8 +54,6 @@ function suspension(message, view) {
   if (waiting) return human
     ? { label: "En attente de vous", note: "Répondez dans la carte de demande de la conversation du bot principal." }
     : { label: "En attente de sous-tâches", note: "Cet appel attend ses sous-tâches. Leur fin ne termine pas la tâche principale." };
-  // A missing active run proves neither delivery nor child success. Without a
-  // receipt or a precise lifecycle snapshot, say only that the wait has ended.
   if (run?.status === "ended") return { label: "Attente terminée", note: "Le run n’est plus actif. Aucune nouvelle réponse n’est demandée par cet appel." };
   if (!current || ["running", "interrupted", "finished"].includes(run?.status)) return { label: human ? "Appel repris" : "Attente de sous-tâches terminée" };
   return { label: "État de l’appel indisponible" };
@@ -105,7 +101,6 @@ function LocalCard({ message, run, onAction, busy }) {
 export function Card({ message, onAction, busy }) {
   const view = useEngine();
   const { run_id: runId, call, outcome, connector, authorized_by, requesting_bot, approval_status } = message.payload || {};
-  // These calls already have a dedicated, user-facing decision/status card.
   if (["begin_task", "complete_task", "propose_skill"].includes(call?.name)) return null;
   if (!call?.call_id || typeof call.name !== "string") {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Appel d’outil indisponible.</article>;

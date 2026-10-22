@@ -12,10 +12,6 @@ test("both document dialogs synchronize React state on native close, including E
   assert.equal(documentToolView({ call: { name: "document_action", arguments: { action: "save" } } }, { status: "running" }).note, "L’action est en cours sur votre Mac.");
 });
 
-// Real DOM regression, without adding a DOM emulator dependency. Run against a
-// disposable debug wrapper + fake OpenAI fixture containing a generated file:
-// GROKBOT_DIALOG_TEST_URL=http://127.0.0.1:<port> node --test src/generated-dialogs.test.js
-// Open that fixture URL in the caller's CHROME_DEVTOOLS_AXI_SESSION first.
 const url = process.env.GROKBOT_DIALOG_TEST_URL;
 test("rendered GeneratedDocument reopens after dialog.close() and survives incoming links", { skip: !url, timeout: 90000 }, () => {
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/?$/);
@@ -33,8 +29,6 @@ test("rendered GeneratedDocument reopens after dialog.close() and survives incom
     const conversations = panels.state.conversations.filter(c => c.messages?.some(m => m.payload?.outcome?.output?.id?.startsWith("generated_")));
     const conversation = conversations[0];
     expect(conversation, "La fixture doit contenir un résultat create_document");
-    // Check the rendered target, not just a successful programmatic click: an
-    // auto-sized button + percentage max-width once collapsed these to 2×2 px.
     for (const thread of conversations) {
       panels.openConversation(thread.id);
       const message = thread.messages.find(m => m.payload?.outcome?.output?.id?.startsWith("generated_"));

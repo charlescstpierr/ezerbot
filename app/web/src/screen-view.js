@@ -23,8 +23,6 @@ export function screenActionState({ outcome, approval_status: approval, run_stat
   }
   if (outcome) return { label: "Terminée" };
   if (runView(run).stopped) return { label: "Arrêtée", reason: "Action interrompue — aucun résultat enregistré.", error: true };
-  // A later call in the same batch may not have reached its approval yet.
-  // Absence of a result is never proof of a human decision or execution.
   if (approval !== "resolved") return { hidden: true };
   return { label: "En cours…" };
 }

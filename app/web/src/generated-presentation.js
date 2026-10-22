@@ -26,7 +26,6 @@ export function documentToolView(payload, run) {
     : phase === "awaiting_approval" ? "Confirmez l’action dans la carte d’approbation."
     : phase === "stopped" ? "Aucun résultat n’a été enregistré avant l’arrêt."
     : "Le résultat sera affiché ici.";
-  // Keep model-oriented syntax out of the main error banner, but available for diagnosis.
   let summary = failure?.message;
   if (creating && failure) {
     if (/Pour CSV ou Excel|Le tableau doit/.test(summary)) summary = "Le tableau fourni par le modèle est mal formé.";

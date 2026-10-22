@@ -9,7 +9,6 @@ import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { localToolLabel } from "./local-call.js";
 
-// Exercise the shipping settings panel, including DOM replacement on refresh.
 class Element {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.listeners = {}; this.attributes = {};
@@ -219,8 +218,6 @@ for (const mcpFirst of [false, true]) {
     const local = standingRule("run_shell", true);
     const mcp = standingRule("mcp_atelier_echo", false, "subject");
     const rules = mcpFirst ? [mcp, local] : [local, mcp];
-    // Execute the shipping panel with rules already present: the old code throws
-    // after its first row and never reaches the reviewer editor.
     const f = settingsPanel({ rules, mcp: connector });
     assert.equal(ruleRows(f.root).length, 2);
     assert.match(ruleRows(f.root)[rules.indexOf(local)].textContent, /Terminal sur votre Mac · Toujours autoriser · Toutes les actions/);
@@ -261,8 +258,6 @@ test("multiple local rules, MCP lifecycle and unknown tools preserve every row a
   }
 });
 
-// Render the actual JSX through Vite's transform rather than inspecting source
-// strings. Middleware mode starts no listening server, and no dependency is added.
 const vite = await createServer({
   root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
   plugins: [react()], server: { middlewareMode: true }, logLevel: "error",

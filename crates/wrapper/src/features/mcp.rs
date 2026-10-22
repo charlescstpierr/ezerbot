@@ -125,16 +125,24 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 pub(crate) fn is_github_tool(name: &str) -> bool {
     catalogue::github::is_tool(name) || is_github_comment(name) || is_github_issue(name)
 }
-/// The Slack read tool: a native adapter, run outside any SQLite writer.
+/// The Slack tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_slack_tool(name: &str) -> bool {
-    name == catalogue::slack::TOOL
+    name == catalogue::slack::TOOL || is_slack_post(name)
+}
+/// The Slack publishing tool opens a draft card and sends nothing until that card is validated.
+pub(crate) fn is_slack_post(name: &str) -> bool {
+    name == catalogue::slack::post::TOOL
 }
 /// Why the Slack tool the bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn slack_unavailable(ctx: &Context<'_>) -> String {
     catalogue::slack::unavailable(ctx)
 }
 pub(crate) fn run_slack_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
-    catalogue::slack::call(ctx, &call.arguments)
+    if is_slack_post(&call.name) {
+        catalogue::slack::post::call(ctx, call)
+    } else {
+        catalogue::slack::call(ctx, &call.arguments)
+    }
 }
 /// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
@@ -181,10 +189,10 @@ pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError>
 pub fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
     catalogue::gmail::calendar_events(ctx)
 }
-/// The publishing tools of the connections: each opens a draft card and sends nothing
+/// The publishing tools of the connections (GitHub, Gmail, Slack): each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_draft(name: &str) -> bool {
-    is_github_comment(name) || is_github_issue(name) || is_gmail_email(name)
+    is_github_comment(name) || is_github_issue(name) || is_gmail_email(name) || is_slack_post(name)
 }
 pub(crate) fn is_github_comment(name: &str) -> bool {
     name == catalogue::github::COMMENT_TOOL
@@ -197,7 +205,9 @@ pub(crate) fn has_draft_title(name: &str) -> bool {
     is_github_issue(name) || is_gmail_email(name)
 }
 pub(crate) fn validate_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
-    if is_gmail_email(&call.name) {
+    if is_slack_post(&call.name) {
+        catalogue::slack::post::validate(ctx, call)
+    } else if is_gmail_email(&call.name) {
         catalogue::gmail::email_validate(ctx, call)
     } else if is_github_issue(&call.name) {
         catalogue::github::issue::validate(ctx, call)
@@ -211,7 +221,9 @@ pub(crate) fn draft_display(
     request_id: &str,
     call: &ToolCall,
 ) -> Result<Value, ApiError> {
-    if is_gmail_email(&call.name) {
+    if is_slack_post(&call.name) {
+        catalogue::slack::post::prepare(ctx, request_id, call)
+    } else if is_gmail_email(&call.name) {
         catalogue::gmail::email_prepare(ctx, request_id, call)
     } else if is_github_issue(&call.name) {
         catalogue::github::issue::prepare(ctx, request_id, call)
@@ -222,8 +234,9 @@ pub(crate) fn draft_display(
 pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
     catalogue::github::comment::call_id(ctx, request_id)
         .or_else(|| catalogue::gmail::email_call_id(ctx, request_id))
+        .or_else(|| catalogue::slack::post::call_id(ctx, request_id))
 }
-/// What Charles corrected on a draft card: a comment has a text, an issue a title and a body,
+/// What Charles corrected on a draft card: a comment or a Slack message has a text, an issue a title and a body,
 /// an email a subject and a body.
 pub(crate) fn edit_draft(
     ctx: &Context<'_>,
@@ -232,7 +245,9 @@ pub(crate) fn edit_draft(
     title: Option<&str>,
     text: Option<&str>,
 ) -> Result<(), ApiError> {
-    if is_gmail_email(tool) {
+    if is_slack_post(tool) {
+        catalogue::slack::post::edit(ctx, request_id, text.unwrap_or_default())
+    } else if is_gmail_email(tool) {
         catalogue::gmail::email_edit(ctx, request_id, title, text)
     } else if is_github_issue(tool) {
         catalogue::github::issue::edit(ctx, request_id, title, text)

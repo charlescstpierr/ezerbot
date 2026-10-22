@@ -27,5 +27,16 @@ pub use transcript::{
     UpdateKind,
 };
 
+/// Renvoie 42 pour sonder le fonctionnement de l'usine.
+pub fn usine_sonde() -> u32 {
+    42
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn usine_sonde_renvoie_42() {
+    assert_eq!(usine_sonde(), 42);
+}

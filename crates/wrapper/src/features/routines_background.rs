@@ -570,7 +570,7 @@ fn drive(app: &mut App) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Waiting scheduled slots of active routines, as the panel counts them.
+/// Scheduled slots of active routines that have not started yet.
 fn waiting(ctx: &Context<'_>) -> i64 {
     ctx.connection
         .query_row(
@@ -582,15 +582,27 @@ fn waiting(ctx: &Context<'_>) -> i64 {
         )
         .unwrap_or(0)
 }
-/// Dispatch the next queued slot, and say whether the queue moved. Stops at a
-/// slot that cannot start, so a refusal never keeps the pass alive.
+/// Scheduled occurrences that a dispatch has taken out of the queue. A tick may
+/// also materialize a new slot, so the queue length alone cannot show progress.
+fn started(ctx: &Context<'_>) -> i64 {
+    ctx.connection
+        .query_row(
+            "SELECT COUNT(*) FROM scheduler_occurrences WHERE manual_nonce IS NULL
+             AND status IN ('running','done','failed')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+/// Dispatch the next queued slot, and say whether one started. Stops at a slot
+/// that cannot start, so a refusal never keeps the pass alive.
 fn queue_advanced(ctx: &Context<'_>) -> bool {
-    let before = waiting(ctx);
-    if before == 0 {
+    if waiting(ctx) == 0 {
         return false;
     }
+    let before = started(ctx);
     super::routines::tick(ctx);
-    waiting(ctx) < before
+    started(ctx) > before
 }
 
 fn pass_deadline() -> Duration {

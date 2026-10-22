@@ -274,6 +274,22 @@ pub fn record_tick(conn: &Connection, now_ms: i64) -> Result<()> {
     Ok(())
 }
 
+/// A pulse from a host that is busy and not materializing, such as a background
+/// pass waiting on a long run. It never advances the last tick across a gap: the
+/// slots of a sleep during the run must still be seen as a gap by the next
+/// [`materialize`], which [`record_tick`] alone is entitled to close.
+pub fn heartbeat(conn: &Connection, now_ms: i64) -> Result<()> {
+    let silent: bool = conn.query_row(
+        "SELECT COALESCE(?1 - last_tick_at > ?2, 0) FROM scheduler_presence WHERE id=1",
+        params![now_ms, TICK_GAP_MS],
+        |row| row.get(0),
+    )?;
+    if silent {
+        return Ok(());
+    }
+    record_tick(conn, now_ms)
+}
+
 fn materialize_one(
     conn: &Connection,
     id: &str,
@@ -1471,6 +1487,31 @@ mod occurrences_tests {
         attach_run(&conn, &heads[0].occurrence_id, "run-1").unwrap();
         assert!(host_tick(&conn, 4 * 3_600_000 + 1_000).is_empty());
         assert_eq!(list(&conn, &routine.routine_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_busy_pulse_never_hides_a_gap_from_the_next_materialization() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        heartbeat(&conn, 90_000).unwrap(); // a normal pulse advances
+        let last = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT last_tick_at FROM scheduler_presence", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(last(&conn), 90_000);
+        heartbeat(&conn, 10 * 60_000).unwrap(); // the Mac slept through the pass
+        assert_eq!(last(&conn), 90_000);
+        heartbeat(&conn, 10 * 60_000 + 1_000).unwrap();
+        assert_eq!(last(&conn), 90_000);
+        host_tick(&conn, 10 * 60_000 + 2_000);
+        let owed = statuses(&conn, &routine);
+        assert!(owed
+            .iter()
+            .filter(|(at, _)| (120_000..=600_000).contains(at))
+            .all(|(_, status)| *status == OccurrenceStatus::Pending));
+        assert_eq!(last(&conn), 10 * 60_000 + 2_000);
     }
 
     #[test]

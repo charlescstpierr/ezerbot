@@ -1287,16 +1287,20 @@ fn record_departure(conn: &Connection, now_ms: i64) {
         let _ = occurrences::begin_absence(conn, now_ms);
     }
 }
-/// Keeps the host's pulse for the next gap, between ticks that dispatch nothing.
+/// Keeps the host's pulse for the next gap while it is busy and does not
+/// materialize, without ever closing a gap that [`tick`] has yet to see.
 pub fn heartbeat(ctx: &Context<'_>) {
     if let Ok(now) = clock(ctx) {
-        let _ = occurrences::record_tick(ctx.connection, now);
+        let _ = occurrences::heartbeat(ctx.connection, now);
     }
 }
 pub fn tick(ctx: &Context<'_>) {
     let needed:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE deleted=0 AND enabled=1) OR EXISTS(SELECT 1 FROM scheduler_occurrences WHERE status IN ('pending','running'))",[],|row|row.get(0)).unwrap_or(false);
     if !needed {
-        heartbeat(ctx);
+        // Nothing to materialize, so nothing can be hidden: this tick is the pulse.
+        if let Ok(now) = clock(ctx) {
+            let _ = occurrences::record_tick(ctx.connection, now);
+        }
         return;
     }
     let work = || -> Result<Vec<Occurrence>, ApiError> {

@@ -308,7 +308,8 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
 }
 pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Option<Value> {
     let (m, phase, _, revision) = record(ctx, &server.id).ok()??;
-    let private = credentials(ctx, &server.id).ok()??;
+    // GitHub has nothing in the vault before its first connection.
+    let private = credentials(ctx, &server.id).ok()?.unwrap_or_default();
     let mut names: Vec<_> = private
         .keys()
         .filter(|k| k.as_str() != "EMAIL")
@@ -333,7 +334,7 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
             "GitHub affichera un code à 8 caractères qu’Ezerbot vous montre ici ; la page https://github.com/login/device s’ouvre dans le navigateur. Vous vous identifiez, autorisez l’application GitHub d’Ezerbot et choisissez les dépôts chez GitHub. Seul l’identifiant public de l’application est envoyé : aucun secret n’existe dans Ezerbot. Les jetons reçus sont conservés dans le coffre. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
         };
         return Some(
-            json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":scopes_label(m),"source":m.source,"licence":m.license,"révision":revision,"connexion":connection,"déconnexion":"Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. GitHub ne permet pas à Ezerbot de révoquer l’accès sans secret d’application : retirez aussi l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."}),
+            json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":"aucune ; les permissions sont celles de la GitHub App d’Ezerbot, choisies chez GitHub","source":m.source,"licence":m.license,"révision":revision,"connexion":connection,"déconnexion":"Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. GitHub ne permet pas à Ezerbot de révoquer l’accès sans secret d’application : retirez aussi l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."}),
         );
     }
     let connection = if m.endpoint.is_empty() {

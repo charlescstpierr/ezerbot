@@ -390,6 +390,11 @@ impl Fixture {
                 .is_terminal()
         });
     }
+    fn wait_approval(&self, run: &str) {
+        wait("approval", || {
+            !requests::list_for_run(&self.db(), run).unwrap().is_empty()
+        });
+    }
     fn decide(&mut self, run: &str, decision: Value) {
         wait("approval", || {
             if !requests::list_for_run(&self.db(), run).unwrap().is_empty() {
@@ -995,7 +1000,41 @@ fn github_device_flow_shows_a_copyable_code_paces_polling_and_never_sends_a_secr
         json!({"error":"authorization_pending"}),
         json!({"error":"slow_down","interval":1}),
     ]);
-    f.github_start();
+    f.with_github_client();
+    let run = f.connect("github");
+    // The approval names the permissions before any browser or code appears.
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    assert_eq!(request["connector"]["tool"], "Connecter GitHub");
+    assert_eq!(request["connector"]["catalogue_id"], "github");
+    let catalogue = &request["arguments"]["catalogue"];
+    assert_eq!(catalogue["service"], "GitHub");
+    assert_eq!(catalogue["action"], "Connecter GitHub");
+    let permissions = catalogue["permissions"].as_str().unwrap();
+    for word in [
+        "Issues",
+        "pull requests",
+        "contenu des dépôts en lecture",
+        "dépôts que vous choisirez chez GitHub",
+    ] {
+        assert!(permissions.contains(word), "{word}: {permissions}");
+    }
+    assert!(catalogue["connexion"]
+        .as_str()
+        .unwrap()
+        .contains("github.com/login/device"));
+    assert_eq!(
+        f.github_requests("/device"),
+        0,
+        "no code before the approval"
+    );
+    f.decide(&run, json!("allow_once"));
     assert_eq!(f.github_requests("/device"), 1);
     let item = f.item("github");
     assert_eq!(item["status"], "authorizing");

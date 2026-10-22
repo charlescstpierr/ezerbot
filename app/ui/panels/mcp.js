@@ -59,7 +59,7 @@
       heading.append(node("strong", item.name), status);
       card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
-      if (item.message) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
+      if (item.message && !(item.device_flow && item.device)) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
       const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
       const copyButton = (caption, value) => {
         let resetCopy;

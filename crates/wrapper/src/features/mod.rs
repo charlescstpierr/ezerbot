@@ -91,6 +91,7 @@ pub mod engine;
 pub mod floating;
 pub mod forms;
 pub mod generated;
+pub mod images;
 pub mod iphone;
 pub mod library;
 pub mod local;
@@ -150,6 +151,7 @@ registry!(
     attachments,
     library,
     generated,
+    images,
     mcp,
     storage,
     usage,

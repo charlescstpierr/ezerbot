@@ -92,6 +92,14 @@ pub struct Seen {
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
     /// Test-only delay before sending Responses headers (without holding Seen).
     pub response_delay: Option<Duration>,
+    /// Image generations are a separate Codex responses call from chat.
+    pub image_calls: Vec<Value>,
+    pub image_authorization: Vec<String>,
+    pub image_headers: Vec<HashMap<String, String>>,
+    pub image_urls: Vec<String>,
+    pub image_reply: VecDeque<ScriptedResponse>,
+    /// Held without the Seen lock so a test can observe the in-flight call.
+    pub image_gate: Option<Arc<AtomicBool>>,
     /// Optional answer derived from the request. `None` keeps the scripted queue.
     pub reply_for: Option<ReplyFor>,
 }
@@ -265,6 +273,7 @@ impl FakeOpenAi {
                 };
                 let mut delay = Duration::ZERO;
                 let mut is_probe = false;
+                let mut is_image = false;
                 let mut probe_gate = None;
                 let (status, content_type, payload) = match request.url() {
                     "/jwks" => (200, "application/json".to_owned(), JWKS.to_owned()),
@@ -381,7 +390,33 @@ impl FakeOpenAi {
                     "/v1/responses" | "/backend-api/codex/responses" => {
                         let request_body: Value =
                             serde_json::from_str(&body).unwrap_or(Value::Null);
-                        if request_body["instructions"]
+                        if request_body["tools"].as_array().is_some_and(|tools| {
+                            tools.iter().any(|tool| tool["type"] == "image_generation")
+                        }) {
+                            is_image = true;
+                            seen.image_authorization.push(bearer.clone());
+                            seen.image_headers.push(
+                                request
+                                    .headers()
+                                    .iter()
+                                    .map(|header| {
+                                        (
+                                            header.field.to_string().to_ascii_lowercase(),
+                                            header.value.to_string(),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            seen.image_urls.push(request.url().to_owned());
+                            seen.image_calls.push(request_body);
+                            let reply = seen.image_reply.pop_front().unwrap_or_else(|| {
+                                ScriptedResponse::json(
+                                    200,
+                                    json!({"output":[{"type":"image_generation_call","status":"completed","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII="}]}),
+                                )
+                            });
+                            (reply.status, reply.content_type, reply.body)
+                        } else if request_body["instructions"]
                             .as_str()
                             .unwrap_or_default()
                             .starts_with("Test de connexion.")
@@ -502,6 +537,8 @@ impl FakeOpenAi {
                 };
                 let gate = if is_probe {
                     None
+                } else if is_image {
+                    seen.image_gate.clone()
                 } else {
                     match request.url() {
                         "/v1/models" => seen.models_gate.clone(),

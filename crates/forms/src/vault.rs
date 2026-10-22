@@ -718,6 +718,44 @@ mod tests {
     }
 
     #[test]
+    fn active_keychain_refusal_does_not_store_plaintext() {
+        let test = TestVault::new();
+        let path = test.vault.path().to_owned();
+        let before = fs::read(&path).unwrap();
+        let vault = Vault::open_refusing_keychain(&path).unwrap();
+        let error = vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap_err();
+        assert!(!error.to_string().contains("image-key-secret-9931"));
+        assert!(!format!("{error:?}").contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(Vault::open(&path)
+            .unwrap()
+            .get("OPENAI_API_KEY")
+            .unwrap()
+            .is_none());
+        test.vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap();
+        let seeded = fs::read(&path).unwrap();
+        let deletion = Vault::open_refusing_keychain(&path)
+            .unwrap()
+            .remove("OPENAI_API_KEY")
+            .unwrap_err();
+        assert!(deletion.to_string().contains("Suppression non confirmée"));
+        assert!(!deletion.to_string().contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), seeded);
+    }
+
+    #[test]
     fn list_returns_metadata_only() {
         let test = TestVault::new();
         let reference = test

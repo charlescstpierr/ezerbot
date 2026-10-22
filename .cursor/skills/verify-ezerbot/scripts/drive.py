@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -253,6 +253,64 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "bibliothèque du bot non prête",
         )
+    if sphere == "images":
+        eval_js(evidence, close_overlays_js())
+        done = """() => {
+          const card = document.querySelector('.gb-generated-image-card[data-image-state="done"]');
+          const image = card?.querySelector("img");
+          if (!card || !image || !image.complete || !image.naturalWidth) return null;
+          card.scrollIntoView({block: "center"});
+          return {ok: true, width: image.naturalWidth, height: image.naturalHeight, cells: card.querySelectorAll(".gb-image-cell").length};
+        }"""
+        if not eval_js(evidence, """() => !!document.querySelector('.gb-generated-image-card[data-image-state="done"]')"""):
+            eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+            wait_js(
+                evidence,
+                """() => {
+                  const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+                  return editor ? {ok: true} : null;
+                }""",
+                "compositeur non prêt",
+            )
+            eval_js(
+                evidence,
+                """() => {
+                  const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+                  editor.focus();
+                  if (!document.execCommand("insertText", false, "Dessine un phare au crépuscule")) throw new Error("saisie refusée");
+                  return true;
+                }""",
+            )
+            wait_js(
+                evidence,
+                """() => {
+                  const send = document.getElementById("send-button");
+                  if (!send || send.disabled) return null;
+                  send.click();
+                  return {ok: true};
+                }""",
+                "envoi impossible",
+            )
+        state = wait_js(evidence, done, "image générée absente", timeout=40)
+        if state.get("cells") != 1:
+            raise SystemExit(f"l’image générée n’a pas son agrandissement: {state}")
+        viewer = eval_js(
+            evidence,
+            """async () => {
+              document.querySelector(".gb-generated-image-card .gb-image-cell").click();
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              const dialog = document.querySelector("dialog.gb-image-viewer");
+              const labels = [...(dialog?.querySelectorAll(".gb-image-action") || [])].map((button) => button.textContent.trim());
+              const open = !!dialog?.open;
+              dialog?.querySelector(".gb-image-close")?.click();
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              return {open, labels};
+            }""",
+        )
+        if not viewer.get("open") or viewer.get("labels") != ["Enregistrer l’image…", "Copier l’image"]:
+            raise SystemExit(f"la visionneuse de l’image générée est incomplète: {viewer}")
+        state["viewer"] = viewer["labels"]
+        return state
     raise SystemExit(f"sphère inconnue: {sphere}")
 
 

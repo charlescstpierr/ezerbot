@@ -555,7 +555,7 @@ fn sync_main(
     ensure_dir(parent, paths)?;
     let git_dir = paths.work_dir.join(".git");
     if git_dir.is_dir() {
-        run(
+        require_sync_success(run(
             runner,
             paths,
             "git",
@@ -569,8 +569,8 @@ fn sync_main(
             ],
             &paths.work_dir,
             git_env(),
-        )?;
-        run(
+        )?)?;
+        require_sync_success(run(
             runner,
             paths,
             "git",
@@ -585,8 +585,8 @@ fn sync_main(
             ],
             &paths.work_dir,
             git_env(),
-        )?;
-        run(
+        )?)?;
+        require_sync_success(run(
             runner,
             paths,
             "git",
@@ -600,13 +600,13 @@ fn sync_main(
             ],
             &paths.work_dir,
             git_env(),
-        )?;
+        )?)?;
     } else if path_occupied(&paths.work_dir)? {
         return Err(UpdateError::message(
             "Le dossier de travail existe déjà et n’est pas un clone Ezerbot. Rien n’a été effacé.",
         ));
     } else {
-        run(
+        require_sync_success(run(
             runner,
             paths,
             "git",
@@ -622,7 +622,7 @@ fn sync_main(
             ],
             parent,
             git_env(),
-        )?;
+        )?)?;
     }
     let head = run(
         runner,
@@ -658,6 +658,16 @@ fn sync_main(
     };
     let unix = commit_unix(runner, paths)?;
     reconcile_checked_out(installed, remote, &CommitRef { sha, unix })
+}
+
+fn require_sync_success(output: CommandOutput) -> Result<(), UpdateError> {
+    if output.status != 0 {
+        return Err(UpdateError::with_log(
+            "La synchronisation Git a échoué. L’application actuelle est restée en place.",
+            command_log(&output),
+        ));
+    }
+    Ok(())
 }
 
 fn commit_unix(
@@ -1530,6 +1540,48 @@ mod tests {
             Some(bundle.as_path())
         );
         assert_eq!(RELAUNCH_EXIT_CODE, 86);
+    }
+
+    #[test]
+    fn synchronisation_git_ratee_interdit_la_compilation_du_cache() {
+        struct FailingGit {
+            inner: Scripted,
+            command: &'static str,
+        }
+        impl CommandRunner for FailingGit {
+            fn run(&mut self, request: &CommandRequest) -> Result<CommandOutput, UpdateError> {
+                if request.program == "git" && request.args.iter().any(|arg| arg == self.command) {
+                    return Ok(CommandOutput {
+                        status: 128,
+                        stdout: "sortie git".into(),
+                        stderr: format!("échec {}", self.command),
+                    });
+                }
+                self.inner.run(request)
+            }
+        }
+        for command in ["set-url", "fetch", "checkout", "clone"] {
+            let fixture = layout(command, false);
+            if command != "clone" {
+                fs::create_dir_all(fixture.paths.work_dir.join(".git")).unwrap();
+            }
+            let installed = commit(&hex_sha('a'), Some(100));
+            let cached = commit(&hex_sha('b'), Some(200));
+            let remote = commit(&hex_sha('c'), Some(300));
+            let mut inner = scripted(&fixture.paths, cached, 0, "");
+            inner.head_unix = Some(200);
+            let mut runner = FailingGit { inner, command };
+            let mut input = applying(&fixture.paths, &remote, Fault::None);
+            input.installed = Some(&installed);
+            let mut phases = Vec::new();
+            let error =
+                apply(&input, &mut runner, &mut |phase| phases.push(phase)).expect_err(command);
+            assert!(error.log.contains(&format!("échec {command}")), "{error:?}");
+            assert!(error.log.contains("sortie git"));
+            assert_eq!(phases, vec![Phase::Telechargement], "{command}");
+            assert_eq!(marker(&fixture.paths.bundle), "ancienne-version");
+            assert_sessions(&fixture.paths.user_data);
+        }
     }
 
     #[test]

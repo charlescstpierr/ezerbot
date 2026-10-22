@@ -8,7 +8,7 @@ Les valeurs par défaut retenues sont locales : coffre fichier `0600`, mémoire 
 
 | Capacité livrée | Suite ou limite encore ouverte |
 |---|---|
-| Skills | Import nommé par frontmatter pouvant mettre à jour une skill existante : choix local, anciennes versions conservées. Pas d’écriture modèle, Teach→skill, fichiers annexes ou marketplace. `GET /api/skills` charge encore tous les corps. |
+| Skills | Import nommé par frontmatter pouvant mettre à jour une skill existante : choix local, anciennes versions conservées. Pas d’écriture modèle, Teach→skill ou marketplace. `GET /api/skills` charge encore tous les corps. |
 | Mémoire | Pas d’extraction automatique. Oublier ne supprime ni les messages utilisateur, ni toutes les copies déléguées/cartes, ni les sauvegardes. Expurgation sous verrou coûteuse; refus 409 si une autre réponse concernée tourne. Tombstones UI limitées à la fenêtre courante; purge des faits privés de bots supprimés possible par l’API seulement, pas dans l’interface. |
 | Runs/contexte | Reprise et outils internes durables, pas garantie d’unicité d’effets externes. Fin de tour ≠ fin de tâche; pas de continuation infinie après budget. Évaluer les tâches et les fenêtres réelles avec un vrai fournisseur. |
 | Formulaires/approbations/secrets | Reçu de reprise et règles Toujours persistées fonctionnent. **Le reviewer en langage naturel reste à implémenter**; type et table prévus dans la crate `forms`, non exposés par l’API ni l’interface. Seules les règles Toujours sont évaluées automatiquement. Aucun outil externe protégé en production. Suppression du fil de décision annule les demandes au lieu de les rerouter. Coffre local non chiffré par le trousseau; pas de consommateur de secret. |
@@ -130,7 +130,7 @@ Les familles et obligations du tableau proviennent de `evidence/parity.json`. La
 | Écrans de bot et reprise humaine | Contrat partiel | Non implémenté | ScreenLease et ownership des entrées | Deux bots en parallèle; contrôle humain; clic avec lease périmée |
 | Registre d'outils | Chemin client retracé | Outils internes livrés | Ajouter outils externes avec politique et journal d’effets | Refus explicites, effet incertain après panne et permissions |
 | Daemon local et supervision | Chemin client retracé | Non implémenté | Supervisor, générations, outbox et transports bornés | Ancien PID, changement de compte, credential expiré et reprise de résultat |
-| Shell et jobs background | Chemin client retracé | Non implémenté | ShellService avec politique OS explicite et groupe de processus | Cwd hors scope; kill descendants; sortie volumineuse; budget |
+| Shell et jobs background | Chemin client retracé | Shell local et tâches de fond livrés | ShellService avec politique OS explicite et groupe de processus | Cwd hors scope; kill descendants; sortie volumineuse; budget |
 | Fichiers et transferts | Chemin client retracé | Images locales livrées | Fichiers généraux, root handles, transferts et quotas | Vision réelle, purge, symlinks et transferts interrompus |
 | Panneau desktop-mount | Chemin client retracé | Non implémenté | Panneau flottant du bot; pas un montage de dossiers | Ouverture, déplacement, fermeture et scope du composeur |
 | Approvals et auto-review | Contrat partiel | Gate/règles locales livrées | Reviewer langage naturel et règles admin; outils externes à protéger | Décision utilisateur dans le chat principal, digest modifié et révocation |

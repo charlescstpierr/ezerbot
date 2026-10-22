@@ -2682,3 +2682,24 @@ fn github_comment_goes_out_under_the_chosen_account_and_asks_first_when_there_ar
     assert_eq!(*auth, format!("Bearer {second_token}"));
     assert_eq!(seen.github.comments.len(), 1);
 }
+
+#[test]
+fn github_draft_is_not_sent_when_its_account_lost_the_bot_activation() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-off", "Texte du brouillon.");
+    // Another account keeps the shared tools available while the first is switched off.
+    f.github_add_account();
+    let first = f.github_accounts()[0]["server"]["id"].clone();
+    f.post(
+        "/api/mcp/select",
+        json!({"id":first,"bot_id":"grokbot","enabled":false}),
+    );
+    f.github_resolve(&card, "send-off", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("plus activés"), "{reason}");
+    assert_eq!(f.github_requests("/comments"), 0);
+    assert!(f.published_comments().is_empty());
+}

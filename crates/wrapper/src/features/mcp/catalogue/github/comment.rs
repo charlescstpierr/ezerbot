@@ -285,14 +285,15 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         }
         _ => return Err(uncertain()),
     }
-    let held = held(ctx, &login, &account);
-    let held = match held {
+    let held = match held(ctx, &login, &account) {
         Ok(held) if fingerprint(&repository, issue, &login, &account, &text) == print => held,
-        _ => {
+        other => {
             settle(ctx, &request_id, "failed", None)?;
-            return Err(invalid(
-                "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
-            ));
+            return Err(other.err().unwrap_or_else(|| {
+                invalid(
+                    "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
+                )
+            }));
         }
     };
     let (server, m) = (held.server, held.m);

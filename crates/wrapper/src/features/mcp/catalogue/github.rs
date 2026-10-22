@@ -775,14 +775,21 @@ pub(super) fn resolve(ctx: &Context<'_>, named: Option<&str>) -> Result<Account,
 }
 /// The account a draft card was prepared for, while it is still that login.
 pub(super) fn held(ctx: &Context<'_>, login: &str, id: &str) -> Result<Account, ApiError> {
-    connected(ctx)?
+    let account = connected(ctx)?
         .into_iter()
         .find(|a| a.id == id && a.login == login)
         .ok_or_else(|| {
             invalid(
                 "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
             )
-        })
+        })?;
+    // Another account's activation does not authorize this one for the bot.
+    if !account.enabled {
+        return Err(invalid(&format!(
+            "Les outils GitHub ne sont plus activés pour ce bot avec le compte {login} : rien n’a été publié."
+        )));
+    }
+    Ok(account)
 }
 /// Why the GitHub tools are not offered to this bot: no account, a disconnected one,
 /// or a connected one this bot may not use.

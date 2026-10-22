@@ -374,6 +374,7 @@
         path = "/api/approvals/resolve"; body.decision = detail?.decision;
         // A draft card sends the text its owner corrected; the server binds it to the card.
         if (typeof detail?.text === "string") body.text = detail.text;
+        if (typeof detail?.title === "string") body.title = detail.title;
         // Do not echo the displayed arguments: they may be redacted. The server
         // binds entry_id to the original action digest (wrapper review r2 §2).
       } else return false;
@@ -405,6 +406,7 @@
         if (request.kind?.kind === "site_form") delete body.values;
         delete body.value;
         delete body.text;
+        delete body.title;
         changed();
       }
       // Reconcile lost responses and decisions made in another window. A refresh

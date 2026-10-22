@@ -114,6 +114,9 @@
     card.append(actions);
     return card;
   }
+  // The first request names the service alone; a GitHub account other than the first is named by its slot.
+  const slotBody = item => item.slot && item.slot !== item.id ? {id:item.id,account:item.slot} : {id:item.id};
+  const accountStatus = {connected:"Connecté",authorizing:"En attente de votre autorisation chez GitHub",reconnect:"À reconnecter",error:"En erreur",saved:"Connexion enregistrée · à démarrer"};
   function renderCatalogue(items, bots) {
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
@@ -153,14 +156,14 @@
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
       if (item.message && !(item.device_flow && item.device)) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
       const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
-      const copyButton = (caption, value) => {
+      const copyButton = (caption, value, name = item.name) => {
         let resetCopy;
         const copy = button("Copier", async () => {
           clearTimeout(resetCopy);
           try { await panels.copyText(value); copy.textContent = "Copié"; resetCopy = setTimeout(() => { copy.textContent = "Copier"; },1500); }
           catch { feedback.textContent = "Sélectionnez le texte pour le copier. La copie automatique n’est pas disponible."; feedback.scrollIntoView?.({block:"nearest"}); }
         });
-        copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${item.name}`);
+        copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${name}`);
         return copy;
       };
       const copyable = (caption, value) => {
@@ -170,7 +173,7 @@
       };
       if (item.redirect_uri) copyable("URL de retour OAuth", item.redirect_uri);
       if (item.id === "notion") setup.append(node("p", "Autorisations choisies pendant le consentement Notion.", "mcp-note"));
-      else if (item.device_flow) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
+      else if (item.device_flow || !item.needs_client) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
       else copyable("Portées OAuth", item.scopes_label || item.scopes);
       setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
       let form, client, secret;
@@ -187,23 +190,25 @@
       }
       card.append(setup);
       if (item.device_flow && !item.configured) card.append(node("p", "L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir ici : Connecter restera indisponible tant qu’elle n’est pas préparée.", "mcp-warning"));
-      if (item.device_flow && item.device) {
+      if (item.unconfigured_message && !item.configured) card.append(node("p", item.unconfigured_message, "mcp-warning"));
+      const deviceBlock = (code, name, action = "authorize") => {
         const device = node("div", null, "mcp-device"); device.setAttribute("role", "group"); device.setAttribute("aria-label", "Code de connexion GitHub");
-        const until = new Date(item.device.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
+        const until = new Date(code.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
         const row = node("div", null, "mcp-copy-row");
-        row.append(node("code", item.device.user_code, "mcp-device-code"), copyButton("le code de connexion", item.device.user_code));
+        row.append(node("code", code.user_code, "mcp-device-code"), copyButton("le code de connexion", code.user_code, name));
         device.append(node("p", "Entrez ce code sur github.com/login/device :", "mcp-note"), row, node("p", `Le code est valable jusqu’à ${until}. Ezerbot termine la connexion dès que vous avez autorisé l’application chez GitHub.`, "mcp-note"));
         const page = node("a", "Ouvrir github.com/login/device", "secondary-button");
-        page.href = item.device.verification_uri; page.target = "_blank"; page.rel = "noopener noreferrer"; page.setAttribute("data-connector-action", "authorize");
+        page.href = code.verification_uri; page.target = "_blank"; page.rel = "noopener noreferrer"; page.setAttribute("data-connector-action", action);
         device.append(page);
-        card.append(device);
-      }
+        return device;
+      };
+      if (item.device_flow && item.device) card.append(deviceBlock(item.device, item.name));
       const actions = node("div", null, "mcp-actions");
       const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", event => {
         event?.preventDefault();
         if (form && !item.has_client && !setup.open) { setup.open = true; client.focus?.(); }
         else if (form && setup.open) return form.requestSubmit();
-        else return act("/api/connectors/connect", {id:item.id}, connect);
+        else return act("/api/connectors/connect", slotBody(item), connect);
       }, ["disconnected","reconnect","error"].includes(item.status) ? "primary-button" : "secondary-button");
       connect.setAttribute("data-connector-action", "connect");
       if (form) {
@@ -211,7 +216,7 @@
         connect.type = "submit"; connect.setAttribute("form", form.id);
         form.addEventListener("submit", async event => {
           event.preventDefault();
-          const body = {id:item.id,client_id:client.value,client_secret:secret.value};
+          const body = {...slotBody(item),client_id:client.value,client_secret:secret.value};
           client.value = ""; secret.value = "";
           try { await act("/api/connectors/connect", body, connect); }
           finally { delete body.client_secret; delete body.client_id; }
@@ -219,7 +224,7 @@
       }
       if (item.status !== "authorizing") actions.append(connect);
       if (item.device_flow && item.status === "authorizing") {
-        const cancel = button("Annuler", () => act("/api/connectors/cancel", {id:item.id}, cancel)); cancel.setAttribute("data-connector-action", "cancel"); actions.append(cancel);
+        const cancel = button("Annuler", () => act("/api/connectors/cancel", slotBody(item), cancel)); cancel.setAttribute("data-connector-action", "cancel"); actions.append(cancel);
       }
       if (item.authorization_url && item.status === "authorizing" && !item.device) {
         const link = node("a", "Ouvrir la page de connexion", "secondary-button");
@@ -227,7 +232,8 @@
         actions.append(link);
       }
       if (item.server) {
-        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); remove.setAttribute("data-connector-action","disconnect"); if (!(item.device_flow && item.status === "authorizing")) actions.append(remove);
+        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", slotBody(item), remove)); remove.setAttribute("data-connector-action","disconnect");
+        if ((item.accounts || []).length > 1 && item.account) remove.setAttribute("aria-label", `Déconnecter ${item.account}`); if (!(item.device_flow && item.status === "authorizing")) actions.append(remove);
         if (item.status === "connected" || item.server.tools.length) {
           const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
           for (const bot of bots) {
@@ -244,12 +250,50 @@
           card.append(node("p", "Les outils et leur activation par bot seront disponibles après la connexion.", "mcp-note"));
         }
       }
+      const others = (item.accounts || []).filter(account => account.id !== item.slot);
+      if (item.device_flow && item.configured && item.status === "connected" && !(item.accounts || []).some(account => account.status === "authorizing")) {
+        const another = button("Connecter un autre compte", () => act("/api/connectors/connect", {id:item.id,another:true}, another));
+        another.setAttribute("data-connector-action", "add-account"); actions.append(another);
+      }
       card.append(actions);
+      for (const account of others) card.append(accountBlock(item, account, copyButton, deviceBlock, bots));
       if (previous) previous.node.replaceWith(card); else catalogue.append(card);
       catalogueCards.set(item.id,{key:cardKey,node:card,text});
       restoreCard(card,view);
     }
     filterCatalogue();
+  }
+  // A GitHub account beside the first one: its login, its own code wait, disconnect and bot switches.
+  function accountBlock(item, account, copyButton, deviceBlock, bots) {
+    const block = node("section", null, "mcp-account"); block.setAttribute("data-account", account.id);
+    const who = account.account || "nouveau compte";
+    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte GitHub · ${who} · ${accountStatus[account.status] || "Déconnecté"}`, "mcp-note"));
+    if (account.message && !account.device) block.append(node("p", account.message, account.warning ? "mcp-warning" : ["error","reconnect"].includes(account.status) ? "mcp-error" : "mcp-note"));
+    if (account.device) block.append(deviceBlock(account.device, `${item.name} (${who})`, "authorize-account"));
+    const actions = node("div", null, "mcp-actions");
+    const target = {id:item.id,account:account.id};
+    if (["reconnect","error"].includes(account.status)) {
+      const connect = button("Reconnecter", () => act("/api/connectors/connect", target, connect), "primary-button");
+      connect.setAttribute("data-connector-action", "reconnect-account"); connect.setAttribute("aria-label", `Reconnecter ${who}`); actions.append(connect);
+    }
+    if (account.status === "authorizing") {
+      const cancel = button("Annuler", () => act("/api/connectors/cancel", target, cancel));
+      cancel.setAttribute("data-connector-action", "cancel-account"); cancel.setAttribute("aria-label", `Annuler la connexion de ${who}`); actions.append(cancel);
+    } else {
+      const remove = button("Déconnecter", () => act("/api/connectors/disconnect", target, remove));
+      remove.setAttribute("data-connector-action", "disconnect-account"); remove.setAttribute("aria-label", `Déconnecter ${who}`); actions.append(remove);
+    }
+    block.append(actions);
+    if (account.status === "connected" && account.server) {
+      const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", `Activer les outils pour (${who})`));
+      for (const bot of bots) {
+        const check = input(`catalogue-${item.id}-${account.id}-${bot.id}`, "", "checkbox"); check.checked = account.server.enabled_bots.includes(bot.id);
+        check.addEventListener("change", () => act("/api/mcp/select", {id:account.server.id,bot_id:bot.id,enabled:check.checked}, check));
+        choices.append(label(bot.name, check));
+      }
+      block.append(choices);
+    }
+    return block;
   }
   async function act(path, body, b) {
     b.disabled = true;
@@ -276,7 +320,7 @@
   function render(state) {
     if (!list) return;
     const items = state.mcp?.catalogue || [];
-    const catalogueIds = new Set(items.map(i => i.server?.id).filter(Boolean));
+    const catalogueIds = new Set(items.flatMap(i => [i.server?.id, ...(i.accounts || []).map(a => a.server?.id), ...(i.slot_servers || [])]).filter(Boolean));
     const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);
     // Catalogue updates are keyed independently of the custom-server list.
@@ -296,9 +340,11 @@
       status.append(dot, document.createTextNode(({connected:"Connecté",busy:"Occupé",starting:"Démarrage en cours",disconnected:"Déconnecté",crashed:"Serveur arrêté",error:"En erreur"})[server.status] || "État inconnu"));
       heading.append(node("strong", server.name), status);
       card.append(heading);
-      const config = node("details"); config.append(node("summary", "Configuration locale"));
-      config.append(node("pre", [server.command, ...server.arguments].join("\n")));
-      config.append(node("p", server.environment_names.length ? `Variables privées : ${server.environment_names.join(", ")} · valeurs masquées` : "Aucune variable privée.", "mcp-note"));
+      const config = node("details"); config.append(node("summary", server.url ? "Adresse du serveur" : "Configuration locale"));
+      config.append(node("pre", server.url || [server.command, ...server.arguments].join("\n")));
+      config.append(node("p", server.url
+        ? (server.environment_names.length ? "Jeton privé conservé dans le coffre · valeur masquée, jamais réaffichée." : "Aucun jeton.")
+        : (server.environment_names.length ? `Variables privées : ${server.environment_names.join(", ")} · valeurs masquées` : "Aucune variable privée."), "mcp-note"));
       card.append(config);
       if (server.error) card.append(node("p", server.error, "mcp-error"));
       const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
@@ -310,11 +356,11 @@
       }
       card.append(choices);
       const tools = node("details"); tools.append(node("summary", `Outils (${server.tools.length})${["connected","busy"].includes(server.status) ? "" : " · dernier catalogue connu"}`));
-      if (!server.tools.length) tools.append(node("p", "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
+      if (!server.tools.length) tools.append(node("p", server.url ? "Connectez le serveur pour découvrir ses outils." : "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
       for (const tool of server.tools) { const item = node("p"); item.append(node("strong",tool.name),node("span",` — ${tool.description || "Sans description"}`)); tools.append(item); }
       card.append(tools);
       const actions = node("div", null, "mcp-actions");
-      const restart = button(["connected","busy","starting"].includes(server.status) ? "Redémarrer…" : "Démarrer…", () => act("/api/mcp/restart",{id:server.id},restart));
+      const restart = button(["connected","busy","starting"].includes(server.status) ? (server.url ? "Reconnecter…" : "Redémarrer…") : (server.url ? "Connecter…" : "Démarrer…"), () => act("/api/mcp/restart",{id:server.id},restart));
       const remove = button("Supprimer…", () => act("/api/mcp/remove",{id:server.id},remove));
       actions.append(restart,remove); card.append(actions); list.append(card);
     }
@@ -333,7 +379,33 @@
       const name = input("name", "Par exemple : Atelier local"); name.required = true; name.maxLength = 60;
       const command = input("command", "/chemin/vers/le/serveur"); command.required = true;
       const args = node("textarea"); args.name = "arguments"; args.rows = 3; args.placeholder = "/chemin/serveur.py\n--option"; args.spellcheck = false;
-      form.append(label("Nom du connecteur",name),label("Commande (sans interpréteur de shell)",command),label("Arguments — un par ligne",args));
+      // Deux façons d'ajouter un serveur : une commande locale, ou l'adresse HTTPS d'un serveur distant.
+      let mode = "command";
+      const modes = node("fieldset", null, "mcp-bots"); modes.append(node("legend", "Type de serveur"));
+      const modeChoices = {};
+      for (const [id, caption] of [["command","Commande locale"],["url","Adresse HTTPS"]]) {
+        const choice = input("transport", "", "radio"); choice.checked = id === mode; choice.setAttribute("aria-label", caption);
+        choice.addEventListener("change", () => setMode(id));
+        modeChoices[id] = choice; modes.append(label(caption, choice));
+      }
+      const url = input("url", "https://exemple.fr/mcp"); url.maxLength = 2048; url.setAttribute("aria-label", "Adresse du serveur MCP");
+      const token = input("token", "Jeton d’accès (facultatif)", "password"); token.maxLength = 2048; token.setAttribute("aria-label", "Jeton d’accès du serveur");
+      const onThisMac = input("on-this-mac", "", "checkbox"); onThisMac.setAttribute("aria-label", "Ce serveur est sur ce Mac");
+      const localField = label("Ce serveur tourne sur ce Mac — requis pour une adresse http://127.0.0.1", onThisMac);
+      localField.hidden = true;
+      const remote = node("div", null, "mcp-remote");
+      remote.append(label("Adresse HTTPS du serveur",url),label("Jeton d’accès — conservé dans le coffre, jamais réaffiché",token),localField,node("p","HTTPS est exigé. http:// n’est accepté que pour 127.0.0.1, sur ce Mac. Le jeton n’est envoyé qu’à cette adresse ; une redirection est refusée. Les outils du serveur demandent votre approbation à chaque nouvel usage.","mcp-note"));
+      url.addEventListener("input", () => { localField.hidden = !/^\s*http:/i.test(url.value); });
+      const local = node("div", null, "mcp-local");
+      local.append(label("Commande (sans interpréteur de shell)",command),label("Arguments — un par ligne",args));
+      function setMode(next) {
+        mode = next;
+        for (const [id, choice] of Object.entries(modeChoices)) choice.checked = id === next;
+        local.hidden = next !== "command"; remote.hidden = next !== "url";
+        command.required = next === "command"; url.required = next === "url";
+      }
+      setMode(mode);
+      form.append(label("Nom du connecteur",name),modes,remote,local);
       const env = node("div",null,"mcp-environment");
       const addEnv = () => {
         const row = node("div",null,"mcp-env-row");
@@ -341,7 +413,7 @@
         const v = input("env-value", "Valeur privée", "password"); v.setAttribute("aria-label","Valeur privée de la variable");
         row.append(k,v,button("Retirer",()=> {v.value="";row.remove();})); env.append(row);
       };
-      form.append(node("p","Variables d’environnement privées : conservées sur ce Mac (trousseau macOS ou fichier local, selon Paramètres), jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal. Les valeurs de 8 caractères ou plus sont masquées dans tous les résultats, même si ce connecteur est inactif. Pour les valeurs plus courtes, seuls les champs texte identiques de ce serveur sont masqués ; les nombres et booléens restent inchangés.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
+      local.append(node("p","Variables d’environnement privées : conservées sur ce Mac (trousseau macOS ou fichier local, selon Paramètres), jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal. Les valeurs de 8 caractères ou plus sont masquées dans tous les résultats, même si ce connecteur est inactif. Pour les valeurs plus courtes, seuls les champs texte identiques de ce serveur sont masqués ; les nombres et booléens restent inchangés.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
       const submit = node("button","Enregistrer le connecteur","primary-button"); submit.type = "submit";
       form.append(submit); details.append(form); section.append(details);
       feedback = node("p",null,"mcp-error"); feedback.setAttribute("role","status"); section.append(feedback);
@@ -349,6 +421,19 @@
         event.preventDefault(); submit.disabled=true; feedback.textContent=""; feedback.className="mcp-error";
         const environment = Object.create(null);
         let invalid = false;
+        if (mode === "url") {
+          const body = {name:name.value,url:url.value,token:token.value,on_this_mac:onThisMac.checked};
+          token.value = "";
+          try {
+            await panels.api("/api/mcp/add",body);
+            form.reset(); setMode("command"); localField.hidden = true; details.open=false;
+            await panels.refresh();
+            feedback.className="mcp-note";
+            feedback.textContent="Serveur enregistré. Activez-le pour un bot, puis connectez-le : une approbation s’ouvre avant tout envoi du jeton.";
+          } catch (e) { feedback.textContent=e.message || "Le serveur n’a pas pu être enregistré."; }
+          finally { delete body.token; token.value=""; submit.disabled=false; }
+          return;
+        }
         for (const row of env.children) {
           const [k,v] = row.querySelectorAll("input");
           if (!k.value.trim() || Object.hasOwn(environment,k.value.trim())) invalid=true;

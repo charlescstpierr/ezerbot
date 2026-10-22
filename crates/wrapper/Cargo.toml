@@ -37,6 +37,8 @@ rustix = { version = "1", features = ["fs"] }
 ring = "0.17"
 # Existing locked URL parser; endpoint validation must not use string heuristics.
 url = "2"
+# Fuseaux IANA de l'agenda : « demain » se juge dans le fuseau du calendrier.
+jiff = { workspace = true }
 # getpwuid_r sans unsafe dans cette crate (`forbid(unsafe_code)`).
 nix = { version = "0.29.0", default-features = false, features = ["fs", "signal", "user"] }
 

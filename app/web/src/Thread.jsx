@@ -140,7 +140,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
   );
 }
 
-function UserMessage({ message, busy, onCopy, onRetry, onReact, onResend, onDelete, menuOpen, onMenuOpenChange }) {
+function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onResend, onDelete, menuOpen, onMenuOpenChange }) {
   const demonstration = isDemonstrationMessage(message);
   if (isTeachMessage(message) || demonstration) return (
     <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
@@ -158,7 +158,7 @@ function UserMessage({ message, busy, onCopy, onRetry, onReact, onResend, onDele
       {message.body && <div className="gb-bubble" data-find-body>{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
         ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
         : part.text)}</div>}
-      <MessageAttachments message={message} />
+      <MessageAttachments message={message} memoSpeed={memoSpeed} />
       <footer className="gb-actions">
         {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />{followUp ? "Enregistré" : "Envoyé"}</span>}
         {["queued", "dispatching"].includes(message.state) && !menu.status && <span className="gb-status">Envoi en cours…</span>}
@@ -286,7 +286,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -364,7 +364,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onRes
           const menuOpen = message.id != null && openMenuId === message.id;
           const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
-            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
+            ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}

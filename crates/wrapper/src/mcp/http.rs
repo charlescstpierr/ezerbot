@@ -1,5 +1,6 @@
-//! Streamable HTTP for the fixed, reviewed catalogue endpoints. No redirects,
-//! sampling, elicitation, arbitrary URL or credential-bearing error text.
+//! Streamable HTTP for the fixed, reviewed catalogue endpoints and for the one
+//! address a user typed. No redirects, sampling, elicitation or
+//! credential-bearing error text; the token only goes to the approved origin.
 use super::{Error, Result, FRAME_LIMIT};
 use serde_json::{json, Value};
 use std::{
@@ -8,6 +9,42 @@ use std::{
 };
 
 pub(crate) const AUTH_REQUIRED: &str = "La connexion au service a expiré ou a été révoquée. Utilisez « Reconnecter » dans les paramètres.";
+pub(crate) const REDIRECTED: &str = "Le serveur MCP a répondu par une redirection. Elle n’est pas suivie : le jeton n’est envoyé qu’à l’adresse saisie.";
+/// The address a user typed, as it will be stored and called: `https`, or `http`
+/// only for `127.0.0.1` once the user confirmed that the server is on this Mac.
+/// No credentials, query or fragment in the address: the secret has its own field.
+pub(crate) fn approved_endpoint(
+    raw: &str,
+    on_this_mac: bool,
+) -> std::result::Result<String, String> {
+    let url = url::Url::parse(raw.trim()).map_err(|_| {
+        "L’adresse du serveur MCP est invalide. Exemple : https://exemple.fr/mcp".to_owned()
+    })?;
+    if url.as_str().len() > 2048 {
+        return Err("L’adresse du serveur MCP dépasse 2 048 caractères.".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "L’adresse ne doit pas contenir d’identifiants. Saisissez le jeton dans son champ."
+                .into(),
+        );
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("L’adresse ne doit pas contenir de paramètres (?…) ni d’ancre (#…). Saisissez le jeton dans son champ.".into());
+    }
+    match (url.scheme(), url.host()) {
+        ("https", Some(_)) => {}
+        ("http", Some(url::Host::Ipv4(ip))) if ip == std::net::Ipv4Addr::LOCALHOST => {
+            if !on_this_mac {
+                return Err("Confirmez que ce serveur est sur ce Mac pour accepter une adresse http://127.0.0.1.".into());
+            }
+        }
+        _ => {
+            return Err("Seules les adresses https:// sont acceptées. http:// n’est permis que pour 127.0.0.1, après confirmation que le serveur est sur ce Mac.".into());
+        }
+    }
+    Ok(url.into())
+}
 pub(super) struct Remote {
     endpoint: String,
     token: String,
@@ -38,10 +75,12 @@ impl Remote {
             .build();
         let mut request = agent
             .post(&self.endpoint)
-            .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .set("Accept", "application/json, text/event-stream")
             .set("MCP-Protocol-Version", &self.version);
+        if !self.token.is_empty() {
+            request = request.set("Authorization", &format!("Bearer {}", self.token));
+        }
         if let Some(session) = &self.session {
             request = request.set("Mcp-Session-Id", session);
         }
@@ -57,6 +96,10 @@ impl Remote {
             }
             Err(_) => return Err("Le service MCP est indisponible. Réessayez la connexion.".into()),
         };
+        // With redirects disabled a 3xx is still an `Ok`: refuse it, never read it.
+        if (300..400).contains(&response.status()) {
+            return Err(REDIRECTED.into());
+        }
         if let Some(session) = response.header("Mcp-Session-Id") {
             if session.len() > 512 || session.chars().any(char::is_control) {
                 return Err("Session MCP invalide.".into());

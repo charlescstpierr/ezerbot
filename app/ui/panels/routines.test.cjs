@@ -464,3 +464,142 @@ test('an enabled publication Tailscale cannot confirm stays removable, even with
   assert.doesNotMatch(h.t.content.textContent, /Publier avec Tailscale Funnel/);
   assert.doesNotMatch(h.t.content.textContent, /https:\/\//);
 });
+
+const everyMinute = { kind: 'every', interval_ms: 60000, phase_ms: null };
+const groupRoutine = { ...routine, name: 'Groupe', enabled: true, body: { kind: 'inline_prompt', prompt: 'Rapport' }, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'webhook' } }, { id: 'trigger-c', trigger: { kind: 'webhook' } }] } };
+const labelled = (h, text) => h.t.content.querySelectorAll('.form-label').filter(l => String(l.children[0]).startsWith(text));
+const inputOf = label => label.children.find(c => c.tagName === 'INPUT' || c.tagName === 'SELECT');
+const type = (input, value) => { input.value = value; input.listeners.input?.(); };
+function groupEditor(sent) {
+  return harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [groupRoutine] };
+    sent.push({ url, body });
+    return { routine: groupRoutine, webhooks: [] };
+  });
+}
+
+test('a group editor lists its simple triggers and refuses a group of fewer than two', async () => {
+  const sent = [], h = groupEditor(sent);
+  await h.t.edit(groupRoutine);
+  const remove = () => h.t.content.querySelectorAll('button').filter(b => b.textContent === 'Retirer ce déclencheur');
+  assert.equal(remove().length, 3);
+  assert.doesNotMatch(h.t.content.textContent, /Groupe : .*Groupe/);
+  remove()[2].click(); remove()[1].click();
+  assert.equal(remove().length, 1);
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /au moins deux déclencheurs/);
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  assert.match(h.t.status.textContent, /au moins deux déclencheurs/);
+  assert.equal(sent.length, 0);
+});
+
+test('saving a group keeps the IDs of the triggers it already has and sends only what changed', async () => {
+  const sent = [], h = groupEditor(sent);
+  await h.t.edit(groupRoutine);
+  // The second "Cron" label is the first trigger of the group, after the routine's own field.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger)), { kind: 'group', members: [
+    { id: 'trigger-a', trigger: { kind: 'every', interval_ms: 120000, phase_ms: null } },
+    { id: 'trigger-b', trigger: { kind: 'webhook' } },
+    { id: 'trigger-c', trigger: { kind: 'webhook' } },
+  ] });
+});
+
+test('each webhook of a group has its own URL and its own token, shown once after saving', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' }, {
+    api: async url => { if (url === '/api/routines/update') return { routine: groupRoutine, webhooks: [{ trigger_id: 'trigger-b', token: 'ezwh_first' }, { trigger_id: 'trigger-c', token: 'ezwh_second' }] }; throw new Error(`inattendu : ${url}`); },
+  });
+  h.panels.state.routines.items = [{ routine: groupRoutine }];
+  h.panels.state.routine_webhooks.items = { [groupRoutine.routine_id]: { trigger_id: 'trigger-b', webhooks: [{ trigger_id: 'trigger-b' }, { trigger_id: 'trigger-c' }] } };
+  await h.t.mutate('/api/routines/update', { bot_id: 'grokbot', routine_id: groupRoutine.routine_id }, 'Routine enregistrée.');
+  await h.t.loadFunnel();
+  const text = h.t.content.textContent;
+  assert.match(text, /Webhook 1/);
+  assert.match(text, /Webhook 2/);
+  assert.match(text, /hooks\/routine-test\/trigger-b/);
+  assert.match(text, /hooks\/routine-test\/trigger-c/);
+  assert.match(text, /ezwh_first/);
+  assert.match(text, /ezwh_second/);
+  h.t.revealed.clear(); h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /ezwh_/);
+});
+
+test('history names the simple trigger of a group that started each run', async () => {
+  const schedule = { ...occurrence('group-schedule', 'done', null), trigger: { kind: 'schedule', label: 'Horaire', description: 'Chaque minute, à partir de l’activation', trigger_id: 'trigger-a' } };
+  const call = { ...occurrence('group-hook', 'done', 'webhook:trigger-c:call:1'), trigger: { kind: 'webhook', label: 'Webhook 2', received_at: 1_760_000_000_000, trigger_id: 'trigger-c' } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([schedule, call]) });
+  await h.t.showHistory(groupRoutine);
+  assert.match(h.t.content.textContent, /Horaire \(Chaque minute, à partir de l’activation\) · /);
+  assert.match(h.t.content.textContent, /Webhook 2 · reçu le/);
+});
+
+// The harness clock reads 10 000 ms: the one-shot at 5 000 ms is in the past.
+const pinned = { ...groupRoutine, time_zone: 'UTC', trigger: { kind: 'group', members: [
+  { id: 'trigger-a', trigger: { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' } },
+  { id: 'trigger-b', trigger: everyMinute },
+  { id: 'trigger-c', trigger: { kind: 'once', at: 5000 } },
+] } };
+const savedTrigger = async (routineToEdit, change) => {
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [routineToEdit] };
+    sent.push({ url, body });
+    return { routine: routineToEdit, webhooks: [] };
+  });
+  await h.t.edit(routineToEdit);
+  change(h);
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  return { sent, h };
+};
+
+test('saving a group keeps the explicit timezone of a trigger even when it equals the routine timezone', async () => {
+  const { sent } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  const members = JSON.parse(JSON.stringify(sent.find(s => s.url === '/api/routines/update').body.trigger.members));
+  assert.deepEqual(members[0].trigger, { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' });
+  assert.equal(members[1].trigger.interval_ms, 120000);
+});
+
+test('a one-shot of the group that already fired and was not touched does not block saving the rest', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  assert.ok(sent.some(s => s.url === '/api/routines/update'), h.t.status.textContent);
+});
+
+test('a one-shot of the group moved into the past is still refused', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(labelled(h, 'Date et heure UTC')[3].children.find(c => c.tagName === 'INPUT'), '1970-01-01T00:00:01.000'));
+  assert.equal(sent.length, 0);
+  assert.match(h.t.status.textContent, /instant futur/);
+});
+
+test('reviewing a group before its activation offers no way to change its triggers', async () => {
+  const h = harness(async url => url.startsWith('/api/routines?') ? { routines: [groupRoutine] } : {});
+  await h.t.edit(groupRoutine, true);
+  const labels = h.t.content.querySelectorAll('button').map(b => b.textContent);
+  assert.ok(labels.includes('Activer cette routine'));
+  assert.ok(!labels.includes('Retirer ce déclencheur'));
+  assert.ok(!labels.includes('Ajouter un déclencheur'));
+});
+
+test('missed ranges of two group members with the same version and start are both listed', async () => {
+  const range = (member) => ({ routine_id: routine.routine_id, member_id: member, schedule_version: 1, from_inclusive: 1000, until_exclusive: 5000, time_zone: 'UTC', trigger: everyMinute });
+  const h = harness(async () => page([], { missed_ranges: [range('trigger-a'), range('trigger-b')] }));
+  await h.t.showHistory(routine);
+  assert.match(h.t.content.textContent, /Plages d’occurrences manquées \(2\)/);
+  assert.equal(h.t.content.querySelectorAll('.routines-warning').length, 2);
+});
+
+test('replacing a webhook of a group by an identical one is saved, not mistaken for no change', async () => {
+  const two = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: { kind: 'webhook' } }, { id: 'trigger-b', trigger: { kind: 'webhook' } }] } };
+  const { sent, h } = await savedTrigger(two, h => {
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Retirer ce déclencheur').click();
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+    const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'webhook') && !el.children.some(o => o.value === 'group'));
+    type(kinds[kinds.length - 1], 'webhook');
+  });
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  const members = JSON.parse(JSON.stringify(update.body.trigger.members));
+  assert.deepEqual(members, [{ id: 'trigger-b', trigger: { kind: 'webhook' } }, { trigger: { kind: 'webhook' } }]);
+});

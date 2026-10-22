@@ -13,6 +13,18 @@
 .gb-voice-memo details { color: var(--muted); font-size: 12px; }
 .gb-voice-memo summary { cursor: pointer; }
 .gb-voice-memo p { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 400px; }
+.gb-memo-speed { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.gb-memo-speed input { box-sizing: border-box; width: 52px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--canvas); color: var(--text); font: inherit; text-align: right; }
+.gb-memo-speed input:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
+.gb-memo-speed input[aria-invalid="true"] { border-color: var(--danger-text); }
+.gb-voice-memo p.gb-memo-refusal { margin: 0; color: var(--danger-text); font-size: 12px; }
+.gb-voice-memo p.gb-memo-notice { margin: 0; color: var(--muted); font-size: 12px; }
+.gb-voice-memo p.gb-memo-words { margin: 4px 0 0; color: var(--text); font-size: 13px; line-height: 1.6; text-align: left; }
+.gb-memo-word { display: inline; padding: 0 2px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.gb-memo-word:hover { background: var(--accent-soft); }
+.gb-memo-word:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
+.gb-memo-word.is-untimed { color: var(--muted); cursor: default; }
+.gb-memo-word.is-untimed:hover { background: transparent; }
 
 .gb-document-chip { display: flex; align-items: flex-start; align-self: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); max-width: 100%; text-align: left; }
 .gb-document-chip > svg { width: 22px; height: 26px; flex: 0 0 auto; color: var(--muted); }

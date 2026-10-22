@@ -274,11 +274,63 @@ test("GitHub offers no client fields and connects in one click", async () => {
   assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github"}});
 });
 
+const gmail = {...service,id:"gmail",name:"Gmail",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify",scopes_label:"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify",redirect_uri:null};
+
+test("Gmail offers no client fields, shows its account and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [{...gmail,status:"connected",account:"charles@example.test",has_tokens:true,server:{id:"g1",enabled_bots:[],tools:[{name:"list_recent_messages"}]}}]);
+  const card = catalogueCard(root,"gmail");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input" && n.type !== "checkbox").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("Secret OAuth"));
+  assert.ok(!card.textContent.includes("Portées OAuth"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  assert.match(card.textContent, /Compte connecté : charles@example.test/);
+  const idle = await mount([], {}, [gmail]);
+  const fresh = catalogueCard(idle.root,"gmail");
+  assert.equal(fresh.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  await fresh.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(idle.calls[0], {path:"/api/connectors/connect",body:{id:"gmail"}});
+});
+
+test("a Gmail card without the Google client of Ezerbot explains it and never shows the form", async () => {
+  const sentence = "Le client Google d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion à Gmail reste indisponible tant que ce client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...gmail,configured:false,has_client:false,unconfigured_message:sentence}]);
+  const card = catalogueCard(root,"gmail");
+  assert.match(card.textContent, /client Google d’Ezerbot n’est pas configuré/);
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+});
+
 test("an unconfigured GitHub application is explained on the card and by the refused click", async () => {
   const { root } = await mount([], {}, [{...github,configured:false,has_client:false}]);
   const card = catalogueCard(root,"github");
   assert.match(card.textContent, /n’est pas configurée/);
   assert.equal(card.all().filter(n => n.tag === "input").length, 0);
+});
+
+const slackClient = {...service,id:"slack",name:"Slack",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes_label:"Lecture seule des canaux, choisie pendant le consentement Slack",redirect_uri:null};
+
+test("Slack offers no client fields and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [slackClient]);
+  const card = catalogueCard(root,"slack");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("Secret OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  assert.ok(!card.textContent.includes("Portées OAuth"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"slack"}});
+});
+
+test("a Slack client that is not configured is explained on the card and offers no form", async () => {
+  const said = "Le client Slack d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que le client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...slackClient,configured:false,has_client:false,unconfigured_message:said}]);
+  const card = catalogueCard(root,"slack");
+  assert.ok(card.textContent.includes(said));
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  const warning = card.all().find(n => n.className === "mcp-warning");
+  assert.equal(warning.textContent, said);
 });
 
 test("the device code is shown, copyable and cancellable while GitHub waits", async () => {
@@ -363,7 +415,7 @@ test("a search without result says so instead of leaving a blank panel", async (
   assert.equal(emptyState(root), undefined);
 });
 
-test("Gmail keeps its client fields when the search shows it", async () => {
+test("a service that needs a client keeps its client fields when the search shows it", async () => {
   const { root } = await mount([], {}, catalogueServices);
   type(searchField(root), "gmail");
   assert.deepEqual(shown(root), ["gmail"]);
@@ -384,4 +436,120 @@ test("the search and a typed draft survive a catalogue refresh", async () => {
   setState({bots:[{id:"grokbot",name:"Ezerbot"}],mcp:{servers:[],catalogue:catalogueServices.map(s => s.id === "gmail" ? {...s,status:"error",message:"Boum"} : s)}});
   assert.deepEqual(shown(root), ["slack"], "a card re-rendered while hidden stays hidden");
   assert.equal(root.all().find(n => n.name === "slack-client").value, "brouillon");
+});
+
+const twoAccounts = () => {
+  const first = {id:"c1",enabled_bots:["grokbot"],tools:[{name:"list_issues",description:"Lister"}]};
+  const second = {id:"c2",enabled_bots:[],tools:[{name:"list_issues",description:"Lister"}]};
+  const accounts = [
+    {id:"github",account:"charles-test",status:"connected",device:null,has_tokens:true,server:first},
+    {id:"github:2",account:"autre-compte",status:"connected",device:null,has_tokens:true,server:second},
+  ];
+  return {first,second,item:{...github,slot:"github",status:"connected",has_tokens:true,account:"charles-test",server:first,accounts}};
+};
+
+test("GitHub shows both accounts, adds another one, and disconnects only the account it names", async () => {
+  const {first,second,item} = twoAccounts();
+  const { root, calls } = await mount([first,second], {}, [item]);
+  const card = catalogueCard(root,"github");
+  assert.match(card.textContent, /Compte connecté : charles-test/);
+  assert.match(card.textContent, /Compte connecté : autre-compte/);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0, "the accounts are not custom servers");
+  await card.all().find(n => n.attrs["data-connector-action"] === "add-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github",another:true}});
+  const block = card.all().find(n => n.attrs["data-account"] === "github:2");
+  await block.all().find(n => n.attrs["data-connector-action"] === "disconnect-account").events.click();
+  assert.deepEqual(calls[1], {path:"/api/connectors/disconnect",body:{id:"github",account:"github:2"}});
+  const check = block.all().find(n => n.type === "checkbox"); check.checked = true;
+  await check.events.change();
+  assert.deepEqual(calls[2], {path:"/api/mcp/select",body:{id:"c2",bot_id:"grokbot",enabled:true}});
+  const lead = card.all().find(n => n.attrs["data-connector-action"] === "disconnect");
+  assert.equal(lead.attrs["aria-label"], "Déconnecter charles-test");
+  await lead.events.click();
+  assert.deepEqual(calls[3], {path:"/api/connectors/disconnect",body:{id:"github"}});
+});
+
+test("a second account waits for its code beside the first and is cancelled by its own button", async () => {
+  const {first,item} = twoAccounts();
+  const device = {user_code:"WDJB-MJH2",verification_uri:"https://github.com/login/device",expires_at:Date.UTC(2026,9,22,12,15)};
+  item.accounts[1] = {id:"github:2",account:null,status:"authorizing",device,has_tokens:false,server:{id:"c2",enabled_bots:[],tools:[]}};
+  const { root, calls, copies } = await mount([first], {}, [item]);
+  const card = catalogueCard(root,"github");
+  const block = card.all().find(n => n.attrs["data-account"] === "github:2");
+  assert.ok(block.all().find(n => n.tag === "code" && n.textContent === "WDJB-MJH2"));
+  assert.equal(card.all().filter(n => n.attrs["data-connector-action"] === "add-account").length, 0, "one wait at a time");
+  await block.all().find(n => n.attrs["aria-label"] === "Copier le code de connexion — GitHub (nouveau compte)").events.click();
+  assert.deepEqual(copies, ["WDJB-MJH2"]);
+  await block.all().find(n => n.attrs["data-connector-action"] === "cancel-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github",account:"github:2"}});
+});
+
+test("when the first slot is gone the card leads with the next account and names its slot", async () => {
+  const second = {id:"c2",enabled_bots:[],tools:[]};
+  const item = {...github,slot:"github:2",status:"authorizing",account:null,server:second,device:{user_code:"WDJB-MJH3",verification_uri:"https://github.com/login/device",expires_at:Date.UTC(2026,9,22,12,15)},accounts:[{id:"github:2",account:null,status:"authorizing",device:null,server:second}]};
+  const { root, calls } = await mount([second], {}, [item]);
+  const card = catalogueCard(root,"github");
+  await card.all().find(n => n.tag === "button" && n.textContent === "Annuler").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github",account:"github:2"}});
+});
+
+test("a GitHub slot refused before its first connection is not a custom server", async () => {
+  const {first,item} = twoAccounts();
+  item.accounts = item.accounts.slice(0,1);
+  const refused = {id:"c3",name:"GitHub",status:"disconnected",command:"https://api.github.com",arguments:[],environment_names:[],enabled_bots:[],tools:[]};
+  item.slot_servers = ["c1","c3"];
+  const { root } = await mount([first,refused], {}, [item]);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0);
+  assert.match(root.textContent, /Aucun connecteur ajouté/);
+});
+
+const pickAddress = root => {
+  const radio = root.all().find(n => n.type === "radio" && n.getAttribute("aria-label") === "Adresse HTTPS");
+  radio.checked = true;
+  radio.events.change();
+};
+
+test("MCP by address submits the URL, the secret and the Mac confirmation, then empties the secret field", async () => {
+  const { root, calls } = await mount();
+  pickAddress(root);
+  const field = name => root.all().find(n => n.name === name);
+  const command = field("command"), url = field("url"), token = field("token");
+  assert.equal(token.type, "password");
+  assert.equal(command.required, false, "a command is not required for an address");
+  assert.equal(url.required, true);
+  field("name").value = "Serveur distant";
+  url.value = "http://127.0.0.1:8080/mcp"; url.events.input();
+  field("on-this-mac").checked = true;
+  token.value = "jeton-factice-alpha";
+  await root.all().find(n => n.tag === "form").events.submit({ preventDefault() {} });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/mcp/add");
+  assert.deepEqual(calls[0].body, {name:"Serveur distant",url:"http://127.0.0.1:8080/mcp",token:"jeton-factice-alpha",on_this_mac:true});
+  assert.equal(token.value, "", "the secret is not kept in the field after the request");
+  const feedback = root.all().find(n => n.attrs.role === "status");
+  assert.equal(feedback.className, "mcp-note");
+  assert.match(feedback.textContent, /Serveur enregistré/);
+  assert.ok(!root.textContent.includes("jeton-factice-alpha"));
+});
+
+test("the confirmation « sur ce Mac » only appears for an http address", async () => {
+  const { root } = await mount();
+  pickAddress(root);
+  const url = root.all().find(n => n.name === "url");
+  const confirmation = root.all().find(n => n.tag === "label" && n.textContent.includes("sur ce Mac"));
+  assert.equal(confirmation.hidden, true);
+  url.value = "https://exemple.fr/mcp"; url.events.input();
+  assert.equal(confirmation.hidden, true);
+  url.value = "http://127.0.0.1:8080/mcp"; url.events.input();
+  assert.equal(confirmation.hidden, false);
+});
+
+test("a server added by address shows its address and a masked token, never a command", async () => {
+  const server = {id:"distant",name:"Serveur distant",status:"disconnected",command:"",url:"https://exemple.fr/mcp",arguments:[],environment_names:["ACCESS_TOKEN"],enabled_bots:[],tools:[]};
+  const { root } = await mount([server]);
+  assert.match(root.textContent, /Adresse du serveur/);
+  assert.ok(root.all().some(n => n.tag === "pre" && n.textContent === "https://exemple.fr/mcp"));
+  assert.match(root.textContent, /Jeton privé conservé dans le coffre/);
+  assert.ok(!root.textContent.includes("ACCESS_TOKEN"));
+  assert.ok(root.all().some(n => n.tag === "button" && n.textContent === "Connecter…"));
 });

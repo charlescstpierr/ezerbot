@@ -93,7 +93,20 @@ pub(super) fn execute(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiEr
                 return Ok(result);
             }
             let env = environment(ctx, &server)?;
-            let client = match Client::spawn(&server.command, &server.arguments, &env) {
+            let spawned = match &server.endpoint {
+                // The address was confirmed when it was added; never trust a stored
+                // value that would no longer pass the same check.
+                Some(endpoint) => crate::mcp::approved_endpoint(endpoint, true)
+                    .map(|endpoint| {
+                        Client::remote(
+                            endpoint,
+                            env.get("ACCESS_TOKEN").cloned().unwrap_or_default(),
+                        )
+                    })
+                    .map_err(McpError::from),
+                None => Client::spawn(&server.command, &server.arguments, &env),
+            };
+            let client = match spawned {
                 Ok(client) => client,
                 Err(error) => {
                     // No process was created. Do not overwrite a simultaneous start.

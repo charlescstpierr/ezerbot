@@ -25,7 +25,8 @@ fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
         "issue":{"type":"integer","minimum":1,"description":"Numéro de l’issue."},
-        "text":{"type":"string","description":"Texte exact du commentaire, que Charles pourra corriger avant l’envoi."}
+        "text":{"type":"string","description":"Texte exact du commentaire, que Charles pourra corriger avant l’envoi."},
+        "compte":account_property()
     },"required":["repository","issue","text"]})
 }
 pub(super) fn tool_definition() -> Value {
@@ -38,7 +39,7 @@ pub(super) fn tool_definition() -> Value {
 pub(in super::super::super) fn tool_spec() -> ToolSpec {
     ToolSpec {
         name: TOOL.into(),
-        description: "GitHub · commenter une issue d’un dépôt `propriétaire/dépôt` avec le compte GitHub connecté. Une carte brouillon montre le texte, que Charles peut corriger ; rien n’est publié avant son clic sur Envoyer, et un refus ne publie rien. Le résultat dit quel texte a été publié.".into(),
+        description: format!("GitHub · commenter une issue d’un dépôt `propriétaire/dépôt` avec le compte GitHub connecté. Une carte brouillon montre le texte, que Charles peut corriger ; rien n’est publié avant son clic sur Envoyer, et un refus ne publie rien. Le résultat dit quel texte a été publié. {ACCOUNTS_NOTE}"),
         schema: schema(),
         requires_approval: true,
     }
@@ -84,19 +85,6 @@ fn check_text(ctx: &Context<'_>, text: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
-fn account_id(ctx: &Context<'_>) -> Result<String, ApiError> {
-    let id: Option<Option<String>> = ctx
-        .connection
-        .query_row(
-            "SELECT account_id FROM wrapper_connector_catalogue WHERE id='github'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    id.flatten().filter(|id| !id.is_empty()).ok_or_else(|| {
-        invalid("GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez.")
-    })
-}
 fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -104,6 +92,7 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
         repository: String,
         issue: u64,
         text: String,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid("Arguments invalides : indiquez le dépôt (propriétaire/dépôt), le numéro de l’issue et le texte.")
@@ -117,12 +106,12 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
         return Err(invalid("Numéro d’issue invalide."));
     }
     check_text(ctx, &args.text)?;
-    let (_, _, login) = resolve(ctx)?;
+    let account = resolve(ctx, args.compte.as_deref())?;
     Ok(Draft {
         repository: format!("{owner}/{name}"),
         issue: args.issue,
-        login,
-        account_id: account_id(ctx)?,
+        login: account.login,
+        account_id: account.id,
         text: args.text,
     })
 }
@@ -130,9 +119,26 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
 /// Checked before any card: a bad target or a missing account never opens one.
 pub(in super::super::super) fn validate(
     ctx: &Context<'_>,
-    arguments: &Value,
+    call: &ToolCall,
 ) -> Result<(), ApiError> {
-    parse(ctx, arguments).map(|_| ())
+    // A draft that already exists is bound to its account: resuming it must not resolve the
+    // optional `compte` of the original call again, which other accounts may now make ambiguous.
+    if let Some(run) = ctx.run_id {
+        if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
+            let bound: Option<(String, String)> = ctx
+                .connection
+                .query_row(
+                    "SELECT login,account_id FROM wrapper_github_drafts WHERE request_id=?1",
+                    [&request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((login, account)) = bound {
+                return held(ctx, &login, &account).map(|_| ());
+            }
+        }
+    }
+    parse(ctx, &call.arguments).map(|_| ())
 }
 fn display(draft: &Draft, fingerprint: &str) -> Value {
     json!({"brouillon":{
@@ -171,10 +177,15 @@ pub(in super::super::super) fn call_id(ctx: &Context<'_>, request_id: &str) -> O
         .ok()
 }
 /// Under the connection lock, the credentials in use are still those of the approved account.
-fn bound(ctx: &Context<'_>, login: &str, account: &str) -> Result<(), ApiError> {
+pub(super) fn bound(
+    ctx: &Context<'_>,
+    server: &str,
+    login: &str,
+    account: &str,
+) -> Result<(), ApiError> {
     let row: Option<(String, Option<String>, Option<String>)> = ctx.connection.query_row(
-        "SELECT phase,account_email,account_id FROM wrapper_connector_catalogue WHERE id='github'",
-        [],
+        "SELECT phase,account_email,account_id FROM wrapper_connector_catalogue WHERE server_id=?1",
+        [server],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional()?;
     match row {
@@ -296,16 +307,18 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         }
         _ => return Err(uncertain()),
     }
-    let (server, m, current) = resolve(ctx)?;
-    if current != login
-        || account_id(ctx)? != account
-        || fingerprint(&repository, issue, &login, &account, &text) != print
-    {
-        settle(ctx, &request_id, "failed", None)?;
-        return Err(invalid(
-            "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
-        ));
-    }
+    let held = match held(ctx, &login, &account) {
+        Ok(held) if fingerprint(&repository, issue, &login, &account, &text) == print => held,
+        other => {
+            settle(ctx, &request_id, "failed", None)?;
+            return Err(other.err().unwrap_or_else(|| {
+                invalid(
+                    "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
+                )
+            }));
+        }
+    };
+    let (server, m) = (held.server, held.m);
     // One claim before the call: only the run that wins it may reach GitHub.
     let claimed = ctx.connection.execute(
         "UPDATE wrapper_github_drafts SET state='sending' WHERE request_id=?1 AND state='draft'",
@@ -323,7 +336,7 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         ctx,
         &server,
         m,
-        &|ctx| bound(ctx, &login, &account),
+        &|ctx| bound(ctx, &server.id, &login, &account),
         &|access| {
             send_json(
                 agent()

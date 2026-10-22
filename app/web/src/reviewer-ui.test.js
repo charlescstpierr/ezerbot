@@ -288,6 +288,21 @@ test("connector lifecycle cards show the provider-specific action and its result
   } finally {delete globalThis.window;}
 });
 
+test("starting a server added by address shows the address it will contact, not a command or arguments", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"remote",kind:"approval",payload:{
+      entry_id:"remote",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+      kind:{kind:"approval",tool:"mcp_start_remote",expires_at:Date.now()+60000},
+      connector:{server:"Serveur distant",tool:"Démarrer le connecteur",origin:"settings"},
+      arguments:{serveur:"Serveur distant",commande:"https://exemple.fr/mcp",arguments:[],variables_privées:["ACCESS_TOKEN"],transport:"https",action:"Démarrer le connecteur"},
+    }}}));
+    assert.ok(html.includes("Adresse du service"));assert.ok(html.includes("https://exemple.fr/mcp"));
+    assert.ok(!html.includes(">Commande<"));assert.ok(!html.includes("Aucun argument"));
+    assert.ok(html.includes("valeurs masquées"));
+  } finally {delete globalThis.window;}
+});
+
 test("a GitHub disconnection names the account and offers Confirmer and Annuler, never Toujours", () => {
   globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
   const card=(tool,compte)=>renderToStaticMarkup(React.createElement(Card,{message:{id:"github",kind:"approval",payload:{

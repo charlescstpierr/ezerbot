@@ -2,7 +2,8 @@
 //! device flow, which sends only the public `client_id`: no `client_secret` is read,
 //! sent or stored. The device code lives in the waiting thread's memory, never in
 //! SQLite or the vault. Tokens are written once, after GitHub names the account, and
-//! a refused write keeps nothing.
+//! a refused write keeps nothing. Several accounts may be connected: each has its own
+//! slot, its own secret, and a conversation keeps the account Charles named.
 use super::*;
 use std::{
     io::Read,
@@ -10,6 +11,8 @@ use std::{
 };
 pub(in super::super) mod comment;
 pub(in super::super) use comment::TOOL as COMMENT_TOOL;
+pub(in super::super) mod issue;
+pub(in super::super) use issue::TOOL as ISSUE_TOOL;
 
 /// Read tools of the closed list. None needs an approval card: they only read.
 const TOOL: &str = "github_list_issues";
@@ -28,8 +31,14 @@ const NOT_CONNECTED: &str =
 /// What a read says once the account was disconnected, here or by a cancelled sign-in.
 const DISCONNECTED: &str =
     "GitHub est déconnecté. Reconnectez GitHub dans Paramètres › Connecteurs, puis réessayez.";
+/// A connected account this bot was not given.
+const ENABLE: &str =
+    "GitHub n’est pas activé pour ce bot. Activez-le dans Paramètres › Connecteurs, puis réessayez.";
 const RECONNECT: &str =
     "La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub dans Paramètres › Connecteurs.";
+
+/// Said to the model with every tool: how several accounts are told apart.
+pub(super) const ACCOUNTS_NOTE: &str = "Plusieurs comptes GitHub peuvent être connectés : tant que Charles n’en a pas choisi un pour cette conversation, l’outil répond qu’il faut lui demander lequel (sans appeler GitHub). Rappelez alors l’outil avec `compte` = le login choisi ; ce choix vaut pour la suite de la conversation jusqu’à ce que Charles en nomme un autre.";
 
 /// Public value of the build, replaceable by the environment for tests and the judge.
 pub(super) fn client_id() -> Option<String> {
@@ -43,6 +52,10 @@ pub(super) fn client_id() -> Option<String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
     .then(|| value.to_owned())
+}
+pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_github_account_choice (conversation_id TEXT PRIMARY KEY,account_id TEXT NOT NULL);")?;
+    Ok(())
 }
 pub(super) fn not_configured() -> ApiError {
     invalid("L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que l’application n’est pas préparée.")
@@ -391,6 +404,15 @@ fn complete(ctx: &Context<'_>, server: &Server, m: Manifest, raw: &Value) -> Res
     let mut env = HashMap::new();
     let expires = tokens(raw, &mut env)?;
     let (login, id) = account_of(m, &env["ACCESS_TOKEN"])?;
+    // One connection per GitHub user: a second sign-in of the same user adds nothing.
+    let twin: bool = ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE (id='github' OR id GLOB 'github:*') AND account_id=?1 AND server_id!=?2 AND phase IN ('connected','reconnect'))",
+        params![id, server.id],
+        |r| r.get(0),
+    )?;
+    if twin {
+        return Err(invalid(&format!("Le compte GitHub {login} est déjà connecté. Aucun jeton n’a été enregistré en double : pour en ajouter un autre, identifiez-vous chez GitHub avec un autre compte.")));
+    }
     env.insert("EMAIL".into(), login);
     write_tokens(ctx, server, &env)?;
     let stored = (|| -> Result<(), ApiError> {
@@ -460,22 +482,29 @@ const TOOLS: [Tool; 3] = [
         schema: repository_schema,
     },
 ];
+/// The `compte` field every tool of the list accepts.
+pub(super) fn account_property() -> Value {
+    json!({"type":"string","description":"Identifiant (login) du compte GitHub à utiliser, seulement quand plusieurs comptes sont connectés et que Charles en a nommé un. Ne le devinez pas : l’outil dit s’il faut demander lequel."})
+}
 fn issues_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
-        "state":{"type":"string","enum":["open","closed","all"],"description":"État des issues ; open par défaut."}
+        "state":{"type":"string","enum":["open","closed","all"],"description":"État des issues ; open par défaut."},
+        "compte":account_property()
     },"required":["repository"]})
 }
 fn pull_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
-        "number":{"type":"integer","minimum":1,"description":"Numéro de la pull request ; la plus récente si omis."}
+        "number":{"type":"integer","minimum":1,"description":"Numéro de la pull request ; la plus récente si omis."},
+        "compte":account_property()
     },"required":["repository"]})
 }
 fn repository_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
-        "path":{"type":"string","description":"Chemin d’un fichier du dépôt, par exemple docs/guide.md ; le README si omis."}
+        "path":{"type":"string","description":"Chemin d’un fichier du dépôt, par exemple docs/guide.md ; le README si omis."},
+        "compte":account_property()
     },"required":["repository"]})
 }
 /// Model-facing tools, advertised only while GitHub is connected and enabled for the bot.
@@ -484,11 +513,11 @@ pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec>
         .iter()
         .map(|tool| grokbot_engine::contracts::ToolSpec {
             name: tool.name.into(),
-            description: tool.model.into(),
+            description: format!("{} {ACCOUNTS_NOTE}", tool.model),
             schema: (tool.schema)(),
             requires_approval: false,
         })
-        .chain(std::iter::once(comment::tool_spec()))
+        .chain([comment::tool_spec(), issue::tool_spec()])
         .collect()
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
@@ -499,6 +528,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         .collect();
     let mut tools = tools;
     tools.push(comment::tool_definition());
+    tools.push(issue::tool_definition());
     let tools = json!(tools);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
@@ -623,30 +653,178 @@ pub(in super::super) fn call(
         },
     }
 }
+/// A connected GitHub account, ready to be called.
+pub(super) struct Account {
+    server: Server,
+    m: Manifest,
+    login: String,
+    id: String,
+    /// Enabled for the bot that asks.
+    enabled: bool,
+}
+/// The accounts that hold a live connection, the first one first.
+fn connected(ctx: &Context<'_>) -> Result<Vec<Account>, ApiError> {
+    let mut stmt = ctx.connection.prepare("SELECT server_id,account_email,account_id FROM wrapper_connector_catalogue WHERE (id='github' OR id GLOB 'github:*') AND phase='connected' AND account_email IS NOT NULL AND account_id IS NOT NULL ORDER BY id='github' DESC,rowid")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let servers = super::super::servers(ctx.connection)?;
+    let m = manifest("github")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(server_id, login, id)| {
+            let server = servers.iter().find(|s| s.id == server_id)?.clone();
+            let enabled = ctx
+                .bot_id
+                .is_none_or(|bot| super::super::enabled(ctx.connection, &server.id, bot));
+            Some(Account {
+                server,
+                m,
+                login,
+                id,
+                enabled,
+            })
+        })
+        .collect())
+}
+/// What a request resolves to: one account to call, or the question to put to Charles.
+pub(super) enum Pick {
+    Use(Box<Account>),
+    Ask(Value),
+}
+/// The account this request resolved. Zero usable accounts is a sentence, not a call;
+/// several without a choice is a question, and no provider is called before it is answered.
+pub(super) fn pick(ctx: &Context<'_>, named: Option<&str>) -> Result<Pick, ApiError> {
+    let all = connected(ctx)?;
+    let usable: Vec<Account> = all.into_iter().filter(|a| a.enabled).collect();
+    if usable.is_empty() {
+        let rows = github_rows(ctx)?;
+        let any = |wanted: &str| rows.iter().any(|(_, phase)| phase == wanted);
+        return Err(invalid(if rows.is_empty() {
+            NOT_CONNECTED
+        } else if any("connected") {
+            ENABLE
+        } else if any("reconnect") {
+            RECONNECT
+        } else {
+            DISCONNECTED
+        }));
+    }
+    let logins = || usable.iter().map(|a| a.login.as_str()).collect::<Vec<_>>();
+    let named = named.map(str::trim).filter(|n| !n.is_empty());
+    let chosen = if let Some(name) = named {
+        let found = usable
+            .iter()
+            .position(|a| a.login.eq_ignore_ascii_case(name));
+        let Some(found) = found else {
+            return Err(invalid(&format!(
+                "Aucun compte GitHub connecté ne s’appelle {}. Comptes disponibles : {}.",
+                clean(name, 100),
+                logins().join(", ")
+            )));
+        };
+        if let Some(conversation) = ctx.conversation_id {
+            ctx.connection.execute(
+                "INSERT INTO wrapper_github_account_choice(conversation_id,account_id) VALUES (?1,?2) ON CONFLICT(conversation_id) DO UPDATE SET account_id=excluded.account_id",
+                params![conversation, usable[found].id],
+            )?;
+        }
+        found
+    } else {
+        // What the conversation chose comes before any default: a chosen account that can no
+        // longer be used is said so, never silently replaced by another one.
+        let remembered: Option<String> = match ctx.conversation_id {
+            Some(conversation) => ctx
+                .connection
+                .query_row(
+                    "SELECT account_id FROM wrapper_github_account_choice WHERE conversation_id=?1",
+                    [conversation],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        let mut found = None;
+        if let Some(id) = remembered {
+            found = usable.iter().position(|a| a.id == id);
+            if found.is_none() {
+                let lost: Option<(String, String)> = ctx
+                    .connection
+                    .query_row(
+                        "SELECT account_email,phase FROM wrapper_connector_catalogue WHERE account_id=?1 AND (id='github' OR id GLOB 'github:*')",
+                        [&id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((login, phase)) = lost {
+                    let why = if phase == "connected" {
+                        "n’est plus activé pour ce bot"
+                    } else {
+                        "doit être reconnecté (Paramètres › Connecteurs)"
+                    };
+                    return Err(invalid(&format!(
+                        "Le compte GitHub {login} choisi pour cette conversation {why}. Nommez un autre compte pour continuer avec lui."
+                    )));
+                }
+            }
+        }
+        match found.or((usable.len() == 1).then_some(0)) {
+            Some(found) => found,
+            None => {
+                let logins = logins();
+                return Ok(Pick::Ask(json!({
+                    "choix_requis":true,
+                    "comptes":logins,
+                    "texte":format!("Plusieurs comptes GitHub sont connectés : {}. Demandez à Charles lequel utiliser, puis rappelez cet outil avec le champ `compte`. Rien n’a été lu sur GitHub.", logins.join(", ")),
+                })));
+            }
+        }
+    };
+    Ok(Pick::Use(Box::new(
+        usable
+            .into_iter()
+            .nth(chosen)
+            .expect("a position of this list"),
+    )))
+}
+/// The account for a tool that cannot answer with a question first.
+pub(super) fn resolve(ctx: &Context<'_>, named: Option<&str>) -> Result<Account, ApiError> {
+    match pick(ctx, named)? {
+        Pick::Use(account) => Ok(*account),
+        Pick::Ask(question) => Err(invalid(question["texte"].as_str().unwrap_or(""))),
+    }
+}
+/// The account a draft card was prepared for, while it is still that login.
+pub(super) fn held(ctx: &Context<'_>, login: &str, id: &str) -> Result<Account, ApiError> {
+    let account = connected(ctx)?
+        .into_iter()
+        .find(|a| a.id == id && a.login == login)
+        .ok_or_else(|| {
+            invalid(
+                "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
+            )
+        })?;
+    // Another account's activation does not authorize this one for the bot.
+    if !account.enabled {
+        return Err(invalid(&format!(
+            "Les outils GitHub ne sont plus activés pour ce bot avec le compte {login} : rien n’a été publié."
+        )));
+    }
+    Ok(account)
+}
 /// Why the GitHub tools are not offered to this bot: no account, a disconnected one,
 /// or a connected one this bot may not use.
 pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
-    match resolve(ctx) {
+    match pick(ctx, None) {
         Err(error) => error.message,
-        Ok(_) => "GitHub n’est pas activé pour ce bot. Activez-le dans Paramètres › Connecteurs, puis réessayez.".into(),
+        Ok(_) => ENABLE.into(),
     }
-}
-/// The account this request resolved. Zero connected accounts is a sentence, not a call.
-fn resolve(ctx: &Context<'_>) -> Result<(Server, Manifest, String), ApiError> {
-    let row: Option<(String, String, Option<String>)> = ctx.connection.query_row("SELECT server_id,phase,account_email FROM wrapper_connector_catalogue WHERE id='github'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let Some((id, phase_name, login)) = row else {
-        return Err(invalid(NOT_CONNECTED));
-    };
-    let login = match (phase_name.as_str(), login) {
-        ("connected", Some(login)) => login,
-        ("reconnect", _) => return Err(invalid(RECONNECT)),
-        _ => return Err(invalid(DISCONNECTED)),
-    };
-    let server = super::super::servers(ctx.connection)?
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| invalid(NOT_CONNECTED))?;
-    Ok((server, manifest("github")?, login))
 }
 /// Run one authenticated call. An access past its expiry is renewed first, and a 401
 /// renews once more and calls again: a rejected call has not touched the provider.
@@ -715,10 +893,15 @@ fn limit_error(reply: &Reply, login: &str) -> ApiError {
 /// expiry is renewed once before the call, a rejected one once after. Any status that
 /// says nothing about the target (limit, refusal, outage) is already a sentence here;
 /// 200 and 404 come back for the caller, which knows what was missing.
-fn read(ctx: &Context<'_>, route: &str, repo: &str) -> Result<(String, Reply), ApiError> {
-    let (server, m, login) = resolve(ctx)?;
+fn read(
+    ctx: &Context<'_>,
+    account: &Account,
+    route: &str,
+    repo: &str,
+) -> Result<(String, Reply), ApiError> {
+    let (server, m, login) = (&account.server, account.m, account.login.clone());
     let url = format!("{}/{route}", endpoint(m, "api"));
-    let reply = authorized(ctx, &server, m, &|_| Ok(()), &|access| {
+    let reply = authorized(ctx, server, m, &|_| Ok(()), &|access| {
         send(
             agent()
                 .get(&url)
@@ -773,6 +956,7 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
     struct Args {
         repository: String,
         state: Option<String>,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt.")
@@ -783,8 +967,13 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
         _ => return Err(invalid("État invalide : open, closed ou all.")),
     };
     let repo = format!("{owner}/{name}");
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => account,
+        Pick::Ask(question) => return Ok(question),
+    };
     let (login, reply) = read(
         ctx,
+        &account,
         &format!("repos/{owner}/{name}/issues?state={state}&per_page={PAGE}"),
         &repo,
     )?;
@@ -848,6 +1037,7 @@ fn read_pull_request(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiE
     struct Args {
         repository: String,
         number: Option<u64>,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt et, si besoin, le numéro de la pull request.")
@@ -868,7 +1058,11 @@ fn read_pull_request(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiE
             format!("repos/{owner}/{name}/pulls?state=all&sort=created&direction=desc&per_page=1")
         }
     };
-    let (login, reply) = read(ctx, &route, &repo)?;
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => account,
+        Pick::Ask(question) => return Ok(question),
+    };
+    let (login, reply) = read(ctx, &account, &route, &repo)?;
     if reply.status != 200 {
         return Err(match args.number {
             Some(number) => invalid(&format!("La pull request #{number} de {repo} est introuvable pour le compte {login} : le numéro n’existe pas, ou l’application GitHub d’Ezerbot n’est pas installée sur ce dépôt.")),
@@ -953,6 +1147,7 @@ fn read_repository(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
     struct Args {
         repository: String,
         path: Option<String>,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt et, si besoin, le chemin d’un fichier.")
@@ -965,7 +1160,11 @@ fn read_repository(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
         None => None,
     };
     let repo = format!("{owner}/{name}");
-    let (login, info) = read(ctx, &format!("repos/{owner}/{name}"), &repo)?;
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => account,
+        Pick::Ask(question) => return Ok(question),
+    };
+    let (login, info) = read(ctx, &account, &format!("repos/{owner}/{name}"), &repo)?;
     if info.status != 200 {
         return Err(repository_missing(&repo, &login));
     }
@@ -982,7 +1181,7 @@ fn read_repository(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
         None => format!("repos/{owner}/{name}/readme"),
     };
     let wanted = path.unwrap_or("README");
-    let (_, file) = read(ctx, &route, &repo)?;
+    let (_, file) = read(ctx, &account, &route, &repo)?;
     let unreadable = |why: &str| {
         invalid(&format!(
             "Impossible d’afficher {wanted} dans {repo} : {why}"

@@ -526,8 +526,8 @@ pub fn request_tool_approval(
             super::generated::approval_display(ctx, call)?
         } else if call.name == "propose_skill" {
             super::skills::proposal_display(ctx, call)?
-        } else if super::mcp::is_github_comment(&call.name) {
-            super::mcp::github_comment_display(ctx, &id, call)?
+        } else if super::mcp::is_draft(&call.name) {
+            super::mcp::draft_display(ctx, &id, call)?
         } else {
             call.arguments.clone()
         };
@@ -863,8 +863,10 @@ struct Decision {
     decision: ApprovalDecision,
     tool: Option<String>,
     arguments: Option<Value>,
-    /// Corrected text of a draft card, bound to the card by the host.
+    /// Corrected text (the body of an issue or an email) of a draft card, bound to the card by the host.
     text: Option<String>,
+    /// Corrected title of an issue draft, or subject of an email draft.
+    title: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1265,8 +1267,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     ))
                 }
             }
-            if let Some(text) = &input.text {
-                if !super::mcp::is_github_comment(tool)
+            if input.text.is_some() || input.title.is_some() {
+                if !super::mcp::is_draft(tool)
+                    || (input.title.is_some() && !super::mcp::has_draft_title(tool))
                     || !matches!(input.decision, ApprovalDecision::AllowOnce)
                 {
                     return Err(ApiError::new(
@@ -1276,7 +1279,13 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 }
                 // A replayed click keeps the text of the first one.
                 if request.status == RequestStatus::Pending {
-                    super::mcp::edit_github_comment(&ctx, &request.id, text)?;
+                    super::mcp::edit_draft(
+                        &ctx,
+                        &request.id,
+                        tool,
+                        input.title.as_deref(),
+                        input.text.as_deref(),
+                    )?;
                 }
             }
             let mut decision = input.decision;
@@ -1509,7 +1518,7 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        let publication = super::mcp::is_github_comment(tool);
+        let publication = super::mcp::is_draft(tool);
         let consent = super::recall::is_consent(tool);
         if tool == super::routines_background::ACTION
             || tool == super::routine_webhooks::ACTION
@@ -1522,7 +1531,7 @@ fn request_value(
             let call_id = if consent {
                 approved_call_id(ctx, request)?
             } else if publication {
-                super::mcp::github_comment_call(ctx, &request.id)
+                super::mcp::draft_call(ctx, &request.id)
             } else {
                 None
             };
@@ -1629,6 +1638,15 @@ fn approval_policy(
 ) -> grokbot_forms::policy::Policy {
     let remote = remote_tool_name(ctx, tool);
     let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
+    if super::mcp::is_draft(tool) {
+        // Its name may not say a send, but it publishes under the user's name: no standing rule.
+        policy.remember = false;
+        policy.protection = Some(grokbot_forms::policy::Protection::Outbound);
+        policy.scope = "none".into();
+        policy.pattern.clear();
+        policy.label = "Envoi sous votre nom".into();
+        return policy;
+    }
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
         || tool == super::routine_webhooks::ACTION

@@ -40,14 +40,14 @@ Depuis la racine du dépôt. Le build n’exporte jamais `CARGO_TARGET_DIR`. Un 
 Puis, avec `HOME` et `CFFIXED_USER_HOME` pointés sur un répertoire neuf (`mktemp -d`) :
 
 ```bash
-target/debug/grokbot-wrapper --port 0 --db <throwaway>/workspace.sqlite
+EZERBOT_FAKE_SIGNIN=1 target/debug/grokbot-wrapper --port 0 --db <throwaway>/workspace.sqlite
 ```
 
-L’instance est prête quand sa première ligne stdout est `{"url":"http://127.0.0.1:<port>"}` et que `GET /` contient `<title>Ezerbot</title>`. Le badge `ChatGPT` apparaît ensuite : le jeton fictif est lu, le catalogue vient du faux OpenAI. Tant que le badge reste `Local`, l’instance n’est pas utilisable pour les sphères qui dépendent du compte.
+L’instance est prête quand sa première ligne stdout est `{"url":"http://127.0.0.1:<port>"}` et que `GET /` contient `<title>Ezerbot</title>`. Le badge `ChatGPT` apparaît ensuite : la session factice ouverte par `EZERBOT_FAKE_SIGNIN=1` est lue, le catalogue vient du faux OpenAI. Tant que le badge reste `Local`, l’instance n’est pas utilisable pour les sphères qui dépendent du compte.
 
 Le lanceur refuse de démarrer si `HOME` résout vers le vrai dossier personnel (le défaut Mac, le home du compte Unix, ou `HOME` au moment de l’appel) ou si un chemin touche `~/Library/Application Support/Grokbot`. `Grokbot Local` sous le répertoire jetable n’est pas ce dossier. Les preuves sont hors du dépôt et hors de ce `HOME`.
 
-Le faux serveur n’écoute que `127.0.0.1`. `GROKBOT_FAKE_OPENAI` reçoit son URL. Le fichier `<throwaway>/workspace.chatgpt-auth.json` (mode `0600`) contient uniquement `fake-access-verify` / `fake-refresh-verify`, le scope `chatgpt.tokens.use.direct`, l’e-mail `vous@exemple.com` et `welcomed: true`. Aucune variable d’identifiant du parent n’est transmise au wrapper.
+Le faux serveur n’écoute que `127.0.0.1`. `GROKBOT_FAKE_OPENAI` reçoit son URL. `EZERBOT_FAKE_SIGNIN=1` (binaire debug seulement, voir `crates/wrapper/src/fake_signin.rs`) fait écrire au wrapper la session factice `<throwaway>/workspace.codex-auth.json` qui connecte le badge ; l’ancien fichier `workspace.chatgpt-auth.json`, encore écrit par le lanceur, ne suffit plus. Aucune variable d’identifiant du parent n’est transmise au wrapper.
 
 Invocation :
 

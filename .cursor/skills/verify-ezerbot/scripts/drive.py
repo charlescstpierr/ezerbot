@@ -557,11 +557,12 @@ def memo_step(evidence: Path, index: int) -> None:
     if index == 3:
         state = eval_js(
             evidence,
-            """() => {
+            """async () => {
               const audio = document.querySelector(".gb-voice-memo audio");
               audio.pause(); audio.currentTime = 3;
               const word = document.querySelector(".gb-voice-memo .gb-memo-word.is-untimed");
               word.click();
+              await new Promise((resolve) => setTimeout(resolve, 300));
               return {text: word.textContent, at: audio.currentTime, notice: document.querySelector(".gb-memo-notice")?.textContent || ""};
             }""",
         )

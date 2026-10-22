@@ -2349,6 +2349,99 @@ fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
     assert!(!still.contains("secret hors dossier"));
 }
 
+#[test]
+fn a_granted_folder_that_contains_app_data_does_not_import_it() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let parent = std::env::temp_dir().join(format!("grokbot-contains-data-{stamp}"));
+    let data = parent.join("donnees");
+    let folder = parent.join("dossier");
+    let _guard = scopeguard(&parent);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        data.join("SKILL.md"),
+        "---\nname: Piege\n---\nsecret dans les donnees",
+    )
+    .unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let mut app = App::open(&data.join("app.sqlite")).unwrap();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &parent}));
+    assert_eq!(added["contains_app_data"], true);
+    let stored = added["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|folder| folder.as_str())
+        .unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    assert!(report["report"].as_array().unwrap().iter().any(|item| {
+        item["file_name"].as_str().unwrap().starts_with("donnees")
+            && item["status"]["reason"] == "app-data"
+    }));
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(!saved.contains("secret dans les donnees"));
+    assert!(!saved.contains("Piege"));
+}
+
+#[test]
+fn a_hard_link_to_a_protected_file_is_not_imported() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-hardlink-import-{stamp}"));
+    let chosen = scratch.join("choisi");
+    let folder = chosen.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let secret = db.0.join("secret.md");
+    std::fs::write(&secret, "secret par lien dur").unwrap();
+    std::fs::hard_link(&secret, folder.join("copie.md")).unwrap();
+    let source = folder.join("source.md");
+    std::fs::write(&source, "annexe reliee").unwrap();
+    std::fs::hard_link(&source, folder.join("reliee.md")).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &chosen}));
+    assert_eq!(added["contains_app_data"], false);
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let linked = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/copie.md")
+        .unwrap();
+    assert_eq!(linked["status"]["reason"], "app-data");
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(saved.contains("annexe reliee"));
+    assert!(!saved.contains("secret par lien dur"));
+}
+
 fn scopeguard(path: &std::path::Path) -> impl Drop {
     struct Guard(std::path::PathBuf);
     impl Drop for Guard {

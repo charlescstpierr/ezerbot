@@ -484,6 +484,27 @@ test("a skill folder stays in one import request when the batch is nearly full",
   assert.ok(requests.some((paths) => paths.includes("dossier/SKILL.md") && paths.includes("dossier/modele.md")), `le dossier doit rester dans un seul envoi, paquets ${JSON.stringify(requests.map((paths) => paths.filter((path) => path !== "pad.txt")))}`);
 });
 
+test("a protected folder entry is explained without importing it", async () => {
+  const folder = "/tmp/dossier-accorde";
+  const { root } = mount({
+    state: {
+      skills: { by_bot: { bot: [] } },
+      demonstrations: { links: [] },
+      conversations: [],
+      local: { folders: [folder] },
+    },
+    api(path) {
+      if (path !== "/api/skills/import-folder") return { versions: [] };
+      return { report: [{ file_name: "donnees/secret.md", status: { status: "skipped", reason: "app-data" } }] };
+    },
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Importer un dossier").listeners.click();
+  await flushImport();
+  const row = descendants(root).find((el) => el.dataset.status === "skipped");
+  assert.match(row.textContent, /donnees\/secret\.md/);
+  assert.match(row.textContent, /données d’Ezerbot/);
+});
+
 test("the folder button does not ask the browser to walk a directory", () => {
   const source = readFileSync(new URL("../../ui/panels/skills.js", import.meta.url), "utf8");
   assert.equal(source.includes("webkitdirectory"), false);

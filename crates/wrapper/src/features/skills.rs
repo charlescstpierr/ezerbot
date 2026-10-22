@@ -3,8 +3,10 @@
 //! /versions?bot_id=…&skill_id=…; all suffixes are under /api/skills.
 //! POST /import accepts {bot_id, files:[{path,content}|{path,base64}|{path,bytes:[u8]}]}.
 //! POST /import-folder accepts {bot_id, path} and reads only a directory already
-//! granted for local files. That read uses `read_directory` (`symlink_metadata`):
-//! a symlink is skipped and its target is never opened. A `directory` field on
+//! granted for local files. The walk skips symlinks, anything inside Ezerbot's
+//! data directory, and a hard link whose inode is a protected file. File bytes
+//! come from `read_bytes_checked` (`O_NOFOLLOW|O_NONBLOCK`, regular file only).
+//! The canonical root is checked again after the walk. A `directory` field on
 //! /import is rejected; it used to read an arbitrary path with no grant check.
 //! Limit batches to 1,000 files and <=8 MiB of SERIALIZED JSON, not raw file
 //! bytes; the host ceiling is 16 MiB. Base64 preserves binary/invalid UTF-8 for
@@ -462,28 +464,19 @@ fn handle(
                 let ctx = app.feature_context();
                 super::local::readable_granted_dir(&ctx, &input.path)?
             };
-            let (files, skipped) = read_granted_directory(&directory)?;
-            finish_import(app, &input.bot_id, files, skipped)
+            let read = {
+                let ctx = app.feature_context();
+                super::local::read_granted_tree(&ctx, &directory)?
+            };
+            let files = read
+                .files
+                .into_iter()
+                .map(|(path, bytes)| ImportFile { path, bytes })
+                .collect();
+            finish_import(app, &input.bot_id, files, read.skipped)
         }
         _ => unreachable!("filtered skill route"),
     }
-}
-
-type DirectoryRead = (Vec<ImportFile>, Vec<(String, String)>);
-
-fn read_granted_directory(path: &std::path::Path) -> Result<DirectoryRead, ApiError> {
-    import::read_directory(path).map_err(|error| {
-        let message = match (error.kind(), error.to_string().as_str()) {
-            (std::io::ErrorKind::InvalidInput, "too-many-files") => {
-                "too-many-files: maximum 1000 per request"
-            }
-            (std::io::ErrorKind::InvalidInput, "symlink") => {
-                "Un lien symbolique n’est pas importé."
-            }
-            _ => "Le dossier n'a pas pu être lu.",
-        };
-        ApiError::new(400, message)
-    })
 }
 
 fn finish_import(

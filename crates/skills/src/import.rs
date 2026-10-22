@@ -189,7 +189,7 @@ pub fn read_directory(root: &std::path::Path) -> std::io::Result<DirectoryWalk> 
             if meta.is_file() {
                 files.push(ImportFile {
                     path: relative,
-                    bytes: std::fs::read(&path)?,
+                    bytes: read_nofollow(&path)?,
                 });
             }
         }
@@ -197,6 +197,34 @@ pub fn read_directory(root: &std::path::Path) -> std::io::Result<DirectoryWalk> 
     }
     walk(root, root, &mut files, &mut skipped)?;
     Ok((files, skipped))
+}
+
+/// Open a regular file without following a symlink swapped in at the last
+/// component, and without blocking on a FIFO or a device.
+fn read_nofollow(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000 | 0x800);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4);
+    }
+    let mut file = options.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "symlink",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    Ok(bytes)
 }
 
 pub fn import_batch(

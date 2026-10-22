@@ -288,6 +288,26 @@ test("connector lifecycle cards show the provider-specific action and its result
   } finally {delete globalThis.window;}
 });
 
+test("a GitHub disconnection names the account and offers Confirmer and Annuler, never Toujours", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  const card=(tool,compte)=>renderToStaticMarkup(React.createElement(Card,{message:{id:"github",kind:"approval",payload:{
+    entry_id:"github",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+    kind:{kind:"approval",tool,expires_at:Date.now()+60000},
+    connector:{server:"GitHub",tool:tool.startsWith("mcp_remove_")?"Déconnecter GitHub":"Connecter GitHub",origin:"settings"},
+    policy:{remember:false,protection:null,scope:"none"},
+    arguments:{commande:"https://api.github.com",arguments:[],variables_privées:["ACCESS_TOKEN","REFRESH_TOKEN"],catalogue:{transport:"https",service:"GitHub",licence:"Service GitHub",permissions:"Issues",portées:"aucune",connexion:"Un code s’affiche.",déconnexion:compte?`Le compte GitHub ${compte} sera déconnecté.`:"Les jetons sont supprimés.",...(compte?{compte}:{})}},
+  }}}));
+  try {
+    const html=card("mcp_remove_github","charles-test");
+    assert.ok(html.includes("Déconnecter le compte GitHub charles-test ?"));
+    assert.ok(html.includes("Compte : <strong>charles-test</strong>"));
+    assert.ok(html.includes(">Confirmer<")&&html.includes(">Annuler<"));
+    for(const word of ["Toujours","Autoriser une fois","Refuser","Mémoriser"]) assert.ok(!html.includes(word),word);
+    const connect=card("mcp_start_github");
+    assert.ok(connect.includes("Autoriser une fois")&&!connect.includes(">Confirmer<"));
+  } finally {delete globalThis.window;}
+});
+
 test("managed Google approvals describe the adapter without inventing an empty argument list", () => {
   globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
   try {

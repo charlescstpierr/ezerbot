@@ -318,9 +318,10 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         .cloned()
         .collect();
     names.sort();
+    let remove = action == "remove";
     let action = format!(
         "{} {}",
-        if action == "remove" {
+        if remove {
             "Déconnecter"
         } else if phase != "disconnected" || private.contains_key("ACCESS_TOKEN") {
             "Reconnecter"
@@ -330,14 +331,21 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         m.name
     );
     if m.id == "github" {
-        let connection = if action == "remove" {
+        let connection = if remove {
             ""
         } else {
             "GitHub affichera un code à 8 caractères qu’Ezerbot vous montre ici ; la page https://github.com/login/device s’ouvre dans le navigateur. Vous vous identifiez, autorisez l’application GitHub d’Ezerbot et choisissez les dépôts chez GitHub. Seul l’identifiant public de l’application est envoyé : aucun secret n’existe dans Ezerbot. Les jetons reçus sont conservés dans le coffre. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
         };
-        return Some(
-            json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":"aucune ; les permissions sont celles de la GitHub App d’Ezerbot, choisies chez GitHub","source":m.source,"licence":m.license,"révision":revision,"connexion":connection,"déconnexion":"Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. GitHub ne permet pas à Ezerbot de révoquer l’accès sans secret d’application : retirez aussi l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."}),
-        );
+        let mut card = json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":"aucune ; les permissions sont celles de la GitHub App d’Ezerbot, choisies chez GitHub","source":m.source,"licence":m.license,"révision":revision,"connexion":connection});
+        card["déconnexion"] = match private.get("EMAIL").filter(|_| remove) {
+            // The confirmation names the account it would disconnect.
+            Some(login) => {
+                card["compte"] = json!(login);
+                json!(format!("Le compte GitHub {login} sera déconnecté : ses jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à GitHub de révoquer le jeton ; sans le secret d’une application, GitHub peut refuser, et le message le dira. Retirez alors l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."))
+            }
+            None => json!("Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. Ezerbot demande aussi à GitHub de révoquer le jeton ; sans le secret d’une application, GitHub peut refuser, et le message le dira."),
+        };
+        return Some(card);
     }
     let connection = if m.endpoint.is_empty() {
         "Le serveur Google workspace-mcp 2.1.1 est téléchargé si nécessaire, puis lancé sur ce Mac avec uvx et l’adaptateur Ezerbot (identifiants en mémoire)."
@@ -667,6 +675,7 @@ pub(super) fn remove(
         return Err(invalid("La configuration OAuth a changé. Approuvez une nouvelle demande depuis les paramètres."));
     }
     let env = credentials(ctx, &server.id)?.unwrap_or_default();
+    let had_tokens = env.contains_key("ACCESS_TOKEN");
     // Invalidate any browser callback before revocation/deletion. All callback
     // publication and tool refreshes share EFFECTS, so no late token resurrection.
     ctx.connection.execute("UPDATE wrapper_connector_catalogue SET generation=generation+1,authorization_url=NULL WHERE server_id=?1",[&server.id])?;
@@ -696,8 +705,10 @@ pub(super) fn remove(
             format!("mcp_remove_{}", server.id)
         ],
     )?;
-    let message = if revoked && m.id == "github" {
-        "Déconnecté. Les jetons et règles de ce connecteur ont été supprimés."
+    let message = if m.id == "github" && !had_tokens {
+        "Déconnecté. Aucun jeton n’était conservé ; les règles de ce connecteur ont été supprimées."
+    } else if revoked && m.id == "github" {
+        "Déconnecté. GitHub a confirmé la révocation ; les jetons et règles de ce connecteur ont été supprimés."
     } else if revoked {
         "Déconnecté. Les jetons et règles de ce connecteur ont été supprimés. La configuration OAuth est conservée."
     } else {

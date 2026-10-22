@@ -407,12 +407,10 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
     } else {
         env.get("REFRESH_TOKEN").or_else(|| env.get("ACCESS_TOKEN"))
     };
-    let Some(token) = token else { return true };
     if m.id == "github" {
-        // Revoking a user token needs the app's secret, which Ezerbot does not hold:
-        // the disconnect says so instead of claiming a revocation.
-        return false;
+        return super::github::revoke(m, env);
     }
+    let Some(token) = token else { return true };
     let mut fields = token_fields(env);
     fields.push(("token".into(), token.clone()));
     if m.id == "notion" {

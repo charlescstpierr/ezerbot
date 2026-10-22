@@ -9,9 +9,9 @@ Le quota du forfait est partagé avec les autres applications Codex. Les tokens 
 
 ## Lecture et confidentialité
 
-`GET /backend-api/wham/usage` utilise le Bearer et l’en-tête `chatgpt-account-id` de la session Codex propre à Ezerbot. Aucun fichier d’identifiants de pi, de Codex CLI ou d’un autre outil n’est lu. Le transport ne suit pas les redirections. Seuls les champs validés du quota atteignent l’interface ; ni jeton, ni corps d’erreur brut ne sont exposés.
+`GET /backend-api/wham/usage` utilise le Bearer et l’en-tête `chatgpt-account-id` de la session Codex propre à Ezerbot. Aucun fichier d’identifiants de pi, de Codex CLI ou d’un autre outil n’est lu. Le transport ne suit pas les redirections ; toute réponse hors 2xx est une erreur. Seuls les champs validés du quota atteignent l’interface ; ni jeton, ni corps d’erreur brut ne sont exposés.
 
-La lecture est faite en arrière-plan, coalescée et mise en cache 60 secondes. **Actualiser** peut la relancer après 5 secondes. Une réponse 401 entraîne au plus un renouvellement et une nouvelle lecture. Une déconnexion invalide les lectures en vol. Après une erreur ou une réinitialisation échue, aucune jauge fictive n’est affichée. Le partage d’abonnement, sans connexion Codex sélectionnée, indique que la jauge n’est pas disponible.
+La lecture est faite en arrière-plan, coalescée et mise en cache 60 secondes. **Actualiser** peut la relancer après 5 secondes. Une réponse 401 entraîne au plus un renouvellement et une nouvelle lecture. Une déconnexion invalide les lectures en vol. Après une erreur, aucune jauge fictive n’est affichée. Une fenêtre dont la réinitialisation est échue devient seule indisponible (`null`, listée dans `quota.unavailable`) ; les autres restent affichées. Si la dernière lecture précède cette réinitialisation, le quota est relu après 5 secondes. Le partage d’abonnement, sans connexion Codex sélectionnée, indique que la jauge n’est pas disponible.
 
 API locale : `GET /api/usage` et `POST /api/usage/refresh`. La première renvoie la ventilation durable et le dernier état du quota, sans attendre le réseau OpenAI.
 

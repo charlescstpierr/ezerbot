@@ -37,7 +37,7 @@ function fixture() {
     followVoiceReply(id){follows.push(id);},
   };
   runInNewContext(readFileSync(new URL("../../ui/panels/voice-conversation.js",import.meta.url),"utf8"),{
-    window:{GrokbotPanels:panels,EzerbotMicrophone:{current:()=>context.state.voice.microphone||"",fellBack(){notices.push("repli");}},EzerbotDictation:{refresh(){dictationRefreshes++;},cancel(){} },GrokbotChat:{createVoiceReader,voiceNeedsAction},webkit:{messageHandlers:{ezerbotVoiceSession:{postMessage:bridge}}},addEventListener(){}},
+    window:{GrokbotPanels:panels,EzerbotMicrophone:{current:()=>context.state.voice.microphone||"",fellBack(id){notices.push("repli:"+id);}},EzerbotDictation:{refresh(){dictationRefreshes++;},cancel(){} },GrokbotChat:{createVoiceReader,voiceNeedsAction},webkit:{messageHandlers:{ezerbotVoiceSession:{postMessage:bridge}}},addEventListener(){}},
     document:{createElement:tag=>new Element(tag),getElementById:()=>send,querySelector:()=>controls,addEventListener(name,fn){if(name==="keydown")keydown=fn;}},
     crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
@@ -148,6 +148,6 @@ test("the voice mode listens to the chosen microphone and never sends it as a vo
 test("a microphone gone when the voice mode starts is announced and the mode still runs",async()=>{
   const f=fixture(); f.context.state.voice.microphone="usb"; f.startExtras={microphone_fallback:true};
   await cls(f.root,"voice-session-toggle").onclick();
-  assert.deepEqual(f.notices,["repli"]);
+  assert.deepEqual(f.notices,["repli:usb"],"only the missing choice is forgotten");
   assert.equal(cls(f.root,"voice-session-toggle").attributes["aria-pressed"],"true");
 });

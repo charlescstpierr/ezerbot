@@ -207,6 +207,17 @@ test("a removed microphone is announced, forgotten and the default one is used",
   assert.equal(cls(f.root,"voice-mic").attributes["aria-pressed"],"true","dictation still runs");
   assert.match(status(f),/Microphone intégré/);
 });
+test("a microphone picked while a dictation runs after a fallback is not erased by the next poll", async () => {
+  const f = fixture(); f.ctx.state.voice.microphone = "usb";
+  f.startExtras = {microphone_id:"built-in",microphone_name:"Microphone intégré",microphone_fallback:true};
+  await cls(f.root,"voice-mic").onclick();
+  const section = f.settings(); await flush();
+  const radio = descendants(descendants(section).find(el => el.dataset.id === "usb")).find(el => el.tagName === "input");
+  radio.checked = true; await radio.onchange(); await flush();
+  await f.poll(); await f.poll();
+  assert.deepEqual(saved(f),[{id:""},{id:"usb"}], "the status polls do not forget the new choice");
+  assert.equal(f.notices.length,1);
+});
 test("a short click starts and a second click stops, as before", async () => {
   const f = fixture();
   press(f,100); release(f,180); click(f); await flush();

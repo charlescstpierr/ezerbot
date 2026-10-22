@@ -41,11 +41,14 @@ static BOOL EzerbotHasInput(AudioDeviceID device) {
     AudioObjectPropertyAddress streams = EzerbotAddress(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput);
     UInt32 size = 0;
     if (AudioObjectGetPropertyDataSize(device, &streams, 0, NULL, &size) != noErr || !size) return NO;
-    // The aggregate device voice processing creates is not a microphone to choose.
-    AudioObjectPropertyAddress transport = EzerbotAddress(kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal);
-    UInt32 kind = 0; UInt32 kindSize = sizeof(kind);
-    if (AudioObjectGetPropertyData(device, &transport, 0, NULL, &kindSize, &kind) == noErr && (kind == kAudioDeviceTransportTypeAggregate || kind == kAudioDeviceTransportTypeAutoAggregate)) return NO;
-    return YES;
+    // The private aggregates AVAudioEngine and voice processing create are not microphones to choose.
+    // An aggregate device the user made stays: it can be the system default.
+    NSString *uid = EzerbotString(device, kAudioDevicePropertyDeviceUID);
+    return !([uid hasPrefix:@"VPAUAggregateAudioDevice"] || [uid hasPrefix:@"CADefaultDeviceAggregate"]);
+}
+static NSDictionary *EzerbotDescribe(AudioDeviceID device) {
+    NSString *uid = EzerbotString(device, kAudioDevicePropertyDeviceUID), *name = EzerbotString(device, kAudioObjectPropertyName);
+    return uid.length && uid.length <= 256 && name.length ? @{@"id":uid,@"name":name} : nil;
 }
 + (NSArray<NSDictionary *> *)available {
     AudioObjectPropertyAddress devices = EzerbotAddress(kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal);
@@ -58,9 +61,8 @@ static BOOL EzerbotHasInput(AudioDeviceID device) {
     NSMutableArray *microphones = [NSMutableArray array];
     for (NSUInteger i = 0; i < count; i++) {
         if (!EzerbotHasInput(list[i])) continue;
-        NSString *uid = EzerbotString(list[i], kAudioDevicePropertyDeviceUID), *name = EzerbotString(list[i], kAudioObjectPropertyName);
-        if (!uid.length || uid.length > 256 || !name.length) continue;
-        NSDictionary *entry = @{@"id":uid,@"name":name};
+        NSDictionary *entry = EzerbotDescribe(list[i]);
+        if (!entry) continue;
         if (list[i] == fallback) [microphones insertObject:entry atIndex:0]; else [microphones addObject:entry];
     }
     return microphones;
@@ -69,12 +71,14 @@ static BOOL EzerbotHasInput(AudioDeviceID device) {
     NSArray<NSDictionary *> *microphones = [self available];
     NSDictionary *chosen = nil;
     for (NSDictionary *entry in microphones) if (requested.length && [entry[@"id"] isEqual:requested]) chosen = entry;
-    NSDictionary *effective = chosen ?: microphones.firstObject;
-    return @{@"id":effective[@"id"] ?: @"", @"name":effective[@"name"] ?: @"", @"fallback":@((BOOL)(requested.length && !chosen))};
+    // Without a choice, or when it is gone, the microphone is the system default as it is, listed or not.
+    NSDictionary *system = chosen ? nil : EzerbotDescribe(EzerbotDefaultInput()) ?: microphones.firstObject;
+    NSDictionary *effective = chosen ?: system;
+    return @{@"id":effective[@"id"] ?: @"", @"name":effective[@"name"] ?: @"", @"system":@((BOOL)!chosen), @"fallback":@((BOOL)(requested.length && !chosen))};
 }
 + (AudioDeviceID)deviceForResolved:(NSDictionary *)resolved {
     NSString *uid = resolved[@"id"];
-    if (!uid.length) return kAudioObjectUnknown;
+    if (!uid.length || [resolved[@"system"] boolValue]) return kAudioObjectUnknown;
     AudioObjectPropertyAddress address = EzerbotAddress(kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal);
     CFStringRef qualifier = (__bridge CFStringRef)uid;
     AudioDeviceID device = kAudioObjectUnknown; UInt32 size = sizeof(device);

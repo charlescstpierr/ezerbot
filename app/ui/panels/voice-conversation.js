@@ -98,9 +98,10 @@
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
-      const result = await bridge("start", {microphone:window.EzerbotMicrophone?.current() ?? ""});
+      const requested = window.EzerbotMicrophone?.current() ?? "";
+      const result = await bridge("start", {microphone:requested});
       if (rev !== epoch) return;
-      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack();
+      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack(requested);
       if (errors[result.status]) { fail(result.status); return; }
       phase = result.status; render(); schedule(rev);
     } catch (error) { if (rev === epoch) fail("failed", error.message); }

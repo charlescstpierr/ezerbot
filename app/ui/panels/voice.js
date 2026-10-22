@@ -34,8 +34,9 @@
   const limit = (seconds) => seconds >= 120 && seconds % 60 === 0 ? `${seconds / 60} minutes` : `${seconds} secondes`;
   window.EzerbotDictation = { active: live, refresh: render, cancel() { reset(); changed(); } };
   // Dictation and the voice mode share one choice. A microphone that is gone is forgotten at once and said so once.
-  async function forgetMicrophone() {
-    if (!chosenMicrophone()) return;
+  // Only the choice that was missing is forgotten: a microphone picked meanwhile stays.
+  async function forgetMicrophone(missing) {
+    if (!chosenMicrophone() || (missing !== undefined && chosenMicrophone() !== missing)) return;
     chosenOverride = "";
     panels.notify(fallbackPhrase);
     if (microphoneNotice) microphoneNotice.textContent = fallbackPhrase;
@@ -128,11 +129,11 @@
     if (panels.meetingActive?.()) { panels.notify(errors.meeting_busy); return; }
     reset();
     try {
-      session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked };
+      session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked, requested: chosenMicrophone(), fellBack: false };
       capSeconds = session.memo ? 60 : 300;
       phase = "authorizing"; changed();
       const rev = revision;
-      const result = await bridge("start", { purpose: session.memo ? "memo" : "dictation", microphone: chosenMicrophone() });
+      const result = await bridge("start", { purpose: session.memo ? "memo" : "dictation", microphone: session.requested });
       if (rev === revision) await accept(result, rev);
     } catch (error) { phase = "idle"; panels.notify(error.message || "La dictée n’a pas pu démarrer."); changed(); }
   }
@@ -170,7 +171,7 @@
     if (result.max_seconds) capSeconds = result.max_seconds;
     if (result.microphone_name) microphoneName = result.microphone_name;
     partial = Boolean(result.partial);
-    if (result.microphone_fallback) forgetMicrophone();
+    if (result.microphone_fallback && !session.fellBack) { session.fellBack = true; forgetMicrophone(session.requested); }
     timer.textContent = `${clock(result.elapsed_ms || 0)} / ${clock(capSeconds * 1000)}`;
     const level = Math.max(0, Math.min(1, result.level || 0));
     meter.style.setProperty("--level", String(level)); meter.setAttribute("aria-valuenow", level.toFixed(2));

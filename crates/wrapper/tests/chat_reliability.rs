@@ -420,6 +420,9 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
     for expired in [false, true] {
         let mut f = Fixture::new(expired);
         if expired {
+            // Finish the initial quota read before expiring the shared token;
+            // otherwise it can race the chat for the refresh lock.
+            until(|| f.provider.codex_usage(false)["status"] == "ready");
             save_token(&f.db, true);
             *f.fake.refresh.lock().unwrap() = Some(Fault::RefreshExpired);
         }

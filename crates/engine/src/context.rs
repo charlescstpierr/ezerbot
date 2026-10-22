@@ -120,7 +120,7 @@ pub fn assemble_input_for_entries(
     {
         return Err(invalid("a nonempty app contract is required"));
     }
-    let mut caps = [limit; 10];
+    let mut caps = [limit; 11];
     for block in blocks {
         if matches!(
             block.source,
@@ -148,7 +148,7 @@ pub fn assemble_input_for_entries(
         ));
     }
     let mut remaining = limit;
-    let mut used = [0; 10];
+    let mut used = [0; 11];
     let mut kept = Vec::new();
     // Reserve the app contract before any optional context.
     for (index, block) in candidates
@@ -660,6 +660,7 @@ fn category(source: ContextSource) -> usize {
         ContextSource::DelegatedContext => 7,
         ContextSource::History => 8,
         ContextSource::CurrentMessage => 9,
+        ContextSource::Library => 10,
     }
 }
 fn make_block(source: ContextSource, budget: usize, text: String) -> ContextBlock {
@@ -678,6 +679,7 @@ fn is_external(source: ContextSource) -> bool {
             | ContextSource::ToolResult
             | ContextSource::ImageCaption
             | ContextSource::DelegatedContext
+            | ContextSource::Library
     )
 }
 fn fence(source: ContextSource, text: &str) -> String {

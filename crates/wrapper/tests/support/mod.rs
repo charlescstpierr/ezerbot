@@ -92,7 +92,12 @@ pub struct Seen {
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
     /// Test-only delay before sending Responses headers (without holding Seen).
     pub response_delay: Option<Duration>,
+    /// Optional answer derived from the request. `None` keeps the scripted queue.
+    pub reply_for: Option<ReplyFor>,
 }
+
+/// Test hook: inspect the request and optionally replace the scripted reply.
+pub type ReplyFor = Arc<dyn Fn(&Value) -> Option<ScriptedResponse> + Send + Sync>;
 
 pub struct ScriptedResponse {
     pub status: u16,
@@ -250,7 +255,10 @@ impl FakeOpenAi {
                     .map(|header| header.value.to_string())
                     .unwrap_or_default();
                 let mut seen = observations.lock().unwrap();
-                let response_delay = if request.url() == "/v1/responses" {
+                let response_delay = if matches!(
+                    request.url(),
+                    "/v1/responses" | "/backend-api/codex/responses"
+                ) {
                     seen.response_delay
                 } else {
                     None
@@ -445,6 +453,12 @@ impl FakeOpenAi {
                             ]));
                                 delay = seen.memory_delay;
                                 (reply.status, reply.content_type, reply.body)
+                            } else if let Some(reply) = seen
+                                .reply_for
+                                .clone()
+                                .and_then(|reply| reply(&request_body))
+                            {
+                                (reply.status, reply.content_type, reply.body)
                             } else if let Some(reply) = seen.responses.pop_front() {
                                 (reply.status, reply.content_type, reply.body)
                             } else if request_body["instructions"]
@@ -491,7 +505,8 @@ impl FakeOpenAi {
                 } else {
                     match request.url() {
                         "/v1/models" => seen.models_gate.clone(),
-                        "/v1/responses" => seen
+                        // Codex-session fixtures call the backend path: gate/delay it too.
+                        "/v1/responses" | "/backend-api/codex/responses" => seen
                             .response_gate
                             .as_ref()
                             .filter(|(at, _)| *at == seen.bodies.len())

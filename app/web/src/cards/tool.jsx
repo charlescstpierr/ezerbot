@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from "react";
 import { localCallView, localStatusLabel, localFailureView, localLimits, localToolLabel } from "../local-call.js";
+import { runView } from "../run-status.js";
 import { LocalResult } from "../local-result.js";
 import { ScreenCard, screenTools } from "../screen.jsx";
 import { GeneratedDocument, DocumentTool } from "../generated-document.jsx";
@@ -16,8 +17,6 @@ export function useEngine() {
   return engine();
 }
 
-// Shared presentation only. Never dump whole engine events: they can contain
-// opaque provider reasoning. All external text stays text, never HTML/Markdown.
 export function Data({ value }) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return <pre className="gb-engine-data">{text ?? "Non disponible"}</pre>;
@@ -55,8 +54,6 @@ function suspension(message, view) {
   if (waiting) return human
     ? { label: "En attente de vous", note: "Répondez dans la carte de demande de la conversation du bot principal." }
     : { label: "En attente de sous-tâches", note: "Cet appel attend ses sous-tâches. Leur fin ne termine pas la tâche principale." };
-  // A missing active run proves neither delivery nor child success. Without a
-  // receipt or a precise lifecycle snapshot, say only that the wait has ended.
   if (run?.status === "ended") return { label: "Attente terminée", note: "Le run n’est plus actif. Aucune nouvelle réponse n’est demandée par cet appel." };
   if (!current || ["running", "interrupted", "finished"].includes(run?.status)) return { label: human ? "Appel repris" : "Attente de sous-tâches terminée" };
   return { label: "État de l’appel indisponible" };
@@ -78,13 +75,14 @@ export function openConnectors(connector) {
 function LocalCard({ message, run, onAction, busy }) {
   const { call, outcome, authorized_by: authority, approval_status: approvalStatus, run_status: storedStatus } = message.payload;
   const output = outcome?.output;
-  const runStatus = run?.status && run.status !== "ended" ? run.status : storedStatus || run?.status;
+  const { status: runStatus, stopped } = runView(storedStatus, run?.status);
   const { args, preview, shellArguments } = localCallView(call);
-  const pending = !outcome && !["ended", "finished", "cancelled", "failed"].includes(runStatus);
+  const pending = !outcome && !stopped;
   if (!outcome && runStatus === "awaiting_approval") return <article className="gb-message gb-engine-card gb-local-card gb-local-waiting" data-message-id={message.id} data-card-kind="tool"><p>Accord requis dans la carte d’approbation.</p></article>;
   const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approvalStatus, runStatus) : null;
+  const running = output?.background === true && output?.status === "en cours";
   const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
-  const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé"].includes(output?.status) ? "warning" : outcome ? "success" : "neutral");
+  const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé", "arrêtée"].includes(output?.status) ? "warning" : running || !outcome ? "neutral" : "success");
   return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || (pending && runStatus === "running" ? "running" : "")}>
     <div className="gb-local-header"><strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
     {authority?.kind === "rule" && <p>Autorisée automatiquement par une règle « Toujours » (Paramètres › Autorisations permanentes).</p>}
@@ -93,6 +91,7 @@ function LocalCard({ message, run, onAction, busy }) {
     {failure && <p className="gb-local-failure" data-tone={failure.tone} role={failure.tone === "warning" ? "alert" : "status"}>{failure.message}</p>}
     {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
     {pending && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
+    {running && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.task.stop")}>Arrêter</button>}
     {output?.exit_code != null && <p>Code de sortie : {output.exit_code}</p>}
     {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
     {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}
@@ -104,18 +103,18 @@ function LocalCard({ message, run, onAction, busy }) {
 export function Card({ message, onAction, busy }) {
   const view = useEngine();
   const { run_id: runId, call, outcome, connector, authorized_by, requesting_bot, approval_status } = message.payload || {};
-  // These calls already have a dedicated, user-facing decision/status card.
   if (["begin_task", "complete_task", "propose_skill"].includes(call?.name)) return null;
   if (!call?.call_id || typeof call.name !== "string") {
     return <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={kind}>Appel d’outil indisponible.</article>;
   }
   const run = view?.run(runId);
+  const storedStatus = message.payload?.run_status;
+  const { status: runStatus, stopped: ended } = runView(storedStatus, run?.status);
   if (screenTools[call.name]) return <ScreenCard message={message} />;
   if (call.name === "create_document" && outcome?.status === "done" && outcome.output?.id?.startsWith("generated_")) return <GeneratedDocument file={outcome.output} message={message} />;
   if (["create_document", "document_action"].includes(call.name)) return <DocumentTool message={message} run={run} />;
   if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const background = call.name === "routines_background_configure";
-  const ended = ["ended", "finished", "cancelled", "failed"].includes(run?.status);
   let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
   const decisionLabels = { denied: "Refusé", cancelled: "Annulé", expired: "Approbation expirée" };
   const refused = outcome?.status === "failed" && Object.hasOwn(decisionLabels, approval_status);

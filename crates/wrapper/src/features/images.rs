@@ -28,8 +28,9 @@ const IMAGE_HOST: &str = "https://chatgpt.com/backend-api/codex/responses";
 const ORIGINATOR: &str = "ezerbot";
 /// GPT Image can take about two minutes. The read and the whole call share this budget.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
-/// Base64 of a 20 MiB image, plus a small JSON envelope.
-const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 1024 * 1024;
+/// The finished base64 image appears in both output_item.done and response.completed.
+/// Keep the decoded-image limit separate from this bounded transport budget.
+const MAX_RESPONSE_BYTES: usize = 2 * MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1024 * 1024;
 
 empty_hooks!(
     migrate,
@@ -206,6 +207,8 @@ fn post(
             "model": model,
             "input": description,
             "store": false,
+            "stream": true,
+            "instructions": "Tu es un assistant utile.",
             "tools": [{
                 "type": "image_generation",
                 "model": MODEL,
@@ -234,12 +237,11 @@ fn post(
 
 fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
     let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    if let Some(code) = sse_error_code(body) {
+        return Err(phrase(status, &code));
+    }
     if !(200..300).contains(&status) || value.get("error").is_some_and(|error| !error.is_null()) {
-        let code = if value.is_null() {
-            sse_error_code(body)
-        } else {
-            error_parts(&value).0
-        };
+        let code = error_parts(&value).0;
         return Err(phrase(status, &code));
     }
     let Some(encoded) = encoded_image(&value).or_else(|| sse_image(body)) else {
@@ -302,10 +304,8 @@ fn sse_image(body: &[u8]) -> Option<String> {
     found
 }
 
-fn sse_error_code(body: &[u8]) -> String {
-    let Some(text) = std::str::from_utf8(body).ok() else {
-        return String::new();
-    };
+fn sse_error_code(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
     for line in text.lines() {
         let Some(data) = line.trim().strip_prefix("data:") else {
             continue;
@@ -315,16 +315,14 @@ fn sse_error_code(body: &[u8]) -> String {
         };
         let code = error_parts(&value).0;
         if !code.is_empty() {
-            return code;
+            return Some(code);
         }
         if value["type"] == "response.failed" || value["type"] == "error" {
             let nested = error_parts(&value["response"]);
-            if !nested.0.is_empty() {
-                return nested.0;
-            }
+            return Some(nested.0);
         }
     }
-    String::new()
+    None
 }
 
 fn phrase(status: u16, code: &str) -> &'static str {

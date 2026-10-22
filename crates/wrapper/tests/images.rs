@@ -193,6 +193,10 @@ fn assert_image_contract(fixture: &Fixture, prompt: &str, size: &str) {
     let call = &seen.image_calls[0];
     assert_eq!(call["model"], "gpt-6.1-sol");
     assert_eq!(call["input"], prompt);
+    assert_eq!(call["stream"], true);
+    assert!(call["instructions"]
+        .as_str()
+        .is_some_and(|text| !text.trim().is_empty()));
     assert!(call.get("aspect_ratio").is_none());
     assert!(call.get("prompt").is_none());
     assert!(call.get("n").is_none());
@@ -386,6 +390,73 @@ fn safety_refusal_is_one_french_sentence() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(fixture.image_calls(), 1);
     assert_key_hidden(&mut fixture);
+}
+
+#[test]
+fn streamed_safety_refusal_with_http_success_is_shown() {
+    let mut fixture = Fixture::open();
+    fixture.server.seen.lock().unwrap().image_reply.push_back(ScriptedResponse::events(&[
+        json!({"type":"response.failed","response":{"error":{"code":"content_safety_blocked","message":"blocked"}}}),
+    ]));
+    fixture.ask(
+        "refus-stream",
+        json!({"description":"un phare"}),
+        "Dessine un phare",
+    );
+    fixture.until("refus de sécurité streamé absent", |fixture| {
+        fixture.tool()["body"]
+            == "La génération de cette image a été refusée pour des raisons de sécurité."
+    });
+    assert!(fixture.tool()["attachments"].as_array().unwrap().is_empty());
+    assert_eq!(fixture.image_calls(), 1);
+}
+
+#[test]
+fn repeated_streamed_image_preserves_the_decoded_size_limit() {
+    for (size, accepted) in [(20 * 1024 * 1024, true), (20 * 1024 * 1024 + 1, false)] {
+        let mut fixture = Fixture::open();
+        let mut bytes = png();
+        bytes.resize(size, 0);
+        let item = json!({"type":"image_generation_call","status":"completed","result":STANDARD.encode(&bytes)});
+        fixture
+            .server
+            .seen
+            .lock()
+            .unwrap()
+            .image_reply
+            .push_back(ScriptedResponse::events(&[
+                json!({"type":"response.output_item.done","item":item}),
+                json!({"type":"response.completed","response":{"output":[item]}}),
+            ]));
+        fixture.ask(
+            "large-stream",
+            json!({"description":"un phare"}),
+            "Dessine un phare",
+        );
+        fixture.until("génération streamée non terminée", |fixture| {
+            let tool = fixture.tool();
+            !tool.is_null() && tool["body"] != INDICATOR
+        });
+        let tool = fixture.tool();
+        if accepted {
+            let attachments = tool["attachments"].as_array().unwrap();
+            assert_eq!(attachments.len(), 1, "{tool}");
+            match fixture
+                .app
+                .api_response("GET", attachments[0]["url"].as_str().unwrap(), b"")
+                .unwrap()
+            {
+                ApiResponse::Bytes { body, .. } => assert_eq!(body, bytes),
+                ApiResponse::Json(_) => panic!("image non binaire"),
+            }
+        } else {
+            assert_eq!(
+                tool["body"],
+                "L’image générée dépasse 20 Mo et n’a pas été conservée."
+            );
+            assert!(tool["attachments"].as_array().unwrap().is_empty());
+        }
+    }
 }
 
 #[test]

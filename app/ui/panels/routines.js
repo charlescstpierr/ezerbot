@@ -476,7 +476,9 @@
     const memberValue = (member) => ({ id: member.id, kind: member.trigger.kind === "once" ? "once" : member.trigger.kind === "webhook" ? "webhook" : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "" });
     if (r?.trigger.kind === "group") { for (const member of r.trigger.members) addRow(memberValue(member)); renderRows(); }
     groupBox.append(node("h4", "", "Déclencheurs du groupe"), node("p", "routines-note", "Au moins deux déclencheurs simples, sans groupe dans un groupe. La routine part dès que l’un d’eux part ; chaque départ est une occurrence nommée dans l’historique."), groupRows);
-    groupBox.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
+    const groupActions = node("div", "routines-actions");
+    groupActions.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
+    groupBox.append(groupActions);
     fields.append(groupBox);
     fields.append(node("p", "routines-note", "Exemples : 0 9 * * 1-5, @daily, @every 1h30m, @every 1h/10m. Un préfixe TZ= prime sur le champ Fuseau. Pour une seule fois, saisissez l’UTC ; l’aperçu le convertit dans le fuseau choisi. Le serveur valide l’horaire ; cet aperçu ne prédit pas le prochain départ."));
     const preview = node("p", "routines-preview"); preview.setAttribute("role", "status"); fields.append(preview);

@@ -13,10 +13,9 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp "${TMPDIR:-/tmp}/ezerbot-shell.XXXXXX.o")"
 trap 'rm -f "$out"' EXIT
 
+# -framework only matters when linking; with -c and -Werror clang rejects it
+# as an unused argument.
 clang -fobjc-arc -Wall -Wextra -Werror -mmacosx-version-min=12.3 \
-  -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers \
-  -framework UserNotifications -framework AVFoundation -framework Speech \
-  -framework ApplicationServices -framework Security -framework Carbon \
   -c "$root/app/native/main.m" -o "$out"
 
 printf '%s\n' 'Coque Cocoa compilée.'

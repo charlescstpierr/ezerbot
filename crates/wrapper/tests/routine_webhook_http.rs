@@ -192,6 +192,7 @@ esac
     fn wait_listener(&self) {
         wait("webhook listener", || {
             std::net::TcpStream::connect(self.hook.trim_start_matches("http://")).is_ok()
+                && self.state()["routine_webhooks"]["listener"]["listening"] == true
         });
     }
     fn commands(&self) -> String {

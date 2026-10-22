@@ -9,7 +9,6 @@ import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { localToolLabel } from "./local-call.js";
 
-// Exercise the shipping settings panel, including DOM replacement on refresh.
 class Element {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.listeners = {}; this.attributes = {};
@@ -219,8 +218,6 @@ for (const mcpFirst of [false, true]) {
     const local = standingRule("run_shell", true);
     const mcp = standingRule("mcp_atelier_echo", false, "subject");
     const rules = mcpFirst ? [mcp, local] : [local, mcp];
-    // Execute the shipping panel with rules already present: the old code throws
-    // after its first row and never reaches the reviewer editor.
     const f = settingsPanel({ rules, mcp: connector });
     assert.equal(ruleRows(f.root).length, 2);
     assert.match(ruleRows(f.root)[rules.indexOf(local)].textContent, /Terminal sur votre Mac · Toujours autoriser · Toutes les actions/);
@@ -261,8 +258,6 @@ test("multiple local rules, MCP lifecycle and unknown tools preserve every row a
   }
 });
 
-// Render the actual JSX through Vite's transform rather than inspecting source
-// strings. Middleware mode starts no listening server, and no dependency is added.
 const vite = await createServer({
   root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
   plugins: [react()], server: { middlewareMode: true }, logLevel: "error",
@@ -432,6 +427,39 @@ test("a background shell card stays En cours with Arrêter, then shows Terminée
   assert.match(stopped, /Arrêtée/); assert.match(stopped, /Sortie tronquée/); assert.ok(!stopped.includes("Code de sortie"));
   const failed = html({ status: "échec", background: true, stdout: "", stderr: "raté", exit_code: 3 });
   assert.match(failed, /Code de sortie non nul/); assert.match(failed, /Code de sortie : 3/);
+});
+
+test("interrupted tool cards are stopped, not left running or waiting", () => {
+  const local = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "stopped", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "run_shell", arguments: {command:"sleep 20",cwd:"/tmp"} },
+  } } }));
+  assert.doesNotMatch(local, /En cours/);
+  assert.doesNotMatch(local, /Annuler l’exécution/);
+  assert.match(local, /Arrêtée/);
+  const generic = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "generic", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+  } } }));
+  assert.doesNotMatch(generic, /Résultat en attente/);
+  assert.match(generic, /Non exécuté/);
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, GrokbotEngine: { version: () => 1, run: () => ({ status: "interrupted" }) } };
+  try {
+    const live = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "live", kind: "tool", payload: {
+      run_id: "run", run_status: "running", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+    } } }));
+    assert.doesNotMatch(live, /Résultat en attente/);
+    assert.match(live, /Non exécuté/);
+  } finally { delete globalThis.window; }
+});
+
+test("an interrupted document card does not promise a later result", () => {
+  const html = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "doc", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "document_action", arguments: { action: "save", path: "/tmp/note.txt" } },
+  } } }));
+  assert.match(html, /Arrêtée/);
+  assert.match(html, /Aucun résultat n’a été enregistré avant l’arrêt/);
+  assert.doesNotMatch(html, /Le résultat sera affiché ici/);
+  assert.doesNotMatch(html, /En cours/);
+  assert.doesNotMatch(html, /Annuler l’exécution/);
 });
 
 test("generic approval retains its code identifier instead of a local-action label", () => {

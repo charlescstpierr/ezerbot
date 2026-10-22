@@ -70,9 +70,11 @@ test("selection publication is ordered, deduplicated and excludes task/routine c
 
 test("open in Ezerbot refreshes the shared transcript before focusing the exact target", async () => {
   const f = fixture();
-  assert.equal(await f.window.EzerbotFloatingMain.openConversation("visible"), true);
+  assert.equal((await f.window.EzerbotFloatingMain.openConversation("visible")).opened, true);
   assert.deepEqual(f.calls, ["refresh", "visible"]);
-  await assert.rejects(() => f.window.EzerbotFloatingMain.openConversation("deleted"), /plus disponible/);
+  const refused = await f.window.EzerbotFloatingMain.openConversation("deleted");
+  assert.equal(refused.opened, false);
+  assert.match(refused.reason, /plus disponible/);
 });
 
 test("compact content uses only writable threads and the latest text reply", () => {

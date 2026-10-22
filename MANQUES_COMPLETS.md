@@ -8,7 +8,7 @@ Les valeurs par défaut retenues sont locales : coffre fichier `0600`, mémoire 
 
 | Capacité livrée | Suite ou limite encore ouverte |
 |---|---|
-| Skills | Import nommé par frontmatter pouvant mettre à jour une skill existante : choix local, anciennes versions conservées. Pas d’écriture modèle, Teach→skill, fichiers annexes ou marketplace. `GET /api/skills` charge encore tous les corps. |
+| Skills | Import nommé par frontmatter pouvant mettre à jour une skill existante : choix local, anciennes versions conservées. Pas d’écriture modèle, Teach→skill ou marketplace. `GET /api/skills` charge encore tous les corps. |
 | Mémoire | Pas d’extraction automatique. Oublier ne supprime ni les messages utilisateur, ni toutes les copies déléguées/cartes, ni les sauvegardes. Expurgation sous verrou coûteuse; refus 409 si une autre réponse concernée tourne. Tombstones UI limitées à la fenêtre courante; purge des faits privés de bots supprimés possible par l’API seulement, pas dans l’interface. |
 | Runs/contexte | Reprise et outils internes durables, pas garantie d’unicité d’effets externes. Fin de tour ≠ fin de tâche; pas de continuation infinie après budget. Évaluer les tâches et les fenêtres réelles avec un vrai fournisseur. |
 | Formulaires/approbations/secrets | Reçu de reprise et règles Toujours persistées fonctionnent. **Le reviewer en langage naturel reste à implémenter**; type et table prévus dans la crate `forms`, non exposés par l’API ni l’interface. Seules les règles Toujours sont évaluées automatiquement. Aucun outil externe protégé en production. Suppression du fil de décision annule les demandes au lieu de les rerouter. Coffre local non chiffré par le trousseau; pas de consommateur de secret. |

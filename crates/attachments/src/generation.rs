@@ -655,12 +655,101 @@ fn table_lines_that_fit(y: f32) -> usize {
     }
     take
 }
+struct CellBox {
+    size: f32,
+    inset: f32,
+    lines: Vec<String>,
+}
+
+impl CellBox {
+    const FONT: f32 = 10.0;
+    const INSET: f32 = 4.0;
+
+    fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn paint_line(
+        &self,
+        ops: &mut Vec<u8>,
+        index: usize,
+        column_x: f32,
+        baseline: f32,
+    ) -> Result<()> {
+        draw_line(
+            ops,
+            &self.lines[index],
+            column_x + self.inset,
+            baseline,
+            self.size,
+        )
+    }
+}
+
+fn widest_at(text: &str, size: f32) -> Result<f32> {
+    let mut widest = 0.0f32;
+    for c in text.chars() {
+        widest = widest.max(char_width(c, size)?);
+    }
+    Ok(widest)
+}
+
+fn largest_hundredth(text: &str, room: f32) -> Result<f32> {
+    let fits = |hundredths: i32| -> Result<bool> {
+        Ok(widest_at(text, hundredths as f32 / 100.0)? <= room)
+    };
+    if fits(1_000)? {
+        return Ok(CellBox::FONT);
+    }
+    let mut lo = 1i32;
+    let mut hi = 999i32;
+    let mut best = 0i32;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid)? {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if best == 0 {
+        return Err(invalid(
+            "Un glyphe de cette cellule ne tient pas dans la colonne.",
+        ));
+    }
+    Ok(best as f32 / 100.0)
+}
+
+fn fit_cell(text: &str, column_width: f32) -> Result<CellBox> {
+    if text.is_empty() {
+        let inset = ((column_width / 2.0).clamp(0.0, CellBox::INSET) * 100.0).floor() / 100.0;
+        return Ok(CellBox {
+            size: CellBox::FONT,
+            inset,
+            lines: vec![String::new()],
+        });
+    }
+    let at_font = widest_at(text, CellBox::FONT)?;
+    let size = if at_font <= column_width {
+        CellBox::FONT
+    } else {
+        largest_hundredth(text, column_width)?
+    };
+    let widest = widest_at(text, size)?;
+    let leftover = (column_width - widest).max(0.0);
+    let inset = ((leftover / 2.0).clamp(0.0, CellBox::INSET) * 100.0).floor() / 100.0;
+    let budget = (column_width - 2.0 * inset).max(widest);
+    let lines = wrap_width(text, budget, size)?;
+    Ok(CellBox { size, inset, lines })
+}
+
 fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
     let cols = rows.first().map(Vec::len).unwrap_or(1).max(1);
     let mut pref = vec![48.0f32; cols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            pref[i] = pref[i].max(measure(cell, 10.0)?.min(280.0) + 8.0);
+            pref[i] = pref[i].max(measure(cell, CellBox::FONT)?.min(280.0) + 2.0 * CellBox::INSET);
         }
     }
     let sum: f32 = pref.iter().sum();
@@ -672,17 +761,17 @@ fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
     let extra = (CONTENT_W - pref.iter().map(|w| w * scale).sum::<f32>()).max(0.0) / cols as f32;
     let widths: Vec<f32> = pref.iter().map(|w| w * scale + extra).collect();
     for (r, row) in rows.iter().enumerate() {
-        let mut cell_lines = Vec::new();
+        let mut fitted = Vec::new();
         for (c, cell) in row.iter().enumerate() {
-            cell_lines.push(wrap_width(cell, (widths[c] - 8.0).max(12.0), 10.0)?);
+            fitted.push(fit_cell(cell, widths[c])?);
         }
-        while cell_lines.len() < cols {
-            cell_lines.push(vec![String::new()]);
+        while fitted.len() < cols {
+            fitted.push(fit_cell("", widths[fitted.len()])?);
         }
         let mut offsets = vec![0usize; cols];
         loop {
             let remaining = (0..cols)
-                .map(|c| cell_lines[c].len().saturating_sub(offsets[c]))
+                .map(|c| fitted[c].line_count().saturating_sub(offsets[c]))
                 .max()
                 .unwrap_or(0);
             if remaining == 0 {
@@ -713,10 +802,10 @@ fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
                         .as_bytes(),
                 );
                 page.ops().extend(b"0.090 0.125 0.200 rg\n");
-                let end = (offsets[c] + take).min(cell_lines[c].len());
+                let end = (offsets[c] + take).min(fitted[c].line_count());
                 let mut baseline = page.y - 12.0;
-                for line in &cell_lines[c][offsets[c]..end] {
-                    draw_line(page.ops(), line, x + 4.0, baseline, 10.0)?;
+                for index in offsets[c]..end {
+                    fitted[c].paint_line(page.ops(), index, x, baseline)?;
                     baseline -= 13.0;
                 }
                 offsets[c] = end;
@@ -2478,9 +2567,10 @@ mod tests {
     }
 
     fn box_containing(boxes: &[PdfBox], x: f32, y: f32) -> Option<&PdfBox> {
-        boxes.iter().find(|b| {
-            x + 0.2 >= b.x && x <= b.x + b.w + 0.2 && y + 0.2 >= b.y && y <= b.y + b.h + 0.2
-        })
+        boxes
+            .iter()
+            .filter(|b| x + 0.05 >= b.x && x < b.x + b.w && y + 0.2 >= b.y && y <= b.y + b.h + 0.2)
+            .max_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
     }
 
     fn pdf_stroke_boxes(bytes: &[u8]) -> Vec<PdfBox> {

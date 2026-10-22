@@ -125,6 +125,17 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 pub(crate) fn is_github_tool(name: &str) -> bool {
     catalogue::github::is_tool(name) || is_github_draft(name)
 }
+/// The Slack read tool: a native adapter, run outside any SQLite writer.
+pub(crate) fn is_slack_tool(name: &str) -> bool {
+    name == catalogue::slack::TOOL
+}
+/// Why the Slack tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn slack_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::slack::unavailable(ctx)
+}
+pub(crate) fn run_slack_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    catalogue::slack::call(ctx, &call.arguments)
+}
 /// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
     catalogue::github::unavailable(ctx)
@@ -471,9 +482,8 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
         {
             continue;
         }
-        if catalogue::is_native(ctx, &server.id) {
+        if let Some(service) = catalogue::native_service(ctx, &server.id) {
             let tools = catalogue::native_tools(ctx, &server);
-            let service = catalogue::id_for_server(ctx, &server.id);
             if !tools.is_empty() && native_offered.insert(service) {
                 result.extend(tools);
             }

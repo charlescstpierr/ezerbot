@@ -596,21 +596,55 @@ fn legacy_refresh_is_merged_when_the_destination_has_no_token() {
 fn destination_refresh_wins_and_the_source_is_tombstoned() {
     let root = scratch("dest-wins").join("Library/Application Support");
     let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
-    write_auth(
-        &legacy,
-        &auth("legacy-refresh", now().saturating_add(86_400)),
-    );
+    let mut older = auth("legacy-refresh", now().saturating_add(86_400));
+    older["saved_at"] = json!(10);
+    write_auth(&legacy, &older);
     let imported = root.join("Grokbot/workspace.chatgpt-auth.json");
-    write_auth(
-        &imported,
-        &auth("dest-refresh", now().saturating_add(86_400)),
-    );
+    let mut newer = auth("dest-refresh", now().saturating_add(86_400));
+    newer["saved_at"] = json!(50);
+    newer["host_id"] = json!("host-dest");
+    write_auth(&imported, &newer);
     let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
     let session = provider(&root.join("Grokbot/workspace.sqlite"), &server);
     assert!(session.connected());
     assert_eq!(saved(&imported)["refresh_token"], "dest-refresh");
+    assert_eq!(saved(&imported)["host_id"], "host-dest");
     assert!(saved(&legacy)["refresh_token"].is_null());
     assert_eq!(server.seen.lock().unwrap().forms.len(), 0);
+}
+
+#[test]
+fn a_newer_source_refresh_replaces_the_older_destination() {
+    let root = scratch("source-newer").join("Library/Application Support");
+    let legacy = root.join("Grokbot Local/workspace.chatgpt-auth.json");
+    let mut newer = auth("new-refresh", now().saturating_add(86_400));
+    newer["saved_at"] = json!(80);
+    newer["host_id"] = json!("host-source");
+    newer["access_token"] = json!("access-new");
+    write_auth(&legacy, &newer);
+    let imported = root.join("Grokbot/workspace.chatgpt-auth.json");
+    let mut older = auth("old-refresh", now().saturating_add(86_400));
+    older["saved_at"] = json!(20);
+    older["host_id"] = json!("host-dest");
+    older["access_token"] = json!("access-old");
+    write_auth(&imported, &older);
+    let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
+    let session = provider(&root.join("Grokbot/workspace.sqlite"), &server);
+    assert!(session.connected());
+    assert_eq!(saved(&imported)["refresh_token"], "new-refresh");
+    assert_eq!(saved(&imported)["access_token"], "access-new");
+    assert_eq!(saved(&imported)["host_id"], "host-dest");
+    assert_eq!(saved(&imported)["saved_at"], 80);
+    assert!(saved(&legacy)["refresh_token"].is_null());
+    assert!(!saved(&legacy).to_string().contains("new-refresh"));
+    assert!(!saved(&imported).to_string().contains("old-refresh"));
+    assert_eq!(server.seen.lock().unwrap().forms.len(), 0);
+
+    let again = provider(&root.join("Grokbot/workspace.sqlite"), &server);
+    assert!(again.connected());
+    assert_eq!(saved(&imported)["refresh_token"], "new-refresh");
+    assert!(saved(&legacy)["refresh_token"].is_null());
+    assert_ne!(again.status()["signin"], "failed");
 }
 
 #[test]
@@ -844,4 +878,43 @@ fn two_processes_do_not_double_rotate() {
     assert_ne!(outcome.kind, "signin_expired");
     assert!(seen.lock().unwrap().forms.is_empty());
     assert_eq!(saved(&auth_path)["refresh_token"], refresh);
+}
+
+#[test]
+fn several_threads_share_a_single_refresh() {
+    let root = scratch("threads");
+    let db = root.join("workspace.sqlite");
+    let auth_path = root.join("workspace.chatgpt-auth.json");
+    write_auth(&auth_path, &auth("stale-refresh", 1));
+    let gate = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Seen {
+        token_gate: Some(gate.clone()),
+        ..Seen::default()
+    }));
+    let server = FakeOpenAi::new(seen.clone());
+    let session = provider(&db, &server);
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let worker = session.clone();
+            std::thread::spawn(move || ask(&worker))
+        })
+        .collect();
+    wait("un seul renouvellement", || {
+        seen.lock().unwrap().forms.len() == 1
+    });
+    // Plus long que l’ancienne attente de 400 ms : un fil qui ouvrirait un second
+    // descripteur, ou qui abandonnerait, se verrait ici.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(seen.lock().unwrap().forms.len(), 1);
+    gate.store(true, Ordering::SeqCst);
+    for handle in handles {
+        let outcome = handle.join().unwrap();
+        assert!(outcome.ok, "{}", outcome.message);
+        assert_ne!(outcome.kind, "signin_expired");
+        assert_ne!(outcome.kind, "signin");
+    }
+    assert_eq!(seen.lock().unwrap().forms.len(), 1);
+    assert_ne!(saved(&auth_path)["refresh_token"], "stale-refresh");
+    assert!(session.connected());
+    assert_eq!(session.status()["signin"], "idle");
 }

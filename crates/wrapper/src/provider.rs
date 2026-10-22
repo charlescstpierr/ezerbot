@@ -6,14 +6,14 @@ mod connection;
 mod reliable;
 pub use connection::Provider;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,17 +40,76 @@ const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
 /// Dernier recours absolu si le dossier personnel est inconnu. Jamais le répertoire courant.
 const FALLBACK_HOME: &str = "/var/empty";
 
+/// Un seul descripteur par fichier de verrou, pour tout le processus.
+/// Sur macOS, fermer n’importe quel descripteur du fichier lâche le `flock`.
+struct ProcessLocks {
+    files: HashMap<PathBuf, nix::fcntl::Flock<fs::File>>,
+}
+
+static PROCESS_LOCKS: OnceLock<Mutex<ProcessLocks>> = OnceLock::new();
+
 thread_local! {
-    static HELD_LOCKS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    static LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LOCK_GUARD: RefCell<Option<MutexGuard<'static, ProcessLocks>>> =
+        const { RefCell::new(None) };
+}
+
+fn process_locks() -> &'static Mutex<ProcessLocks> {
+    PROCESS_LOCKS.get_or_init(|| {
+        Mutex::new(ProcessLocks {
+            files: HashMap::new(),
+        })
+    })
 }
 
 fn holds_lock(path: &Path) -> bool {
-    HELD_LOCKS.with(|held| held.borrow().iter().any(|item| item == path))
+    LOCK_DEPTH.with(|depth| depth.get() > 0)
+        && LOCK_GUARD.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|state| state.files.contains_key(path))
+        })
+}
+
+/// Attend la fin du renouvellement d’un autre fil. Le descripteur n’est ouvert
+/// qu’une fois le mutex obtenu.
+fn enter_process_lock() {
+    if LOCK_DEPTH.with(|depth| depth.get()) > 0 {
+        LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        return;
+    }
+    let guard = process_locks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    LOCK_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
+    LOCK_DEPTH.with(|depth| depth.set(1));
+}
+
+fn release_process_lock(owned: Option<&Path>) {
+    LOCK_GUARD.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            if let Some(path) = owned {
+                state.files.remove(path);
+            }
+        }
+    });
+    let depth = LOCK_DEPTH.with(|depth| {
+        let next = depth.get().saturating_sub(1);
+        depth.set(next);
+        next
+    });
+    if depth == 0 {
+        LOCK_GUARD.with(|slot| {
+            if let Some(mut state) = slot.borrow_mut().take() {
+                state.files.clear();
+            }
+        });
+    }
 }
 
 /// Même dossier que l’application Cocoa : `Application Support/Grokbot`.
-/// `Grokbot Local` n’est plus une destination. Une session déjà là est fusionnée
-/// une fois sous verrou, puis le fichier d’origine reste sans `refresh_token`.
+/// `Grokbot Local` n’est plus une destination. Le `refresh_token` le plus récent
+/// des deux fichiers est gardé ; l’autre chemin reste, sans jeton.
 ///
 /// Les jetons restent dans le JSON propriétaire voisin de la base
 /// (`workspace.codex-auth.json` ou `workspace.chatgpt-auth.json`, mode 0600).
@@ -549,33 +608,56 @@ fn preserved_scope(codex: bool, stored: &str, granted: String) -> String {
     }
 }
 
-/// Verrou `flock` tenu par le processus. Le noyau le lâche à la mort du
-/// processus. Un second descripteur n’est jamais ouvert pour le même fichier :
-/// le fermer libérerait le verrou du processus sur macOS.
+/// `flock` tenu par le processus, sous un mutex commun à tous les fils.
+/// Un seul descripteur est ouvert : sur macOS, en fermer un autre lâche le verrou
+/// pendant l’appel HTTP (modèles, sonde, titres, routines).
 struct AuthLock {
     path: PathBuf,
-    _file: nix::fcntl::Flock<fs::File>,
+    owns_fd: bool,
 }
 
 impl AuthLock {
-    /// `None` si ce fil tient déjà ce fichier, ou si un autre processus vivant
-    /// le tient encore après une courte attente. Jamais de vol.
+    /// Attend le mutex du processus, puis le `flock`. `None` si ce fil tient
+    /// déjà ce fichier, ou si un autre processus vivant le tient encore.
     fn acquire(auth_file: &Path) -> Option<Self> {
         let path = auth_file.with_extension("lock");
         if holds_lock(&path) {
             return None;
         }
+        enter_process_lock();
+        if LOCK_GUARD.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|state| state.files.contains_key(&path))
+        }) {
+            return Some(Self {
+                path,
+                owns_fd: false,
+            });
+        }
         let started = Instant::now();
         loop {
-            let file = open_lock(&path)?;
+            let Some(file) = open_lock(&path) else {
+                release_process_lock(None);
+                return None;
+            };
             match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
                 Ok(file) => {
-                    HELD_LOCKS.with(|held| held.borrow_mut().push(path.clone()));
-                    return Some(Self { path, _file: file });
+                    LOCK_GUARD.with(|slot| {
+                        let mut slot = slot.borrow_mut();
+                        let state = slot.as_mut().expect("mutex de session tenu");
+                        debug_assert!(!state.files.contains_key(&path));
+                        state.files.insert(path.clone(), file);
+                    });
+                    return Some(Self {
+                        path,
+                        owns_fd: true,
+                    });
                 }
                 Err((file, _)) => {
                     drop(file);
                     if started.elapsed() > REFRESH_LOCK_WAIT {
+                        release_process_lock(None);
                         return None;
                     }
                     thread::sleep(Duration::from_millis(15));
@@ -587,12 +669,7 @@ impl AuthLock {
 
 impl Drop for AuthLock {
     fn drop(&mut self) {
-        HELD_LOCKS.with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(index) = held.iter().rposition(|item| item == &self.path) {
-                held.remove(index);
-            }
-        });
+        release_process_lock(self.owns_fd.then_some(self.path.as_path()));
     }
 }
 
@@ -672,6 +749,23 @@ fn promote_temporary(temporary: &Path, primary: &Path) -> std::io::Result<()> {
         let _ = fs::set_permissions(primary, fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+/// `saved_at`, sinon la date d’émission du jeton (`iat`), sinon l’expiration.
+fn credential_time(credentials: &Credentials) -> u64 {
+    if credentials.saved_at > 0 {
+        return credentials.saved_at;
+    }
+    token_issued_at(credentials.access_token.as_deref())
+        .or_else(|| token_issued_at(credentials.id_token.as_deref()))
+        .unwrap_or(credentials.expires_at)
+}
+
+fn token_issued_at(token: Option<&str>) -> Option<u64> {
+    let payload = token?.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("iat").and_then(Value::as_u64)
 }
 
 fn tombstone(path: &Path, source: &Credentials) {
@@ -872,15 +966,20 @@ impl Session {
         {
             return;
         }
-        if self
-            .read_raw()
-            .and_then(|credentials| credentials.refresh_token)
-            .is_some_and(|token| !token.is_empty())
-        {
-            tombstone(&legacy, &source);
-            return;
+        let destination = self.read_raw();
+        if let Some(current) = destination.as_ref().filter(|credentials| {
+            credentials
+                .refresh_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+        }) {
+            if credential_time(current) >= credential_time(&source) {
+                // La destination est la plus récente : on ne touche qu’à l’ancienne.
+                tombstone(&legacy, &source);
+                return;
+            }
         }
-        let mut destination = self.read_raw().unwrap_or_default();
+        let mut destination = destination.unwrap_or_default();
         let host = if destination.host_id.is_empty() {
             source.host_id.clone()
         } else {

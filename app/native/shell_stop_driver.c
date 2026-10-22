@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -52,18 +53,36 @@ static void driver_reap(const ShellChild *child) {
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child-ignore") == 0) {
         signal(SIGTERM, SIG_IGN);
+        int fd = argc > 2 ? atoi(argv[2]) : -1;
+        if (fd >= 0) {
+            char go = 1;
+            if (write(fd, &go, 1) != 1) _exit(2);
+            close(fd);
+        }
         for (;;) pause();
     }
     int quit_fd = -1;
     if (shell_stop_arm(&quit_fd) != 0) return 2;
     int ignore = argc > 1 && strcmp(argv[1], "ignore") == 0;
     char *sleep_argv[] = {"/bin/sleep", "60", NULL};
-    char *ignore_argv[] = {argv[0], "child-ignore", NULL};
+    int note[2] = {-1, -1};
+    char note_text[16];
+    char *ignore_argv[] = {argv[0], "child-ignore", note_text, NULL};
     pid_t child = 0;
-    int spawned = ignore
-        ? posix_spawn(&child, argv[0], NULL, NULL, ignore_argv, environ)
-        : posix_spawn(&child, "/bin/sleep", NULL, NULL, sleep_argv, environ);
-    if (spawned != 0) return 2;
+    int spawned;
+    if (ignore) {
+        if (pipe(note) != 0) return 2;
+        snprintf(note_text, sizeof note_text, "%d", note[1]);
+        spawned = posix_spawn(&child, argv[0], NULL, NULL, ignore_argv, environ);
+        close(note[1]);
+        if (spawned != 0) return 2;
+        char go = 0;
+        if (read(note[0], &go, 1) != 1) return 2;
+        close(note[0]);
+    } else {
+        spawned = posix_spawn(&child, "/bin/sleep", NULL, NULL, sleep_argv, environ);
+        if (spawned != 0) return 2;
+    }
     printf("ready %d\n", (int)child);
     fflush(stdout);
     for (;;) {

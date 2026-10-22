@@ -804,3 +804,26 @@ fn waking_from_sleep_stops_tracking_and_asks_recall_to_remove_the_bot() {
     f.sync();
     assert_eq!(f.recall.leaves(), 1);
 }
+
+#[test]
+fn a_clean_close_also_sends_the_removals_already_owed() {
+    let mut f = Fixture::new();
+    recall::pause_background(true);
+    f.connect();
+    f.joined();
+    f.recall.code("nouvel_etat_inconnu");
+    f.sync();
+    assert_eq!(f.item()["meeting"]["label"], "Échec");
+    assert_eq!(f.recall.leaves(), 0);
+    f.post("/api/recall/shutdown", json!({}));
+    assert_eq!(f.recall.leaves(), 1);
+    let pending: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM wrapper_recall_meetings WHERE needs_leave=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+}

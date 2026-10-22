@@ -556,6 +556,9 @@ fn shutdown(ctx: &Context<'_>) -> Value {
     // Une invitation sans réponse n’a pas encore d’identifiant de bot : sortir sans
     // l’attendre laisserait Recall créer un bot que personne ne retirera.
     wait_creations();
+    // Les sorties déjà demandées (statut inconnu, coupure) partent aussi : après la fermeture,
+    // plus rien ne les ferait aboutir. Au mieux : une sortie non confirmée reste due.
+    let _ = drain_pending_leaves(ctx);
     if let Ok(Some(meeting)) = active(ctx.connection) {
         let unresolved = meeting.bot_id.is_none()
             && CREATING

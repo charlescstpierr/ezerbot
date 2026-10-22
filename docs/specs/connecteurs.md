@@ -1,6 +1,6 @@
 # Connecteurs
 
-Statut : décisions du grill du 21 octobre 2026. Aucune implémentation de ce lot n’est commencée. La première tranche qui doit marcher de bout en bout, avec un vrai compte, est GitHub. Les tranches sont des issues enfants de la carte [Connecteurs](https://github.com/charlescstpierr/ezerbot/issues/44).
+Statut : décisions du grill du 21 octobre 2026. Aucune implémentation de ce lot n’est commencée. La première tranche qui doit marcher de bout en bout, avec un vrai compte, est GitHub. Les tranches sont des issues enfants de la carte [Connecteurs](https://github.com/charlescstpierr/ezerbot/issues/44). Le complément [`connecteurs-google-slack.md`](connecteurs-google-slack.md) change ensuite Gmail, Calendar, Drive et Slack : « installation actuelle » désigne ici l’état de ce lot.
 
 ## Contexte
 
@@ -12,11 +12,11 @@ Cet existant ne suffit pas pour un usage réel :
 - Le parcours n’a jamais été joué avec un vrai compte. Les tests parlent à un fournisseur de boucle locale.
 - Un service ne garde qu’un compte. L’identité affichée est une adresse, pas une liste de comptes.
 - Les serveurs ajoutés à la main sont des commandes locales (stdio). Il n’y a pas de serveur MCP en HTTPS à coller par son URL.
-- Il n’y a pas de carte brouillon. Une approbation peut autoriser un outil, y compris pour les fois suivantes. Rien ne montre le texte exact qui partira sous le nom de Charles, ni n’empêche un « Toujours » sur une publication ou une suppression.
+- Il n’y a pas de carte brouillon. Depuis `4f77a4c` (#130), un outil dont le nom dit un envoi sous le nom de Charles (courriel, message, commentaire) ou une suppression demande une confirmation à chaque fois, sans « Toujours ». Ce classement lit le nom de l’outil. Rien ne montre un texte modifiable, lié à l’empreinte de ce qui part, et un outil dont le nom ne dit pas l’envoi garde son « Toujours ».
 
 Le catalogue et le courtier sont sur main (`b5d9219`, `c88bdd8`, `c63488a`). Les connecteurs MCP locaux avec approbation par outil sont `2bb6070`. Les empreintes `6acead7`, `749a35e` et `9ba1aa2` citées au grill ne sont pas dans `charlescstpierr/ezerbot` ; le comportement qu’elles désignent est celui de ces commits.
 
-Le coffre refuse déjà d’écrire un secret dans SQLite. Sur l’app Mac signée, il préfère le trousseau. Si le trousseau est verrouillé, il bascule aujourd’hui vers le fichier de secours, sans dialogue. Un jeton de compte qui suivrait ce repli se retrouverait dans un fichier du Mac.
+Le coffre refuse déjà d’écrire un secret dans SQLite. Sur l’app Mac signée, il écrit dans le trousseau. Si le trousseau est verrouillé ou refuse, l’écriture échoue, sans dialogue, et rien n’est copié dans le fichier de secours (`e8895d5`, #124). Les connecteurs passent par ce coffre.
 
 ## Verdict d’accès
 
@@ -37,8 +37,8 @@ Le serveur MCP hébergé `https://api.githubcopilot.com/mcp/` n’est pas le con
 3. **La politique d’action a trois classes.** Une lecture connue part seule. Une publication prépare une carte brouillon : texte exact, dépôt, numéro ou titre, compte GitHub. « Envoyer » publie ce texte, une seule fois, sous le compte affiché. « Annuler » ne publie rien. Le texte de la carte est modifiable avant l’envoi ; ce qui part est le texte validé. Il n’y a pas de « Toujours ». Une suppression affiche une carte de confirmation qui nomme la cible, avec « Confirmer » et « Annuler », sans « Toujours ». Un refus laisse le compte et les jetons en place. Cette carte brouillon est celle qu’un connecteur ultérieur devra utiliser pour un courriel, un message, un commentaire ou une issue. Ce lot la branche sur GitHub seulement.
 4. **Plusieurs comptes par service, prouvé sur GitHub.** Une connexion est un service plus un utilisateur GitHub (identifiant numérique), avec son login affiché et son propre secret dans le coffre. Deux connexions GitHub coexistent. S’il n’y en a qu’une, le bot l’utilise. S’il y en a plusieurs, il demande laquelle avant d’agir, et la conversation garde ce choix jusqu’à ce que Charles en nomme une autre. Déconnecter l’une ne touche pas à l’autre.
 5. **Le catalogue se cherche, et GitHub s’installe en un clic.** Le champ filtre le nom et la description des six services. Une recherche vide les montre tous. Aucun résultat le dit. La carte GitHub n’a ni identifiant ni secret. Les cinq autres services gardent leur installation actuelle, y compris la saisie d’un client quand elle existe aujourd’hui.
-6. **Un serveur MCP HTTPS s’ajoute par son URL.** Le formulaire des serveurs personnalisés garde la commande locale et ajoute l’URL. HTTPS est exigé. `http` n’est accepté que pour `127.0.0.1`, après une confirmation explicite que le serveur est sur ce Mac. Pas de redirection. Le jeton éventuel est un champ mot de passe, rangé dans le coffre, renvoyé seulement vers l’origine approuvée, jamais réaffiché, jamais donné au modèle. Les outils découverts ne sont pas des lectures automatiques : le premier appel passe par l’approbation existante, arguments visibles, « Toujours » possible pour cet outil précis. Les classer en brouillon ou en suppression est hors de ce lot.
-7. **Les jetons de compte ne suivent pas le repli fichier.** Sur l’app Mac qui active le trousseau, un jeton d’accès ou de rafraîchissement de connecteur qui ne peut pas être écrit dans le trousseau n’est pas écrit dans le fichier de secours. La connexion échoue, la carte le dit, rien n’est conservé. Le repli fichier des autres secrets reste celui d’aujourd’hui. Le `device_code` ne quitte pas la mémoire d’attente. Le coffre garde sa limite actuelle : un secret qui ne tient pas fait échouer la connexion, sans valeur tronquée.
+6. **Un serveur MCP HTTPS s’ajoute par son URL.** Le formulaire des serveurs personnalisés garde la commande locale et ajoute l’URL. HTTPS est exigé. `http` n’est accepté que pour `127.0.0.1`, après une confirmation explicite que le serveur est sur ce Mac. Pas de redirection. Le jeton éventuel est un champ mot de passe, rangé dans le coffre, renvoyé seulement vers l’origine approuvée, jamais réaffiché, jamais donné au modèle. Les outils découverts ne sont pas des lectures automatiques : le premier appel passe par l’approbation existante, arguments visibles, « Toujours » possible pour cet outil précis, sauf quand son nom dit un envoi ou une suppression (#130 : confirmation à chaque fois). Les classer en brouillon ou en suppression est hors de ce lot.
+7. **Les jetons de compte ne suivent jamais un repli fichier.** Le coffre l’impose déjà à tout secret (`e8895d5`). Sur l’app Mac qui active le trousseau, un jeton d’accès ou de rafraîchissement de connecteur qui ne peut pas être écrit dans le trousseau n’est pas écrit dans le fichier de secours. La connexion échoue, la carte le dit, rien n’est conservé. Ce lot n’ajoute aucun chemin qui contourne ce refus. Le `device_code` ne quitte pas la mémoire d’attente. Le coffre garde sa limite actuelle : un secret qui ne tient pas fait échouer la connexion, sans valeur tronquée.
 
 ## Récits
 
@@ -127,18 +127,18 @@ Un juge visuel sur Mac coche ces parcours dans l’app signée, avec la GitHub A
 - Faire marcher Gmail, Google Calendar, Google Drive, Slack ou Notion sans client créé par Charles. Ils restent au parcours actuel.
 - Le serveur MCP hébergé de GitHub Copilot, une OAuth App au scope `repo`, et un jeton d’installation qui parlerait au nom du robot de l’app.
 - Fermer ou supprimer une issue, fusionner ou commenter en revue une pull request, pousser des commits, gérer les réglages du dépôt.
-- Le classement automatique des outils d’un MCP ajouté en « publication » ou « suppression ». Ils restent sur l’approbation existante.
+- Le classement automatique des outils d’un MCP ajouté en carte brouillon ou en carte de confirmation propre à ce lot. Ils restent sur l’approbation existante, avec le classement par nom de #130, qui ne change pas.
 - Les webhooks GitHub, l’iPhone, l’ordinateur cloud, et un partage de connexions entre Mac.
 - Un « Toujours » sur une carte brouillon ou une confirmation de suppression.
 - Appeler `github.com` depuis les tests automatisés. Le compte réel est réservé au juge.
-- Changer le repli fichier des secrets qui ne sont pas des jetons de compte de connecteur.
+- Changer le comportement du coffre quand le trousseau refuse, déjà fermé sur main.
 
 ## Risques
 
-- **Le trousseau verrouillé écrit aujourd’hui dans le fichier.** Un jeton `ghu_` ou `ghr_` dans ce fichier est lisible par tout processus du compte macOS. Décision 7 inverse ce repli pour les jetons de compte seulement. Le juge du parcours 9 est le moment de vérité. Les tests Linux ne voient pas le trousseau : ils prouvent l’absence du jeton dans la base et les journaux ; le refus de repli se prouve sur Mac.
+- **Un jeton hors du trousseau.** Un jeton `ghu_` ou `ghr_` dans un fichier est lisible par tout processus du compte macOS. Le coffre de main refuse déjà le repli fichier quand le trousseau refuse. Le risque est qu’une tranche contourne ce refus. Décision 7 le garde, et le juge du parcours 9 est le moment de vérité. Les tests Linux ne voient pas le trousseau : ils prouvent l’absence du jeton dans la base et les journaux ; le refus se prouve sur Mac.
 - **Le `client_id` est public.** C’est voulu. Le secret qui ne doit jamais apparaître est le `client_secret`, et il n’est pas dans l’app. Un `device_code` volé pendant les 15 minutes d’attente permettrait de finir le flux si Charles entre aussi le code. L’attente est en mémoire, annulable, et invalidée au redémarrage.
 - **Les permissions de l’app sont plus larges que la lecture.** Issues et pull requests sont en écriture pour que le commentaire et la création d’issue soient possibles. La classe publication est la barrière locale. Un bug qui classerait mal un outil enverrait du texte sans carte. La liste d’outils est fermée, et le test de la carte compte les appels au fournisseur : zéro avant Envoyer, un après.
-- **Un « Toujours » existe encore pour les outils MCP ajoutés et pour les anciens connecteurs.** Un outil MCP qui envoie un message peut donc repartir sans carte brouillon. Ce lot ne le classe pas. La mitigation est l’approbation du premier appel, arguments visibles, portée limitée à cet outil.
+- **Un « Toujours » existe encore pour les outils MCP ajoutés et pour les anciens connecteurs,** sauf ceux dont le nom dit un envoi ou une suppression (#130). Ce classement lit le nom : un outil qui envoie sous un nom neutre peut repartir sans carte brouillon. Ce lot ne le classe pas. La mitigation est l’approbation du premier appel, arguments visibles, portée limitée à cet outil.
 - **SSO d’organisation.** Un dépôt d’org invisible après autorisation se dit en français (session SAML ou installation à élargir). Le bot ne réessaie pas en boucle.
 - **Limite de 4 Ko du coffre.** Les jetons GitHub tiennent. Un secret MCP trop gros fait échouer l’ajout, sans troncature et sans secret partiel.
 - **Renouvellement.** Un rafraîchissement qui échoue ne réutilise pas l’accès expiré. La carte passe à « reconnecter ». Deux rafraîchissements concurrents ne doivent pas garder un ancien `ghr_` que GitHub aurait déjà invalidé.
@@ -148,7 +148,7 @@ Un juge visuel sur Mac coche ces parcours dans l’app signée, avec la GitHub A
 
 Chaque tranche traverse le parcours visible, le coffre et le test. Le détail et les critères vivent dans l’issue. Les blocages sont aussi des dépendances natives sur le suivi. La première à prendre est la connexion GitHub et la liste des issues.
 
-Carte : [Connecteurs](https://github.com/charlescstpierr/ezerbot/issues/44).
+Carte : [Connecteurs](https://github.com/charlescstpierr/ezerbot/issues/44). Les tranches Google et Slack ([#89](https://github.com/charlescstpierr/ezerbot/issues/89), [#90](https://github.com/charlescstpierr/ezerbot/issues/90), [#100](https://github.com/charlescstpierr/ezerbot/issues/100), [#101](https://github.com/charlescstpierr/ezerbot/issues/101), [#102](https://github.com/charlescstpierr/ezerbot/issues/102), [#103](https://github.com/charlescstpierr/ezerbot/issues/103)) relèvent du complément cité plus haut.
 
 1. [Connecter GitHub et lister les issues d’un dépôt](https://github.com/charlescstpierr/ezerbot/issues/45). Aucun bloquant. Première tranche à prendre.
 2. [Lire une pull request et un dépôt GitHub](https://github.com/charlescstpierr/ezerbot/issues/46). Bloquée par 45.

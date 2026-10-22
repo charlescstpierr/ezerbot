@@ -357,6 +357,36 @@ impl Journal {
         Ok(decision)
     }
 
+    /// Retire une soumission qui n’a pas été livrée. Une acceptation ou un écho reste.
+    ///
+    /// Ce n’est pas une transition : le message livré n’est pas rouvert, et le refus
+    /// terminal du journal n’est pas rejoué par `dispatch`.
+    pub fn discard_undelivered(
+        &mut self,
+        actor: &AuthenticatedActor,
+        conversation_id: &ConversationId,
+        message_id: &MessageId,
+    ) -> Result<(), JournalError> {
+        self.abandon_open_transaction();
+        let current = self
+            .lookup(&actor.account_id, conversation_id, message_id)
+            .cloned()
+            .ok_or(JournalError::NotFound)?;
+        self.ensure_continuation(actor, current.generation)?;
+        if matches!(
+            current.state,
+            SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
+        ) {
+            return Err(JournalError::IllegalTransition(
+                "un message livré ne se retire pas".into(),
+            ));
+        }
+        self.committed
+            .retain(|record| !record.matches(&actor.account_id, conversation_id, message_id));
+        self.projection = Self::replay(&self.committed);
+        Ok(())
+    }
+
     /// État consultable de la clé. Après un crash, seuls les enregistrements validés comptent.
     pub fn get(
         &self,

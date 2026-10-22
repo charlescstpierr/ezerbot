@@ -33,6 +33,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+const STALE_FORM: &str = "Ce formulaire n\u{2019}a pas \u{00e9}t\u{00e9} accept\u{00e9}.";
+
 empty_hooks!(context, link_attachments);
 mod reviewer;
 
@@ -52,6 +54,36 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             "ALTER TABLE wrapper_forms_calls ADD COLUMN display_json TEXT NOT NULL DEFAULT 'null'",
         )?;
     }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wrapper_forms_boot (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            boot_id TEXT NOT NULL
+        );",
+    )?;
+    for (column, definition) in [
+        ("boot_id", "TEXT NOT NULL DEFAULT ''"),
+        ("replaced", "INTEGER NOT NULL DEFAULT 0"),
+        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('forms_requests') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            conn.execute(
+                &format!("ALTER TABLE forms_requests ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    // Every process open rotates the boot. A secret form from the previous
+    // process is then stale; age alone never is.
+    conn.execute(
+        "INSERT INTO wrapper_forms_boot(singleton, boot_id) VALUES (1, lower(hex(randomblob(16))))
+         ON CONFLICT(singleton) DO UPDATE SET boot_id = excluded.boot_id",
+        [],
+    )?;
     Ok(())
 }
 
@@ -388,8 +420,39 @@ fn create_request(
             attach(ctx.connection, &request, receipt)?;
         }
     }
+    stamp_request(ctx, &request)?;
     requests::get(ctx.connection, id)?
         .ok_or_else(|| ApiError::new(500, "Human input request was not persisted"))
+}
+
+fn current_boot(conn: &Connection) -> Result<String, ApiError> {
+    conn.query_row(
+        "SELECT boot_id FROM wrapper_forms_boot WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()?
+    .filter(|boot: &String| !boot.is_empty())
+    .ok_or_else(|| ApiError::new(500, "Identifiant de démarrage des formulaires absent."))
+}
+
+/// Stamp the process that created the request. A newer pending secret request
+/// for the same bot retires the previous one. `created_at` is not an expiry.
+fn stamp_request(ctx: &Context<'_>, request: &HumanInputRequest) -> Result<(), ApiError> {
+    ctx.connection.execute(
+        "UPDATE forms_requests SET boot_id=?1, created_at=?2 WHERE id=?3 AND created_at=0",
+        params![current_boot(ctx.connection)?, clock(ctx), request.id],
+    )?;
+    if matches!(request.kind, InputKind::Secret { .. }) {
+        ctx.connection.execute(
+            "UPDATE forms_requests SET replaced=1
+             WHERE id<>?1 AND status='pending'
+               AND json_extract(kind_json,'$.kind')='secret'
+               AND json_extract(route_json,'$.requesting_bot_id')=?2",
+            params![request.id, request.route.requesting_bot_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn guarded_identity(
@@ -777,6 +840,22 @@ struct Cancellation {
 #[serde(deny_unknown_fields)]
 struct SecretName {
     name: String,
+    #[serde(default)]
+    bot_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotScope {
+    bot_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretPut {
+    bot_id: String,
+    name: String,
+    description: String,
+    // No Debug/Serialize: the panel value never enters a log or a response.
+    value: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -845,6 +924,8 @@ pub fn routes(
                 | "/api/approvals/resolve"
                 | "/api/approvals/rules/revoke"
                 | "/api/secrets/delete"
+                | "/api/secrets/list"
+                | "/api/secrets/put"
         ) | ("GET" | "DELETE", "/api/secrets")
             | ("GET" | "POST", "/api/approvals/reviewer")
     ) {
@@ -900,11 +981,31 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
         tx.commit()?;
         return Ok(json!({"rules":rules}));
     }
+    if path == "/api/secrets/list" {
+        let input: BotScope = parse(body)?;
+        require_live_bot(&ctx, &input.bot_id)?;
+        return Ok(json!({"secrets": scoped_secrets(&ctx, &input.bot_id)?}));
+    }
+    if path == "/api/secrets/put" {
+        let input: SecretPut = parse(body)?;
+        require_live_bot(&ctx, &input.bot_id)?;
+        let description = input.description.trim();
+        if description.is_empty() {
+            return Err(ApiError::new(400, "La description est requise."));
+        }
+        vault(&ctx)?.set_for_bot(&input.bot_id, &input.name, description, &input.value)?;
+        return Ok(json!({"secrets": scoped_secrets(&ctx, &input.bot_id)?}));
+    }
     if path == "/api/secrets" && method == "GET" {
         return Ok(json!({"secrets":secret_metadata(&ctx)?}));
     }
     if path == "/api/secrets/delete" || method == "DELETE" {
         let input: SecretName = parse(body)?;
+        if let Some(bot_id) = input.bot_id.as_deref() {
+            require_live_bot(&ctx, bot_id)?;
+            vault(&ctx)?.remove_for_bot(bot_id, &input.name)?;
+            return Ok(json!({"secrets": scoped_secrets(&ctx, bot_id)?}));
+        }
         vault(&ctx)?.remove(&input.name)?;
         return Ok(json!({"secrets":secret_metadata(&ctx)?}));
     }
@@ -930,6 +1031,19 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 |r| r.get(0),
             )?;
             if existing {
+                // A secret card is single use. The same submission id still
+                // returns the original receipt and does not rewrite the vault.
+                // Any other submission is refused before a write.
+                if matches!(request.kind, InputKind::Secret { .. }) {
+                    let same: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM forms_resolutions WHERE entry_id=?1 AND submission_id=?2)",
+                        params![&input.entry_id, &submission],
+                        |row| row.get(0),
+                    )?;
+                    if !same {
+                        return Err(ApiError::new(409, STALE_FORM));
+                    }
+                }
                 requests::receipt(&tx, &input.entry_id, &submission)?
             } else {
                 let receipt = match &request.kind {
@@ -954,6 +1068,17 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                                 "Secret submissions use the value field",
                             ));
                         }
+                        let (replaced, boot_id): (i64, String) = tx.query_row(
+                            "SELECT replaced, boot_id FROM forms_requests WHERE id=?1",
+                            [&request.id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                        // Before any resolution or vault write. A request older
+                        // than 30 minutes stays acceptable; only replacement or
+                        // a new process boot refuses it.
+                        if replaced != 0 || boot_id != current_boot(&tx)? {
+                            return Err(ApiError::new(409, STALE_FORM));
+                        }
                         requests::submit_secret_ref(
                             &tx,
                             &input.entry_id,
@@ -972,7 +1097,12 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                         .value
                         .as_deref()
                         .ok_or_else(|| ApiError::new(400, "Secret value is required"))?;
-                    vault(&ctx)?.set(name, purpose, value)?;
+                    vault(&ctx)?.set_for_bot(
+                        &request.route.requesting_bot_id,
+                        name,
+                        purpose,
+                        value,
+                    )?;
                 }
                 receipt
             }
@@ -1148,6 +1278,61 @@ fn orphaned_requests(conn: &Connection) -> Result<Vec<String>, ApiError> {
 fn secret_metadata(ctx: &Context<'_>) -> Result<Value, ApiError> {
     let vault = vault(ctx)?;
     Ok(redact_value(&vault, &json!(vault.list()?))?)
+}
+
+fn valid_bot_id(bot_id: &str) -> bool {
+    !bot_id.is_empty()
+        && bot_id.len() <= 128
+        && bot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn require_live_bot(ctx: &Context<'_>, bot_id: &str) -> Result<(), ApiError> {
+    if !valid_bot_id(bot_id) {
+        return Err(ApiError::new(400, "Identifiant de bot invalide."));
+    }
+    let deleted: Option<bool> = ctx
+        .connection
+        .query_row(
+            "SELECT deleted FROM wrapper_bots WHERE account_id=?1 AND id=?2",
+            params![ACCOUNT, bot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match deleted {
+        None => Err(ApiError::new(404, "Bot introuvable.")),
+        Some(true) => Err(ApiError::new(409, "Ce bot a été supprimé.")),
+        Some(false) => Ok(()),
+    }
+}
+
+fn scoped_secrets(ctx: &Context<'_>, bot_id: &str) -> Result<Value, ApiError> {
+    let vault = vault(ctx)?;
+    let rows = vault
+        .bot_secrets()?
+        .get(bot_id)
+        .cloned()
+        .unwrap_or_default();
+    Ok(redact_value(&vault, &json!(rows))?)
+}
+
+fn live_bot_secrets(ctx: &Context<'_>, vault: &Vault) -> Result<Value, ApiError> {
+    let grouped = vault.bot_secrets()?;
+    let mut statement = ctx
+        .connection
+        .prepare("SELECT id FROM wrapper_bots WHERE account_id=?1 AND deleted=0 ORDER BY id")?;
+    let ids = statement
+        .query_map(params![ACCOUNT], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut map = serde_json::Map::new();
+    for id in ids {
+        map.insert(
+            id.clone(),
+            json!(grouped.get(&id).cloned().unwrap_or_default()),
+        );
+    }
+    Ok(Value::Object(map))
 }
 // Build metadata without reopening the vault; callers redact their whole public
 // projection once, rather than reading/validating the file once per request.
@@ -1393,9 +1578,11 @@ pub fn state(ctx: &Context<'_>) -> Value {
             }
         }
         let vault = vault(ctx)?;
+        let secrets = vault.list()?;
+        let bot_secrets = live_bot_secrets(ctx, &vault)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":vault.list()?,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":secrets,"bot_secrets":bot_secrets,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))

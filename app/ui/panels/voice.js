@@ -46,7 +46,7 @@
   }
   window.EzerbotMicrophone = { current: chosenMicrophone, fellBack: forgetMicrophone };
   const tones = { mic_denied: "danger", speech_denied: "danger", no_microphone: "danger", failed: "danger", upload_failed: "danger", offline_unavailable: "warning", limited: "warning" };
-  const language = () => document.documentElement.lang || "fr";
+  const language = () => context?.state?.voice?.language || document.documentElement.lang || "fr";
   async function bridge(command, extra = {}) {
     const body = { command, token: session?.token || "", language: language(), ...extra };
     const native = window.webkit?.messageHandlers?.ezerbotVoice;

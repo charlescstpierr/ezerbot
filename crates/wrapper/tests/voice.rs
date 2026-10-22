@@ -818,3 +818,51 @@ fn the_voice_mode_listens_to_the_chosen_microphone_or_the_default_one_when_it_is
     assert_eq!(fallback["microphone_id"], "fake-built-in");
     assert_eq!(fallback["microphone_fallback"], true);
 }
+
+#[test]
+fn dictation_language_survives_restart() {
+    let mut f = Fixture::new();
+    for language in ["en-US", "fr-CA"] {
+        f.post("/api/voice/language", json!({"language":language}));
+        f.reopen();
+        assert_eq!(
+            f.app.api("GET", "/api/state", b"").unwrap()["voice"]["language"],
+            language
+        );
+    }
+}
+
+#[test]
+fn dictation_keeps_the_language_received_at_start() {
+    let mut f = Fixture::new();
+    for language in ["en-US", "fr-CA"] {
+        let started = f.post(
+            "/api/voice/debug",
+            json!({"command":"start","token":"locale","purpose":"dictation","language":language}),
+        );
+        assert_eq!(started["language"], language);
+        let stopped = f.post(
+            "/api/voice/debug",
+            json!({"command":"stop","token":"locale"}),
+        );
+        assert_eq!(stopped["status"], "ready");
+        assert_eq!(stopped["language"], language);
+        assert!(!stopped["transcript"].as_str().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn invalid_dictation_language_preserves_the_saved_choice() {
+    let mut f = Fixture::new();
+    f.post("/api/voice/language", json!({"language":"en-US"}));
+    for language in ["", "fr CA", "fr\nCA", &"a".repeat(33)] {
+        assert!(f
+            .denied("/api/voice/language", json!({"language":language}))
+            .contains("invalide"));
+    }
+    f.reopen();
+    assert_eq!(
+        f.app.api("GET", "/api/state", b"").unwrap()["voice"]["language"],
+        "en-US"
+    );
+}

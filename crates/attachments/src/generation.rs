@@ -673,8 +673,18 @@ fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
     let widths: Vec<f32> = pref.iter().map(|w| w * scale + extra).collect();
     for (r, row) in rows.iter().enumerate() {
         let mut cell_lines = Vec::new();
+        let mut cell_sizes = vec![10.0f32; cols];
         for (c, cell) in row.iter().enumerate() {
-            cell_lines.push(wrap_width(cell, (widths[c] - 8.0).max(12.0), 10.0)?);
+            let padding = 4.0f32.min(widths[c] / 4.0);
+            let available = widths[c] - 2.0 * padding;
+            let widest = cell.chars().try_fold(0.0f32, |width, ch| {
+                Ok::<_, Error>(width.max(char_width(ch, 10.0)?))
+            })?;
+            // A single glyph must fit too; round down to the PDF's precision.
+            if widest > available {
+                cell_sizes[c] = (10.0 * available / widest * 100.0).floor() / 100.0;
+            }
+            cell_lines.push(wrap_width(cell, available, cell_sizes[c])?);
         }
         while cell_lines.len() < cols {
             cell_lines.push(vec![String::new()]);
@@ -716,7 +726,8 @@ fn paint_table(page: &mut Painter, rows: &[Vec<String>]) -> Result<()> {
                 let end = (offsets[c] + take).min(cell_lines[c].len());
                 let mut baseline = page.y - 12.0;
                 for line in &cell_lines[c][offsets[c]..end] {
-                    draw_line(page.ops(), line, x + 4.0, baseline, 10.0)?;
+                    let padding = 4.0f32.min(w / 4.0);
+                    draw_line(page.ops(), line, x + padding, baseline, cell_sizes[c])?;
                     baseline -= 13.0;
                 }
                 offsets[c] = end;
@@ -2466,6 +2477,51 @@ mod tests {
         for line in lines {
             let end = 42.0 + dejavu_width(line, 12.0);
             assert!(end <= 595.0, "la ligne dépasse 595 pt ({end}) : {line}");
+        }
+    }
+
+    #[test]
+    fn wide_pdf_tables_keep_text_inside_each_cell() {
+        for (cols, wide_columns) in [(20, 0), (50, 0), (50, 1), (50, 49)] {
+            let mut cells = vec!["WWWé"; cols];
+            cells[..wide_columns].fill("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+            let row = format!("| {} |", cells.join(" | "));
+            let pdf = generate(&Request {
+                name: "Large".into(),
+                format: "pdf".into(),
+                content: format!("{row}\n{}\n{row}", md_cells("---", cols)),
+            })
+            .unwrap();
+            let mut seen = 0;
+            for stream in content_streams(&pdf.bytes) {
+                let text: String = stream.iter().map(|b| char::from(*b)).collect();
+                let mut bounds = None;
+                for op in text.lines() {
+                    let parts: Vec<_> = op.split_whitespace().collect();
+                    if op.ends_with("re S") {
+                        let x: f32 = parts[4].parse().unwrap();
+                        let width: f32 = parts[6].parse().unwrap();
+                        bounds = Some((x, x + width));
+                    } else if op.starts_with("BT /F1 ") {
+                        let size: f32 = parts[2].parse().unwrap();
+                        let x: f32 = parts[8].parse().unwrap();
+                        let start = op.find('(').unwrap() + 1;
+                        let end = op.rfind(')').unwrap();
+                        let shown = &op[start..end];
+                        let (left, right) = bounds.expect("cadre de cellule");
+                        assert!(x >= left);
+                        assert!(
+                            x + dejavu_width(shown, size) <= right + 0.02,
+                            "texte hors cellule : {op}, bord droit {right}"
+                        );
+                        seen += shown.chars().count();
+                    }
+                }
+            }
+            assert_eq!(
+                seen,
+                cells.iter().map(|s| s.chars().count()).sum::<usize>() * 2
+            );
         }
     }
 

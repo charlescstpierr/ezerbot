@@ -408,6 +408,66 @@ fn interrupted_group_callback_is_not_silently_reissued_in_the_same_process() {
 }
 
 #[test]
+fn interrupted_group_tool_call_is_recorded_without_another_model_call() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    let conversation = f.group(&["a", "b"]);
+    let db = f.db();
+    with_tx(&db, |conn| -> grokbot_engine::contracts::Result<()> {
+        let run = model::Run {
+            run_id: "groupe-interrompu".into(),
+            bot_id: "a".into(),
+            conversation_id: conversation,
+            trigger: Trigger::UserMessage {
+                message_id: "message-groupe".into(),
+                attempt: 0,
+            },
+            kind: RunKind::Chat,
+            status: RunStatus::Queued,
+            task_status: None,
+            turn_end: None,
+            budgets: RunBudgets::default(),
+            started_at: 1,
+        };
+        model::start(conn, &run)?;
+        model::set_running_at(conn, &run.run_id, 2)?;
+        store::append_event(
+            conn,
+            &run.run_id,
+            RunEventKind::ToolCall,
+            &json!({"call_id":"appel","name":"remember","arguments":{}}),
+        )?;
+        let mut current = store::required(conn, &run.run_id)?;
+        current.status = RunStatus::Interrupted;
+        store::save(conn, &current)?;
+        store::append_event(
+            conn,
+            &run.run_id,
+            RunEventKind::Interrupted,
+            &json!({"reason":"process_restart"}),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    f.app.tick(0);
+    let db = f.db();
+    assert_eq!(
+        store::required(&db, "groupe-interrompu").unwrap().status,
+        RunStatus::Interrupted
+    );
+    let events = store::events(&db, "groupe-interrompu", 0).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == RunEventKind::ToolResult && event.payload["call_id"] == "appel"
+    }));
+    let replay = grokbot_engine::run_loop::replay_items(&events).unwrap();
+    assert!(serde_json::to_string(&replay).unwrap().contains("appel"));
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+}
+
+#[test]
 fn refusal_model_failure_stop_removal_and_uncertain_restart_are_terminal() {
     let mut f = Fixture::new(true);
     f.bot("a");

@@ -211,12 +211,12 @@ function harness({ bots = [bot("alpha", "Alpha"), bot("beta", "Bêta")], session
     session,
     bots,
     document,
-    button: actions.querySelector("button"),
+    button: actions.querySelector("[data-topbar-intent=members]"),
     dialog: panels.querySelector("dialog"),
     bar: body.querySelector(".group-bar"),
     banner: body.querySelector(".group-cost-banner"),
     show(conversation) { host.panel.onState({}, current(conversation)); },
-    openCreate() { host.panel.onState({}, current(null)); this.button.click(); },
+    openCreate() { host.panel.onState({}, current(null)); actions.querySelector("[data-topbar-intent=create]").click(); },
   };
 }
 
@@ -527,6 +527,62 @@ test("le nom, la description et le signe gardent le focus pendant un rafraîchis
   assert.equal(again.value, "Atelier");
   assert.equal(again.selectionStart, 2);
   assert.equal(again.selectionEnd, 5);
+});
+
+test("l’accueil ne montre que Créer un groupe", () => {
+  const h = harness();
+  h.show(null);
+  const labels = h.document.querySelectorAll(".topbar-actions button").filter((button) => !button.hidden).map((button) => button.textContent);
+  assert.deepEqual(labels, ["Créer un groupe"]);
+});
+
+test("une tâche cache Créer un groupe et Membres", () => {
+  const h = harness();
+  h.show({ id: "tache", kind: "task", title: "Tâche", member_ids: [], messages: [] });
+  const labels = h.document.querySelectorAll(".topbar-actions button").filter((button) => !button.hidden).map((button) => button.textContent);
+  assert.deepEqual(labels, []);
+});
+
+test("dans un fil direct, la barre montre Créer un groupe puis Membres", () => {
+  const h = harness();
+  h.show({ id: "direct", kind: "chat", title: "Direct", bot_id: "alpha", member_ids: ["alpha"], messages: [] });
+  const labels = h.document.querySelectorAll(".topbar-actions button").filter((button) => !button.hidden).map((button) => button.textContent);
+  assert.deepEqual(labels, ["Créer un groupe", "Membres"]);
+  h.document.querySelectorAll(".topbar-actions button").find((button) => button.textContent === "Membres").click();
+  assert.match(h.dialog.querySelector(".dialog-header").textContent, /Membres du fil/);
+  assert.equal(h.dialog.querySelector("[data-group-field=name]"), null);
+});
+
+test("dans un groupe, Créer un groupe reste dans la barre et ouvre un formulaire vide", async () => {
+  const gone = bot("ancien", "Ancien");
+  gone.deleted = true;
+  const h = harness({ bots: [bot("alpha", "Alpha"), bot("beta", "Bêta"), gone] });
+  const room = group("groupe-a", "Atelier", "Croiser les lectures", { color: "cyan", mark: "A" });
+  room.member_ids = ["alpha", "ancien"];
+  h.show(room);
+  const labels = h.document.querySelectorAll(".topbar-actions button").filter((button) => !button.hidden).map((button) => button.textContent);
+  assert.deepEqual(labels, ["Créer un groupe", "Membres"]);
+  const create = h.document.querySelectorAll(".topbar-actions button").find((button) => button.textContent === "Créer un groupe");
+  create.click();
+  assert.match(h.dialog.querySelector(".dialog-header").textContent, /Créer un groupe/);
+  assert.doesNotMatch(h.dialog.querySelector(".dialog-header").textContent, /Membres du fil/);
+  assert.equal(h.dialog.querySelector("[data-group-field=name]").value, "");
+  assert.equal(h.dialog.querySelector("[data-group-field=description]").value, "");
+  assert.equal(h.dialog.querySelector("[data-group-field=mark]").value, "");
+  assert.equal(h.dialog.querySelector("[data-bot-choice=ancien]"), null);
+  assert.equal(h.dialog.querySelectorAll("[data-bot-choice]").filter((box) => box.checked).length, 0);
+  fill(h.dialog.querySelector("[data-group-field=name]"), "Nouveau");
+  fill(h.dialog.querySelector("[data-group-field=description]"), "Un autre fil");
+  for (const id of ["alpha", "beta"]) {
+    const choice = h.dialog.querySelector(`[data-bot-choice=${id}]`);
+    choice.checked = true;
+    choice.onchange();
+  }
+  await h.dialog.querySelector("[data-group-action=create]").click();
+  assert.deepEqual(h.calls.at(-1), {
+    path: "/api/conversations",
+    body: { bot_ids: ["alpha", "beta"], title: "Nouveau", description: "Un autre fil", avatar: { color: "citron", mark: "N" } },
+  });
 });
 
 test("le renommage d’un groupe montre la pastille et le nom de chaque couleur", async () => {

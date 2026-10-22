@@ -8,6 +8,8 @@ pub(super) const SUMMARY: &str = "Lire le début d’un fichier nommé du Drive 
 /// Characters of a file given to the model.
 const EXCERPT: usize = 4000;
 const NAME: usize = 200;
+/// Search pages followed while they come back empty.
+const PAGES: usize = 10;
 const DOCS: &str = "application/vnd.google-apps";
 
 pub(super) fn schema() -> Value {
@@ -77,28 +79,42 @@ pub(super) fn read_file(ctx: &Context<'_>, arguments: &Value) -> Result<Value, A
         }
         Ok(reply.body)
     };
-    let found = search(read(
-        ctx,
-        &account,
-        "drive",
-        &format!(
-            "drive/v3/files?{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .append_pair(
-                    "q",
-                    &format!("name = '{}' and trashed = false", quoted(name))
-                )
-                .append_pair("orderBy", "modifiedTime desc")
-                .append_pair("pageSize", "10")
-                .append_pair("fields", "files(id,name,mimeType,modifiedTime)")
-                .finish()
-        ),
-        Want::Json,
-    )?)?;
-    let files = found["files"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    // Drive may answer a page with no file and still have more: only a missing token ends
+    // the search, and the first page that holds files is the one read.
+    let mut files: Vec<Value> = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..PAGES {
+        let mut route = url::form_urlencoded::Serializer::new(String::new());
+        route
+            .append_pair(
+                "q",
+                &format!("name = '{}' and trashed = false", quoted(name)),
+            )
+            .append_pair("orderBy", "modifiedTime desc")
+            .append_pair("pageSize", "10")
+            .append_pair(
+                "fields",
+                "nextPageToken,files(id,name,mimeType,modifiedTime)",
+            );
+        if let Some(token) = &token {
+            route.append_pair("pageToken", token);
+        }
+        let found = search(read(
+            ctx,
+            &account,
+            "drive",
+            &format!("drive/v3/files?{}", route.finish()),
+            Want::Json,
+        )?)?;
+        files = found["files"].as_array().cloned().unwrap_or_default();
+        match found["nextPageToken"]
+            .as_str()
+            .filter(|next| files.is_empty() && !next.is_empty() && next.len() <= 2048)
+        {
+            Some(next) => token = Some(next.to_owned()),
+            None => break,
+        }
+    }
     let Some((file, id)) = files
         .iter()
         .find_map(|file| file_id(file["id"].as_str()?).map(|id| (file, id)))

@@ -418,9 +418,15 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
             params![owner, seen.event.id, seen.event.cas.key(), seen.stamp],
         )?;
     }
-    // Only the most recent deliveries matter: older versions are no longer listed.
+    // A record goes once its cursor can no longer list that version again: a change older
+    // than the floor of the changes, a start at or before the floor of the starts. A
+    // tombstone with no update timestamp has no such floor: the latest 1000 are kept.
     tx.execute(
-        "DELETE FROM wrapper_calendar_delivered WHERE account_id=?1 AND rowid NOT IN (SELECT rowid FROM wrapper_calendar_delivered WHERE account_id=?1 ORDER BY rowid DESC LIMIT 1000)",
+        "DELETE FROM wrapper_calendar_delivered WHERE account_id=?1 AND ((cas<>'begins' AND stamp>0 AND stamp<?2) OR (cas='begins' AND stamp<=?3))",
+        params![owner, newest, started],
+    )?;
+    tx.execute(
+        "DELETE FROM wrapper_calendar_delivered WHERE account_id=?1 AND stamp=0 AND rowid NOT IN (SELECT rowid FROM wrapper_calendar_delivered WHERE account_id=?1 AND stamp=0 ORDER BY rowid DESC LIMIT 1000)",
         [&owner],
     )?;
     tx.commit()?;

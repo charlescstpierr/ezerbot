@@ -115,6 +115,8 @@ struct GmailScript {
     agenda_page: usize,
     /// Files of the Drive: id, name, mimeType, modifiedTime and the text they hold.
     files: Vec<Value>,
+    /// Search pages of the Drive that come back empty, with a token, before the files.
+    empty_search_pages: usize,
     /// Method and address of every calendar and Drive request, in order.
     calls: Vec<(String, String)>,
 }
@@ -171,7 +173,7 @@ impl GmailScript {
         answer
     }
     /// A Drive search by exact name, or the content of one file by media or export.
-    fn file(files: &[Value], rest: &str) -> (u16, Value) {
+    fn file(files: &[Value], rest: &str, empty_pages: usize) -> (u16, Value) {
         let parse = |query: &str| -> std::collections::HashMap<String, String> {
             url::form_urlencoded::parse(query.as_bytes())
                 .into_owned()
@@ -179,6 +181,14 @@ impl GmailScript {
         };
         if let Some(query) = rest.strip_prefix('?') {
             let q = parse(query);
+            assert!(q["fields"].contains("nextPageToken"), "{}", q["fields"]);
+            let page: usize = q.get("pageToken").map_or(0, |t| t.parse().unwrap());
+            if page < empty_pages {
+                return (
+                    200,
+                    json!({"files":[],"nextPageToken":(page + 1).to_string()}),
+                );
+            }
             let name = q["q"]
                 .strip_prefix("name = '")
                 .and_then(|r| r.strip_suffix("' and trashed = false"))
@@ -600,7 +610,7 @@ impl OAuth {
                         }
                     } else if let Some(rest) = url.strip_prefix("/gmail/drive/drive/v3/files") {
                         g.calls.push((method.clone(), url.clone()));
-                        GmailScript::file(&g.files, rest)
+                        GmailScript::file(&g.files, rest, g.empty_search_pages)
                     } else {
                         (404, json!({}))
                     }
@@ -4610,4 +4620,56 @@ fn agenda_hours_are_those_of_the_calendar_and_another_event_zone_is_named() {
     );
     // The event itself keeps its own zone for a routine.
     assert_eq!(output["evenements"][0]["fuseau"], "Europe/Paris");
+}
+
+#[test]
+fn calendar_delivery_records_stay_while_their_cursor_can_still_list_them() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 100;
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    // One change on the floor, then a thousand starts: more rows than a fixed budget keeps.
+    let mut all = vec![agenda_event(
+        "edge",
+        "Changé",
+        &agenda_at(1, 10),
+        ms - 7_200_000,
+        ms - 1_800_000,
+        "confirmed",
+    )];
+    let long_ago = ms - 90_000_000;
+    let now = jiff::Zoned::now().with_time_zone(agenda_zone());
+    for n in 0..1000 {
+        let begun = now.checked_sub(jiff::Span::new().seconds(2 + n)).unwrap();
+        all.push(agenda_event(
+            &format!("b{n:04}"),
+            "Commencé",
+            &begun,
+            long_ago,
+            long_ago,
+            "confirmed",
+        ));
+    }
+    f.agenda(all);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(events.len(), 1001);
+    assert_eq!(ids(&events)[0], ("edge", Modifie));
+    // The change is listed again at the floor of its cursor: it is still known.
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn drive_follows_empty_search_pages_before_saying_there_is_no_match() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.drive(vec![json!({"id":"late1","name":"Rapport","mimeType":"text/plain","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Sur la quatrième page."})]);
+    f.oauth.seen.lock().unwrap().gmail.empty_search_pages = 3;
+    let run = f.github_call("late", DRIVE_TOOL, json!({"nom":"Rapport"}));
+    assert_eq!(done(&f, &run)["extrait"], "Sur la quatrième page.");
+    // A search that ends empty is still "no file".
+    let run = f.github_call("none", DRIVE_TOOL, json!({"nom":"Absent"}));
+    assert!(failed(&f, &run).contains("Aucun fichier"));
 }

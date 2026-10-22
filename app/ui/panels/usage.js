@@ -54,12 +54,12 @@
     if (!quotaArea) return;
     clearTimeout(quotaPoll);
     if (data?.status === "loading" || data?.refreshing) quotaPoll = setTimeout(() => { void load(false); }, 800);
+    const ready = data?.status === "ready";
     // An unchanged reading keeps its nodes: repainting identical content makes the panel flash.
-    const shown = JSON.stringify(data ?? null);
+    const shown = JSON.stringify(ready ? data : { ...data, refreshing: undefined });
     if (shown === quotaShown) return;
     quotaShown = shown;
     quotaArea.replaceChildren();
-    const ready = data?.status === "ready";
     const high = ready && windows(data).filter((w) => w.used_percent >= 80).sort((a, b) => b.used_percent - a.used_percent)[0];
     warning.hidden = !high;
     if (high) warningText.textContent = `${percent(high.used_percent)} % du ${windowName(high).toLowerCase()} Codex utilisés. ${percent(high.remaining_percent)} % restants.`;

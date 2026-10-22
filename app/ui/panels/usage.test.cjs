@@ -264,3 +264,11 @@ test('an account change during a load discards that read and reloads once after 
   assert.equal(h.section.querySelectorAll('table').length, 1);
   assert.equal(h.warning.hidden, true);
 });
+
+test('a background « refreshing » flag the panel does not display leaves an unavailable quota untouched', () => {
+  const h = harness();
+  h.panels.panel.onState(state({ status: 'unavailable', message: 'Indisponible.', refreshing: true }));
+  const notice = h.section.querySelector('.usage-empty');
+  h.panels.panel.onState(state({ status: 'unavailable', message: 'Indisponible.', refreshing: false }));
+  assert.equal(h.section.querySelector('.usage-empty'), notice);
+});

@@ -293,9 +293,19 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
         }
     }
     let Some(index) = command_index(&tokens) else {
+        // A wrapper option may consume operands, so the executable cannot be
+        // named. Treat any destructive or mailing word as the executable.
         scan.unproven = true;
+        scan_loosely(&tokens, 0, scan);
         return;
     };
+    if !plain_word(&tokens[index]) {
+        // `$X`, a glob, `~`, a brace or a leftover escape: the shell picks the
+        // program, not this scan.
+        scan.unproven = true;
+        scan_loosely(&tokens, index, scan);
+        return;
+    }
     if destructive_at(&tokens, index) {
         scan.destructive = true;
     }
@@ -303,10 +313,70 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
     if is_mailer(base) {
         scan.outbound = true;
     }
+    if base == "eval" {
+        scan.unproven = true;
+        scan_shell_at(&tokens[index + 1..].join(" "), scan, depth + 1);
+    } else if is_runner(base) {
+        scan.unproven = true;
+        scan_loosely(&tokens, index + 1, scan);
+    }
     if is_code_interpreter(base) && has_code_flag(base, &tokens[index + 1..]) {
         scan.unproven = true;
         if let Some(script) = shell_script(&tokens, index) {
             scan_shell_at(&script, scan, depth + 1);
+        }
+    }
+}
+
+/// Programs that start another program or shell code from their operands.
+fn is_runner(base: &str) -> bool {
+    matches!(
+        base,
+        "exec"
+            | "xargs"
+            | "timeout"
+            | "gtimeout"
+            | "watch"
+            | "source"
+            | "."
+            | "setsid"
+            | "stdbuf"
+            | "doas"
+            | "ionice"
+            | "chroot"
+            | "busybox"
+            | "parallel"
+            | "caffeinate"
+            | "arch"
+            | "xcrun"
+            | "unshare"
+            | "flock"
+            | "script"
+            | "builtin"
+            | "trap"
+            | "at"
+    )
+}
+
+/// A program name written out literally. Anything the shell would still expand
+/// or unescape is not.
+fn plain_word(token: &str) -> bool {
+    !token.is_empty()
+        && token.chars().all(|ch| {
+            ch.is_alphanumeric()
+                || matches!(ch, '.' | '_' | '/' | '+' | '@' | '%' | ':' | ',' | '-')
+        })
+}
+
+/// Without a grammar for the wrapper, any later word that names a destructive
+/// or mailing program counts as the executable.
+fn scan_loosely(tokens: &[String], from: usize, scan: &mut ShellScan) {
+    for at in from..tokens.len() {
+        if destructive_at(tokens, at) {
+            scan.destructive = true;
+        }
+        if is_mailer(basename(&tokens[at])) {
+            scan.outbound = true;
         }
     }
 }
@@ -325,7 +395,7 @@ fn exact_shell_key(command: &str) -> bool {
 fn command_has_shell_metachar(command: &str) -> bool {
     command
         .chars()
-        .any(|ch| matches!(ch, ';' | '&' | '|' | '`' | '(' | ')') || ch.is_control())
+        .any(|ch| matches!(ch, ';' | '&' | '|' | '`' | '(' | ')' | '\\') || ch.is_control())
 }
 
 #[allow(clippy::while_let_on_iterator)] // the scan peeks and consumes the next operator
@@ -339,7 +409,9 @@ fn split_shell(command: &str) -> (Vec<String>, bool, Vec<String>) {
     while let Some(ch) = chars.next() {
         if let Some(mark) = quote {
             current.push(ch);
-            if ch == mark {
+            if mark == '"' && ch == '\\' {
+                current.extend(chars.next());
+            } else if ch == mark {
                 quote = None;
             }
             continue;
@@ -400,12 +472,19 @@ fn take_balanced(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String
     let mut depth = 1;
     let mut inner = String::new();
     let mut quote = None;
-    for ch in chars.by_ref() {
+    while let Some(ch) = chars.next() {
         if let Some(mark) = quote {
             inner.push(ch);
-            if ch == mark {
+            if mark == '"' && ch == '\\' {
+                inner.extend(chars.next());
+            } else if ch == mark {
                 quote = None;
             }
+            continue;
+        }
+        if ch == '\\' {
+            inner.push(ch);
+            inner.extend(chars.next());
             continue;
         }
         if ch == '\'' || ch == '"' {
@@ -535,7 +614,12 @@ fn command_index(tokens: &[String]) -> Option<usize> {
     let mut cursor = 0;
     while cursor < tokens.len() {
         let token = tokens[cursor].as_str();
-        if is_assignment(token) {
+        if is_assignment(token)
+            || matches!(
+                token,
+                "!" | "{" | "if" | "then" | "else" | "elif" | "do" | "while" | "until"
+            )
+        {
             cursor += 1;
             continue;
         }
@@ -570,14 +654,22 @@ fn basename(token: &str) -> &str {
     token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
+/// Words as `/bin/sh` reads them: quotes removed, backslash escapes decoded.
 fn shell_tokens(command: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;
-    for ch in command.chars() {
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
         match quote {
             Some(mark) if ch == mark => quote = None,
+            Some('"') if ch == '\\' => match chars.next() {
+                Some(next @ ('$' | '`' | '"' | '\\')) => current.push(next),
+                Some(next) => current.extend(['\\', next]),
+                None => current.push('\\'),
+            },
             Some(_) => current.push(ch),
+            None if ch == '\\' => current.extend(chars.next().filter(|next| *next != '\n')),
             None if ch == '\'' || ch == '"' => quote = Some(ch),
             None if ch.is_whitespace() => {
                 if !current.is_empty() {
@@ -675,6 +767,61 @@ mod tests {
         ] {
             assert!(!shell_is_destructive(command), "{command}");
         }
+    }
+
+    #[test]
+    fn escapes_runners_and_wrapper_operands_cannot_hide_a_deletion() {
+        for command in [
+            "r\\m note",
+            "\\rm note",
+            "\"r\"m note",
+            "'r'm note",
+            "r\\\nm note",
+            "eval 'rm note'",
+            "eval rm note",
+            "eval \"printf ok; rm note\"",
+            "exec rm note",
+            "xargs rm",
+            "timeout 5 rm note",
+            "env -u FOO rm note",
+            "env --unset=FOO rm note",
+            "sudo -u root rm note",
+            "nice -n 5 rm note",
+            "time -p rm note",
+            "if true; then rm note; fi",
+            "printf \"\\\"\" ; rm note",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert_eq!(
+                policy.protection,
+                Some(Protection::Destructive),
+                "{command}"
+            );
+        }
+        for command in [
+            "env -u FOO sendmail bob",
+            "xargs sendmail bob",
+            "eval sendmail bob",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert_eq!(policy.protection, Some(Protection::Outbound), "{command}");
+        }
+        for command in [
+            "eval 'printf oui'",
+            "$PROGRAM note",
+            "\"$PROGRAM\" note",
+            "r* note",
+            "~/bin/tool",
+            "{rm,note}",
+            "printf a\\ b",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+        }
+        assert!(!shell_is_destructive("printf 'r\\m'"));
+        assert!(!shell_is_destructive("echo \"\\$HOME rm\""));
     }
 
     #[test]

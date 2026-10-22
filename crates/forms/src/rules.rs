@@ -776,6 +776,12 @@ mod tests {
             "bash -c 'printf oui'",
             "sendmail bob",
             "printf x\nwhoami",
+            "r\\m note",
+            "eval 'rm note'",
+            "exec rm note",
+            "xargs rm",
+            "timeout 5 rm note",
+            "$PROGRAM note",
         ] {
             assert!(
                 evaluate(&conn, &route, "run_shell", &json!({"command": command}))

@@ -293,9 +293,7 @@ pub(super) fn complete(
         ReviewAnswer::ask("Les règles ont changé pendant la revue. Vérifiez cette demande.")
     } else if request.status != RequestStatus::Pending {
         ReviewAnswer::ask("Une décision a déjà été prise pour cette demande.")
-    } else if policy
-        .as_ref()
-        .is_some_and(|item| item.protection.is_some())
+    } else if policy.as_ref().is_none_or(|item| item.protection.is_some())
         || matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "delegate")
     {
         // An in-flight model "allow" must not grant a send, a deletion, a

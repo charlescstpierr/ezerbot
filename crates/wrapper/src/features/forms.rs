@@ -499,8 +499,8 @@ pub fn request_tool_approval(
             super::generated::approval_display(ctx, call)?
         } else if call.name == "propose_skill" {
             super::skills::proposal_display(ctx, call)?
-        } else if super::mcp::is_github_draft(&call.name) {
-            super::mcp::github_draft_display(ctx, &id, call)?
+        } else if super::mcp::is_draft(&call.name) {
+            super::mcp::draft_display(ctx, &id, call)?
         } else {
             call.arguments.clone()
         };
@@ -1175,7 +1175,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 }
             }
             if input.text.is_some() || input.title.is_some() {
-                if !super::mcp::is_github_draft(tool)
+                if !super::mcp::is_draft(tool)
                     || (input.title.is_some() && !super::mcp::is_github_issue(tool))
                     || !matches!(input.decision, ApprovalDecision::AllowOnce)
                 {
@@ -1186,7 +1186,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 }
                 // A replayed click keeps the text of the first one.
                 if request.status == RequestStatus::Pending {
-                    super::mcp::edit_github_draft(
+                    super::mcp::edit_draft(
                         &ctx,
                         &request.id,
                         tool,
@@ -1417,7 +1417,7 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        let publication = super::mcp::is_github_draft(tool);
+        let publication = super::mcp::is_draft(tool);
         let consent = super::recall::is_consent(tool);
         if tool == super::routines_background::ACTION
             || tool == super::routine_webhooks::ACTION
@@ -1430,7 +1430,7 @@ fn request_value(
             let call_id = if consent {
                 approved_call_id(ctx, request)?
             } else if publication {
-                super::mcp::github_draft_call(ctx, &request.id)
+                super::mcp::draft_call(ctx, &request.id, tool)
             } else {
                 None
             };
@@ -1537,7 +1537,7 @@ fn approval_policy(
 ) -> grokbot_forms::policy::Policy {
     let remote = remote_tool_name(ctx, tool);
     let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
-    if super::mcp::is_github_draft(tool) {
+    if super::mcp::is_draft(tool) {
         // Its name may not say a send, but it publishes under the user's name: no standing rule.
         policy.remember = false;
         policy.protection = Some(grokbot_forms::policy::Protection::Outbound);

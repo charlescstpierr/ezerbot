@@ -1,9 +1,12 @@
 //! Slack connection and its closed read adapter. The user token comes from the public
 //! client of Ezerbot's Slack app (PKCE, loopback return): no `client_secret` is read,
 //! sent or stored, and a keychain that refuses the write keeps nothing. The one tool,
-//! reading a channel, calls the Slack Web API with that token and needs no approval card.
+//! reading a channel, calls the Slack Web API with that token and needs no approval card;
+//! the other, posting a message, only ever runs from a validated draft card (see `post`).
 use super::*;
 use std::{io::Read, time::Duration};
+
+pub(in super::super) mod post;
 
 pub(in super::super) const TOOL: &str = "slack_read_channel";
 const SHORT: &str = "read_channel";
@@ -21,7 +24,7 @@ const DISCONNECTED: &str =
     "Slack est déconnecté. Reconnectez Slack dans Paramètres › Connecteurs, puis réessayez.";
 const ENABLE: &str =
     "Slack n’est pas activé pour ce bot. Activez-le dans Paramètres › Connecteurs, puis réessayez.";
-const MISSING_SCOPE: &str = "Slack n’a pas accordé toutes les autorisations de lecture à Ezerbot. Reconnectez Slack dans Paramètres › Connecteurs pour les accorder de nouveau.";
+const MISSING_SCOPE: &str = "Slack n’a pas accordé toutes les autorisations nécessaires à Ezerbot. Reconnectez Slack dans Paramètres › Connecteurs pour les accorder de nouveau.";
 const RECONNECT: &str =
     "La connexion Slack a expiré ou a été révoquée. Reconnectez Slack dans Paramètres › Connecteurs.";
 
@@ -67,18 +70,24 @@ fn schema() -> Value {
 }
 const SUMMARY: &str =
     "Lire les derniers messages d’un canal Slack, en lecture seule, avec le compte Slack connecté.";
-/// Model-facing tool, advertised only while Slack is connected and enabled for the bot.
+/// Model-facing tools, advertised only while Slack is connected and enabled for the bot.
 pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec> {
-    vec![grokbot_engine::contracts::ToolSpec {
+    vec![read_spec(), post::tool_spec()]
+}
+fn read_spec() -> grokbot_engine::contracts::ToolSpec {
+    grokbot_engine::contracts::ToolSpec {
         name: TOOL.into(),
         description: "Slack · lire les derniers messages d’un canal nommé (lecture seule, compte Slack connecté dans Ezerbot). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme l’espace, le canal, l’auteur et la date de chaque message.".into(),
         schema: schema(),
         requires_approval: false,
-    }]
+    }
 }
-/// The connection has no process: it is native, and its tool is this fixed one.
+/// The connection has no process: it is native, and its tools are this fixed list.
 pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiError> {
-    let tools = json!([{"name":SHORT,"description":SUMMARY,"inputSchema":schema()}]);
+    let tools = json!([
+        {"name":SHORT,"description":SUMMARY,"inputSchema":schema()},
+        post::tool_definition(),
+    ]);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
         params![server.id, tools.to_string()],
@@ -90,7 +99,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         "Connecté. Activez l’outil pour les bots de votre choix.",
     )?;
     Ok(
-        json!({"message":"Slack est connecté. Activez l’outil pour un bot : lire un canal part sans carte d’approbation.","outils":tools}),
+        json!({"message":"Slack est connecté. Activez l’outil pour un bot : lire un canal part sans carte d’approbation ; un message n’est publié qu’après votre clic sur sa carte brouillon.","outils":tools}),
     )
 }
 
@@ -164,14 +173,21 @@ fn get(m: Manifest, access: &str, method: &str, query: &[(&str, &str)]) -> Resul
     let mut url = url::Url::parse(&format!("{}/{method}", endpoint(m, "api")))
         .map_err(|_| unreachable_slack())?;
     url.query_pairs_mut().extend_pairs(query);
-    let outcome = agent()
-        .get(url.as_str())
-        .set("Authorization", &format!("Bearer {access}"))
-        .set("Accept", "application/json")
-        .call();
+    reply_of(
+        agent()
+            .get(url.as_str())
+            .set("Authorization", &format!("Bearer {access}"))
+            .set("Accept", "application/json")
+            .call(),
+    )
+    .map_err(|_| unreachable_slack())
+}
+/// What Slack answered, whatever the status: no redirect, bounded body. A transport failure
+/// or an unreadable body carries no detail.
+fn reply_of(outcome: Result<ureq::Response, ureq::Error>) -> Result<Reply, ()> {
     let response = match outcome {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(_) => return Err(unreachable_slack()),
+        Err(_) => return Err(()),
     };
     let status = response.status();
     let retry_after = response.header("retry-after").and_then(|v| v.parse().ok());
@@ -180,9 +196,9 @@ fn get(m: Manifest, access: &str, method: &str, query: &[(&str, &str)]) -> Resul
         .into_reader()
         .take(4 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| unreachable_slack())?;
+        .map_err(|_| ())?;
     if bytes.len() > 4 * 1024 * 1024 {
-        return Err(unreachable_slack());
+        return Err(());
     }
     Ok(Reply {
         status,
@@ -221,7 +237,7 @@ fn refusal(ctx: &Context<'_>, server: &Server, reply: &Reply, channel: &str) -> 
             .filter(|s| *s <= 3600)
             .map(|s| format!(" Réessayez dans environ {} s.", s.max(1)))
             .unwrap_or_default();
-        return invalid(&format!("Slack limite le débit des requêtes.{wait}"));
+        return ApiError::new(429, format!("Slack limite le débit des requêtes.{wait}"));
     }
     let code = reply.body["error"].as_str().unwrap_or("");
     match code {

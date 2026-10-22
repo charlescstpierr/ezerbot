@@ -205,6 +205,8 @@ test("the Cocoa shell opens NSSavePanel and only then writes the image", () => {
   const failure = save.indexOf("L’image n’a pas pu être enregistrée.", write);
   assert.ok(panel > 0 && panel < confirmed && confirmed < write && write < failure, save);
   assert.match(save, /cancelled/);
+  assert.match(save, /\[body\[@"name"\] isKindOfClass:NSString\.class\] \? \(NSString \*\)body\[@"name"\]/);
+  assert.doesNotMatch(save, /body\[@"name"\]\.lastPathComponent/);
   const policy = shell.slice(shell.indexOf("- (BOOL)isWorkspaceBlobURL:"), shell.indexOf("- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:"));
   assert.match(policy, /blob:/);
   assert.match(policy, /null\//);

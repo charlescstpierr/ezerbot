@@ -489,7 +489,8 @@
             return;
         }
         if (self.terminating || !self.window) { replyHandler(@{@"ok": @NO, @"error": @"L’image n’a pas pu être enregistrée."}, nil); return; }
-        NSString *suggested = [body[@"name"] isKindOfClass:NSString.class] ? body[@"name"].lastPathComponent : @"";
+        NSString *givenName = [body[@"name"] isKindOfClass:NSString.class] ? (NSString *)body[@"name"] : @"";
+        NSString *suggested = givenName.lastPathComponent;
         NSCharacterSet *forbidden = [NSCharacterSet characterSetWithCharactersInString:@"\\/:*?\"<>|\n\r\t"];
         suggested = [[suggested componentsSeparatedByCharactersInSet:forbidden] componentsJoinedByString:@""];
         suggested = [suggested stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];

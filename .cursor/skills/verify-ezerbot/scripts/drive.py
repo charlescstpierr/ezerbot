@@ -506,26 +506,34 @@ MEMO_SPEED_JS = """(text) => {
 }"""
 
 
+MEMO_READY_JS = """() => document.querySelector(".gb-voice-memo audio") && document.querySelector(".gb-voice-memo .gb-memo-speed input") ? {ok: true} : null"""
+
+
 def memo_speed(evidence: Path, text: str) -> dict:
+    # Le fil peut se redessiner entre deux commandes : on attend le lecteur avant de saisir.
+    wait_js(evidence, MEMO_READY_JS, "lecteur du mémo absent")
     return eval_js(evidence, f"() => ({MEMO_SPEED_JS})({json.dumps(text)})")
 
 
 def memo_reset(evidence: Path) -> dict:
     """Le mémo repart de zéro : vitesse 1, lecture arrêtée au début, aucune phrase d’erreur."""
     memo_speed(evidence, "1")
-    return eval_js(
+    return wait_js(
         evidence,
         """() => {
           const audio = document.querySelector(".gb-voice-memo audio");
+          if (!audio) return null;
           audio.pause(); audio.currentTime = 0;
           document.querySelector(".gb-voice-memo").scrollIntoView({block: "center"});
           return {ok: true, speed: document.querySelector(".gb-voice-memo .gb-memo-speed input").value, words: document.querySelectorAll(".gb-voice-memo .gb-memo-word").length, duration: audio.duration};
         }""",
+        "lecteur du mémo absent",
     )
 
 
 def memo_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 le mémo à la vitesse 1, 1 vitesse 2 puis 3 refusée, 2 clic sur un mot du milieu, 3 clic sur un mot sans horodatage."""
+    wait_js(evidence, MEMO_READY_JS, "lecteur du mémo absent")
     if index == 0:
         state = memo_reset(evidence)
         if state["speed"] != "1":

@@ -45,10 +45,16 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
+/// What identifies the client at the token and revocation endpoints. Gmail's and Slack's is
+/// the public client of the build and nothing else: no secret is read, so none can be sent.
 fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
-    // Gmail sends the public client of the build and nothing else: no secret exists.
-    if m.id == "gmail" {
-        return gmail::client_id()
+    let public = match m.id {
+        "gmail" => Some(gmail::client_id()),
+        "slack" => Some(slack::client_id()),
+        _ => None,
+    };
+    if let Some(client) = public {
+        return client
             .map(|id| vec![("client_id".into(), id)])
             .unwrap_or_default();
     }
@@ -88,6 +94,12 @@ fn accept_token(
     if raw.get("error").is_some() || raw["ok"] == false {
         return Err(fail());
     }
+    // Slack names the workspace beside the user token, not inside it.
+    let workspace = raw["team"]["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 100 && !s.chars().any(char::is_control))
+        .map(str::to_owned);
     let raw = if raw["authed_user"]["access_token"].is_string() {
         raw["authed_user"].clone()
     } else {
@@ -135,13 +147,33 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    save(ctx, &server.id, env).map_err(|error| {
-        if m.id == "gmail" {
-            gmail::refused_write(ctx)
+    if m.id == "slack" {
+        // The workspace is the account shown on the card; a renewal keeps the one it had.
+        // The exchange may give the team's identifier only: the token names the workspace.
+        let workspace = workspace.or_else(|| {
+            env.get("EMAIL")
+                .is_none()
+                .then(|| slack::workspace_of(m, access))
+                .flatten()
+        });
+        if let Some(workspace) = workspace {
+            env.insert("EMAIL".into(), workspace);
         } else {
-            error
+            env.entry("EMAIL".into()).or_insert_with(|| "Slack".into());
         }
-    })?;
+        // A client typed under an earlier version is not carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        slack::write_tokens(ctx, server, env)?;
+    } else {
+        save(ctx, &server.id, env).map_err(|error| {
+            if m.id == "gmail" {
+                gmail::refused_write(ctx)
+            } else {
+                error
+            }
+        })?;
+    }
     ctx.connection.execute(
         "UPDATE wrapper_connector_catalogue SET expires_at=?2 WHERE server_id=?1",
         params![server.id, expires],
@@ -199,16 +231,18 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && m.id != "gmail" && !env.contains_key("CLIENT_ID") {
+    if fake_base().is_some() && !matches!(m.id, "gmail" | "slack") && !env.contains_key("CLIENT_ID")
+    {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
+    // Gmail's and Slack's client is the build's, never read from the vault.
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
-    let client = if m.id == "gmail" {
-        gmail::client_id().ok_or_else(gmail::not_configured)?
-    } else {
-        env.get("CLIENT_ID").ok_or_else(fail)?.clone()
+    let client = match m.id {
+        "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
+        "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
+        _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
     };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
     {

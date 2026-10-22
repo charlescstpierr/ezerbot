@@ -20,6 +20,17 @@ use std::{
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 use tiny_http::{Header, Response, Server};
 
+/// The public client of Ezerbot's Slack app, as a build or the judge configures it.
+const SLACK_CLIENT: &str = "1234567890.1234567890";
+const SLACK_ACCESS: &str = "xoxp-slack-access-secret-never-visible";
+fn fields_of(url: &str) -> std::collections::HashMap<String, String> {
+    url::Url::parse(&format!("http://fixture{url}"))
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect()
+}
+
 #[derive(Default)]
 struct SeenOAuth {
     requests: Vec<(String, String)>,
@@ -33,6 +44,19 @@ struct SeenOAuth {
     token_scope: Option<String>,
     github: GithubScript,
     gmail: GmailScript,
+    slack: SlackScript,
+}
+/// Scripted Slack provider: the PKCE exchange, the Web API reads and the revocation.
+#[derive(Default)]
+struct SlackScript {
+    /// What the authorization URL asked for, echoed back as granted.
+    scope: String,
+    /// The access token the provider still accepts.
+    live: Option<String>,
+    /// `ok`, or the error Slack answers to a revocation.
+    revoke_error: bool,
+    /// The documented token response names the team by id only.
+    team_id_only: bool,
 }
 /// Scripted GitHub App provider: device flow, user, refresh and one REST route.
 struct GithubScript {
@@ -119,6 +143,10 @@ struct GmailScript {
     empty_search_pages: usize,
     /// Method and address of every calendar and Drive request, in order.
     calls: Vec<(String, String)>,
+    /// Status the provider answers to a send; 0 and 200 deliver it.
+    send_status: u16,
+    /// The messages the provider delivered, as the RFC 822 text it was given.
+    sent: Vec<String>,
 }
 const AGENDA_ZONE: &str = "America/Toronto";
 impl GmailScript {
@@ -565,6 +593,29 @@ impl OAuth {
                             200,
                             json!({"emailAddress":"charles@example.test","messagesTotal":6}),
                         )
+                    } else if post && url == "/gmail/api/gmail/v1/users/me/messages/send" {
+                        match g.send_status {
+                            0 | 200 => {
+                                let given: Value = serde_json::from_str(&body).unwrap();
+                                let raw = URL_SAFE_NO_PAD
+                                    .decode(given["raw"].as_str().unwrap())
+                                    .unwrap();
+                                g.sent.push(String::from_utf8(raw).unwrap());
+                                (
+                                    200,
+                                    json!({"id":format!("sent{}",g.sent.len()),"threadId":"t1","labelIds":["SENT"]}),
+                                )
+                            }
+                            429 => (
+                                429,
+                                json!({"error":{"code":429,"message":"Too many","errors":[{"reason":"rateLimitExceeded"}]}}),
+                            ),
+                            403 => (
+                                403,
+                                json!({"error":{"code":403,"message":"Forbidden","errors":[{"reason":"insufficientPermissions"}]}}),
+                            ),
+                            status => (status, json!({"error":{"code":status}})),
+                        }
                     } else if let Some(listing) =
                         url.strip_prefix("/gmail/api/gmail/v1/users/me/messages?")
                     {
@@ -611,6 +662,88 @@ impl OAuth {
                     } else if let Some(rest) = url.strip_prefix("/gmail/drive/drive/v3/files") {
                         g.calls.push((method.clone(), url.clone()));
                         GmailScript::file(&g.files, rest, g.empty_search_pages)
+                    } else {
+                        (404, json!({}))
+                    }
+                } else if url.starts_with("/slack/") {
+                    let challenge = seen.challenge.clone();
+                    let slack = &mut seen.slack;
+                    let path = url.split('?').next().unwrap().to_owned();
+                    let live = slack
+                        .live
+                        .as_ref()
+                        .is_some_and(|t| auth.as_deref() == Some(format!("Bearer {t}").as_str()));
+                    if path == "/slack/token" {
+                        if fields.get("grant_type").map(String::as_str)
+                            == Some("authorization_code")
+                        {
+                            let verifier = fields.get("code_verifier").expect("PKCE verifier");
+                            assert_eq!(
+                                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                                challenge
+                            );
+                        }
+                        slack.live = Some(SLACK_ACCESS.to_owned());
+                        let team = if slack.team_id_only {
+                            json!({"id":"T0FIXTURE"})
+                        } else {
+                            json!({"id":"T0FIXTURE","name":"Atelier Ezerbot"})
+                        };
+                        (
+                            200,
+                            json!({"ok":true,"app_id":"A0FIXTURE","team":team,"authed_user":{"id":"U0CHARLES","scope":slack.scope,"access_token":SLACK_ACCESS,"token_type":"user"}}),
+                        )
+                    } else if path == "/slack/revoke" {
+                        if slack.revoke_error {
+                            (200, json!({"ok":false,"error":"token_revoked"}))
+                        } else {
+                            slack.live = None;
+                            (200, json!({"ok":true,"revoked":true}))
+                        }
+                    } else if !live {
+                        (200, json!({"ok":false,"error":"invalid_auth"}))
+                    } else if path == "/slack/api/auth.test" {
+                        (
+                            200,
+                            json!({"ok":true,"team":"Atelier Ezerbot","team_id":"T0FIXTURE","user":"charles","user_id":"U0CHARLES"}),
+                        )
+                    } else if path == "/slack/api/conversations.list" {
+                        (
+                            200,
+                            json!({"ok":true,"channels":[{"id":"C0GENERAL","name":"general","is_member":true},{"id":"C0PROJET","name":"projet-prive","is_private":true,"is_member":true},{"id":"C0DEHORS","name":"dehors","is_member":false}],"response_metadata":{"next_cursor":""}}),
+                        )
+                    } else if path == "/slack/api/conversations.history" {
+                        match fields_of(&url).get("channel").map(String::as_str) {
+                            Some("C0GENERAL") => (
+                                200,
+                                json!({"ok":true,"messages":[
+                                    {"type":"message","user":"U0ALICE","ts":"1760000200.000100","text":"Le déploiement est terminé, merci <@U0CHARLES>."},
+                                    {"type":"message","user":"U0CHARLES","ts":"1760000100.000200","text":"Bonjour à toute l’équipe"},
+                                    {"type":"message","subtype":"channel_join","user":"U0BOB","ts":"1760000000.000300","text":"<@U0BOB> a rejoint le canal"}
+                                ],"has_more":true}),
+                            ),
+                            Some("C0PROJET") => (
+                                200,
+                                json!({"ok":true,"messages":[{"type":"message","user":"U0ALICE","ts":"1760000300.000100","text":"Le budget est validé"}],"has_more":false}),
+                            ),
+                            Some("C0DEHORS") => (200, json!({"ok":false,"error":"not_in_channel"})),
+                            Some("C0LIMITES1") => {
+                                (200, json!({"ok":false,"error":"missing_scope"}))
+                            }
+                            _ => (200, json!({"ok":false,"error":"channel_not_found"})),
+                        }
+                    } else if path == "/slack/api/users.info" {
+                        match fields_of(&url).get("user").map(String::as_str) {
+                            Some("U0ALICE") => (
+                                200,
+                                json!({"ok":true,"user":{"id":"U0ALICE","name":"alice","real_name":"Alice Martin","profile":{"display_name":"alice"}}}),
+                            ),
+                            Some("U0CHARLES") => (
+                                200,
+                                json!({"ok":true,"user":{"id":"U0CHARLES","name":"charles","real_name":"Charles Test","profile":{"display_name":"charles"}}}),
+                            ),
+                            _ => (200, json!({"ok":false,"error":"user_not_found"})),
+                        }
                     } else {
                         (404, json!({}))
                     }
@@ -789,7 +922,7 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        let body = if !matches!(id, "notion" | "github" | "gmail")
+        let body = if !matches!(id, "notion" | "github" | "gmail" | "slack")
             && self.item(id)["has_client"] != true
         {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
@@ -840,7 +973,14 @@ impl Fixture {
         let auth = url::Url::parse(&auth).unwrap();
         let fields: std::collections::HashMap<_, _> = auth.query_pairs().into_owned().collect();
         assert_eq!(fields["code_challenge_method"], "S256");
-        self.oauth.seen.lock().unwrap().challenge = fields["code_challenge"].clone();
+        {
+            let mut seen = self.oauth.seen.lock().unwrap();
+            seen.challenge = fields["code_challenge"].clone();
+            if id == "slack" {
+                // What Slack is asked for is what the fake grants.
+                seen.slack.scope = fields["scope"].replace(' ', ",");
+            }
+        }
         let mut callback = url::Url::parse(&fields["redirect_uri"]).unwrap();
         callback
             .query_pairs_mut()
@@ -898,6 +1038,7 @@ impl Drop for Fixture {
         std::env::remove_var("GROKBOT_FAKE_CONNECTORS");
         std::env::remove_var("EZERBOT_GITHUB_CLIENT_ID");
         std::env::remove_var("EZERBOT_GOOGLE_CLIENT_ID");
+        std::env::remove_var("EZERBOT_SLACK_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
@@ -1046,7 +1187,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     assert_eq!(f.oauth.count("/token"), 0);
     assert_eq!(f.callback("calendar", true, false), 400);
     assert_eq!(f.item("calendar")["status"], "reconnect");
-    for id in ["calendar", "drive", "slack", "notion"] {
+    for id in ["calendar", "drive", "notion"] {
         f.oauth.seen.lock().unwrap().token_scope = if id == "notion" {
             Some(String::new())
         } else {
@@ -1193,13 +1334,13 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     assert_eq!(f.item("drive")["account"], Value::Null);
     assert_eq!(before + 1, f.oauth.count("/revoke"));
     f.oauth.seen.lock().unwrap().revoke_error = true;
-    let run = f.post("/api/connectors/disconnect", json!({"id":"slack"}))["run_id"]
+    let run = f.post("/api/connectors/disconnect", json!({"id":"notion"}))["run_id"]
         .as_str()
         .unwrap()
         .to_owned();
     f.decide(&run, json!("allow_once"));
-    assert_eq!(f.item("slack")["warning"], true);
-    assert!(f.item("slack")["message"]
+    assert_eq!(f.item("notion")["warning"], true);
+    assert!(f.item("notion")["message"]
         .as_str()
         .unwrap()
         .contains("non confirmée"));
@@ -1388,7 +1529,7 @@ fn github_card_has_no_client_fields_and_explains_a_missing_application() {
     assert_eq!(github["needs_client"], false);
     assert_eq!(github["configured"], false);
     assert_eq!(github["redirect_uri"], Value::Null);
-    for other in ["calendar", "drive", "slack"] {
+    for other in ["calendar", "drive"] {
         assert_eq!(f.item(other)["needs_client"], true);
         assert_eq!(f.item(other)["configured"], true);
     }
@@ -3473,7 +3614,7 @@ fn gmail_card_has_no_client_fields_and_explains_a_missing_google_client() {
         .as_str()
         .unwrap()
         .contains("client Google d’Ezerbot n’est pas configuré"));
-    for other in ["calendar", "drive", "slack"] {
+    for other in ["calendar", "drive"] {
         assert_eq!(f.item(other)["needs_client"], true, "{other}");
     }
     assert_eq!(f.item("notion")["needs_client"], false);
@@ -3949,6 +4090,878 @@ fn gmail_watch_survives_the_disconnection_of_another_google_service_with_the_sam
         ["m7"],
         "Gmail's baseline was not reset by another service"
     );
+}
+
+const SLACK_READ: &str = "slack_read_channel";
+
+impl Fixture {
+    /// The public client of Ezerbot's Slack app is build configuration, never a form field.
+    fn with_slack_client(&self) {
+        std::env::set_var("EZERBOT_SLACK_CLIENT_ID", SLACK_CLIENT);
+    }
+    /// Connect in one click, finish the browser leg, and enable the tool for the default bot.
+    fn slack_connect(&mut self) {
+        self.with_slack_client();
+        let run = self.connect("slack");
+        self.decide(&run, json!("allow_once"));
+        assert_eq!(self.item("slack")["status"], "authorizing");
+        assert_eq!(self.callback("slack", false, false), 200);
+        wait("slack connected", || {
+            self.item("slack")["status"] == "connected"
+        });
+        let server = self.item("slack")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn slack_requests(&self, part: &str) -> Vec<(String, String)> {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, _)| url.starts_with("/slack/") && url.contains(part))
+            .cloned()
+            .collect()
+    }
+    fn slack_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='slack'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn slack_read(&mut self, id: &str, arguments: Value) -> String {
+        self.github_call(id, SLACK_READ, arguments)
+    }
+    /// Nothing of the access token is in the state, the database, the run or the model's input.
+    fn assert_slack_token_nowhere(&self, run: &str) {
+        let inputs = format!("{:?}", self.ai.seen.lock().unwrap().bodies);
+        let events = format!("{:?}", store::events(&self.db(), run, 0).unwrap());
+        let database = std::fs::read(&self.path).unwrap();
+        for secret in [SLACK_ACCESS, "xoxp-"] {
+            assert!(!inputs.contains(secret), "model input holds {secret}");
+            assert!(!events.contains(secret), "run events hold {secret}");
+            assert!(!database
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn slack_card_has_no_client_fields_and_explains_a_missing_client() {
+    let mut f = Fixture::new();
+    let slack = f.item("slack");
+    assert_eq!(slack["needs_client"], false);
+    assert_eq!(slack["configured"], false);
+    assert_eq!(slack["redirect_uri"], Value::Null);
+    let said = slack["unconfigured_message"].as_str().unwrap();
+    assert!(
+        said.contains("client Slack d’Ezerbot n’est pas configuré"),
+        "{said}"
+    );
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    for body in [
+        br#"{"id":"slack"}"#.as_slice(),
+        br#"{"id":"slack","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(
+            error
+                .message
+                .contains("client Slack d’Ezerbot n’est pas configuré"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("fixture-oauth-secret"));
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before,
+        "a missing client opens no approval card"
+    );
+    assert!(f.slack_requests("").is_empty());
+    assert_eq!(f.item("slack")["status"], "disconnected");
+    // With the client configured, the card says so, and a typed secret is refused, not stored.
+    f.with_slack_client();
+    let slack = f.item("slack");
+    assert_eq!(slack["configured"], true);
+    assert_eq!(slack["unconfigured_message"], Value::Null);
+    assert_eq!(slack["needs_client"], false);
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"slack","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(f.slack_secret().is_none());
+}
+
+#[test]
+fn slack_connects_with_the_public_client_and_pkce_and_sends_no_client_secret() {
+    let mut f = Fixture::new();
+    f.with_slack_client();
+    let run = f.connect("slack");
+    // The approval names the vault, which may be a local file on an unsigned host.
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    let connection = request["arguments"]["catalogue"]["connexion"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        connection.contains("conservé dans le coffre"),
+        "{connection}"
+    );
+    assert!(
+        !connection.contains("jamais dans un fichier"),
+        "{connection}"
+    );
+    f.decide(&run, json!("allow_once"));
+    let item = f.item("slack");
+    assert_eq!(item["status"], "authorizing");
+    let authorize = url::Url::parse(item["authorization_url"].as_str().unwrap()).unwrap();
+    let query: std::collections::HashMap<_, _> = authorize.query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], SLACK_CLIENT);
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(!query.contains_key("client_secret"));
+    assert!(query["scope"].contains("channels:history"));
+    assert_eq!(f.callback("slack", false, false), 200);
+    wait("slack connected", || {
+        f.item("slack")["status"] == "connected"
+    });
+    let exchanges = f.slack_requests("/token");
+    assert_eq!(exchanges.len(), 1);
+    let sent: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(exchanges[0].1.as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(sent["client_id"], SLACK_CLIENT);
+    assert!(sent.contains_key("code_verifier"));
+    assert!(
+        !sent.contains_key("client_secret"),
+        "no client secret leaves the Mac: {sent:?}"
+    );
+    let item = f.item("slack");
+    assert_eq!(item["account"], "Atelier Ezerbot");
+    assert_eq!(item["has_tokens"], true);
+    assert_eq!(item["needs_client"], false);
+    assert_eq!(item["server"]["tools"][0]["name"], "read_channel");
+    // The vault holds the user token and no client at all.
+    let kept = f.slack_secret().unwrap();
+    assert_eq!(kept["ACCESS_TOKEN"], SLACK_ACCESS);
+    assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
+    assert!(!f.state().to_string().contains(SLACK_ACCESS));
+}
+
+#[test]
+fn slack_reads_a_channel_without_a_card_names_the_messages_and_keeps_the_token_out_of_the_thread() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let run = f.slack_read("read-general", json!({"channel":"#general"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "Atelier Ezerbot");
+    assert_eq!(output["canal"], "general");
+    let messages = output["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "a channel join is not a message");
+    assert_eq!(messages[0]["auteur"], "Charles Test");
+    assert_eq!(messages[0]["texte"], "Bonjour à toute l’équipe");
+    assert_eq!(messages[1]["auteur"], "Alice Martin");
+    assert_eq!(
+        messages[1]["texte"],
+        "Le déploiement est terminé, merci @Charles Test."
+    );
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("Atelier Ezerbot") && text.contains("#general"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Charles Test : Bonjour à toute l’équipe"),
+        "{text}"
+    );
+    assert!(text.find("Bonjour").unwrap() < text.find("déploiement").unwrap());
+    assert!(!text.contains("<@") && !text.contains("a rejoint"));
+    assert_eq!(output["autres_messages"], true);
+    assert_eq!(f.slack_requests("conversations.list").len(), 1);
+    let history = f.slack_requests("conversations.history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(fields_of(&history[0].0)["channel"], "C0GENERAL");
+    // The model saw the messages, and no token reached it, the thread or the database.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Alice Martin") && inputs.contains("Bonjour à toute l’équipe"));
+    f.assert_slack_token_nowhere(&run);
+    assert!(!f.state().to_string().contains(SLACK_ACCESS));
+}
+
+#[test]
+fn slack_reads_by_id_or_private_name_and_says_what_a_refused_read_means() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let run = f.slack_read("read-id", json!({"channel":"C0GENERAL","limit":1}));
+    done(&f, &run);
+    assert_eq!(
+        f.slack_requests("conversations.list").len(),
+        0,
+        "an identifier needs no lookup by name"
+    );
+    assert_eq!(
+        fields_of(&f.slack_requests("conversations.history")[0].0)["limit"],
+        "1"
+    );
+    let run = f.slack_read("read-private", json!({"channel":"projet-prive"}));
+    assert!(done(&f, &run)["texte"]
+        .as_str()
+        .unwrap()
+        .contains("Le budget est validé"));
+    let run = f.slack_read("read-outside", json!({"channel":"dehors"}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("n’êtes pas membre"), "{reason}");
+    let run = f.slack_read("read-unknown", json!({"channel":"inconnu"}));
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("Aucun canal Slack ne s’appelle inconnu"),
+        "{reason}"
+    );
+    // The unknown name stopped at the lookup: no read went out for it.
+    assert_eq!(f.slack_requests("conversations.history").len(), 3);
+    f.assert_slack_token_nowhere(&run);
+}
+
+#[test]
+fn slack_revoked_access_asks_to_reconnect_and_calls_nothing_else() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    f.oauth.seen.lock().unwrap().slack.live = None;
+    let run = f.slack_read("read-revoked", json!({"channel":"general"}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Slack"), "{reason}");
+    assert_eq!(f.item("slack")["status"], "reconnect");
+    assert_eq!(f.slack_requests("conversations.history").len(), 0);
+}
+
+#[test]
+fn slack_disconnect_removes_the_secret_and_says_whether_slack_confirmed_the_revocation() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let run = f.post("/api/connectors/disconnect", json!({"id":"slack"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("slack")["status"], "disconnected");
+    assert_eq!(f.item("slack")["warning"], false);
+    assert_eq!(f.slack_requests("/revoke").len(), 1);
+    assert!(f.slack_secret().is_none());
+    f.oauth.seen.lock().unwrap().slack.revoke_error = true;
+    f.slack_connect();
+    let run = f.post("/api/connectors/disconnect", json!({"id":"slack"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("slack")["warning"], true);
+    assert!(
+        f.slack_secret().is_none(),
+        "the local token goes either way"
+    );
+}
+
+#[test]
+fn slack_missing_scope_drops_the_insufficient_token_and_the_next_connect_asks_for_consent_again() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let run = f.slack_read("read-limited", json!({"channel":"C0LIMITES1"}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Slack"), "{reason}");
+    let item = f.item("slack");
+    assert_eq!(item["status"], "reconnect");
+    assert_eq!(item["has_tokens"], false);
+    assert!(
+        f.slack_secret().is_none(),
+        "the insufficient token is not kept"
+    );
+    // Reconnecting goes through the browser again instead of reusing that token.
+    let exchanges = f.slack_requests("/token").len();
+    let run = f.connect("slack");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("slack")["status"], "authorizing");
+    assert_eq!(f.callback("slack", false, false), 200);
+    wait("slack reconnected", || {
+        f.item("slack")["status"] == "connected"
+    });
+    assert_eq!(f.slack_requests("/token").len(), exchanges + 1);
+}
+
+#[test]
+fn slack_names_the_workspace_with_the_token_when_the_exchange_only_gives_its_id() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().slack.team_id_only = true;
+    f.slack_connect();
+    assert_eq!(f.item("slack")["account"], "Atelier Ezerbot");
+    let run = f.slack_read("read-named", json!({"channel":"general"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "Atelier Ezerbot");
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("espace Atelier Ezerbot"));
+}
+
+#[test]
+fn slack_forgets_a_client_typed_under_an_earlier_version_at_the_next_sign_in_and_at_disconnect() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let id: String = f
+        .db()
+        .query_row(
+            "SELECT server_id FROM wrapper_connector_catalogue WHERE id='slack'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let key = format!("MCP_{id}_ENV").to_uppercase();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    let legacy = |tokens: bool| {
+        let mut variables =
+            json!({"CLIENT_ID":"old-typed-client","CLIENT_SECRET":"old-typed-secret"});
+        if tokens {
+            variables["ACCESS_TOKEN"] = json!("xoxp-old-token");
+        }
+        json!({ "variables": variables }).to_string()
+    };
+    vault
+        .set(&key, grokbot_forms::vault::MCP_ENV_PURPOSE, &legacy(true))
+        .unwrap();
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='slack'",
+            [],
+        )
+        .unwrap();
+    let run = f.connect("slack");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("slack", false, false), 200);
+    wait("slack connected", || {
+        f.item("slack")["status"] == "connected"
+    });
+    let kept = f.slack_secret().unwrap();
+    assert_eq!(kept["ACCESS_TOKEN"], SLACK_ACCESS);
+    assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
+    // A disconnect keeps no client registration for Slack, even one an earlier version stored.
+    vault
+        .set(&key, grokbot_forms::vault::MCP_ENV_PURPOSE, &legacy(false))
+        .unwrap();
+    let run = f.post("/api/connectors/disconnect", json!({"id":"slack"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert!(f.slack_secret().is_none());
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[test]
+fn slack_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_copy() {
+    let mut f = Fixture::new();
+    f.with_slack_client();
+    let missing = std::env::temp_dir().join("ezerbot-absent-keychain-for-slack.keychain-db");
+    std::env::set_var("GROKBOT_TEST_KEYCHAIN", &missing);
+    grokbot_forms::vault::enable_os_vault(true);
+    let run = f.connect("slack");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("slack", false, false), 400);
+    assert_eq!(f.item("slack")["status"], "reconnect");
+    let message = f.item("slack")["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("trousseau"), "{message}");
+    assert!(f.item("slack")["has_tokens"] == false);
+    let vault_file = f.path.with_extension("secrets.json");
+    let file = std::fs::read(&vault_file).unwrap_or_default();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in [SLACK_ACCESS.as_bytes(), b"xoxp-"] {
+        assert!(!file.windows(secret.len()).any(|w| w == secret));
+        assert!(!database.windows(secret.len()).any(|w| w == secret));
+    }
+    assert!(!f.state().to_string().contains(SLACK_ACCESS));
+    std::env::remove_var("GROKBOT_TEST_KEYCHAIN");
+    grokbot_forms::vault::enable_os_vault(false);
+}
+
+const GMAIL_SEND_TOOL: &str = "gmail_send_email";
+
+/// A delivered message split into its headers and its decoded body.
+fn mail_parts(raw: &str) -> (std::collections::HashMap<String, String>, String) {
+    let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+    let mut headers: std::collections::HashMap<String, String> = Default::default();
+    let mut last = String::new();
+    for line in head.split("\r\n") {
+        if line.starts_with(' ') {
+            if let Some(value) = headers.get_mut(&last) {
+                value.push_str(line);
+            }
+        } else {
+            let (name, value) = line.split_once(": ").expect("a header line");
+            last = name.to_lowercase();
+            headers.insert(last.clone(), value.to_owned());
+        }
+    }
+    let joined: String = body.split("\r\n").collect();
+    let text = base64::engine::general_purpose::STANDARD
+        .decode(joined)
+        .expect("base64 body");
+    (
+        headers,
+        String::from_utf8(text).unwrap().replace("\r\n", "\n"),
+    )
+}
+/// The text of a header that may be one or several RFC 2047 words.
+fn decoded_header(value: &str) -> String {
+    value
+        .split(' ')
+        .map(|word| {
+            match word
+                .strip_prefix("=?UTF-8?B?")
+                .and_then(|w| w.strip_suffix("?="))
+            {
+                Some(b64) => String::from_utf8(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .unwrap(),
+                )
+                .unwrap(),
+                None => format!("{word} "),
+            }
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+impl Fixture {
+    fn prepare_email(&mut self, id: &str, subject: &str, body: &str) -> (String, Value) {
+        self.github_prepare(
+            id,
+            GMAIL_SEND_TOOL,
+            json!({"to":["moi"],"cc":["bruno@example.test"],"subject":subject,"body":body}),
+        )
+    }
+    fn delivered_mail(&self) -> Vec<String> {
+        self.oauth.seen.lock().unwrap().gmail.sent.clone()
+    }
+    fn email_sends(&self) -> usize {
+        self.gmail_requests("/messages/send")
+    }
+    fn card_of(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+}
+
+#[test]
+fn gmail_email_waits_on_a_draft_card_shows_the_fields_and_cancel_sends_nothing() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let tool = tools
+        .iter()
+        .find(|t| t.name == GMAIL_SEND_TOOL)
+        .expect("the send tool is in the closed list");
+    assert!(tool.requires_approval);
+    assert!(
+        !tools
+            .iter()
+            .find(|t| t.name == GMAIL_TOOL)
+            .unwrap()
+            .requires_approval,
+        "the read stays without a card"
+    );
+
+    let (run, card) = f.prepare_email("mail-1", "Test parité", "Bonjour");
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Gmail");
+    assert_eq!(draft["de"], "charles@example.test");
+    assert_eq!(draft["a"], json!(["charles@example.test"]));
+    assert_eq!(draft["cc"], json!(["bruno@example.test"]));
+    assert_eq!(draft["objet"], "Test parité");
+    assert_eq!(draft["texte"], "Bonjour");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.email_sends(), 0, "nothing before the click");
+    assert!(f.delivered_mail().is_empty());
+
+    // There is no “Toujours”: neither a standing allow nor a standing refusal.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("mail-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.email_sends(), 0);
+
+    // Annuler sends nothing.
+    f.github_resolve(&card, "mail-cancel", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.email_sends(), 0);
+    assert!(f.delivered_mail().is_empty());
+}
+
+#[test]
+fn gmail_email_sends_the_corrected_text_once_under_the_connected_account() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, card) = f.prepare_email("mail-2", "Test parité", "Bonjour");
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    assert_eq!(f.email_sends(), 0);
+
+    f.github_resolve_issue(
+        &card,
+        "mail-send-1",
+        json!("allow_once"),
+        Some("Objet corrigé"),
+        Some("Bonjour validé"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["compte"], "charles@example.test");
+    assert_eq!(output["objet"], "Objet corrigé");
+    assert_eq!(output["texte"], "Bonjour validé");
+    assert_eq!(f.email_sends(), 1);
+    let delivered = f.delivered_mail();
+    assert_eq!(delivered.len(), 1, "one mail, not two");
+    let (headers, body) = mail_parts(&delivered[0]);
+    assert_eq!(headers["from"], "charles@example.test");
+    assert_eq!(headers["to"], "charles@example.test");
+    assert_eq!(headers["cc"], "bruno@example.test");
+    assert_eq!(decoded_header(&headers["subject"]), "Objet corrigé");
+    assert_eq!(body, "Bonjour validé");
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .gmail
+            .authorization
+            .iter()
+            .rev()
+            .find(|(url, _)| url.ends_with("/messages/send"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.gmail.live_tokens[0]));
+    }
+
+    // The settled card shows the text that left, bound to a new fingerprint.
+    let settled = f.card_of(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["objet"], "Objet corrigé");
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Bonjour validé");
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["publication_result"]["status"], "done");
+
+    // A second Envoyer on the same card never calls Gmail again: the same click is
+    // answered with its first receipt, another click is refused.
+    f.github_resolve_issue(
+        &card,
+        "mail-send-1",
+        json!("allow_once"),
+        Some("Autre objet"),
+        Some("Autre texte"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "mail-send-2",
+            json!("allow_once"),
+            Some("Autre objet"),
+            Some("Autre texte")
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.email_sends(), 1);
+    assert_eq!(f.delivered_mail().len(), 1);
+
+    // The model learned what left, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Bonjour validé"));
+    for secret in GMAIL_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+
+    // Reading the inbox still starts without any card.
+    let read = f.github_call("read-after-mail", GMAIL_TOOL, json!({}));
+    assert!(matches!(f.outcome(&read), ToolOutcome::Done { .. }));
+}
+
+#[test]
+fn gmail_email_sends_the_proposal_unedited_and_keeps_accents_and_lines_out_of_the_headers() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let subject =
+        "Réunion à 14 h — ordre du jour et pièces jointes à relire avant la rencontre de lundi";
+    let (run, card) = f.prepare_email(
+        "mail-3",
+        subject,
+        "Première ligne\nBcc: pirate@example.test\n\nÀ bientôt",
+    );
+    f.github_resolve(&card, "mail-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    let delivered = f.delivered_mail();
+    assert_eq!(delivered.len(), 1);
+    let (headers, body) = mail_parts(&delivered[0]);
+    assert_eq!(decoded_header(&headers["subject"]), subject);
+    assert!(
+        !headers.contains_key("bcc"),
+        "a body line is never a header"
+    );
+    assert_eq!(
+        body,
+        "Première ligne\nBcc: pirate@example.test\n\nÀ bientôt"
+    );
+}
+
+#[test]
+fn gmail_email_refuses_a_bad_draft_without_a_card_and_without_calling_google() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let cases = [
+        (
+            "bad-to",
+            json!({"to":["Bob <bob@example.test>"],"subject":"x"}),
+            "Adresse invalide",
+        ),
+        (
+            "bad-domain",
+            json!({"to":["bob@example"],"subject":"x"}),
+            "Adresse invalide",
+        ),
+        (
+            "no-to",
+            json!({"to":[],"subject":"x"}),
+            "au moins un destinataire",
+        ),
+        (
+            "no-subject",
+            json!({"to":["bob@example.test"],"subject":"  "}),
+            "objet est vide",
+        ),
+        (
+            "subject-lines",
+            json!({"to":["bob@example.test"],"subject":"a\nBcc: b@example.test"}),
+            "une seule ligne",
+        ),
+        (
+            "extra",
+            json!({"to":["bob@example.test"],"subject":"x","bcc":["z@example.test"]}),
+            "Arguments invalides",
+        ),
+    ];
+    for (id, arguments, expected) in cases {
+        let run = f.github_call(id, GMAIL_SEND_TOOL, arguments);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(expected), "{id}: {reason}");
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before,
+        "a bad draft opens no card"
+    );
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
+fn gmail_email_accepts_an_apostrophe_in_a_bare_address() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (_, card) = f.github_prepare(
+        "mail-apos",
+        GMAIL_SEND_TOOL,
+        json!({"to":["o'connor@example.test"],"subject":"Essai"}),
+    );
+    assert_eq!(
+        card["arguments"]["brouillon"]["a"],
+        json!(["o'connor@example.test"])
+    );
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
+fn gmail_email_refuses_an_address_holding_a_vault_value_without_a_card() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let token = f.gmail_secret().unwrap()["ACCESS_TOKEN"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let secret = format!("{token}@example.test");
+    let cases = [
+        ("vault-to", json!({"to":[secret],"subject":"x"})),
+        (
+            "vault-cc",
+            json!({"to":["bob@example.test"],"cc":[secret],"subject":"x"}),
+        ),
+    ];
+    for (id, arguments) in cases {
+        let conversation = f.github_conversation();
+        f.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GMAIL_SEND_TOOL,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        f.script(vec![json!({"type":"response.completed"})]);
+        f.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Écris le courriel."}),
+        );
+        let run: String = f.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        for _ in 0..200 {
+            f.app.tick(0);
+            if store::required(&f.db(), &run).unwrap().status.is_terminal() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let status = store::required(&f.db(), &run).unwrap().status;
+        assert!(status.is_terminal(), "{id}: {status:?}");
+        // The chat already masks the value before the tool sees it; either
+        // way the address is refused and the value is never repeated.
+        let reason = failed(&f, &run);
+        assert!(reason.contains("dresse"), "{id}: {reason}");
+        assert!(!reason.contains(&token), "{id}: {reason}");
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before,
+        "an address holding a vault value opens no card"
+    );
+    assert!(!f.state().to_string().contains(&token));
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
+fn gmail_email_refused_limited_and_unconfirmed_sends_are_visible_and_never_a_sent_mail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    for (status, label, state, id) in [
+        (403, "Refusé", "refused", "mail-403"),
+        (429, "Trop de messages", "rate_limited", "mail-429"),
+        (503, "Envoi non confirmé", "unconfirmed", "mail-503"),
+    ] {
+        f.oauth.seen.lock().unwrap().gmail.send_status = status;
+        let sends = f.email_sends();
+        let (run, card) = f.prepare_email(id, "Test", "Bonjour");
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+            panic!("{status}: {:?}", f.outcome(&run));
+        };
+        assert!(reason.starts_with(label), "{status}: {reason}");
+        if status == 503 {
+            assert!(reason.contains("accusé de réception"), "{reason}");
+            assert!(reason.contains("peut-être parti"), "{reason}");
+        } else {
+            assert!(reason.contains("Aucun courriel n’est parti"), "{reason}");
+        }
+        let settled = f.card_of(&card);
+        assert_eq!(settled["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(settled["publication_result"]["status"], "failed");
+        assert_ne!(settled["publication_result"]["status"], "done");
+        // One call, and the card is spent: another click never reaches Google again.
+        assert_eq!(f.email_sends(), sends + 1, "{status}");
+        assert!(f
+            .github_resolve(&card, &format!("{id}-again"), json!("allow_once"), None)
+            .is_err());
+        f.app.tick(0);
+        assert_eq!(f.email_sends(), sends + 1, "{status}");
+    }
+    assert!(f.delivered_mail().is_empty(), "none of the three left");
+}
+
+#[test]
+fn gmail_email_is_refused_when_the_account_changed_or_lost_the_bot_after_the_card() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, card) = f.prepare_email("mail-acc", "Test", "Bonjour");
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    f.github_resolve(&card, "mail-acc-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("compte Gmail a changé"), "{reason}");
+    assert_eq!(f.email_sends(), 0);
+
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let (run, card) = f.prepare_email("mail-off", "Test", "Bonjour");
+    let server = f.item("gmail")["server"].clone();
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server["id"],"bot_id":"grokbot","enabled":false}),
+    );
+    f.github_resolve(&card, "mail-off-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("pas activé"), "{reason}");
+    assert_eq!(f.email_sends(), 0);
+    assert!(f.delivered_mail().is_empty());
 }
 
 const CALENDAR_TOOL: &str = "calendar_list_events";

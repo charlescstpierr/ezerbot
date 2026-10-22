@@ -732,12 +732,34 @@ fn node_value(node: &Node, depth: usize) -> Result<Value, Diagnostic> {
     }
 }
 
-fn push_value(out: &mut String, value: &Value) {
+// Shared rendering policy with app/ui/panels/pages.js: count every visit,
+// including empty output, and bound UTF-8 text before appending it.
+const MAX_RENDER_VISITS: usize = 10_000;
+const MAX_PREVIEW_BYTES: usize = 1_000_000;
+
+fn render_budget_exceeded() -> Diagnostic {
+    Diagnostic {
+        line: 1,
+        character: 1,
+        message: "la Page dépasse le budget de rendu".into(),
+    }
+}
+
+fn push_text(out: &mut String, text: &str) -> Result<(), Diagnostic> {
+    if text.len() > MAX_PREVIEW_BYTES - out.len() {
+        return Err(render_budget_exceeded());
+    }
+    out.push_str(text);
+    Ok(())
+}
+
+fn push_value(out: &mut String, value: &Value) -> Result<(), Diagnostic> {
     match value {
-        Value::String(text) => out.push_str(text),
-        Value::Number(number) => out.push_str(&number.to_string()),
+        Value::String(text) => push_text(out, text)?,
+        Value::Number(number) => push_text(out, &number.to_string())?,
         _ => {}
     }
+    Ok(())
 }
 
 fn preview_node(
@@ -746,27 +768,32 @@ fn preview_node(
     states: &BTreeMap<String, Value>,
     out: &mut String,
     depth: usize,
+    remaining_visits: &mut usize,
 ) -> Result<(), Diagnostic> {
+    if *remaining_visits == 0 {
+        return Err(render_budget_exceeded());
+    }
+    *remaining_visits -= 1;
     if nests(node) && depth > MAX_DEPTH {
         return Err(too_deep());
     }
     match node {
-        Node::Text(text) => out.push_str(text),
+        Node::Text(text) => push_text(out, text)?,
         Node::State(name) => {
             if let Some(value) = states.get(name) {
-                push_value(out, value);
+                push_value(out, value)?;
             }
         }
         Node::Field { index } => {
             if let Some(value) = row.and_then(|cells| cells.get(*index)) {
-                push_value(out, value);
+                push_value(out, value)?;
             }
         }
         Node::Map { items, node } => {
             if let Some(rows) = items.as_array() {
                 for item in rows {
                     if let Some(cells) = item.as_array() {
-                        preview_node(node, Some(cells), states, out, depth)?;
+                        preview_node(node, Some(cells), states, out, depth, remaining_visits)?;
                     }
                 }
             }
@@ -781,7 +808,7 @@ fn preview_node(
                 } else {
                     depth
                 };
-                preview_node(child, row, states, out, next)?;
+                preview_node(child, row, states, out, next, remaining_visits)?;
             }
         }
     }
@@ -876,7 +903,8 @@ pub fn compile(source: &str) -> Result<Compiled, Diagnostic> {
     let view = parser.parse_program()?;
     let states: BTreeMap<_, _> = parser.states.iter().cloned().collect();
     let mut preview = String::new();
-    preview_node(&view, None, &states, &mut preview, 1)?;
+    let mut remaining_visits = MAX_RENDER_VISITS;
+    preview_node(&view, None, &states, &mut preview, 1, &mut remaining_visits)?;
     if preview.trim().is_empty() {
         return Err(Diagnostic {
             line: 1,
@@ -897,6 +925,26 @@ pub fn compile(source: &str) -> Result<Compiled, Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_maps_have_a_cumulative_budget() {
+        for (levels, leaf) in [
+            (14, "x".to_string()),
+            (14, String::new()),
+            (8, "é".repeat(3000)),
+            (40, "x".to_string()),
+        ] {
+            let mut body = format!("<div>{leaf}</div>");
+            for _ in 0..levels {
+                body = format!("<div>{{rows.map((row) => ({body}))}}</div>");
+            }
+            let source = format!(
+                "export default function Page() {{ const rows = [[1], [2]]; return ({body}); }}"
+            );
+            let error = compile(&source).expect_err("expansion excessive");
+            assert_eq!(error.message, "la Page dépasse le budget de rendu");
+        }
+    }
 
     const BROKEN: &str = r#"export default function Page() {
   return (
@@ -1086,14 +1134,15 @@ mod tests {
         let kept = chain(MAX_DEPTH);
         assert!(node_value(&kept, 1).is_ok());
         let mut preview = String::new();
-        preview_node(&kept, None, &states, &mut preview, 1).unwrap();
+        let mut remaining_visits = MAX_RENDER_VISITS;
+        preview_node(&kept, None, &states, &mut preview, 1, &mut remaining_visits).unwrap();
         assert!(preview.contains("ok"), "{preview}");
 
         let over = chain(MAX_DEPTH + 1);
         assert_eq!(node_value(&over, 1).unwrap_err().message, TOO_DEEP);
         let mut preview = String::new();
         assert_eq!(
-            preview_node(&over, None, &states, &mut preview, 1)
+            preview_node(&over, None, &states, &mut preview, 1, &mut remaining_visits)
                 .unwrap_err()
                 .message,
             TOO_DEEP

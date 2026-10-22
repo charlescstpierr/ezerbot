@@ -111,6 +111,21 @@
   }
 
   const maxDepth = 64;
+  // Keep aligned with compile.rs; reset for every paint, including state changes.
+  const maxRenderVisits = 10000;
+  const maxTextBytes = 1000000;
+  const budgetMessage = "la Page dépasse le budget de rendu";
+
+  function renderText(value, budget) {
+    const text = value == null ? "" : String(value);
+    // Count UTF-8 bytes without allocating an encoded copy of oversized text.
+    for (const character of text) {
+      const code = character.codePointAt(0);
+      budget.bytes -= code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+      if (budget.bytes < 0) throw new Error(budgetMessage);
+    }
+    return document.createTextNode(text);
+  }
 
   function place(parent, child) {
     if (Array.isArray(child)) {
@@ -136,21 +151,22 @@
     return false;
   }
 
-  function render(spec, row, rowIndex, depth) {
+  function render(spec, row, rowIndex, depth, budget) {
+    if (budget.visits-- <= 0) throw new Error(budgetMessage);
     if (!spec || typeof spec !== "object") return null;
     if (nests(spec) && depth > maxDepth) return null;
-    if (spec.type === "text") return document.createTextNode(spec.text == null ? "" : String(spec.text));
+    if (spec.type === "text") return renderText(spec.text, budget);
     if (spec.type === "state") {
       const value = viewState[spec.name];
-      return document.createTextNode(value == null ? "" : String(value));
+      return renderText(value, budget);
     }
     if (spec.type === "field") {
       const value = row && spec.index != null ? row[spec.index] : "";
-      return document.createTextNode(value == null ? "" : String(value));
+      return renderText(value, budget);
     }
     if (spec.type === "map") {
       const items = Array.isArray(spec.items) ? spec.items : [];
-      return items.map((item, index) => render(spec.node, item, index, depth));
+      return items.map((item, index) => render(spec.node, item, index, depth, budget));
     }
     if (spec.type !== "element" || !allowed.has(spec.tag)) return null;
     const el = document.createElement(spec.tag);
@@ -173,7 +189,7 @@
     }
     for (const child of spec.children || []) {
       if (nests(child) && depth >= maxDepth) return null;
-      place(el, render(child, row, rowIndex, nests(child) ? depth + 1 : depth));
+      place(el, render(child, row, rowIndex, nests(child) ? depth + 1 : depth, budget));
     }
     return el;
   }
@@ -195,7 +211,15 @@
     shell.diagnostic.hidden = true;
     shell.diagnostic.textContent = "";
     shell.canvas.replaceChildren();
-    place(shell.canvas, render(page.document.view, null, null, 1));
+    try {
+      const budget = { visits: maxRenderVisits, bytes: maxTextBytes };
+      place(shell.canvas, render(page.document.view, null, null, 1, budget));
+    } catch (error) {
+      if (error.message !== budgetMessage) throw error;
+      shell.diagnostic.hidden = false;
+      shell.diagnostic.textContent = budgetMessage;
+      shell.canvas.replaceChildren();
+    }
   }
 
   function sourceKey(page) {

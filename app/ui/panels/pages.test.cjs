@@ -280,3 +280,16 @@ test("une compilation cassée montre la ligne et le caractère, pas une Page vid
   assert.match(sidebar.textContent, /Pages/);
   assert.doesNotMatch(`${sidebar.textContent}\n${main.textContent}`, /Partager|lien public|URL publique/);
 });
+
+for (const [levels, text] of [[14, "x"], [14, ""], [8, "é".repeat(3000)], [40, "x"]]) {
+  test(`les maps imbriquées respectent le budget cumulé (${levels}, ${text.length})`, async () => {
+    let view = { type: "text", text };
+    for (let i = 0; i < levels; i++) {
+      view = { type: "element", tag: "div", children: [{ type: "map", items: [[1], [2]], node: view }] };
+    }
+    const { panels, main } = harness({ id: "budget", title: "Budget", status: "ready", document: { states: [], view } });
+    await panels.panel.onState(panels.state, { bot: { id: "grokbot" }, conversation: { id: "fil" } });
+    assert.match(main.textContent, /la Page dépasse le budget de rendu/);
+    assert.equal(canvasOf(main).children.length, 0);
+  });
+}

@@ -25,7 +25,7 @@
   const botViews = new Set();
   const noVoice = {voice:"",speed:1,language:"",chosen:false};
   // Each bot speaks with its own voice, speed and language, whichever conversation it is in.
-  const botVoice = () => ctx?.state?.voice?.bots?.[ctx.bot?.id] || noVoice;
+  const botVoice = botId => ctx?.state?.voice?.bots?.[botId || ctx.bot?.id] || noVoice;
   const active = () => Boolean(token);
   let lastActive = false;
   errors.microphone_busy = "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.";
@@ -163,9 +163,9 @@
           if (rev !== epoch) return;
         }
       }
-      const chunks = reader.read(ctx.conversation?.messages || [], needsAction);
-      const settings = botVoice();
-      for (const text of chunks) {
+      const chunks = reader.readByAuthor(ctx.conversation?.messages || [], needsAction);
+      for (const {text, botId} of chunks) {
+        const settings = botVoice(botId);
         const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
         if (rev !== epoch) return;
         if (errors[receipt.status]) { fail(receipt.status); return; }

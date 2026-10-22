@@ -205,3 +205,16 @@ test("the voices the Mac offers are handed to the engine once, so that bots with
   f.setContext(f.context); await new Promise(r=>setImmediate(r));
   assert.equal(f.calls.filter(c=>c.path==="/api/voice/voices").length,1);
 });
+test("in a group, each reply is spoken with the voice of the bot that wrote it",async()=>{
+  const f=fixture(); await cls(f.root,"voice-session-toggle").onclick();
+  f.context.conversation.kind="group";
+  f.context.conversation.messages.push(
+    {id:"a",role:"assistant",kind:"reply",state:"streaming",body:"Je commence.",payload:{bot_id:"ezerbot"}},
+    {id:"b",role:"assistant",kind:"reply",state:"streaming",body:"Je continue.",payload:{bot_id:"chef"}},
+  );
+  await f.tick();
+  assert.deepEqual(f.calls.filter(c=>c.command==="speak").map(({text,voice,speed,language})=>({text,voice,speed,language})),[
+    {text:"Je commence.",voice:"v-a",speed:1,language:""},
+    {text:"Je continue.",voice:"v-b",speed:1.8,language:"fr"},
+  ]);
+});

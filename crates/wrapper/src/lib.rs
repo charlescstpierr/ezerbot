@@ -334,6 +334,16 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     pub kind: String,
     pub parent_id: Option<String>,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<GroupAvatar>,
+}
+
+/// Pastille d’un groupe : une couleur d’accent et un signe court.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupAvatar {
+    pub color: String,
+    pub mark: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -697,6 +707,8 @@ struct CreateConversation {
     title: Option<String>,
     bot_id: Option<String>,
     bot_ids: Option<Vec<String>>,
+    description: Option<String>,
+    avatar: Option<GroupAvatar>,
 }
 
 #[derive(Deserialize)]
@@ -749,6 +761,8 @@ struct UpdateConversation {
     id: String,
     title: Option<String>,
     favorite: Option<bool>,
+    description: Option<String>,
+    avatar: Option<GroupAvatar>,
 }
 
 #[derive(Deserialize)]
@@ -865,6 +879,12 @@ impl App {
                 "TEXT NOT NULL DEFAULT 'chat'",
             ),
             ("wrapper_conversations", "parent_id", "TEXT"),
+            (
+                "wrapper_conversations",
+                "group_description",
+                "TEXT NOT NULL DEFAULT ''",
+            ),
+            ("wrapper_conversations", "group_avatar", "TEXT"),
         ] {
             let present: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
@@ -1331,6 +1351,41 @@ fn valid_bot_name(name: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(name.into())
+}
+
+fn valid_group_description(description: &str) -> Result<String, ApiError> {
+    let description = description.trim();
+    let forbidden = description
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t');
+    if description.is_empty() || description.chars().count() > 280 || forbidden {
+        return Err(ApiError::new(
+            400,
+            "La description du groupe doit contenir entre 1 et 280 caractères.",
+        ));
+    }
+    Ok(description.into())
+}
+
+fn valid_group_avatar(avatar: &GroupAvatar) -> Result<GroupAvatar, ApiError> {
+    let color = valid_bot_color(&avatar.color)?.to_owned();
+    let mark = avatar.mark.trim();
+    let allowed = (1..=4).contains(&mark.chars().count())
+        && !mark.chars().any(|c| c.is_whitespace() || c.is_control());
+    if !allowed {
+        return Err(ApiError::new(
+            400,
+            "Le signe de l’avatar contient de un à quatre caractères, sans espace.",
+        ));
+    }
+    Ok(GroupAvatar {
+        color,
+        mark: mark.into(),
+    })
+}
+
+fn stored_group_avatar(raw: Option<String>) -> Option<GroupAvatar> {
+    raw.and_then(|value| serde_json::from_str(&value).ok())
 }
 
 fn valid_bot_color(color: &str) -> Result<&'static str, ApiError> {

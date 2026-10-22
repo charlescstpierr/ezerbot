@@ -245,12 +245,12 @@ impl Fixture {
         (run, edge)
     }
     fn child_done(&mut self, edge: &Delegation) {
+        self.child_result(edge, "Verified child summary");
+    }
+    fn child_result(&mut self, edge: &Delegation, summary: &str) {
         self.events(vec![
-            call(
-                "finish-child",
-                "complete_task",
-                json!({"summary":"Verified child summary"}),
-            ),
+            json!({"type":"response.output_text.delta","delta":summary}),
+            call("finish-child", "complete_task", json!({"summary":summary})),
             completed(),
         ]);
         self.tick();
@@ -263,6 +263,44 @@ impl Fixture {
         wait("child owner released", || {
             self.provider.status()["titling"] == false
         });
+    }
+    /// The parent resume is a spawned model call. Settle it before queueing
+    /// another scripted response, and drop an acknowledgement it no longer needs.
+    fn settle(&mut self, c: &str, m: &str) {
+        let run_id = self.run(c, m).run_id;
+        let terminal = |status: RunStatus| {
+            matches!(
+                status,
+                RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+            )
+        };
+        if terminal(store::get(&self.db(), &run_id).unwrap().unwrap().status)
+            && self.provider.status()["titling"] == false
+        {
+            return;
+        }
+        let before = self.server.seen.lock().unwrap().responses.len();
+        self.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Parent acknowledged"}),
+            completed(),
+        ]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            self.tick();
+            let status = store::get(&self.db(), &run_id).unwrap().unwrap().status;
+            if terminal(status) && self.provider.status()["titling"] == false {
+                let mut seen = self.server.seen.lock().unwrap();
+                if seen.responses.len() > before {
+                    seen.responses.pop_back();
+                }
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent {status:?} not settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
     fn resume(&mut self, c: &str, m: &str) {
         self.events(vec![
@@ -1905,6 +1943,213 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
     assert!(
         matches!(f.tool(&root,"check","check_delegations",json!({})),ToolOutcome::Done{output} if output["delegations"][0]["status"]["result"]=="stable result")
     );
+}
+
+#[test]
+fn selected_image_reaches_the_child_request_and_not_another_thread() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    const DESCRIPTION: &str = "Carré PNG d’un pixel, fond clair.";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Décris cette photo");
+    targeted["selected_context"]["texts"] = json!(["photo.png"]);
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    // The send would otherwise start a caption call that consumes the scripted
+    // child reply. Prepare the same draft the message will carry.
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue la description de cette photo."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-photo", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "describe-photo",
+            "body": "Délègue la description de cette photo.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "describe-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "describe-photo")).remove(0);
+    f.child_result(&edge, DESCRIPTION);
+    let seen = f.server.seen.lock().unwrap();
+    let child = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris cette photo")
+        })
+        .expect("requête de l'enfant")
+        .clone();
+    drop(seen);
+    let child_json = child.to_string();
+    assert!(
+        child_json.contains(&format!("data:image/png;base64,{PNG}")),
+        "la requête de l'enfant ne contient pas les octets de l'image"
+    );
+    // Delegated blocks are JSON-fenced, so the descriptor's quotes are escaped once.
+    // Object keys are alphabetical: mime and path precede kind.
+    let instructions = child["instructions"]
+        .as_str()
+        .unwrap_or("")
+        .replace("\\\"", "\"");
+    let marker = "\"kind\":\"selected_images\"";
+    let at = instructions
+        .find(marker)
+        .expect("selected_images absent de la requête de l'enfant");
+    let start = instructions[..at]
+        .rfind('{')
+        .expect("objet selected_images introuvable");
+    let end = instructions[at..]
+        .find('}')
+        .expect("objet selected_images non fermé")
+        + at
+        + 1;
+    let selected = &instructions[start..end];
+    assert!(
+        selected.contains("\"mime_type\":\"image/png\""),
+        "selected_images n'a pas le type MIME"
+    );
+    let path_key = "\"path\":\"";
+    let path_at = selected
+        .find(path_key)
+        .expect("selected_images n'a pas le chemin local");
+    let path = &selected[path_at + path_key.len()..];
+    let path = &path[..path.find('"').unwrap()];
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        png,
+        "le chemin de selected_images ne pointe pas vers les octets"
+    );
+    assert!(
+        !selected
+            .split("\"mime_type\"")
+            .next()
+            .unwrap_or("")
+            .contains("photo.png"),
+        "le nom du fichier ne doit pas tenir lieu d'image"
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let thread = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == json!(edge.conversation_id))
+        .unwrap();
+    let messages = thread["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["body"].as_str().unwrap_or("").contains(DESCRIPTION)),
+        "le fil task: ne décrit pas l'image"
+    );
+    let brief = messages
+        .iter()
+        .find(|m| m["kind"] == "delegation_brief")
+        .expect("consigne du fil task:");
+    assert!(
+        brief["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == image && a["mime_type"] == "image/png"),
+        "le fil task: ne montre pas l'image jointe"
+    );
+    f.settle(&c, "describe-photo");
+
+    let mut name_only = args("child");
+    name_only["objective"] = json!("Décris photo.png");
+    name_only["selected_context"]["texts"] = json!(["photo.png"]);
+    let (_, name_edge) = f.begin(&c, "name-only", name_only);
+    f.child_result(&name_edge, "Je n'ai que le nom photo.png.");
+    let seen = f.server.seen.lock().unwrap();
+    let named = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris photo.png")
+        })
+        .expect("requête du fil qui n'a sélectionné que le nom")
+        .clone();
+    drop(seen);
+    assert!(
+        !named.to_string().contains(PNG)
+            && !named["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("selected_images"),
+        "le nom du fichier a suffi à transmettre l'image"
+    );
+    f.settle(&c, "name-only");
+
+    let other = f.conversation();
+    let mut elsewhere = args("child");
+    elsewhere["objective"] = json!("Décris ce fil vide");
+    let (_, other_edge) = f.begin(&other, "other-thread", elsewhere);
+    f.child_result(&other_edge, "Ce fil n'a pas de photo.");
+    let seen = f.server.seen.lock().unwrap();
+    let foreign = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris ce fil vide")
+        })
+        .expect("requête de l'autre fil")
+        .clone();
+    drop(seen);
+    assert!(
+        !foreign.to_string().contains(PNG) && !foreign.to_string().contains(&image),
+        "un autre fil a placé l'image dans la requête de l'enfant"
+    );
+    f.settle(&other, "other-thread");
+
+    let outsider = f.root("other-thread-root");
+    let mut stolen = args("child");
+    stolen["selected_context"]["selected_images"] = json!([image]);
+    stolen["selected_context"]["texts"] = json!(["photo.png"]);
+    assert!(
+        matches!(
+            f.tool(&outsider, "steal", "delegate", stolen),
+            ToolOutcome::Failed { .. }
+        ),
+        "une image d'un autre fil a été acceptée dans selected_images"
+    );
+    assert!(f.children(&outsider).is_empty());
 }
 
 #[test]

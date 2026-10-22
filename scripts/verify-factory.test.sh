@@ -18,7 +18,7 @@ trap cleanup EXIT
 # PATH sans le vrai gh : seuls les outils du test et les doublures sont visibles.
 SAFE=$(mktemp -d)
 keep+=("$SAFE")
-for tool in git tee date mktemp sed awk dirname basename mkdir cp rm env bash grep diff head chmod cat; do
+for tool in git tee date mktemp sed awk dirname basename mkdir cp rm env bash grep diff head tail chmod cat python3; do
   if [[ -x "/usr/bin/$tool" ]]; then
     ln -s "/usr/bin/$tool" "$SAFE/$tool"
   elif [[ -x "/bin/$tool" ]]; then
@@ -54,6 +54,15 @@ if [[ "${CARGO_STUB_FAIL:-}" == "${1:-}" ]]; then
   printf '%s\n' 'echec volontaire' >&2
   exit 1
 fi
+case "${1:-}" in
+  test)
+    printf '%s\n' 'test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'
+    printf '%s\n' 'test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s'
+    ;;
+  build|clippy)
+    printf '%s\n' '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s'
+    ;;
+esac
 exit 0
 EOF
   cat >"$BIN/rustc" <<'EOF'
@@ -62,6 +71,7 @@ printf '%s\n' "${RUSTC_STUB_VERSION:-rustc 1.99.1 (test)}"
 EOF
   cat >"$BIN/gitleaks" <<'EOF'
 #!/bin/bash
+printf '%s\n' '1:00AM INF no leaks found'
 exit 0
 EOF
   chmod +x "$BIN/cargo" "$BIN/rustc" "$BIN/gitleaks"
@@ -83,6 +93,35 @@ EOF
 install_gh() {
   cat >"$BIN/gh" <<'EOF'
 #!/bin/bash
+if [[ "${1:-}" == "api" ]]; then
+  method="GET"
+  input=""
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --paginate) shift ;;
+      --method) method=$2; shift 2 ;;
+      --input) input=$2; shift 2 ;;
+      --jq) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  state="${GH_STATE:?}"
+  mkdir -p "$state"
+  if [[ "$method" == "GET" ]]; then
+    if [[ -f "$state/posted" ]]; then
+      printf '%s\n' '[{"id":77,"body":"<!-- factory-proof -->\nprécédent"}]'
+    else
+      printf '%s\n' '[]'
+    fi
+    exit 0
+  fi
+  cp "$input" "$state/last.json"
+  printf '%s\n' "$method" >>"$state/methods"
+  printf '77\n' >"$state/posted"
+  printf '%s\n' '{"id":77}'
+  exit 0
+fi
 if [[ "${GH_STUB_FAIL:-}" == 1 ]]; then
   printf '%s\n' 'gh stub echec' >&2
   exit 1
@@ -140,7 +179,9 @@ for literal in \
   'cargo test --workspace --locked' \
   'cargo clippy --workspace --all-targets --locked -- -D warnings' \
   'gitleaks detect --redact --log-opts=origin/main..HEAD' \
-  'gh issue view'
+  'gh issue view' \
+  '<!-- factory-proof -->' \
+  '--comment'
 do
   if ! grep -F -q -- "$literal" "$SCRIPT"; then
     bad "littéral $literal"
@@ -170,12 +211,13 @@ EOF
 run_script 137 "$SHA" "$REPO/criteres.md"
 expect_status 0 "barrière verte"
 first=$(printf '%s\n' "$OUTPUT" | head -n 1)
-if [[ "$first" == "$SHA" ]]; then
-  ok "SHA en tête"
+if [[ "$first" == '<!-- factory-proof -->' ]]; then
+  ok "marqueur en tête"
 else
-  printf 'première ligne [%s] au lieu de [%s]\n' "$first" "$SHA" >&2
-  bad "SHA en tête"
+  printf 'première ligne [%s]\n' "$first" >&2
+  bad "marqueur en tête"
 fi
+require_grep "SHA \`${SHA}\`" "SHA dans le résumé"
 log="$REPO/target/verify-factory/137-${SHA}.log"
 if [[ -f "$log" ]]; then
   ok "journal présent"
@@ -198,6 +240,12 @@ require_grep "critères: fichier ${REPO}/criteres.md" "source fichier"
 require_grep "+ echo critere-ok" "commande verify"
 require_grep "critere-ok" "sortie verify"
 require_grep "verify-factory: ok" "verdict ok"
+require_grep '- `cargo build --workspace --locked` — exit 0 — Finished '"'"'dev'"'"' profile [unoptimized + debuginfo] target(s) in 0.01s' "résultat build"
+require_grep '- `cargo fmt --check` — exit 0 — ok' "résultat fmt"
+require_grep '- `cargo test --workspace --locked` — exit 0 — test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured' "résultat tests"
+require_grep '- `gitleaks detect --redact --log-opts=origin/main..HEAD` — exit 0 — no leaks found' "résultat gitleaks"
+require_grep '- `echo critere-ok` — exit 0 — critere-ok' "résultat critère"
+require_grep '<summary>Journal complet</summary>' "journal replié"
 if [[ "$(printf '%s\n' "$OUTPUT" | grep -c '^horodatage=')" -eq 1 ]]; then
   ok "un seul horodatage"
 else
@@ -335,6 +383,97 @@ require_grep "un" "première commande"
 require_grep "deux" "deuxième commande"
 require_grep "trois" "troisième commande"
 require_absent "+ # commentaire" "commentaire ignoré"
+
+# 14. --comment crée, puis met à jour le commentaire marqué.
+setup_repo
+install_gh
+export GH_STATE="$REPO/gh-state"
+git -C "$REPO" remote add origin https://github.com/exemple/ezerbot.git
+printf '```verify\necho critere-ok\n```\n' >"$REPO/criteres.md"
+run_script --comment 138 137 "$SHA" "$REPO/criteres.md"
+expect_status 0 "commentaire créé"
+if [[ "$(cat "$GH_STATE/methods")" == "POST" ]]; then
+  ok "création POST"
+else
+  printf 'méthodes [%s]\n' "$(cat "$GH_STATE/methods")" >&2
+  bad "création POST"
+fi
+if python3 -c 'import json,sys; body=json.load(open(sys.argv[1],encoding="utf-8"))["body"]; full=open(sys.argv[2],encoding="utf-8").read(); sys.exit(0 if body==full and "<!-- factory-proof -->" in body else 1)' "$GH_STATE/last.json" "$REPO/target/verify-factory/137-${SHA}.log"; then
+  ok "corps publié"
+else
+  bad "corps publié"
+fi
+require_absent "commentaire tronqué" "pas de troncature si le journal tient"
+run_script --comment 138 137 "$SHA" "$REPO/criteres.md"
+expect_status 0 "commentaire mis à jour"
+if [[ "$(cat "$GH_STATE/methods")" == $'POST\nPATCH' ]]; then
+  ok "mise à jour PATCH"
+else
+  printf 'méthodes [%s]\n' "$(cat "$GH_STATE/methods")" >&2
+  bad "mise à jour PATCH"
+fi
+unset GH_STATE
+
+# 15. --comment sans dépôt origin.
+setup_repo
+install_gh
+export GH_STATE="$REPO/gh-state"
+printf '```verify\necho critere-ok\n```\n' >"$REPO/criteres.md"
+run_script --comment 138 137 "$REPO/criteres.md"
+expect_status 1 "commentaire sans origin"
+require_grep "origin introuvable: --comment impossible" "message origin"
+unset GH_STATE
+
+# 16. --comment sans gh.
+setup_repo
+printf '```verify\necho critere-ok\n```\n' >"$REPO/criteres.md"
+run_script --comment 9 12 "$REPO/criteres.md"
+expect_status 1 "commentaire sans gh"
+require_grep "gh absent: --comment impossible" "message commentaire sans gh"
+
+# 17. Journal trop long : le fichier reste complet, le commentaire tient dans la limite.
+setup_repo
+install_gh
+export GH_STATE="$REPO/gh-state"
+git -C "$REPO" remote add origin https://github.com/exemple/ezerbot.git
+cat >"$REPO/criteres.md" <<'EOF'
+```verify
+python3 -c 'print("\n".join(["ligne-journal"]*8000))'
+```
+EOF
+run_script --comment 138 21 "$REPO/criteres.md"
+expect_status 0 "commentaire long"
+long_log="$REPO/target/verify-factory/21-${SHA}.log"
+if [[ "$(grep -c 'ligne-journal' "$long_log")" -ge 8000 ]]; then
+  ok "journal local complet"
+else
+  bad "journal local complet"
+fi
+if grep -F -q 'Journal tronqué' "$long_log"; then
+  bad "journal local non tronqué"
+else
+  ok "journal local non tronqué"
+fi
+if python3 -c '
+import json, sys
+body = json.load(open(sys.argv[1], encoding="utf-8"))["body"]
+if len(body) > 65536:
+    raise SystemExit(1)
+need = ("<!-- factory-proof -->", "verify-factory: ok", "[… milieu omis …]", "ligne-journal", "Journal tronqué")
+raise SystemExit(0 if all(part in body for part in need) else 1)
+' "$GH_STATE/last.json"; then
+  ok "commentaire dans la limite"
+else
+  bad "commentaire dans la limite"
+fi
+unset GH_STATE
+
+# 18. Option --comment mal formée.
+setup_repo
+run_script --comment
+expect_status 2 "--comment sans numéro"
+run_script --comment abc 1
+expect_status 2 "--comment non numérique"
 
 if [[ "$fail_count" -ne 0 ]]; then
   printf '%s échec(s)\n' "$fail_count" >&2

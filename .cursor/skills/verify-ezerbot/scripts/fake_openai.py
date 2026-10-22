@@ -110,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path == "/v1/models":
+        if path in ("/v1/models", "/backend-api/codex/models"):
             self._send(200, json.dumps(MODELS).encode(), "application/json")
         elif path == "/backend-api/wham/usage":
             self._send(200, json.dumps(USAGE).encode(), "application/json")

@@ -177,7 +177,9 @@ export function findCountLabel(count, index) {
 }
 
 // WebKit avant Safari 17.2 n’a pas les Custom Highlights : la sélection native
-// montre alors l’occurrence, sans toucher aux nœuds que React met à jour.
+// montre alors l’occurrence, sans toucher aux nœuds que React met à jour. Tant
+// qu’un champ de saisie a le focus, on la laisse en place : la déplacer dans le
+// fil sortirait la frappe du champ de recherche.
 const selected = new WeakMap();
 
 export function clearFindMarks(root) {
@@ -205,7 +207,7 @@ function highlightRange(ranges, start, end) {
   range.setStart(first.node, Math.max(0, start - first.start));
   range.setEnd(last.node, Math.min(last.node.nodeValue.length, end - last.start));
   if (painted) view.CSS.highlights.set("gb-find-current", new view.Highlight(range));
-  else {
+  else if (!document.activeElement?.matches?.("input, textarea, [contenteditable]")) {
     selection.removeAllRanges();
     selection.addRange(range);
     selected.set(document, range);

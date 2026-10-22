@@ -396,6 +396,28 @@ test("sans Custom Highlights, la sélection native montre l’occurrence et se r
   assert.equal(ranges.length, 0);
 });
 
+test("sans Custom Highlights, la frappe dans le champ de recherche garde la sélection", () => {
+  const root = article({ id: "m-bot", name: "Ezerbot", body: `Oui ${rare}` });
+  const document = root.ownerDocument;
+  const view = document.defaultView;
+  delete view.CSS;
+  delete view.Highlight;
+  const ranges = [];
+  view.getSelection = () => ({
+    get rangeCount() { return ranges.length; },
+    getRangeAt: (index) => ranges[index],
+    removeAllRanges() { ranges.length = 0; },
+    addRange(range) { ranges.push(range); },
+  });
+  document.activeElement = { matches: (selector) => selector.split(", ").includes("input") };
+  const mark = highlightOccurrence(root, rare, 0);
+  assert.equal(mark.textContent, rare);
+  assert.equal(ranges.length, 0);
+  document.activeElement = null;
+  highlightOccurrence(root, rare, 0);
+  assert.equal(ranges.length, 1);
+});
+
 test("un vote que le Mac refuse n’entre ni dans l’export ni dans l’essai suivant", async () => {
   const { createNativeRatingTable } = await import("./thread-rating.js");
   const writes = [];

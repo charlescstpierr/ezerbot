@@ -2078,7 +2078,11 @@ fn git_inline_aliases_still_ask_when_a_permanent_shell_rule_exists() {
         assert!(f.root().join("note").exists(), "{command}");
     }
     // The alias really deletes: only the human's one-time approval runs it.
-    f.send("once", "run_shell", f.shell("git -c alias.wipe=rm wipe -q note"));
+    f.send(
+        "once",
+        "run_shell",
+        f.shell("git -c alias.wipe=rm wipe -q note"),
+    );
     let card = f.request("once");
     f.decide(&card, json!("allow_once"));
     f.finish("once");

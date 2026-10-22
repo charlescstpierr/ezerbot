@@ -97,10 +97,10 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .search-field input::placeholder { color: var(--sidebar-muted); opacity: 1; }
 .search-field kbd { color: var(--sidebar-muted); font-size: 9px; }
 .search-field input::-webkit-search-cancel-button { cursor: pointer; }
-.find-bar { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--pane); }
+.find-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: 0 0 auto; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--pane); }
 .find-bar[hidden] { display: none; }
 .find-title { margin: 0; font-size: 12px; font-weight: 600; white-space: nowrap; }
-.find-field { flex: 1; min-width: 120px; }
+.find-field { flex: 1 1 140px; min-width: 120px; }
 .find-bar .text-input { padding: 8px 10px; }
 .find-count { margin: 0; min-width: 9.5em; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .find-bar .secondary-button { padding: 8px 10px; white-space: nowrap; }

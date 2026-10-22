@@ -36,7 +36,7 @@ Grill du 21 octobre 2026.
 
 ### Rattrapage
 
-L’identité d’un créneau horaire est la routine, la version de son horaire et l’instant prévu dans son fuseau. Cette identité part au plus une fois. Un second réveil, un second tick ou un futur exécuteur distant qui trouverait l’identité déjà réclamée ne relance pas le run.
+L’identité d’un créneau horaire est la routine, le déclencheur horaire, la version de l’horaire de ce déclencheur et l’instant prévu dans son fuseau. Chaque déclencheur horaire d’un groupe a sa propre version : éditer l’un ne change pas la version, ni les créneaux rattrapables, d’un autre. Deux déclencheurs horaires d’un groupe qui tombent au même instant (un quotidien et un hebdomadaire un lundi, par exemple) ont donc deux identités distinctes et donnent deux occurrences. Chaque identité part au plus une fois. Un second réveil, un second tick ou un futur exécuteur distant qui trouverait l’identité déjà réclamée ne relance pas le run.
 
 L’éligibilité se juge sur l’intervalle manqué, pas sur l’état au tick de reprise : à la réouverture de l’application, « application ouverte » est vrai, ce qui ne dit rien de ce qui précédait. Le planificateur était censé tourner pendant un intervalle quand, tout du long, l’application était ouverte ou l’agent en arrière-plan était activé. Quitter l’application alors que l’agent est désactivé, ou désactiver l’agent alors que l’application est fermée, est une absence voulue : elle commence à cet instant et finit au premier tick suivant. Ouvrir l’application ou activer l’agent ferme l’absence voulue.
 
@@ -146,7 +146,7 @@ Une seule frontière : la routine telle que le panneau, l’historique, le fil e
 ## Décisions d’implémentation
 
 - Étendre le déclencheur à côté de l’horaire existant. Les routines cron, `@every` et date unique déjà enregistrées continuent de partir. Le premier nouveau genre est le webhook. Le groupe, GitHub, le courriel et le calendrier s’ajoutent comme genres simples supplémentaires, le groupe ne contenant que des genres simples.
-- Le planificateur horaire reste le propriétaire des créneaux, de la version d’horaire et de la coupure pause / édition / suppression. Le rattrapage est une politique sur le trou depuis le dernier tick, pas une seconde file parallèle.
+- Le planificateur horaire reste le propriétaire des créneaux, de la version d’horaire de chaque déclencheur horaire et de la coupure pause / édition / suppression. Le rattrapage est une politique sur le trou depuis le dernier tick, pas une seconde file parallèle.
 - Le fait « censé tourner » décrit l’intervalle manqué, pas le tick de reprise : application ouverte, ou agent activé, sans absence voulue (application quittée avec l’agent désactivé, ou agent désactivé application fermée) entre le dernier tick réussi et la reprise. L’instant de début et de fin d’une absence voulue est enregistré et injectable. La détection ne repose pas sur un journal de veille fragile : un trou hors absence voulue est le signal d’extinction, de veille ou de panne.
 - L’ingress webhook est un adaptateur devant l’identité d’occurrence. Funnel est l’adaptateur retenu. Un ingress ultérieur dépose le même `POST` authentifié.
 - Funnel et Serve sont deux publications Tailscale distinctes. Le port du webhook n’est pas le port de la PWA. Aucune commande Funnel ne vise le HTTPS 443 de la PWA.

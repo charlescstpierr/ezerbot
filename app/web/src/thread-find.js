@@ -97,7 +97,7 @@ function bodyElements(root) {
 
 const BLOCKS = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DETAILS", "DIV", "DL", "DT", "FIGCAPTION", "FIGURE", "H1", "H2", "H3", "H4", "H5", "H6", "HR", "LI", "OL", "P", "PRE", "SECTION", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
 
-// Les blocs et les sauts de ligne sont séparés par une espace sans nœud texte :
+// Les blocs, les sauts de ligne et les nœuds faits d’espaces blancs sont séparés par une espace sans nœud texte :
 // « Bonjour »/« monde » en deux paragraphes se cherche « Bonjour monde », et le
 // texte en ligne reste collé.
 function visibleText(body) {
@@ -108,6 +108,8 @@ function visibleText(body) {
     if (!node) return;
     if (node.nodeType === 3) {
       if (!node.nodeValue) return;
+      // Streamdown laisse un « \n » entre les blocs : il vaut une seule espace.
+      if (!node.nodeValue.trim()) { separate(); return; }
       pieces.push({ node, start: full.length, end: full.length + node.nodeValue.length });
       full += node.nodeValue;
       return;

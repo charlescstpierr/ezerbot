@@ -361,6 +361,22 @@ test("les paragraphes et les sauts de ligne séparent les mots, le texte en lign
   assert.equal(root.ownerDocument.defaultView.CSS.highlights.has("gb-find-current"), true);
 });
 
+test("les retours à la ligne que Streamdown laisse entre les paragraphes valent une espace", () => {
+  const document = createDocument();
+  const root = article({ id: "m-bot", name: "Ezerbot", body: "", document });
+  const bubble = root.querySelector("[data-find-body]");
+  bubble.childNodes = [];
+  const paragraph = (value) => {
+    const node = document.createElement("p");
+    node.append(value);
+    return node;
+  };
+  bubble.append(paragraph("Hello"), "\n", paragraph("world"), "\n");
+  assert.equal(findInRendered(root, "hello world").length, 1);
+  assert.equal(findInRendered(root, "helloworld").length, 0);
+  assert.ok(highlightOccurrence(root, "hello world", 0));
+});
+
 test("sans Custom Highlights, la sélection native montre l’occurrence et se retire", () => {
   const root = article({ id: "m-bot", name: "Ezerbot", body: `Oui ${rare}` });
   const view = root.ownerDocument.defaultView;

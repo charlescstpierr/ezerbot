@@ -8,6 +8,10 @@
   let selectedId = null;
   let pinnedId = null;
   let loadedKey = null;
+  let paintedSignature = null;
+  let orphan = null;
+  let lastState = null;
+  let currentConversationId = null;
   let detail = null;
   let viewState = {};
   let full = false;
@@ -77,6 +81,29 @@
     shell.fullButton.textContent = full ? "Revenir au fil" : "Ouvrir en pleine page";
   }
 
+  function conversationExists(id) {
+    const conversations = lastState && Array.isArray(lastState.conversations) ? lastState.conversations : [];
+    return conversations.some((conversation) => conversation.id === id);
+  }
+
+  function openPage(page, pages) {
+    if (page.conversation_id && conversationExists(page.conversation_id)) {
+      if (!host.openConversation(page.conversation_id)) {
+        host.notify("Impossible d’ouvrir la conversation de cette Page pendant qu’une réponse est en cours.");
+        return;
+      }
+      orphan = null;
+      pinnedId = page.id;
+    } else {
+      // La conversation d’origine n’existe plus : la Page reste affichée tant que le fil ouvert ne change pas.
+      pinnedId = null;
+      orphan = { id: page.id, anchor: currentConversationId };
+    }
+    selectedId = page.id;
+    paintList(pages);
+    load(page);
+  }
+
   function paintList(pages) {
     shell.list.replaceChildren();
     if (!pages.length) {
@@ -88,18 +115,17 @@
       button.type = "button";
       button.dataset.pageId = page.id;
       if (page.id === selectedId) button.setAttribute("aria-current", "page");
-      button.addEventListener("click", () => {
-        pinnedId = page.id;
-        if (page.conversation_id) host.openConversation(page.conversation_id);
-        selectedId = page.id;
-        paintList(pages);
-        load(page);
-      });
+      button.addEventListener("click", () => openPage(page, pages));
       shell.list.append(button);
     }
   }
 
   function choose(pages, conversationId) {
+    if (orphan) {
+      const kept = pages.find((page) => page.id === orphan.id);
+      if (kept && orphan.anchor === (conversationId || null)) return kept;
+      orphan = null;
+    }
     if (!conversationId) {
       pinnedId = null;
       return null;
@@ -194,7 +220,10 @@
     return el;
   }
 
+  const signature = (page) => `${sourceKey(page)}:${page && page.status ? page.status : ""}:${page && page.diagnostic ? page.diagnostic : ""}`;
+
   function paintCanvas(page) {
+    paintedSignature = signature(page);
     const ready = page && page.status === "ready" && page.document && page.document.view;
     if (!ready) {
       shell.diagnostic.hidden = false;
@@ -240,7 +269,9 @@
     }
     detail = page;
     if (document.activeElement !== shell.input) shell.input.value = page.title || "";
-    paintCanvas(page);
+    // Un état identique (le fil se rafraîchit toutes les 200 ms pendant une réponse) ne reconstruit pas le DOM :
+    // le focus clavier et la sélection de texte restent en place.
+    if (paintedSignature !== signature(page)) paintCanvas(page);
   }
 
   async function load(summary) {
@@ -287,6 +318,7 @@
     selectedId = null;
     detail = null;
     loadedKey = null;
+    paintedSignature = null;
     full = false;
     shell.stage.hidden = true;
     shell.canvas.replaceChildren();
@@ -298,10 +330,21 @@
   async function onState(state, ctx) {
     const ui = ensureShell();
     if (!ui) return;
+    lastState = state;
     const botId = ctx && ctx.bot && ctx.bot.id;
-    const bucket = botId && state && state.pages && state.pages.by_bot ? state.pages.by_bot[botId] : null;
-    const pages = Array.isArray(bucket) ? bucket : [];
+    const byBot = state && state.pages && state.pages.by_bot ? state.pages.by_bot : {};
     const conversationId = ctx && ctx.conversation ? ctx.conversation.id : null;
+    currentConversationId = conversationId;
+    const pages = Array.isArray(byBot[botId]) ? [...byBot[botId]] : [];
+    // Dans un groupe, chaque participant écrit sous son propre identifiant : les Pages du fil comptent, quel que soit l’auteur.
+    if (conversationId) {
+      for (const bucket of Object.values(byBot)) {
+        if (!Array.isArray(bucket)) continue;
+        for (const page of bucket) {
+          if (page.conversation_id === conversationId && !pages.some((known) => known.id === page.id)) pages.push(page);
+        }
+      }
+    }
     const chosen = choose(pages, conversationId);
     selectedId = chosen ? chosen.id : null;
     paintList(pages);

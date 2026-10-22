@@ -257,9 +257,18 @@ impl Parser {
                 Some('\\') => match self.bump() {
                     Some('n') => text.push('\n'),
                     Some('t') => text.push('\t'),
-                    Some('\\') => text.push('\\'),
-                    Some('"') => text.push('"'),
-                    Some(other) => text.push(other),
+                    Some('r') => text.push('\r'),
+                    Some('b') => text.push('\u{8}'),
+                    Some('f') => text.push('\u{c}'),
+                    Some(plain @ ('\\' | '"' | '\'' | '/')) => text.push(plain),
+                    Some('u') => text.push(self.parse_unicode_escape(line, character)?),
+                    Some(other) => {
+                        return Err(Diagnostic {
+                            line,
+                            character,
+                            message: format!("échappement « \\{other} » non pris en charge"),
+                        })
+                    }
                     None => {
                         return Err(Diagnostic {
                             line,
@@ -278,6 +287,51 @@ impl Parser {
                 }
             }
         }
+    }
+
+    fn parse_unicode_escape(&mut self, line: u32, character: u32) -> Result<char, Diagnostic> {
+        let invalid = || Diagnostic {
+            line,
+            character,
+            message: "échappement Unicode invalide".into(),
+        };
+        if self.eat_char('{') {
+            let mut digits = String::new();
+            while let Some(ch) = self.peek().filter(char::is_ascii_hexdigit) {
+                digits.push(ch);
+                self.bump();
+            }
+            if digits.is_empty() || digits.len() > 6 || !self.eat_char('}') {
+                return Err(invalid());
+            }
+            return u32::from_str_radix(&digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or_else(invalid);
+        }
+        let first = self.parse_hex4().ok_or_else(invalid)?;
+        let code = if (0xD800..0xDC00).contains(&first) {
+            if !(self.eat_char('\\') && self.eat_char('u')) {
+                return Err(invalid());
+            }
+            let second = self.parse_hex4().ok_or_else(invalid)?;
+            if !(0xDC00..0xE000).contains(&second) {
+                return Err(invalid());
+            }
+            0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
+        } else {
+            first
+        };
+        char::from_u32(code).ok_or_else(invalid)
+    }
+
+    fn parse_hex4(&mut self) -> Option<u32> {
+        let mut value = 0;
+        for _ in 0..4 {
+            value = value * 16 + self.peek()?.to_digit(16)?;
+            self.bump();
+        }
+        Some(value)
     }
 
     fn parse_number(&mut self) -> Result<i64, Diagnostic> {
@@ -1087,6 +1141,40 @@ mod tests {
 "#;
         let page = compile(source).expect("une ligne à deux colonnes");
         assert!(page.preview.contains('A'), "{}", page.preview);
+    }
+
+    fn single_state_text(source_literal: &str) -> Result<String, Diagnostic> {
+        let source = format!(
+            "export default function Page() {{\n  const [offre, setOffre] = useState({source_literal});\n  return (<p>{{offre}}</p>);\n}}\n"
+        );
+        compile(&source).map(|page| page.preview)
+    }
+
+    #[test]
+    fn string_escapes_are_decoded() {
+        let preview =
+            single_state_text(r#""caf\u00e9: 9\u20ac \u{1F600} \uD83D\uDE00 \"x\" \/ \'""#)
+                .expect("des échappements valides");
+        assert!(preview.contains("café: 9€ 😀 😀 \"x\" / '"), "{preview}");
+    }
+
+    #[test]
+    fn unsupported_string_escapes_are_diagnosed() {
+        for literal in [
+            r#""a\qb""#,
+            r#""\u12""#,
+            r#""\uD83D""#,
+            r#""\uDE00""#,
+            r#""\u{110000}""#,
+            r#""\x41""#,
+        ] {
+            let error = single_state_text(literal).expect_err(literal);
+            assert!(
+                error.message.contains("échappement"),
+                "{literal}: {}",
+                error.message
+            );
+        }
     }
 
     #[test]

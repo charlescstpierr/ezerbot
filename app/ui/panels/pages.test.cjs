@@ -293,3 +293,63 @@ for (const [levels, text] of [[14, "x"], [14, ""], [8, "é".repeat(3000)], [40, 
     assert.equal(canvasOf(main).children.length, 0);
   });
 }
+
+const ctxOf = (conversation, bot = "grokbot") => ({ bot: { id: bot }, conversation: conversation ? { id: conversation } : null });
+
+test("un rafraîchissement identique ne reconstruit pas la Page et garde le focus", async () => {
+  const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
+  const { panels, main } = harness(page);
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const before = buttons(canvasOf(main));
+  await panels.panel.onState(panels.state, ctxOf("fil"));
+  const after = buttons(canvasOf(main));
+  assert.equal(after.length, 3);
+  assert.equal(after.every((button, index) => button === before[index]), true);
+  after[1].click();
+  assert.match(main.textContent, /Offre choisie : Confort/);
+});
+
+test("une Page écrite par un autre participant d’un groupe s’affiche avec le fil du groupe", async () => {
+  const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
+  const { panels, main, sidebar } = harness(page);
+  panels.state.pages.by_bot = {
+    coordinateur: [],
+    grokbot: [{ id: "page_ready", bot_id: "grokbot", conversation_id: "groupe", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready" }],
+  };
+  await panels.panel.onState(panels.state, ctxOf("groupe", "coordinateur"));
+  assert.match(sidebar.textContent, /Trois forfaits/);
+  assert.match(main.textContent, /Offre choisie : Essentiel/);
+  await panels.panel.onState(panels.state, ctxOf("autre", "coordinateur"));
+  assert.doesNotMatch(sidebar.textContent, /Trois forfaits/);
+});
+
+test("une Page dont la conversation a disparu reste ouvrable, sans l’afficher à côté d’un autre fil", async () => {
+  const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
+  const { panels, main, sidebar } = harness(page);
+  panels.state.conversations = [{ id: "autre" }];
+  await panels.panel.onState(panels.state, ctxOf("autre"));
+  assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+  const link = descendants(sidebar).find((el) => el.tagName === "button" && el.classes.includes("page-link"));
+  assert.ok(link);
+  link.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(main.textContent, /Offre choisie : Essentiel/);
+  await panels.panel.onState(panels.state, ctxOf("autre"));
+  assert.match(main.textContent, /Offre choisie : Essentiel/);
+  await panels.panel.onState(panels.state, ctxOf("encore-un-autre"));
+  assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+});
+
+test("une navigation refusée pendant une réponse prévient au lieu d’afficher la Page à côté d’un autre fil", async () => {
+  const page = { id: "page_ready", title: "Trois forfaits", filename: "forfaits.page.tsx", status: "ready", diagnostic: null, preview: "", source_version: "v1", document: readyDocument };
+  const { panels, main, sidebar } = harness(page);
+  const notices = [];
+  panels.notify = (message) => notices.push(message);
+  panels.openConversation = () => false;
+  panels.state.conversations = [{ id: "fil" }, { id: "autre" }];
+  await panels.panel.onState(panels.state, ctxOf("autre"));
+  descendants(sidebar).find((el) => el.tagName === "button" && el.classes.includes("page-link")).click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices.length, 1);
+  assert.equal(descendants(main).some((el) => el.classes.includes("page-canvas") && el.children.length > 0), false);
+});

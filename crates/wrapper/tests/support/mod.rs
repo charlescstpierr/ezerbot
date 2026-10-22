@@ -250,7 +250,10 @@ impl FakeOpenAi {
                     .map(|header| header.value.to_string())
                     .unwrap_or_default();
                 let mut seen = observations.lock().unwrap();
-                let response_delay = if request.url() == "/v1/responses" {
+                let response_delay = if matches!(
+                    request.url(),
+                    "/v1/responses" | "/backend-api/codex/responses"
+                ) {
                     seen.response_delay
                 } else {
                     None
@@ -491,7 +494,8 @@ impl FakeOpenAi {
                 } else {
                     match request.url() {
                         "/v1/models" => seen.models_gate.clone(),
-                        "/v1/responses" => seen
+                        // Codex-session fixtures call the backend path: gate/delay it too.
+                        "/v1/responses" | "/backend-api/codex/responses" => seen
                             .response_gate
                             .as_ref()
                             .filter(|(at, _)| *at == seen.bodies.len())

@@ -464,10 +464,35 @@ fn handle(
                 let ctx = app.feature_context();
                 super::local::readable_granted_dir(&ctx, &input.path)?
             };
-            let read = {
+            let mut read = {
                 let ctx = app.feature_context();
                 super::local::read_granted_tree(&ctx, &directory)?
             };
+            // A primary refused as too large leaves its folder without a
+            // `SKILL.md`. Its companions must not become unrelated skills.
+            let refused: Vec<String> = read
+                .skipped
+                .iter()
+                .filter(|(path, reason)| {
+                    reason == "too-large" && (path == "SKILL.md" || path.ends_with("/SKILL.md"))
+                })
+                .map(|(path, _)| path.trim_end_matches("SKILL.md").to_owned())
+                .collect();
+            if !refused.is_empty() {
+                let (orphans, kept): (Vec<_>, Vec<_>) =
+                    read.files.into_iter().partition(|(path, _)| {
+                        refused.iter().any(|dir| {
+                            path.strip_prefix(dir.as_str())
+                                .is_some_and(|name| !name.contains('/'))
+                        })
+                    });
+                read.files = kept;
+                read.skipped.extend(
+                    orphans
+                        .into_iter()
+                        .map(|(path, _)| (path, "too-large".into())),
+                );
+            }
             // A folder chosen directly holds its own `SKILL.md`. Keep its name in
             // the paths so the primary and its annexes still share a directory,
             // as they do when the parent folder is imported.

@@ -2533,6 +2533,48 @@ fn a_granted_folder_does_not_read_unsupported_files_or_exceed_its_byte_budget() 
     );
 }
 
+#[test]
+fn a_granted_folder_with_an_oversized_primary_does_not_turn_its_annexes_into_skills() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-big-primary-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SKILL.md"),
+        format!("---\nname: Gros\n---\n{}", "a".repeat(1_100_000)),
+    )
+    .unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe").unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(
+        &mut app,
+        "/api/local/folders/add",
+        json!({"path": &scratch}),
+    );
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let items = report["report"].as_array().unwrap();
+    for name in ["dossier/SKILL.md", "dossier/modele.md"] {
+        let item = items.iter().find(|item| item["file_name"] == name).unwrap();
+        assert_eq!(item["status"]["status"], "skipped", "{name}: {items:?}");
+        assert_eq!(item["status"]["reason"], "too-large");
+    }
+    assert!(listing(&mut app, "grokbot").is_empty());
+}
+
 fn scopeguard(path: &std::path::Path) -> impl Drop {
     struct Guard(std::path::PathBuf);
     impl Drop for Guard {

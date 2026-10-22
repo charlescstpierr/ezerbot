@@ -163,7 +163,7 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
         let lead = rows
             .iter()
             .find(|(_, phase)| phase != "disconnected")
-            .map_or("github", |(row, _)| row.as_str());
+            .map_or(m.id, |(row, _)| row.as_str());
         let mut item = item_of(ctx, *m, lead, &local)?;
         let mut accounts = Vec::new();
         for (row, _) in rows.iter().filter(|(_, phase)| phase != "disconnected") {

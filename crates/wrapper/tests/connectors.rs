@@ -4989,6 +4989,46 @@ fn gmail_second_google_account_is_added_beside_the_first_with_its_own_secret() {
     }
 }
 
+/// The body the settings card sends for Connecter, built from `/api/state` as the
+/// panel does: the slot is named only when it is not the service itself.
+fn card_connect_body(item: &Value) -> Value {
+    if item["slot"].is_string() && item["slot"] != item["id"] {
+        json!({"id":item["id"],"account":item["slot"]})
+    } else {
+        json!({"id":item["id"]})
+    }
+}
+
+#[test]
+fn gmail_card_connects_a_first_account_on_a_fresh_base_and_after_the_last_one_left() {
+    let mut f = Fixture::new();
+    f.with_google_client();
+    let item = f.item("gmail");
+    assert_eq!(item["slot"], "gmail");
+    assert_eq!(item["status"], "disconnected");
+    let started = f.post("/api/connectors/connect", card_connect_body(&item));
+    let run = started["run_id"].as_str().expect("connect starts").to_owned();
+    f.decide(&run, json!("allow_once"));
+    f.gmail_inbox();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+
+    let run = f.post("/api/connectors/disconnect", json!({"id":"gmail"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    wait("gmail disconnected", || {
+        f.item("gmail")["status"] == "disconnected"
+    });
+    let item = f.item("gmail");
+    assert_eq!(item["slot"], "gmail");
+    let started = f.post("/api/connectors/connect", card_connect_body(&item));
+    assert!(started["run_id"].is_string(), "{started}");
+}
+
 #[test]
 fn gmail_sign_in_of_an_address_already_connected_adds_nothing() {
     let mut f = Fixture::new();

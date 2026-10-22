@@ -119,9 +119,26 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
 /// Checked before any card: a bad target or a missing account never opens one.
 pub(in super::super::super) fn validate(
     ctx: &Context<'_>,
-    arguments: &Value,
+    call: &ToolCall,
 ) -> Result<(), ApiError> {
-    parse(ctx, arguments).map(|_| ())
+    // A draft that already exists is bound to its account: resuming it must not resolve the
+    // optional `compte` of the original call again, which other accounts may now make ambiguous.
+    if let Some(run) = ctx.run_id {
+        if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
+            let bound: Option<(String, String)> = ctx
+                .connection
+                .query_row(
+                    "SELECT login,account_id FROM wrapper_github_drafts WHERE request_id=?1",
+                    [&request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((login, account)) = bound {
+                return held(ctx, &login, &account).map(|_| ());
+            }
+        }
+    }
+    parse(ctx, &call.arguments).map(|_| ())
 }
 fn display(draft: &Draft, fingerprint: &str) -> Value {
     json!({"brouillon":{

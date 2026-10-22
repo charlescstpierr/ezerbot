@@ -733,9 +733,9 @@ pub(super) fn pick(ctx: &Context<'_>, named: Option<&str>) -> Result<Pick, ApiEr
             )?;
         }
         found
-    } else if usable.len() == 1 {
-        0
     } else {
+        // What the conversation chose comes before any default: a chosen account that can no
+        // longer be used is said so, never silently replaced by another one.
         let remembered: Option<String> = match ctx.conversation_id {
             Some(conversation) => ctx
                 .connection
@@ -747,7 +747,31 @@ pub(super) fn pick(ctx: &Context<'_>, named: Option<&str>) -> Result<Pick, ApiEr
                 .optional()?,
             None => None,
         };
-        match remembered.and_then(|id| usable.iter().position(|a| a.id == id)) {
+        let mut found = None;
+        if let Some(id) = remembered {
+            found = usable.iter().position(|a| a.id == id);
+            if found.is_none() {
+                let lost: Option<(String, String)> = ctx
+                    .connection
+                    .query_row(
+                        "SELECT account_email,phase FROM wrapper_connector_catalogue WHERE account_id=?1 AND (id='github' OR id GLOB 'github:*')",
+                        [&id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((login, phase)) = lost {
+                    let why = if phase == "connected" {
+                        "n’est plus activé pour ce bot"
+                    } else {
+                        "doit être reconnecté (Paramètres › Connecteurs)"
+                    };
+                    return Err(invalid(&format!(
+                        "Le compte GitHub {login} choisi pour cette conversation {why}. Nommez un autre compte pour continuer avec lui."
+                    )));
+                }
+            }
+        }
+        match found.or((usable.len() == 1).then_some(0)) {
             Some(found) => found,
             None => {
                 let logins = logins();

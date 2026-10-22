@@ -2703,3 +2703,69 @@ fn github_draft_is_not_sent_when_its_account_lost_the_bot_activation() {
     assert_eq!(f.github_requests("/comments"), 0);
     assert!(f.published_comments().is_empty());
 }
+
+#[test]
+fn github_existing_draft_still_sends_with_its_account_when_another_account_is_added() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-two", "Texte du brouillon.");
+    // A second account makes a fresh call ambiguous, never the draft already bound to the first.
+    f.github_add_account();
+    f.github_resolve(&card, "send-two", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert_eq!(done(&f, &run)["compte"], "charles-test");
+    let seen = f.oauth.seen.lock().unwrap();
+    let first_token = seen.github.live_tokens[0].clone();
+    let (_, auth) = seen
+        .github
+        .authorization
+        .iter()
+        .rev()
+        .find(|(u, _)| u.ends_with("/comments"))
+        .unwrap();
+    assert_eq!(*auth, format!("Bearer {first_token}"));
+    assert_eq!(seen.github.comments.len(), 1);
+}
+
+#[test]
+fn github_conversation_choice_is_not_replaced_by_another_account_when_it_needs_reconnecting() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.github_add_account();
+    let conversation = f.github_conversation();
+    assert_eq!(
+        f.github_ask(&conversation, "keep-1", Some("charles-test"))["compte"],
+        "charles-test"
+    );
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    let before = f.github_requests("/issues");
+    let run = f.github_call_in(
+        &conversation,
+        "keep-2",
+        GITHUB_TOOL,
+        json!({"repository":"charles/essai"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("charles-test") && reason.contains("reconnecté"),
+        "{reason}"
+    );
+    assert_eq!(
+        f.github_requests("/issues"),
+        before,
+        "the other account is not called"
+    );
+    // Naming the other account still works and becomes the conversation's choice.
+    let other = f.github_ask(&conversation, "keep-3", Some("autre-compte"));
+    assert_eq!(other["compte"], "autre-compte");
+    assert_eq!(
+        f.github_ask(&conversation, "keep-4", None)["compte"],
+        "autre-compte"
+    );
+}

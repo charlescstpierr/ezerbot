@@ -130,7 +130,7 @@ pub(crate) fn is_github_comment(name: &str) -> bool {
     name == catalogue::github::COMMENT_TOOL
 }
 pub(crate) fn validate_github_comment(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
-    catalogue::github::comment::validate(ctx, &call.arguments)
+    catalogue::github::comment::validate(ctx, call)
 }
 /// Content of the draft card, stored with the approval request.
 pub(crate) fn github_comment_display(

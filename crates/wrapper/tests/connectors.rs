@@ -107,6 +107,10 @@ struct GmailScript {
     authorization: Vec<(String, String)>,
     /// Runs while the provider answers a listing: what happens to the app meanwhile.
     during_listing: Option<Box<dyn Fn() + Send>>,
+    /// Status the provider answers to a send; 0 and 200 deliver it.
+    send_status: u16,
+    /// The messages the provider delivered, as the RFC 822 text it was given.
+    sent: Vec<String>,
 }
 impl GmailScript {
     /// One message as Gmail's `format=full` returns it: a text part and an HTML part.
@@ -439,6 +443,29 @@ impl OAuth {
                             200,
                             json!({"emailAddress":"charles@example.test","messagesTotal":6}),
                         )
+                    } else if post && url == "/gmail/api/gmail/v1/users/me/messages/send" {
+                        match g.send_status {
+                            0 | 200 => {
+                                let given: Value = serde_json::from_str(&body).unwrap();
+                                let raw = URL_SAFE_NO_PAD
+                                    .decode(given["raw"].as_str().unwrap())
+                                    .unwrap();
+                                g.sent.push(String::from_utf8(raw).unwrap());
+                                (
+                                    200,
+                                    json!({"id":format!("sent{}",g.sent.len()),"threadId":"t1","labelIds":["SENT"]}),
+                                )
+                            }
+                            429 => (
+                                429,
+                                json!({"error":{"code":429,"message":"Too many","errors":[{"reason":"rateLimitExceeded"}]}}),
+                            ),
+                            403 => (
+                                403,
+                                json!({"error":{"code":403,"message":"Forbidden","errors":[{"reason":"insufficientPermissions"}]}}),
+                            ),
+                            status => (status, json!({"error":{"code":status}})),
+                        }
                     } else if let Some(listing) =
                         url.strip_prefix("/gmail/api/gmail/v1/users/me/messages?")
                     {
@@ -3799,4 +3826,390 @@ fn gmail_watch_survives_the_disconnection_of_another_google_service_with_the_sam
         ["m7"],
         "Gmail's baseline was not reset by another service"
     );
+}
+
+const GMAIL_SEND_TOOL: &str = "gmail_send_email";
+
+/// A delivered message split into its headers and its decoded body.
+fn mail_parts(raw: &str) -> (std::collections::HashMap<String, String>, String) {
+    let (head, body) = raw.split_once("\r\n\r\n").expect("headers then body");
+    let mut headers: std::collections::HashMap<String, String> = Default::default();
+    let mut last = String::new();
+    for line in head.split("\r\n") {
+        if line.starts_with(' ') {
+            if let Some(value) = headers.get_mut(&last) {
+                value.push_str(line);
+            }
+        } else {
+            let (name, value) = line.split_once(": ").expect("a header line");
+            last = name.to_lowercase();
+            headers.insert(last.clone(), value.to_owned());
+        }
+    }
+    let joined: String = body.split("\r\n").collect();
+    let text = base64::engine::general_purpose::STANDARD
+        .decode(joined)
+        .expect("base64 body");
+    (
+        headers,
+        String::from_utf8(text).unwrap().replace("\r\n", "\n"),
+    )
+}
+/// The text of a header that may be one or several RFC 2047 words.
+fn decoded_header(value: &str) -> String {
+    value
+        .split(' ')
+        .map(|word| {
+            match word
+                .strip_prefix("=?UTF-8?B?")
+                .and_then(|w| w.strip_suffix("?="))
+            {
+                Some(b64) => String::from_utf8(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .unwrap(),
+                )
+                .unwrap(),
+                None => format!("{word} "),
+            }
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+impl Fixture {
+    fn prepare_email(&mut self, id: &str, subject: &str, body: &str) -> (String, Value) {
+        self.github_prepare(
+            id,
+            GMAIL_SEND_TOOL,
+            json!({"to":["moi"],"cc":["bruno@example.test"],"subject":subject,"body":body}),
+        )
+    }
+    fn delivered_mail(&self) -> Vec<String> {
+        self.oauth.seen.lock().unwrap().gmail.sent.clone()
+    }
+    fn email_sends(&self) -> usize {
+        self.gmail_requests("/messages/send")
+    }
+    fn card_of(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+}
+
+#[test]
+fn gmail_email_waits_on_a_draft_card_shows_the_fields_and_cancel_sends_nothing() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let tool = tools
+        .iter()
+        .find(|t| t.name == GMAIL_SEND_TOOL)
+        .expect("the send tool is in the closed list");
+    assert!(tool.requires_approval);
+    assert!(
+        !tools
+            .iter()
+            .find(|t| t.name == GMAIL_TOOL)
+            .unwrap()
+            .requires_approval,
+        "the read stays without a card"
+    );
+
+    let (run, card) = f.prepare_email("mail-1", "Test parité", "Bonjour");
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Gmail");
+    assert_eq!(draft["de"], "charles@example.test");
+    assert_eq!(draft["a"], json!(["charles@example.test"]));
+    assert_eq!(draft["cc"], json!(["bruno@example.test"]));
+    assert_eq!(draft["objet"], "Test parité");
+    assert_eq!(draft["texte"], "Bonjour");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.email_sends(), 0, "nothing before the click");
+    assert!(f.delivered_mail().is_empty());
+
+    // There is no “Toujours”: neither a standing allow nor a standing refusal.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("mail-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.email_sends(), 0);
+
+    // Annuler sends nothing.
+    f.github_resolve(&card, "mail-cancel", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.email_sends(), 0);
+    assert!(f.delivered_mail().is_empty());
+}
+
+#[test]
+fn gmail_email_sends_the_corrected_text_once_under_the_connected_account() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, card) = f.prepare_email("mail-2", "Test parité", "Bonjour");
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    assert_eq!(f.email_sends(), 0);
+
+    f.github_resolve_issue(
+        &card,
+        "mail-send-1",
+        json!("allow_once"),
+        Some("Objet corrigé"),
+        Some("Bonjour validé"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["compte"], "charles@example.test");
+    assert_eq!(output["objet"], "Objet corrigé");
+    assert_eq!(output["texte"], "Bonjour validé");
+    assert_eq!(f.email_sends(), 1);
+    let delivered = f.delivered_mail();
+    assert_eq!(delivered.len(), 1, "one mail, not two");
+    let (headers, body) = mail_parts(&delivered[0]);
+    assert_eq!(headers["from"], "charles@example.test");
+    assert_eq!(headers["to"], "charles@example.test");
+    assert_eq!(headers["cc"], "bruno@example.test");
+    assert_eq!(decoded_header(&headers["subject"]), "Objet corrigé");
+    assert_eq!(body, "Bonjour validé");
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .gmail
+            .authorization
+            .iter()
+            .rev()
+            .find(|(url, _)| url.ends_with("/messages/send"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.gmail.live_tokens[0]));
+    }
+
+    // The settled card shows the text that left, bound to a new fingerprint.
+    let settled = f.card_of(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["objet"], "Objet corrigé");
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Bonjour validé");
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["publication_result"]["status"], "done");
+
+    // A second Envoyer on the same card never calls Gmail again: the same click is
+    // answered with its first receipt, another click is refused.
+    f.github_resolve_issue(
+        &card,
+        "mail-send-1",
+        json!("allow_once"),
+        Some("Autre objet"),
+        Some("Autre texte"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "mail-send-2",
+            json!("allow_once"),
+            Some("Autre objet"),
+            Some("Autre texte")
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.email_sends(), 1);
+    assert_eq!(f.delivered_mail().len(), 1);
+
+    // The model learned what left, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Bonjour validé"));
+    for secret in GMAIL_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+
+    // Reading the inbox still starts without any card.
+    let read = f.github_call("read-after-mail", GMAIL_TOOL, json!({}));
+    assert!(matches!(f.outcome(&read), ToolOutcome::Done { .. }));
+}
+
+#[test]
+fn gmail_email_sends_the_proposal_unedited_and_keeps_accents_and_lines_out_of_the_headers() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let subject =
+        "Réunion à 14 h — ordre du jour et pièces jointes à relire avant la rencontre de lundi";
+    let (run, card) = f.prepare_email(
+        "mail-3",
+        subject,
+        "Première ligne\nBcc: pirate@example.test\n\nÀ bientôt",
+    );
+    f.github_resolve(&card, "mail-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    let delivered = f.delivered_mail();
+    assert_eq!(delivered.len(), 1);
+    let (headers, body) = mail_parts(&delivered[0]);
+    assert_eq!(decoded_header(&headers["subject"]), subject);
+    assert!(
+        !headers.contains_key("bcc"),
+        "a body line is never a header"
+    );
+    assert_eq!(
+        body,
+        "Première ligne\nBcc: pirate@example.test\n\nÀ bientôt"
+    );
+}
+
+#[test]
+fn gmail_email_refuses_a_bad_draft_without_a_card_and_without_calling_google() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let cases = [
+        (
+            "bad-to",
+            json!({"to":["Bob <bob@example.test>"],"subject":"x"}),
+            "Adresse invalide",
+        ),
+        (
+            "bad-domain",
+            json!({"to":["bob@example"],"subject":"x"}),
+            "Adresse invalide",
+        ),
+        (
+            "no-to",
+            json!({"to":[],"subject":"x"}),
+            "au moins un destinataire",
+        ),
+        (
+            "no-subject",
+            json!({"to":["bob@example.test"],"subject":"  "}),
+            "objet est vide",
+        ),
+        (
+            "subject-lines",
+            json!({"to":["bob@example.test"],"subject":"a\nBcc: b@example.test"}),
+            "une seule ligne",
+        ),
+        (
+            "extra",
+            json!({"to":["bob@example.test"],"subject":"x","bcc":["z@example.test"]}),
+            "Arguments invalides",
+        ),
+    ];
+    for (id, arguments, expected) in cases {
+        let run = f.github_call(id, GMAIL_SEND_TOOL, arguments);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(expected), "{id}: {reason}");
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before,
+        "a bad draft opens no card"
+    );
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
+fn gmail_email_refused_limited_and_unconfirmed_sends_are_visible_and_never_a_sent_mail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    for (status, label, state, id) in [
+        (403, "Refusé", "refused", "mail-403"),
+        (429, "Trop de messages", "rate_limited", "mail-429"),
+        (503, "Envoi non confirmé", "unconfirmed", "mail-503"),
+    ] {
+        f.oauth.seen.lock().unwrap().gmail.send_status = status;
+        let sends = f.email_sends();
+        let (run, card) = f.prepare_email(id, "Test", "Bonjour");
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+            panic!("{status}: {:?}", f.outcome(&run));
+        };
+        assert!(reason.starts_with(label), "{status}: {reason}");
+        if status == 503 {
+            assert!(reason.contains("accusé de réception"), "{reason}");
+            assert!(reason.contains("peut-être parti"), "{reason}");
+        } else {
+            assert!(reason.contains("Aucun courriel n’est parti"), "{reason}");
+        }
+        let settled = f.card_of(&card);
+        assert_eq!(settled["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(settled["publication_result"]["status"], "failed");
+        assert_ne!(settled["publication_result"]["status"], "done");
+        // One call, and the card is spent: another click never reaches Google again.
+        assert_eq!(f.email_sends(), sends + 1, "{status}");
+        assert!(f
+            .github_resolve(&card, &format!("{id}-again"), json!("allow_once"), None)
+            .is_err());
+        f.app.tick(0);
+        assert_eq!(f.email_sends(), sends + 1, "{status}");
+    }
+    assert!(f.delivered_mail().is_empty(), "none of the three left");
+}
+
+#[test]
+fn gmail_email_is_refused_when_the_account_changed_or_lost_the_bot_after_the_card() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, card) = f.prepare_email("mail-acc", "Test", "Bonjour");
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    f.github_resolve(&card, "mail-acc-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("compte Gmail a changé"), "{reason}");
+    assert_eq!(f.email_sends(), 0);
+
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='charles@example.test' WHERE id='gmail'",
+            [],
+        )
+        .unwrap();
+    let (run, card) = f.prepare_email("mail-off", "Test", "Bonjour");
+    let server = f.item("gmail")["server"].clone();
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server["id"],"bot_id":"grokbot","enabled":false}),
+    );
+    f.github_resolve(&card, "mail-off-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("pas activé"), "{reason}");
+    assert_eq!(f.email_sends(), 0);
+    assert!(f.delivered_mail().is_empty());
 }

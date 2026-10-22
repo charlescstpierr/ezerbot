@@ -61,3 +61,19 @@ test("Envoyer transmet le titre et le corps corrigés d’une issue, sans « Tou
   assert.match(card, /Titre de l’issue/);
   assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
 });
+
+test("Envoyer transmet l’objet et le corps corrigés d’un courriel, et la carte nomme les trois échecs", async () => {
+  const calls = [];
+  const panels = mount(async (path, body) => { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; });
+  const mail = { ...message, id: "draft-5", payload: { ...message.payload, entry_id: "draft-5", kind: { kind: "approval", tool: "gmail_send_email" } } };
+  assert.equal(await panels.panel.onCardAction(mail, "forms.decide", { decision: "allow_once", title: "Objet validé", text: "Bonjour validé" }, context(panels)), true);
+  assert.equal(calls[0].body.title, "Objet validé");
+  assert.equal(calls[0].body.text, "Bonjour validé");
+  const other = { ...mail, id: "draft-6", payload: { ...mail.payload, entry_id: "draft-6" } };
+  await panels.panel.onCardAction(other, "forms.decide", { decision: "deny" }, context(panels));
+  assert.equal(Object.hasOwn(calls[1].body, "title"), false);
+  assert.equal(Object.hasOwn(calls[1].body, "text"), false);
+  const card = readFileSync(new URL("./cards/draft.jsx", import.meta.url), "utf8");
+  for (const word of ["draft.objet", "draft.de", "draft.cc", "Objet (modifiable)", "Corps du courriel", "Refusé", "Trop de messages", "Envoi non confirmé"]) assert.ok(card.includes(word), word);
+  assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
+});

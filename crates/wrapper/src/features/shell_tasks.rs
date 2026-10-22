@@ -153,7 +153,17 @@ fn redact_outcome(
 // Replay uses the ToolResult event's entry ID but reads this mutable journal.
 // Invalidate its covering summaries in the same transaction as each change;
 // the revision also rejects an in-flight summary made from the old result.
-fn invalidate_result(conn: &Connection, run_id: &str, call_id: &str) -> Result<(), ApiError> {
+// An ordinary live-output update (`live`) only acts when a stored summary
+// already covers the result: bumping the revision on every 150 ms snapshot
+// would make a longer summary request fail its revision check indefinitely.
+// The terminal update always invalidates, so a summary of partial output
+// cannot outlive the task.
+fn invalidate_result(
+    conn: &Connection,
+    run_id: &str,
+    call_id: &str,
+    live: bool,
+) -> Result<(), ApiError> {
     let kind = serde_json::to_value(grokbot_engine::contracts::RunEventKind::ToolResult)
         .expect("event kind serializes");
     let mut statement = conn.prepare(
@@ -167,6 +177,20 @@ fn invalidate_result(conn: &Connection, run_id: &str, call_id: &str) -> Result<(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for (conversation, seq) in entries {
+        if live {
+            let covered: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_summaries s
+                 WHERE conversation_id=?1 AND record IS NOT NULL AND (
+                    coverage_complete=0 OR EXISTS (
+                        SELECT 1 FROM engine_summary_entries e
+                        WHERE e.summary_id=s.summary_id AND e.entry_id=?2)))",
+                params![conversation, format!("{run_id}:{seq}")],
+                |row| row.get(0),
+            )?;
+            if !covered {
+                continue;
+            }
+        }
         grokbot_engine::compaction::invalidate_covering(
             conn,
             &conversation,
@@ -217,7 +241,7 @@ pub(crate) fn publish(
             )?;
             if updated == 1 {
                 if raw != serialized {
-                    invalidate_result(&tx, run_id, call_id)?;
+                    invalidate_result(&tx, run_id, call_id, false)?;
                 }
                 tx.execute(
                     "UPDATE wrapper_shell_tasks SET status='arrêtée', exit_code=NULL WHERE run_id=?1 AND call_id=?2",
@@ -258,7 +282,7 @@ pub(crate) fn publish(
     )?;
     if updated == 1 {
         if raw != serialized {
-            invalidate_result(&tx, run_id, call_id)?;
+            invalidate_result(&tx, run_id, call_id, snap.status == "en cours")?;
         }
         tx.execute(
             "UPDATE wrapper_shell_tasks SET status=?3, exit_code=?4 WHERE run_id=?1 AND call_id=?2 AND status='en cours'",
@@ -325,7 +349,7 @@ fn mark_stopped(conn: &Connection, only: Option<(&str, &str)>) -> Result<(), Api
             Some(Some(raw)) => {
                 if let Ok(mut value) = serde_json::from_str::<Value>(&raw) {
                     if value["output"]["status"] == "en cours" {
-                        invalidate_result(&tx, &run_id, &call_id)?;
+                        invalidate_result(&tx, &run_id, &call_id, false)?;
                         value["output"]["status"] = json!("arrêtée");
                         value["output"]["exit_code"] = Value::Null;
                         value["output"]["signal"] = Value::Null;
@@ -908,5 +932,84 @@ mod tests {
         let value: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["output"]["stdout"], "queue complète");
         assert_eq!(value["output"]["status"], "arrêtée");
+    }
+
+    #[test]
+    fn live_output_updates_leave_the_compaction_revision_alone_until_a_summary_covers_them() {
+        let (temp, conn) = db();
+        let file = temp.0.join("workspace.sqlite");
+        conn.execute("INSERT INTO engine_runs(run_id,bot_id,conversation_id,trigger_kind,trigger_ref,attempt,status,record) VALUES ('run','bot','chat','user','ref',0,'completed','{}')", []).unwrap();
+        conn.execute(
+            "INSERT INTO engine_run_events VALUES ('run',2,?1,?2)",
+            params![
+                serde_json::to_value(grokbot_engine::contracts::RunEventKind::ToolResult)
+                    .unwrap()
+                    .as_str(),
+                json!({"call_id":"call"}).to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO engine_external_tools VALUES ('run','call',?1)",
+            [json!({"status":"done","output":{"status":"en cours"}}).to_string()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", []).unwrap();
+        let mut redactor = redact::SnapshotRedactor::default();
+        let mut snap = Snap {
+            status: "en cours",
+            stdout: "un".into(),
+            stderr: String::new(),
+            truncated: false,
+            incomplete: false,
+            exit_code: None,
+            signal: None,
+        };
+        let revision =
+            |conn: &Connection| grokbot_engine::compaction::revision(conn, "chat").unwrap();
+        let before = revision(&conn);
+        for text in ["un", "un deux", "un deux trois"] {
+            snap.stdout = text.into();
+            assert!(matches!(
+                publish(&file, "run", "call", &snap, &mut redactor).unwrap(),
+                Publish::Updated
+            ));
+        }
+        assert_eq!(revision(&conn), before, "no summary covers the live result");
+        let summary = grokbot_engine::contracts::Summary {
+            summary_id: "covering".into(),
+            conversation_id: "chat".into(),
+            text: "still running".into(),
+            truncation_last_entry_inclusive: "run:2".into(),
+            resume_from_entry_inclusive: "later".into(),
+            previous_summary_id: None,
+            includes_tool_results: true,
+            strategy: "test".into(),
+        };
+        conn.execute("INSERT INTO engine_summaries(summary_id,conversation_id,previous_summary_id,record,segment_start_entry_id,coverage_complete) VALUES ('covering','chat',NULL,?1,'covering',1)", [serde_json::to_string(&summary).unwrap()]).unwrap();
+        conn.execute(
+            "INSERT INTO engine_summary_entries VALUES ('covering','run:2')",
+            [],
+        )
+        .unwrap();
+        snap.stdout = "un deux trois quatre".into();
+        publish(&file, "run", "call", &snap, &mut redactor).unwrap();
+        assert!(
+            revision(&conn) > before,
+            "a covering summary is invalidated"
+        );
+        assert!(
+            grokbot_engine::compaction::latest_in_segment(&conn, "chat", "covering")
+                .unwrap()
+                .is_none()
+        );
+        let after_live = revision(&conn);
+        snap.status = "terminé";
+        snap.exit_code = Some(0);
+        publish(&file, "run", "call", &snap, &mut redactor).unwrap();
+        assert!(
+            revision(&conn) > after_live,
+            "the terminal update always bumps"
+        );
     }
 }

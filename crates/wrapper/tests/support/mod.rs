@@ -92,7 +92,12 @@ pub struct Seen {
     pub response_gate: Option<(usize, Arc<AtomicBool>)>,
     /// Test-only delay before sending Responses headers (without holding Seen).
     pub response_delay: Option<Duration>,
+    /// Optional answer derived from the request. `None` keeps the scripted queue.
+    pub reply_for: Option<ReplyFor>,
 }
+
+/// Test hook: inspect the request and optionally replace the scripted reply.
+pub type ReplyFor = Arc<dyn Fn(&Value) -> Option<ScriptedResponse> + Send + Sync>;
 
 pub struct ScriptedResponse {
     pub status: u16,
@@ -447,6 +452,12 @@ impl FakeOpenAi {
                                 json!({"type":"response.completed"}),
                             ]));
                                 delay = seen.memory_delay;
+                                (reply.status, reply.content_type, reply.body)
+                            } else if let Some(reply) = seen
+                                .reply_for
+                                .clone()
+                                .and_then(|reply| reply(&request_body))
+                            {
                                 (reply.status, reply.content_type, reply.body)
                             } else if let Some(reply) = seen.responses.pop_front() {
                                 (reply.status, reply.content_type, reply.body)

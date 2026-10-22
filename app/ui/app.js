@@ -210,6 +210,7 @@
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
     get state() { return state; },
     get connected() { return connected; },
+    get busy() { return busy; },
     api, refresh, notify, copyText, createBotMascot, botSummary,
     followVoiceReply(conversationId) {
       if (window.EzerbotVoiceMode?.active() && currentConversation()?.id === conversationId) render(true);

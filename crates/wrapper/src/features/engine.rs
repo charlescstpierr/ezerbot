@@ -2004,37 +2004,18 @@ impl RunGatewayCall<'_> {
             if sending.entry_id == original.entry_id
                 && matches!(run.trigger, Trigger::Delegation { .. })
             {
-                let sources = super::delegation::material_sources(self.connection, &run)?;
+                let delivery = super::delegation::delivery_for_run(self.connection, &run)?
+                    .ok_or_else(|| Error::InvalidInput("missing delegation".into()))?;
                 let mut urls = self.image_urls.lock().unwrap_or_else(|e| e.into_inner());
-                let (mut images, documents) = super::attachments::selected_material(
+                let (images, documents) = super::attachments::selected_material(
                     &ctx,
-                    &sources,
+                    delivery.sources(),
+                    delivery.grants().live(),
                     &request.model,
                     sending_bytes,
                     &mut urls,
                 )
                 .map_err(engine_error)?;
-                if let Some((conversation, ids)) =
-                    super::delegation::delegation_image_selection(self.connection, &run)?
-                {
-                    for image in super::attachments::images_for_selected(
-                        &ctx,
-                        &conversation,
-                        &ids,
-                        &request.model,
-                        sending_bytes,
-                        &mut urls,
-                    )
-                    .map_err(engine_error)?
-                    {
-                        if !images
-                            .iter()
-                            .any(|existing| existing.attachment_id == image.attachment_id)
-                        {
-                            images.push(image);
-                        }
-                    }
-                }
                 drop(urls);
                 sending.images = images;
                 sending.text.push_str(&documents);

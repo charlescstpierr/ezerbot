@@ -173,6 +173,7 @@ impl Session {
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));
         }
+        let within = turn.is_none().then_some(limits.total);
         thread::spawn(move || {
             let worker = Worker {
                 inner: session.inner.clone(),
@@ -186,6 +187,7 @@ impl Session {
                     true,
                     &mut notices,
                     &abandoned,
+                    within,
                     &mut |status| {
                         let _ = send(&tx, Wire::Headers(status));
                     },
@@ -594,6 +596,99 @@ mod elapsed_interval {
         }
         session.hold_worker_exits(false);
         assert!(peak <= 4, "closing peaked at {peak}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The title cap bounds the request itself, not only the caller's wait: a
+    /// server that never answers loses its connection when the cap expires.
+    #[test]
+    fn a_slow_title_request_is_dropped_within_its_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed_tx, closed) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            socket
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            let mut byte = [0u8; 1];
+            loop {
+                match socket.read(&mut byte) {
+                    Ok(0) => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Ok(_) | Err(_) => break,
+                }
+            }
+            let _ = closed_tx.send(Instant::now());
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-title-cap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "cap",
+                "account_id": "cap",
+                "client_id": "cap",
+                "access_token": token(),
+                "refresh_token": "cap-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&db, endpoints, false, true);
+        *super::lock(&session.inner.deadlines) = super::Deadlines {
+            first: Duration::from_secs(30),
+            stall: Duration::from_secs(30),
+            total: Duration::from_secs(2),
+        };
+        let started = Instant::now();
+        let mut events = Vec::new();
+        session
+            .reliable_stream(
+                serde_json::json!({"model": "gpt-test", "instructions": "Écris un titre", "input": []}),
+                &AtomicBool::new(false),
+                None,
+                &mut |_, _| Ok(()),
+                &mut |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(matches!(events.last(), Some(ModelEvent::Failed { .. })));
+        let dropped = closed
+            .recv_timeout(Duration::from_secs(6))
+            .expect("the title request was still open after its cap");
+        assert!(
+            dropped.duration_since(started) <= Duration::from_secs(4),
+            "the request outlived the title cap by {:?}",
+            dropped.duration_since(started)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

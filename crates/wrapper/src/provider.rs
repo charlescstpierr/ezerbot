@@ -1914,6 +1914,7 @@ impl Session {
             capability_fallback,
             notices,
             &AtomicBool::new(false),
+            None,
             &mut |_| {},
         )
     }
@@ -1924,15 +1925,26 @@ impl Session {
         capability_fallback: bool,
         notices: &mut Vec<String>,
         abandoned: &AtomicBool,
+        within: Option<Duration>,
         on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
+        let deadline = within.map(|within| Instant::now() + within);
         let mut token = self.bearer(false)?;
         let mut refreshed = false;
         loop {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
             }
-            let attempt = self.request(&token, &mut body)?.send_json(body.clone());
+            let mut request = self.request(&token, &mut body)?;
+            if let Some(deadline) = deadline {
+                // The cap bounds the whole call, not only the caller's wait.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(Failure::other("Réponse annulée."));
+                }
+                request = request.timeout(remaining);
+            }
+            let attempt = request.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {
                 Ok(response) => {
                     on_status(response.status());

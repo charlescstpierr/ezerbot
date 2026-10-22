@@ -194,6 +194,68 @@
     }
   }
 
+  function grantedFolders() {
+    const folders = panels.state.local?.folders;
+    return Array.isArray(folders) ? folders.filter((folder) => typeof folder === "string" && folder.startsWith("/")) : [];
+  }
+  async function importGrantedFolder(botId, path) {
+    const job = session(botId);
+    if (job.running || job.mutating) return;
+    job.running = true;
+    job.generation++;
+    job.rows = [{ path, status: "pending" }];
+    job.message = "Import en cours… Les paquets déjà écrits sont conservés.";
+    changed();
+    try {
+      const { report } = await panels.api("/api/skills/import-folder", { bot_id: botId, path });
+      if (!Array.isArray(report)) throw new Error("Rapport incomplet du moteur local.");
+      const rows = report.map((item) => {
+        const status = item.status?.status;
+        if (!["written", "skipped", "duplicate", "annex"].includes(status)) throw new Error("Statut d’import inconnu.");
+        if (status === "annex") job.points.import = true;
+        return { path: item.file_name, status, reason: item.status.reason, skillId: item.status.skill_id };
+      });
+      job.rows = rows;
+      job.message = "Import terminé. Les succès sont conservés même si d’autres fichiers sont refusés.";
+    } catch (error) {
+      job.rows = [{ path, status: "unknown", reason: error.message }];
+      job.message = "Import interrompu : certains résultats sont incertains. Vérifiez la liste avant de réimporter; les écritures déjà reçues restent conservées.";
+    } finally {
+      await refresh();
+      job.running = false;
+      changed();
+    }
+  }
+  let folderPicker = null;
+  function chooseGrantedFolder(botId) {
+    const folders = grantedFolders();
+    if (!folders.length) {
+      panels.notify("Accordez d’abord ce dossier dans les fichiers locaux.");
+      return;
+    }
+    if (folders.length === 1) {
+      void importGrantedFolder(botId, folders[0]);
+      return;
+    }
+    folderPicker?.close();
+    const picker = node("dialog", "dialog skills-folder-picker");
+    folderPicker = picker;
+    picker.setAttribute("aria-label", "Dossier accordé à importer");
+    const list = node("ul", "skills-folder-choices");
+    for (const path of folders) {
+      const item = node("li");
+      item.append(button(path, () => {
+        picker.close();
+        void importGrantedFolder(botId, path);
+      }));
+      list.append(item);
+    }
+    picker.append(node("h2", "", "Importer un dossier accordé"), list, button("Annuler", () => picker.close()));
+    picker.addEventListener("close", () => { if (folderPicker === picker) folderPicker = null; picker.remove?.(); });
+    (document.getElementById("panels") || document.body).append(picker);
+    picker.showModal();
+  }
+
   function botSection(bot, container) {
     const section = node("section", "skills-section");
     const sectionTitle = node("h3", "", "Skills"); sectionTitle.tabIndex = -1;
@@ -227,22 +289,19 @@
     const fileInput = node("input", "skills-file-input");
     fileInput.type = "file"; fileInput.multiple = true;
     fileInput.accept = EXTENSIONS.map((extension) => `.${extension}`).join(",");
-    const directoryInput = fileInput.cloneNode();
-    directoryInput.setAttribute("webkitdirectory", "");
-    directoryInput.setAttribute("directory", "");
-    fileInput.name = "skills-files"; directoryInput.name = "skills-directory";
+    fileInput.name = "skills-files";
     fileInput.setAttribute("aria-label", "Fichiers de skills");
-    directoryInput.setAttribute("aria-label", "Dossier de skills");
-    for (const input of [fileInput, directoryInput]) input.addEventListener("change", () => {
-      const files = Array.from(input.files || []);
-      input.value = ""; // Re-selecting the same file must still trigger change.
+    fileInput.addEventListener("change", () => {
+      const files = Array.from(fileInput.files || []);
+      fileInput.value = ""; // Re-selecting the same file must still trigger change.
       void importFiles(bot.id, files);
     });
     const add = button("Nouvelle skill", () => void openEditor(null));
     const chooseFiles = button("Importer des fichiers", () => fileInput.click());
-    const chooseDirectory = button("Importer un dossier", () => directoryInput.click());
+    const chooseDirectory = button("Importer un dossier", () => chooseGrantedFolder(bot.id));
+    chooseDirectory.title = "Lit un dossier déjà accordé dans Fichiers locaux, sans suivre les liens.";
     const demonstrate = button("Montrer au bot", () => window.EzerbotDemonstration?.open(bot.id));
-    actions.append(add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput);
+    actions.append(add, demonstrate, chooseFiles, chooseDirectory, fileInput);
     section.append(node("p", "skills-note", "Import par paquets de 8 Mio. Chaque paquet est indépendant : des fichiers de même nom de frontmatter dans des paquets différents peuvent mettre à jour la même skill (historique conservé)."));
 
     // Dialogs live outside #bot-form: nested forms would submit bot settings.
@@ -506,7 +565,7 @@
       const recording = panels.state.demonstrations?.session;
       demonstrate.textContent = recording?.status === "recording" && recording.bot_id === bot.id ? "Démonstration en cours…" : "Montrer au bot";
       demonstrate.title = recording?.status === "recording" && recording.bot_id === bot.id ? "Ouvrir les contrôles de la démonstration" : "Montrer une tâche sur votre Mac";
-      for (const control of [add, demonstrate, chooseFiles, chooseDirectory, fileInput, directoryInput]) control.disabled = locked;
+      for (const control of [add, demonstrate, chooseFiles, chooseDirectory, fileInput]) control.disabled = locked;
       const skills = panels.state.skills?.by_bot?.[bot.id] || [];
       add.disabled = locked || skills.length >= 250;
       const next = JSON.stringify([skills, locked, panels.state.skills?.error, panels.state.demonstrations?.links]);

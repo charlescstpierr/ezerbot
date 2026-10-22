@@ -2,6 +2,10 @@
 //! creation), POST /update and /delete (skill_id + expected_version), and GET
 //! /versions?bot_id=…&skill_id=…; all suffixes are under /api/skills.
 //! POST /import accepts {bot_id, files:[{path,content}|{path,base64}|{path,bytes:[u8]}]}.
+//! POST /import-folder accepts {bot_id, path} and reads only a directory already
+//! granted for local files. That read uses `read_directory` (`symlink_metadata`):
+//! a symlink is skipped and its target is never opened. A `directory` field on
+//! /import is rejected; it used to read an arbitrary path with no grant check.
 //! Limit batches to 1,000 files and <=8 MiB of SERIALIZED JSON, not raw file
 //! bytes; the host ceiling is 16 MiB. Base64 preserves binary/invalid UTF-8 for
 //! the importer to reject without numeric-array expansion. Append per-file
@@ -108,9 +112,13 @@ struct ImportInput {
     bot_id: String,
     #[serde(default)]
     files: Vec<Upload>,
-    /// Local folder read by the server. Symlinks are skipped and never followed.
-    #[serde(default)]
-    directory: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FolderImportInput {
+    bot_id: String,
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -213,6 +221,7 @@ pub fn routes(
                     | "/api/skills/restore"
                     | "/api/skills/versions"
                     | "/api/skills/import"
+                    | "/api/skills/import-folder"
             )
     ) {
         return None;
@@ -422,8 +431,7 @@ fn handle(
             }
             // Decode before taking the writer lock; malformed transport data
             // refuses the request before any file is persisted.
-            let mut skipped_links = Vec::new();
-            let mut files: Vec<_> = input
+            let files = input
                 .files
                 .into_iter()
                 .map(|file| {
@@ -443,35 +451,66 @@ fn handle(
                     })
                 })
                 .collect::<Result<_, ApiError>>()?;
-            if let Some(directory) = input.directory.as_deref() {
-                let (read, skipped) = import::read_directory(std::path::Path::new(directory))
-                    .map_err(|_| ApiError::new(400, "Le dossier n'a pas pu être lu."))?;
-                skipped_links = skipped;
-                files = read;
-            }
-            if files.len() + skipped_links.len() > MAX_IMPORT_FILES {
-                return Err(ApiError::new(
-                    400,
-                    "too-many-files: maximum 1000 per request",
-                ));
-            }
-            // Hold the writer lock BEFORE listing: both the cap and digest checks
-            // in import_batch are read-then-write. File errors are not tx errors.
-            let tx = write_transaction(&app.connection)?;
-            require_bot(app, &input.bot_id)?;
-            let mut report =
-                import::import_batch(&tx, &input.bot_id, &files).map_err(skill_error)?;
-            for (path, reason) in skipped_links {
-                report.push(grokbot_skills::import::ImportItem {
-                    file_name: path,
-                    status: grokbot_skills::import::ImportStatus::Skipped { reason },
-                });
-            }
-            tx.commit()?;
-            Ok(json!({"report": report, "scope": "request"}))
+            finish_import(app, &input.bot_id, files, Vec::new())
+        }
+        (_, "/api/skills/import-folder") => {
+            let input: FolderImportInput = parse(body)?;
+            // Resolve the grant before the writer lock. The filesystem walk can
+            // be large; the permission decision uses the same folder table as
+            // local reads and does not follow a symlink at the chosen path.
+            let directory = {
+                let ctx = app.feature_context();
+                super::local::readable_granted_dir(&ctx, &input.path)?
+            };
+            let (files, skipped) = read_granted_directory(&directory)?;
+            finish_import(app, &input.bot_id, files, skipped)
         }
         _ => unreachable!("filtered skill route"),
     }
+}
+
+type DirectoryRead = (Vec<ImportFile>, Vec<(String, String)>);
+
+fn read_granted_directory(path: &std::path::Path) -> Result<DirectoryRead, ApiError> {
+    import::read_directory(path).map_err(|error| {
+        let message = match (error.kind(), error.to_string().as_str()) {
+            (std::io::ErrorKind::InvalidInput, "too-many-files") => {
+                "too-many-files: maximum 1000 per request"
+            }
+            (std::io::ErrorKind::InvalidInput, "symlink") => {
+                "Un lien symbolique n’est pas importé."
+            }
+            _ => "Le dossier n'a pas pu être lu.",
+        };
+        ApiError::new(400, message)
+    })
+}
+
+fn finish_import(
+    app: &App,
+    bot_id: &str,
+    files: Vec<ImportFile>,
+    skipped_links: Vec<(String, String)>,
+) -> Result<Value, ApiError> {
+    if files.len() + skipped_links.len() > MAX_IMPORT_FILES {
+        return Err(ApiError::new(
+            400,
+            "too-many-files: maximum 1000 per request",
+        ));
+    }
+    // Hold the writer lock BEFORE listing: both the cap and digest checks
+    // in import_batch are read-then-write. File errors are not tx errors.
+    let tx = write_transaction(&app.connection)?;
+    require_bot(app, bot_id)?;
+    let mut report = import::import_batch(&tx, bot_id, &files).map_err(skill_error)?;
+    for (path, reason) in skipped_links {
+        report.push(grokbot_skills::import::ImportItem {
+            file_name: path,
+            status: grokbot_skills::import::ImportStatus::Skipped { reason },
+        });
+    }
+    tx.commit()?;
+    Ok(json!({"report": report, "scope": "request"}))
 }
 
 fn require_bot(app: &App, bot_id: &str) -> Result<(), ApiError> {
@@ -1010,14 +1049,14 @@ fn applied_skill_text(name: &str, body: &str, files: &[SkillFile]) -> String {
         let prefix: String = chars[..low].iter().collect();
         return format!("{header}{prefix}\n{notice}\n{annexes}{close}");
     }
+    let fits_annexes = |section: &str| {
+        fenced_tool_result_len(&format!("{header}\n{notice}\n{section}{close}"))
+            <= APPLIED_CONTEXT_BUDGET
+    };
     let mut kept = String::new();
     for file in files {
         let whole = format!("Annexe {} :\n{}\n", file.path, file.content);
-        let room = |extra: &str| {
-            fenced_tool_result_len(&format!("{header}\n{notice}\n{kept}{extra}{close}"))
-                <= APPLIED_CONTEXT_BUDGET
-        };
-        if room(&whole) {
+        if fits_annexes(&format!("{kept}{whole}")) {
             kept.push_str(&whole);
             continue;
         }
@@ -1029,7 +1068,7 @@ fn applied_skill_text(name: &str, body: &str, files: &[SkillFile]) -> String {
             let mid = low + (high - low).div_ceil(2);
             let prefix: String = content[..mid].iter().collect();
             let block = format!("{label}{prefix}\n[annexe tronquée]\n");
-            if room(&block) {
+            if fits_annexes(&format!("{kept}{block}")) {
                 low = mid;
             } else {
                 high = mid - 1;
@@ -1038,14 +1077,55 @@ fn applied_skill_text(name: &str, body: &str, files: &[SkillFile]) -> String {
         if low > 0 {
             let prefix: String = content[..low].iter().collect();
             kept.push_str(&format!("{label}{prefix}\n[annexe tronquée]\n"));
-        } else {
-            let announced = format!("Annexe {} :\n[annexe tronquée]\n", file.path);
-            if room(&announced) {
-                kept.push_str(&announced);
-            }
+            continue;
         }
+        let announced = format!("Annexe {} :\n[annexe tronquée]\n", file.path);
+        if fits_annexes(&format!("{kept}{announced}")) {
+            kept.push_str(&announced);
+            continue;
+        }
+        const MARKER: &str = "[annexe tronquée]\n";
+        if fits_annexes(&format!("{kept}{MARKER}")) {
+            kept.push_str(MARKER);
+            continue;
+        }
+        // Even the marker line does not fit beside what earlier annexes kept.
+        // Shrink that earlier text so this annex still announces the cut.
+        kept = keep_annex_marker(&kept, MARKER, &fits_annexes);
     }
     format!("{header}\n{notice}\n{kept}{close}")
+}
+
+/// Preserve a trailing truncation marker, then append another, by shortening
+/// the text that already occupied the fence.
+fn keep_annex_marker(kept: &str, marker: &str, fits: &impl Fn(&str) -> bool) -> String {
+    let head = kept.strip_suffix(marker).unwrap_or(kept);
+    let suffix = if kept.ends_with(marker) {
+        marker.repeat(2)
+    } else {
+        marker.to_owned()
+    };
+    let chars: Vec<char> = head.chars().collect();
+    let mut low = 0;
+    let mut high = chars.len();
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let prefix: String = chars[..mid].iter().collect();
+        if fits(&format!("{prefix}{suffix}")) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let prefix: String = chars[..low].iter().collect();
+    let candidate = format!("{prefix}{suffix}");
+    if fits(&candidate) {
+        candidate
+    } else if fits(marker) {
+        marker.to_owned()
+    } else {
+        kept.to_owned()
+    }
 }
 
 fn applied_skill_block(ctx: &Context<'_>, request: &ContextRequest) -> Option<ContextBlock> {
@@ -1094,4 +1174,32 @@ fn applied_skill_block(ctx: &Context<'_>, request: &ContextRequest) -> Option<Co
         budget: 16_000,
         text,
     })
+}
+
+#[cfg(test)]
+mod truncation {
+    use super::{applied_skill_text, fenced_tool_result_len, APPLIED_CONTEXT_BUDGET};
+    use grokbot_skills::library::SkillFile;
+
+    #[test]
+    fn a_marker_survives_when_the_announced_line_does_not_fit() {
+        let huge = "x".repeat(20_000);
+        let files = vec![
+            SkillFile {
+                path: "un.md".into(),
+                content: huge.clone(),
+            },
+            SkillFile {
+                path: "deux.md".into(),
+                content: huge.clone(),
+            },
+        ];
+        let text = applied_skill_text("Titre", "corps", &files);
+        assert!(
+            text.matches("[annexe tronquée]").count() >= 2,
+            "chaque annexe doit encore annoncer la coupe, pas seulement la première"
+        );
+        assert!(fenced_tool_result_len(&text) <= APPLIED_CONTEXT_BUDGET);
+        assert!(!text.contains(&huge));
+    }
 }

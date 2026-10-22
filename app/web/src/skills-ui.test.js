@@ -20,6 +20,7 @@ class Element {
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   cloneNode() { return new Element(this.tagName); }
+  remove() { this.removed = true; }
   showModal() { this.open = true; }
   close() { this.open = false; this.listeners.close?.(); }
   focus() {}
@@ -139,7 +140,7 @@ function mount(options = {}) {
       requests.push({ path: "refresh" });
       if (options.refresh) await options.refresh(panels, requests);
     },
-    notify() {},
+    notify(message) { options.notify?.(message); },
     openConversation(id) {
       const known = (panels.state.conversations || []).some((item) => item.id === id);
       requests.push({ path: "open", body: id, known });
@@ -191,7 +192,7 @@ test("an annex import report stays readable and checks the folder point", async 
       ] };
     },
   });
-  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const input = descendants(root).find((el) => el.name === "skills-files");
   input.files = [textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"), textFile("dossier/modele.md", "Réponds exactement : Le modèle annexe est suivi.")];
   input.listeners.change();
   await flushImport();
@@ -287,7 +288,7 @@ test("a folder import skips a symlink and a path that leaves the folder", async 
       return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
     },
   });
-  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const input = descendants(root).find((el) => el.name === "skills-files");
   const link = textFile("dossier/lien.md", "secret hors dossier");
   link.symlink = true;
   input.files = [
@@ -336,7 +337,7 @@ test("an absolute path is not uploaded", async () => {
       return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
     },
   });
-  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const input = descendants(root).find((el) => el.name === "skills-files");
   input.files = [
     textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps"),
     textFile("/etc/secret.md", "hors racine"),
@@ -361,7 +362,7 @@ test("companions stay local when SKILL.md cannot be prepared", async () => {
       return { report: body.files.map(() => ({ status: { status: "written", skill_id: "s" } })) };
     },
   });
-  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const input = descendants(root).find((el) => el.name === "skills-files");
   const skill = textFile("dossier/SKILL.md", "---\nname: Modèle\n---\nCorps");
   skill.arrayBuffer = async () => { throw new Error("read"); };
   const oversized = textFile("autre/SKILL.md", "---\nname: Large\n---\nCorps");
@@ -476,9 +477,80 @@ test("a skill folder stays in one import request when the batch is nearly full",
   const padSize = uploadSize("pad.txt", encoder.encode(pad));
   assert.equal(overhead + padSize + 1 + skillSize <= 8 * 1024 * 1024, true);
   assert.equal(overhead + padSize + 1 + skillSize + 1 + modeleSize > 8 * 1024 * 1024, true);
-  const input = descendants(root).find((el) => el.name === "skills-directory");
+  const input = descendants(root).find((el) => el.name === "skills-files");
   input.files = [textFile("pad.txt", pad), textFile("dossier/SKILL.md", skillText), textFile("dossier/modele.md", modeleText)];
   input.listeners.change();
   await flushImport();
   assert.ok(requests.some((paths) => paths.includes("dossier/SKILL.md") && paths.includes("dossier/modele.md")), `le dossier doit rester dans un seul envoi, paquets ${JSON.stringify(requests.map((paths) => paths.filter((path) => path !== "pad.txt")))}`);
+});
+
+test("the folder button does not ask the browser to walk a directory", () => {
+  const source = readFileSync(new URL("../../ui/panels/skills.js", import.meta.url), "utf8");
+  assert.equal(source.includes("webkitdirectory"), false);
+  assert.equal(source.includes("skills-directory"), false);
+});
+
+test("Importer un dossier posts a granted folder and shows a real symlink skip", async () => {
+  const folder = "/tmp/dossier-accorde";
+  const { root, requests } = mount({
+    state: {
+      skills: { by_bot: { bot: [] } },
+      demonstrations: { links: [] },
+      conversations: [],
+      local: { folders: [folder] },
+    },
+    api(path, body) {
+      if (path !== "/api/skills/import-folder") return { versions: [] };
+      assert.equal(body.bot_id, "bot");
+      assert.equal(body.path, folder);
+      assert.equal(body.files, undefined);
+      assert.equal(JSON.stringify(body).includes("base64"), false);
+      return {
+        report: [
+          { file_name: "dossier/SKILL.md", status: { status: "written", skill_id: "s" } },
+          { file_name: "dossier/modele.md", status: { status: "annex", skill_id: "s" } },
+          { file_name: "dossier/lien.md", status: { status: "skipped", reason: "symlink" } },
+        ],
+      };
+    },
+  });
+  assert.equal(descendants(root).some((el) => el.name === "skills-directory"), false);
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Importer un dossier").listeners.click();
+  await flushImport();
+  assert.equal(requests.some((call) => call.path === "/api/skills/import"), false);
+  assert.equal(requests.filter((call) => call.path === "/api/skills/import-folder").length, 1);
+  const skipped = descendants(root).find((el) => el.dataset.status === "skipped");
+  assert.match(skipped.textContent, /dossier\/lien\.md/);
+  assert.match(skipped.textContent, /lien symbolique/);
+  assert.equal(descendants(root).find((el) => el.dataset.point === "import").dataset.done, "true");
+});
+
+test("Importer un dossier asks for a granted folder before reading anything", () => {
+  let note = "";
+  const { root, requests } = mount({ notify(message) { note = message; } });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Importer un dossier").listeners.click();
+  assert.equal(note, "Accordez d’abord ce dossier dans les fichiers locaux.");
+  assert.equal(requests.some((call) => String(call.path).includes("import")), false);
+});
+
+test("several granted folders are chosen before the folder import", async () => {
+  const first = "/tmp/premier";
+  const second = "/tmp/second";
+  const { root, requests } = mount({
+    state: {
+      skills: { by_bot: { bot: [] } },
+      demonstrations: { links: [] },
+      conversations: [],
+      local: { folders: [first, second] },
+    },
+    api(path, body) {
+      if (path !== "/api/skills/import-folder") return { versions: [] };
+      return { report: [{ file_name: "dossier/SKILL.md", status: { status: "written", skill_id: "s" } }] };
+    },
+  });
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === "Importer un dossier").listeners.click();
+  assert.equal(requests.some((call) => call.path === "/api/skills/import-folder"), false);
+  descendants(root).find((el) => el.tagName === "button" && el.textContent === second).listeners.click();
+  await flushImport();
+  assert.equal(requests.find((call) => call.path === "/api/skills/import-folder").body.path, second);
 });

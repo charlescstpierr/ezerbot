@@ -2225,3 +2225,136 @@ fn imported_long_fields_can_be_resubmitted_unchanged_by_full_editor_form() {
     assert_eq!(error.status, 400);
     assert_eq!(error.message, "name-too-large");
 }
+
+#[test]
+fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-folder-import-{stamp}"));
+    let chosen = scratch.join("choisi");
+    let outside = scratch.join("dehors");
+    let folder = chosen.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("secret.md");
+    std::fs::write(&secret, "secret hors dossier").unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    std::os::unix::fs::symlink(&secret, folder.join("lien.md")).unwrap();
+    std::os::unix::fs::symlink(&outside, chosen.join("echappe")).unwrap();
+    let link = scratch.join("lien-dossier");
+    std::os::unix::fs::symlink(&chosen, &link).unwrap();
+
+    let db = Database::new();
+    let mut app = db.open();
+    let rejected = request(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "directory": outside}),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.message, "La requête JSON est invalide.");
+    assert!(listing(&mut app, "grokbot").is_empty());
+
+    let ungranted = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": chosen}),
+    )
+    .unwrap_err();
+    assert_eq!(ungranted.status, 403);
+    assert_eq!(
+        ungranted.message,
+        "Accordez d’abord ce dossier dans les fichiers locaux."
+    );
+
+    let linked = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": link}),
+    )
+    .unwrap_err();
+    assert_eq!(linked.status, 400);
+    assert_eq!(linked.message, "Un lien symbolique n’est pas importé.");
+    assert!(listing(&mut app, "grokbot").is_empty());
+
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": chosen}));
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let skipped = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/lien.md")
+        .unwrap();
+    assert_eq!(skipped["status"]["status"], "skipped");
+    assert_eq!(skipped["status"]["reason"], "symlink");
+    assert!(report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| { item["file_name"] == "echappe" && item["status"]["reason"] == "symlink" }));
+    assert!(report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| { !item["file_name"].as_str().unwrap().starts_with("echappe/") }));
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(!saved.contains("secret hors dossier"));
+
+    let sibling = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": outside}),
+    )
+    .unwrap_err();
+    assert_eq!(sibling.status, 403);
+
+    let app_data = post(&mut app, "/api/local/folders/add", json!({"path": &db.0}));
+    let data_dir = db.0.canonicalize().unwrap();
+    let data = app_data["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|folder| {
+            let text = folder.as_str()?;
+            (std::path::Path::new(text) == data_dir.as_path()).then_some(text)
+        })
+        .unwrap();
+    let protected = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": data}),
+    )
+    .unwrap_err();
+    assert_eq!(protected.status, 403);
+    assert_eq!(
+        protected.message,
+        "Les données d’Ezerbot ne s’importent pas comme skills."
+    );
+    let still = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(!still.contains("secret hors dossier"));
+}
+
+fn scopeguard(path: &std::path::Path) -> impl Drop {
+    struct Guard(std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    Guard(path.to_path_buf())
+}

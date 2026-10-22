@@ -374,6 +374,45 @@ pub fn granted(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<String>, Api
     }
     Ok(None)
 }
+
+/// A skill-folder import may read this directory only when it is a real
+/// directory inside a folder the user already granted. The path itself must
+/// not be a symlink: canonicalize would follow it. Links inside the tree are
+/// left to `read_directory`, which records them and does not open the target.
+pub(super) fn readable_granted_dir(ctx: &Context<'_>, path: &str) -> Result<PathBuf, ApiError> {
+    let requested = absolute(path)?;
+    let meta = fs::symlink_metadata(&requested).map_err(io_error)?;
+    if meta.file_type().is_symlink() {
+        return Err(ApiError::new(400, "Un lien symbolique n’est pas importé."));
+    }
+    if !meta.is_dir() {
+        return Err(ApiError::new(400, "Choisissez un dossier existant."));
+    }
+    let resolved = requested.canonicalize().map_err(io_error)?;
+    if is_app_data(ctx, &resolved)? {
+        return Err(ApiError::new(
+            403,
+            "Les données d’Ezerbot ne s’importent pas comme skills.",
+        ));
+    }
+    let mut stmt = ctx
+        .connection
+        .prepare("SELECT path FROM wrapper_local_folders")?;
+    for folder in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let folder = folder?;
+        // A replaced or symlinked grant does not authorize a different folder.
+        if Path::new(&folder).canonicalize().ok().as_deref() == Some(Path::new(&folder))
+            && resolved.starts_with(&folder)
+        {
+            return Ok(resolved);
+        }
+    }
+    Err(ApiError::new(
+        403,
+        "Accordez d’abord ce dossier dans les fichiers locaux.",
+    ))
+}
+
 fn read_bytes(path: &Path) -> Result<Vec<u8>, ApiError> {
     read_bytes_checked(path, |_| Ok(()))
 }

@@ -1,6 +1,6 @@
 # Réunions, voix et iPhone
 
-Statut : décisions de Charles du 21 octobre 2026. Aucune implémentation de ce lot n’est commencée. Le comportement visé est celui de Grok Bot 0.72.1 décrit dans le rapport du jour (réunions Recall, voix, iPhone), recalé sur le Mac de Charles : pas d’ordinateur cloud dans ce lot. Les tranches sont des issues enfants de la carte [Réunions, voix et iPhone](https://github.com/charlescstpierr/ezerbot/issues/63).
+Statut : décisions de Charles du 21 octobre 2026. La première tranche, l’invitation du bot Recall ([#64](https://github.com/charlescstpierr/ezerbot/issues/64) : entrée Réunions, carte de consentement, Quitter, sortie à la fermeture), est implémentée. Les autres tranches ne le sont pas. Le comportement visé est celui de Grok Bot 0.72.1 décrit dans le rapport du jour (réunions Recall, voix, iPhone), recalé sur le Mac de Charles : pas d’ordinateur cloud dans ce lot. Les tranches sont des issues enfants de la carte [Réunions, voix et iPhone](https://github.com/charlescstpierr/ezerbot/issues/63).
 
 Vocabulaire déjà en usage : catalogue, connecteur, coffre, trousseau, carte brouillon, bot, fil, bulle, mode voix, dictée, mémo vocal, PWA, appairage. Une réunion Recall est l’entrée de catalogue de ce lot. Une capture locale est l’enregistrement au microphone déjà livré.
 

@@ -196,6 +196,7 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
             .unwrap_or(Value::Null);
         items.push(json!({"device":device,"device_flow":m.id=="github","configured":m.id!="github"||has_client,"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(*m),"redirect_uri":setup_redirect(*m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
     }
+    items.push(super::super::recall::item(ctx)?);
     Ok(json!(items))
 }
 #[derive(Deserialize)]

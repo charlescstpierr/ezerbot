@@ -30,6 +30,33 @@ export function Card({ message, busy, onAction }) {
   const blocked = !previewAvailable || localApprovalBlocked(action.tool, preview);
   // entry_id, not an echo of a redacted preview, binds the canonical action.
   const decide = (decision) => act("forms.decide", { decision });
+  const recall = request.recall;
+  if (recall) {
+    const join = recall.action === "join";
+    const result = request.configuration_result;
+    return (
+      <HumanInputCard message={message} title={join ? "Inviter le bot dans la réunion" : "Déconnecter Réunions"} input={input} showDelivery={false}>
+        <div className="space-y-3" data-follow-actions="true" data-recall-card={recall.action}>
+          {join ? <>
+            <dl className="grid gap-3 text-sm" aria-label="Invitation à la réunion">
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Lien de la réunion</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{recall.link}</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">Nom vu par les participants</dt><dd className="mt-1 ml-0 break-words">{recall.bot_name}</dd></div>
+            </dl>
+            <p className="text-sm">{recall.phrase}</p>
+          </> : <p className="text-sm">Déconnecter {recall.name} retire la clé Recall de ce Mac. Une réunion en cours est quittée avant le retrait.</p>}
+          {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="gb-retry gb-retry-primary" onClick={() => decide("allow_once")}>{join ? "Accepter" : "Confirmer"}</button>
+              <button type="button" className="gb-retry" onClick={() => decide("deny")}>Annuler</button>
+            </div>
+          </fieldset>}
+          {input.status === "denied" && <p className="text-sm" role="status">{join ? "Annulé : personne n’a été invité." : "Annulé : la clé est conservée."}</p>}
+          {!pending && input.status === "resolved" && <p className={`text-sm${result?.status === "failed" ? " gb-status-alert" : ""}`} role={result?.status === "failed" ? "alert" : "status"}>{result?.status === "failed" ? `Échec : ${result.reason}` : result?.status === "done" ? result.output?.message : "En cours…"}</p>}
+          {pending && expired && <p className="text-sm">Le délai de décision est écoulé. Actualisation de l’état…</p>}
+        </div>
+      </HumanInputCard>
+    );
+  }
   const backgroundTask = request.background_task;
   if (backgroundTask) {
     const decision = request.decision;

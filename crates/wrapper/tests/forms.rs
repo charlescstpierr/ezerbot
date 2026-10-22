@@ -1515,10 +1515,37 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
 
 #[test]
 fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
+    const SENTINEL: &str = "SENTINEL_SITE_PRIVATE_171";
+    // The native host writes the wrapper's stderr to logs/engine.log. Run in
+    // isolation to inspect both output streams without redirecting other tests.
+    const CHILD: &str = "EZERBOT_SITE_FORM_LOG_CAPTURE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "site_form_keeps_values_outside_bot_and_replays_without_writing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!bytes
+                .windows(SENTINEL.len())
+                .any(|w| w == SENTINEL.as_bytes()));
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let mut f = Fixture::new();
     let request = f.suspended_request("run", "site", "request_site_form",
         json!({"origin":"https://example.org","fields":[{"name":"password","label":"Mot de passe","field_type":{"kind":"text"},"required":true}]}));
-    let sentinel = "SENTINEL_SITE_PRIVATE_171";
+    let sentinel = SENTINEL;
     let body = json!({"entry_id":request.entry_id,"submission_id":"site-1","conversation_id":f.conversation,
         "origin":"https://example.org","values":{"password":sentinel}});
     let first = f.post("/api/forms/site-submit", body.clone());
@@ -1534,8 +1561,18 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
     assert!(saved.contains(sentinel));
     let mut persisted: Value =
         serde_json::from_slice(&std::fs::read(vault.path()).unwrap()).unwrap();
-    persisted[format!("SITE_{}", request.id.to_uppercase())]["updated_at"] = json!(1);
+    // More than 30 minutes old, including across a fresh vault open (#81).
+    let old = f.app.feature_context().now_ms as i64 - 31 * 60 * 1000;
+    persisted[format!("SITE_{}", request.id.to_uppercase())]["updated_at"] = json!(old);
     std::fs::write(vault.path(), serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let reopened = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(
+        reopened
+            .get(&format!("SITE_{}", request.id.to_uppercase()))
+            .unwrap(),
+        Some(saved.clone())
+    );
 
     let mut replay = body;
     replay["values"] = json!({"password":"replacement"});
@@ -1556,7 +1593,24 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
         RunProgress::Ended(TurnEnd::Finished)
     );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let export = serde_json::to_string(&state["conversations"]).unwrap();
+    let export = f.post(
+        "/api/templates/export",
+        json!({"bot_id":"grokbot","include_memories":true}),
+    );
+    // Also inspect files emitted by application diagnostics, if any.
+    if let Ok(logs) = std::fs::read_dir(f.directory.join("logs")) {
+        for log in logs {
+            let path = log.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|w| w == sentinel.as_bytes()),
+                "secret in {}",
+                path.display()
+            );
+        }
+    }
     let evidence = json!([
         state,
         export,

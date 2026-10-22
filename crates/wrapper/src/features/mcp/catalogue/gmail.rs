@@ -3,10 +3,14 @@
 //! `client_secret` is read, sent or stored, and nothing is kept in the vault before the
 //! first connection. Tokens are written once, after Google names the account, and a
 //! vault that refuses the write keeps nothing: there is no file copy. The tools are a
-//! fixed list of reads; a new message is also a normalized event, delivered once.
+//! fixed list: reads, and one send that waits on a draft card (`email`). A new message is
+//! also a normalized event, delivered once.
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, sync::Mutex, time::Duration};
+
+mod email;
+pub(in super::super) use email::TOOL as EMAIL_TOOL;
 
 pub(in super::super) const TOOL: &str = "gmail_list_recent_messages";
 pub(in super::super) fn is_tool(name: &str) -> bool {
@@ -62,7 +66,7 @@ pub(super) fn not_configured() -> ApiError {
 }
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY,since_ms INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));")?;
-    Ok(())
+    email::migrate(conn)
 }
 /// What the connection forgets about the mailbox once it is disconnected.
 pub(super) fn forget_mailbox(tx: &rusqlite::Transaction<'_>, server: &str) -> Result<(), ApiError> {
@@ -85,14 +89,16 @@ struct Reply {
     status: u16,
     body: Value,
 }
-/// One authenticated read, no redirect, bounded body. Transport failures carry no detail.
-fn get(url: &str, access: &str) -> Result<Reply, ()> {
-    let response = match agent()
-        .get(url)
+/// One authenticated call, no redirect, bounded body. Transport failures carry no detail.
+fn request(method: &str, url: &str, access: &str, body: Option<&Value>) -> Result<Reply, ()> {
+    let request = agent()
+        .request(method, url)
         .set("Authorization", &format!("Bearer {access}"))
-        .set("Accept", "application/json")
-        .call()
-    {
+        .set("Accept", "application/json");
+    let response = match match body {
+        Some(body) => request.send_json(body),
+        None => request.call(),
+    } {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(_) => return Err(()),
     };
@@ -110,6 +116,9 @@ fn get(url: &str, access: &str) -> Result<Reply, ()> {
         status,
         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     })
+}
+fn get(url: &str, access: &str) -> Result<Reply, ()> {
+    request("GET", url, access, None)
 }
 fn unreachable_google() -> ApiError {
     ApiError::new(
@@ -146,17 +155,22 @@ fn schema() -> Value {
 }
 /// Model-facing tools, advertised only while Gmail is connected and enabled for the bot.
 pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec> {
-    vec![grokbot_engine::contracts::ToolSpec {
-        name: TOOL.into(),
-        description: MODEL.into(),
-        schema: schema(),
-        requires_approval: false,
-    }]
+    vec![
+        grokbot_engine::contracts::ToolSpec {
+            name: TOOL.into(),
+            description: MODEL.into(),
+            schema: schema(),
+            requires_approval: false,
+        },
+        email::tool_spec(),
+    ]
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
 pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiError> {
-    let tools =
-        json!([{"name":"list_recent_messages","description":SUMMARY,"inputSchema":schema()}]);
+    let tools = json!([
+        {"name":"list_recent_messages","description":SUMMARY,"inputSchema":schema()},
+        email::tool_definition()
+    ]);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
         params![server.id, tools.to_string()],
@@ -168,7 +182,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         "Connecté. Activez les outils pour les bots de votre choix.",
     )?;
     Ok(
-        json!({"message":"Gmail est connecté. Activez ses outils pour un bot : la lecture des derniers courriels part sans carte d’approbation.","outils":tools}),
+        json!({"message":"Gmail est connecté. Activez ses outils pour un bot : la lecture des derniers courriels part sans carte d’approbation, et un courriel n’est envoyé qu’après votre clic sur sa carte brouillon.","outils":tools}),
     )
 }
 
@@ -231,7 +245,32 @@ pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
 /// One authenticated read. An access past its expiry is renewed first, and a 401 renews
 /// once more and calls again: a rejected call has not touched the mailbox.
 fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiError> {
+    exchange(ctx, account, route, None)
+}
+/// A read, or with a `body` the one POST of a send. A 401 is a rejection before anything
+/// happened, so the renewal and the second call are safe for a send too; a transport
+/// failure is not, and a send then answers that its receipt is missing.
+fn exchange(
+    ctx: &Context<'_>,
+    account: &Account,
+    route: &str,
+    body: Option<&Value>,
+) -> Result<Reply, ApiError> {
     let (server, m) = (&account.server, account.m);
+    let (method, lost, during, nothing) = match body {
+        Some(_) => (
+            "POST",
+            email::unconfirmed as fn() -> ApiError,
+            "l’envoi",
+            "envoyé",
+        ),
+        None => (
+            "GET",
+            unreachable_google as fn() -> ApiError,
+            "la lecture",
+            "lu",
+        ),
+    };
     super::ensure(ctx, server)?;
     let url = format!("{}/{route}", endpoint(m, "api"));
     let attempt = || -> Result<(String, Reply), ApiError> {
@@ -243,15 +282,15 @@ fn read(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Reply, ApiE
             // bound to another one, nor for a bot that is no longer given Gmail.
             let current = self::account(ctx)?;
             if current.email != account.email || !current.enabled {
-                return Err(invalid(
-                    "Le compte Gmail a changé pendant la lecture : rien n’a été lu. Réessayez.",
-                ));
+                return Err(invalid(&format!(
+                    "Le compte Gmail a changé pendant {during} : rien n’a été {nothing}. Réessayez."
+                )));
             }
             credentials(ctx, &server.id)?
                 .and_then(|env| env.get("ACCESS_TOKEN").cloned())
                 .ok_or_else(|| invalid(RECONNECT))?
         };
-        let reply = get(&url, &access).map_err(|_| unreachable_google())?;
+        let reply = request(method, &url, &access, body).map_err(|_| lost())?;
         Ok((access, reply))
     };
     let (used, mut reply) = attempt()?;
@@ -410,6 +449,11 @@ fn message(
         .map(Some)
         .ok_or_else(|| invalid("La réponse de Gmail est illisible."))
 }
+
+pub(in super::super) use email::{
+    call as email_call, call_id as email_call_id, edit as email_edit, prepare as email_prepare,
+    validate as email_validate,
+};
 
 pub(in super::super) fn call(
     ctx: &Context<'_>,

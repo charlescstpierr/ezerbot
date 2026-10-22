@@ -13,6 +13,8 @@ Le quota du forfait est partagé avec les autres applications Codex. Les tokens 
 
 La lecture est faite en arrière-plan, coalescée et mise en cache 60 secondes. **Actualiser** peut la relancer après 5 secondes. Une réponse 401 entraîne au plus un renouvellement et une nouvelle lecture. Une déconnexion invalide les lectures en vol. Après une erreur, aucune jauge fictive n’est affichée. Une fenêtre dont la réinitialisation est échue devient seule indisponible (`null`, listée dans `quota.unavailable`) ; les autres restent affichées. Si la dernière lecture précède cette réinitialisation, le quota est relu après 5 secondes. Le partage d’abonnement, sans connexion Codex sélectionnée, indique que la jauge n’est pas disponible.
 
+Panneau ouvert, un changement de backend, de connexion ou d’e-mail recharge l’historique. Toutes les 60 secondes, le panneau relit seulement l’usage, sans repeindre l’espace ni ce qui n’a pas changé ; cette lecture est sautée pendant un envoi ou quand la fenêtre est masquée. **Actualiser** pressé pendant un chargement est mis en file et relancé une fois à la fin.
+
 API locale : `GET /api/usage` et `POST /api/usage/refresh`. La première renvoie la ventilation durable et le dernier état du quota, sans attendre le réseau OpenAI.
 
 ## Vérification sans compte externe
@@ -23,4 +25,4 @@ node --test app/ui/panels/usage.test.cjs
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Les tests utilisent uniquement de faux serveurs et des sessions éphémères propres à Ezerbot. Ils couvrent OAuth/renouvellement, absence de fuite d’identifiants, validation des fenêtres, erreurs, déconnexion pendant une lecture, déduplication des tokens, sources et conservation après suppression/redémarrage. Les tests UI couvrent aussi la borne de 80 % et l’actualisation du quota quand la base locale reste inactive.
+Les tests utilisent uniquement de faux serveurs et des sessions éphémères propres à Ezerbot. Ils couvrent OAuth/renouvellement, absence de fuite d’identifiants, validation des fenêtres, erreurs, déconnexion pendant une lecture, déduplication des tokens, sources et conservation après suppression/redémarrage. Les tests UI couvrent aussi la borne de 80 %, l’actualisation du quota quand la base locale reste inactive, l’intervalle de 60 secondes, le saut pendant un envoi, la mise en file d’**Actualiser** et le rechargement après un changement de compte.

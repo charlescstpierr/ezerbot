@@ -7,6 +7,7 @@ Les réunions règlent la durée de conservation de l’audio gardé. Les routin
 - `reunions-retention` montre le sélecteur `#meeting-retention` (1, 7 et 30 jours).
 - `routines-ouvrir` ouvre le dialogue Routines du bot par défaut.
 - `routines-liste` montre le titre Routines et le choix du bot, sans créer de routine.
+- `routines-webhook` (hors parcours groupé) : une routine au déclencheur Webhook montre, dans le dialogue Routines, la publication Tailscale Funnel (URL `https`, rappel Bearer, jeton masqué) ou la raison sans URL. Voir « Gotchas ».
 
 ## How to get to it (user POV)
 
@@ -35,3 +36,4 @@ Preconditions:
 - « Nouvelle routine » crée une routine. Ne pas le presser.
 - Le dialogue Routines couvre Paramètres. Le fermer par son bouton « Fermer » avant de revenir à l’accueil.
 - Sous 560 px de haut, les deux sections ne tiennent pas ensemble. D’où deux captures, pas une capture unique déclarée suffisante.
+- `routines-webhook` crée une routine : le parcours groupé ne la touche pas. Pour la voir, lancer le wrapper de debug avec `GROKBOT_FAKE_TAILSCALE` (script dans le `HOME` jetable) et `GROKBOT_WEBHOOK_PORT` (port libre) ; un debug n'appelle jamais le vrai Tailscale. Le faux script répond à `status --json`, `funnel …` et `serve status --json`. L'approbation de la publication est une carte dans la conversation Approbations.

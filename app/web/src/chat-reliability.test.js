@@ -150,18 +150,16 @@ test("an expired session has an explicit persistent reconnect presentation", () 
 });
 
 test("an expired session body states the expiry instead of the generic sign-in copy", () => {
+  const validated = "Ta session ChatGPT a expiré. Reconnecte-toi pour continuer.";
   const expired = signInCardState({ message: { error_kind: "signin_expired" } });
   const generic = signInCardState({ message: { error_kind: "signin" } });
-  assert.match(expired.copy, /^Votre session ChatGPT a expiré\. /);
+  assert.equal(expired.copy, validated);
   assert.notEqual(expired.copy, generic.copy);
-  assert.match(expired.copy, /Reconnectez votre compte ChatGPT, puis réessayez\./);
   const group = signInCardState({ message: { error_kind: "signin_expired" }, isGroup: true });
-  assert.match(group.copy, /^Votre session ChatGPT a expiré\. /);
-  assert.match(group.copy, /envoyez un nouveau message/);
+  assert.equal(group.copy, validated);
   assert.equal(group.showRetry, false);
   const task = signInCardState({ message: { error_kind: "signin_expired" }, isTask: true });
-  assert.match(task.copy, /^Votre session ChatGPT a expiré\. /);
-  assert.match(task.copy, /conversation principale/);
+  assert.equal(task.copy, validated);
   const reconnected = signInCardState({ message: { error_kind: "signin_expired" }, providerConnected: true });
   assert.equal(reconnected.title, "Compte ChatGPT connecté");
   assert.match(reconnected.copy, /Réessayez pour obtenir la réponse/);

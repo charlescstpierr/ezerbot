@@ -105,3 +105,15 @@ test("a reply that stays silent for 60 s asks whether to retry only when a retry
   assert.match(group, /La réponse n’arrive pas\. Envoyez un nouveau message\./);
   assert.ok(!labels(group).includes("Réessayer"));
 });
+
+test("an expired ChatGPT session card shows the validated text, not the generic sign-in copy", () => {
+  const expired = { id: "expired", role: "assistant", state: "failed", error_kind: "signin_expired", error: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT." };
+  for (const props of [{}, { isGroup: true }, { isTask: true }]) {
+    const html = thread(expired, props);
+    assert.match(html, /<p>Ta session ChatGPT a expiré\. Reconnecte-toi pour continuer\.<\/p>/);
+    assert.doesNotMatch(html, /<p>[^<]*Connectez votre compte/);
+    assert.ok(labels(html).includes("Se reconnecter"));
+  }
+  const missing = thread({ ...expired, error_kind: "signin" });
+  assert.doesNotMatch(missing, /Ta session ChatGPT a expiré/);
+});

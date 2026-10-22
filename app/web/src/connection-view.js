@@ -18,9 +18,7 @@ export function composerConnectionState({ offline = false, live = false, busy = 
 
 function signInCopy({ providerConnected, expired, group, isTask }) {
   if (providerConnected) return group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse.";
-  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis envoyez un nouveau message."
-    : isTask ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
-      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez votre compte ChatGPT, puis réessayez.";
+  if (expired) return "Ta session ChatGPT a expiré. Reconnecte-toi pour continuer.";
   return group ? "Connectez votre compte ChatGPT, puis envoyez un nouveau message."
     : isTask ? "Connectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
       : "Votre question est conservée. Connectez votre compte ChatGPT, puis réessayez.";

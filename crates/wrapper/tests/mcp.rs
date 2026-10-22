@@ -1223,3 +1223,279 @@ fn crash_and_launch_errors_are_french_and_restartable() {
         matches!(f.outcome(&run),ToolOutcome::Failed {reason} if reason.contains("Impossible de démarrer"))
     );
 }
+
+/// What a remote server saw: the Authorization header and the JSON-RPC method.
+type Exchanges = Arc<Mutex<Vec<(Option<String>, String)>>>;
+/// A Streamable HTTP MCP server on 127.0.0.1 that records what it is asked.
+struct RemoteServer {
+    base: String,
+    server: Arc<tiny_http::Server>,
+    seen: Exchanges,
+}
+impl RemoteServer {
+    /// `redirect_to` answers every request with a 302 instead of serving tools.
+    fn start(redirect_to: Option<String>) -> Self {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let base = format!(
+            "http://127.0.0.1:{}",
+            server.server_addr().to_ip().unwrap().port()
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (listener, log) = (server.clone(), seen.clone());
+        std::thread::spawn(move || {
+            for mut request in listener.incoming_requests() {
+                let mut body = String::new();
+                std::io::Read::read_to_string(request.as_reader(), &mut body).unwrap();
+                let frame: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let authorization = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.to_string());
+                let method = frame["method"].as_str().unwrap_or("").to_owned();
+                log.lock().unwrap().push((authorization, method.clone()));
+                if let Some(target) = &redirect_to {
+                    let location =
+                        tiny_http::Header::from_bytes("Location", target.as_bytes()).unwrap();
+                    let _ = request.respond(tiny_http::Response::empty(302).with_header(location));
+                    continue;
+                }
+                let result = match method.as_str() {
+                    "initialize" => {
+                        json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"Distant","version":"1"}})
+                    }
+                    "tools/list" => {
+                        json!({"tools":[{"name":"echo","description":"Répéter un texte.","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]})
+                    }
+                    "tools/call" => {
+                        json!({"content":[{"type":"text","text":frame["params"]["arguments"]["text"]}]})
+                    }
+                    _ => {
+                        let _ = request.respond(tiny_http::Response::empty(202));
+                        continue;
+                    }
+                };
+                let json_type =
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap();
+                let _ = request.respond(
+                    tiny_http::Response::from_string(
+                        json!({"jsonrpc":"2.0","id":frame["id"],"result":result}).to_string(),
+                    )
+                    .with_header(json_type),
+                );
+            }
+        });
+        Self { base, server, seen }
+    }
+    fn calls(&self, method: &str) -> usize {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, m)| m == method)
+            .count()
+    }
+    fn requests(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+    fn authorizations(&self) -> Vec<Option<String>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(a, _)| a.clone())
+            .collect()
+    }
+}
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        self.server.unblock();
+    }
+}
+impl Fixture {
+    fn try_post(&mut self, path: &str, body: Value) -> Result<Value, grokbot_wrapper::ApiError> {
+        self.app.api("POST", path, body.to_string().as_bytes())
+    }
+    fn add_url(&mut self, url: &str, token: &str, on_this_mac: bool) -> String {
+        self.post(
+            "/api/mcp/add",
+            json!({"name":"Serveur distant","url":url,"token":token,"on_this_mac":on_this_mac}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    /// The SQLite file and its journals, as text, to look for a secret. The test
+    /// vault is a disposable file next to them and is deliberately not read.
+    fn database_text(&self) -> String {
+        let name = self.path.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut all = String::new();
+        for entry in std::fs::read_dir(self.path.parent().unwrap()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_str().unwrap().starts_with(&name) {
+                let bytes = std::fs::read(entry.path()).unwrap_or_default();
+                all.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        all
+    }
+}
+
+#[test]
+fn only_https_or_confirmed_loopback_addresses_are_accepted() {
+    let mut f = Fixture::new();
+    for (url, confirmed, expected) in [
+        ("http://exemple.fr/mcp", false, "https://"),
+        ("http://exemple.fr/mcp", true, "https://"),
+        ("http://localhost:8080/mcp", true, "https://"),
+        ("http://127.0.0.1:8080/mcp", false, "sur ce Mac"),
+        ("ftp://exemple.fr/mcp", false, "https://"),
+        ("exemple.fr/mcp", false, "invalide"),
+        (
+            "https://utilisateur:mot@exemple.fr/mcp",
+            false,
+            "identifiants",
+        ),
+        ("https://exemple.fr/mcp?cle=abc", false, "paramètres"),
+    ] {
+        let error = f
+            .try_post(
+                "/api/mcp/add",
+                json!({"name":"Distant","url":url,"on_this_mac":confirmed}),
+            )
+            .unwrap_err();
+        assert!(error.message.contains(expected), "{url}: {}", error.message);
+    }
+    assert!(f.state()["mcp"]["servers"].as_array().unwrap().is_empty());
+    let id = f.add_url("https://exemple.fr/mcp", "", false);
+    let server = &f.state()["mcp"]["servers"][0];
+    assert_eq!(server["id"], id);
+    assert_eq!(server["url"], "https://exemple.fr/mcp");
+    let local = f.post(
+        "/api/mcp/add",
+        json!({"name":"Sur ce Mac","url":"http://127.0.0.1:8080/mcp","on_this_mac":true}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(f.state()["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["id"] == local && s["url"] == "http://127.0.0.1:8080/mcp"));
+    let error = f
+        .try_post(
+            "/api/mcp/add",
+            json!({"name":"Mixte","url":"https://exemple.fr/mcp","command":"python3"}),
+        )
+        .unwrap_err();
+    assert!(error.message.contains("pas les deux"));
+    let error = f
+        .try_post(
+            "/api/mcp/add",
+            json!({"name":"Local","command":"python3","token":"jeton-secret-bravo"}),
+        )
+        .unwrap_err();
+    assert!(error.message.contains("par adresse"));
+}
+
+#[test]
+fn a_remote_server_keeps_its_secret_in_the_vault_and_asks_before_every_new_tool() {
+    let remote = RemoteServer::start(None);
+    let mut f = Fixture::new();
+    let secret = "jeton-distant-charlie";
+    let id = f.add_url(&format!("{}/mcp", remote.base), secret, true);
+    // Saved, not contacted: the secret is nowhere but the vault, and not shown again.
+    assert_eq!(remote.requests(), 0);
+    assert!(!f.state().to_string().contains(secret));
+    assert!(!f.database_text().contains(secret));
+    assert_eq!(
+        features::forms::vault(&f.app.feature_context())
+            .unwrap()
+            .list()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.connect(&id);
+    assert!(remote
+        .authorizations()
+        .iter()
+        .all(|a| a.as_deref() == Some(&format!("Bearer {secret}")[..])));
+    let tool = f.tool("echo");
+    assert!(tool.starts_with(&format!("mcp_{id}_")));
+    // Discovery listed the tool; calling it opens the approval and calls nothing.
+    assert_eq!(remote.calls("tools/call"), 0);
+    let run = f.send(&tool, json!({"text":"Bonjour"}), "remote-first");
+    assert_eq!(run.status, RunStatus::AwaitingApproval);
+    assert!(
+        matches!(f.request(&run.run_id).kind, requests::InputKind::Approval { tool: asked, .. } if asked == tool)
+    );
+    assert_eq!(
+        f.tool_card("remote-first")["call"]["arguments"]["text"],
+        "Bonjour"
+    );
+    assert_eq!(remote.calls("tools/call"), 0);
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("deny"));
+    f.finish(&run.run_id);
+    assert_eq!(remote.calls("tools/call"), 0);
+    // Accepting is what calls the server, once.
+    let run = f.send(&tool, json!({"text":"Bonjour"}), "remote-second");
+    assert_eq!(remote.calls("tools/call"), 0);
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.decide(&run.run_id, json!("allow_once"));
+    f.finish(&run.run_id);
+    assert_eq!(remote.calls("tools/call"), 1);
+    assert!(
+        matches!(f.outcome(&run.run_id), ToolOutcome::Done { output } if output["content"][0]["text"] == "Bonjour")
+    );
+    let bodies =
+        f.ai.seen
+            .lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .map(Value::to_string)
+            .collect::<String>();
+    assert!(!bodies.contains(secret));
+    assert!(!f.state().to_string().contains(secret));
+    assert!(!f.database_text().contains(secret));
+}
+
+#[test]
+fn a_remote_server_without_a_token_receives_no_authorization_header() {
+    let remote = RemoteServer::start(None);
+    let mut f = Fixture::new();
+    let id = f.add_url(&format!("{}/mcp", remote.base), "", true);
+    f.connect(&id);
+    assert!(remote.requests() > 0);
+    assert!(remote.authorizations().iter().all(Option::is_none));
+}
+
+#[test]
+fn a_redirect_is_refused_and_the_token_never_reaches_another_host() {
+    let elsewhere = RemoteServer::start(None);
+    let remote = RemoteServer::start(Some(format!("{}/mcp", elsewhere.base)));
+    let mut f = Fixture::new();
+    let id = f.add_url(
+        &format!("{}/mcp", remote.base),
+        "jeton-redirige-delta",
+        true,
+    );
+    f.post(
+        "/api/mcp/select",
+        json!({"id":id,"bot_id":"grokbot","enabled":true}),
+    );
+    let run = f.start(&id);
+    f.decide(&run, json!("allow_once"));
+    let server = f.state()["mcp"]["servers"][0].clone();
+    assert_ne!(server["status"], "connected");
+    assert!(
+        server["error"].as_str().unwrap().contains("redirection"),
+        "{server}"
+    );
+    assert!(server["tools"].as_array().unwrap().is_empty());
+    assert!(remote.requests() > 0);
+    assert_eq!(elsewhere.requests(), 0);
+}

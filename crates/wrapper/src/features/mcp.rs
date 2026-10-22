@@ -88,6 +88,18 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_mcp_approval_chat (account_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL);",
     )?;
+    // A server added by address (HTTPS) has no command; its approved address lives here.
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_mcp_servers') WHERE name='endpoint')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        conn.execute(
+            "ALTER TABLE wrapper_mcp_servers ADD COLUMN endpoint TEXT",
+            [],
+        )?;
+    }
     catalogue::migrate(conn)?;
     Ok(())
 }
@@ -158,11 +170,20 @@ pub(crate) fn is_lifecycle(name: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct Add {
     name: String,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     arguments: Vec<String>,
     #[serde(default)]
     environment: BTreeMap<String, String>,
+    /// HTTPS address of a remote server, instead of a local command.
+    url: Option<String>,
+    /// Optional bearer secret of that server: it goes to the vault, never back.
+    #[serde(default)]
+    token: String,
+    /// The user confirmed that an `http://127.0.0.1` server runs on this Mac.
+    #[serde(default)]
+    on_this_mac: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,13 +202,14 @@ struct Server {
     id: String,
     name: String,
     command: String,
+    endpoint: Option<String>,
     arguments: Vec<String>,
     names: Vec<String>,
     tools: Vec<Value>,
     error: Option<String>,
 }
 fn servers(conn: &Connection) -> Result<Vec<Server>, ApiError> {
-    let mut stmt = conn.prepare("SELECT id,name,command,arguments_json,environment_names_json,tools_json,error FROM wrapper_mcp_servers ORDER BY name,id")?;
+    let mut stmt = conn.prepare("SELECT id,name,command,arguments_json,environment_names_json,tools_json,error,endpoint FROM wrapper_mcp_servers ORDER BY name,id")?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -198,15 +220,17 @@ fn servers(conn: &Connection) -> Result<Vec<Server>, ApiError> {
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(id, name, command, args, names, tools, error)| {
+        .map(|(id, name, command, args, names, tools, error, endpoint)| {
             Ok(Server {
                 id,
                 name,
                 command,
+                endpoint,
                 arguments: serde_json::from_str(&args)
                     .map_err(|_| invalid("Configuration MCP illisible."))?,
                 names: serde_json::from_str(&names)
@@ -703,7 +727,7 @@ fn state_servers(ctx: &Context<'_>) -> Result<Vec<Value>, ApiError> {
             .query_map([&server.id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let tools: Vec<_> = server.tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"namespace":namespace(&server,t)})).collect();
-        result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
+        result.push(json!({"id":server.id,"name":server.name,"command":server.command,"url":server.endpoint,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
     }
     Ok(result)
 }
@@ -737,13 +761,90 @@ pub fn routes(
     }
     Some(route(app, path, body).map(ApiResponse::Json))
 }
+/// A server reached by address: the address is the approved origin, the optional
+/// token a vault secret that is never shown again nor given to the model.
+fn add_remote(ctx: &Context<'_>, add: Add) -> Result<Value, ApiError> {
+    let name = add.name.trim();
+    if !add.command.trim().is_empty() || !add.arguments.is_empty() || !add.environment.is_empty() {
+        return Err(invalid(
+            "Choisissez une commande locale ou une adresse https, pas les deux.",
+        ));
+    }
+    if name.is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control) {
+        return Err(invalid("Nom du connecteur invalide (1 à 60 caractères)."));
+    }
+    let endpoint = crate::mcp::approved_endpoint(add.url.as_deref().unwrap_or(""), add.on_this_mac)
+        .map_err(|message| invalid(&message))?;
+    let token = add.token.trim();
+    if token.len() > 2048 || !token.bytes().all(|c| c.is_ascii_graphic()) {
+        return Err(invalid(
+            "Le jeton est invalide : 2 Ko au plus, sans espace ni caractère de contrôle.",
+        ));
+    }
+    if !token.is_empty() && (name.contains(token) || endpoint.contains(token)) {
+        return Err(invalid(
+            "Gardez le jeton uniquement dans son champ, pas dans le nom ni dans l’adresse.",
+        ));
+    }
+    let vault = super::forms::vault(ctx)?;
+    let public = json!([name, endpoint]);
+    if redact_value(&vault, &public)? != public {
+        return Err(invalid(
+            "La configuration publique contient un secret. Utilisez le champ du jeton.",
+        ));
+    }
+    let tx = write_transaction(ctx.connection)?;
+    let count: i64 = tx.query_row("SELECT count(*) FROM wrapper_mcp_servers", [], |r| r.get(0))?;
+    if count >= 20 {
+        return Err(invalid("La limite est de 20 connecteurs."));
+    }
+    if servers(&tx)?
+        .iter()
+        .any(|s| s.name.to_lowercase() == name.to_lowercase())
+    {
+        return Err(ApiError::new(
+            409,
+            "Un connecteur porte déjà ce nom. Choisissez un nom distinct pour les approbations.",
+        ));
+    }
+    let id: String = tx.query_row("SELECT lower(hex(randomblob(8)))", [], |r| r.get(0))?;
+    let names = if token.is_empty() {
+        json!([])
+    } else {
+        json!(["ACCESS_TOKEN"])
+    };
+    tx.execute("INSERT INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json,endpoint) VALUES (?1,?2,'','[]',?3,?4)",params![id,name,names.to_string(),endpoint])?;
+    let variables: BTreeMap<&str, &str> = if token.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([("ACCESS_TOKEN", token)])
+    };
+    let raw = json!({"variables":variables}).to_string();
+    if raw.len() > grokbot_forms::vault::MAX_SECRET_VALUE_BYTES {
+        return Err(invalid(
+            "Le jeton dépasse la limite du coffre local (4 Ko au total).",
+        ));
+    }
+    vault.set(
+        &secret_name(&id),
+        grokbot_forms::vault::MCP_ENV_PURPOSE,
+        &raw,
+    )?;
+    tx.commit()?;
+    Ok(json!({"id":id,"mcp":state(ctx)}))
+}
 fn lifecycle_arguments(
     ctx: &Context<'_>,
     server: &Server,
     action: &str,
     restarting: bool,
 ) -> Value {
-    let mut args = json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
+    // The approval shows the exact address the secret may be sent to.
+    let command = server.endpoint.as_deref().unwrap_or(&server.command);
+    let mut args = json!({"serveur":server.name,"commande":command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
+    if server.endpoint.is_some() {
+        args["transport"] = json!("https");
+    }
     if let Some(catalogue) = catalogue::preview(ctx, server, action) {
         args["action"] = catalogue["action"].clone();
         args["variables_privées"] = catalogue["variables_privées"].clone();
@@ -759,6 +860,14 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     let ctx = app.feature_context();
     if path == "/api/mcp/add" {
         let add: Add = parse(body)?;
+        if add.url.is_some() {
+            return add_remote(&ctx, add);
+        }
+        if !add.token.is_empty() || add.on_this_mac {
+            return Err(invalid(
+                "Le jeton et la confirmation « sur ce Mac » ne concernent qu’un serveur ajouté par adresse.",
+            ));
+        }
         let name = add.name.trim();
         let command = add.command.trim();
         if name.is_empty()

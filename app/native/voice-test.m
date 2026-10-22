@@ -22,7 +22,12 @@ int main(void) {
         assert([result[@"status"] isEqual:@"ready"]);
         assert([result[@"transcript"] hasPrefix:@"Bonjour"]);
         assert([result[@"data"] length] > 44);
+        // A memo hands over each word with its start; the starts only grow and stay inside the recording.
+        NSArray *words = result[@"words"];
+        assert(words.count == 11 && [words[0][@"text"] isEqual:@"Bonjour,"] && [words[0][@"start_ms"] integerValue] == 0);
+        for (NSUInteger i = 1; i < words.count; ++i) assert([words[i][@"start_ms"] integerValue] > [words[i - 1][@"start_ms"] integerValue] && [words[i][@"start_ms"] integerValue] < 1000);
         [voice command:@{@"command":@"cancel",@"token":@"one"} reply:reply];
+        assert([result[@"words"] count] == 0);
         assert([result[@"status"] isEqual:@"idle"]);
         assert([result[@"data"] length] == 0);
         // The memo stays at one minute and keeps its audio.
@@ -46,6 +51,7 @@ int main(void) {
         [voice command:@{@"command":@"status",@"token":@"dictation"} reply:reply];
         assert([result[@"status"] isEqual:@"ready"] && [result[@"too_long"] boolValue]);
         assert([result[@"transcript"] hasPrefix:@"Bonjour"] && [result[@"data"] length] == 0);
+        assert([result[@"words"] count] == 0);
         [voice cancel];
         // The microphone: listed, announced, and replaced by the default one when it is gone.
         [voice command:@{@"command":@"microphones",@"token":@""} reply:reply];

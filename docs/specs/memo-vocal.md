@@ -1,5 +1,7 @@
 # Mémo vocal — vitesse et saut au mot
 
+Statut : la tranche T23 ([#96](https://github.com/charlescstpierr/ezerbot/issues/96)) est implémentée. Les horodatages des mots viennent des segments de la reconnaissance du Mac et sont gardés avec le mémo. Un mot sans horodatage dit qu’il n’en a pas et la lecture continue.
+
 Complément de `docs/specs/reunions-voix-iphone.md`. Pas une nouvelle carte. La tranche est un enfant de [Réunions, voix et iPhone](https://github.com/charlescstpierr/ezerbot/issues/63). Cette page ne crée pas l’issue. L’annexe en donne le corps.
 
 La spec des réunions décide : « Le mémo ne change pas de voix dans ce lot : il garde la lecture déjà livrée. » Ce complément couvre le trou VX-2 laissé par cette phrase : la vitesse choisie et le saut au mot. Il ne rouvre ni la dictée, ni l’appel, ni Recall.

@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -350,6 +350,35 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             "voix des bots non attribuées",
         )
         return open_bot_voice(evidence, "Ezerbot")
+    if sphere == "memo-vocal":
+        # Un mémo de vingt secondes déjà envoyé, ouvert dans son fil. Il n’est créé qu’une fois par passage complet.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              if (document.querySelector(".gb-voice-memo .gb-memo-word")) return true;
+              const { conversation } = await panels.api("/api/conversations", {});
+              const token = "memo-" + Date.now();
+              await panels.api("/api/voice/debug", {command: "start", token, purpose: "memo", scenario: "long_memo"});
+              const memo = await panels.api("/api/voice/debug", {command: "stop", token});
+              const kept = await panels.api("/api/voice/memos", {conversation_id: conversation.id, upload_id: token, data: memo.data, transcript: memo.transcript, language: memo.language, words: memo.words});
+              await panels.api("/api/send", {conversation_id: conversation.id, message_id: "message-" + token, body: "Voici mon mémo vocal.", attachments: [kept.id]});
+              await panels.refresh();
+              panels.openConversation(conversation.id);
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """() => {
+              const audio = document.querySelector(".gb-voice-memo audio");
+              const words = document.querySelectorAll(".gb-voice-memo .gb-memo-word");
+              return audio && words.length > 10 && audio.duration > 19 ? {ok: true} : null;
+            }""",
+            "mémo de vingt secondes absent du fil",
+        )
+        return memo_reset(evidence)
     if sphere == "pages":
         # Une conversation neuve à chaque passage : la capture « avant » la montre sans Page, « après » est prise à l’envoi.
         eval_js(evidence, close_overlays_js())
@@ -464,6 +493,82 @@ def voice_bots_step(evidence: Path, index: int) -> None:
             raise SystemExit(f"la vitesse au-delà de 2 n’est pas refusée telle quelle: {state}")
 
 
+MEMO_SPEED_JS = """(text) => {
+  const input = document.querySelector(".gb-voice-memo .gb-memo-speed input");
+  input.focus();
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, text);
+  input.dispatchEvent(new Event("input", {bubbles: true}));
+  input.blur();
+  return new Promise((resolve) => setTimeout(() => {
+    const audio = document.querySelector(".gb-voice-memo audio");
+    resolve({shown: input.value, rate: audio.playbackRate, refusal: document.querySelector(".gb-memo-refusal")?.textContent || ""});
+  }, 200));
+}"""
+
+
+def memo_speed(evidence: Path, text: str) -> dict:
+    return eval_js(evidence, f"() => ({MEMO_SPEED_JS})({json.dumps(text)})")
+
+
+def memo_reset(evidence: Path) -> dict:
+    """Le mémo repart de zéro : vitesse 1, lecture arrêtée au début, aucune phrase d’erreur."""
+    memo_speed(evidence, "1")
+    return eval_js(
+        evidence,
+        """() => {
+          const audio = document.querySelector(".gb-voice-memo audio");
+          audio.pause(); audio.currentTime = 0;
+          document.querySelector(".gb-voice-memo").scrollIntoView({block: "center"});
+          return {ok: true, speed: document.querySelector(".gb-voice-memo .gb-memo-speed input").value, words: document.querySelectorAll(".gb-voice-memo .gb-memo-word").length, duration: audio.duration};
+        }""",
+    )
+
+
+def memo_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 le mémo à la vitesse 1, 1 vitesse 2 puis 3 refusée, 2 clic sur un mot du milieu, 3 clic sur un mot sans horodatage."""
+    if index == 0:
+        state = memo_reset(evidence)
+        if state["speed"] != "1":
+            raise SystemExit(f"le mémo ne part pas de la vitesse 1: {state}")
+    if index == 1:
+        faster = memo_speed(evidence, "2")
+        refused = memo_speed(evidence, "3")
+        if faster["rate"] != 2 or refused["rate"] != 2 or refused["shown"] != "2" or "de 0,5 à 2" not in refused["refusal"]:
+            raise SystemExit(f"la vitesse 3 n’est pas refusée telle quelle: {faster} / {refused}")
+        slower = memo_speed(evidence, "0,5")
+        if slower["rate"] != 0.5 or slower["refusal"]:
+            raise SystemExit(f"la vitesse 0,5 n’est pas suivie par la lecture: {slower}")
+        memo_speed(evidence, "2")
+        memo_speed(evidence, "3")
+    if index == 2:
+        jump = eval_js(
+            evidence,
+            """() => {
+              const audio = document.querySelector(".gb-voice-memo audio");
+              audio.currentTime = 0;
+              const words = [...document.querySelectorAll(".gb-voice-memo button.gb-memo-word")];
+              const word = words[Math.floor(words.length / 2)];
+              word.click();
+              return {text: word.textContent, start: Number(word.dataset.startMs) / 1000, at: audio.currentTime, rate: audio.playbackRate, paused: audio.paused};
+            }""",
+        )
+        if jump["at"] != jump["start"] or jump["start"] < 5 or jump["rate"] != 2:
+            raise SystemExit(f"le clic sur un mot n’a pas placé la lecture au début de ce mot: {jump}")
+    if index == 3:
+        state = eval_js(
+            evidence,
+            """() => {
+              const audio = document.querySelector(".gb-voice-memo audio");
+              audio.pause(); audio.currentTime = 3;
+              const word = document.querySelector(".gb-voice-memo .gb-memo-word.is-untimed");
+              word.click();
+              return {text: word.textContent, at: audio.currentTime, notice: document.querySelector(".gb-memo-notice")?.textContent || ""};
+            }""",
+        )
+        if state["at"] != 3 or state["notice"] != "Ce mot n’a pas d’horodatage : la lecture continue.":
+            raise SystemExit(f"un mot sans horodatage a déplacé la lecture ou ne le dit pas: {state}")
+
+
 def dictation_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
     if index == 0:
@@ -529,6 +634,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
+    if sphere == "memo-vocal":
+        return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "dictee":
@@ -555,6 +662,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             dictation_step(evidence, index)
         if sphere == "voix-bots":
             voice_bots_step(evidence, index)
+        if sphere == "memo-vocal":
+            memo_step(evidence, index)
         if sphere == "reunions-routines" and index == 1:
             eval_js(
                 evidence,

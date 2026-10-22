@@ -167,3 +167,44 @@ test("a generated image and attached images share the grid, while documents and 
   assert.match(mixedHtml, /Mémo vocal/);
   assert.equal((mixedHtml.match(/class="gb-image-cell"/g) || []).length, 1);
 });
+
+const memoMessage = (words, extra = {}) => ({
+  id: "memo-msg",
+  body: "Écoute ceci.",
+  attachments: [{ id: "voice_1", kind: "voice", duration_ms: 20000, transcript: "Premier point le budget", language: "fr", words, ...extra }],
+});
+const spoken = [{ text: "Premier", start_ms: 0 }, { text: "point", start_ms: 600 }, { text: "le", start_ms: null }, { text: "budget", start_ms: 1200 }];
+
+test("a voice memo shows a speed control starting at 1, or at the speed of its bot", () => {
+  const plain = markup(memoMessage(spoken));
+  assert.match(plain, /aria-label="Vitesse de lecture du mémo, de 0,5 à 2"[^>]*value="1"|value="1"[^>]*aria-label="Vitesse de lecture du mémo, de 0,5 à 2"/);
+  const bot = markup(memoMessage(spoken), { memoSpeed: 1.5 });
+  assert.match(bot, /value="1,5"/);
+  assert.match(markup(memoMessage(spoken), { memoSpeed: 3 }), /value="1"/, "a speed out of range is not shown");
+});
+
+test("every word with a start is a button that says where it jumps, and a word without one is not", () => {
+  const html = markup(memoMessage(spoken));
+  assert.equal((html.match(/<button[^>]*class="gb-memo-word"/g) || []).length, 3);
+  assert.match(html, /data-start-ms="600"/);
+  assert.match(html, /<span class="gb-memo-word is-untimed"[^>]*>le<\/span>/);
+  assert.doesNotMatch(html, /<button[^>]*>le<\/button>/);
+});
+
+test("a memo kept before word starts existed still shows its transcript as text", () => {
+  const html = markup(memoMessage([]));
+  assert.match(html, /<summary>Transcription<\/summary><p>Premier point le budget<\/p>/);
+  assert.doesNotMatch(html, /gb-memo-word/);
+});
+
+test("the memo words stay readable and clickable in the stylesheet", () => {
+  const css = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
+  assert.match(css, /\.gb-memo-word\s*\{[^}]*cursor:\s*pointer/);
+  assert.match(css, /\.gb-memo-word:focus-visible/);
+  assert.match(css, /\.gb-memo-speed input\s*\{/);
+});
+
+test("the shell hands the thread the speed of the bot of the open conversation", () => {
+  const shell = readFileSync(new URL("../../ui/app.js", import.meta.url), "utf8");
+  assert.match(shell, /memoSpeed: state\.voice\?\.bots\?\.\[conversation\?\.bot_id\]\?\.speed/);
+});

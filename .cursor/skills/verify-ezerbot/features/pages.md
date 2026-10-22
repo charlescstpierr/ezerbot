@@ -7,7 +7,7 @@ Une Page est un tableau interactif que le bot écrit en `.page.tsx` : Ezerbot la
 - `pages-avant` montre le fil d’une conversation neuve, sans Page.
 - `pages-apres` montre la Page « Trois forfaits » dans `.page-stage`, à côté du fil, et son entrée dans la liste « Pages ».
 - `pages-choix` change l’offre choisie au clic sur « Choisir » (`button.page-choice`) sans perdre le focus.
-- `pages-texte` affiche les prix écrits avec un échappement Unicode comme « 9 € » (jamais « 9u20ac »).
+- `pages-texte` affiche les prix écrits avec un échappement Unicode comme « 9 € » (jamais « 9u20ac »), et les références JSX `&lt;` et `&#8364;` s’affichent « < » et « € ».
 
 ## How to get to it (user POV)
 

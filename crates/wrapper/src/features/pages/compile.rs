@@ -105,10 +105,14 @@ impl Parser {
     }
 
     fn pos(&self) -> (u32, u32) {
+        self.pos_at(self.index)
+    }
+
+    fn pos_at(&self, index: usize) -> (u32, u32) {
         self.lines
-            .get(self.index)
+            .get(index)
             .copied()
-            .zip(self.columns.get(self.index).copied())
+            .zip(self.columns.get(index).copied())
             .unwrap_or_else(|| {
                 self.lines
                     .last()
@@ -481,8 +485,68 @@ impl Parser {
         if text.trim().is_empty() {
             Ok(None)
         } else {
-            Ok(Some(Node::Text(text)))
+            Ok(Some(Node::Text(self.decode_references(&text, start)?)))
         }
+    }
+
+    /// Décode les références de caractères JSX (`&lt;`, `&#8364;`, `&#x20AC;`) ; un « & » nu reste littéral.
+    fn decode_references(&self, text: &str, start: usize) -> Result<String, Diagnostic> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != '&' {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            let Some(end) = chars[i + 1..]
+                .iter()
+                .take(12)
+                .position(|ch| *ch == ';')
+                .map(|offset| i + 1 + offset)
+            else {
+                out.push('&');
+                i += 1;
+                continue;
+            };
+            let name: String = chars[i + 1..end].iter().collect();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '#')
+            {
+                out.push('&');
+                i += 1;
+                continue;
+            }
+            let decoded = match name.as_str() {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "nbsp" => Some('\u{a0}'),
+                _ => name.strip_prefix('#').and_then(|digits| {
+                    match digits.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => digits.parse().ok(),
+                    }
+                    .and_then(char::from_u32)
+                }),
+            };
+            let Some(ch) = decoded else {
+                let (line, character) = self.pos_at(start + i);
+                return Err(Diagnostic {
+                    line,
+                    character,
+                    message: format!("référence « &{name}; » non prise en charge"),
+                });
+            };
+            out.push(ch);
+            i = end + 1;
+        }
+        Ok(out)
     }
 
     fn parse_jsx_expr(&mut self, depth: usize) -> Result<Node, Diagnostic> {
@@ -1172,6 +1236,30 @@ mod tests {
             assert!(
                 error.message.contains("échappement"),
                 "{literal}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_character_references_are_decoded_or_diagnosed() {
+        let page = |text: &str| {
+            compile(&format!(
+                "export default function Page() {{\n  return (<p>{text}</p>);\n}}\n"
+            ))
+        };
+        let preview = page("Prix &lt; 10 &#8364; &#x20AC; R&D &amp;&nbsp;&quot;x&apos;")
+            .expect("des références valides")
+            .preview;
+        assert!(
+            preview.contains("Prix < 10 € € R&D &\u{a0}\"x'"),
+            "{preview}"
+        );
+        for bad in ["&eacute;", "&#xD800;", "&#99999999;"] {
+            let error = page(bad).expect_err(bad);
+            assert!(
+                error.message.contains("référence"),
+                "{bad}: {}",
                 error.message
             );
         }

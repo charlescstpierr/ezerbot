@@ -75,6 +75,7 @@ PAGE_SOURCE = r"""export default function Forfaits() {
   return (
     <article>
       <h1>Trois forfaits</h1>
+      <p>Tout &lt; 30 &#8364; par mois</p>
       <p>Offre choisie : {offre}</p>
       <table>
         <thead>

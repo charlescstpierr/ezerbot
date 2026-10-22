@@ -360,6 +360,8 @@ def pages_request(evidence: Path) -> dict:
     )
     if "9 €" not in state["text"] or "u20ac" in state["text"]:
         raise SystemExit(f"l’échappement Unicode du prix est mal décodé: {state['text']}")
+    if "Tout < 30 € par mois" not in state["text"]:
+        raise SystemExit(f"les références de caractères JSX sont mal décodées: {state['text']}")
     chosen = eval_js(
         evidence,
         """async () => {

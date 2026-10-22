@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use grokbot_wrapper::{
-    body_limit, header_safe, too_large, validate_headers_for_path, ApiError, ApiResponse, App,
-    Provider,
+    body_limit, default_database_path, header_safe, too_large, validate_headers_for_path, ApiError,
+    ApiResponse, App, Provider,
 };
 use serde_json::json;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
@@ -34,10 +34,7 @@ fn options() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     let mut port = 0;
     let mut routine_wake = false;
-    let mut db = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Library/Application Support/Grokbot Local/workspace.sqlite");
+    let mut db = default_database_path();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--routine-wake" | "--headless-routines" => routine_wake = true,
@@ -209,9 +206,18 @@ fn payload(
     }
 }
 
+#[cfg(debug_assertions)]
+mod fake_signin;
+
 /// Les builds de développement peuvent viser un faux serveur OpenAI pour essayer l'interface
 /// sans compte. Un build de production ne lit jamais cette variable.
+/// `EZERBOT_FAKE_SIGNIN=1` n’existe que dans un binaire de debug : il démarre son propre
+/// faux OpenAI sur 127.0.0.1 et ouvre une session locale, sans OAuth.
 fn provider(db: &std::path::Path) -> Provider {
+    #[cfg(debug_assertions)]
+    if let Some(provider) = fake_signin::connect(db) {
+        return provider;
+    }
     #[cfg(debug_assertions)]
     if let Ok(base) = std::env::var("GROKBOT_FAKE_OPENAI") {
         let base = fake_openai_base(&base)

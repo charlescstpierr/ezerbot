@@ -957,6 +957,7 @@ fn shell(
         std::thread::spawn(move || {
             use std::os::unix::process::ExitStatusExt;
             let _done = super::shell_tasks::DoneFlag(control.done);
+            let mut redactor = grokbot_forms::redact::SnapshotRedactor::default();
             let live = |stdout: &super::shell_tasks::Piece, stderr: &super::shell_tasks::Piece| {
                 super::shell_tasks::Snap {
                     status: "en cours",
@@ -983,6 +984,7 @@ fn shell(
                         &run_id,
                         &call_id,
                         &live(&stdout, &stderr),
+                        &mut redactor,
                     ) {
                         Ok(super::shell_tasks::Publish::Terminal)
                         | Ok(super::shell_tasks::Publish::Closed)
@@ -1034,7 +1036,7 @@ fn shell(
                 }
             };
             for _ in 0..100 {
-                match super::shell_tasks::publish(&db, &run_id, &call_id, &snap) {
+                match super::shell_tasks::publish(&db, &run_id, &call_id, &snap, &mut redactor) {
                     Ok(
                         super::shell_tasks::Publish::Updated
                         | super::shell_tasks::Publish::Closed

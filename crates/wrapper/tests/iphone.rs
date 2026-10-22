@@ -213,19 +213,6 @@ fn off_by_default_confirmation_refusal_restart_and_revocation() {
     for path in ["/api/approvals/resolve", "/api/forms/submit"] {
         assert!(f.remote("POST", path, json!({}), Some(&token)).is_err());
     }
-    // A paired phone reaches the task card's Arrêter route (an unknown task is
-    // a 409 from the handler, not the 403 of the remote allowlist).
-    assert_eq!(
-        f.remote(
-            "POST",
-            "/api/local/tasks/stop",
-            json!({"run_id":"run-absent","call_id":"call-absent"}),
-            Some(&token)
-        )
-        .unwrap_err()
-        .status,
-        409
-    );
     let replacement = App::open(&f.path).unwrap();
     f.app = replacement;
     assert!(iphone::enabled(&f.app));
@@ -436,4 +423,24 @@ fn remote_decisions_use_the_same_digest_bound_approval_gate() {
         ApprovalCheck::Denied { .. }
     ));
     tx.commit().unwrap();
+}
+
+#[test]
+fn paired_phone_can_stop_a_background_task() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    f.app.feature_context().connection.execute(
+        "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", [],
+    ).unwrap();
+    let body = json!({"run_id":"run","call_id":"call"});
+    assert_eq!(
+        f.remote("POST", "/api/local/tasks/stop", body.clone(), None)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let result = f
+        .remote("POST", "/api/local/tasks/stop", body, Some(&token))
+        .unwrap();
+    assert_eq!(result["status"], "arrêtée");
 }

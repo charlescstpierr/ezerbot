@@ -17,18 +17,18 @@ use std::collections::BTreeSet;
 const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
-    let values = patterns(vault)?;
+    let values = known_patterns(vault)?;
     Ok(mask(text, &values))
 }
 /// Redact a cumulative live snapshot and withhold enough trailing characters
 /// to cover a secret split across reads, including its JSON-escaped form.
 /// Publish the complete text with `redact` once the stream finishes.
 pub fn redact_live(vault: &Vault, text: &str) -> Result<String> {
-    Ok(redact_live_with(&patterns(vault)?, text))
+    let values = known_patterns(vault)?;
+    Ok(mask_live(text, &values))
 }
-/// `redact_live` against patterns the caller retained, so a value removed from
-/// the vault after it was seen stays masked for the rest of the stream.
-pub fn redact_live_with(values: &[String], text: &str) -> String {
+
+fn mask_live(text: &str, values: &[String]) -> String {
     let mut output = mask(text, values);
     let tail = values
         .iter()
@@ -44,18 +44,37 @@ pub fn redact_live_with(values: &[String], text: &str) -> String {
     output
 }
 
+/// Retains every observed pattern for the lifetime of cumulative task output.
+#[derive(Default)]
+pub struct SnapshotRedactor {
+    known: BTreeSet<String>,
+}
+
+impl SnapshotRedactor {
+    pub fn redact(&mut self, vault: &Vault, value: &Value, live: bool) -> Result<Value> {
+        // Always refresh, failing closed even when older patterns are available.
+        self.known.extend(known_patterns(vault)?);
+        let patterns: Vec<_> = self.known.iter().cloned().collect();
+        let mut value = value.clone();
+        if live {
+            for field in ["stdout", "stderr"] {
+                if let Some(text) = value["output"][field].as_str() {
+                    value["output"][field] = Value::String(mask_live(text, &patterns));
+                }
+            }
+        }
+        mask_value(&value, &patterns)
+    }
+}
+
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.
-    mask_value(value, &patterns(vault)?)
-}
-/// `redact_value` against patterns the caller retained across vault changes.
-pub fn redact_value_with(values: &[String], value: &Value) -> Result<Value> {
-    mask_value(value, values)
+    let values = known_patterns(vault)?;
+    mask_value(value, &values)
 }
 
-/// The exact strings (raw and JSON-escaped) the vault currently masks.
-pub fn patterns(vault: &Vault) -> Result<Vec<String>> {
+fn known_patterns(vault: &Vault) -> Result<Vec<String>> {
     let mut patterns = BTreeSet::new();
     for value in vault.known_values()? {
         let encoded = serde_json::to_string(&value)?;

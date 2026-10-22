@@ -856,7 +856,19 @@ fn rename_path(
     fs::rename(from, to).map_err(|error| io_error("Déplacement impossible", to, error))
 }
 
+/// Fichiers de session réels, à côté de `workspace.sqlite`.
+/// `workspace.*-auth.json`, `workspace.provider.json`, et tout nom `*.sqlite*`.
+fn preserved_session_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    (name.starts_with("workspace.") && name.ends_with("-auth.json"))
+        || name == "workspace.provider.json"
+        || name.contains(".sqlite")
+}
+
 fn copy_path(src: &Path, dst: &Path, paths: &UpdatePaths) -> Result<(), UpdateError> {
+    if src.file_name().is_some_and(preserved_session_name) {
+        return Ok(());
+    }
     authorize(src, paths)?;
     authorize(dst, paths)?;
     let metadata =
@@ -1227,6 +1239,16 @@ mod tests {
         let user = root.join("user-data");
         fs::create_dir_all(&user).unwrap();
         fs::write(user.join("workspace.sqlite"), "sessions-intactes").unwrap();
+        for name in [
+            "workspace.codex-auth.json",
+            "workspace.chatgpt-auth.json",
+            "workspace.provider.json",
+            "workspace.sqlite-wal",
+            "workspace.sqlite-shm",
+            "workspace.sqlite-journal",
+        ] {
+            fs::write(user.join(name), format!("kept-{name}")).unwrap();
+        }
         let bundle = if bundle_in_dev {
             dev.join("app/build/Ezerbot.app")
         } else {
@@ -1574,10 +1596,7 @@ mod tests {
             .with_file_name("Ezerbot.app.previous")
             .exists());
         assert_eq!(phases, vec![Phase::Telechargement, Phase::Compilation]);
-        assert_eq!(
-            fs::read_to_string(fixture.paths.user_data.join("workspace.sqlite")).unwrap(),
-            "sessions-intactes"
-        );
+        assert_sessions(&fixture.paths.user_data);
         assert_outside_dev(&runner, &fixture.paths.dev_root);
     }
 
@@ -1615,10 +1634,7 @@ mod tests {
             fs::read_to_string(fixture.paths.dev_root.join("src-secret.txt")).unwrap(),
             "code-local"
         );
-        assert_eq!(
-            fs::read_to_string(fixture.paths.user_data.join("workspace.sqlite")).unwrap(),
-            "sessions-intactes"
-        );
+        assert_sessions(&fixture.paths.user_data);
         assert_outside_dev(&runner, &fixture.paths.dev_root);
         let dev = fixture.paths.dev_root.clone();
         for path in take_touches() {
@@ -1687,10 +1703,74 @@ mod tests {
             fs::read_to_string(paths.dev_root.join("src-secret.txt")).unwrap(),
             "code-local"
         );
+        assert_sessions(&paths.user_data);
+    }
+
+    fn assert_sessions(user: &Path) {
         assert_eq!(
-            fs::read_to_string(paths.user_data.join("workspace.sqlite")).unwrap(),
+            fs::read_to_string(user.join("workspace.sqlite")).unwrap(),
             "sessions-intactes"
         );
+        for name in [
+            "workspace.codex-auth.json",
+            "workspace.chatgpt-auth.json",
+            "workspace.provider.json",
+            "workspace.sqlite-wal",
+            "workspace.sqlite-shm",
+            "workspace.sqlite-journal",
+        ] {
+            assert_eq!(
+                fs::read_to_string(user.join(name)).unwrap(),
+                format!("kept-{name}"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn la_copie_ne_remplace_pas_les_noms_reels_de_session() {
+        let fixture = layout("noms", false);
+        let names = [
+            "workspace.codex-auth.json",
+            "workspace.chatgpt-auth.json",
+            "workspace.provider.json",
+            "workspace.sqlite",
+            "workspace.sqlite-wal",
+            "workspace.sqlite-shm",
+            "workspace.sqlite-journal",
+        ];
+        for name in names {
+            fs::write(fixture.paths.bundle.join(name), format!("bundle-{name}")).unwrap();
+        }
+        let staged = fixture.paths.work_dir.join("staged");
+        write_app(&staged, "binaire-nouveau", &hex_sha('c'));
+        fs::create_dir_all(staged.join("Contents/Resources")).unwrap();
+        fs::write(staged.join("Contents/Resources/notes.txt"), "release-notes").unwrap();
+        for name in names {
+            fs::write(staged.join(name), "wiped").unwrap();
+            fs::write(staged.join("Contents").join(name), "wiped").unwrap();
+        }
+        copy_path(&staged, &fixture.paths.bundle, &fixture.paths).unwrap();
+        assert_eq!(marker(&fixture.paths.bundle), "binaire-nouveau");
+        assert_eq!(
+            fs::read(fixture.paths.bundle.join("Contents/Resources/notes.txt")).unwrap(),
+            b"release-notes"
+        );
+        for name in names {
+            assert_eq!(
+                fs::read_to_string(fixture.paths.bundle.join(name)).unwrap(),
+                format!("bundle-{name}"),
+                "{name}"
+            );
+            assert!(
+                !fixture.paths.bundle.join("Contents").join(name).exists(),
+                "{name}"
+            );
+        }
+        assert_sessions(&fixture.paths.user_data);
+        let refused = copy_path(&staged, &fixture.paths.user_data, &fixture.paths);
+        assert!(refused.is_err());
+        assert_sessions(&fixture.paths.user_data);
     }
 
     #[test]

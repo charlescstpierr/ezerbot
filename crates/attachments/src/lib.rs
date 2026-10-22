@@ -5,6 +5,7 @@
 
 pub mod documents;
 pub mod generation;
+mod pdf_font;
 pub mod precaption;
 pub mod staging;
 

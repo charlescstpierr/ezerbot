@@ -121,7 +121,10 @@ function Floating() {
       const result = native({ command: "openConversation", conversation_id: id });
       if (result) await result;
       else { localStorage.setItem("grokbot.selected", id); location.href = "/"; }
-    } catch { setError("Impossible d’ouvrir ce fil. Réessayez depuis Ezerbot."); }
+    } catch (failure) {
+      const reason = typeof failure?.message === "string" ? failure.message.trim() : "";
+      setError(reason || "Impossible d’ouvrir ce fil. Réessayez depuis Ezerbot.");
+    }
   }
   async function send(event) {
     event.preventDefault();

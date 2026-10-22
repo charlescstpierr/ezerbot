@@ -101,6 +101,9 @@
     card.append(actions);
     return card;
   }
+  // The first request names the service alone; a GitHub account other than the first is named by its slot.
+  const slotBody = item => item.slot && item.slot !== item.id ? {id:item.id,account:item.slot} : {id:item.id};
+  const accountStatus = {connected:"Connecté",authorizing:"En attente de votre autorisation chez GitHub",reconnect:"À reconnecter",error:"En erreur",saved:"Connexion enregistrée · à démarrer"};
   function renderCatalogue(items, bots) {
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
@@ -134,14 +137,14 @@
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
       if (item.message && !(item.device_flow && item.device)) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
       const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
-      const copyButton = (caption, value) => {
+      const copyButton = (caption, value, name = item.name) => {
         let resetCopy;
         const copy = button("Copier", async () => {
           clearTimeout(resetCopy);
           try { await panels.copyText(value); copy.textContent = "Copié"; resetCopy = setTimeout(() => { copy.textContent = "Copier"; },1500); }
           catch { feedback.textContent = "Sélectionnez le texte pour le copier. La copie automatique n’est pas disponible."; feedback.scrollIntoView?.({block:"nearest"}); }
         });
-        copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${item.name}`);
+        copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${name}`);
         return copy;
       };
       const copyable = (caption, value) => {
@@ -168,23 +171,24 @@
       }
       card.append(setup);
       if (item.device_flow && !item.configured) card.append(node("p", "L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir ici : Connecter restera indisponible tant qu’elle n’est pas préparée.", "mcp-warning"));
-      if (item.device_flow && item.device) {
+      const deviceBlock = (code, name, action = "authorize") => {
         const device = node("div", null, "mcp-device"); device.setAttribute("role", "group"); device.setAttribute("aria-label", "Code de connexion GitHub");
-        const until = new Date(item.device.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
+        const until = new Date(code.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
         const row = node("div", null, "mcp-copy-row");
-        row.append(node("code", item.device.user_code, "mcp-device-code"), copyButton("le code de connexion", item.device.user_code));
+        row.append(node("code", code.user_code, "mcp-device-code"), copyButton("le code de connexion", code.user_code, name));
         device.append(node("p", "Entrez ce code sur github.com/login/device :", "mcp-note"), row, node("p", `Le code est valable jusqu’à ${until}. Ezerbot termine la connexion dès que vous avez autorisé l’application chez GitHub.`, "mcp-note"));
         const page = node("a", "Ouvrir github.com/login/device", "secondary-button");
-        page.href = item.device.verification_uri; page.target = "_blank"; page.rel = "noopener noreferrer"; page.setAttribute("data-connector-action", "authorize");
+        page.href = code.verification_uri; page.target = "_blank"; page.rel = "noopener noreferrer"; page.setAttribute("data-connector-action", action);
         device.append(page);
-        card.append(device);
-      }
+        return device;
+      };
+      if (item.device_flow && item.device) card.append(deviceBlock(item.device, item.name));
       const actions = node("div", null, "mcp-actions");
       const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", event => {
         event?.preventDefault();
         if (form && !item.has_client && !setup.open) { setup.open = true; client.focus?.(); }
         else if (form && setup.open) return form.requestSubmit();
-        else return act("/api/connectors/connect", {id:item.id}, connect);
+        else return act("/api/connectors/connect", slotBody(item), connect);
       }, ["disconnected","reconnect","error"].includes(item.status) ? "primary-button" : "secondary-button");
       connect.setAttribute("data-connector-action", "connect");
       if (form) {
@@ -192,7 +196,7 @@
         connect.type = "submit"; connect.setAttribute("form", form.id);
         form.addEventListener("submit", async event => {
           event.preventDefault();
-          const body = {id:item.id,client_id:client.value,client_secret:secret.value};
+          const body = {...slotBody(item),client_id:client.value,client_secret:secret.value};
           client.value = ""; secret.value = "";
           try { await act("/api/connectors/connect", body, connect); }
           finally { delete body.client_secret; delete body.client_id; }
@@ -200,7 +204,7 @@
       }
       if (item.status !== "authorizing") actions.append(connect);
       if (item.device_flow && item.status === "authorizing") {
-        const cancel = button("Annuler", () => act("/api/connectors/cancel", {id:item.id}, cancel)); cancel.setAttribute("data-connector-action", "cancel"); actions.append(cancel);
+        const cancel = button("Annuler", () => act("/api/connectors/cancel", slotBody(item), cancel)); cancel.setAttribute("data-connector-action", "cancel"); actions.append(cancel);
       }
       if (item.authorization_url && item.status === "authorizing" && !item.device) {
         const link = node("a", "Ouvrir la page de connexion", "secondary-button");
@@ -208,7 +212,8 @@
         actions.append(link);
       }
       if (item.server) {
-        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); remove.setAttribute("data-connector-action","disconnect"); if (!(item.device_flow && item.status === "authorizing")) actions.append(remove);
+        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", slotBody(item), remove)); remove.setAttribute("data-connector-action","disconnect");
+        if ((item.accounts || []).length > 1 && item.account) remove.setAttribute("aria-label", `Déconnecter ${item.account}`); if (!(item.device_flow && item.status === "authorizing")) actions.append(remove);
         if (item.status === "connected" || item.server.tools.length) {
           const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
           for (const bot of bots) {
@@ -225,11 +230,49 @@
           card.append(node("p", "Les outils et leur activation par bot seront disponibles après la connexion.", "mcp-note"));
         }
       }
+      const others = (item.accounts || []).filter(account => account.id !== item.slot);
+      if (item.device_flow && item.configured && item.status === "connected" && !(item.accounts || []).some(account => account.status === "authorizing")) {
+        const another = button("Connecter un autre compte", () => act("/api/connectors/connect", {id:item.id,another:true}, another));
+        another.setAttribute("data-connector-action", "add-account"); actions.append(another);
+      }
       card.append(actions);
+      for (const account of others) card.append(accountBlock(item, account, copyButton, deviceBlock, bots));
       if (previous) previous.node.replaceWith(card); else catalogue.append(card);
       catalogueCards.set(item.id,{key:cardKey,node:card});
       restoreCard(card,view);
     }
+  }
+  // A GitHub account beside the first one: its login, its own code wait, disconnect and bot switches.
+  function accountBlock(item, account, copyButton, deviceBlock, bots) {
+    const block = node("section", null, "mcp-account"); block.setAttribute("data-account", account.id);
+    const who = account.account || "nouveau compte";
+    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte GitHub · ${who} · ${accountStatus[account.status] || "Déconnecté"}`, "mcp-note"));
+    if (account.message && !account.device) block.append(node("p", account.message, account.warning ? "mcp-warning" : ["error","reconnect"].includes(account.status) ? "mcp-error" : "mcp-note"));
+    if (account.device) block.append(deviceBlock(account.device, `${item.name} (${who})`, "authorize-account"));
+    const actions = node("div", null, "mcp-actions");
+    const target = {id:item.id,account:account.id};
+    if (["reconnect","error"].includes(account.status)) {
+      const connect = button("Reconnecter", () => act("/api/connectors/connect", target, connect), "primary-button");
+      connect.setAttribute("data-connector-action", "reconnect-account"); connect.setAttribute("aria-label", `Reconnecter ${who}`); actions.append(connect);
+    }
+    if (account.status === "authorizing") {
+      const cancel = button("Annuler", () => act("/api/connectors/cancel", target, cancel));
+      cancel.setAttribute("data-connector-action", "cancel-account"); cancel.setAttribute("aria-label", `Annuler la connexion de ${who}`); actions.append(cancel);
+    } else {
+      const remove = button("Déconnecter", () => act("/api/connectors/disconnect", target, remove));
+      remove.setAttribute("data-connector-action", "disconnect-account"); remove.setAttribute("aria-label", `Déconnecter ${who}`); actions.append(remove);
+    }
+    block.append(actions);
+    if (account.status === "connected" && account.server) {
+      const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", `Activer les outils pour (${who})`));
+      for (const bot of bots) {
+        const check = input(`catalogue-${item.id}-${account.id}-${bot.id}`, "", "checkbox"); check.checked = account.server.enabled_bots.includes(bot.id);
+        check.addEventListener("change", () => act("/api/mcp/select", {id:account.server.id,bot_id:bot.id,enabled:check.checked}, check));
+        choices.append(label(bot.name, check));
+      }
+      block.append(choices);
+    }
+    return block;
   }
   async function act(path, body, b) {
     b.disabled = true;
@@ -256,7 +299,7 @@
   function render(state) {
     if (!list) return;
     const items = state.mcp?.catalogue || [];
-    const catalogueIds = new Set(items.map(i => i.server?.id).filter(Boolean));
+    const catalogueIds = new Set(items.flatMap(i => [i.server?.id, ...(i.accounts || []).map(a => a.server?.id)]).filter(Boolean));
     const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);
     // Catalogue updates are keyed independently of the custom-server list.

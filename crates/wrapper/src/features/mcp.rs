@@ -374,6 +374,8 @@ fn enabled(conn: &Connection, server: &str, bot: &str) -> bool {
 }
 pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
     let mut result = Vec::new();
+    // Several accounts of one service share one closed list of tools.
+    let mut native_offered = false;
     for server in servers(ctx.connection).unwrap_or_default() {
         for action in ["start", "remove"]
             .into_iter()
@@ -401,7 +403,11 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
             continue;
         }
         if catalogue::is_native(ctx, &server.id) {
-            result.extend(catalogue::native_tools(ctx, &server));
+            let tools = catalogue::native_tools(ctx, &server);
+            if !tools.is_empty() && !native_offered {
+                native_offered = true;
+                result.extend(tools);
+            }
             continue;
         }
         let handle = ctx

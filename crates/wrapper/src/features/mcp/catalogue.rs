@@ -79,6 +79,18 @@ fn manifest(id: &str) -> Result<Manifest, ApiError> {
         .copied()
         .ok_or_else(|| invalid("Ce connecteur n’est pas dans le catalogue."))
 }
+/// A catalogue row is a service plus, for GitHub, one account slot: `github`, `github:2`…
+fn row_manifest(row: &str) -> Result<Manifest, ApiError> {
+    manifest(row.split_once(':').map_or(row, |(service, _)| service))
+}
+/// The GitHub account slots, the first one first.
+fn github_rows(ctx: &Context<'_>) -> Result<Vec<(String, String)>, ApiError> {
+    let mut stmt = ctx.connection.prepare("SELECT id,phase FROM wrapper_connector_catalogue WHERE id='github' OR id GLOB 'github:*' ORDER BY id='github' DESC,rowid")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
 fn server_id(id: &str) -> String {
     format!("c{}", &format!("{:x}", Sha256::digest(id.as_bytes()))[..15])
 }
@@ -87,7 +99,7 @@ fn record(
     server: &str,
 ) -> Result<Option<(Manifest, String, i64, i64)>, ApiError> {
     let row: Option<(String,String,i64,i64)> = ctx.connection.query_row("SELECT id,phase,expires_at,generation FROM wrapper_connector_catalogue WHERE server_id=?1", [server], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    row.map(|(id, phase, expires, g)| Ok((manifest(&id)?, phase, expires, g)))
+    row.map(|(id, phase, expires, g)| Ok((row_manifest(&id)?, phase, expires, g)))
         .transpose()
 }
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
@@ -113,6 +125,7 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
             )?;
         }
     }
+    github::migrate(conn)?;
     github::comment::migrate(conn)?;
     conn.execute_batch("UPDATE wrapper_connector_catalogue SET phase='reconnect',message='La connexion a été interrompue. Reconnectez le service.',authorization_url=NULL,device_user_code=NULL,device_expires_at=0,generation=generation+1 WHERE phase='authorizing';")?;
     Ok(())
@@ -121,83 +134,111 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
     let local = super::state_servers(ctx)?;
     let mut items = Vec::new();
     for m in MANIFESTS {
-        let id = server_id(m.id);
-        let row: Option<(String,Option<String>,i64,Option<String>)> = ctx.connection.query_row("SELECT phase,message,expires_at,authorization_url FROM wrapper_connector_catalogue WHERE id=?1", [m.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        let device: Option<(Option<String>, i64)> = ctx.connection.query_row("SELECT device_user_code,device_expires_at FROM wrapper_connector_catalogue WHERE id=?1", [m.id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let server = local.iter().find(|s| s["id"] == id).cloned();
-        let configured = row.is_some();
-        let (phase, message, expires, url) =
-            row.unwrap_or_else(|| ("disconnected".into(), None, 0, None));
-        let private = if configured {
-            credentials(ctx, &id)?.unwrap_or_default()
-        } else {
-            HashMap::new()
-        };
-        // GitHub has no client to type: it is configured by the build, or not at all.
-        let has_client = if m.id == "github" {
-            github::client_id().is_some()
-        } else {
-            private.contains_key("CLIENT_ID")
-                && (m.id == "notion" || private.contains_key("CLIENT_SECRET"))
-        };
-        let has_tokens =
-            private.contains_key("ACCESS_TOKEN") || private.contains_key("REFRESH_TOKEN");
-        let can_refresh = private.contains_key("REFRESH_TOKEN");
-        let expired = expires > 0 && expires <= wall_clock() as i64 + 30_000;
-        let warning = message.as_deref() == Some(REVOCATION_WARNING);
-        let status = if phase == "authorizing"
-            || phase == "reconnect"
-            || phase == "error"
-            || phase == "disconnected"
-        {
-            phase.as_str()
-        } else if expired && !can_refresh {
-            "reconnect"
-        } else if m.id == "github" && server.is_some() {
-            // Native connection: there is no process to be alive or crashed.
-            "connected"
-        } else if server
-            .as_ref()
-            .is_some_and(|s| s["status"] == "error" || s["status"] == "crashed")
-        {
-            "error"
-        } else if server
-            .as_ref()
-            .is_some_and(|s| s["status"] == "connected" || s["status"] == "busy")
-        {
-            "connected"
-        } else {
-            "saved"
-        };
-        let message = if status == "saved" {
-            Some("Identifiants conservés dans le coffre. Reconnectez le service pour démarrer ses outils.".to_owned())
-        } else if status == "reconnect" && phase == "connected" {
-            Some("Le jeton a expiré. Reconnectez le service.".to_owned())
-        } else if status == "connected" && expired && can_refresh {
-            Some("Le jeton sera renouvelé au prochain appel autorisé.".to_owned())
-        } else if status == "error" && phase == "connected" {
-            server
-                .as_ref()
-                .and_then(|s| s["error"].as_str())
-                .map(str::to_owned)
-        } else {
-            message.filter(|s| !s.starts_with("Connecté."))
-        };
-        let message = message.map(|s| {
-            if s == crate::mcp::AUTH_REQUIRED {
-                "La connexion a expiré ou a été révoquée. Reconnectez le service.".to_owned()
-            } else {
-                s
-            }
-        });
-        let device = device
-            .filter(|_| phase == "authorizing")
-            .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
-            .unwrap_or(Value::Null);
-        items.push(json!({"device":device,"device_flow":m.id=="github","configured":m.id!="github"||has_client,"id":m.id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(*m),"redirect_uri":setup_redirect(*m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}));
+        if m.id != "github" {
+            items.push(item_of(ctx, *m, m.id, &local)?);
+            continue;
+        }
+        // The card follows the first account that is still there; a disconnected
+        // first slot gives way to the next one instead of hiding it.
+        let rows = github_rows(ctx)?;
+        let lead = rows
+            .iter()
+            .find(|(_, phase)| phase != "disconnected")
+            .map_or("github", |(row, _)| row.as_str());
+        let mut item = item_of(ctx, *m, lead, &local)?;
+        let mut accounts = Vec::new();
+        for (row, _) in rows.iter().filter(|(_, phase)| phase != "disconnected") {
+            let account = item_of(ctx, *m, row, &local)?;
+            accounts.push(json!({"id":row,"account":account["account"],"status":account["status"],"message":account["message"],"warning":account["warning"],"device":account["device"],"authorization_url":account["authorization_url"],"has_tokens":account["has_tokens"],"server":account["server"]}));
+        }
+        item["accounts"] = json!(accounts);
+        items.push(item);
     }
     items.push(super::super::recall::item(ctx)?);
     Ok(json!(items))
+}
+/// One card, or one GitHub account slot, as the settings panel shows it.
+fn item_of(
+    ctx: &Context<'_>,
+    m: Manifest,
+    row_id: &str,
+    local: &[Value],
+) -> Result<Value, ApiError> {
+    let id = server_id(row_id);
+    let row: Option<(String,Option<String>,i64,Option<String>)> = ctx.connection.query_row("SELECT phase,message,expires_at,authorization_url FROM wrapper_connector_catalogue WHERE id=?1", [row_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let device: Option<(Option<String>, i64)> = ctx.connection.query_row("SELECT device_user_code,device_expires_at FROM wrapper_connector_catalogue WHERE id=?1", [row_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let server = local.iter().find(|s| s["id"] == id).cloned();
+    let configured = row.is_some();
+    let (phase, message, expires, url) =
+        row.unwrap_or_else(|| ("disconnected".into(), None, 0, None));
+    let private = if configured {
+        credentials(ctx, &id)?.unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    // GitHub has no client to type: it is configured by the build, or not at all.
+    let has_client = if m.id == "github" {
+        github::client_id().is_some()
+    } else {
+        private.contains_key("CLIENT_ID")
+            && (m.id == "notion" || private.contains_key("CLIENT_SECRET"))
+    };
+    let has_tokens = private.contains_key("ACCESS_TOKEN") || private.contains_key("REFRESH_TOKEN");
+    let can_refresh = private.contains_key("REFRESH_TOKEN");
+    let expired = expires > 0 && expires <= wall_clock() as i64 + 30_000;
+    let warning = message.as_deref() == Some(REVOCATION_WARNING);
+    let status = if phase == "authorizing"
+        || phase == "reconnect"
+        || phase == "error"
+        || phase == "disconnected"
+    {
+        phase.as_str()
+    } else if expired && !can_refresh {
+        "reconnect"
+    } else if m.id == "github" && server.is_some() {
+        // Native connection: there is no process to be alive or crashed.
+        "connected"
+    } else if server
+        .as_ref()
+        .is_some_and(|s| s["status"] == "error" || s["status"] == "crashed")
+    {
+        "error"
+    } else if server
+        .as_ref()
+        .is_some_and(|s| s["status"] == "connected" || s["status"] == "busy")
+    {
+        "connected"
+    } else {
+        "saved"
+    };
+    let message = if status == "saved" {
+        Some("Identifiants conservés dans le coffre. Reconnectez le service pour démarrer ses outils.".to_owned())
+    } else if status == "reconnect" && phase == "connected" {
+        Some("Le jeton a expiré. Reconnectez le service.".to_owned())
+    } else if status == "connected" && expired && can_refresh {
+        Some("Le jeton sera renouvelé au prochain appel autorisé.".to_owned())
+    } else if status == "error" && phase == "connected" {
+        server
+            .as_ref()
+            .and_then(|s| s["error"].as_str())
+            .map(str::to_owned)
+    } else {
+        message.filter(|s| !s.starts_with("Connecté."))
+    };
+    let message = message.map(|s| {
+        if s == crate::mcp::AUTH_REQUIRED {
+            "La connexion a expiré ou a été révoquée. Reconnectez le service.".to_owned()
+        } else {
+            s
+        }
+    });
+    let device = device
+        .filter(|_| phase == "authorizing")
+        .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
+        .unwrap_or(Value::Null);
+    Ok(
+        json!({"device":device,"device_flow":m.id=="github","configured":m.id!="github"||has_client,"id":m.id,"slot":row_id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":setup_redirect(m),"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -207,21 +248,66 @@ struct Connect {
     client_id: String,
     #[serde(default)]
     client_secret: String,
+    /// The GitHub account slot to (re)connect; the first one when absent.
+    #[serde(default)]
+    account: Option<String>,
+    /// Add a GitHub account beside the ones already connected.
+    #[serde(default)]
+    another: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Slot {
+    id: String,
+    #[serde(default)]
+    account: Option<String>,
+}
+/// The catalogue row a request names: the service itself, or one of its GitHub slots.
+fn slot_row(ctx: &Context<'_>, m: Manifest, account: Option<&str>) -> Result<String, ApiError> {
+    let Some(account) = account.filter(|a| *a != m.id) else {
+        return Ok(m.id.to_owned());
+    };
+    if m.id == "github" && github_rows(ctx)?.iter().any(|(row, _)| row == account) {
+        return Ok(account.to_owned());
+    }
+    Err(invalid("Ce compte GitHub n’existe plus."))
+}
+/// Where a new GitHub account goes: a free slot, never over a live connection or a wait.
+fn another_slot(ctx: &Context<'_>) -> Result<String, ApiError> {
+    let rows = github_rows(ctx)?;
+    if rows.iter().any(|(_, phase)| phase == "authorizing") {
+        return Err(ApiError::new(
+            409,
+            "Une connexion GitHub attend déjà un code. Terminez-la ou annulez-la avant d’ajouter un autre compte.",
+        ));
+    }
+    if rows.is_empty() {
+        return Ok("github".into());
+    }
+    if let Some((row, _)) = rows.iter().find(|(_, phase)| phase == "disconnected") {
+        return Ok(row.clone());
+    }
+    Ok((2..)
+        .map(|n| format!("github:{n}"))
+        .find(|row| rows.iter().all(|(taken, _)| taken != row))
+        .expect("an unbounded range has a free slot"))
 }
 pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     let ctx = app.feature_context();
     if path == "/api/connectors/disconnect" {
-        let input: Identity = parse(body)?;
+        let input: Slot = parse(body)?;
         let m = manifest(&input.id)?;
+        let row = slot_row(&ctx, m, input.account.as_deref())?;
         return super::route(
             app,
             "/api/mcp/remove",
-            json!({"id":server_id(m.id)}).to_string().as_bytes(),
+            json!({"id":server_id(&row)}).to_string().as_bytes(),
         );
     }
     if path == "/api/connectors/cancel" {
-        let input: Identity = parse(body)?;
+        let input: Slot = parse(body)?;
         let m = manifest(&input.id)?;
+        let row = slot_row(&ctx, m, input.account.as_deref())?;
         if m.id != "github" {
             return Err(invalid(
                 "Ce service ne se connecte pas par un code à entrer.",
@@ -230,7 +316,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
         // Bumping the generation retires the waiting thread: a late authorization,
         // even one GitHub still accepts, can no longer reach the vault.
-        let cancelled = ctx.connection.execute("UPDATE wrapper_connector_catalogue SET generation=generation+1,phase='disconnected',message='Connexion annulée. Aucun jeton n’a été conservé.',authorization_url=NULL,device_user_code=NULL,device_expires_at=0 WHERE id=?1 AND phase='authorizing'",[m.id])?;
+        let cancelled = ctx.connection.execute("UPDATE wrapper_connector_catalogue SET generation=generation+1,phase='disconnected',message='Connexion annulée. Aucun jeton n’a été conservé.',authorization_url=NULL,device_user_code=NULL,device_expires_at=0 WHERE id=?1 AND phase='authorizing'",[&row])?;
         if cancelled == 0 {
             return Err(ApiError::new(
                 409,
@@ -255,7 +341,15 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
     {
         return Err(invalid("Identifiants OAuth invalides."));
     }
-    let id = server_id(m.id);
+    if (input.another || input.account.is_some()) && m.id != "github" {
+        return Err(invalid("Ce service ne garde qu’un compte."));
+    }
+    let row = if input.another {
+        another_slot(&ctx)?
+    } else {
+        slot_row(&ctx, m, input.account.as_deref())?
+    };
+    let id = server_id(&row);
     {
         // Settings runs on the HTTP thread: never wait behind a provider's
         // token exchange or first package download. State polling stays usable.
@@ -295,7 +389,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         }
         let tx = write_transaction(ctx.connection)?;
         tx.execute("INSERT OR IGNORE INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json) VALUES (?1,?2,?3,?4,?5)",params![id,m.name,if m.endpoint.is_empty(){"uvx · workspace-mcp 2.1.1"}else{m.endpoint},json!([]).to_string(),if m.id=="github"{json!(["ACCESS_TOKEN","REFRESH_TOKEN"])}else{json!(["ACCESS_TOKEN","REFRESH_TOKEN","CLIENT_ID","CLIENT_SECRET"])}.to_string()])?;
-        tx.execute("INSERT INTO wrapper_connector_catalogue(id,server_id) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET generation=generation+1,authorization_url=NULL,phase=CASE WHEN phase='authorizing' THEN 'reconnect' ELSE phase END",params![m.id,id])?;
+        tx.execute("INSERT INTO wrapper_connector_catalogue(id,server_id) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET generation=generation+1,authorization_url=NULL,phase=CASE WHEN phase='authorizing' THEN 'reconnect' ELSE phase END",params![row,id])?;
         // A GitHub connection has no setup to keep before its tokens exist.
         if m.id != "github" {
             save(&ctx, &id, &env)?;
@@ -330,13 +424,22 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         m.name
     );
     if m.id == "github" {
+        let account: Option<String> = ctx
+            .connection
+            .query_row(
+                "SELECT account_email FROM wrapper_connector_catalogue WHERE server_id=?1",
+                [&server.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()??;
         let connection = if action == "remove" {
             ""
         } else {
             "GitHub affichera un code à 8 caractères qu’Ezerbot vous montre ici ; la page https://github.com/login/device s’ouvre dans le navigateur. Vous vous identifiez, autorisez l’application GitHub d’Ezerbot et choisissez les dépôts chez GitHub. Seul l’identifiant public de l’application est envoyé : aucun secret n’existe dans Ezerbot. Les jetons reçus sont conservés dans le coffre. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
         };
         return Some(
-            json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":"aucune ; les permissions sont celles de la GitHub App d’Ezerbot, choisies chez GitHub","source":m.source,"licence":m.license,"révision":revision,"connexion":connection,"déconnexion":"Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. GitHub ne permet pas à Ezerbot de révoquer l’accès sans secret d’application : retirez aussi l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."}),
+            json!({"id":m.id,"service":m.name,"compte":account,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":"aucune ; les permissions sont celles de la GitHub App d’Ezerbot, choisies chez GitHub","source":m.source,"licence":m.license,"révision":revision,"connexion":connection,"déconnexion":"Les jetons locaux, l’activation par bot et les règles de ce service sont supprimés, et le connecteur s’arrête. GitHub ne permet pas à Ezerbot de révoquer l’accès sans secret d’application : retirez aussi l’autorisation d’Ezerbot dans les réglages de votre compte GitHub."}),
         );
     }
     let connection = if m.endpoint.is_empty() {
@@ -703,6 +806,8 @@ pub(super) fn remove(
     } else {
         REVOCATION_WARNING
     };
+    // A conversation that had chosen this account is asked again, never sent to another.
+    tx.execute("DELETE FROM wrapper_github_account_choice WHERE account_id=(SELECT account_id FROM wrapper_connector_catalogue WHERE server_id=?1)",[&server.id])?;
     tx.execute("UPDATE wrapper_connector_catalogue SET phase='disconnected',message=?2,expires_at=0,account_email=NULL,account_id=NULL,device_user_code=NULL,device_expires_at=0 WHERE server_id=?1",params![server.id,message])?;
     tx.commit()?;
     super::execution::retire(ctx, &server.id);

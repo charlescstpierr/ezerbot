@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { documentToolView } from "./generated-presentation.js";
 
 const component = readFileSync(new URL("./generated-document.jsx", import.meta.url), "utf8");
 test("both document dialogs synchronize React state on native close, including Escape and shell navigation", () => {
   assert.equal((component.match(/ref=\{dialog\} onClose=\{onClose\}/g) || []).length, 2);
   assert.doesNotMatch(component, /onCancel=\{onClose\}/);
   assert.match(component, /view\.summary !== view\.failure\.message/);
-  assert.match(component, /L’action est en cours sur votre Mac\./);
+  assert.equal(documentToolView({ call: { name: "document_action", arguments: { action: "save" } } }, { status: "running" }).note, "L’action est en cours sur votre Mac.");
 });
 
 // Real DOM regression, without adding a DOM emulator dependency. Run against a

@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from "react";
 import { localCallView, localStatusLabel, localFailureView, localLimits, localToolLabel } from "../local-call.js";
+import { runView } from "../run-status.js";
 import { LocalResult } from "../local-result.js";
 import { ScreenCard, screenTools } from "../screen.jsx";
 import { GeneratedDocument, DocumentTool } from "../generated-document.jsx";
@@ -78,9 +79,9 @@ export function openConnectors(connector) {
 function LocalCard({ message, run, onAction, busy }) {
   const { call, outcome, authorized_by: authority, approval_status: approvalStatus, run_status: storedStatus } = message.payload;
   const output = outcome?.output;
-  const runStatus = run?.status && run.status !== "ended" ? run.status : storedStatus || run?.status;
+  const { status: runStatus, stopped } = runView(storedStatus, run?.status);
   const { args, preview, shellArguments } = localCallView(call);
-  const pending = !outcome && !["ended", "finished", "cancelled", "failed", "interrupted"].includes(runStatus);
+  const pending = !outcome && !stopped;
   if (!outcome && runStatus === "awaiting_approval") return <article className="gb-message gb-engine-card gb-local-card gb-local-waiting" data-message-id={message.id} data-card-kind="tool"><p>Accord requis dans la carte d’approbation.</p></article>;
   const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approvalStatus, runStatus) : null;
   const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
@@ -111,13 +112,12 @@ export function Card({ message, onAction, busy }) {
   }
   const run = view?.run(runId);
   const storedStatus = message.payload?.run_status;
-  const runStatus = run?.status && run.status !== "ended" ? run.status : storedStatus || run?.status;
+  const { status: runStatus, stopped: ended } = runView(storedStatus, run?.status);
   if (screenTools[call.name]) return <ScreenCard message={message} />;
   if (call.name === "create_document" && outcome?.status === "done" && outcome.output?.id?.startsWith("generated_")) return <GeneratedDocument file={outcome.output} message={message} />;
   if (["create_document", "document_action"].includes(call.name)) return <DocumentTool message={message} run={run} />;
   if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const background = call.name === "routines_background_configure";
-  const ended = ["ended", "finished", "cancelled", "failed", "interrupted"].includes(runStatus);
   let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
   const decisionLabels = { denied: "Refusé", cancelled: "Annulé", expired: "Approbation expirée" };
   const refused = outcome?.status === "failed" && Object.hasOwn(decisionLabels, approval_status);

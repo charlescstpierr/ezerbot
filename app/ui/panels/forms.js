@@ -263,8 +263,17 @@
       const server = state.mcp?.servers?.find((s) => s.tools.some((t) => t.namespace === rule.tool) || [`mcp_start_${s.id}`, `mcp_remove_${s.id}`].includes(rule.tool));
       const tool = server?.tools.find((t) => t.namespace === rule.tool)?.name || (rule.tool.startsWith("mcp_start_") ? "Démarrer / redémarrer" : "Supprimer le connecteur");
       const localLabel = window.GrokbotLocalUi?.toolLabel(rule.tool) || rule.tool;
-      const toolName = server ? `${server.name} · ${tool}` : localLabel;
-      description.textContent = `${botName} · ${toolName}${rule.document_summary ? ` · ${rule.document_summary}` : ""} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
+      const toolName = rule.tool === "background_computer"
+        ? "Tâche en arrière-plan · Exécuter une tâche sur l'ordinateur"
+        : server ? `${server.name} · ${tool}` : localLabel;
+      const scopeLabel = rule.tool === "background_computer"
+        ? "Ce type d’action"
+        : rule.scope === "global"
+        ? "Toutes les actions de cet outil"
+        : rule.scope === "pattern"
+          ? `Cette commande · ${rule.args_digest}`
+          : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`;
+      description.textContent = `${botName} · ${toolName}${rule.document_summary ? ` · ${rule.document_summary}` : ""} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${scopeLabel} `;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Retirer la règle";

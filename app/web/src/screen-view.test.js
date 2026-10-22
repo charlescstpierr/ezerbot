@@ -22,7 +22,7 @@ test("queued calls are never called authorised before their own human decision",
   }
   assert.equal(screenDecisionLabel(null),null);
   assert.equal(screenDecisionLabel("pending"),null);
-  assert.equal(screenDecisionLabel("resolved"),"Autorisée par vous");
+  assert.equal(screenDecisionLabel("resolved"),"Autorisé une fois");
   assert.equal(screenDecisionLabel("denied"),"Refusée par vous");
   assert.equal(screenDecisionLabel("cancelled"),"Approbation annulée");
 });

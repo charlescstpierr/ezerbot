@@ -878,6 +878,45 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
     wait("délégation Codex terminée", || {
         tick(&mut app);
         let state = app.api("GET", "/api/state", b"").unwrap();
+        let pending: Vec<(String, String)> = state["conversations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|conversation| conversation["messages"].as_array().into_iter().flatten())
+            .filter(|message| {
+                message["kind"] == "approval"
+                    && message["payload"]["status"]["status"] == "pending"
+                    && message["payload"]["policy"]["scope"] == "action"
+            })
+            .map(|message| {
+                (
+                    message["payload"]["entry_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                    message["payload"]["route"]["target_conversation_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            })
+            .collect();
+        if !pending.is_empty() {
+            for (entry, conversation) in pending {
+                post(
+                    &mut app,
+                    "/api/approvals/resolve",
+                    json!({
+                        "entry_id": entry,
+                        "submission_id": format!("bg-{entry}"),
+                        "conversation_id": conversation,
+                        "decision": "allow_once"
+                    }),
+                );
+            }
+            tick(&mut app);
+        }
+        let state = app.api("GET", "/api/state", b"").unwrap();
         state["conversations"]
             .as_array()
             .unwrap()

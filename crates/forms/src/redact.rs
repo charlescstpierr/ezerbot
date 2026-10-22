@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 // Shorter in UTF-8 bytes than *any* valid secret, so repeated masking converges
 // even if replacement boundaries accidentally form another known secret.
-const MASK: &str = "[...]";
+pub const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
     let values = known_patterns(vault)?;

@@ -2151,7 +2151,7 @@ fn a_webhook_whose_routine_a_bot_moved_to_a_schedule_answers_nothing() {
             json!({"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"schedule":"@every 1h"}),
         )
         .unwrap();
-    assert!(matches!(moved, ToolOutcome::Done { .. }));
+    let moved = output(moved);
     assert_eq!(
         features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer))
             .unwrap_err()
@@ -2163,6 +2163,21 @@ fn a_webhook_whose_routine_a_bot_moved_to_a_schedule_answers_nothing() {
             .as_object()
             .unwrap()
             .is_empty()
+    );
+    // Back to a webhook from the panel: a fresh trigger, never the revoked token.
+    let back = f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":moved["routine"]["modified_at"],"schedule_version":moved["routine"]["schedule_version"],"trigger":{"kind":"webhook"}}),
+    );
+    assert_ne!(
+        back["webhook"]["token"].as_str().unwrap(),
+        bearer.trim_start_matches("Bearer ")
+    );
+    assert_eq!(
+        features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer))
+            .unwrap_err()
+            .status,
+        404
     );
 }
 

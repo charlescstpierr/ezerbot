@@ -525,6 +525,10 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
     }
     prompt(ctx.connection, &r.bot_id, &r.body)?;
     r = routine::update(ctx.connection, &r, clock(ctx)?)?;
+    // Leaving the webhook trigger revokes its token, whoever edited (panel or bot).
+    if r.trigger != Schedule::Webhook {
+        routine_webhooks::forget(ctx.connection, &r.routine_id)?;
+    }
     if model {
         // Model changes cannot silently repurpose an active, confirmed routine.
         routine::set_enabled(ctx.connection, &r.routine_id, false, clock(ctx)?)?;

@@ -522,7 +522,7 @@ fn a_stalled_authenticated_upload_does_not_freeze_the_host() {
         std::net::TcpStream::connect(host.hook.trim_start_matches("http://")).unwrap();
     write!(
         stalled,
-        "POST /hooks/{}/{} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{{\"par",
+        "POST /hooks/{}/{} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n3e8\r\n{{\"par",
         hook.routine_id, hook.trigger_id, hook.token
     )
     .unwrap();
@@ -535,4 +535,32 @@ fn a_stalled_authenticated_upload_does_not_freeze_the_host() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(host.runs(&hook), 1);
     drop(stalled);
+}
+
+#[test]
+fn stalled_uploads_are_capped_and_free_their_slot_when_the_client_leaves() {
+    use std::io::Write;
+    let host = Host::new();
+    let hook = host.webhook_routine("Plafonnée");
+    host.wait_listener();
+    let addr = host.hook.trim_start_matches("http://").to_owned();
+    let stall = || {
+        let mut socket = std::net::TcpStream::connect(&addr).unwrap();
+        write!(
+            socket,
+            "POST /hooks/{}/{} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nTransfer-Encoding: chunked\r\n\r\n3e8\r\n{{",
+            hook.routine_id, hook.trigger_id, hook.token
+        )
+        .unwrap();
+        socket.flush().unwrap();
+        socket
+    };
+    let held: Vec<_> = (0..4).map(|_| stall()).collect();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(host.call(&hook, Some(&hook.token), None, b"{}").0, 503);
+    assert_eq!(host.runs(&hook), 0);
+    drop(held);
+    wait("reader slots are freed", || {
+        host.call(&hook, Some(&hook.token), None, b"{}").0 == 200
+    });
 }

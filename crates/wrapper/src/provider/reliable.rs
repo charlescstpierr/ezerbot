@@ -65,13 +65,23 @@ struct Worker {
     inner: Arc<Inner>,
     settled: Arc<Mutex<Settled>>,
 }
-impl Drop for Worker {
-    fn drop(&mut self) {
+impl Worker {
+    /// Declared before the last send: once the caller holds the terminal event no
+    /// read is left to close, so dropping the caller must not count this socket.
+    fn finish(&self) {
         let mut settled = lock(&self.settled);
+        if settled.worker_done {
+            return;
+        }
         settled.worker_done = true;
         if settled.counted {
             self.inner.closing.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 fn send(tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
@@ -103,6 +113,14 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn resume_turns(&self) {
         lock(&self.inner.paused_turns).clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn hold_worker_exits(&self, hold: bool) {
+        self.inner.held_exits.store(hold, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn closing_sockets(&self) -> usize {
+        self.inner.closing.load(Ordering::SeqCst)
     }
     pub(super) fn reliable_stream(
         &self,
@@ -156,7 +174,7 @@ impl Session {
             limits.total = limits.total.min(Duration::from_secs(12));
         }
         thread::spawn(move || {
-            let _worker = Worker {
+            let worker = Worker {
                 inner: session.inner.clone(),
                 settled: worker_settled,
             };
@@ -175,6 +193,7 @@ impl Session {
                     Ok(response) => response,
                     Err(failure) => {
                         send(&tx, Wire::Failure(failure.clone()))?;
+                        worker.finish();
                         return send(
                             &tx,
                             Wire::Event(ModelEvent::Failed {
@@ -230,11 +249,23 @@ impl Session {
                                 }),
                             )?;
                         }
+                        if matches!(
+                            event,
+                            ModelEvent::Completed
+                                | ModelEvent::Failed { .. }
+                                | ModelEvent::Incomplete { .. }
+                        ) {
+                            worker.finish();
+                        }
                         send(&tx, Wire::Event(event))
                     },
                 )
             })();
             let _ = result; // Receiver is the sole persistence owner; never log content/errors here.
+            #[cfg(test)]
+            while session.inner.held_exits.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
         });
         let _abandon = Abandon {
             flag: abandoned.clone(),
@@ -374,7 +405,9 @@ impl Session {
 
 #[cfg(test)]
 mod elapsed_interval {
+    use super::Session;
     use crate::{App, Endpoints, Provider};
+    use grokbot_engine::contracts::ModelEvent;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use std::{
         io::{BufRead, BufReader, Read, Write},
@@ -491,6 +524,76 @@ mod elapsed_interval {
             elapsed >= 700 && blocked.elapsed() >= Duration::from_millis(700),
             "elapsed interval lost: {elapsed}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A transport that delivered its last event has nothing left to close: a burst
+    /// of finished turns must never be counted as sockets still shutting down.
+    #[test]
+    fn finished_workers_are_not_counted_as_closing_sockets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for _ in 0..24 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
+                thread::spawn(move || respond(&mut socket, &AtomicBool::new(false)));
+            }
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-burst-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "burst",
+                "account_id": "burst",
+                "client_id": "burst",
+                "access_token": token(),
+                "refresh_token": "burst-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&db, endpoints, false, true);
+        session.hold_worker_exits(true);
+        let mut peak = 0;
+        for burst in 0..8 {
+            let mut events = Vec::new();
+            session
+                .reliable_stream(
+                    serde_json::json!({"model": "gpt-test", "instructions": "Écris un titre", "input": []}),
+                    &AtomicBool::new(false),
+                    None,
+                    &mut |_, _| Ok(()),
+                    &mut |event| {
+                        events.push(event);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            peak = peak.max(session.closing_sockets());
+            assert!(
+                matches!(events.last(), Some(ModelEvent::Completed)),
+                "turn {burst} was refused or failed: {events:?}"
+            );
+        }
+        session.hold_worker_exits(false);
+        assert!(peak <= 4, "closing peaked at {peak}");
         let _ = std::fs::remove_dir_all(root);
     }
 

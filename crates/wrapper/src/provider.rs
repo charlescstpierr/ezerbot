@@ -357,6 +357,9 @@ struct Inner {
     live_reads: Mutex<HashMap<String, Arc<Mutex<reliable::Settled>>>>,
     #[cfg(test)]
     paused_turns: Mutex<std::collections::HashSet<String>>,
+    /// Retient chaque fil réseau juste avant sa sortie, après qu'il s'est déclaré terminé.
+    #[cfg(test)]
+    held_exits: AtomicBool,
     interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
@@ -843,6 +846,8 @@ impl Session {
                 live_reads: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 paused_turns: Mutex::new(std::collections::HashSet::new()),
+                #[cfg(test)]
+                held_exits: AtomicBool::new(false),
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),

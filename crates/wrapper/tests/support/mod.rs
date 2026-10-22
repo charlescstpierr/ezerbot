@@ -52,6 +52,12 @@ pub struct Seen {
     pub forms: Vec<HashMap<String, String>>,
     pub headers: Vec<HashMap<String, String>>,
     pub refresh_error: bool,
+    /// HTTP 503 from the token endpoint: the refresh token is still good.
+    pub refresh_transient: bool,
+    /// Nombre de refus explicites avant un renouvellement réussi.
+    pub refresh_refusals: u32,
+    /// Replaces the scope string on a successful refresh. `None` keeps the fixture scope.
+    pub refresh_scope: Option<String>,
     pub invalid_codex_account: bool,
     pub token_gate: Option<Arc<AtomicBool>>,
     pub bearer: Vec<String>,
@@ -282,14 +288,35 @@ impl FakeOpenAi {
                             format!("access-{sequence}")
                         };
                         seen.access_tokens.push(access.clone());
+                        let default_scope = "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke";
+                        let scope = if refresh {
+                            seen.refresh_scope
+                                .clone()
+                                .unwrap_or_else(|| default_scope.into())
+                        } else {
+                            default_scope.into()
+                        };
                         let reply = json!({
                             "access_token": access,
                             "refresh_token": format!("refresh-{sequence}"),
                             "id_token": if codex { access.clone() } else { id_token(&issuer, &seen.nonce) },
                             "token_type": "Bearer", "expires_in": if refresh { 3600 } else { 1 },
-                            "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke",
+                            "scope": scope,
                         });
-                        if refresh && seen.refresh_error {
+                        if refresh && seen.refresh_transient {
+                            (
+                                503,
+                                "application/json".into(),
+                                json!({"error":{"code":"temporarily_unavailable"}}).to_string(),
+                            )
+                        } else if refresh && seen.refresh_error {
+                            (
+                                400,
+                                "application/json".into(),
+                                json!({"error":{"code":"invalid_grant"}}).to_string(),
+                            )
+                        } else if refresh && seen.refresh_refusals > 0 {
+                            seen.refresh_refusals -= 1;
                             (
                                 400,
                                 "application/json".into(),

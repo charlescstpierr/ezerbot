@@ -156,7 +156,7 @@ test("storage warning is a dedicated alert in a separated block and marks Param�
   const notice = byClass(block, "storage-notice");
   assert.equal(notice.attributes.role, "alert");
   assert.equal(notice.children[0].tagName, "strong");
-  assert.match(notice.textContent, /^Trousseau indisponible\./);
+  assert.match(notice.textContent, /^Le trousseau macOS est indisponible\./);
   assert.ok(f.root.children.indexOf(block) < f.root.children.findIndex(e => e.textContent === "Autorisations permanentes"));
   const marker = byClass(f.settingsButton, "storage-warning-marker");
   assert.equal(marker.hidden, false);
@@ -183,7 +183,7 @@ test("storage check confirms refusal and recovery inside the modal, persisting t
   assert.match(byClass(f.root, "storage-feedback").textContent, /^Le trousseau est toujours inaccessible/);
   f.panels.refresh = async () => updateStorage(f, { backend: "keychain", label: "Trousseau macOS" });
   await button(f.root, "Vérifier le stockage").listeners.click();
-  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli\./);
+  assert.match(byClass(f.root, "storage-feedback").textContent, /^Trousseau macOS rétabli\.$/);
   assert.equal(byClass(f.root, "storage-feedback").attributes.role, "status");
   assert.equal(button(f.root, "Vérifier le stockage"), undefined);
   f.registration.onState(f.panels.state);
@@ -316,19 +316,57 @@ test("connector recovery reveals the affected card and focuses its single action
   finally {delete globalThis.document;delete globalThis.window;delete globalThis.requestAnimationFrame;}
 });
 
-test("secret cards warn about current fallback without claiming that a historical Keychain item moved", () => {
+function secretMessage(status, kind = { kind: "secret", name: "CLE_API", purpose: "Test" }) {
+  return {
+    id: "secret-test", kind: "secret", payload: {
+      entry_id: "secret-test", status: { status }, route: { requesting_bot_id: "grokbot" }, kind,
+    },
+  };
+}
+
+test("secret cards warn about current fallback only while the form is still open", () => {
   for (const backend of ["file_fallback", "keychain", "file"]) {
-    globalThis.window = { GrokbotForms: { view() {}, storage: () => ({ backend }) } };
+    globalThis.window = {
+      GrokbotForms: { view() {}, storage: () => ({ backend }) },
+      GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } },
+    };
     try {
-      const html = renderToStaticMarkup(React.createElement(SecretCard, { message: {
-        id: "secret-test", kind: "secret", payload: { entry_id: "secret-test", status: { status: "resolved" }, route: { requesting_bot_id: "Ezerbot" }, kind: { kind: "secret", name: "CLE_API", purpose: "Test" } },
-      } }));
-      assert.equal(html.includes("gb-secret-storage-warning"), backend === "file_fallback");
-      if (backend === "file_fallback") assert.ok(html.includes("Les nouveaux secrets ne sont pas enregistrés"));
-      assert.ok(html.includes("selon Paramètres"));
-      assert.ok(!html.includes("envoyée au coffre local"));
+      const pending = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("pending") }));
+      assert.equal(pending.includes("gb-secret-storage-warning"), backend === "file_fallback");
+      if (backend === "file_fallback") assert.ok(pending.includes("Les nouveaux secrets ne sont pas enregistrés"));
+      assert.ok(pending.includes("selon Paramètres"));
+      assert.ok(!pending.includes("envoyée au coffre local"));
+      const resolved = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("resolved") }));
+      assert.ok(!resolved.includes("gb-secret-storage-warning"));
+      assert.ok(!resolved.includes("selon Paramètres"));
+      assert.ok(resolved.includes("Secret CLE_API enregistré"));
+      assert.ok(!resolved.includes("type=\"password\""));
     } finally { delete globalThis.window; }
   }
+});
+
+test("a conversation secret card takes one masked value and then names the recorded secret", () => {
+  globalThis.window = {
+    GrokbotForms: { view() {}, storage: () => ({ backend: "keychain" }) },
+    GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } },
+  };
+  try {
+    const pasted = "phrase secrete du formulaire";
+    const pending = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("pending", { kind: "secret", name: "STRIPE_KEY", purpose: "Clé API Stripe" }) }));
+    assert.ok(pending.includes("Clé API Stripe"));
+    assert.ok(pending.includes("STRIPE_KEY"));
+    assert.ok(pending.includes("type=\"password\""));
+    assert.ok(pending.includes(">Enregistrer<"));
+    assert.ok(!pending.includes("Enregistrer le secret"));
+    assert.ok(!pending.includes(pasted));
+    assert.ok(!pending.includes("Secret STRIPE_KEY enregistré"));
+    const resolved = renderToStaticMarkup(React.createElement(SecretCard, { message: secretMessage("resolved", { kind: "secret", name: "STRIPE_KEY", purpose: "Clé API Stripe" }) }));
+    assert.ok(resolved.includes("Secret STRIPE_KEY enregistré"));
+    assert.ok(!resolved.includes("type=\"password\""));
+    assert.ok(!resolved.includes(">Enregistrer<"));
+    assert.ok(!resolved.includes(pasted));
+    assert.ok(!resolved.includes("selon Paramètres"));
+  } finally { delete globalThis.window; }
 });
 function card(status, decision, args = { path: "~/Documents/projets/notes.txt" }, pending = false, tool = "test_read_resource") {
   globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };

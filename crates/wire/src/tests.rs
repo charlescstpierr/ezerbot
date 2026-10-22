@@ -318,6 +318,45 @@ fn cursor_from_json(cursor: &ResumeCursor) -> ResumeCursorDto {
 }
 
 #[test]
+fn curseur_avec_boot_id_vide_est_une_erreur() {
+    let dto = ResumeCursorDto {
+        schema_version: 1,
+        epoch: crate::ReplicaEpochDto {
+            boot_id: String::new(),
+            server_generation: 7,
+            recovery: 2,
+        },
+        covered_through: 11,
+        complete: true,
+    };
+
+    assert_eq!(cursor_from_dto(dto), Err(WireError::EmptyId));
+}
+
+#[test]
+fn messages_des_erreurs_wire_en_francais() {
+    let cases = [
+        (
+            WireError::UnsupportedVersion { version: 2 },
+            "version de schéma 2 non prise en charge",
+        ),
+        (
+            WireError::UnknownSubmissionState,
+            "état de soumission inconnu",
+        ),
+        (
+            WireError::InvalidDigest,
+            "empreinte hexadécimale invalide : 64 caractères minuscules attendus",
+        ),
+        (WireError::EmptyId, "identifiant vide"),
+    ];
+
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[test]
 fn digest_hex_invalide_est_une_erreur() {
     let cases = [
         "zzzz",

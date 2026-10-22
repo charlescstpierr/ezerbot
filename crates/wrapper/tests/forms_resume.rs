@@ -405,7 +405,7 @@ fn secret_resolution_resumes_with_ref_only() {
     assert_eq!(
         Vault::open(&f.path.with_extension("secrets.json"))
             .unwrap()
-            .get("API_TOKEN")
+            .get_for_bot("grokbot", "API_TOKEN")
             .unwrap()
             .as_deref(),
         Some("vault-only-secret")
@@ -415,7 +415,7 @@ fn secret_resolution_resumes_with_ref_only() {
     assert_eq!(
         Vault::open(&f.path.with_extension("secrets.json"))
             .unwrap()
-            .get("API_TOKEN")
+            .get_for_bot("grokbot", "API_TOKEN")
             .unwrap()
             .as_deref(),
         Some("vault-only-secret")

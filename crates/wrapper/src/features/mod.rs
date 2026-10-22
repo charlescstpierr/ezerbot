@@ -105,6 +105,7 @@ pub mod screen;
 pub mod skills;
 pub mod storage;
 pub mod templates;
+pub mod updates;
 pub mod usage;
 pub mod voice;
 pub mod voice_session;
@@ -158,7 +159,8 @@ registry!(
     meetings,
     screen,
     templates,
-    demonstrations
+    demonstrations,
+    updates
 );
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {

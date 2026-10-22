@@ -4,6 +4,7 @@
   const panels = window.GrokbotPanels;
   if (!panels) return;
   const kinds = new Set(["form", "approval", "secret"]);
+  const STALE_FORM = "Ce formulaire n\u2019a pas \u00e9t\u00e9 accept\u00e9.";
   const activity = new Map();
   const changed = () => window.dispatchEvent(new Event("grokbot:forms-change"));
   // Only non-sensitive delivery metadata lives here. Never cache values, arguments,
@@ -28,7 +29,7 @@
       storageWarning.className = "storage-warning-marker";
       storageWarning.textContent = "!";
       storageWarning.setAttribute("role", "img");
-      storageWarning.setAttribute("aria-label", "Attention : le trousseau macOS est indisponible. Les nouveaux secrets ne sont pas enregistrés. Vérifiez le stockage dans Paramètres.");
+      storageWarning.setAttribute("aria-label", "Attention : le trousseau macOS a refusé l’enregistrement. Les nouveaux secrets ne sont pas enregistrés. Vérifiez le stockage dans Paramètres.");
       button.append(storageWarning);
     }
     storageWarning.hidden = next?.backend !== "file_fallback";
@@ -207,7 +208,7 @@
       notice.className = `storage-notice${information ? " storage-info" : ""}`;
       notice.setAttribute("role", information ? "status" : "alert");
       const title = document.createElement("strong");
-      title.textContent = information ? "Activation du trousseau en attente" : "Trousseau indisponible.";
+      title.textContent = information ? "Activation du trousseau en attente" : "Le trousseau macOS est indisponible.";
       const detail = document.createElement("span");
       detail.textContent = state.forms.storage.notice;
       notice.append(title, detail);
@@ -380,7 +381,8 @@
           "La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible.",
         ].includes(error?.message);
         activity.set(request.entry_id, { ...previous, busy: false,
-          error: uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
+          error: error?.message === STALE_FORM ? STALE_FORM
+            : uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
         delete body.value;

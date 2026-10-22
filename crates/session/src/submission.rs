@@ -294,6 +294,19 @@ impl SubmissionSession {
         let outcome = transport.lookup(&request);
         self.apply_reconciliation(&request, outcome)
     }
+    /// Oublie une soumission qui n’est pas livrée. Un message accepté ou écho reste.
+    pub fn discard_undelivered(
+        &mut self,
+        conversation: &ConversationId,
+        message: &MessageId,
+    ) -> Result<(), SessionError> {
+        self.ensure_active()?;
+        let actor = self.actor.clone();
+        self.journal_mut()?
+            .discard_undelivered(&actor, conversation, message)?;
+        self.persist()?;
+        Ok(())
+    }
     pub fn observe_echo(
         &mut self,
         conversation: &ConversationId,

@@ -117,6 +117,9 @@ impl Session {
     }
 
     pub(super) fn complete_codex(&self, attempt: &Attempt, code: &str) -> Result<(), Failure> {
+        let before = self
+            .read()
+            .and_then(|credentials| credentials.refresh_token);
         let response = agent()
             .post(&self.inner.endpoints.token)
             .send_form(&[
@@ -143,20 +146,16 @@ impl Session {
         if attempt.cancel.load(Ordering::SeqCst) {
             return Err(Failure::other("Connexion annulée."));
         }
-        let _guard = lock(&self.inner.credentials);
-        let mut credentials = self.load_or_create().map_err(|_| {
-            Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
-        })?;
-        update_profile(&mut credentials, &tokens)?;
-        credentials.client_id = Some(CLIENT.into());
-        credentials.access_token = Some(tokens.access_token);
-        credentials.refresh_token = tokens.refresh_token;
-        credentials.id_token = tokens.id_token;
-        credentials.scopes = SCOPE.into();
-        credentials.expires_at = seconds() + tokens.expires_in;
-        credentials.saved_at = seconds();
-        self.write(&credentials).map_err(|_| {
-            Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
+        self.store_signin(before.as_deref(), |credentials| {
+            update_profile(credentials, &tokens)?;
+            credentials.client_id = Some(CLIENT.into());
+            credentials.access_token = Some(tokens.access_token);
+            credentials.refresh_token = tokens.refresh_token;
+            credentials.id_token = tokens.id_token;
+            credentials.scopes = SCOPE.into();
+            credentials.expires_at = seconds() + tokens.expires_in;
+            credentials.saved_at = seconds();
+            Ok(())
         })?;
         self.reset_probe();
         self.inner.local_revoked.store(false, Ordering::SeqCst);
@@ -169,7 +168,9 @@ impl Session {
     /// revue des approbations). Seule la variante Codex adapte le corps Responses.
     pub(super) fn request(&self, token: &str, body: &mut Value) -> Result<ureq::Request, Failure> {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
-            return Err(Failure::signin());
+            return Err(Failure::other(
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.",
+            ));
         }
         let limits = *lock(&self.inner.deadlines);
         // ureq 2.12.1 applies `.timeout()` on every body read and ignores
@@ -207,6 +208,12 @@ impl Session {
     /// Bearer and ChatGPT account id for an image call. The account id is the
     /// same claim the chat request puts in `chatgpt-account-id`.
     pub(crate) fn image_auth(&self) -> Result<(String, String), Failure> {
+        if !self
+            .read()
+            .is_some_and(|credentials| credentials.usable(self.inner.codex))
+        {
+            return Err(Failure::signin());
+        }
         let token = self.bearer(false)?;
         let access = claims(&token).ok_or_else(Failure::signin)?;
         let account = access[AUTH_CLAIM]["chatgpt_account_id"]
@@ -331,7 +338,9 @@ impl Session {
         for attempt in 0..2 {
             let token = self.bearer(attempt > 0)?;
             if self.inner.local_revoked.load(Ordering::SeqCst) {
-                return Err(Failure::signin());
+                return Err(Failure::other(
+                    "La déconnexion est en cours sur ce Mac. Réessayez.",
+                ));
             }
             let request = ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(5))
@@ -347,7 +356,11 @@ impl Session {
             let response = match response {
                 Ok(response) => response,
                 Err(ureq::Error::Status(401, _)) if attempt == 0 => continue,
-                Err(ureq::Error::Status(401 | 403, _)) => return Err(Failure::signin()),
+                Err(ureq::Error::Status(401 | 403, _)) => {
+                    return Err(Failure::other(
+                        "Impossible de lire le quota Codex. La session enregistrée sur ce Mac est conservée.",
+                    ))
+                }
                 Err(_) => {
                     return Err(Failure::other(
                         "Impossible de lire le quota Codex. Réessayez dans un instant.",
@@ -385,7 +398,9 @@ impl Session {
                 checked_at: now,
             });
         }
-        Err(Failure::signin())
+        Err(Failure::other(
+            "Impossible de lire le quota Codex. Réessayez dans un instant.",
+        ))
     }
 
     /// Nonblocking, coalesced and throttled: ordinary /api/state polling must

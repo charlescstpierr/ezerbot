@@ -4152,6 +4152,56 @@ fn gmail_email_accepts_an_apostrophe_in_a_bare_address() {
 }
 
 #[test]
+fn gmail_email_refuses_an_address_holding_a_vault_value_without_a_card() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let token = f.gmail_secret().unwrap()["ACCESS_TOKEN"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let secret = format!("{token}@example.test");
+    let cases = [
+        ("vault-to", json!({"to":[secret],"subject":"x"})),
+        (
+            "vault-cc",
+            json!({"to":["bob@example.test"],"cc":[secret],"subject":"x"}),
+        ),
+    ];
+    for (id, arguments) in cases {
+        let conversation = f.github_conversation();
+        f.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GMAIL_SEND_TOOL,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        f.script(vec![json!({"type":"response.completed"})]);
+        f.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Écris le courriel."}),
+        );
+        let run: String = f.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        for _ in 0..200 {
+            f.app.tick(0);
+            if store::required(&f.db(), &run).unwrap().status.is_terminal() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let status = store::required(&f.db(), &run).unwrap().status;
+        assert!(status.is_terminal(), "{id}: {status:?}");
+        // The chat already masks the value before the tool sees it; either
+        // way the address is refused and the value is never repeated.
+        let reason = failed(&f, &run);
+        assert!(reason.contains("dresse"), "{id}: {reason}");
+        assert!(!reason.contains(&token), "{id}: {reason}");
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before,
+        "an address holding a vault value opens no card"
+    );
+    assert!(!f.state().to_string().contains(&token));
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
 fn gmail_email_refused_limited_and_unconfirmed_sends_are_visible_and_never_a_sent_mail() {
     let mut f = Fixture::new();
     f.gmail_connect();

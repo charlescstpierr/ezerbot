@@ -34,10 +34,19 @@ function harness(api = async () => ({ codex: quota(80), local: local() })) {
   const section = new Element('section'), dialog = new Element('dialog'), topbar = new Element('header');
   const header = new Element('div'); header.className = 'dialog-header'; dialog.append(header, section);
   let nextPoll;
-  const panels = { api, refresh: async () => {}, register(p) { this.panel = p; p.settingsSection(section); } };
+  const clock = { now: 0, intervals: [] };
+  const calls = [];
+  const panels = { busy: false, refreshes: 0, api: (...args) => { calls.push(args); return api(...args); }, refresh: async () => { panels.refreshes++; }, register(p) { this.panel = p; p.settingsSection(section); } };
   const document = { visibilityState: 'visible', createElement: t => new Element(t), getElementById: () => dialog, querySelector: () => topbar };
-  vm.runInNewContext(fs.readFileSync(`${__dirname}/usage.js`, 'utf8'), { window: { GrokbotPanels: panels }, document, Intl, Date, setInterval() {}, setTimeout(f) { nextPoll = f; return 1; }, clearTimeout() { nextPoll = null; }, MutationObserver: class { observe() {} } });
-  return { panels, section, dialog, nav: header.afterNode, warning: topbar.afterNode, poll: () => nextPoll?.() };
+  const setInterval = (fn, every) => clock.intervals.push({ fn, every, due: clock.now + every });
+  vm.runInNewContext(fs.readFileSync(`${__dirname}/usage.js`, 'utf8'), { window: { GrokbotPanels: panels }, document, Intl, Date, setInterval, setTimeout(f) { nextPoll = f; return 1; }, clearTimeout() { nextPoll = null; }, MutationObserver: class { observe() {} } });
+  const advance = ms => {
+    const end = clock.now + ms;
+    for (let next; (next = clock.intervals.filter(i => i.due <= end).sort((a, b) => a.due - b.due)[0]);) { clock.now = next.due; next.due += next.every; next.fn(); }
+    clock.now = end;
+  };
+  const refresh = () => section.querySelectorAll('button').find(b => b.textContent === 'Actualiser');
+  return { panels, document, section, dialog, nav: header.afterNode, warning: topbar.afterNode, calls, advance, refresh, intervals: () => clock.intervals.map(i => i.every), poll: () => nextPoll?.() };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const state = codex => ({ provider: { backend: 'codex', connected: true }, usage: { codex } });
@@ -144,4 +153,114 @@ test('a settings link to Usage shows the section; any other settings link leaves
   assert.match(h.section.textContent, /1.500 tokens/);
   h.panels.panel.onSettingsLink('appearance');
   assert.equal(h.dialog.classList.contains('usage-focus'), false);
+});
+
+const deferred = () => { const d = {}; d.promise = new Promise(resolve => { d.resolve = resolve; }); return d; };
+
+test('the quota is re-read every 60 s through the usage route only, never the whole workspace state', async () => {
+  const h = harness();
+  assert.deepEqual(h.intervals(), [60000]);
+  h.advance(59999); await flush();
+  assert.equal(h.calls.length, 0);
+  h.advance(1); await flush();
+  assert.deepEqual(h.calls, [['/api/usage']]);
+  assert.equal(h.panels.refreshes, 0);
+  assert.equal(h.warning.hidden, false);
+  assert.match(h.section.textContent, /20 % restants/);
+  h.advance(60000); await flush();
+  assert.equal(h.calls.length, 2);
+});
+
+test('the 60 s read is skipped while a message is being sent or the window is hidden', async () => {
+  const h = harness();
+  h.panels.busy = true;
+  h.advance(60000); await flush();
+  assert.equal(h.calls.length, 0);
+  h.panels.busy = false; h.document.visibilityState = 'hidden';
+  h.advance(60000); await flush();
+  assert.equal(h.calls.length, 0);
+  h.document.visibilityState = 'visible';
+  h.advance(60000); await flush();
+  assert.equal(h.calls.length, 1);
+});
+
+test('the 60 s read does not repaint an unchanged panel nor flash its refresh button', async () => {
+  const gate = deferred();
+  let first = true;
+  const h = harness(() => { if (first) { first = false; return Promise.resolve({ codex: quota(40), local: local() }); } return gate.promise; });
+  h.nav.querySelectorAll('button')[1].events.click(); await flush();
+  const grid = h.section.querySelector('.usage-quota-grid'), table = h.section.querySelector('table');
+  h.advance(60000);
+  assert.equal(h.calls.length, 2);
+  assert.ok(!h.refresh().disabled);
+  assert.notEqual(h.section.attrs['aria-busy'], 'true');
+  gate.resolve({ codex: quota(40), local: local() }); await flush();
+  assert.equal(h.section.querySelector('.usage-quota-grid'), grid);
+  assert.equal(h.section.querySelector('table'), table);
+  h.advance(60000); await flush();
+});
+
+test('a 60 s read that returns after a provider change cannot restore the previous account', async () => {
+  const gate = deferred();
+  const h = harness(() => gate.promise);
+  h.advance(60000);
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: false }, usage: { codex: { status: 'signin' } } });
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: true, email: 'autre@example.com' }, usage: { codex: { status: 'signin' } } });
+  gate.resolve({ codex: quota(95), local: local() }); await flush();
+  assert.equal(h.warning.hidden, true);
+  assert.equal(h.section.querySelectorAll('progress').length, 0);
+});
+
+test('« Actualiser » pressed during a load is queued, once, instead of ignored', async () => {
+  const gates = [];
+  const h = harness(() => { const d = deferred(); gates.push(d); return d.promise; });
+  h.nav.querySelectorAll('button')[1].events.click();
+  assert.equal(h.calls.length, 1);
+  assert.ok(!h.refresh().disabled);
+  h.refresh().events.click(); h.refresh().events.click();
+  assert.equal(h.calls.length, 1);
+  gates[0].resolve({ codex: quota(10), local: local() }); await flush();
+  assert.deepEqual(h.calls.map(c => c[0]), ['/api/usage', '/api/usage/refresh']);
+  assert.equal(JSON.stringify(h.calls[1][1]), '{}');
+  gates[1].resolve({ codex: quota(30), local: local() }); await flush();
+  assert.equal(h.calls.length, 2);
+  assert.match(h.section.textContent, /70 % restants/);
+});
+
+test('an account change with Usage open reloads the history; a change while closed does not', async () => {
+  const h = harness();
+  const account = (backend, connected, email) => ({ provider: { backend, connected, email }, usage: { codex: quota(20) } });
+  h.panels.panel.onState(account('codex', true, 'a@example.com'));
+  h.dialog.showModal();
+  h.nav.querySelectorAll('button')[1].events.click(); await flush();
+  assert.equal(h.calls.length, 1);
+  h.panels.panel.onState(account('codex', true, 'a@example.com'));
+  assert.equal(h.calls.length, 1);
+  for (const next of [account('codex', true, 'b@example.com'), account('codex', false, ''), account('grok', true, 'b@example.com')]) {
+    const before = h.calls.length;
+    h.panels.panel.onState(next); await flush();
+    assert.equal(h.calls.length, before + 1);
+    assert.equal(h.calls.at(-1)[0], '/api/usage');
+    assert.match(h.section.textContent, /1.500 tokens/);
+  }
+  h.nav.querySelectorAll('button')[0].events.click();
+  const closed = h.calls.length;
+  h.panels.panel.onState(account('codex', true, 'c@example.com')); await flush();
+  assert.equal(h.calls.length, closed);
+});
+
+test('an account change during a load discards that read and reloads once after it', async () => {
+  const gates = [];
+  const h = harness(() => { const d = deferred(); gates.push(d); return d.promise; });
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: true, email: 'a@example.com' }, usage: { codex: quota(20) } });
+  h.dialog.showModal();
+  h.nav.querySelectorAll('button')[1].events.click();
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: true, email: 'b@example.com' }, usage: { codex: quota(20) } });
+  assert.equal(h.calls.length, 1);
+  gates[0].resolve({ codex: quota(95), local: local() }); await flush();
+  assert.equal(h.section.querySelectorAll('table').length, 0);
+  assert.equal(h.calls.length, 2);
+  gates[1].resolve({ codex: quota(20), local: local() }); await flush();
+  assert.equal(h.section.querySelectorAll('table').length, 1);
+  assert.equal(h.warning.hidden, true);
 });

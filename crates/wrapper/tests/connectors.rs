@@ -54,6 +54,8 @@ struct SlackScript {
     live: Option<String>,
     /// `ok`, or the error Slack answers to a revocation.
     revoke_error: bool,
+    /// The documented token response names the team by id only.
+    team_id_only: bool,
 }
 /// Scripted GitHub App provider: device flow, user, refresh and one REST route.
 struct GithubScript {
@@ -398,9 +400,14 @@ impl OAuth {
                             );
                         }
                         slack.live = Some(SLACK_ACCESS.to_owned());
+                        let team = if slack.team_id_only {
+                            json!({"id":"T0FIXTURE"})
+                        } else {
+                            json!({"id":"T0FIXTURE","name":"Atelier Ezerbot"})
+                        };
                         (
                             200,
-                            json!({"ok":true,"app_id":"A0FIXTURE","team":{"id":"T0FIXTURE","name":"Atelier Ezerbot"},"authed_user":{"id":"U0CHARLES","scope":slack.scope,"access_token":SLACK_ACCESS,"token_type":"user"}}),
+                            json!({"ok":true,"app_id":"A0FIXTURE","team":team,"authed_user":{"id":"U0CHARLES","scope":slack.scope,"access_token":SLACK_ACCESS,"token_type":"user"}}),
                         )
                     } else if path == "/slack/revoke" {
                         if slack.revoke_error {
@@ -411,6 +418,11 @@ impl OAuth {
                         }
                     } else if !live {
                         (200, json!({"ok":false,"error":"invalid_auth"}))
+                    } else if path == "/slack/api/auth.test" {
+                        (
+                            200,
+                            json!({"ok":true,"team":"Atelier Ezerbot","team_id":"T0FIXTURE","user":"charles","user_id":"U0CHARLES"}),
+                        )
                     } else if path == "/slack/api/conversations.list" {
                         (
                             200,
@@ -431,6 +443,9 @@ impl OAuth {
                                 json!({"ok":true,"messages":[{"type":"message","user":"U0ALICE","ts":"1760000300.000100","text":"Le budget est validé"}],"has_more":false}),
                             ),
                             Some("C0DEHORS") => (200, json!({"ok":false,"error":"not_in_channel"})),
+                            Some("C0LIMITES1") => {
+                                (200, json!({"ok":false,"error":"missing_scope"}))
+                            }
                             _ => (200, json!({"ok":false,"error":"channel_not_found"})),
                         }
                     } else if path == "/slack/api/users.info" {
@@ -3503,6 +3518,47 @@ fn slack_disconnect_removes_the_secret_and_says_whether_slack_confirmed_the_revo
         f.slack_secret().is_none(),
         "the local token goes either way"
     );
+}
+
+#[test]
+fn slack_missing_scope_drops_the_insufficient_token_and_the_next_connect_asks_for_consent_again() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let run = f.slack_read("read-limited", json!({"channel":"C0LIMITES1"}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Slack"), "{reason}");
+    let item = f.item("slack");
+    assert_eq!(item["status"], "reconnect");
+    assert_eq!(item["has_tokens"], false);
+    assert!(
+        f.slack_secret().is_none(),
+        "the insufficient token is not kept"
+    );
+    // Reconnecting goes through the browser again instead of reusing that token.
+    let exchanges = f.slack_requests("/token").len();
+    let run = f.connect("slack");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("slack")["status"], "authorizing");
+    assert_eq!(f.callback("slack", false, false), 200);
+    wait("slack reconnected", || {
+        f.item("slack")["status"] == "connected"
+    });
+    assert_eq!(f.slack_requests("/token").len(), exchanges + 1);
+}
+
+#[test]
+fn slack_names_the_workspace_with_the_token_when_the_exchange_only_gives_its_id() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().slack.team_id_only = true;
+    f.slack_connect();
+    assert_eq!(f.item("slack")["account"], "Atelier Ezerbot");
+    let run = f.slack_read("read-named", json!({"channel":"general"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "Atelier Ezerbot");
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("espace Atelier Ezerbot"));
 }
 
 #[test]

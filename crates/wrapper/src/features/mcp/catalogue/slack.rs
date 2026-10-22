@@ -21,6 +21,7 @@ const DISCONNECTED: &str =
     "Slack est déconnecté. Reconnectez Slack dans Paramètres › Connecteurs, puis réessayez.";
 const ENABLE: &str =
     "Slack n’est pas activé pour ce bot. Activez-le dans Paramètres › Connecteurs, puis réessayez.";
+const MISSING_SCOPE: &str = "Slack n’a pas accordé toutes les autorisations de lecture à Ezerbot. Reconnectez Slack dans Paramètres › Connecteurs pour les accorder de nouveau.";
 const RECONNECT: &str =
     "La connexion Slack a expiré ou a été révoquée. Reconnectez Slack dans Paramètres › Connecteurs.";
 
@@ -189,6 +190,16 @@ fn get(m: Manifest, access: &str, method: &str, query: &[(&str, &str)]) -> Resul
         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     })
 }
+/// The workspace a fresh token belongs to, when the exchange named only its identifier.
+pub(super) fn workspace_of(m: Manifest, access: &str) -> Option<String> {
+    let reply = get(m, access, "auth.test", &[]).ok()?;
+    reply.body["team"]
+        .as_str()
+        .map(str::trim)
+        .filter(|name| reply.body["ok"] == true && !name.is_empty() && name.len() <= 100)
+        .filter(|name| !name.chars().any(char::is_control))
+        .map(str::to_owned)
+}
 fn unreachable_slack() -> ApiError {
     ApiError::new(
         503,
@@ -219,9 +230,26 @@ fn refusal(ctx: &Context<'_>, server: &Server, reply: &Reply, channel: &str) -> 
             let _ = phase(ctx, &server.id, "reconnect", RECONNECT);
             invalid(RECONNECT)
         }
-        "missing_scope" => invalid("Slack n’a pas accordé toutes les autorisations de lecture à Ezerbot. Reconnectez Slack dans Paramètres › Connecteurs pour les accorder."),
-        "not_in_channel" => invalid(&format!("Vous n’êtes pas membre du canal {channel}. Rejoignez-le dans Slack, puis réessayez.")),
-        "channel_not_found" => invalid(&format!("Slack ne trouve pas le canal {channel} avec ce compte.")),
+        "missing_scope" => {
+            // A token that lacks a permission cannot be reused or renewed into one that has
+            // it: it goes, so that reconnecting asks Slack for consent again.
+            let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(vault) = crate::features::forms::vault(ctx) {
+                let _ = vault.remove(&secret_name(&server.id));
+            }
+            let _ = ctx.connection.execute(
+                "UPDATE wrapper_connector_catalogue SET expires_at=0 WHERE server_id=?1",
+                [&server.id],
+            );
+            let _ = phase(ctx, &server.id, "reconnect", MISSING_SCOPE);
+            invalid(MISSING_SCOPE)
+        }
+        "not_in_channel" => invalid(&format!(
+            "Vous n’êtes pas membre du canal {channel}. Rejoignez-le dans Slack, puis réessayez."
+        )),
+        "channel_not_found" => invalid(&format!(
+            "Slack ne trouve pas le canal {channel} avec ce compte."
+        )),
         _ if reply.status >= 500 => unreachable_slack(),
         _ => {
             let code: String = code

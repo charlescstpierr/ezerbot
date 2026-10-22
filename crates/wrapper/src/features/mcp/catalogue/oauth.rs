@@ -139,6 +139,13 @@ fn accept_token(
     }
     if m.id == "slack" {
         // The workspace is the account shown on the card; a renewal keeps the one it had.
+        // The exchange may give the team's identifier only: the token names the workspace.
+        let workspace = workspace.or_else(|| {
+            env.get("EMAIL")
+                .is_none()
+                .then(|| slack::workspace_of(m, access))
+                .flatten()
+        });
         if let Some(workspace) = workspace {
             env.insert("EMAIL".into(), workspace);
         } else {

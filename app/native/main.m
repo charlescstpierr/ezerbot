@@ -754,7 +754,33 @@ static void shell_task_reap(const ShellChild *child) {
     }
 }
 
+// Réunions : un bot Recall invité doit sortir de l'appel avant que le moteur
+// ne soit arrêté. Le moteur n'a que SIGTERM puis une seconde, trop peu pour le réseau.
+// Sans réunion, la réponse est immédiate ; un moteur muet ne retient pas la fermeture plus de 4 s.
+- (void)leaveRecallMeetings {
+    NSURL *base = self.backendURL;
+    if (!base || !self.backendTask.running) return;
+    NSURLComponents *components = [NSURLComponents componentsWithURL:base resolvingAgainstBaseURL:NO];
+    components.path = @"/api/recall/shutdown";
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:components.URL];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"local" forHTTPHeaderField:@"X-Grokbot-Request"];
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.timeoutIntervalForRequest = 4;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        (void)data; (void)response; (void)error;
+        dispatch_semaphore_signal(finished);
+    }] resume];
+    dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    [session invalidateAndCancel];
+}
+
 - (void)stopBackend {
+    [self leaveRecallMeetings];
     [self.voice cancel];
     [self.voiceSession cancel];
     [self.floating invalidate];

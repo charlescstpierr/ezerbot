@@ -7,6 +7,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 - `parametres-ouvrir` ouvre le dialogue Paramètres depuis le bas de la barre latérale.
 - `connecteurs-section` montre le titre Connecteurs et l’ajout d’un serveur, sans en enregistrer.
 - `connecteurs-vide` laisse la liste des serveurs personnels vide sur une base neuve.
+- `connecteurs-reunions` montre l’entrée Réunions du catalogue : un seul champ de clé (mot de passe) et le bouton Connecter, sans OAuth.
 
 ## How to get to it (user POV)
 
@@ -24,6 +25,7 @@ Preconditions:
 - **Ouvrir Paramètres.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }'`. `result:` vaut `true`. Le titre `#settings-title` est `Paramètres`.
 - **Aller aux connecteurs.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { const panel = document.querySelector("[data-panel=mcp]"); panel.scrollIntoView({block:"start"}); return panel.querySelector("h3").textContent; }'`. `result:` vaut `"Connecteurs"`.
 - **Formulaire d’ajout.** Le `summary` « Ajouter un serveur MCP » est dans `[data-panel="mcp"]`. Ne pas le soumettre.
+- **Entrée Réunions.** `[data-panel="mcp"] [data-connector="reunions"]` contient un seul `input` de type `password` et le bouton « Connecter ». Ne pas le soumettre : la clé et les liens de réunion ne passent que par un fournisseur de boucle (`GROKBOT_FAKE_RECALL`), jamais par cette sphère.
 - **Liste vide.** `[data-panel="mcp"] .mcp-list` ne contient pas d’article de serveur personnalisé.
 - **Capture.** Pour chaque thème et chaque taille (`1140x780`, `820x560`), Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> resize <largeur> <hauteur>` puis `screenshot <preuves>/spheres/parametres-connecteurs/<theme>-<largeur>x<hauteur>.png`.
 - **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere parametres-connecteurs`.

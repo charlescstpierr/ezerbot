@@ -481,6 +481,9 @@ fn needs_recovery(ctx: &Context<'_>, name: &str) -> bool {
 }
 
 pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> Option<Value> {
+    if let Some(label) = super::recall::tool_label(name) {
+        return Some(label);
+    }
     let mut label = display(ctx, name)?;
     let recoverable = needs_recovery(ctx, name);
     let server_id = name

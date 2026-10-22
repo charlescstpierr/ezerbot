@@ -102,6 +102,7 @@ pub mod memory_auto;
 pub mod multibot;
 pub mod notifications;
 pub mod pages;
+pub mod recall;
 pub mod routines;
 pub mod routines_background;
 pub mod screen;
@@ -163,6 +164,7 @@ registry!(
     local,
     voice,
     meetings,
+    recall,
     screen,
     templates,
     demonstrations,

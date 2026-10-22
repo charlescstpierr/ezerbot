@@ -626,7 +626,10 @@ pub fn check_tool_approval(
             },
         );
     }
-    if super::mcp::is_lifecycle(&call.name) || super::screen::is_tool(&call.name) {
+    if super::mcp::is_lifecycle(&call.name)
+        || super::screen::is_tool(&call.name)
+        || super::recall::is_consent(&call.name)
+    {
         return Ok(ApprovalCheck::Ask);
     }
     // Skill revisions always require the user's explicit click, even if an
@@ -1130,7 +1133,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 };
                 return Err(ApiError::new(400, message));
             }
-            if (super::mcp::is_lifecycle(tool) || super::screen::is_tool(tool))
+            if (super::mcp::is_lifecycle(tool)
+                || super::screen::is_tool(tool)
+                || super::recall::is_consent(tool))
                 && matches!(
                     input.decision,
                     ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
@@ -1385,7 +1390,10 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        if tool == super::routines_background::ACTION || super::mcp::is_lifecycle(tool) {
+        if tool == super::routines_background::ACTION
+            || super::mcp::is_lifecycle(tool)
+            || super::recall::is_consent(tool)
+        {
             let result: Option<String> = ctx.connection.query_row(
                 "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
                 [&request.run_id], |r| r.get(0),
@@ -1398,6 +1406,15 @@ fn request_value(
         }
         if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
+        }
+        if let Some(display) = super::recall::call_display(
+            ctx,
+            tool,
+            &value["arguments"],
+            &request.route.requesting_bot_id,
+            request.run_id.starts_with("mcp-host-"),
+        ) {
+            value["recall"] = display;
         }
         let policy = policy_for_request(ctx, request)?;
         if policy.scope == "action" {
@@ -1416,7 +1433,7 @@ fn request_value(
 }
 
 /// One classifier for the gate, the card and the decision route.
-fn bot_display_name(ctx: &Context<'_>, bot_id: &str) -> String {
+pub(crate) fn bot_display_name(ctx: &Context<'_>, bot_id: &str) -> String {
     ctx.connection
         .query_row(
             "SELECT name FROM wrapper_bots WHERE account_id=?1 AND id=?2",
@@ -1451,6 +1468,7 @@ fn approval_policy(
     let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
+        || super::recall::is_consent(tool)
         || tool == "propose_skill"
         || super::local::is_read(tool)
     {
@@ -1547,6 +1565,7 @@ fn policy_for_request(
     // their (possibly large) bodies on every state poll.
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
+        || super::recall::is_consent(tool)
         || tool == "propose_skill"
         || super::local::is_read(tool)
     {

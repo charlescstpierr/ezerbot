@@ -152,7 +152,10 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               panel.scrollIntoView({block: "start"});
               const heading = panel.querySelector("h3")?.textContent || "";
               const add = [...panel.querySelectorAll("summary")].some((node) => node.textContent.includes("Ajouter un serveur MCP"));
-              return heading === "Connecteurs" && add ? {ok: true, heading} : null;
+              // La carte Réunions n'a qu'un champ de clé masqué (aucune clé enregistrée sur une base neuve).
+              const keys = [...panel.querySelectorAll('[data-connector="reunions"] input')];
+              const reunions = keys.length === 1 && keys[0].type === "password";
+              return heading === "Connecteurs" && add && reunions ? {ok: true, heading, reunions} : null;
             }""",
             "connecteurs non prêts",
         )

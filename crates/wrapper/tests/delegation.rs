@@ -2069,6 +2069,127 @@ fn selected_image_reaches_the_child_request_and_not_another_thread() {
 }
 
 #[test]
+fn selected_image_follows_when_the_task_input_is_forwarded() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Décris cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Transmets cette photo."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-photo", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "forward-photo",
+            "body": "Transmets cette photo.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "forward-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "forward-photo")).remove(0);
+    let mut forwarded = args("grandchild");
+    forwarded["objective"] = json!("Décris la photo un niveau plus bas");
+    forwarded["selected_context"]["entry_ids"] = json!([edge.id]);
+    f.events(vec![
+        call("forward-task", "delegate", forwarded),
+        completed(),
+        call(
+            "finish-grandchild",
+            "complete_task",
+            json!({"summary":"Photo reçue"}),
+        ),
+        completed(),
+        call(
+            "finish-child",
+            "complete_task",
+            json!({"summary":"Transmise"}),
+        ),
+        completed(),
+    ]);
+    wait("grandchild request", || {
+        f.tick();
+        f.server.seen.lock().unwrap().bodies.iter().any(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris la photo un niveau plus bas")
+        })
+    });
+    let seen = f.server.seen.lock().unwrap();
+    let grandchild = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris la photo un niveau plus bas")
+        })
+        .expect("requête du petit-enfant")
+        .clone();
+    drop(seen);
+    let grandchild_json = grandchild.to_string();
+    assert!(
+        grandchild_json.contains(&format!("data:image/png;base64,{PNG}")),
+        "la requête du petit-enfant ne contient pas les octets de l'image transmise avec l'entrée"
+    );
+    let instructions = grandchild["instructions"]
+        .as_str()
+        .unwrap_or("")
+        .replace("\\\"", "\"");
+    let marker = "\"kind\":\"selected_images\"";
+    let at = instructions
+        .find(marker)
+        .expect("selected_images absent de la requête du petit-enfant");
+    let start = instructions[..at]
+        .rfind('{')
+        .expect("objet selected_images introuvable");
+    let end = instructions[at..]
+        .find('}')
+        .expect("objet selected_images non fermé")
+        + at
+        + 1;
+    let selected = &instructions[start..end];
+    let path_key = "\"path\":\"";
+    let path_at = selected
+        .find(path_key)
+        .expect("selected_images n'a pas le chemin local");
+    let path = &selected[path_at + path_key.len()..];
+    let path = &path[..path.find('"').unwrap()];
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        png,
+        "le chemin transmis au petit-enfant ne pointe pas vers les octets"
+    );
+}
+
+#[test]
 fn selected_images_captions_and_documents_reach_child_after_restart_only() {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let mut f = Fixture::new(true);

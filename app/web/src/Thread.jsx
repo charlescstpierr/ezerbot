@@ -13,7 +13,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
-import { clearFindMarks, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
+import { clearFindMarks, findInRendered, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
@@ -286,7 +286,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onRateGood, onRateBad }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -300,29 +300,36 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onRes
   const findAnchor = useRef(null);
   useLayoutEffect(() => {
     const root = threadRoot.current;
-    const { identity, recenter } = shouldRecenterFind(findAnchor.current, find);
-    findAnchor.current = identity;
     let attempts = 0;
     let frame = 0;
+    // Les correspondances viennent du DOM que React vient de valider : le
+    // compteur, l’occurrence active et le surlignage partent du même texte.
     const apply = () => {
       clearFindMarks(root);
-      if (!find?.query || !find.messageId || !root) return null;
+      const matches = find?.query && root ? findInRendered(root, find.query) || [] : [];
+      onFindMatches?.(matches);
+      const active = matches[find?.index < matches.length ? find.index : 0];
+      if (!active) return { mark: null, recenter: false };
+      const { identity, recenter } = shouldRecenterFind(findAnchor.current, { query: find.query, ...active });
       const escape = (value) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, ""));
-      const article = root.querySelector(`[data-message-id="${escape(find.messageId)}"]`);
-      return article ? highlightOccurrence(article, find.query, find.indexInMessage || 0) : null;
+      const article = root.querySelector(`[data-message-id="${escape(active.messageId)}"]`);
+      const mark = article ? highlightOccurrence(article, find.query, active.indexInMessage) : null;
+      if (mark) findAnchor.current = identity;
+      return { mark, recenter };
     };
     const reveal = () => {
-      const mark = apply();
+      const { mark, recenter } = apply();
       if (mark && recenter) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
       else if (!mark && find?.query && attempts < 8) {
         attempts += 1;
         frame = requestAnimationFrame(reveal);
       }
     };
+    if (!find?.query) findAnchor.current = "";
     reveal();
     onLayout?.();
     return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
-  }, [ordered, onLayout, find]);
+  }, [ordered, onLayout, find, onFindMatches]);
   return (
     <Tooltip.Provider delayDuration={350}>
       <div className="gb-thread" ref={threadRoot}>

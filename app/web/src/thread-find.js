@@ -42,11 +42,21 @@ function alignSpans(original) {
   return { folded, spans };
 }
 
+// Les spans sont ordonnés : une recherche dichotomique trouve le premier span
+// touché, puis on avance jusqu’à la fin de la correspondance.
 function cover(spans, foldStart, foldEnd, length) {
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (spans[middle].foldEnd <= foldStart) low = middle + 1;
+    else high = middle;
+  }
   let start = length;
   let end = 0;
-  for (const span of spans) {
-    if (span.foldEnd <= foldStart || span.foldStart >= foldEnd || span.foldStart === span.foldEnd) continue;
+  for (let index = low; index < spans.length && spans[index].foldStart < foldEnd; index += 1) {
+    const span = spans[index];
+    if (span.foldStart === span.foldEnd) continue;
     start = Math.min(start, span.start);
     end = Math.max(end, span.end);
   }
@@ -67,17 +77,6 @@ export function matchRanges(text, query) {
     const range = cover(spans, at, at + needle.length, source.length);
     if (range) matches.push(range);
     from = at + needle.length;
-  }
-  return matches;
-}
-
-export function findInThread(messages, query, textOf = (message) => message?.body || "") {
-  const matches = [];
-  for (const message of messages || []) {
-    if (!message?.id) continue;
-    matchRanges(textOf(message), query).forEach((range, indexInMessage) => {
-      matches.push({ messageId: message.id, indexInMessage, start: range.start, end: range.end });
-    });
   }
   return matches;
 }

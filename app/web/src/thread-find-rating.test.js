@@ -1,26 +1,47 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { clearFindMarks, cycleFind, findCountLabel, findInRendered, findInThread, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
+import { clearFindMarks, cycleFind, findCountLabel, findInRendered, highlightOccurrence, matchRanges, shouldRecenterFind } from "./thread-find.js";
 import { createRatingTable, ratingLabels } from "./thread-rating.js";
 
 const rare = "xyloglotte";
 
 test("la recherche annonce le nombre et circule sans tenir compte de la casse", () => {
-  const messages = [
-    { id: "m-user", body: `As-tu vu ${rare} ?` },
-    { id: "m-bot", body: `Oui, ${rare} revient, et encore ${rare}.` },
-  ];
-  const matches = findInThread(messages, "XYLOGLOTTE", (message) => message.body);
-  assert.equal(matches.length, 3);
-  assert.deepEqual(matches.map((match) => [match.messageId, match.indexInMessage]), [
-    ["m-user", 0], ["m-bot", 0], ["m-bot", 1],
-  ]);
+  assert.equal(matchRanges(`Oui, ${rare} revient, et encore ${rare}.`, "XYLOGLOTTE").length, 2);
+  assert.deepEqual(matchRanges("   ", "   "), []);
   assert.equal(findCountLabel(3, 0), "1 sur 3 résultats");
   assert.equal(findCountLabel(0, 0), "Aucun résultat");
   assert.equal(cycleFind(0, 3, -1), 2);
   assert.equal(cycleFind(2, 3, 1), 0);
-  assert.deepEqual(findInThread(messages, "   "), []);
+});
+
+test("une réponse avec du texte avant et après un appel compte chaque fragment affiché", () => {
+  const document = createDocument();
+  const thread = document.createElement("div");
+  for (const [id, body] of [["reply1:part:0", `Avant ${rare}`], ["tool", "carte"], ["reply1", `Après ${rare}`]]) {
+    const fragment = article({ id, name: "Ezerbot", body, document });
+    thread.append(fragment);
+  }
+  thread.ownerDocument = document;
+  const found = findInRendered(thread, rare);
+  assert.deepEqual(found.map((match) => [match.messageId, match.indexInMessage]), [["reply1:part:0", 0], ["reply1", 0]]);
+  const mark = highlightOccurrence(thread.querySelector("[data-message-id=\"reply1:part:0\"]"), rare, 0);
+  assert.equal(mark.textContent, rare);
+  assert.equal(mark.parentNode.textContent, `Avant ${rare}`);
+});
+
+test("un lien Markdown rendu compte une seule occurrence", () => {
+  const root = article({ id: "m-bot", name: "Ezerbot", body: rare });
+  assert.equal(findInRendered(root, rare).length, 1);
+});
+
+test("une longue réponse à beaucoup de correspondances se traite en temps linéaire", () => {
+  const text = "Les petites phrases de la prose française. ".repeat(5000);
+  const start = performance.now();
+  const matches = matchRanges(text, "e");
+  assert.ok(matches.length > 20000);
+  assert.deepEqual(matches[0], { start: 1, end: 2 });
+  assert.ok(performance.now() - start < 2000, "la recherche rescanne tous les spans à chaque occurrence");
 });
 
 test("Fermer n’écrit rien, l’envoi est dans l’export, et le module ne parle pas au réseau", () => {
@@ -153,8 +174,7 @@ function createDocument() {
   return document;
 }
 
-function article({ id, name, time = "12:00", body, buttons = [] }) {
-  const document = createDocument();
+function article({ id, name, time = "12:00", body, buttons = [], document = createDocument() }) {
   const root = document.createElement("article");
   if (id) root.setAttribute("data-message-id", id);
   const header = document.createElement("header");
@@ -254,7 +274,9 @@ test("un rafraîchissement du fil ne recentre plus l’occurrence déjà affich�
   assert.equal(query.recenter, true);
   const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
   const effect = source.slice(source.indexOf("useLayoutEffect(() => {"), source.indexOf("Tooltip.Provider"));
-  assert.match(effect, /shouldRecenterFind\(findAnchor\.current, find\)/);
+  assert.match(effect, /findInRendered\(root, find\.query\)/);
+  assert.match(effect, /onFindMatches\?\.\(matches\)/);
+  assert.match(effect, /shouldRecenterFind\(findAnchor\.current,/);
   assert.doesNotMatch(effect, /if \(mark\) mark\.scrollIntoView/);
   assert.match(effect, /if \(mark && recenter\) mark\.scrollIntoView/);
 });
@@ -267,7 +289,8 @@ test("une réponse terminée propose Bon résultat et Mauvais résultat, pas pen
   const bundle = readFileSync(new URL("../../ui/chat.js", import.meta.url), "utf8");
   assert.match(bundle, /Bon résultat/);
   assert.match(bundle, /Mauvais résultat/);
-  assert.match(bundle, /findInThread/);
+  assert.match(bundle, /findInRendered/);
+  assert.doesNotMatch(bundle, /findInThread/);
   assert.match(bundle, /createRatingTable/);
 });
 

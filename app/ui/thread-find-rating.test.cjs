@@ -274,20 +274,29 @@ async function boot({ storageThrows = false } = {}) {
   document.body.append(dialog);
 
   let threadProps = null;
+  let activeMatch = null;
   const window = {
     GrokbotChat: {
       createDeepLinkQueue: () => ({ receive() {}, setReady() {} }),
       createApprovalFollow: () => ({ arm() {}, cancel() {} }),
       mountInput: () => input,
       isPendingReply: () => false,
-      renderThread(_node, props) { threadProps = props; },
+      // Simule la validation React : le fil rapporte les correspondances du texte affiché.
+      renderThread(_node, props) {
+        threadProps = props;
+        activeMatch = null;
+        if (!props.find) return;
+        const matches = props.messages.flatMap((message) => (findMod.matchRanges(message.body, props.find.query).map((_, indexInMessage) => ({ messageId: message.id, indexInMessage }))));
+        props.onFindMatches(matches);
+        activeMatch = matches[props.find.index] || null;
+      },
       connectionMessages: (messages) => messages,
       composerConnectionState: ({ offline = false, live = false, busy = false }) => ({ offline, live: live && !offline, busy: busy && !offline, mode: live && !offline ? "stop" : "send", icon: live && !offline ? "#i-stop" : "#i-send", title: offline ? "Moteur local indisponible" : "Envoyer le message", label: "Envoyer le message" }),
       searchableMessageText: teach.searchableMessageText,
       revealPendingApproval() {},
       teachPrompt: teach.TEACH_PROMPT,
       exportMessage: teach.exportMessage,
-      findInThread: findMod?.findInThread || (() => []),
+      findInRendered: () => [],
       cycleFind: findMod?.cycleFind || ((index) => index),
       findCountLabel: findMod?.findCountLabel || (() => ""),
       createRatingTable: ratingMod?.createRatingTable || (() => ({ list: () => [], recordGood() {}, recordBad() {}, exportDocument: () => ({ notations: [] }) })),
@@ -333,7 +342,7 @@ async function boot({ storageThrows = false } = {}) {
     const raw = localStorage.getItem("ezerbot.notations");
     return raw ? JSON.parse(raw) : [];
   }
-  return { document, key, notations, calls, blobs, assistant, get threadProps() { return threadProps; } };
+  return { document, key, notations, calls, blobs, assistant, get threadProps() { return threadProps; }, get activeMatch() { return activeMatch; } };
 }
 
 test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l’envoi et aucune requête de notation ne part", async () => {
@@ -352,16 +361,16 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   field.value = "XYLOGLOTTE";
   field.dispatch("input");
   assert.equal(app.document.getElementById("find-count").textContent, "1 sur 3 résultats");
-  assert.equal(app.threadProps.find.messageId, "m-user");
-  assert.equal(app.threadProps.find.indexInMessage, 0);
+  assert.equal(app.activeMatch.messageId, "m-user");
+  assert.equal(app.activeMatch.indexInMessage, 0);
 
   app.document.getElementById("find-next").click();
   assert.equal(app.document.getElementById("find-count").textContent, "2 sur 3 résultats");
-  assert.equal(app.threadProps.find.messageId, "m-bot");
-  assert.equal(app.threadProps.find.indexInMessage, 0);
+  assert.equal(app.activeMatch.messageId, "m-bot");
+  assert.equal(app.activeMatch.indexInMessage, 0);
   app.document.getElementById("find-next").click();
   assert.equal(app.document.getElementById("find-count").textContent, "3 sur 3 résultats");
-  assert.equal(app.threadProps.find.indexInMessage, 1);
+  assert.equal(app.activeMatch.indexInMessage, 1);
   app.document.getElementById("find-next").click();
   assert.equal(app.document.getElementById("find-count").textContent, "1 sur 3 résultats");
   app.document.getElementById("find-previous").click();
@@ -382,7 +391,7 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   assert.equal(app.document.getElementById("rating-dialog").open, false);
   assert.deepEqual(app.notations(), []);
 
-  app.threadProps.onRateGood(app.assistant);
+  await app.threadProps.onRateGood(app.assistant);
   assert.equal(app.notations().length, 1);
   assert.equal(app.notations()[0].vote, "bon");
   assert.equal(app.notations()[0].message_id, "m-bot");
@@ -399,6 +408,7 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   choice.checked = true;
   app.document.getElementById("rating-details").value = DETAILS;
   app.document.getElementById("rating-form").dispatch("submit");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(app.document.getElementById("rating-dialog").open, false);
   const rows = app.notations();
   assert.equal(rows.length, 2);

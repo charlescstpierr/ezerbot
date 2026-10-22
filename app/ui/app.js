@@ -63,7 +63,7 @@
   }
   const ratings = await openRatings() || { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
   let pendingRating = null;
-  let findState = { open: false, query: "", index: 0 };
+  let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };
   let followAfterLayout = null;
   let scrollGeneration = 0;
   // Section hooks mount once: settingsSection(container, context), botSection(bot, container, context).
@@ -1042,11 +1042,13 @@
     ui.welcome.hidden = hasMessages;
     ui.messages.hidden = !hasMessages;
     const visibleMessages = window.GrokbotChat.connectionMessages(conversation?.messages || [], connected);
-    const matches = findState.open ? currentFindMatches(visibleMessages) : [];
-    if (findState.index >= matches.length) findState.index = 0;
-    const activeMatch = matches[findState.index] || null;
-    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: findState.open && activeMatch ? { query: findState.query.trim(), messageId: activeMatch.messageId, indexInMessage: activeMatch.indexInMessage } : null, onRateGood: rateGood, onRateBad: rateBad, ...thread });
-    paintFind(matches);
+    const query = findState.query.trim();
+    const searching = findState.open && Boolean(query);
+    // Les correspondances d’un autre fil ou d’une recherche fermée ne survivent pas ; le fil validé les recalcule.
+    if (!searching || findState.conversationId !== (conversation?.id || null)) findState.matches = [];
+    findState.conversationId = conversation?.id || null;
+    window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, ...thread });
+    paintFind();
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -1577,17 +1579,17 @@
     closeMenu();
   }
 
-  function currentFindMatches(visibleMessages = window.GrokbotChat.connectionMessages(currentConversation()?.messages || [], connected)) {
-    const rendered = window.GrokbotChat.findInRendered?.(ui.messages, findState.query);
-    if (rendered) return rendered;
-    return window.GrokbotChat.findInThread
-      ? window.GrokbotChat.findInThread(visibleMessages, findState.query, window.GrokbotChat.searchableMessageText)
-      : [];
+  // Appelé par le fil à chaque validation React : le compteur suit le DOM affiché.
+  function onFindMatches(matches) {
+    findState.matches = matches;
+    if (findState.index >= matches.length) findState.index = 0;
+    paintFind();
   }
 
-  function paintFind(matches) {
+  function paintFind() {
     const bar = $("find-bar");
     if (!bar) return;
+    const matches = findState.matches;
     bar.hidden = !findState.open;
     const count = $("find-count");
     const label = findState.open && findState.query.trim() && window.GrokbotChat.findCountLabel
@@ -1603,7 +1605,7 @@
   }
 
   function openFind() {
-    if (!$("find-bar") || !window.GrokbotChat.findInThread) return;
+    if (!$("find-bar") || !window.GrokbotChat.findInRendered) return;
     findState.open = true;
     render();
     $("find-input")?.focus();
@@ -1622,9 +1624,8 @@
   }
 
   function stepFind(direction) {
-    if (!window.GrokbotChat.cycleFind || !window.GrokbotChat.findInThread) return;
-    const matches = currentFindMatches();
-    if (!matches.length) return;
+    const matches = findState.matches;
+    if (!window.GrokbotChat.cycleFind || !matches.length) return;
     findState.index = window.GrokbotChat.cycleFind(findState.index, matches.length, direction);
     render();
   }

@@ -174,7 +174,7 @@ impl Session {
         }
         let limits = *lock(&self.inner.deadlines);
         // ureq 2.12.1 applies `.timeout()` on every body read and ignores
-        // `.timeout_read()`. The session loop already enforces `limits.total`.
+        // `.timeout_read()`. The foreground stream sets its own deadline per request.
         let mut request = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
             .timeout_write(Duration::from_secs(15))

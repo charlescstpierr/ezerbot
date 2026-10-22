@@ -17,7 +17,7 @@ impl Default for Deadlines {
         Self {
             first: Duration::from_secs(25),
             stall: Duration::from_secs(60),
-            total: Duration::from_secs(600),
+            total: Duration::from_secs(60),
         }
     }
 }
@@ -157,6 +157,9 @@ impl Session {
             limits.stall = limits.stall.min(Duration::from_secs(10));
             limits.total = limits.total.min(Duration::from_secs(12));
         }
+        // ureq cuts a blocked read at this instant; the session loop below only
+        // reports the timeout, it cannot close a socket the worker is reading.
+        let deadline = Instant::now() + limits.total;
         thread::spawn(move || {
             let _worker = Worker {
                 inner: session.inner.clone(),
@@ -170,6 +173,7 @@ impl Session {
                     true,
                     &mut notices,
                     &abandoned,
+                    Some(deadline),
                     &mut |status| {
                         let _ = send(&tx, Wire::Headers(status));
                     },
@@ -371,6 +375,17 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod production_deadlines {
+    use super::Deadlines;
+    use std::time::Duration;
+
+    #[test]
+    fn a_response_is_bounded_to_sixty_seconds() {
+        assert_eq!(Deadlines::default().total, Duration::from_secs(60));
     }
 }
 

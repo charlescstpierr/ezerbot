@@ -13,6 +13,7 @@ import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
+import { clearFindMarks, findInRendered, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
@@ -132,7 +133,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
       <Mascot create={createMascot} />
       <div className="gb-content">
         <header className="gb-meta"><strong>Consigne de {botName}</strong><Timestamp value={message.created_at} /></header>
-        {message.body && <p className="gb-instruction-text">{message.body}</p>}
+        {message.body && <p className="gb-instruction-text" data-find-body>{message.body}</p>}
         <MessageAttachments message={message} align="start" />
       </div>
     </article>
@@ -154,7 +155,7 @@ function UserMessage({ message, busy, onCopy, onRetry, onReact, onResend, onDele
     <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
       {followUp && <span className="gb-followup-label">Suivi</span>}
-      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
+      {message.body && <div className="gb-bubble" data-find-body>{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
         ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
         : part.text)}</div>}
       <MessageAttachments message={message} />
@@ -212,7 +213,7 @@ function TurnLabel({ message }) {
   return message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>;
 }
 
-function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, menuOpen, onMenuOpenChange }) {
+function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad, menuOpen, onMenuOpenChange }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
   const toolPreparing = preparingTool(message);
@@ -251,9 +252,11 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>}
         {prose?.trim()
           ? (
-            <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
-              {prose}
-            </Streamdown>
+            <div data-find-body>
+              <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
+                {prose}
+              </Streamdown>
+            </div>
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
         <MessageAttachments message={message} align="start" markdown />
@@ -263,6 +266,8 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
           <footer className="gb-actions">
             <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onResend={actions.onResend} onDelete={actions.onDelete} />
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
+            {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
+            {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
             {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
@@ -281,20 +286,53 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
   const overlay = useRef(null);
+  const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
   const actions = useMemo(() => ({ onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
-  useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
+  const findAnchor = useRef(null);
+  useLayoutEffect(() => {
+    const root = threadRoot.current;
+    let attempts = 0;
+    let frame = 0;
+    // Les correspondances viennent du DOM que React vient de valider : le
+    // compteur, l’occurrence active et le surlignage partent du même texte.
+    const apply = () => {
+      clearFindMarks(root);
+      const matches = find?.query && root ? findInRendered(root, find.query) || [] : [];
+      onFindMatches?.(matches);
+      const active = matches[find?.index < matches.length ? find.index : 0];
+      if (!active) return { mark: null, recenter: false };
+      const { identity, recenter } = shouldRecenterFind(findAnchor.current, { query: find.query, ...active });
+      const escape = (value) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, ""));
+      const article = root.querySelector(`[data-message-id="${escape(active.messageId)}"]`);
+      const mark = article ? highlightOccurrence(article, find.query, active.indexInMessage) : null;
+      if (mark) findAnchor.current = identity;
+      return { mark, recenter };
+    };
+    const reveal = () => {
+      const { mark, recenter } = apply();
+      if (mark && recenter) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
+      else if (!mark && find?.query && attempts < 8) {
+        attempts += 1;
+        frame = requestAnimationFrame(reveal);
+      }
+    };
+    if (!find?.query) findAnchor.current = "";
+    reveal();
+    onLayout?.();
+    return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
+  }, [ordered, onLayout, find, onFindMatches]);
   return (
     <Tooltip.Provider delayDuration={350}>
-      <div className="gb-thread">
+      <div className="gb-thread" ref={threadRoot}>
         {ordered.map((message) => {
           const delegated = message.payload?.source === "delegation";
           const author = bots.find((bot) => bot.id === (delegated ? message.payload.from_bot : message.payload?.bot_id));
@@ -327,7 +365,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onRes
           const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
             ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
-            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />;
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

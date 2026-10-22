@@ -122,8 +122,8 @@ pub fn command_pattern(tool: &str, arguments: &Value) -> Option<String> {
     exact_shell_key(command).then(|| command.to_owned())
 }
 
-/// A sub-agent. A shell `background` flag is not a background launch: that
-/// executor is not available here, so the flag is refused by the shell tool.
+/// A sub-agent. A shell `background` flag runs a command in the background,
+/// but it is still one exact command with its own rule key, not a launch.
 pub fn background_launch(tool: &str, arguments: &Value) -> bool {
     tool == "delegate" && arguments.is_object()
 }

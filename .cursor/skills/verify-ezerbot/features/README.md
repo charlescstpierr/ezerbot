@@ -6,7 +6,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 
 - Lancer l’instance avec `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves>`.
 - `HOME` et `CFFIXED_USER_HOME` sont un répertoire `mktemp` neuf. Le refus est immédiat si ce `HOME` est le vrai dossier personnel ou si un chemin touche `~/Library/Application Support/Grokbot`.
-- Le faux OpenAI de bouclage et le fichier `workspace.chatgpt-auth.json` fictif sont déjà en place. Ne pas copier d’identifiants ChatGPT.
+- Le faux OpenAI de bouclage et le fichier `workspace.codex-auth.json` fictif sont déjà en place. Ne pas copier d’identifiants ChatGPT.
 - Poser `CHROME_DEVTOOLS_AXI_SESSION` sur l’identifiant du run.
 - Lancer `bash .cursor/skills/verify-ezerbot/scripts/doctor.sh --evidence <preuves>` et exiger `doctor: ok`, la bonne URL, le bon port et le commit extrait.
 - Ne jamais piloter une instance qui n’a pas été démarrée par ce run, ni ouvrir `Ezerbot.app`.

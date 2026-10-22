@@ -60,6 +60,10 @@ struct GithubScript {
     authorization: Vec<(String, String)>,
     /// Bodies of the comments the provider accepted, in order.
     comments: Vec<Value>,
+    /// Bodies of the issues the provider accepted, in order.
+    created: Vec<Value>,
+    /// Status the provider answers to an issue creation; 201 creates it.
+    create_status: u16,
 }
 impl Default for GithubScript {
     fn default() -> Self {
@@ -83,6 +87,8 @@ impl Default for GithubScript {
             token_times: Vec::new(),
             authorization: Vec::new(),
             comments: Vec::new(),
+            created: Vec::new(),
+            create_status: 201,
         }
     }
 }
@@ -223,6 +229,19 @@ impl OAuth {
                             )
                         } else {
                             (401, json!({"message":"Bad credentials"}))
+                        }
+                    } else if post && url == "/github/api/repos/charles/essai/issues" {
+                        if !is_live(g) {
+                            (401, json!({"message":"Bad credentials"}))
+                        } else if g.create_status != 201 {
+                            (g.create_status, json!({"message":"Validation Failed"}))
+                        } else {
+                            let sent: Value = serde_json::from_str(&body).unwrap();
+                            g.created.push(sent.clone());
+                            (
+                                201,
+                                json!({"number":31,"html_url":"https://github.com/charles/essai/issues/31","title":sent["title"],"body":sent["body"],"user":{"login":"charles-test"}}),
+                            )
                         }
                     } else if url.starts_with("/github/api/repos/charles/essai/issues") {
                         let known = is_live(g);
@@ -1539,15 +1558,15 @@ fn github_pull_request_and_repository_tools_are_reads_without_approval() {
             .iter()
             .filter(|t| t.name.starts_with("github_"))
             .count(),
-        4,
-        "the list of GitHub tools is closed: three reads and one comment on a draft card"
+        5,
+        "the list of GitHub tools is closed: three reads, one comment and one issue on a draft card"
     );
     let writes: Vec<_> = tools
         .iter()
         .filter(|t| t.name.starts_with("github_") && t.requires_approval)
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(writes, [GITHUB_COMMENT_TOOL]);
+    assert_eq!(writes, [GITHUB_COMMENT_TOOL, GITHUB_ISSUE_TOOL]);
     // The closed list is also what the connection card reports.
     let listed = f.item("github")["server"]["tools"].to_string();
     for name in [
@@ -1555,6 +1574,7 @@ fn github_pull_request_and_repository_tools_are_reads_without_approval() {
         "get_pull_request",
         "read_repository",
         "add_issue_comment",
+        "create_issue",
     ] {
         assert!(listed.contains(name), "{name}: {listed}");
     }
@@ -2034,6 +2054,7 @@ fn github_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_c
 }
 
 const GITHUB_COMMENT_TOOL: &str = "github_add_issue_comment";
+const GITHUB_ISSUE_TOOL: &str = "github_create_issue";
 
 impl Fixture {
     /// One chat turn in which the bot prepares a comment. The run stops on its card.
@@ -2046,23 +2067,34 @@ impl Fixture {
         text: &str,
         account: Option<&str>,
     ) -> (String, Value) {
-        let conversation = self.post("/api/conversations", json!({"title":"Commentaire"}))
-            ["conversation"]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         let mut arguments = json!({"repository":"charles/essai","issue":12,"text":text});
         if let Some(account) = account {
             arguments["compte"] = json!(account);
         }
-        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GITHUB_COMMENT_TOOL,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.github_prepare(id, GITHUB_COMMENT_TOOL, arguments)
+    }
+    /// One chat turn in which the bot prepares an issue. The run stops on its card.
+    fn github_prepare_issue(&mut self, id: &str, title: &str, body: &str) -> (String, Value) {
+        self.github_prepare(
+            id,
+            GITHUB_ISSUE_TOOL,
+            json!({"repository":"charles/essai","title":title,"body":body}),
+        )
+    }
+    fn github_prepare(&mut self, id: &str, tool: &str, arguments: Value) -> (String, Value) {
+        let conversation = self.post("/api/conversations", json!({"title":"Brouillon"}))
+            ["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
         self.script(vec![json!({"type":"response.completed"})]);
         self.post(
             "/api/send",
-            json!({"conversation_id":conversation,"message_id":id,"body":"Commente l’issue 12 de charles/essai."}),
+            json!({"conversation_id":conversation,"message_id":id,"body":"Prépare le brouillon."}),
         );
         let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
-        wait("comment card", || {
+        wait("draft card", || {
             self.app.tick(0);
             !requests::list_for_run(&self.db(), &run).unwrap().is_empty()
         });
@@ -2083,9 +2115,22 @@ impl Fixture {
         decision: Value,
         text: Option<&str>,
     ) -> Result<Value, grokbot_wrapper::ApiError> {
+        self.github_resolve_issue(card, submission, decision, None, text)
+    }
+    fn github_resolve_issue(
+        &mut self,
+        card: &Value,
+        submission: &str,
+        decision: Value,
+        title: Option<&str>,
+        text: Option<&str>,
+    ) -> Result<Value, grokbot_wrapper::ApiError> {
         let mut body = json!({"entry_id":card["entry_id"],"conversation_id":card["route"]["target_conversation_id"],"submission_id":submission,"decision":decision});
         if let Some(text) = text {
             body["text"] = json!(text);
+        }
+        if let Some(title) = title {
+            body["title"] = json!(title);
         }
         self.app.api(
             "POST",
@@ -2104,6 +2149,20 @@ impl Fixture {
     }
     fn published_comments(&self) -> Vec<Value> {
         self.oauth.seen.lock().unwrap().github.comments.clone()
+    }
+    fn created_issues(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().github.created.clone()
+    }
+    /// Issues POSTed to the provider, whatever it answered.
+    fn issue_creations(&self) -> usize {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, body)| url.ends_with("/repos/charles/essai/issues") && !body.is_empty())
+            .count()
     }
 }
 
@@ -2373,6 +2432,281 @@ fn github_draft_card_shows_only_the_result_of_its_own_call() {
         "the listing's result is not a publication"
     );
     assert_eq!(f.github_requests("/comments"), 0);
+}
+
+#[test]
+fn github_issue_waits_on_a_draft_card_without_always_and_cancel_creates_nothing() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_issue("issue-1", "Essai Ezerbot", "créée depuis la carte");
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["action"], "Créer une issue");
+    assert_eq!(draft["depot"], "charles/essai");
+    assert_eq!(draft["titre"], "Essai Ezerbot");
+    assert_eq!(draft["texte"], "créée depuis la carte");
+    assert_eq!(draft["login"], "charles-test");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.issue_creations(), 0, "nothing before the click");
+
+    // There is no “Toujours”: neither a standing allow nor a standing refusal.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("issue-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.issue_creations(), 0);
+
+    // Annuler creates nothing.
+    f.github_resolve(&card, "issue-cancel", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.issue_creations(), 0);
+    assert!(f.created_issues().is_empty());
+}
+
+#[test]
+fn github_issue_creates_one_issue_with_the_corrected_title_and_body_under_the_displayed_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_issue("issue-2", "Essai Ezerbot", "créée depuis la carte");
+    assert_eq!(f.issue_creations(), 0);
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+
+    f.github_resolve_issue(
+        &card,
+        "issue-send-1",
+        json!("allow_once"),
+        Some("Essai validé"),
+        Some("Corps validé"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["numero"], 31);
+    assert_eq!(output["titre"], "Essai validé");
+    assert_eq!(output["texte"], "Corps validé");
+    assert!(output["message"]
+        .as_str()
+        .unwrap()
+        .contains("charles/essai#31"));
+    assert!(output["url"].as_str().unwrap().ends_with("/issues/31"));
+    assert_eq!(f.created_issues().len(), 1);
+    assert_eq!(f.created_issues()[0]["title"], "Essai validé");
+    assert_eq!(f.created_issues()[0]["body"], "Corps validé");
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .github
+            .authorization
+            .iter()
+            .rev()
+            .find(|(u, _)| u.ends_with("/repos/charles/essai/issues"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.github.live_access));
+    }
+
+    // The settled card shows what left, bound to a new fingerprint, and the bubble's number.
+    let settled = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["entry_id"] == card["entry_id"])
+        .unwrap()
+        .clone();
+    assert_eq!(settled["arguments"]["brouillon"]["titre"], "Essai validé");
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Corps validé");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["publication_result"]["output"]["numero"], 31);
+
+    // A second Envoyer on the same card never calls GitHub again: the same click is
+    // answered with its first receipt, another click is refused.
+    f.github_resolve_issue(
+        &card,
+        "issue-send-1",
+        json!("allow_once"),
+        Some("Autre titre"),
+        Some("Autre corps"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "issue-send-2",
+            json!("allow_once"),
+            Some("Autre titre"),
+            Some("Autre corps"),
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.issue_creations(), 1);
+    assert_eq!(f.created_issues()[0]["title"], "Essai validé");
+
+    // The model learned the number, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Essai validé") && inputs.contains("31"));
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_issue_sends_the_proposal_unedited_and_refuses_a_blank_title_or_a_comment_field() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_issue("issue-3", "Titre proposé", "Corps proposé");
+    for (index, title) in ["", "  ", "deux\nlignes"].into_iter().enumerate() {
+        let error = f
+            .github_resolve_issue(
+                &card,
+                &format!("issue-blank-{index}"),
+                json!("allow_once"),
+                Some(title),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 400, "{title:?}");
+    }
+    // Deny never carries an edit.
+    assert!(f
+        .github_resolve_issue(&card, "issue-deny-edit", json!("deny"), Some("x"), None)
+        .is_err());
+    assert_eq!(f.issue_creations(), 0);
+    let still = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["entry_id"] == card["entry_id"])
+        .unwrap()
+        .clone();
+    assert_eq!(still["status"]["status"], "pending");
+    assert_eq!(still["arguments"]["brouillon"]["titre"], "Titre proposé");
+
+    f.github_resolve(&card, "issue-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.created_issues().len(), 1);
+    assert_eq!(f.created_issues()[0]["title"], "Titre proposé");
+    assert_eq!(f.created_issues()[0]["body"], "Corps proposé");
+}
+
+#[test]
+fn github_comment_card_refuses_a_title_edit_and_still_goes_through_the_same_card() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("comment-title", "Bonjour du brouillon.");
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "comment-title-1",
+            json!("allow_once"),
+            Some("Titre"),
+            None
+        )
+        .is_err());
+    assert_eq!(f.github_requests("/comments"), 0);
+    f.github_resolve(
+        &card,
+        "comment-title-2",
+        json!("allow_once"),
+        Some("Bonjour validé"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.published_comments().len(), 1);
+    assert_eq!(f.issue_creations(), 0);
+}
+
+#[test]
+fn github_issue_refuses_a_bad_target_without_a_card_and_reports_refusals_without_a_retry() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let conversation = f.post("/api/conversations", json!({"title":"Cible"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc-bad-issue","call_id":"bad-issue","name":GITHUB_ISSUE_TOOL,"arguments":json!({"repository":"../etc/passwd","title":"x"}).to_string()}}),json!({"type":"response.completed"})]);
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"bad-issue","body":"Ouvre une issue."}),
+    );
+    let run: String = f.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')='bad-issue'",[],|r|r.get(0)).unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("propriétaire/dépôt"), "{reason}");
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.issue_creations(), 0);
+
+    // GitHub refuses the creation: a French sentence, one call, and the card is spent.
+    f.oauth.seen.lock().unwrap().github.create_status = 422;
+    let (run, card) = f.github_prepare_issue("issue-422", "Titre", "Corps");
+    f.github_resolve(&card, "issue-422-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("Rien n’a été créé"), "{reason}");
+    assert_eq!(f.issue_creations(), 1);
+    f.app.tick(0);
+    assert_eq!(f.issue_creations(), 1);
+
+    // An outage may or may not have created it: it says so, and never calls again.
+    f.oauth.seen.lock().unwrap().github.create_status = 503;
+    let (run, card) = f.github_prepare_issue("issue-503", "Titre", "Corps");
+    f.github_resolve(&card, "issue-503-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("peut-être été créée"), "{reason}");
+    f.app.tick(0);
+    assert_eq!(f.issue_creations(), 2);
+}
+
+#[test]
+fn github_issue_is_refused_when_the_account_changed_after_the_card() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_issue("issue-4", "Titre", "Corps");
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre-compte',account_id='999' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    f.github_resolve(&card, "issue-send-4", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("compte GitHub a changé"), "{reason}");
+    assert_eq!(f.issue_creations(), 0);
 }
 
 impl Fixture {

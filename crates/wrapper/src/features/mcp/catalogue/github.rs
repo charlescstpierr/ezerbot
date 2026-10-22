@@ -11,6 +11,8 @@ use std::{
 };
 pub(in super::super) mod comment;
 pub(in super::super) use comment::TOOL as COMMENT_TOOL;
+pub(in super::super) mod issue;
+pub(in super::super) use issue::TOOL as ISSUE_TOOL;
 
 /// Read tools of the closed list. None needs an approval card: they only read.
 const TOOL: &str = "github_list_issues";
@@ -515,7 +517,7 @@ pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec>
             schema: (tool.schema)(),
             requires_approval: false,
         })
-        .chain(std::iter::once(comment::tool_spec()))
+        .chain([comment::tool_spec(), issue::tool_spec()])
         .collect()
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
@@ -526,6 +528,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         .collect();
     let mut tools = tools;
     tools.push(comment::tool_definition());
+    tools.push(issue::tool_definition());
     let tools = json!(tools);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",

@@ -45,3 +45,19 @@ test("la carte brouillon n’offre ni « Toujours » ni règle à mémoriser", (
   const approval = readFileSync(new URL("./cards/approval.jsx", import.meta.url), "utf8");
   assert.match(approval, /preview\?\.brouillon\) return <DraftCard/);
 });
+
+test("Envoyer transmet le titre et le corps corrigés d’une issue, sans « Toujours »", async () => {
+  const calls = [];
+  const panels = mount(async (path, body) => { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; });
+  const issue = { ...message, id: "draft-3", payload: { ...message.payload, entry_id: "draft-3", kind: { kind: "approval", tool: "github_create_issue" } } };
+  assert.equal(await panels.panel.onCardAction(issue, "forms.decide", { decision: "allow_once", title: "Essai validé", text: "Corps validé" }, context(panels)), true);
+  assert.equal(calls[0].body.title, "Essai validé");
+  assert.equal(calls[0].body.text, "Corps validé");
+  const other = { ...issue, id: "draft-4", payload: { ...issue.payload, entry_id: "draft-4" } };
+  await panels.panel.onCardAction(other, "forms.decide", { decision: "deny" }, context(panels));
+  assert.equal(Object.hasOwn(calls[1].body, "title"), false);
+  const card = readFileSync(new URL("./cards/draft.jsx", import.meta.url), "utf8");
+  assert.match(card, /draft\.titre/);
+  assert.match(card, /Titre de l’issue/);
+  assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
+});

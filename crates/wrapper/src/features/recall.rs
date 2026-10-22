@@ -53,6 +53,14 @@ const MAX_BODY: u64 = 1 << 20;
 /// Invitations dont la réponse de Recall est attendue : la fermeture les attend.
 static CREATING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 const CREATION_WAIT: Duration = Duration::from_secs(12);
+/// Les tests rendent le suivi de fond déterministe : seules leurs passes explicites comptent.
+static BACKGROUND_OFF: AtomicBool = AtomicBool::new(false);
+#[doc(hidden)]
+pub fn pause_background(paused: bool) {
+    BACKGROUND_OFF.store(paused, Ordering::Release);
+}
+static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+const WAKE_GAP_MS: u64 = 60_000;
 static POLLING: AtomicBool = AtomicBool::new(false);
 static NEXT_POLL: AtomicU64 = AtomicU64::new(0);
 
@@ -529,12 +537,8 @@ fn leave(ctx: &Context<'_>, id: Option<&str>) -> Result<Value, ApiError> {
     leave_meeting(ctx, &meeting, "cancelled")?;
     Ok(json!({"left":true,"message":"Le bot a quitté la réunion."}))
 }
-/// Fermeture propre : le bot sort avant que la fenêtre disparaisse. La réunion
-/// passe à Terminée ; sans confirmation, elle prend l’état d’un arrêt brutal.
-fn shutdown(ctx: &Context<'_>) -> Value {
-    let mut left = 0;
-    // Une invitation sans réponse n’a pas encore d’identifiant de bot : sortir sans
-    // l’attendre laisserait Recall créer un bot que personne ne retirera.
+/// Attend, au plus `CREATION_WAIT`, les invitations dont Recall n’a pas encore répondu.
+fn wait_creations() {
     let waited = std::time::Instant::now();
     while !CREATING
         .lock()
@@ -544,6 +548,14 @@ fn shutdown(ctx: &Context<'_>) -> Value {
     {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+/// Fermeture propre : le bot sort avant que la fenêtre disparaisse. La réunion
+/// passe à Terminée ; sans confirmation, elle prend l’état d’un arrêt brutal.
+fn shutdown(ctx: &Context<'_>) -> Value {
+    let mut left = 0;
+    // Une invitation sans réponse n’a pas encore d’identifiant de bot : sortir sans
+    // l’attendre laisserait Recall créer un bot que personne ne retirera.
+    wait_creations();
     if let Ok(Some(meeting)) = active(ctx.connection) {
         let unresolved = meeting.bot_id.is_none()
             && CREATING
@@ -746,7 +758,7 @@ fn drain_pending_leaves(ctx: &Context<'_>) -> Result<(), ApiError> {
         let region = meeting.region.as_deref();
         let confirmed = leave_bot(&key, region, bot).is_ok()
             || bot_code(&key, region, bot)
-                .map(|code| !matches!(map_status(&code).0, "joining" | "in_call"))
+                .map(|code| map_status(&code).0 == "done")
                 .unwrap_or(false);
         if !confirmed {
             return Err(ApiError::new(502, LEAVE_UNCONFIRMED));
@@ -767,6 +779,18 @@ fn remove(ctx: &Context<'_>) -> Result<Value, ApiError> {
             arguments: json!({}),
         },
     )?;
+    // Une invitation sans réponse crée un bot que seule cette clé peut retirer : l’attendre.
+    wait_creations();
+    if !CREATING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+    {
+        return Err(ApiError::new(
+            409,
+            "Une invitation attend encore la réponse de Recall. Réessayez dans un instant : la clé est conservée.",
+        ));
+    }
     // Une réunion en cours est quittée avant le retrait de la clé.
     if let Some(meeting) = active(ctx.connection)? {
         leave_meeting(ctx, &meeting, "cancelled")?;
@@ -784,8 +808,27 @@ fn remove(ctx: &Context<'_>) -> Result<Value, ApiError> {
 
 // ---- Suivi en arrière-plan -----------------------------------------------------
 
+/// Réveil de veille : l’appel a pu continuer sans nous. La réunion n’est plus suivie
+/// (même phrase qu’un arrêt brutal) et une sortie du bot est redemandée une fois.
+#[doc(hidden)]
+pub fn reconcile_wake(ctx: &Context<'_>) {
+    let _ = ctx.connection.execute(
+        "UPDATE wrapper_recall_meetings SET state='failed',message=?1,needs_leave=(bot_id IS NOT NULL),updated_at=?2 WHERE state IN ('joining','in_call') AND NOT EXISTS(SELECT 1 FROM wrapper_recall_meetings WHERE state='joining' AND bot_id IS NULL)",
+        params![RESUME, crate::now()],
+    );
+}
+
 /// Hors du fil HTTP : aucune requête réseau sous le verrou SQLite ni sous le tick.
 pub fn tick(ctx: &Context<'_>) {
+    if BACKGROUND_OFF.load(Ordering::Acquire) {
+        return;
+    }
+    // Le tick bat toutes les 500 ms : un long silence est une veille du Mac.
+    let now = wall_clock();
+    let previous = LAST_TICK.swap(now, Ordering::AcqRel);
+    if previous != 0 && now.saturating_sub(previous) > WAKE_GAP_MS {
+        reconcile_wake(ctx);
+    }
     let work: bool = ctx
         .connection
         .query_row(

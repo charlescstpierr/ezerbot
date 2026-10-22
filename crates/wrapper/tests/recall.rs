@@ -262,6 +262,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        recall::pause_background(false);
         std::env::remove_var("GROKBOT_FAKE_RECALL");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
@@ -728,4 +729,78 @@ fn disconnecting_first_drains_a_pending_removal_before_the_key_goes() {
         )
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+#[test]
+fn an_unknown_status_never_counts_as_a_confirmed_removal_before_the_key_goes() {
+    let mut f = Fixture::new();
+    recall::pause_background(true);
+    f.connect();
+    f.joined();
+    f.recall.code("nouvel_etat_inconnu");
+    f.sync();
+    assert_eq!(f.item()["meeting"]["label"], "Échec");
+    // Recall refuse la sortie et répond encore par un état inconnu : la clé reste.
+    f.recall.seen.lock().unwrap().leave_status = 500;
+    let run = f.post("/api/recall/disconnect", json!({}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.item()["status"], "connected");
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    assert!(vault.get("REUNIONS_RECALL_KEY").unwrap().is_some());
+    let pending: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM wrapper_recall_meetings WHERE needs_leave=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 1);
+}
+
+#[test]
+fn disconnecting_waits_for_an_invitation_still_awaiting_recall() {
+    let mut f = Fixture::new();
+    recall::pause_background(true);
+    f.connect();
+    f.recall.seen.lock().unwrap().create_delay = Duration::from_millis(1500);
+    let run = f.join(MEET);
+    let request = f.request(&run);
+    f.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id,"submission_id":"accept","decision":"allow_once"}));
+    f.app.tick(0);
+    wait("meeting row", || {
+        f.db().query_row("SELECT count(*) FROM wrapper_recall_meetings WHERE state='joining' AND bot_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
+    });
+    let remove = f.post("/api/recall/disconnect", json!({}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&remove, json!("allow_once"));
+    // Le bot créé pendant l'attente est retiré avant que la clé ne parte.
+    assert_eq!(f.recall.leaves(), 1);
+    assert_eq!(f.item()["status"], "disconnected");
+    assert_eq!(f.item()["meeting"]["label"], "Annulée");
+}
+
+#[test]
+fn waking_from_sleep_stops_tracking_and_asks_recall_to_remove_the_bot() {
+    let mut f = Fixture::new();
+    recall::pause_background(true);
+    f.connect();
+    f.joined();
+    f.recall.code("in_call_recording");
+    f.sync();
+    assert_eq!(f.meeting_state(), "in_call");
+    recall::reconcile_wake(&f.app.feature_context());
+    let item = f.item();
+    assert_eq!(item["meeting"]["label"], "Échec");
+    assert_eq!(item["meeting"]["message"], recall::RESUME);
+    assert_eq!(item["meeting"]["active"], false);
+    f.sync();
+    f.sync();
+    assert_eq!(f.recall.leaves(), 1);
 }

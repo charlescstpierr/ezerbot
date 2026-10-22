@@ -135,12 +135,137 @@ struct GmailScript {
     authorization: Vec<(String, String)>,
     /// Runs while the provider answers a listing: what happens to the app meanwhile.
     during_listing: Option<Box<dyn Fn() + Send>>,
+    /// Events of the primary calendar, as Google lists them.
+    agenda: Vec<Value>,
+    /// Status of every calendar request; 200 answers normally.
+    agenda_status: u16,
+    /// Events per page of a listing, whatever `maxResults` asks; 0 gives as many as asked.
+    agenda_page: usize,
+    /// Files of the Drive: id, name, mimeType, modifiedTime and the text they hold.
+    files: Vec<Value>,
+    /// Search pages of the Drive that come back empty, with a token, before the files.
+    empty_search_pages: usize,
+    /// Method and address of every calendar and Drive request, in order.
+    calls: Vec<(String, String)>,
     /// Status the provider answers to a send; 0 and 200 deliver it.
     send_status: u16,
     /// The messages the provider delivered, as the RFC 822 text it was given.
     sent: Vec<String>,
 }
+const AGENDA_ZONE: &str = "America/Toronto";
 impl GmailScript {
+    /// The events of a listing: the changes since `updatedMin`, or the events of a window.
+    fn events(all: &[Value], listing: &str, page: usize) -> Value {
+        let q: std::collections::HashMap<_, _> = url::form_urlencoded::parse(listing.as_bytes())
+            .into_owned()
+            .collect();
+        let stamp = |v: &Value| v.as_str().unwrap().parse::<jiff::Timestamp>().unwrap();
+        // A tombstone may carry nothing but its identifier and status.
+        let changed = |e: &Value| {
+            e["updated"]
+                .as_str()
+                .map_or(jiff::Timestamp::MAX, |t| t.parse().unwrap())
+        };
+        let start = |e: &Value| stamp(&e["start"]["dateTime"]);
+        let mut items: Vec<Value> = if let Some(min) = q.get("updatedMin") {
+            let min = min.parse::<jiff::Timestamp>().unwrap();
+            let deleted = q.get("showDeleted").is_some_and(|s| s == "true");
+            let mut kept: Vec<Value> = all
+                .iter()
+                .filter(|e| changed(e) >= min && (deleted || e["status"] != "cancelled"))
+                .cloned()
+                .collect();
+            kept.sort_by_key(changed);
+            kept
+        } else {
+            assert_eq!(q["singleEvents"], "true");
+            let min = q["timeMin"].parse::<jiff::Timestamp>().unwrap();
+            let max = q["timeMax"].parse::<jiff::Timestamp>().unwrap();
+            let mut kept: Vec<Value> = all
+                .iter()
+                .filter(|e| {
+                    e["status"] != "cancelled"
+                        && start(e) < max
+                        && stamp(&e["end"]["dateTime"]) > min
+                })
+                .cloned()
+                .collect();
+            kept.sort_by_key(start);
+            kept
+        };
+        let offset: usize = q.get("pageToken").map_or(0, |t| t.parse().unwrap());
+        let wanted: usize = q["maxResults"].parse().unwrap();
+        let limit = if page > 0 { wanted.min(page) } else { wanted };
+        let rest = items.split_off(offset.min(items.len()));
+        let more = rest.len() > limit;
+        let mut answer = json!({"items":rest.into_iter().take(limit).collect::<Vec<_>>()});
+        if more {
+            answer["nextPageToken"] = json!((offset + limit).to_string());
+        }
+        answer
+    }
+    /// A Drive search by exact name, or the content of one file by media or export.
+    fn file(files: &[Value], rest: &str, empty_pages: usize) -> (u16, Value) {
+        let parse = |query: &str| -> std::collections::HashMap<String, String> {
+            url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect()
+        };
+        if let Some(query) = rest.strip_prefix('?') {
+            let q = parse(query);
+            assert!(q["fields"].contains("nextPageToken"), "{}", q["fields"]);
+            let page: usize = q.get("pageToken").map_or(0, |t| t.parse().unwrap());
+            if page < empty_pages {
+                return (
+                    200,
+                    json!({"files":[],"nextPageToken":(page + 1).to_string()}),
+                );
+            }
+            let name = q["q"]
+                .strip_prefix("name = '")
+                .and_then(|r| r.strip_suffix("' and trashed = false"))
+                .unwrap_or_else(|| panic!("unexpected search {}", q["q"]))
+                .replace("\\'", "'")
+                .replace("\\\\", "\\");
+            let mut hits: Vec<&Value> = files.iter().filter(|f| f["name"] == name).collect();
+            hits.sort_by(|a, b| b["modifiedTime"].as_str().cmp(&a["modifiedTime"].as_str()));
+            let found: Vec<Value> = hits
+                .iter()
+                .map(|f| json!({"id":f["id"],"name":f["name"],"mimeType":f["mimeType"],"modifiedTime":f["modifiedTime"]}))
+                .collect();
+            return (200, json!({"files":found}));
+        }
+        let Some((path, query)) = rest.strip_prefix('/').and_then(|r| r.split_once('?')) else {
+            return (404, json!({}));
+        };
+        let q = parse(query);
+        let (id, export) = match path.strip_suffix("/export") {
+            Some(id) => (id, true),
+            None => (path, false),
+        };
+        let Some(file) = files.iter().find(|f| f["id"] == id) else {
+            return (404, json!({"error":{"code":404}}));
+        };
+        let mime = file["mimeType"].as_str().unwrap();
+        let native = mime.starts_with("application/vnd.google-apps.");
+        let text = Value::String(file["text"].as_str().unwrap_or_default().to_owned());
+        match (export, native, q.get("alt"), q.get("mimeType")) {
+            (false, false, Some(alt), _) if alt == "media" => (200, text),
+            (true, true, _, Some(want)) => {
+                let expected = if mime.ends_with(".spreadsheet") {
+                    "text/csv"
+                } else {
+                    "text/plain"
+                };
+                assert_eq!(want, expected, "{mime}");
+                (200, text)
+            }
+            _ => (
+                403,
+                json!({"error":{"errors":[{"reason":"fileNotDownloadable"}]}}),
+            ),
+        }
+    }
     /// One message as Gmail's `format=full` returns it: a text part and an HTML part.
     fn message(entry: &Value) -> Value {
         let encoded = |text: &str| URL_SAFE_NO_PAD.encode(text);
@@ -170,6 +295,7 @@ impl OAuth {
                 };
                 let url = req.url().to_owned();
                 let post = *req.method() == tiny_http::Method::Post;
+                let method = req.method().as_str().to_owned();
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let mut seen = captured.lock().unwrap();
@@ -441,7 +567,7 @@ impl OAuth {
                                 g.live_tokens.push(access.clone());
                                 (
                                     200,
-                                    json!({"access_token":access,"refresh_token":"gmail-refresh-secret-never-visible","expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
+                                    json!({"access_token":access,"refresh_token":"gmail-refresh-secret-never-visible","expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/drive.readonly"}),
                                 )
                             }
                             Some("refresh_token")
@@ -454,7 +580,7 @@ impl OAuth {
                                 g.live_tokens.push(access.clone());
                                 (
                                     200,
-                                    json!({"access_token":access,"expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
+                                    json!({"access_token":access,"expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/drive.readonly"}),
                                 )
                             }
                             _ => (400, json!({"error":"invalid_grant"})),
@@ -521,6 +647,25 @@ impl OAuth {
                             Some(entry) => (200, GmailScript::message(entry)),
                             None => (404, json!({"error":{"code":404}})),
                         }
+                    } else if let Some(rest) =
+                        url.strip_prefix("/gmail/calendar/calendar/v3/calendars/primary")
+                    {
+                        g.calls.push((method.clone(), url.clone()));
+                        if g.agenda_status != 200 && g.agenda_status != 0 {
+                            (g.agenda_status, json!({"error":{"code":g.agenda_status}}))
+                        } else if rest.is_empty() {
+                            (
+                                200,
+                                json!({"id":"charles@example.test","timeZone":AGENDA_ZONE}),
+                            )
+                        } else if let Some(listing) = rest.strip_prefix("/events?") {
+                            (200, GmailScript::events(&g.agenda, listing, g.agenda_page))
+                        } else {
+                            (404, json!({}))
+                        }
+                    } else if let Some(rest) = url.strip_prefix("/gmail/drive/drive/v3/files") {
+                        g.calls.push((method.clone(), url.clone()));
+                        GmailScript::file(&g.files, rest, g.empty_search_pages)
                     } else {
                         (404, json!({}))
                     }
@@ -685,6 +830,9 @@ impl OAuth {
                 drop(seen);
                 let text = if sse {
                     format!("event: message\ndata: {}\n\n", data)
+                } else if let Some(raw) = data.as_str() {
+                    // A text body (a Drive export) is sent as it is, not as a JSON string.
+                    raw.to_owned()
                 } else {
                     data.to_string()
                 };
@@ -3381,10 +3529,12 @@ const GMAIL_SECRETS: [&str; 3] = [
     "gmail-refresh-secret",
     "gmail-renewed-secret",
 ];
-const GMAIL_SCOPES: [&str; 3] = [
+const GMAIL_SCOPES: [&str; 5] = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ];
 
 impl Fixture {
@@ -3551,7 +3701,7 @@ fn gmail_connects_with_the_public_client_and_pkce_and_never_sends_a_secret() {
     assert_eq!(
         query["scope"].split(' ').collect::<Vec<_>>(),
         GMAIL_SCOPES,
-        "Gmail asks for its three scopes and nothing else"
+        "one Google consent: the three Gmail scopes and the two read scopes of the agenda and Drive, nothing else"
     );
     assert!(!url.contains("client_secret"));
     assert_eq!(f.callback("gmail", false, false), 200);
@@ -4827,6 +4977,729 @@ fn gmail_email_is_refused_when_the_account_changed_or_lost_the_bot_after_the_car
     assert!(reason.contains("pas activé"), "{reason}");
     assert_eq!(f.email_sends(), 0);
     assert!(f.delivered_mail().is_empty());
+}
+
+const CALENDAR_TOOL: &str = "calendar_list_events";
+const DRIVE_TOOL: &str = "drive_read_file";
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+fn agenda_zone() -> jiff::tz::TimeZone {
+    jiff::tz::TimeZone::get(AGENDA_ZONE).unwrap()
+}
+/// `days` from today at `hour` o'clock, in the zone of the agenda.
+fn agenda_at(days: i64, hour: i8) -> jiff::Zoned {
+    jiff::Zoned::now()
+        .with_time_zone(agenda_zone())
+        .date()
+        .checked_add(jiff::Span::new().days(days))
+        .unwrap()
+        .at(hour, 0, 0, 0)
+        .to_zoned(agenda_zone())
+        .unwrap()
+}
+fn iso(at: &jiff::Zoned) -> String {
+    at.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
+}
+/// One event as Google lists it; `status` is `confirmed` or `cancelled`.
+fn agenda_event(
+    id: &str,
+    title: &str,
+    start: &jiff::Zoned,
+    created_ms: i64,
+    updated_ms: i64,
+    status: &str,
+) -> Value {
+    let end = start.checked_add(jiff::Span::new().hours(1)).unwrap();
+    let at = |z: &jiff::Zoned| json!({"dateTime":iso(z),"timeZone":AGENDA_ZONE});
+    let utc = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap().to_string();
+    json!({"id":id,"status":status,"summary":title,"created":utc(created_ms),"updated":utc(updated_ms),"start":at(start),"end":at(&end)})
+}
+fn agenda_events(
+    f: &Fixture,
+) -> Result<Vec<grokbot_wrapper::features::mcp::CalendarEvent>, grokbot_wrapper::ApiError> {
+    grokbot_wrapper::features::mcp::calendar_events(&f.app.feature_context())
+}
+
+impl Fixture {
+    fn agenda(&self, events: Vec<Value>) {
+        self.oauth.seen.lock().unwrap().gmail.agenda = events;
+    }
+    fn drive(&self, files: Vec<Value>) {
+        self.oauth.seen.lock().unwrap().gmail.files = files;
+    }
+    fn google_calls(&self) -> Vec<(String, String)> {
+        self.oauth.seen.lock().unwrap().gmail.calls.clone()
+    }
+}
+
+#[test]
+fn gmail_card_says_the_same_consent_reads_the_agenda_and_drive_without_a_second_form() {
+    let mut f = Fixture::new();
+    let gmail = f.item("gmail");
+    let said = format!("{} {}", gmail["description"], gmail["permissions"]);
+    assert!(said.contains("agenda") && said.contains("Drive"), "{said}");
+    assert!(
+        gmail["permissions"]
+            .as_str()
+            .unwrap()
+            .contains("rien n’est écrit"),
+        "the card says nothing is written: {said}"
+    );
+    assert_eq!(gmail["needs_client"], false);
+    // The agenda and Drive are read with Gmail's account: no tool exists before it is connected.
+    let run = f.github_call("agenda-before", CALENDAR_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("Gmail n’est pas connecté"));
+    let run = f.github_call("drive-before", DRIVE_TOOL, json!({"nom":"Plan"}));
+    assert!(failed(&f, &run).contains("Gmail n’est pas connecté"));
+    assert!(f.google_calls().is_empty());
+}
+
+#[test]
+fn agenda_and_drive_are_not_read_until_gmail_is_given_to_the_bot() {
+    let mut f = Fixture::new();
+    f.gmail_inbox();
+    f.gmail_start();
+    assert_eq!(f.callback("gmail", false, false), 200);
+    wait("gmail connected", || {
+        f.item("gmail")["status"] == "connected"
+    });
+    let run = f.github_call("agenda-off", CALENDAR_TOOL, json!({}));
+    assert!(failed(&f, &run).contains("Activez-le"));
+    let run = f.github_call("drive-off", DRIVE_TOOL, json!({"nom":"Plan"}));
+    assert!(failed(&f, &run).contains("Activez-le"));
+    assert!(f.google_calls().is_empty(), "the provider heard nothing");
+}
+
+#[test]
+fn agenda_and_drive_tools_are_a_closed_list_of_reads_without_approval() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let mut names: Vec<_> = tools
+        .iter()
+        .filter(|t| t.name.starts_with("calendar_") || t.name.starts_with("drive_"))
+        .map(|t| (t.name.as_str(), t.requires_approval))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [(CALENDAR_TOOL, false), (DRIVE_TOOL, false)],
+        "two reads and no way to write in the agenda or in Drive"
+    );
+    let listed = f.item("gmail")["server"]["tools"].to_string();
+    for name in ["list_recent_messages", "list_events", "read_file"] {
+        assert!(listed.contains(name), "{name}: {listed}");
+    }
+}
+
+#[test]
+fn agenda_lists_tomorrows_events_without_a_card_a_write_or_a_token() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let ms = now_ms();
+    let old = ms - 86_400_000;
+    f.agenda(vec![
+        agenda_event(
+            "today",
+            "Café avec Zoé",
+            &agenda_at(0, 15),
+            old,
+            old,
+            "confirmed",
+        ),
+        agenda_event("t2", "Dentiste", &agenda_at(1, 14), old, old, "confirmed"),
+        agenda_event(
+            "t1",
+            "Revue de sprint",
+            &agenda_at(1, 9),
+            old,
+            old,
+            "confirmed",
+        ),
+        agenda_event(
+            "gone",
+            "Annulé demain",
+            &agenda_at(1, 11),
+            old,
+            old,
+            "cancelled",
+        ),
+        agenda_event(
+            "later",
+            "Dans deux jours",
+            &agenda_at(2, 9),
+            old,
+            old,
+            "confirmed",
+        ),
+    ]);
+    let run = f.github_call("tomorrow", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles@example.test");
+    assert_eq!(output["fuseau"], AGENDA_ZONE);
+    let events = output["evenements"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["t1", "t2"],
+        "tomorrow's events only, the earlier first, none cancelled"
+    );
+    assert_eq!(events[0]["titre"], "Revue de sprint");
+    assert_eq!(events[0]["debut"], iso(&agenda_at(1, 9)));
+    assert_eq!(events[0]["fuseau"], AGENDA_ZONE);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("Revue de sprint") && text.contains("Dentiste"),
+        "{text}"
+    );
+    assert!(
+        text.contains("compte Gmail : charles@example.test"),
+        "{text}"
+    );
+    assert!(!text.contains("Café avec Zoé") && !text.contains("deux jours"));
+    // Today is one word away; an unknown day is refused rather than guessed.
+    let run = f.github_call("today", CALENDAR_TOOL, json!({"jour":"aujourd_hui"}));
+    let today = done(&f, &run);
+    assert_eq!(today["evenements"].as_array().unwrap().len(), 1);
+    assert_eq!(today["evenements"][0]["id"], "today");
+    let run = f.github_call("yesterday", CALENDAR_TOOL, json!({"jour":"hier"}));
+    assert!(failed(&f, &run).contains("demain"));
+    // Only reads reached the provider, always with the connected account's token.
+    let calls = f.google_calls();
+    assert!(calls.len() >= 4, "{calls:?}");
+    assert!(
+        calls.iter().all(|(method, _)| method == "GET"),
+        "no write call: {calls:?}"
+    );
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        for (url, auth) in seen
+            .gmail
+            .authorization
+            .iter()
+            .filter(|(u, _)| u.contains("/calendar/"))
+        {
+            assert_eq!(
+                *auth,
+                format!("Bearer {}", seen.gmail.live_tokens[0]),
+                "{url}"
+            );
+        }
+    }
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Revue de sprint"));
+    for secret in GMAIL_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn agenda_forbidden_is_a_sentence_that_asks_to_reconnect_gmail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.oauth.seen.lock().unwrap().gmail.agenda_status = 403;
+    let run = f.github_call("agenda-403", CALENDAR_TOOL, json!({}));
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("agenda") && reason.contains("Reconnectez Gmail"),
+        "{reason}"
+    );
+    assert!(f.item("gmail")["status"] == "connected");
+}
+
+#[test]
+fn drive_reads_a_named_file_without_a_card_a_write_or_a_token() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let long = "Ligne du plan. ".repeat(1000);
+    f.drive(vec![
+        json!({"id":"doc1","name":"Plan 2026","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Plan 2026\nObjectif : livrer Ezerbot.\n"}),
+        json!({"id":"doc0","name":"Plan 2026","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-01-02T10:00:00.000Z","text":"Ancien plan."}),
+        json!({"id":"sheet1","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet","modifiedTime":"2026-10-01T10:00:00.000Z","text":"poste,montant\nloyer,1200\n"}),
+        json!({"id":"txt1","name":"L’été d’O'Neil.txt","mimeType":"text/plain","modifiedTime":"2026-09-01T10:00:00.000Z","text":"Notes de l’été."}),
+        json!({"id":"big1","name":"Journal","mimeType":"text/plain","modifiedTime":"2026-09-01T10:00:00.000Z","text":long}),
+        json!({"id":"pdf1","name":"Scan.pdf","mimeType":"application/pdf","modifiedTime":"2026-09-01T10:00:00.000Z","text":"%PDF"}),
+    ]);
+    let run = f.github_call("drive-doc", DRIVE_TOOL, json!({"nom":"Plan 2026"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles@example.test");
+    assert_eq!(
+        output["fichier"]["id"], "doc1",
+        "the most recent file of that name"
+    );
+    assert_eq!(output["fichier"]["nom"], "Plan 2026");
+    assert_eq!(output["fichier"]["autres"], 1);
+    assert!(output["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("Objectif : livrer Ezerbot."));
+    assert_eq!(output["tronque"], false);
+    assert!(output["texte"].as_str().unwrap().contains("Plan 2026"));
+    // A spreadsheet is read as CSV, a plain text file as it is, a name with a quote is escaped.
+    let run = f.github_call("drive-sheet", DRIVE_TOOL, json!({"nom":"Budget"}));
+    assert!(done(&f, &run)["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("loyer,1200"));
+    let run = f.github_call("drive-txt", DRIVE_TOOL, json!({"nom":"L’été d’O'Neil.txt"}));
+    assert_eq!(done(&f, &run)["extrait"], "Notes de l’été.");
+    // A long file gives an excerpt and says it was cut.
+    let run = f.github_call("drive-big", DRIVE_TOOL, json!({"nom":"Journal"}));
+    let big = done(&f, &run);
+    assert_eq!(big["tronque"], true);
+    assert!(big["extrait"].as_str().unwrap().chars().count() <= 4000);
+    // A file that is not text is named, not dumped; an unknown name is a sentence.
+    let run = f.github_call("drive-pdf", DRIVE_TOOL, json!({"nom":"Scan.pdf"}));
+    let pdf = done(&f, &run);
+    assert_eq!(pdf["extrait"], Value::Null);
+    assert!(
+        pdf["texte"]
+            .as_str()
+            .unwrap()
+            .contains("ne peut pas être lu"),
+        "{pdf}"
+    );
+    let run = f.github_call("drive-none", DRIVE_TOOL, json!({"nom":"Introuvable"}));
+    assert!(failed(&f, &run).contains("Aucun fichier"));
+    let run = f.github_call("drive-blank", DRIVE_TOOL, json!({"nom":"  "}));
+    assert!(failed(&f, &run).contains("nom du fichier"));
+    // Only reads, with the account's token, and nothing of it reached the model.
+    let calls = f.google_calls();
+    assert!(
+        !calls.is_empty() && calls.iter().all(|(method, _)| method == "GET"),
+        "no write call: {calls:?}"
+    );
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Objectif : livrer Ezerbot."));
+    for secret in GMAIL_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn calendar_events_carry_id_case_start_and_zone_and_each_comes_out_once() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    // The first look only learns the agenda: nothing is "new" yet.
+    assert!(agenda_events(&f).unwrap().is_empty());
+    // As after an hour with the Mac closed.
+    let ms = now_ms();
+    f.db()
+        .execute(
+            "UPDATE wrapper_calendar_watch SET updated_ms=?1,started_ms=?1",
+            [ms - 3_600_000],
+        )
+        .unwrap();
+    let begun = jiff::Zoned::now()
+        .with_time_zone(agenda_zone())
+        .checked_sub(jiff::Span::new().minutes(1))
+        .unwrap();
+    f.agenda(vec![
+        agenda_event(
+            "e-now",
+            "Point du matin",
+            &begun,
+            ms - 90_000_000,
+            ms - 7_200_000,
+            "confirmed",
+        ),
+        agenda_event(
+            "e-gone",
+            "Annulée",
+            &agenda_at(1, 16),
+            ms - 18_000_000,
+            ms - 600_000,
+            "cancelled",
+        ),
+        agenda_event(
+            "e-moved",
+            "Réunion déplacée",
+            &agenda_at(1, 13),
+            ms - 18_000_000,
+            ms - 1_200_000,
+            "confirmed",
+        ),
+        agenda_event(
+            "e-new",
+            "Lancement",
+            &agenda_at(1, 10),
+            ms - 1_800_000,
+            ms - 1_800_000,
+            "confirmed",
+        ),
+    ]);
+    let events = agenda_events(&f).unwrap();
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.id.as_str(), e.cas))
+            .collect::<Vec<_>>(),
+        [
+            ("e-new", Cree),
+            ("e-moved", Modifie),
+            ("e-gone", Annule),
+            ("e-now", Commence)
+        ],
+        "created, modified and cancelled in the order Google changed them, then what began"
+    );
+    let created = &events[0];
+    assert_eq!(created.titre, "Lancement");
+    assert_eq!(created.fuseau, AGENDA_ZONE);
+    assert_eq!(created.debut, iso(&agenda_at(1, 10)));
+    assert_eq!(
+        created.debut_ms,
+        agenda_at(1, 10).timestamp().as_millisecond()
+    );
+    let begun_event = &events[3];
+    assert_eq!(begun_event.debut_ms, begun.timestamp().as_second() * 1000);
+    assert_eq!(begun_event.fuseau, AGENDA_ZONE);
+    // The same version does not come out again, even when Google lists it again.
+    assert!(agenda_events(&f).unwrap().is_empty());
+    assert!(agenda_events(&f).unwrap().is_empty());
+    // A new version of an event is a new delivery, once.
+    f.agenda({
+        let mut all = f.oauth.seen.lock().unwrap().gmail.agenda.clone();
+        all[2] = agenda_event(
+            "e-moved",
+            "Réunion déplacée",
+            &agenda_at(1, 14),
+            ms - 18_000_000,
+            ms - 1_000,
+            "confirmed",
+        );
+        all
+    });
+    let again = agenda_events(&f).unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|e| (e.id.as_str(), e.cas))
+            .collect::<Vec<_>>(),
+        [("e-moved", Modifie)]
+    );
+    assert_eq!(again[0].debut, iso(&agenda_at(1, 14)));
+    assert!(agenda_events(&f).unwrap().is_empty());
+    // The event is data of the agenda: it carries no token.
+    let shown = format!("{events:?}{again:?}");
+    for secret in GMAIL_SECRETS {
+        assert!(!shown.contains(secret));
+    }
+    assert!(
+        f.google_calls().iter().all(|(method, _)| method == "GET"),
+        "watching the agenda writes nothing"
+    );
+}
+
+#[test]
+fn calendar_events_stop_when_gmail_is_not_connected_and_start_over_after_a_disconnection() {
+    let mut f = Fixture::new();
+    let error = agenda_events(&f).unwrap_err();
+    assert!(
+        error.message.contains("Gmail n’est pas connecté"),
+        "{}",
+        error.message
+    );
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"gmail"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removed, json!("allow_once"));
+    assert!(agenda_events(&f).is_err());
+    let watched: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM wrapper_calendar_watch", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        watched, 0,
+        "a disconnected account keeps no trace of its agenda"
+    );
+}
+
+/// A listing of the watch with its floors set back an hour, as after a Mac left closed.
+fn rewind_agenda(f: &Fixture, ms: i64) {
+    f.db()
+        .execute(
+            "UPDATE wrapper_calendar_watch SET updated_ms=?1,started_ms=?1",
+            [ms - 3_600_000],
+        )
+        .unwrap();
+}
+fn ids(
+    events: &[grokbot_wrapper::features::mcp::CalendarEvent],
+) -> Vec<(&str, grokbot_wrapper::features::mcp::CalendarCase)> {
+    events.iter().map(|e| (e.id.as_str(), e.cas)).collect()
+}
+
+#[test]
+fn calendar_version_listed_again_at_the_floor_is_not_delivered_as_modified() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    // The newest change is a creation: the floor now sits on its own timestamp.
+    f.agenda(vec![agenda_event(
+        "boundary",
+        "Nouveau",
+        &agenda_at(1, 10),
+        ms - 1_800_000,
+        ms - 1_800_000,
+        "confirmed",
+    )]);
+    assert_eq!(ids(&agenda_events(&f).unwrap()), [("boundary", Cree)]);
+    // Google lists it again (the floor is inclusive): the same version is not a second event.
+    assert!(agenda_events(&f).unwrap().is_empty());
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn calendar_watch_follows_page_tokens_for_changes_and_starts() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 2;
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    let mut all = Vec::new();
+    for n in 1..=5 {
+        all.push(agenda_event(
+            &format!("c{n}"),
+            "Changé",
+            &agenda_at(1, 8 + n as i8),
+            ms - 7_200_000,
+            ms - 3_000_000 + n * 1000,
+            "confirmed",
+        ));
+    }
+    let long_ago = ms - 90_000_000;
+    for n in 1..=3 {
+        let begun = jiff::Zoned::now()
+            .with_time_zone(agenda_zone())
+            .checked_sub(jiff::Span::new().minutes(10 * n))
+            .unwrap();
+        all.push(agenda_event(
+            &format!("s{n}"),
+            "Commencé",
+            &begun,
+            long_ago,
+            long_ago,
+            "confirmed",
+        ));
+    }
+    f.agenda(all);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(
+        ids(&events),
+        [
+            ("c1", Modifie),
+            ("c2", Modifie),
+            ("c3", Modifie),
+            ("c4", Modifie),
+            ("c5", Modifie),
+            ("s3", Commence),
+            ("s2", Commence),
+            ("s1", Commence),
+        ],
+        "every page of both listings is read, whatever the page size"
+    );
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn agenda_day_follows_pages_and_says_when_it_is_cut() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let old = now_ms() - 86_400_000;
+    let day = |n: i64| {
+        agenda_event(
+            &format!("d{n:02}"),
+            &format!("Rendez-vous {n}"),
+            &agenda_at(1, 6)
+                .checked_add(jiff::Span::new().minutes(n * 30))
+                .unwrap(),
+            old,
+            old,
+            "confirmed",
+        )
+    };
+    f.agenda((1..=3).map(day).collect());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 2;
+    let run = f.github_call("pages", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(
+        output["evenements"].as_array().unwrap().len(),
+        3,
+        "the second page is read"
+    );
+    assert_eq!(output["tronque"], false);
+    // Past the pages that are followed, the answer says it is not the whole day.
+    f.agenda((1..=14).map(day).collect());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 1;
+    let run = f.github_call("cut", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["tronque"], true);
+    assert_eq!(output["evenements"].as_array().unwrap().len(), 10);
+    assert!(
+        output["texte"].as_str().unwrap().contains("Liste tronquée"),
+        "{output}"
+    );
+}
+
+#[test]
+fn calendar_start_within_the_current_second_is_read_at_the_next_call() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let conn = f.db();
+    let at = |now_ms: i64| grokbot_wrapper::features::Context {
+        connection: &conn,
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: now_ms as u64,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    };
+    let base = (now_ms() / 1000 + 100) * 1000;
+    let poll = |now: i64| grokbot_wrapper::features::mcp::calendar_events(&at(now)).unwrap();
+    assert!(poll(base).is_empty());
+    let start = base + 10_000;
+    let old = now_ms() - 86_400_000;
+    let begins = jiff::Timestamp::from_millisecond(start)
+        .unwrap()
+        .to_zoned(agenda_zone());
+    f.agenda(vec![agenda_event(
+        "tick",
+        "À la seconde",
+        &begins,
+        old,
+        old,
+        "confirmed",
+    )]);
+    // Google excludes the second it is given as `timeMax`: half a second after the start,
+    // the appointment is not listed yet, and it must not be lost for that.
+    assert!(poll(start + 500).is_empty());
+    assert_eq!(ids(&poll(start + 1500)), [("tick", Commence)]);
+    assert!(poll(start + 2500).is_empty());
+}
+
+#[test]
+fn calendar_cancellation_without_an_update_timestamp_is_delivered_once() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    rewind_agenda(&f, now_ms());
+    f.agenda(vec![json!({"id":"tombstone","status":"cancelled"})]);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(ids(&events), [("tombstone", Annule)]);
+    assert_eq!(events[0].fuseau, AGENDA_ZONE);
+    assert!(agenda_events(&f).unwrap().is_empty());
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn agenda_hours_are_those_of_the_calendar_and_another_event_zone_is_named() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let old = now_ms() - 86_400_000;
+    let paris = jiff::tz::TimeZone::get("Europe/Paris").unwrap();
+    let start = agenda_at(1, 9).with_time_zone(paris);
+    let mut event = agenda_event("paris", "Appel Paris", &start, old, old, "confirmed");
+    event["start"]["timeZone"] = json!("Europe/Paris");
+    f.agenda(vec![
+        event,
+        agenda_event("local", "Café", &agenda_at(1, 12), old, old, "confirmed"),
+    ]);
+    let run = f.github_call("zones", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("09:00–10:00 · Appel Paris · fuseau de l’événement : Europe/Paris"),
+        "{text}"
+    );
+    assert!(
+        text.contains("12:00–13:00 · Café\n") || text.ends_with("12:00–13:00 · Café"),
+        "{text}"
+    );
+    // The event itself keeps its own zone for a routine.
+    assert_eq!(output["evenements"][0]["fuseau"], "Europe/Paris");
+}
+
+#[test]
+fn calendar_delivery_records_stay_while_their_cursor_can_still_list_them() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 100;
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    // One change on the floor, then a thousand starts: more rows than a fixed budget keeps.
+    let mut all = vec![agenda_event(
+        "edge",
+        "Changé",
+        &agenda_at(1, 10),
+        ms - 7_200_000,
+        ms - 1_800_000,
+        "confirmed",
+    )];
+    let long_ago = ms - 90_000_000;
+    let now = jiff::Zoned::now().with_time_zone(agenda_zone());
+    for n in 0..1000 {
+        let begun = now.checked_sub(jiff::Span::new().seconds(2 + n)).unwrap();
+        all.push(agenda_event(
+            &format!("b{n:04}"),
+            "Commencé",
+            &begun,
+            long_ago,
+            long_ago,
+            "confirmed",
+        ));
+    }
+    f.agenda(all);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(events.len(), 1001);
+    assert_eq!(ids(&events)[0], ("edge", Modifie));
+    // The change is listed again at the floor of its cursor: it is still known.
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn drive_follows_empty_search_pages_before_saying_there_is_no_match() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.drive(vec![json!({"id":"late1","name":"Rapport","mimeType":"text/plain","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Sur la quatrième page."})]);
+    f.oauth.seen.lock().unwrap().gmail.empty_search_pages = 3;
+    let run = f.github_call("late", DRIVE_TOOL, json!({"nom":"Rapport"}));
+    assert_eq!(done(&f, &run)["extrait"], "Sur la quatrième page.");
+    // A search that ends empty is still "no file".
+    let run = f.github_call("none", DRIVE_TOOL, json!({"nom":"Absent"}));
+    assert!(failed(&f, &run).contains("Aucun fichier"));
 }
 
 const SLACK_POST: &str = "slack_post_message";

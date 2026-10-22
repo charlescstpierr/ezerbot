@@ -147,7 +147,7 @@ test("une compilation ratée s’affiche en rouge dans le coin et reste dans les
   assert.equal(ui.bottom.children[1], ui.button);
 
   await action.listeners.click();
-  assert.deepEqual(calls, ["/api/updates/apply"]);
+  assert.deepEqual(calls, ["/api/updates/hold", "/api/updates/apply"]);
   assert.equal(corner.hidden, false);
   assert.equal(labelOf(corner), "Téléchargement…");
   assert.equal(corner.className.includes("is-running"), true);
@@ -248,4 +248,17 @@ test("le redémarrage attend discrètement une réunion ou un enregistrement", a
   assert.equal(action.attributes.title, "Le redémarrage suivra la fin de l’enregistrement.");
   assert.match(ui.section.textContent, /Dernière tentative : après l’enregistrement/);
   assert.equal(ui.panels.panel.wantsPolling(), true);
+});
+
+test("le premier état de capture est toujours envoyé, même sans capture", async () => {
+  const calls = [];
+  const ui = harness(async (path, body) => {
+    calls.push({ path, body });
+    return { ...installed, available: false, running: false, phase: "idle", message: "" };
+  });
+  ui.panels.panel.onState({ updates: { ...installed, available: false, running: false, phase: "idle" } });
+  ui.panels.panel.onState({ updates: { ...installed, available: false, running: false, phase: "idle" } });
+  const holds = calls.filter((call) => call.path === "/api/updates/hold");
+  assert.equal(holds.length, 1);
+  assert.equal(holds[0].body.active, false);
 });

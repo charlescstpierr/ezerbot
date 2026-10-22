@@ -15,8 +15,7 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod features;
 
-/// Local self-update from the public `main` branch. The dev checkout and the
-/// workspace database are never the working tree.
+/// Mise à jour locale depuis `main`. Le dossier des conversations n’est pas le dépôt de travail.
 pub mod updates;
 
 // The model gateway keeps the root compatibility name while generation belongs

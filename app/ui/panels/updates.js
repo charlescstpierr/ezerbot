@@ -41,7 +41,8 @@
     attente: "Dernière tentative : après l’enregistrement",
     a_jour: "Dernière tentative : déjà à jour",
   };
-  let holdSent = false;
+  // null : le serveur peut garder un hold d’avant le rechargement ; le premier état est toujours envoyé.
+  let holdSent = null;
 
   function captureActive() {
     return Boolean(panels.meetingActive?.() || panels.voiceActive?.() || window.EzerbotVoiceMode?.active?.());
@@ -51,7 +52,7 @@
     const active = captureActive();
     if (active === holdSent) return;
     holdSent = active;
-    panels.api("/api/updates/hold", { active }).catch(() => { holdSent = !active; });
+    panels.api("/api/updates/hold", { active }).catch(() => { holdSent = null; });
   }
 
   function versionLabel(data) {

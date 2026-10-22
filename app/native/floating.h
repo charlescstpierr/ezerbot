@@ -184,7 +184,7 @@ static OSStatus EZFloatingHotKey(EventHandlerCallRef next, EventRef event, void 
     }
     self.openConversation(identifier, ^(BOOL opened, NSString *error) {
         if (opened) { [self close]; reply(@YES,nil); }
-        else reply(nil,error ?: @"Conversation indisponible.");
+        else reply(nil,error ?: @"");
     });
 }
 @end

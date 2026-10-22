@@ -138,7 +138,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         (403, "subscription_sharing_user_not_eligible", "other"),
         (503, "subscription_sharing_usage_unavailable", "other"),
         (503, "subscription_sharing_user_unavailable", "other"),
-        (403, "subscription_sharing_invalid_user", "signin"),
+        (403, "subscription_sharing_invalid_user", "other"),
         (429, "usage_limit_reached", "limit"),
         (403, "usage_not_included", "other"),
         (429, "rate_limit_exceeded", "other"),
@@ -270,7 +270,7 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
             ("subscription_sharing_user_not_eligible", "other"),
             ("subscription_sharing_usage_unavailable", "other"),
             ("subscription_sharing_user_unavailable", "other"),
-            ("subscription_sharing_invalid_user", "signin"),
+            ("subscription_sharing_invalid_user", "other"),
             ("rate_limit_exceeded", "other"),
             ("usage_limit_reached", "limit"),
             ("usage_not_included", "other"),
@@ -358,7 +358,13 @@ fn each_unauthorized_attempt_is_logged_including_a_recovered_failure() {
             json!({"error":{"code":"expired"}}),
         ));
     }
-    assert_eq!(fixture.raw().unwrap_err().kind, "signin");
+    assert_eq!(fixture.raw().unwrap_err().kind, "other");
+    assert!(fixture.provider.connected());
+    let saved: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.directory.join("workspace.chatgpt-auth.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(saved["refresh_token"].is_string());
     let log = fixture.log();
     assert_allowlisted(&log, 4, 3);
     assert!(log

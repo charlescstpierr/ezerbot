@@ -326,6 +326,9 @@ pub fn append_event(
         RunEventKind::TurnEnded => run.status.is_terminal(),
         RunEventKind::Interrupted => run.status == RunStatus::Interrupted,
         RunEventKind::Resumed => run.status == RunStatus::Running,
+        // Recording a result does not resume the run. An interrupted group call
+        // must still be visible to replay; every other event stays rejected.
+        RunEventKind::ToolResult => !run.status.is_terminal(),
         _ => !run.status.is_terminal() && run.status != RunStatus::Interrupted,
     };
     if !allowed {

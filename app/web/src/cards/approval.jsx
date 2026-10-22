@@ -1,6 +1,7 @@
 import { HumanInputCard, inputClass, useHumanInput } from "./form.jsx";
 import { useState } from "react";
 import { SkillProposal } from "./skill-proposal.jsx";
+import { DraftCard } from "./draft.jsx";
 import { LocalApprovalPreview, LocalApprovalWarning, SensitiveWarning, localApprovalBlocked } from "../local-approval.js";
 import { localLimits, localToolLabel, localToolNames } from "../local-call.js";
 import { screenTools, screenWarnings, ScreenArguments } from "../screen.jsx";
@@ -54,6 +55,7 @@ export function Card({ message, busy, onAction }) {
       </HumanInputCard>
     );
   }
+  if (preview?.brouillon) return <DraftCard message={message} input={input} disabled={disabled} expired={expired} />;
   if (action.tool === "propose_skill") return <SkillProposal message={message} input={input} disabled={disabled} expired={expired} />;
   const review = request.review;
   const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")

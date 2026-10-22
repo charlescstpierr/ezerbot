@@ -385,3 +385,68 @@ test("the search and a typed draft survive a catalogue refresh", async () => {
   assert.deepEqual(shown(root), ["slack"], "a card re-rendered while hidden stays hidden");
   assert.equal(root.all().find(n => n.name === "slack-client").value, "brouillon");
 });
+
+const twoAccounts = () => {
+  const first = {id:"c1",enabled_bots:["grokbot"],tools:[{name:"list_issues",description:"Lister"}]};
+  const second = {id:"c2",enabled_bots:[],tools:[{name:"list_issues",description:"Lister"}]};
+  const accounts = [
+    {id:"github",account:"charles-test",status:"connected",device:null,has_tokens:true,server:first},
+    {id:"github:2",account:"autre-compte",status:"connected",device:null,has_tokens:true,server:second},
+  ];
+  return {first,second,item:{...github,slot:"github",status:"connected",has_tokens:true,account:"charles-test",server:first,accounts}};
+};
+
+test("GitHub shows both accounts, adds another one, and disconnects only the account it names", async () => {
+  const {first,second,item} = twoAccounts();
+  const { root, calls } = await mount([first,second], {}, [item]);
+  const card = catalogueCard(root,"github");
+  assert.match(card.textContent, /Compte connecté : charles-test/);
+  assert.match(card.textContent, /Compte connecté : autre-compte/);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0, "the accounts are not custom servers");
+  await card.all().find(n => n.attrs["data-connector-action"] === "add-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github",another:true}});
+  const block = card.all().find(n => n.attrs["data-account"] === "github:2");
+  await block.all().find(n => n.attrs["data-connector-action"] === "disconnect-account").events.click();
+  assert.deepEqual(calls[1], {path:"/api/connectors/disconnect",body:{id:"github",account:"github:2"}});
+  const check = block.all().find(n => n.type === "checkbox"); check.checked = true;
+  await check.events.change();
+  assert.deepEqual(calls[2], {path:"/api/mcp/select",body:{id:"c2",bot_id:"grokbot",enabled:true}});
+  const lead = card.all().find(n => n.attrs["data-connector-action"] === "disconnect");
+  assert.equal(lead.attrs["aria-label"], "Déconnecter charles-test");
+  await lead.events.click();
+  assert.deepEqual(calls[3], {path:"/api/connectors/disconnect",body:{id:"github"}});
+});
+
+test("a second account waits for its code beside the first and is cancelled by its own button", async () => {
+  const {first,item} = twoAccounts();
+  const device = {user_code:"WDJB-MJH2",verification_uri:"https://github.com/login/device",expires_at:Date.UTC(2026,9,22,12,15)};
+  item.accounts[1] = {id:"github:2",account:null,status:"authorizing",device,has_tokens:false,server:{id:"c2",enabled_bots:[],tools:[]}};
+  const { root, calls, copies } = await mount([first], {}, [item]);
+  const card = catalogueCard(root,"github");
+  const block = card.all().find(n => n.attrs["data-account"] === "github:2");
+  assert.ok(block.all().find(n => n.tag === "code" && n.textContent === "WDJB-MJH2"));
+  assert.equal(card.all().filter(n => n.attrs["data-connector-action"] === "add-account").length, 0, "one wait at a time");
+  await block.all().find(n => n.attrs["aria-label"] === "Copier le code de connexion — GitHub (nouveau compte)").events.click();
+  assert.deepEqual(copies, ["WDJB-MJH2"]);
+  await block.all().find(n => n.attrs["data-connector-action"] === "cancel-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github",account:"github:2"}});
+});
+
+test("when the first slot is gone the card leads with the next account and names its slot", async () => {
+  const second = {id:"c2",enabled_bots:[],tools:[]};
+  const item = {...github,slot:"github:2",status:"authorizing",account:null,server:second,device:{user_code:"WDJB-MJH3",verification_uri:"https://github.com/login/device",expires_at:Date.UTC(2026,9,22,12,15)},accounts:[{id:"github:2",account:null,status:"authorizing",device:null,server:second}]};
+  const { root, calls } = await mount([second], {}, [item]);
+  const card = catalogueCard(root,"github");
+  await card.all().find(n => n.tag === "button" && n.textContent === "Annuler").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github",account:"github:2"}});
+});
+
+test("a GitHub slot refused before its first connection is not a custom server", async () => {
+  const {first,item} = twoAccounts();
+  item.accounts = item.accounts.slice(0,1);
+  const refused = {id:"c3",name:"GitHub",status:"disconnected",command:"https://api.github.com",arguments:[],environment_names:[],enabled_bots:[],tools:[]};
+  item.slot_servers = ["c1","c3"];
+  const { root } = await mount([first,refused], {}, [item]);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0);
+  assert.match(root.textContent, /Aucun connecteur ajouté/);
+});

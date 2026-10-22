@@ -10,6 +10,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 - `connecteurs-reunions` montre l’entrée Réunions du catalogue : un seul champ de clé (mot de passe) et le bouton Connecter, sans OAuth.
 - `connecteurs-recherche` filtre le catalogue : « git » ne laisse que GitHub, une recherche vide rend toutes les cartes, une chaîne absente affiche « Aucun service ne correspond à … ».
 - `connecteurs-github` montre la carte GitHub sans champ d’identifiant ni de secret ; sans `client_id` de build, elle dit que l’application GitHub d’Ezerbot n’est pas configurée.
+- `connecteurs-github-comptes` : une fois un compte connecté, la carte GitHub offre « Connecter un autre compte ». Chaque compte a sa ligne `[data-account]` (login, code à entrer pendant l’attente, Déconnecter, activation par bot). La preuve automatisée n’y va pas : elle exige deux comptes GitHub.
 
 ## How to get to it (user POV)
 
@@ -38,5 +39,6 @@ Preconditions:
 - Le dialogue est modal. Un clic sur la marque ne ferme pas Paramètres ; utiliser `[data-close-dialog]` ou « Terminé ».
 - La section est montée dans `#settings-extensions` avec `data-panel="mcp"`. Chercher ce panneau, pas un lien de navigation séparé.
 - Enregistrer un connecteur lancerait une commande locale. Cette sphère ne soumet pas le formulaire.
+- Pour jouer deux comptes sans compte réel, lancer un wrapper de debug à part (HOME et `--db` jetables) avec `GROKBOT_FAKE_CONNECTORS=http://127.0.0.1:<port>` et `EZERBOT_GITHUB_CLIENT_ID` : le fournisseur de boucle sert `/github/device`, `/github/token` et `/github/user`. Ces variables ne sont pas transmises par `launch.sh`.
 - La carte GitHub se connecte par un code à 8 caractères validé chez GitHub avec un vrai compte : la preuve automatisée n’y va pas. Sans `EZERBOT_GITHUB_CLIENT_ID`, un clic sur Connecter est refusé avec une phrase, sans carte d’approbation.
 - Le catalogue peut être long. La capture doit avoir fait défiler le titre Connecteurs dans le dialogue, pas seulement ouvert Paramètres en haut.

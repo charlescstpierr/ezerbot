@@ -15,11 +15,14 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod features;
 
+/// Mise à jour locale depuis `main`. Le dossier des conversations n’est pas le dépôt de travail.
+pub mod updates;
+
 // The model gateway keeps the root compatibility name while generation belongs
 // to its feature module (including the offline simulated reply).
 pub(crate) use features::engine::demo_reply;
 
-pub use provider::{Endpoints, Provider, ToolCall};
+pub use provider::{database_path_from_home, default_database_path, Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -122,7 +125,7 @@ pub fn body_limit(path: &str) -> usize {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
         // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
         // retain the same 20 MiB limit as images.
-        "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
+        "/api/documents" | "/api/library" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/voice/memos" => features::voice::MAX_WAV_BYTES.div_ceil(3) * 4 + 128 * 1024,
         "/api/meetings/finalize" => features::meetings::MAX_WAV_BYTES.div_ceil(3) * 4 + 256 * 1024,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
@@ -135,7 +138,7 @@ pub fn body_limit(path: &str) -> usize {
 
 /// Shared size error for direct API calls, declared lengths and chunked bodies.
 pub fn too_large(path: &str) -> ApiError {
-    if path == "/api/documents" {
+    if path == "/api/documents" || path == "/api/library" {
         return ApiError::new(413, "Le document dépasse la limite de 20 Mo.");
     }
     let limit = body_limit(path);
@@ -217,6 +220,13 @@ CREATE TABLE IF NOT EXISTS wrapper_messages (
     message_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     UNIQUE (account_id, conversation_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS wrapper_reactions (
+    account_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (account_id, conversation_id, message_id)
 );
 CREATE TABLE IF NOT EXISTS wrapper_remote (
     account_id TEXT NOT NULL,
@@ -909,6 +919,7 @@ impl App {
             // Keep the app usable; the Stockage panel exposes the actionable error.
             eprintln!("Nettoyage automatique interrompu : {error}");
         }
+        features::updates::remember_database(path);
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,

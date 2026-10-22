@@ -41,7 +41,14 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     std::fs::write(&fake,format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/commands'\nprintf '%s\\n' '{{\"BackendState\":\"Running\",\"Self\":{{\"DNSName\":\"mac.qa.ts.net.\"}},\"CurrentTailnet\":{{\"Name\":\"qa-tailnet\"}}}}'\n",root.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A free private port: an installed app may already hold 47863 (403 "désactivé").
+    let iphone_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let child = Command::new(env!("CARGO_BIN_EXE_grokbot-wrapper"))
+        .env("GROKBOT_IPHONE_PORT", iphone_port.to_string())
         .args(["--port", "0", "--db"])
         .arg(root.join("workspace.sqlite"))
         .env("HOME", &root)
@@ -65,10 +72,7 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .as_str()
         .unwrap()
         .into();
-    let remote = format!(
-        "http://127.0.0.1:{}",
-        grokbot_wrapper::features::iphone::PORT
-    );
+    let remote = format!("http://127.0.0.1:{iphone_port}");
     assert!(ureq::get(&format!("{remote}/api/state")).call().is_err());
     post(&host.url, "/api/iphone/enabled", json!({"enabled":true}));
     for _ in 0..60 {
@@ -277,9 +281,11 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
     use std::io::{Read, Write};
     fn exchange_socket(
         reader: &mut BufReader<std::net::TcpStream>,
+        port: u16,
     ) -> std::io::Result<(u16, Vec<String>)> {
         reader.get_mut().write_all(
-            b"GET /iphone.css HTTP/1.1\r\nHost: 127.0.0.1:47863\r\nConnection: keep-alive\r\n\r\n",
+            format!("GET /iphone.css HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: keep-alive\r\n\r\n")
+                .as_bytes(),
         )?;
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -305,12 +311,12 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         reader.read_exact(&mut vec![0; length])?;
         Ok((status, headers))
     }
-    let socket = std::net::TcpStream::connect("127.0.0.1:47863").unwrap();
+    let socket = std::net::TcpStream::connect(("127.0.0.1", iphone_port)).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_millis(1500)))
         .unwrap();
     let mut socket = BufReader::new(socket);
-    assert_eq!(exchange_socket(&mut socket).unwrap().0, 200);
+    assert_eq!(exchange_socket(&mut socket, iphone_port).unwrap().0, 200);
     for _ in 0..4 {
         post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
         // Access is denied on both old and fresh connections, never left hanging.
@@ -320,11 +326,11 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         assert_eq!(denial.header("Cache-Control"), Some("no-store"));
         post(&host.url, "/api/iphone/enabled", json!({"enabled":true}));
         let start = std::time::Instant::now();
-        assert_eq!(exchange_socket(&mut socket).unwrap().0, 200);
+        assert_eq!(exchange_socket(&mut socket, iphone_port).unwrap().0, 200);
         assert!(start.elapsed() < Duration::from_secs(2));
     }
     post(&host.url, "/api/iphone/enabled", json!({"enabled":false}));
-    let (status, headers) = exchange_socket(&mut socket).unwrap();
+    let (status, headers) = exchange_socket(&mut socket, iphone_port).unwrap();
     assert_eq!(status, 403);
     assert!(headers.iter().any(|h| h == "connection: close"));
     std::thread::sleep(Duration::from_millis(120));
@@ -333,6 +339,6 @@ fn actual_http_pairing_cookie_assets_disable_and_fake_tailscale() {
         .call();
     assert!(disabled.is_err());
     let commands = std::fs::read_to_string(host.root.join("commands")).unwrap();
-    assert!(commands.contains("serve --bg http://127.0.0.1:47863"));
+    assert!(commands.contains(&format!("serve --bg http://127.0.0.1:{iphone_port}")));
     assert!(commands.contains("serve --https=443 off"));
 }

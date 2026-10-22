@@ -9,7 +9,7 @@
 #import "demonstration.h"
 #import <errno.h>
 #import <poll.h>
-#import <signal.h>
+#include "shell_stop.h"
 #import <sys/stat.h>
 #import <unistd.h>
 
@@ -36,6 +36,16 @@
 @property(nonatomic) NSUInteger deepLinksEpoch;
 @property(nonatomic) BOOL downloadWasImage;
 @end
+
+static int shell_task_still_running(const ShellChild *child) {
+    NSTask *task = (__bridge NSTask *)child->context;
+    return task.running ? 1 : 0;
+}
+
+static void shell_task_reap(const ShellChild *child) {
+    NSTask *task = (__bridge NSTask *)child->context;
+    [task waitUntilExit];
+}
 
 @implementation GrokbotApplication
 
@@ -298,14 +308,24 @@
     task.standardOutput = output;
     task.standardError = self.logHandle;
     task.currentDirectoryURL = [NSURL fileURLWithPath:self.supportPath isDirectory:YES];
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+#ifdef EZERBOT_RELEASE
+    // Recherche discrète au lancement. Le bouton des Réglages reste disponible sans cette variable.
+    environment[@"EZERBOT_QUIET_UPDATE_CHECK"] = @"1";
+#endif
+    task.environment = environment;
     __weak GrokbotApplication *weakSelf = self;
     task.terminationHandler = ^(NSTask *finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GrokbotApplication *strongSelf = weakSelf;
-            if (strongSelf && strongSelf.backendTask == finished && !strongSelf.terminating) {
-                [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
-                              generation:generation];
+            if (!strongSelf || strongSelf.backendTask != finished || strongSelf.terminating) return;
+            // 86 : le moteur a installé une nouvelle application et demande le redémarrage.
+            if (finished.terminationReason == NSTaskTerminationReasonExit && finished.terminationStatus == 86) {
+                [strongSelf relaunchUpdatedApplication];
+                return;
             }
+            [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
+                          generation:generation];
         });
     };
     self.backendTask = task;
@@ -371,8 +391,9 @@
         if (!shell || ![shell isWorkspaceURL:shell.webView.URL]) { reply(NO,@"La fenêtre principale n’est pas prête."); return; }
         [shell.webView callAsyncJavaScript:@"return await window.EzerbotFloatingMain.openConversation(id)"
             arguments:@{@"id":identifier} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
-                if (!error && [result boolValue]) { [shell showMain:nil]; reply(YES,nil); }
-                else reply(NO,@"Ce fil n’est plus disponible ou un envoi est en cours dans Ezerbot.");
+                NSDictionary *outcome = !error && [result isKindOfClass:NSDictionary.class] ? result : nil;
+                if ([outcome[@"opened"] isEqual:@YES]) { [shell showMain:nil]; reply(YES,nil); }
+                else reply(NO, [outcome[@"reason"] isKindOfClass:NSString.class] ? outcome[@"reason"] : nil);
             }];
     };
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
@@ -758,6 +779,26 @@
                           [NSURL fileURLWithPath:[self.supportPath stringByAppendingPathComponent:@"logs"] isDirectory:YES]];
 }
 
+- (void)relaunchUpdatedApplication {
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    NSTask *relaunch = [[NSTask alloc] init];
+    relaunch.executableURL = [NSURL fileURLWithPath:@"/bin/bash"];
+    // $0 est le nom, $1 le pid, $2 le bundle. on ignore SIGHUP pour survivre à la fermeture.
+    relaunch.arguments = @[
+        @"-c",
+        @"trap '' HUP; while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$2\"",
+        @"ezerbot-relaunch",
+        [NSString stringWithFormat:@"%d", getpid()],
+        bundle
+    ];
+    relaunch.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    relaunch.standardError = [NSFileHandle fileHandleWithNullDevice];
+    if ([relaunch launchAndReturnError:nil]) {
+        self.terminating = YES;
+        [NSApp terminate:nil];
+    }
+}
+
 - (void)stopBackend {
     [self.voice cancel];
     [self.voiceSession cancel];
@@ -767,11 +808,12 @@
     self.backendTask = nil;
     task.terminationHandler = nil;
     if (task.running) {
-        [task terminate];
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1];
-        while (task.running && deadline.timeIntervalSinceNow > 0) usleep(20000);
-        if (task.running) kill(task.processIdentifier, SIGKILL);
-        [task waitUntilExit];
+        ShellChild child;
+        child.pid = task.processIdentifier;
+        child.context = (__bridge void *)task;
+        child.still_running = shell_task_still_running;
+        child.reap = shell_task_reap;
+        shell_stop_child(&child);
     }
     [self.logHandle closeFile];
     self.logHandle = nil;
@@ -825,6 +867,15 @@ int main(int argc, const char *argv[]) {
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
         GrokbotApplication *delegate = [[GrokbotApplication alloc] init];
         application.delegate = delegate;
+        int quit_fd = -1;
+        if (shell_stop_arm(&quit_fd) != 0) return 1;
+        static dispatch_source_t quit_source = nil;
+        quit_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, quit_fd, 0, dispatch_get_main_queue());
+        if (quit_source == nil) return 1;
+        dispatch_source_set_event_handler(quit_source, ^{
+            if (shell_stop_take_quit(quit_fd) && !delegate.terminating) [NSApp terminate:nil];
+        });
+        dispatch_resume(quit_source);
         [application run];
     }
     return 0;

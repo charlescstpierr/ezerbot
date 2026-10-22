@@ -12,7 +12,7 @@ class Element {
   addEventListener(name, callback) { this.events[name] = callback; }
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-function fixture(status = "recording") {
+function fixture(status = "recording", hostOverrides = {}) {
   const requests = [], calls = [], root = new Element("div");
   let registration;
   const state = { floating: { shortcut: "cmd+option+space" } };
@@ -21,6 +21,7 @@ function fixture(status = "recording") {
     async api(path, body) { requests.push({ path, body }); return {}; },
     async refresh() { calls.push("refresh"); },
     async focusConversation(id) { calls.push(id); return id === "visible"; },
+    ...hostOverrides,
   };
   const window = { GrokbotPanels: host, ...(status === null ? {} : { webkit: { messageHandlers: { ezerbotFloating: { async postMessage(body) { calls.push(body); return { status }; } } } } }) };
   runInNewContext(readFileSync(new URL("../../ui/panels/floating.js", import.meta.url), "utf8"), { window, document: { createElement: (tag) => new Element(tag) } });
@@ -69,9 +70,11 @@ test("selection publication is ordered, deduplicated and excludes task/routine c
 
 test("open in Ezerbot refreshes the shared transcript before focusing the exact target", async () => {
   const f = fixture();
-  assert.equal(await f.window.EzerbotFloatingMain.openConversation("visible"), true);
+  assert.equal((await f.window.EzerbotFloatingMain.openConversation("visible")).opened, true);
   assert.deepEqual(f.calls, ["refresh", "visible"]);
-  await assert.rejects(() => f.window.EzerbotFloatingMain.openConversation("deleted"), /plus disponible/);
+  const refused = await f.window.EzerbotFloatingMain.openConversation("deleted");
+  assert.equal(refused.opened, false);
+  assert.match(refused.reason, /plus disponible/);
 });
 
 test("compact content uses only writable threads and the latest text reply", () => {
@@ -192,6 +195,85 @@ test("compact layout keeps decisions outside the scroll region and disabled acti
   assert.match(css, /-webkit-line-clamp: 2/);
   assert.ok(!/padding|border/.test(css.match(/\.floating-question \{([^}]+)\}/)[1]), "Clamp padding belongs outside the clipped text to avoid a partial third line");
   assert.match(css, /resize: none/);
+});
+
+const EDITOR = "Fermez l’éditeur en cours, puis rouvrez ce lien. Vos saisies sont conservées.";
+const FALLBACK = "Impossible d’ouvrir ce fil. Réessayez depuis Ezerbot.";
+const BUSY = "La conversation n’est plus disponible ou un envoi est en cours.";
+const panelSource = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
+const fullSource = panelSource.slice(panelSource.indexOf("  async function full("), panelSource.indexOf("  async function send("));
+
+function relay(main) {
+  return async (body) => {
+    let outcome = null;
+    try { outcome = await main.EzerbotFloatingMain.openConversation(body.conversation_id); }
+    catch { throw new Error(""); }
+    if (outcome === true || outcome?.opened === true) return true;
+    throw new Error(typeof outcome?.reason === "string" ? outcome.reason : "");
+  };
+}
+
+function panelFull(native) {
+  const seen = [];
+  const storage = new Map();
+  const location = { href: "" };
+  const full = runInNewContext(`(${fullSource})`, {
+    native,
+    setError: (text) => { seen.push(text); },
+    localStorage: { setItem: (key, value) => storage.set(key, value) },
+    location,
+  });
+  return { full, seen, storage, location };
+}
+
+test("Ouvrir dans Ezerbot shows the refusal the main window raised", async () => {
+  const main = fixture("recording", { async focusConversation() { throw new Error(EDITOR); } });
+  const panel = panelFull(relay(main.window));
+  await panel.full("visible");
+  assert.deepEqual(panel.seen, [EDITOR]);
+  assert.match(panelSource, /className="floating-error" role="alert">\{error\}<\/p>/);
+  assert.match(panelSource, /Ouvrir dans Ezerbot/);
+});
+
+test("a busy main window reaches the floating alert as its own sentence", async () => {
+  const main = fixture("recording", { async focusConversation() { return false; } });
+  const panel = panelFull(relay(main.window));
+  await panel.full("visible");
+  assert.deepEqual(panel.seen, [BUSY]);
+});
+
+test("a missing app reason keeps the generic open sentence", async () => {
+  const main = fixture("recording", { async focusConversation() { throw new TypeError("P.focus is not a function"); } });
+  const panel = panelFull(relay(main.window));
+  await panel.full("visible");
+  assert.deepEqual(panel.seen, [FALLBACK]);
+  const blank = panelFull(async () => { throw new Error("   "); });
+  await blank.full("visible");
+  assert.deepEqual(blank.seen, [FALLBACK]);
+});
+
+test("a successful open shows no alert and the browser path still navigates", async () => {
+  const main = fixture();
+  const panel = panelFull(relay(main.window));
+  await panel.full("visible");
+  assert.deepEqual(panel.seen, []);
+  const browser = panelFull(() => undefined);
+  await browser.full("visible");
+  assert.deepEqual(browser.seen, []);
+  assert.equal(browser.storage.get("grokbot.selected"), "visible");
+  assert.equal(browser.location.href, "/");
+});
+
+test("the shell relays the page reason and authors no open sentence", () => {
+  const shell = readFileSync(new URL("../../native/main.m", import.meta.url), "utf8");
+  const start = shell.indexOf("- (void)openWorkspace:");
+  const workspace = shell.slice(start, shell.indexOf("\n}\n", start));
+  const handler = workspace.slice(workspace.indexOf("completionHandler:"));
+  assert.match(handler, /outcome\[@"reason"\]/);
+  assert.doesNotMatch(handler, /Ce fil n’est plus disponible ou un envoi est en cours dans Ezerbot/);
+  const bridge = readFileSync(new URL("../../native/floating.h", import.meta.url), "utf8");
+  assert.match(bridge, /reply\(nil,error \?: @""\)/);
+  assert.doesNotMatch(bridge, /Conversation indisponible\./);
 });
 
 test("native test builds compile out global registration and all event capture", () => {

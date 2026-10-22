@@ -28,6 +28,15 @@ pub struct SecretMetadata {
     pub updated_at: i64,
 }
 
+/// Public bot-panel row. The value is never part of this type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotSecretMetadata {
+    pub name: String,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // Only this private disk representation serializes values. Neither Vault nor
 // any public DTO implements Serialize/Debug for secret-bearing state.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +45,12 @@ struct StoredSecret {
     purpose: String,
     updated_at: i64,
     value: String,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_name: Option<String>,
 }
 type Secrets = BTreeMap<String, StoredSecret>;
 
@@ -58,6 +73,10 @@ pub struct Vault {
     #[cfg(target_os = "macos")]
     keychain: Option<keychain::Target>,
     signature_notice: Option<&'static str>,
+    /// Test double of an active keychain that refuses mutations. Production
+    /// hosts leave this false; macOS uses `keychain` instead.
+    #[cfg(debug_assertions)]
+    refuse_keychain: bool,
 }
 #[cfg(target_os = "macos")]
 mod keychain;
@@ -97,6 +116,8 @@ impl Vault {
             #[cfg(target_os = "macos")]
             keychain: None,
             signature_notice: None,
+            #[cfg(debug_assertions)]
+            refuse_keychain: false,
         };
         let _file_guard = vault.lock_file(true)?;
         vault.cleanup_temporaries()?;
@@ -131,6 +152,15 @@ impl Vault {
         }
         Ok(vault)
     }
+    /// Active keychain that refuses writes and deletions. Debug tests only:
+    /// nothing is stored in the plaintext file.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn open_refusing_keychain(path: &Path) -> Result<Self> {
+        let mut vault = Self::open(path)?;
+        vault.refuse_keychain = true;
+        Ok(vault)
+    }
     pub fn storage_status(&self) -> StorageStatus {
         #[cfg(target_os = "macos")]
         if self.keychain.is_some() {
@@ -152,36 +182,61 @@ impl Vault {
         validate_purpose(purpose)?;
         let value = value.trim();
         validate_value(value)?;
-        let updated_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-            .ok_or_else(|| invalid("secret vault clock is invalid"))?;
-        let _guard = access();
-        let _file_guard = self.lock_file(true)?;
-        let mut secrets = self.read()?;
-        secrets.insert(
+        self.write_secret(
             name.clone(),
             StoredSecret {
                 purpose: purpose.to_owned(),
-                updated_at,
+                updated_at: timestamp()?,
                 value: value.to_owned(),
+                created_at: 0,
+                bot_id: None,
+                public_name: None,
             },
-        );
-        #[cfg(target_os = "macos")]
-        if let Some(target) = &self.keychain {
-            keychain::set(self, target, &name, secrets.get(&name).unwrap())?;
-            return Ok(SecretRef { name });
-        }
-        self.write(&secrets)?;
+        )?;
         Ok(SecretRef { name })
     }
-    /// For trusted tool consumers only; never return this through state/export/model APIs.
+    /// Store a bot-owned secret. The same write path reaches the macOS keychain
+    /// when that backend is active. Metadata readers never receive `value`.
+    pub fn set_for_bot(
+        &self,
+        bot_id: &str,
+        name: &str,
+        purpose: &str,
+        value: &str,
+    ) -> Result<SecretRef> {
+        let name = canonical_secret_name(name)?;
+        let key = storage_key(bot_id, &name)?;
+        let purpose = purpose.trim();
+        validate_purpose(purpose)?;
+        let value = value.trim();
+        validate_value(value)?;
+        self.write_secret(
+            key,
+            StoredSecret {
+                purpose: purpose.to_owned(),
+                updated_at: timestamp()?,
+                value: value.to_owned(),
+                created_at: 0,
+                bot_id: Some(bot_id.to_owned()),
+                public_name: Some(name.clone()),
+            },
+        )?;
+        Ok(SecretRef { name })
+    }
+    /// Unscoped storage key only. A bot secret is never returned here, even when
+    /// its public name matches. Call `get_for_bot` for that value.
     pub fn get(&self, name: &str) -> Result<Option<String>> {
         let name = canonical_secret_name(name)?;
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
         Ok(self.read()?.remove(&name).map(|secret| secret.value))
+    }
+    /// Bot-owned value at `bot:{bot_id}:{NAME}`. This is the only read of that key.
+    pub fn get_for_bot(&self, bot_id: &str, name: &str) -> Result<Option<String>> {
+        let key = storage_key(bot_id, name)?;
+        let _guard = access();
+        let _file_guard = self.lock_file(true)?;
+        Ok(self.read()?.remove(&key).map(|secret| secret.value))
     }
     pub fn list(&self) -> Result<Vec<SecretMetadata>> {
         let _guard = access();
@@ -198,17 +253,43 @@ impl Vault {
     }
     pub fn remove(&self, name: &str) -> Result<()> {
         let name = canonical_secret_name(name)?;
+        self.remove_exact(&name)
+    }
+    pub fn remove_for_bot(&self, bot_id: &str, name: &str) -> Result<()> {
+        let key = storage_key(bot_id, name)?;
+        self.remove_exact(&key)
+    }
+    /// Metadata grouped by bot. Values stay in the vault.
+    pub fn bot_secrets(&self) -> Result<BTreeMap<String, Vec<BotSecretMetadata>>> {
         let _guard = access();
         let _file_guard = self.lock_file(true)?;
-        #[cfg(target_os = "macos")]
-        if let Some(target) = &self.keychain {
-            return keychain::remove(self, target, &name);
+        let mut grouped: BTreeMap<String, Vec<BotSecretMetadata>> = BTreeMap::new();
+        for secret in self.read()?.into_values() {
+            let Some(bot_id) = secret.bot_id else {
+                continue;
+            };
+            let Some(name) = secret.public_name else {
+                continue;
+            };
+            grouped.entry(bot_id).or_default().push(BotSecretMetadata {
+                name,
+                description: secret.purpose,
+                created_at: if secret.created_at > 0 {
+                    secret.created_at
+                } else {
+                    secret.updated_at
+                },
+                updated_at: secret.updated_at,
+            });
         }
-        let mut secrets = self.read()?;
-        if secrets.remove(&name).is_some() {
-            self.write(&secrets)?;
+        for secrets in grouped.values_mut() {
+            secrets.sort_by(|left, right| left.name.cmp(&right.name));
         }
-        Ok(())
+        Ok(grouped)
+    }
+    /// Every stored value, including bot-owned ones, for redaction only.
+    pub fn values_for_redaction(&self) -> Result<Vec<String>> {
+        self.known_values()
     }
     /// Restricted to redaction, not model context construction.
     pub(crate) fn known_values(&self) -> Result<Vec<String>> {
@@ -259,13 +340,61 @@ impl Vault {
         let secrets: Secrets =
             serde_json::from_slice(&bytes).map_err(|_| invalid("secret vault data is invalid"))?;
         for (name, secret) in &secrets {
-            if canonical_secret_name(name)? != *name {
-                return Err(invalid("secret vault name is not canonical"));
-            }
-            validate_purpose(&secret.purpose)?;
-            validate_value(&secret.value)?;
+            validate_stored(name, secret)?;
         }
         Ok(secrets)
+    }
+    fn write_secret(&self, key: String, mut secret: StoredSecret) -> Result<()> {
+        let _guard = access();
+        let _file_guard = self.lock_file(true)?;
+        let mut secrets = self.read()?;
+        if secret.created_at == 0 {
+            secret.created_at = secrets
+                .get(&key)
+                .map(|existing| existing.created_at)
+                .filter(|created| *created > 0)
+                .unwrap_or(secret.updated_at);
+        }
+        secrets.insert(key.clone(), secret);
+        self.persist(&secrets, &key)
+    }
+    fn persist(&self, secrets: &Secrets, key: &str) -> Result<()> {
+        #[cfg(debug_assertions)]
+        if self.refuse_keychain {
+            let mut file = self.read_file()?;
+            commit_keychain_secret(&mut file, key, secrets.get(key).unwrap(), false)?;
+            self.write(&file)?;
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            return keychain::set(self, target, key, secrets.get(key).unwrap());
+        }
+        #[cfg(not(any(debug_assertions, target_os = "macos")))]
+        let _ = key;
+        self.write(secrets)
+    }
+    /// Always ask the keychain when one is active, even if the snapshot has no
+    /// row. A refusal is an error. Absence from a file vault is idempotent.
+    /// The key is exact: a public name never selects another row.
+    fn remove_exact(&self, key: &str) -> Result<()> {
+        let _guard = access();
+        let _file_guard = self.lock_file(true)?;
+        #[cfg(debug_assertions)]
+        if self.refuse_keychain {
+            return Err(invalid(
+                "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez.",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(target) = &self.keychain {
+            return keychain::remove(self, target, key);
+        }
+        let mut secrets = self.read()?;
+        if secrets.remove(key).is_some() {
+            self.write(&secrets)?;
+        }
+        Ok(())
     }
     // Keep this inode stable: locking the vault itself would stop protecting
     // readers/writers as soon as atomic replacement renamed a new inode over it.
@@ -349,6 +478,24 @@ impl Vault {
         }
         result
     }
+}
+
+/// Record a verified keychain write by dropping the plaintext copy. A refusal
+/// leaves the file untouched and returns an error: no plaintext fallback.
+#[cfg(any(debug_assertions, target_os = "macos"))]
+fn commit_keychain_secret(
+    file: &mut Secrets,
+    name: &str,
+    _secret: &StoredSecret,
+    accepted: bool,
+) -> Result<()> {
+    if !accepted {
+        return Err(invalid(
+            "Le trousseau macOS est indisponible ou son accès a été refusé.",
+        ));
+    }
+    file.remove(name);
+    Ok(())
 }
 
 fn checked_file(path: &Path, writable: bool) -> Result<File> {
@@ -438,6 +585,48 @@ pub fn canonical_secret_name(name: &str) -> Result<String> {
         return Err(invalid("secret name is reserved"));
     }
     Ok(name)
+}
+fn timestamp() -> Result<i64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .ok_or_else(|| invalid("secret vault clock is invalid"))
+}
+fn valid_bot_id(bot_id: &str) -> bool {
+    !bot_id.is_empty()
+        && bot_id.len() <= 128
+        && bot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+fn storage_key(bot_id: &str, name: &str) -> Result<String> {
+    if !valid_bot_id(bot_id) {
+        return Err(invalid("secret bot is invalid"));
+    }
+    let name = canonical_secret_name(name)?;
+    Ok(format!("bot:{bot_id}:{name}"))
+}
+fn validate_stored(key: &str, secret: &StoredSecret) -> Result<()> {
+    validate_purpose(&secret.purpose)?;
+    validate_value(&secret.value)?;
+    if secret.created_at < 0 || secret.updated_at <= 0 {
+        return Err(invalid("secret vault data is invalid"));
+    }
+    match (&secret.bot_id, &secret.public_name) {
+        (None, None) => {
+            if canonical_secret_name(key)? != key {
+                return Err(invalid("secret vault name is not canonical"));
+            }
+        }
+        (Some(bot_id), Some(public_name)) => {
+            if storage_key(bot_id, public_name)? != key {
+                return Err(invalid("secret vault name is not canonical"));
+            }
+        }
+        _ => return Err(invalid("secret vault data is invalid")),
+    }
+    Ok(())
 }
 fn validate_purpose(purpose: &str) -> Result<()> {
     // PS08/A36 maxLength=500, measured like the HTML input in UTF-16 units.
@@ -604,6 +793,79 @@ mod tests {
             .unwrap();
         assert_eq!(canonical_secret_name(" api_token ").unwrap(), "API_TOKEN");
         assert!(canonical_secret_name("PATH").is_err());
+    }
+
+    #[test]
+    fn unscoped_get_and_remove_ignore_bot_secrets_and_a_refused_keychain_writes_nothing() {
+        let test = TestVault::new();
+        test.vault
+            .set("TOKEN", "unscoped", "phrase du coffre global")
+            .unwrap();
+        test.vault
+            .set_for_bot("grokbot", "TOKEN", "bot", "phrase du coffre du bot")
+            .unwrap();
+        assert_eq!(
+            test.vault.get("TOKEN").unwrap().as_deref(),
+            Some("phrase du coffre global")
+        );
+        assert!(test.vault.get("MCP_SERVER_ENV").unwrap().is_none());
+        assert_eq!(
+            test.vault
+                .get_for_bot("grokbot", "token")
+                .unwrap()
+                .as_deref(),
+            Some("phrase du coffre du bot")
+        );
+        test.vault.remove("TOKEN").unwrap();
+        assert!(test.vault.get("TOKEN").unwrap().is_none());
+        assert_eq!(
+            test.vault
+                .get_for_bot("grokbot", "TOKEN")
+                .unwrap()
+                .as_deref(),
+            Some("phrase du coffre du bot")
+        );
+        test.vault.remove("MCP_SERVER_ENV").unwrap();
+        assert_eq!(
+            test.vault
+                .get_for_bot("grokbot", "TOKEN")
+                .unwrap()
+                .as_deref(),
+            Some("phrase du coffre du bot")
+        );
+        test.vault.remove_for_bot("grokbot", "TOKEN").unwrap();
+        assert!(test
+            .vault
+            .get_for_bot("grokbot", "TOKEN")
+            .unwrap()
+            .is_none());
+
+        let refusing = Vault::open_refusing_keychain(test.vault.path()).unwrap();
+        let created = refusing
+            .set("NEW_TOKEN", "refus", "phrase refusee du coffre")
+            .unwrap_err()
+            .to_string();
+        assert!(created.contains("trousseau"));
+        assert!(!created.contains("phrase refusee"));
+        let bot = refusing
+            .set_for_bot("grokbot", "NEW_TOKEN", "refus", "phrase refusee du bot")
+            .unwrap_err()
+            .to_string();
+        assert!(bot.contains("trousseau"));
+        let file = fs::read_to_string(test.vault.path()).unwrap();
+        assert!(!file.contains("phrase refusee"));
+        assert!(refusing.get("NEW_TOKEN").unwrap().is_none());
+        assert!(refusing
+            .get_for_bot("grokbot", "NEW_TOKEN")
+            .unwrap()
+            .is_none());
+        let removed = refusing.remove("ABSENT_KEY").unwrap_err().to_string();
+        assert!(removed.contains("Suppression non confirmée"));
+        assert!(refusing
+            .remove_for_bot("grokbot", "ABSENT_KEY")
+            .unwrap_err()
+            .to_string()
+            .contains("Suppression non confirmée"));
     }
 
     #[test]

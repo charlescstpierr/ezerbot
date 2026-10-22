@@ -181,7 +181,7 @@ fn session_token(account: &str) -> String {
     format!(
         "e30.{}.e30",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            json!({"https://api.openai.com/auth":{"chatgpt_account_id":account}}).to_string()
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id":account,"chatgpt_data_residency":"eu"}}).to_string()
         )
     )
 }
@@ -216,6 +216,12 @@ fn assert_image_contract(fixture: &Fixture, prompt: &str, size: &str) {
     assert_eq!(
         headers.get("chatgpt-account-id").map(String::as_str),
         Some(ACCOUNT)
+    );
+    assert_eq!(
+        headers
+            .get("x-openai-internal-codex-residency")
+            .map(String::as_str),
+        Some("eu")
     );
     assert_eq!(
         headers.get("originator").map(String::as_str),

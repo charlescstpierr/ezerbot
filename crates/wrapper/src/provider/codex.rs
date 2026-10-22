@@ -205,9 +205,9 @@ impl Session {
         ))
     }
 
-    /// Bearer and ChatGPT account id for an image call. The account id is the
-    /// same claim the chat request puts in `chatgpt-account-id`.
-    pub(crate) fn image_auth(&self) -> Result<(String, String), Failure> {
+    /// Bearer and account headers for an image call: the same `chatgpt-account-id`
+    /// and residency headers the chat request carries.
+    pub(crate) fn image_auth(&self) -> Result<(String, Headers), Failure> {
         if !self
             .read()
             .is_some_and(|credentials| credentials.usable(self.inner.codex))
@@ -215,30 +215,34 @@ impl Session {
             return Err(Failure::signin());
         }
         let token = self.bearer(false)?;
-        let access = claims(&token).ok_or_else(Failure::signin)?;
-        let account = access[AUTH_CLAIM]["chatgpt_account_id"]
-            .as_str()
-            .filter(|id| {
-                !id.is_empty()
-                    && id.len() <= 256
-                    && id
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
-            })
-            .ok_or_else(Failure::signin)?;
-        Ok((token, account.to_owned()))
+        let headers = account_header_pairs(&token)?;
+        let valid = headers.iter().any(|(name, id)| {
+            *name == "chatgpt-account-id"
+                && !id.is_empty()
+                && id.len() <= 256
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        });
+        if !valid {
+            return Err(Failure::signin());
+        }
+        Ok((token, headers))
     }
 }
 
+/// Request headers as name and value pairs.
+pub(crate) type Headers = Vec<(&'static str, String)>;
+
 /// The JWT is obtained only by Ezerbot's own OAuth flow. Residency is required
 /// for regional workspaces, just as in Hermes' codex_account_headers.
-fn account_headers(request: ureq::Request, token: &str) -> Result<ureq::Request, Failure> {
+fn account_header_pairs(token: &str) -> Result<Headers, Failure> {
     let access = claims(token).ok_or_else(Failure::signin)?;
     let auth = &access[AUTH_CLAIM];
     let account = auth["chatgpt_account_id"]
         .as_str()
         .ok_or_else(Failure::signin)?;
-    let mut request = request.set("chatgpt-account-id", account);
+    let mut headers = vec![("chatgpt-account-id", account.to_owned())];
     if let Some(region) = auth["chatgpt_data_residency"]
         .as_str()
         .filter(|region| !region.trim().is_empty())
@@ -251,10 +255,16 @@ fn account_headers(request: ureq::Request, token: &str) -> Result<ureq::Request,
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
         {
-            request = request.set("x-openai-internal-codex-residency", region);
+            headers.push(("x-openai-internal-codex-residency", region.to_owned()));
         }
     }
-    Ok(request)
+    Ok(headers)
+}
+
+fn account_headers(request: ureq::Request, token: &str) -> Result<ureq::Request, Failure> {
+    Ok(account_header_pairs(token)?
+        .into_iter()
+        .fold(request, |request, (name, value)| request.set(name, &value)))
 }
 
 /// Only typed, validated quota fields ever leave this module. Never return the

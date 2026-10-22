@@ -120,7 +120,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolO
     let Ok(endpoint) = image_endpoint(&ctx.provider.image_api_base()) else {
         return failed(UNAVAILABLE);
     };
-    let (token, account) = match ctx.provider.image_auth() {
+    let (token, headers) = match ctx.provider.image_auth() {
         Ok(auth) => auth,
         Err(failure) if failure.kind == "signin" || failure.kind == "signin_expired" => {
             return failed(CONNECT);
@@ -130,7 +130,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolO
     let (status, result) = post(
         &endpoint,
         &token,
-        &account,
+        &headers,
         ctx.provider.image_responses_model(),
         &description,
         size,
@@ -181,7 +181,7 @@ pub fn present(
 fn post(
     endpoint: &str,
     token: &str,
-    account: &str,
+    headers: &[(&str, String)],
     model: &str,
     description: &str,
     size: &str,
@@ -200,10 +200,13 @@ fn post(
         .timeout(GENERATION_TIMEOUT)
         .redirects(0)
         .build();
-    let response = agent
-        .post(endpoint)
+    let request = headers
+        .iter()
+        .fold(agent.post(endpoint), |request, (name, value)| {
+            request.set(name, value)
+        });
+    let response = request
         .set("Authorization", &format!("Bearer {token}"))
-        .set("chatgpt-account-id", account)
         .set("originator", ORIGINATOR)
         .set("User-Agent", "ezerbot/0.1.0")
         .set("Accept", "application/json, text/event-stream")

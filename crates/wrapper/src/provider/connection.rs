@@ -366,9 +366,9 @@ impl Provider {
         self.session().inner.endpoints.api.clone()
     }
 
-    /// Bearer and ChatGPT account id for image generation. The token is never
+    /// Bearer and account headers for image generation. The token is never
     /// copied into the account vault.
-    pub(crate) fn image_auth(&self) -> Result<(String, String), Failure> {
+    pub(crate) fn image_auth(&self) -> Result<(String, codex::Headers), Failure> {
         self.session().image_auth()
     }
 

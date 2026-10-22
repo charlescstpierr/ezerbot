@@ -319,6 +319,22 @@ impl Vault {
                     }
                 }
             }
+            // Site envelopes stay local; each field must also be masked alone.
+            if name.starts_with("SITE_") && secret.purpose == "Formulaire de site privé" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                    if let Some(fields) = value["values"].as_object() {
+                        values.extend(
+                            fields
+                                .values()
+                                .map(|v| match v {
+                                    serde_json::Value::String(text) => text.clone(),
+                                    other => other.to_string(),
+                                })
+                                .filter(|v| !v.is_empty()),
+                        );
+                    }
+                }
+            }
             values.push(secret.value);
         }
         Ok(values)

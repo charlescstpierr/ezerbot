@@ -1552,13 +1552,17 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
     let result =
         requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
             .unwrap();
-    assert_eq!(result, json!("rempli"));
+    assert_eq!(result, json!("enregistré dans le coffre local"));
     let vault = forms::vault(&f.app.feature_context()).unwrap();
     let saved = vault
         .get(&format!("SITE_{}", request.id.to_uppercase()))
         .unwrap()
         .unwrap();
     assert!(saved.contains(sentinel));
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, sentinel).unwrap(),
+        "[...]"
+    );
     let mut persisted: Value =
         serde_json::from_slice(&std::fs::read(vault.path()).unwrap()).unwrap();
     // More than 30 minutes old, including across a fresh vault open (#81).
@@ -1572,6 +1576,23 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
             .get(&format!("SITE_{}", request.id.to_uppercase()))
             .unwrap(),
         Some(saved.clone())
+    );
+
+    assert_eq!(
+        grokbot_forms::redact::redact(&reopened, sentinel).unwrap(),
+        "[...]"
+    );
+    vault
+        .set(
+            "SITE_SHORT",
+            "Formulaire de site privé",
+            r#"{"origin":"https://example.org","values":{"pin":".","empty":"","count":42}}"#,
+        )
+        .unwrap();
+    assert_eq!(grokbot_forms::redact::redact(&vault, ".").unwrap(), "[...]");
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, "42").unwrap(),
+        "[...]"
     );
 
     let mut replay = body;
@@ -1624,7 +1645,9 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
             .windows(sentinel.len())
             .any(|window| window == sentinel.as_bytes()));
     }
-    assert!(evidence.to_string().contains("rempli"));
+    assert!(evidence
+        .to_string()
+        .contains("enregistré dans le coffre local"));
 }
 
 #[test]
@@ -1665,4 +1688,35 @@ fn site_form_expiry_refusal_and_target_change_have_no_vault_effect() {
             ));
         }
     }
+}
+
+#[test]
+fn site_forms_reject_oversized_envelope_before_writing() {
+    let mut f = Fixture::new();
+    let request = f.suspended_request("run", "site", "request_site_form",
+        json!({"origin":"https://example.org","fields":[{"name":"password","label":"Mot de passe","field_type":{"kind":"text"},"required":true}]}));
+    let body = json!({"entry_id":request.entry_id,"submission_id":"large","conversation_id":f.conversation,
+        "origin":"https://example.org","values":{"password":"é".repeat(2040)}});
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/forms/site-submit",
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 413);
+    assert!(error
+        .message
+        .starts_with("Formulaire trop volumineux : limite de 4096 octets"));
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .list()
+        .unwrap()
+        .is_empty());
+    let count: i64 = f
+        .conn
+        .query_row("SELECT COUNT(*) FROM forms_resolutions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }

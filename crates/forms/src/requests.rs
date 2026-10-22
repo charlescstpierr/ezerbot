@@ -389,7 +389,7 @@ pub fn resolve_site(
     } else if origin != target {
         ("cible changée", "resolved")
     } else {
-        ("rempli", "resolved")
+        ("enregistré dans le coffre local", "resolved")
     };
     resolve(
         conn,

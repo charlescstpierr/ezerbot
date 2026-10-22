@@ -26,7 +26,7 @@ use grokbot_forms::{
     redact::redact_value,
     requests::{self, Field, HumanInputRequest, InputKind, RequestStatus},
     rules,
-    vault::{canonical_secret_name, Vault, MAX_SECRET_PURPOSE_CHARACTERS},
+    vault::{canonical_secret_name, Vault, MAX_SECRET_PURPOSE_CHARACTERS, MAX_SECRET_VALUE_BYTES},
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
@@ -1086,8 +1086,13 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             } else {
                 let target = input.origin.as_deref().unwrap_or("");
                 let fill = clock(&ctx) < *expires_at && !input.refused && target == origin;
+                let envelope = json!({"origin":origin,"values":input.values}).to_string();
                 if fill {
                     requests::validate_values(fields, &input.values)?;
+                    if envelope.len() > MAX_SECRET_VALUE_BYTES {
+                        return Err(ApiError::new(413,
+                            "Formulaire trop volumineux : limite de 4096 octets, origine et noms des champs compris."));
+                    }
                 }
                 let receipt = requests::resolve_site(
                     &tx,
@@ -1103,7 +1108,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     vault(&ctx)?.set(
                         &format!("SITE_{}", request.id.to_uppercase()),
                         "Formulaire de site privé",
-                        &json!({"origin":origin,"values":input.values}).to_string(),
+                        &envelope,
                     )?;
                 }
                 receipt

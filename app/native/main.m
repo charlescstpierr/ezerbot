@@ -403,6 +403,7 @@ static void shell_task_reap(const ShellChild *child) {
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotFloating"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotImages"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotRatings"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -467,6 +468,20 @@ static void shell_task_reap(const ShellChild *child) {
     }
     NSDictionary *body = message.body;
     NSString *command = body[@"command"];
+    if ([message.name isEqual:@"ezerbotRatings"]) {
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        if ([command isEqual:@"read"]) {
+            replyHandler([defaults stringForKey:@"ezerbot.notations"], nil); return;
+        }
+        if ([command isEqual:@"write"] && [body[@"value"] isKindOfClass:NSString.class]) {
+            NSData *data = [body[@"value"] dataUsingEncoding:NSUTF8StringEncoding];
+            if ([[NSJSONSerialization JSONObjectWithData:data options:0 error:nil] isKindOfClass:NSArray.class]) {
+                [defaults setObject:body[@"value"] forKey:@"ezerbot.notations"];
+                replyHandler(@YES, nil); return;
+            }
+        }
+        replyHandler(nil, @"Notation invalide."); return;
+    }
     if ([message.name isEqual:@"ezerbotFloating"]) {
         if ([command isEqual:@"show"]) { [self.floating show]; replyHandler(@YES,nil); return; }
         if ([command isEqual:@"configure"] && [body[@"shortcut"] isKindOfClass:NSString.class]) {

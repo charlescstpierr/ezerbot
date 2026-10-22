@@ -30,8 +30,8 @@ export function createRatingTable(storage, { now = () => new Date().toISOString(
   const write = (rows) => storage.setItem(RATING_KEY, JSON.stringify(rows));
   const append = (row) => {
     const rows = [...readRows(storage), row];
-    write(rows);
-    return row;
+    const saved = write(rows);
+    return saved?.then ? saved.then(() => row) : row;
   };
   return {
     list() { return readRows(storage); },
@@ -64,4 +64,19 @@ export function createRatingTable(storage, { now = () => new Date().toISOString(
       return { notations: readRows(storage) };
     },
   };
+}
+
+// La copie en mémoire sert les exports synchrones ; chaque écriture attend le Mac.
+export async function createNativeRatingTable(bridge) {
+  let value = await bridge.postMessage({ command: "read" });
+  let pending = Promise.resolve();
+  return createRatingTable({
+    getItem() { return value; },
+    setItem(_key, next) {
+      value = next;
+      const saved = pending.then(() => bridge.postMessage({ command: "write", value: next }));
+      pending = saved.catch(() => {});
+      return saved;
+    },
+  });
 }

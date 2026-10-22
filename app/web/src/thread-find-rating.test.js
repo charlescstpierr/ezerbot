@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { cycleFind, findCountLabel, findInRendered, findInThread, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
+import { clearFindMarks, cycleFind, findCountLabel, findInRendered, findInThread, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { createRatingTable, ratingLabels } from "./thread-rating.js";
 
 const rare = "xyloglotte";
@@ -138,6 +138,15 @@ function createDocument() {
     }
   }
   const document = {
+    defaultView: { CSS: { highlights: new Map() }, Highlight: class { constructor(range) { this.range = range; } } },
+    createRange() {
+      let first, last, start, end;
+      return {
+        setStart(node, offset) { first = node; start = offset; },
+        setEnd(node, offset) { last = node; end = offset; },
+        toString() { return first === last ? first.nodeValue.slice(start, end) : ""; },
+      };
+    },
     createElement: (tag) => new Element(tag),
     createTextNode: (value) => new TextNode(value),
   };
@@ -260,4 +269,37 @@ test("une réponse terminée propose Bon résultat et Mauvais résultat, pas pen
   assert.match(bundle, /Mauvais résultat/);
   assert.match(bundle, /findInThread/);
   assert.match(bundle, /createRatingTable/);
+});
+
+test("la recherche préserve le nœud que le renderer continue à mettre à jour", () => {
+  const root = article({ id: "stream", name: "Ezerbot", body: " hello" });
+  const body = root.querySelector("[data-find-body]");
+  const text = body.firstChild;
+  const bold = root.ownerDocument.createElement("strong");
+  bold.textContent = "début";
+  body.insertBefore(bold, text);
+  highlightOccurrence(root, "hello");
+  assert.equal(text.parentNode, body);
+  assert.equal(root.ownerDocument.defaultView.CSS.highlights.has("gb-find-current"), true);
+  clearFindMarks(root);
+  assert.equal(root.ownerDocument.defaultView.CSS.highlights.has("gb-find-current"), false);
+  text.nodeValue = " hello world";
+  assert.equal(body.textContent, "début hello world");
+});
+
+test("les votes et détails survivent à une nouvelle session native sans localStorage", async () => {
+  const { createNativeRatingTable } = await import("./thread-rating.js");
+  let durable = null;
+  const bridge = () => ({ async postMessage(body) {
+    if (body.command === "read") return durable;
+    durable = body.value;
+    return true;
+  } });
+  const first = await createNativeRatingTable(bridge());
+  await first.recordGood({ conversationId: "c", messageId: "m1" });
+  await first.recordBad({ conversationId: "c", messageId: "m2", motif: "inexact", details: "Une date inventée" });
+  const reopened = await createNativeRatingTable(bridge());
+  assert.deepEqual(reopened.exportDocument().notations.map(({ vote, details }) => ({ vote, details })), [
+    { vote: "bon", details: "" }, { vote: "mauvais", details: "Une date inventée" },
+  ]);
 });

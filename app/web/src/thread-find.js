@@ -167,48 +167,45 @@ export function findCountLabel(count, index) {
 }
 
 export function clearFindMarks(root) {
-  if (!root?.querySelectorAll) return;
-  for (const mark of [...root.querySelectorAll("mark.gb-find-current")]) {
-    const parent = mark.parentNode;
-    if (!parent) continue;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    parent.removeChild(mark);
-    parent.normalize?.();
-  }
+  root?.ownerDocument?.defaultView?.CSS?.highlights?.delete("gb-find-current");
 }
 
-function wrapSlice(node, start, end) {
-  const text = node.nodeValue || "";
-  const mark = node.ownerDocument.createElement("mark");
-  mark.className = "gb-find-current";
-  mark.textContent = text.slice(start, end);
-  const pieces = [];
-  if (start > 0) pieces.push(node.ownerDocument.createTextNode(text.slice(0, start)));
-  pieces.push(mark);
-  if (end < text.length) pieces.push(node.ownerDocument.createTextNode(text.slice(end)));
-  node.replaceWith(...pieces);
-  return mark;
-}
-
-function wrapRange(ranges, start, end) {
+function highlightRange(ranges, start, end) {
   const overlapping = ranges.filter((range) => range.start < end && range.end > start);
-  let first = null;
-  for (const range of overlapping.reverse()) {
-    const localStart = Math.max(0, start - range.start);
-    const localEnd = Math.min(range.node.nodeValue.length, end - range.start);
-    if (localEnd <= localStart) continue;
-    first = wrapSlice(range.node, localStart, localEnd);
-  }
-  return first;
+  if (!overlapping.length) return null;
+  const first = overlapping[0];
+  const last = overlapping[overlapping.length - 1];
+  const document = first.node.ownerDocument;
+  const view = document.defaultView;
+  if (!view?.CSS?.highlights || !view.Highlight) return null;
+  const range = document.createRange();
+  range.setStart(first.node, Math.max(0, start - first.start));
+  range.setEnd(last.node, Math.min(last.node.nodeValue.length, end - last.start));
+  view.CSS.highlights.set("gb-find-current", new view.Highlight(range));
+  return {
+    textContent: range.toString(),
+    parentNode: first.node.parentElement,
+    scrollIntoView(options) {
+      const element = first.node.parentElement;
+      element?.scrollIntoView(options);
+      const rect = range.getBoundingClientRect();
+      for (let parent = element; parent; parent = parent.parentElement) {
+        if (parent.scrollHeight <= parent.clientHeight || !/(auto|scroll)/.test(view.getComputedStyle(parent).overflowY)) continue;
+        const bounds = parent.getBoundingClientRect();
+        parent.scrollBy({ top: rect.top + rect.height / 2 - bounds.top - parent.clientHeight / 2 });
+        break;
+      }
+    },
+  };
 }
 
 // Surligne la n-ième occurrence du corps affiché. L’en-tête, l’heure et les
-// boutons de notation ne comptent pas. Retourne la première marque, ou null.
+// boutons de notation ne comptent pas. Retourne une ancre de défilement, ou null.
 export function highlightOccurrence(root, query, indexInMessage = 0) {
   if (!root?.querySelectorAll) return null;
   clearFindMarks(root);
   const { full, ranges } = renderedBody(root);
   const match = matchRanges(full, query)[indexInMessage];
   if (!match) return null;
-  return wrapRange(ranges, match.start, match.end);
+  return highlightRange(ranges, match.start, match.end);
 }

@@ -1,6 +1,6 @@
 "use strict";
 
-(() => {
+(async () => {
   const $ = (id) => document.getElementById(id);
   const ui = {
     list: $("conversation-list"), search: $("search"), input: null,
@@ -55,11 +55,13 @@
   // Keep the original extras until a queued submission settles, even if state refresh replaces its DTO.
   const pendingSends = new Map();
   const approvalFollow = window.GrokbotChat.createApprovalFollow();
-  function openRatings() {
+  async function openRatings() {
+    const bridge = window.webkit?.messageHandlers?.ezerbotRatings;
+    if (bridge) return window.GrokbotChat.createNativeRatingTable(bridge);
     try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
     catch { return null; }
   }
-  const ratings = openRatings() || { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
+  const ratings = await openRatings() || { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0 };
   let followAfterLayout = null;
@@ -1627,10 +1629,11 @@
     render();
   }
 
-  function rateGood(message) {
+  async function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
-    ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null });
+    try { await ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null }); }
+    catch { notify("Impossible d’enregistrer la notation."); return; }
     notify("Bon résultat enregistré.");
   }
 
@@ -1862,17 +1865,18 @@
   $("find-next")?.addEventListener("click", () => stepFind(1));
   $("find-previous")?.addEventListener("click", () => stepFind(-1));
   $("find-close")?.addEventListener("click", () => closeFind());
-  $("rating-form")?.addEventListener("submit", (event) => {
+  $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;
     const selected = [...$("rating-form").querySelectorAll('input[name="motif"]')].find((input) => input.checked);
-    ratings.recordBad({
+    try { await ratings.recordBad({
       conversationId: pendingRating.conversationId,
       messageId: pendingRating.messageId,
       runId: pendingRating.runId,
       motif: selected?.value || "",
       details: $("rating-details")?.value || "",
-    });
+    }); }
+    catch { notify("Impossible d’enregistrer la notation."); return; }
     pendingRating = null;
     $("rating-dialog")?.close();
     notify("Notation enregistrée.");

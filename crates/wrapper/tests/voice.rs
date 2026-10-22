@@ -818,3 +818,193 @@ fn the_voice_mode_listens_to_the_chosen_microphone_or_the_default_one_when_it_is
     assert_eq!(fallback["microphone_id"], "fake-built-in");
     assert_eq!(fallback["microphone_fallback"], true);
 }
+
+fn upload_with_words(
+    f: &mut Fixture,
+    conversation: &str,
+    nonce: &str,
+    words: Value,
+) -> Result<Value, String> {
+    let body = json!({"conversation_id":conversation,"upload_id":nonce,"data":STANDARD.encode(WAV),"transcript":"Réunion demain à midi","language":"fr","words":words});
+    f.app
+        .api(
+            "POST",
+            "/api/voice/memos",
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn a_memo_keeps_the_start_of_each_word_with_the_message_across_restart() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    let words = json!([
+        {"text":"Réunion","start_ms":0},
+        {"text":"demain","start_ms":400},
+        {"text":"à","start_ms":null},
+        {"text":"midi","start_ms":1000}
+    ]);
+    let memo = upload_with_words(&mut f, &conversation, "words", words.clone()).unwrap();
+    assert_eq!(memo["words"], words);
+    let id = memo["id"].as_str().unwrap().to_owned();
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["voice"]["drafts"][0]["words"], words);
+    f.post("/api/send",json!({"conversation_id":conversation,"message_id":"words-msg","body":"Écoute.","attachments":[id]}));
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let message = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == conversation)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "words-msg")
+        .unwrap()
+        .clone();
+    assert_eq!(message["attachments"][0]["words"], words);
+    assert!(
+        !state.to_string().contains(&STANDARD.encode(WAV)),
+        "the audio itself is never in the state"
+    );
+}
+
+#[test]
+fn a_word_without_a_usable_start_is_not_a_target() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    // The memo lasts 1000 ms: a start after its end cannot be reached, and a negative one is no instant.
+    let memo = upload_with_words(
+        &mut f,
+        &conversation,
+        "late",
+        json!([
+            {"text":"avant","start_ms":999},
+            {"text":"après","start_ms":1001},
+            {"text":"absent"}
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        memo["words"],
+        json!([
+            {"text":"avant","start_ms":999},
+            {"text":"après","start_ms":null},
+            {"text":"absent","start_ms":null}
+        ])
+    );
+    let error = upload_with_words(
+        &mut f,
+        &conversation,
+        "negative",
+        json!([{"text":"non","start_ms":-1}]),
+    )
+    .unwrap_err();
+    assert!(error.contains("Mots du mémo"), "{error}");
+}
+
+#[test]
+fn a_memo_without_words_still_works_and_lists_none() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    assert_eq!(f.upload(&conversation, "plain")["words"], json!([]));
+}
+
+#[test]
+fn malformed_words_are_refused_and_nothing_is_kept() {
+    let mut f = Fixture::new();
+    let conversation = f.conversation();
+    let too_many: Vec<Value> = (0..2001)
+        .map(|i| json!({"text":"a","start_ms":i % 1000}))
+        .collect();
+    for (nonce, words) in [
+        ("long", json!([{"text":"x".repeat(65),"start_ms":0}])),
+        ("empty", json!([{"text":"","start_ms":0}])),
+        ("control", json!([{"text":"a\nb","start_ms":0}])),
+        ("many", json!(too_many)),
+        ("shape", json!(["Réunion"])),
+    ] {
+        let error = upload_with_words(&mut f, &conversation, nonce, words).unwrap_err();
+        assert!(error.contains("Mots du mémo"), "{nonce}: {error}");
+    }
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(state["voice"]["drafts"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_word_times_do_not_reach_the_model_with_the_transcript() {
+    let mut f = Fixture::new();
+    std::fs::write(f.dir.join("workspace.chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"fake-access","refresh_token":"fake-refresh","expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+    f.provider.refresh_models();
+    wait("models", || f.provider.status()["models_ready"] == true);
+    let conversation = f.conversation();
+    let memo = upload_with_words(
+        &mut f,
+        &conversation,
+        "model-words",
+        json!([{"text":"Réunion","start_ms":0},{"text":"demain","start_ms":400}]),
+    )
+    .unwrap();
+    f.post("/api/send",json!({"conversation_id":conversation,"message_id":"voice-words","body":"Lis le mémo.","attachments":[memo["id"]]}));
+    wait("transcript request", || {
+        f.server
+            .seen
+            .lock()
+            .unwrap()
+            .bodies
+            .iter()
+            .any(|b| b.to_string().contains("untrusted-voice"))
+    });
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    let body = bodies
+        .iter()
+        .find(|b| b.to_string().contains("untrusted-voice"))
+        .unwrap()
+        .to_string();
+    assert!(body.contains("Réunion demain"));
+    assert!(!body.contains("start_ms"), "{body}");
+}
+
+#[test]
+fn the_fake_recognizer_hands_a_memo_its_words_and_a_dictation_none() {
+    let mut f = Fixture::new();
+    f.post(
+        DEBUG,
+        json!({"command":"start","token":"d","purpose":"dictation"}),
+    );
+    let dictation = f.post(DEBUG, json!({"command":"stop","token":"d"}));
+    assert_eq!(dictation["words"], json!([]), "a dictation keeps nothing");
+    f.post(
+        DEBUG,
+        json!({"command":"start","token":"m","purpose":"memo","scenario":"long_memo"}),
+    );
+    let memo = f.post(DEBUG, json!({"command":"stop","token":"m"}));
+    let words = memo["words"].as_array().unwrap();
+    assert_eq!(
+        words.len(),
+        memo["transcript"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .count()
+    );
+    assert_eq!(
+        words
+            .iter()
+            .filter(|word| word["start_ms"].is_null())
+            .count(),
+        1
+    );
+    let bytes = STANDARD.decode(memo["data"].as_str().unwrap()).unwrap();
+    assert_eq!(voice::wav_duration(&bytes).unwrap(), 20_000);
+    let last = words
+        .iter()
+        .rev()
+        .find_map(|word| word["start_ms"].as_u64())
+        .unwrap();
+    assert!(last < 20_000);
+}

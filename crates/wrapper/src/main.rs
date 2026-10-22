@@ -323,7 +323,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
         .to_ip()
         .ok_or("Adresse locale non disponible.")?
         .port();
-    if port == grokbot_wrapper::features::iphone::PORT {
+    if port == grokbot_wrapper::features::iphone::port() {
         return Err("Le port 47863 est réservé à l’accès iPhone.".into());
     }
     let mut remote_server: Option<Server> = None;
@@ -333,7 +333,7 @@ fn serve(options: Options) -> Result<(), Box<dyn std::error::Error + Send + Sync
     loop {
         let iphone = grokbot_wrapper::features::iphone::enabled(&app);
         if iphone && remote_server.is_none() {
-            match Server::http(("127.0.0.1", grokbot_wrapper::features::iphone::PORT)) {
+            match Server::http(("127.0.0.1", grokbot_wrapper::features::iphone::port())) {
                 Ok(listener) => {
                     remote_server = Some(listener);
                     grokbot_wrapper::features::iphone::listener_error(&app, None);

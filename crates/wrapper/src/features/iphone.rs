@@ -11,6 +11,20 @@ use sha2::{Digest, Sha256};
 
 mod push;
 pub const PORT: u16 = 47863;
+/// Private iPhone port. Debug builds accept GROKBOT_IPHONE_PORT so tests never
+/// collide with an installed app already listening on 47863.
+pub fn port() -> u16 {
+    if cfg!(debug_assertions) {
+        if let Some(port) = std::env::var("GROKBOT_IPHONE_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|p| *p != 0)
+        {
+            return port;
+        }
+    }
+    PORT
+}
 /// Sentence the iPhone client compares verbatim. Server copies must use this.
 pub const ACCESS_DISABLED: &str = "L’accès iPhone est désactivé sur le Mac.";
 const LIFE: u64 = 120_000;
@@ -81,7 +95,7 @@ fn snapshot(conn: &Connection) -> Result<Value, ApiError> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(json!({"enabled":enabled,"port":PORT,"listener_error":error,"devices":devices}))
+    Ok(json!({"enabled":enabled,"port":port(),"listener_error":error,"devices":devices}))
 }
 pub fn state(ctx: &Context<'_>) -> Value {
     snapshot(ctx.connection).unwrap_or(json!({}))
@@ -109,7 +123,7 @@ pub fn validate_headers(method: &str, headers: &[(String, String)]) -> Result<()
         && host
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.');
-    let local = cfg!(debug_assertions) && host == format!("127.0.0.1:{PORT}");
+    let local = cfg!(debug_assertions) && host == format!("127.0.0.1:{}", port());
     if !dns && !local {
         return Err(bad(403, "Utilisez l’adresse HTTPS Tailscale de ce Mac."));
     }
@@ -466,7 +480,7 @@ pub fn routes(
                     vec![
                         "serve".into(),
                         "--bg".into(),
-                        format!("http://127.0.0.1:{PORT}"),
+                        format!("http://127.0.0.1:{}", port()),
                     ]
                 } else {
                     vec!["serve".into(), "--https=443".into(), "off".into()]

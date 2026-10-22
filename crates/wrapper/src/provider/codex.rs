@@ -408,14 +408,14 @@ impl Session {
                 .set("Accept", "application/json");
             let response = account_headers(request, &token)?.call();
             let response = match response {
-                Ok(response) => response,
+                Ok(response) if (200..300).contains(&response.status()) => response,
                 Err(ureq::Error::Status(401, _)) if attempt == 0 => continue,
                 Err(ureq::Error::Status(401 | 403, _)) => {
                     return Err(Failure::other(
                         "Impossible de lire le quota Codex. La session enregistrée sur ce Mac est conservée.",
                     ))
                 }
-                Err(_) => {
+                _ => {
                     return Err(Failure::other(
                         "Impossible de lire le quota Codex. Réessayez dans un instant.",
                     ))

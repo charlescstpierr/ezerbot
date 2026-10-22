@@ -393,7 +393,7 @@ fn a_quota_redirect_is_never_followed() {
     std::thread::spawn(move || {
         for request in origin.incoming_requests() {
             counted.fetch_add(1, Ordering::SeqCst);
-            let redirect = tiny_http::Response::from_string("")
+            let redirect = tiny_http::Response::from_string(valid().to_string())
                 .with_status_code(302)
                 .with_header(tiny_http::Header::from_bytes("Location", location.clone()).unwrap());
             let _ = request.respond(redirect);

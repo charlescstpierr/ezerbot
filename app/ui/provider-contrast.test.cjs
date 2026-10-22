@@ -19,17 +19,21 @@ function contrast(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-test("OK — ChatGPT répond clears 4.5:1 in both themes", () => {
+test("OK — ChatGPT répond clears 4.5:1 in both themes on the dialog background", () => {
   const css = readFileSync(`${__dirname}/styles.css`, "utf8");
   const light = css.match(/:root \{([^}]+)\}/)[1];
   const dark = css.match(/\[data-theme="dark"\] \{([^}]+)\}/)[1];
-  const token = (block) => block.match(/--ok-text:\s*(#[0-9a-fA-F]{6})/)?.[1];
+  const token = (block, name) => block.match(new RegExp(`${name}:\\s*(#[0-9a-fA-F]{6})`))?.[1];
   const success = css.match(/\.provider-card p\.provider-success \{([^}]+)\}/)[1];
+  const dialog = css.match(/\.dialog \{([^}]+)\}/)[1];
   assert.match(success, /color:\s*var\(--ok-text\)/);
-  assert.equal(token(light), "#157a41");
-  assert.equal(token(dark), "#35c58a");
-  const lightRatio = contrast(token(light), "#ffffff");
-  const darkRatio = contrast(token(dark), "#1b1e24");
-  assert.ok(lightRatio >= 4.5, `light ${token(light)} on #ffffff is ${lightRatio.toFixed(2)}:1`);
-  assert.ok(darkRatio >= 4.5, `dark ${token(dark)} on #1b1e24 is ${darkRatio.toFixed(2)}:1`);
+  // The text sits on the dialog; it must be measured on that real background, not on an assumed white.
+  assert.match(dialog, /background:\s*var\(--pane\)/);
+  for (const [theme, block] of [["light", light], ["dark", dark]]) {
+    const foreground = token(block, "--ok-text");
+    const background = token(block, "--pane");
+    const ratio = contrast(foreground, background);
+    assert.ok(ratio >= 4.5, `${theme} ${foreground} on ${background} is ${ratio.toFixed(2)}:1`);
+  }
+  assert.equal(token(dark, "--ok-text"), "#35c58a", "the dark theme stays unchanged");
 });

@@ -141,6 +141,10 @@
     return handled;
   }
   async function cardAction(message, action, detail) {
+    if (action === "provider.signin") {
+      await signIn();
+      return true;
+    }
     for (const panel of panels.values()) {
       if (!panel.onCardAction) continue;
       try {
@@ -291,6 +295,7 @@
       openBotDialog(bot);
     } else if (kind === "settings") {
       $("settings-dialog").showModal();
+      for (const panel of panels.values()) panelCall(panel, panel.onSettingsLink, id);
       const target = ({ account: $("provider-section"), appearance: $("settings-appearance"), bots: $("settings-bots"), shortcuts: $("settings-shortcuts") })[id]
         || $("settings-extensions").querySelector(`[data-panel="${id}"]`);
       focusLinkTarget(target);
@@ -1140,6 +1145,7 @@
     $("plan-banner").hidden = signedIn;
     $("plan-banner").querySelector("span").textContent = "Connectez votre compte ChatGPT. Un seul abonnement, aucune clé API.";
     document.querySelectorAll("[data-provider-signin]").forEach((button) => {
+      if (button.closest?.(".gb-generated-image-card")) return;
       button.disabled = current.signin === "pending";
       button.textContent = "Se connecter";
     });

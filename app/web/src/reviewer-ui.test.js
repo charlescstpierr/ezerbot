@@ -143,7 +143,7 @@ test("standing rules precede the separated reviewer, whose switch and grouped ac
   assert.equal(actions.children[1].className, "secondary-button");
 });
 
-const fallbackStorage = { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice: "Le trousseau est indisponible." };
+const fallbackStorage = { backend: "file_fallback", label: "Trousseau macOS indisponible", notice: "Les nouveaux secrets ne sont pas enregistrés." };
 function updateStorage(f, storage) {
   f.panels.state.forms.storage = storage;
   f.registration.onState(f.panels.state);

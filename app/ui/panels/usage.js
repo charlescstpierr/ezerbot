@@ -18,6 +18,8 @@
   const percent = (n) => new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(n);
   const date = (n) => new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(n * 1000));
   const labels = { chat: "Chat", routine: "Routines", group: "Groupes", delegation: "Délégation", bot_to_bot: "Entre bots" };
+  const sourceRank = (source) => { const rank = Object.keys(labels).indexOf(source); return rank < 0 ? Infinity : rank; };
+  const missingBot = "Bot supprimé";
   let dialog, section, quotaArea, localArea, notice, refresh, warning, warningText;
   let generalTab, usageTab, quotaState, localData, view = "bot", loading = false, request = 0;
   let providerKey, quotaPoll;
@@ -44,7 +46,8 @@
   function windowName(w) {
     if (w.limit_window_seconds === 604800) return "Quota hebdomadaire";
     const hours = w.limit_window_seconds / 3600;
-    return hours >= 24 ? `Quota sur ${percent(hours / 24)} jours` : `Quota sur ${percent(hours)} heures`;
+    const [amount, unit] = hours >= 24 ? [hours / 24, "jour"] : [hours, "heure"];
+    return `Quota sur ${percent(amount)} ${unit}${amount < 2 ? "" : "s"}`;
   }
   function renderQuota(data) {
     quotaState = data;
@@ -115,10 +118,10 @@
     }
     head.append(header);
     const body = node("tbody");
-    const rows = view === "bot" ? localData.by_bot : localData.by_source;
+    const rows = view === "bot" ? localData.by_bot : [...localData.by_source].sort((a, b) => sourceRank(a.source) - sourceRank(b.source));
     for (const row of rows) {
       const t = row.tokens, tr = node("tr"), label = node("th"); label.scope = "row";
-      label.append(node("span", "", view === "bot" ? `${row.name}${row.deleted ? " (supprimé)" : ""}` : labels[row.source] || row.source));
+      label.append(node("span", "", view === "bot" ? `${row.name}${row.deleted && row.name !== missingBot ? " (supprimé)" : ""}` : labels[row.source] || row.source));
       if (t.unknown_runs) label.append(node("small", "", `${count(t.unknown_runs)} exécution(s) sans mesure`));
       tr.append(label);
       for (const n of [t.input_tokens, t.output_tokens, t.input_tokens + t.output_tokens]) tr.append(node("td", "", !t.measured_runs && t.unknown_runs ? "—" : count(n)));
@@ -157,6 +160,9 @@
       }
       providerKey = key;
       if (state.usage?.codex) renderQuota(state.usage.codex);
+    },
+    onSettingsLink(id) {
+      chooseUsage(id === "usage");
     },
     settingsSection(container) {
       section = container; section.className = "setting-section usage-section";

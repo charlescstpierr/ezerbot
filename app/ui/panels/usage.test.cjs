@@ -103,3 +103,45 @@ test('a late quota read cannot restore signed-out identity or gauge', async () =
   assert.equal(h.section.querySelectorAll('progress').length, 0);
   assert.match(h.section.textContent, /Connectez votre compte/);
 });
+
+const windowQuota = (...seconds) => ({ status: 'ready', quota: { plan: 'plus', checked_at: 1800000000, primary: { used_percent: 10, remaining_percent: 90, limit_window_seconds: seconds[0], reset_at: 1800500000 }, secondary: seconds[1] && { used_percent: 10, remaining_percent: 90, limit_window_seconds: seconds[1], reset_at: 1800500000 } } });
+const cardTitles = h => h.section.querySelectorAll('h4').map(e => e.textContent);
+
+test('quota window labels agree in number: « 1 heure », « 1 jour », then plurals', () => {
+  const h = harness();
+  h.panels.panel.onState(state(windowQuota(3600, 86400)));
+  assert.deepEqual(cardTitles(h), ['Quota sur 1 heure', 'Quota sur 1 jour']);
+  h.panels.panel.onState(state(windowQuota(18000, 172800)));
+  assert.deepEqual(cardTitles(h), ['Quota sur 5 heures', 'Quota sur 2 jours']);
+  h.panels.panel.onState(state(windowQuota(604800)));
+  assert.deepEqual(cardTitles(h), ['Quota hebdomadaire']);
+});
+
+test('sources are listed as chat, routine, group, delegation, bot-to-bot whatever order the server sends', async () => {
+  const alphabetical = ['bot_to_bot', 'chat', 'delegation', 'group', 'routine'];
+  const data = { ...local(), by_source: alphabetical.map(source => ({ source, tokens: { input_tokens: 240, output_tokens: 60, measured_runs: 1, unknown_runs: 0 } })) };
+  const h = harness(async () => ({ codex: quota(10), local: data }));
+  h.nav.querySelectorAll('button')[1].events.click(); await flush();
+  h.section.querySelector('[data-view="source"]').events.click();
+  const rows = h.section.querySelectorAll('tbody')[0].children.map(tr => tr.querySelector('span').textContent);
+  assert.deepEqual(rows, ['Chat', 'Routines', 'Groupes', 'Délégation', 'Entre bots']);
+});
+
+test('a missing bot reads « Bot supprimé » once; a named deleted bot keeps its suffix', async () => {
+  const tokens = { input_tokens: 10, output_tokens: 5, measured_runs: 1, unknown_runs: 0 };
+  const data = { ...local(), by_bot: [{ name: 'Bot supprimé', deleted: true, tokens }, { name: 'Atlas', deleted: true, tokens }, { name: 'Zoé', deleted: false, tokens }] };
+  const h = harness(async () => ({ codex: quota(10), local: data }));
+  h.nav.querySelectorAll('button')[1].events.click(); await flush();
+  const rows = h.section.querySelectorAll('tbody')[0].children.map(tr => tr.querySelector('span').textContent);
+  assert.deepEqual(rows, ['Bot supprimé', 'Atlas (supprimé)', 'Zoé']);
+});
+
+test('a settings link to Usage shows the section; any other settings link leaves Usage', async () => {
+  const h = harness();
+  h.dialog.showModal();
+  h.panels.panel.onSettingsLink('usage'); await flush();
+  assert.equal(h.dialog.classList.contains('usage-focus'), true);
+  assert.match(h.section.textContent, /1.500 tokens/);
+  h.panels.panel.onSettingsLink('appearance');
+  assert.equal(h.dialog.classList.contains('usage-focus'), false);
+});

@@ -435,6 +435,15 @@ fn read_granted_tree_with(
     intervene: &mut dyn FnMut(&Path),
 ) -> Result<GrantedTree, ApiError> {
     let opened = open_dir_nofollow(root)?;
+    // `root` is the canonical path the grant authorized. O_NOFOLLOW guards only
+    // its last component: an ancestor swapped for a symlink since that check
+    // would have opened a directory elsewhere. The handle must still be there.
+    if opened_path(&opened).as_deref() != Some(root) {
+        return Err(ApiError::new(
+            409,
+            "Le dossier a changé pendant la lecture.",
+        ));
+    }
     let opened_meta = opened.metadata().map_err(io_error)?;
     let identity = dev_ino(&opened_meta);
     let canonical = root.canonicalize().map_err(io_error)?;
@@ -588,6 +597,26 @@ fn confirm_import_root(
         return Err(changed());
     }
     Ok(())
+}
+
+/// Where an opened directory lives now, asked of the handle and not of a name.
+fn opened_path(file: &fs::File) -> Option<PathBuf> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = rustix::fs::getpath(file).ok()?;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    {
+        let _ = file;
+        None
+    }
 }
 
 fn dev_ino(meta: &fs::Metadata) -> (u64, u64) {
@@ -1269,6 +1298,7 @@ mod tests {
         fs::create_dir_all(root.join("data")).unwrap();
         let folder = root.join("skills");
         fs::create_dir_all(&folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
         let app = App::open(&root.join("data/app.sqlite")).unwrap();
         let local = folder.join("note.md");
         fs::write(&local, "contenu local").unwrap();
@@ -1303,6 +1333,8 @@ mod tests {
         let folder = root.join("skills");
         let nested = folder.join("nested");
         fs::create_dir_all(&nested).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let nested = folder.join("nested");
         fs::write(nested.join("note.md"), "local").unwrap();
         let outside = root.join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -1327,6 +1359,33 @@ mod tests {
     }
 
     #[test]
+    fn an_ancestor_swapped_before_the_open_does_not_redirect_the_import() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-ancestor-swap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let nested = root.join("granted/nested");
+        fs::create_dir_all(nested.join("skill")).unwrap();
+        fs::write(nested.join("skill/note.md"), "local").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("skill")).unwrap();
+        fs::write(outside.join("skill/note.md"), "OUTSIDE GRANT").unwrap();
+        let authorized = nested.join("skill").canonicalize().unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        // The grant was checked on `authorized`; then an ancestor changes.
+        fs::rename(&nested, root.join("granted/original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &nested).unwrap();
+        let error =
+            read_granted_tree_with(&app.feature_context(), &authorized, &mut |_| {}).unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(!format!("{error:?}").contains("OUTSIDE GRANT"));
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_root_replaced_during_the_walk_discards_what_was_read() {
         let root = std::env::temp_dir().join(format!(
             "ezerbot-swap-root-{}-{}",
@@ -1339,6 +1398,7 @@ mod tests {
         fs::create_dir_all(root.join("data")).unwrap();
         let folder = root.join("skills");
         fs::create_dir_all(&folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
         let app = App::open(&root.join("data/app.sqlite")).unwrap();
         fs::write(folder.join("note.md"), "contenu local").unwrap();
         let elsewhere = root.join("ailleurs");

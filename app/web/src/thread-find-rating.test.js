@@ -337,3 +337,68 @@ test("les votes et détails survivent à une nouvelle session native sans localS
     { vote: "bon", details: "" }, { vote: "mauvais", details: "Une date inventée" },
   ]);
 });
+
+test("les paragraphes et les sauts de ligne séparent les mots, le texte en ligne reste collé", () => {
+  const document = createDocument();
+  const root = article({ id: "m-bot", name: "Ezerbot", body: "", document });
+  const bubble = root.querySelector("[data-find-body]");
+  bubble.childNodes = [];
+  const paragraph = (...parts) => {
+    const node = document.createElement("p");
+    node.append(...parts);
+    return node;
+  };
+  const bold = document.createElement("strong");
+  bold.textContent = "wor";
+  const line = document.createElement("br");
+  bubble.append(paragraph("Hello"), paragraph(bold, "ld"), paragraph("un", line, "deux"));
+  assert.equal(findInRendered(root, "hello world").length, 1);
+  assert.equal(findInRendered(root, "helloworld").length, 0);
+  assert.equal(findInRendered(root, "un deux").length, 1);
+  assert.equal(findInRendered(root, "undeux").length, 0);
+  const mark = highlightOccurrence(root, "hello world", 0);
+  assert.ok(mark);
+  assert.equal(root.ownerDocument.defaultView.CSS.highlights.has("gb-find-current"), true);
+});
+
+test("sans Custom Highlights, la sélection native montre l’occurrence et se retire", () => {
+  const root = article({ id: "m-bot", name: "Ezerbot", body: `Oui ${rare}` });
+  const view = root.ownerDocument.defaultView;
+  delete view.CSS;
+  delete view.Highlight;
+  const ranges = [];
+  view.getSelection = () => ({
+    get rangeCount() { return ranges.length; },
+    getRangeAt: (index) => ranges[index],
+    removeAllRanges() { ranges.length = 0; },
+    addRange(range) { ranges.push(range); },
+  });
+  const mark = highlightOccurrence(root, rare, 0);
+  assert.equal(mark.textContent, rare);
+  assert.equal(ranges.length, 1);
+  clearFindMarks(root);
+  assert.equal(ranges.length, 0);
+});
+
+test("un vote que le Mac refuse n’entre ni dans l’export ni dans l’essai suivant", async () => {
+  const { createNativeRatingTable } = await import("./thread-rating.js");
+  const writes = [];
+  let calls = 0;
+  const table = await createNativeRatingTable({ async postMessage(body) {
+    if (body.command === "read") return null;
+    calls += 1;
+    if (calls === 1) throw new Error("refusé");
+    writes.push(JSON.parse(body.value));
+    return true;
+  } });
+  await assert.rejects(table.recordGood({ conversationId: "c", messageId: "m1" }));
+  assert.deepEqual(table.exportDocument().notations, []);
+  const [first, second] = await Promise.all([
+    table.recordGood({ conversationId: "c", messageId: "m1" }),
+    table.recordBad({ conversationId: "c", messageId: "m2", motif: "inexact", details: "" }),
+  ]);
+  assert.deepEqual(table.exportDocument().notations.map((row) => row.message_id), ["m1", "m2"]);
+  assert.deepEqual(writes.map((rows) => rows.length), [1, 2]);
+  assert.equal(first.message_id, "m1");
+  assert.equal(second.vote, "mauvais");
+});

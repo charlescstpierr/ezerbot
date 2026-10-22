@@ -95,25 +95,32 @@ function bodyElements(root) {
   return [...root.querySelectorAll(BODY_CLASS)];
 }
 
+const BLOCKS = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DETAILS", "DIV", "DL", "DT", "FIGCAPTION", "FIGURE", "H1", "H2", "H3", "H4", "H5", "H6", "HR", "LI", "OL", "P", "PRE", "SECTION", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL"]);
+
+// Les blocs et les sauts de ligne sont séparés par une espace sans nœud texte :
+// « Bonjour »/« monde » en deux paragraphes se cherche « Bonjour monde », et le
+// texte en ligne reste collé.
 function visibleText(body) {
-  const nodes = [];
+  const pieces = [];
+  let full = "";
+  const separate = () => { if (full && !full.endsWith(" ")) full += " "; };
   const visit = (node) => {
     if (!node) return;
     if (node.nodeType === 3) {
-      if (node.nodeValue) nodes.push(node);
+      if (!node.nodeValue) return;
+      pieces.push({ node, start: full.length, end: full.length + node.nodeValue.length });
+      full += node.nodeValue;
       return;
     }
     if (node.nodeType !== 1 || isChrome(node)) return;
+    if (node.tagName === "BR") { separate(); return; }
+    const block = BLOCKS.has(node.tagName);
+    if (block) separate();
     for (const child of node.childNodes || []) visit(child);
+    if (block) separate();
   };
   visit(body);
-  let full = "";
-  const ranges = nodes.map((node) => {
-    const start = full.length;
-    full += node.nodeValue;
-    return { node, start, end: full.length };
-  });
-  return { full, ranges };
+  return { full, ranges: pieces };
 }
 
 function renderedBody(root) {
@@ -121,6 +128,7 @@ function renderedBody(root) {
   const ranges = [];
   for (const body of bodyElements(root)) {
     const piece = visibleText(body);
+    if (full && piece.full && !full.endsWith(" ")) full += " ";
     const base = full.length;
     for (const range of piece.ranges) ranges.push({ node: range.node, start: base + range.start, end: base + range.end });
     full += piece.full;
@@ -166,8 +174,19 @@ export function findCountLabel(count, index) {
   return `${index + 1} sur ${total}`;
 }
 
+// WebKit avant Safari 17.2 n’a pas les Custom Highlights : la sélection native
+// montre alors l’occurrence, sans toucher aux nœuds que React met à jour.
+const selected = new WeakMap();
+
 export function clearFindMarks(root) {
-  root?.ownerDocument?.defaultView?.CSS?.highlights?.delete("gb-find-current");
+  const document = root?.ownerDocument;
+  const view = document?.defaultView;
+  view?.CSS?.highlights?.delete("gb-find-current");
+  const range = selected.get(document);
+  if (!range) return;
+  selected.delete(document);
+  const selection = view?.getSelection?.();
+  if (selection?.rangeCount && selection.getRangeAt(0) === range) selection.removeAllRanges();
 }
 
 function highlightRange(ranges, start, end) {
@@ -177,11 +196,18 @@ function highlightRange(ranges, start, end) {
   const last = overlapping[overlapping.length - 1];
   const document = first.node.ownerDocument;
   const view = document.defaultView;
-  if (!view?.CSS?.highlights || !view.Highlight) return null;
+  const painted = view?.CSS?.highlights && view.Highlight;
+  const selection = painted ? null : view?.getSelection?.();
+  if (!painted && !selection) return null;
   const range = document.createRange();
   range.setStart(first.node, Math.max(0, start - first.start));
   range.setEnd(last.node, Math.min(last.node.nodeValue.length, end - last.start));
-  view.CSS.highlights.set("gb-find-current", new view.Highlight(range));
+  if (painted) view.CSS.highlights.set("gb-find-current", new view.Highlight(range));
+  else {
+    selection.removeAllRanges();
+    selection.addRange(range);
+    selected.set(document, range);
+  }
   return {
     textContent: range.toString(),
     parentNode: first.node.parentElement,

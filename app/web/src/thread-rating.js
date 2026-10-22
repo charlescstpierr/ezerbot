@@ -66,17 +66,23 @@ export function createRatingTable(storage, { now = () => new Date().toISOString(
   };
 }
 
-// La copie en mémoire sert les exports synchrones ; chaque écriture attend le Mac.
+// La copie en mémoire sert les exports synchrones ; elle ne reçoit un vote
+// qu’une fois le Mac d’accord. Les votes passent un par un : chacun repart de
+// la dernière copie validée, donc un échec ne laisse rien derrière lui.
 export async function createNativeRatingTable(bridge) {
-  let value = await bridge.postMessage({ command: "read" });
-  let pending = Promise.resolve();
-  return createRatingTable({
-    getItem() { return value; },
-    setItem(_key, next) {
-      value = next;
-      const saved = pending.then(() => bridge.postMessage({ command: "write", value: next }));
-      pending = saved.catch(() => {});
-      return saved;
+  let committed = await bridge.postMessage({ command: "read" });
+  let queue = Promise.resolve();
+  const table = createRatingTable({
+    getItem() { return committed; },
+    async setItem(_key, next) {
+      await bridge.postMessage({ command: "write", value: next });
+      committed = next;
     },
   });
+  const serial = (record) => (input) => {
+    const saved = queue.then(() => record(input));
+    queue = saved.catch(() => {});
+    return saved;
+  };
+  return { ...table, recordGood: serial(table.recordGood), recordBad: serial(table.recordBad) };
 }

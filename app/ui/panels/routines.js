@@ -317,7 +317,7 @@
     funnelBusy = true; signature = ""; renderList();
     try {
       const result = await panels.api("/api/routines/funnel", { enabled });
-      if (result.conversation_id) { openThread(result.conversation_id, result.approval_message_id); panels.notify("Confirmez l’action dans la carte d’approbation."); }
+      if (result.conversation_id) { await panels.refresh(); openThread(result.conversation_id, result.approval_message_id); panels.notify("Confirmez l’action dans la carte d’approbation."); }
     } catch (error) { message(`Publication impossible : ${error.message}`, true); }
     finally { funnelBusy = false; signature = ""; renderList(); }
   }

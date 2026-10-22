@@ -344,7 +344,7 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<crate::Message> 
         attachments: vec![],
         role: "user",
         body: format!(
-            "Webhook reçu le {}\n\n```json\n{body}\n```",
+            "Webhook reçu le {}\n\n{body}",
             when.unwrap_or_else(|| "date indisponible".into())
         ),
         state: "echoed",

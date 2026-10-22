@@ -12,7 +12,7 @@ const MAX_TEXT: usize = 65_536;
 const ACTION: &str = "Commenter une issue";
 
 pub(in super::super::super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_github_drafts (request_id TEXT PRIMARY KEY,repository TEXT NOT NULL,issue INTEGER NOT NULL,login TEXT NOT NULL,account_id TEXT NOT NULL,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft',comment_url TEXT);")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_github_drafts (request_id TEXT PRIMARY KEY,repository TEXT NOT NULL,issue INTEGER NOT NULL,login TEXT NOT NULL,account_id TEXT NOT NULL,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft',comment_url TEXT,call_id TEXT NOT NULL DEFAULT '');")?;
     // A send that was in flight when the app stopped may or may not have reached GitHub.
     conn.execute(
         "UPDATE wrapper_github_drafts SET state='uncertain' WHERE state='sending'",
@@ -144,9 +144,9 @@ fn display(draft: &Draft, fingerprint: &str) -> Value {
 pub(in super::super::super) fn prepare(
     ctx: &Context<'_>,
     request_id: &str,
-    arguments: &Value,
+    call: &ToolCall,
 ) -> Result<Value, ApiError> {
-    let draft = parse(ctx, arguments)?;
+    let draft = parse(ctx, &call.arguments)?;
     let print = fingerprint(
         &draft.repository,
         draft.issue,
@@ -155,10 +155,38 @@ pub(in super::super::super) fn prepare(
         &draft.text,
     );
     ctx.connection.execute(
-        "INSERT OR IGNORE INTO wrapper_github_drafts(request_id,repository,issue,login,account_id,text,fingerprint) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![request_id, draft.repository, draft.issue as i64, draft.login, draft.account_id, draft.text, print],
+        "INSERT OR IGNORE INTO wrapper_github_drafts(request_id,repository,issue,login,account_id,text,fingerprint,call_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![request_id, draft.repository, draft.issue as i64, draft.login, draft.account_id, draft.text, print, call.call_id],
     )?;
     Ok(display(&draft, &print))
+}
+/// The tool call this draft came from: its result is the only one the card may show.
+pub(in super::super::super) fn call_id(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    ctx.connection
+        .query_row(
+            "SELECT call_id FROM wrapper_github_drafts WHERE request_id=?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .ok()
+}
+/// Under the connection lock, the credentials in use are still those of the approved account.
+fn bound(ctx: &Context<'_>, login: &str, account: &str) -> Result<(), ApiError> {
+    let row: Option<(String, Option<String>, Option<String>)> = ctx.connection.query_row(
+        "SELECT phase,account_email,account_id FROM wrapper_connector_catalogue WHERE id='github'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    match row {
+        Some((phase, Some(current), Some(id)))
+            if phase == "connected" && current == login && id == account =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid(
+            "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
+        )),
+    }
 }
 /// The text Charles validated replaces the proposal, and the fingerprint follows it.
 pub(in super::super::super) fn edit(
@@ -274,7 +302,9 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         || fingerprint(&repository, issue, &login, &account, &text) != print
     {
         settle(ctx, &request_id, "failed", None)?;
-        return Err(invalid("Le compte GitHub ou le texte a changé depuis l’affichage du brouillon : rien n’a été publié."));
+        return Err(invalid(
+            "Le compte GitHub a changé depuis l’affichage du brouillon : rien n’a été publié.",
+        ));
     }
     // One claim before the call: only the run that wins it may reach GitHub.
     let claimed = ctx.connection.execute(
@@ -289,15 +319,21 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         endpoint(m, "api")
     );
     let body = json!({"body": text});
-    let reply = match authorized(ctx, &server, m, &|access| {
-        send_json(
-            agent()
-                .post(&endpoint)
-                .set("Authorization", &format!("Bearer {access}")),
-            &body,
-        )
-        .map_err(|_| uncertain())
-    }) {
+    let reply = match authorized(
+        ctx,
+        &server,
+        m,
+        &|ctx| bound(ctx, &login, &account),
+        &|access| {
+            send_json(
+                agent()
+                    .post(&endpoint)
+                    .set("Authorization", &format!("Bearer {access}")),
+                &body,
+            )
+            .map_err(|_| uncertain())
+        },
+    ) {
         Ok(reply) => reply,
         Err(error) => {
             settle(

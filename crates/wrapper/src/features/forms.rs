@@ -1408,9 +1408,13 @@ fn request_value(
             || super::mcp::is_lifecycle(tool)
             || publication
         {
+            // A draft shows the result of its own call, never the run's latest one.
+            let call_id = publication
+                .then(|| super::mcp::github_comment_call(ctx, &request.id))
+                .flatten();
             let result: Option<String> = ctx.connection.query_row(
-                "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
-                [&request.run_id], |r| r.get(0),
+                "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND (?2 IS NULL OR json_extract(payload,'$.call_id')=?2) ORDER BY seq DESC LIMIT 1",
+                params![&request.run_id, call_id], |r| r.get(0),
             ).optional()?;
             value[if publication {
                 "publication_result"

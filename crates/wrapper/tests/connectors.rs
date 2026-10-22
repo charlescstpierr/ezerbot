@@ -1674,3 +1674,73 @@ fn github_comment_refuses_a_bad_target_without_a_card() {
     );
     assert_eq!(f.github_requests("/comments"), 0);
 }
+
+#[test]
+fn github_comment_is_refused_when_the_account_changed_after_the_card() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-4", "Texte du brouillon.");
+    // A new sign-in replaced the account while the card was open.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='autre-compte',account_id='999' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    f.github_resolve(&card, "send-4", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("compte GitHub a changé"), "{reason}");
+    assert_eq!(f.github_requests("/comments"), 0);
+    assert!(f.published_comments().is_empty());
+}
+
+#[test]
+fn github_draft_card_shows_only_the_result_of_its_own_call() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let conversation = f.post("/api/conversations", json!({"title":"Deux outils"}))["conversation"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let list = json!({"repository":"charles/essai"}).to_string();
+    let draft =
+        json!({"repository":"charles/essai","issue":12,"text":"Après la liste."}).to_string();
+    f.script(vec![
+        json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc-a","call_id":"list-a","name":GITHUB_TOOL,"arguments":list}}),
+        json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc-b","call_id":"draft-b","name":GITHUB_COMMENT_TOOL,"arguments":draft}}),
+        json!({"type":"response.completed"}),
+    ]);
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"two-tools","body":"Liste puis commente."}),
+    );
+    let run: String = f.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')='two-tools'",[],|r|r.get(0)).unwrap();
+    wait("draft card", || {
+        f.app.tick(0);
+        !requests::list_for_run(&f.db(), &run).unwrap().is_empty()
+    });
+    let entry = requests::list_for_run(&f.db(), &run)
+        .unwrap()
+        .remove(0)
+        .entry_id;
+    let card = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["entry_id"] == entry)
+        .unwrap()
+        .clone();
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(
+        card["publication_result"],
+        Value::Null,
+        "the listing's result is not a publication"
+    );
+    assert_eq!(f.github_requests("/comments"), 0);
+}

@@ -134,7 +134,10 @@ pub(crate) fn github_comment_display(
     request_id: &str,
     call: &ToolCall,
 ) -> Result<Value, ApiError> {
-    catalogue::github::comment::prepare(ctx, request_id, &call.arguments)
+    catalogue::github::comment::prepare(ctx, request_id, call)
+}
+pub(crate) fn github_comment_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    catalogue::github::comment::call_id(ctx, request_id)
 }
 pub(crate) fn edit_github_comment(
     ctx: &Context<'_>,

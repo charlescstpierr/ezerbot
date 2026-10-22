@@ -512,13 +512,20 @@ fn authorized(
     ctx: &Context<'_>,
     server: &Server,
     m: Manifest,
+    bind: &dyn Fn(&Context<'_>) -> Result<(), ApiError>,
     call: &dyn Fn(&str) -> Result<Reply, ApiError>,
 ) -> Result<Reply, ApiError> {
     super::ensure(ctx, server)?;
     let attempt = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
-        let access = credentials(ctx, &server.id)?
-            .and_then(|env| env.get("ACCESS_TOKEN").cloned())
-            .ok_or_else(|| invalid(RECONNECT))?;
+        // A sign-in replaces the account and its tokens under this lock: the check and the
+        // read of the credentials see one account, and the call below keeps that token.
+        let access = {
+            let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+            bind(ctx)?;
+            credentials(ctx, &server.id)?
+                .and_then(|env| env.get("ACCESS_TOKEN").cloned())
+                .ok_or_else(|| invalid(RECONNECT))?
+        };
         let reply = call(&access)?;
         Ok((access, reply))
     };
@@ -633,7 +640,7 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
         "{}/repos/{owner}/{name}/issues?state={state}&per_page={PAGE}",
         endpoint(m, "api")
     );
-    let reply = authorized(ctx, &server, m, &|access| {
+    let reply = authorized(ctx, &server, m, &|_| Ok(()), &|access| {
         send(
             agent()
                 .get(&url)

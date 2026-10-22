@@ -1636,6 +1636,9 @@ impl RunServices for Services<'_> {
         call: &grokbot_engine::contracts::ToolCall,
     ) -> Option<String> {
         let ctx = self.ctx(self.connection, run);
+        if super::mcp::is_github_tool(&call.name) {
+            return Some(super::mcp::github_unavailable(&ctx));
+        }
         let result = if super::screen::is_tool(&call.name) {
             super::screen::validate(&ctx, call)
         } else if super::generated::is_external(&call.name) {

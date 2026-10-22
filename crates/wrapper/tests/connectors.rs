@@ -27,6 +27,8 @@ struct SeenOAuth {
     token_error: bool,
     tools_error: bool,
     revoke_error: bool,
+    /// The fake server's only tool is named like a deletion.
+    deleting_tool: bool,
     sse: bool,
     token_scope: Option<String>,
     github: GithubScript,
@@ -48,6 +50,8 @@ struct GithubScript {
     repo: &'static str,
     more: bool,
     long_readme: bool,
+    /// `ok` confirms a revocation; `refused` is what GitHub says without the app secret.
+    revoke: &'static str,
     token_times: Vec<std::time::Instant>,
     authorization: Vec<(String, String)>,
 }
@@ -67,6 +71,7 @@ impl Default for GithubScript {
             repo: "ok",
             more: false,
             long_readme: false,
+            revoke: "ok",
             token_times: Vec::new(),
             authorization: Vec::new(),
         }
@@ -167,6 +172,12 @@ impl OAuth {
                         }
                     } else if url == "/github/user" {
                         (200, json!({"login":"charles-test","id":4242}))
+                    } else if url == "/github/revoke" {
+                        if g.revoke == "ok" {
+                            (200, json!({"revoked":true}))
+                        } else {
+                            (404, json!({"message":"Not Found"}))
+                        }
                     } else if url.starts_with("/github/api/repos/charles/essai/issues") {
                         let live = format!("Bearer {}", g.live_access);
                         let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
@@ -317,7 +328,7 @@ impl OAuth {
                                 json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"factice","version":"1"}})
                             }
                             "tools/list" => {
-                                json!({"tools":[{"name":"echo","description":"Outil factice ; access-secret-never-visible-123456789","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]})
+                                json!({"tools":[{"name":if seen.deleting_tool {"delete_note"} else {"echo"},"description":"Outil factice ; access-secret-never-visible-123456789","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]})
                             }
                             "tools/call" => {
                                 json!({"content":[{"type":"text","text":format!("{} · access-secret-never-visible-123456789",frame["params"]["arguments"]["text"])}]})
@@ -1639,6 +1650,7 @@ fn github_read_failures_are_french_sentences_and_the_provider_is_not_called_agai
     assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
     assert_eq!(f.github_requests("/issues"), before);
     // Disconnected GitHub: a short sentence, no provider call.
+    f.oauth.seen.lock().unwrap().github.revoke = "refused";
     let removal = f.post("/api/connectors/disconnect", json!({"id":"github"}))["run_id"]
         .as_str()
         .unwrap()
@@ -1731,6 +1743,186 @@ fn github_keeps_its_tokens_when_the_renewal_is_only_unreachable() {
             "{script}"
         );
     }
+}
+
+impl Fixture {
+    fn pending_request(&mut self, run: &str) -> Value {
+        self.wait_approval(run);
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["run_id"] == run)
+            .unwrap()
+            .clone()
+    }
+    /// The status a decision is refused with, or none when it was accepted.
+    fn refused_status(&mut self, request: &Value, decision: Value) -> Option<u16> {
+        let body = json!({"entry_id":request["entry_id"],"conversation_id":request["route"]["target_conversation_id"],"submission_id":format!("try-{}",request["entry_id"]),"decision":decision});
+        self.app
+            .api(
+                "POST",
+                "/api/approvals/resolve",
+                body.to_string().as_bytes(),
+            )
+            .err()
+            .map(|e| e.status)
+    }
+    fn disconnect_github(&mut self) -> String {
+        self.post("/api/connectors/disconnect", json!({"id":"github"}))["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn approval_rules(&self) -> i64 {
+        self.db()
+            .query_row("SELECT count(*) FROM forms_approval_rules", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+}
+
+#[test]
+fn github_disconnect_names_the_login_offers_no_always_and_a_refusal_keeps_the_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let tokens = f.github_secret().unwrap();
+    let revocations = f.github_requests("/github/revoke");
+    let run = f.disconnect_github();
+    let request = f.pending_request(&run);
+    assert_eq!(request["connector"]["tool"], "Déconnecter GitHub");
+    let catalogue = &request["arguments"]["catalogue"];
+    assert_eq!(catalogue["compte"], "charles-test");
+    assert!(catalogue["déconnexion"]
+        .as_str()
+        .unwrap()
+        .contains("charles-test"));
+    assert_eq!(
+        request["policy"]["remember"], false,
+        "the card must not offer « Toujours »"
+    );
+    for decision in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ] {
+        assert_eq!(f.refused_status(&request, decision), Some(400));
+    }
+    assert_eq!(f.approval_rules(), 0);
+    // Nothing leaves before the click.
+    assert_eq!(f.item("github")["status"], "connected");
+    assert_eq!(f.github_requests("/github/revoke"), revocations);
+    assert_eq!(f.github_secret().unwrap(), tokens);
+    f.decide(&run, json!("deny"));
+    assert_eq!(f.item("github")["status"], "connected");
+    assert_eq!(f.item("github")["account"], "charles-test");
+    assert_eq!(f.github_secret().unwrap(), tokens);
+    assert_eq!(f.github_requests("/github/revoke"), revocations);
+    let listed = f.github_list("after-refusal", "charles/essai");
+    assert!(matches!(f.outcome(&listed), ToolOutcome::Done { .. }));
+}
+
+#[test]
+fn github_disconnect_removes_the_local_secret_says_the_revocation_was_confirmed_and_asks_to_reconnect(
+) {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let revocations = f.github_requests("/github/revoke");
+    let run = f.disconnect_github();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.github_requests("/github/revoke"), revocations + 1);
+    assert_eq!(f.item("github")["status"], "disconnected");
+    assert_eq!(f.item("github")["account"], Value::Null);
+    assert_eq!(f.item("github")["warning"], false);
+    let message = f.item("github")["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.contains("GitHub a confirmé la révocation"),
+        "{message}"
+    );
+    f.assert_no_github_token_kept();
+    // The next read says to reconnect and calls nothing.
+    let issues = f.github_requests("/issues");
+    let run = f.github_list("after-disconnect", "charles/essai");
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez"), "{reason}");
+    assert_eq!(f.github_requests("/issues"), issues);
+    for secret in GITHUB_SECRETS {
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_disconnect_removes_the_local_secret_even_when_github_does_not_confirm_the_revocation() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.oauth.seen.lock().unwrap().github.revoke = "refused";
+    let revocations = f.github_requests("/github/revoke");
+    let run = f.disconnect_github();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.github_requests("/github/revoke"), revocations + 1);
+    assert_eq!(f.item("github")["status"], "disconnected");
+    assert_eq!(f.item("github")["warning"], true);
+    let message = f.item("github")["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.contains("révocation distante non confirmée"),
+        "{message}"
+    );
+    assert!(!message.contains("a confirmé"), "{message}");
+    f.assert_no_github_token_kept();
+    assert_eq!(f.item("github")["has_tokens"], false);
+    let run = f.github_list("after-unconfirmed", "charles/essai");
+    assert!(failed(&f, &run).contains("Reconnectez"));
+    // The revocation request carries no secret of the app.
+    let seen = f.oauth.seen.lock().unwrap();
+    let (_, body) = seen
+        .requests
+        .iter()
+        .rev()
+        .find(|(url, _)| url == "/github/revoke")
+        .unwrap();
+    assert!(!body.contains("client_secret"));
+    assert!(seen
+        .github
+        .authorization
+        .iter()
+        .all(|(url, auth)| url != "/github/revoke" || !auth.starts_with("Basic")));
+}
+
+#[test]
+fn a_tool_classed_as_a_deletion_never_runs_alone_and_no_always_rule_covers_it() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().deleting_tool = true;
+    let run = f.connect("gmail");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("gmail", false, false), 200);
+    let server = f.item("gmail")["server"].clone();
+    assert_eq!(server["tools"][0]["name"], "delete_note");
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+    );
+    let calls = f.oauth.count("/mcp");
+    let run = f.tool_run(&server, "delete-refused");
+    let request = f.pending_request(&run);
+    assert_eq!(request["policy"]["remember"], false);
+    assert_eq!(request["policy"]["protection"], "destructive");
+    // The provider heard nothing while the card was open.
+    assert_eq!(f.oauth.count("/mcp"), calls);
+    for decision in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"always_allow":{"scope":"subject"}}),
+    ] {
+        assert_eq!(f.refused_status(&request, decision), Some(400));
+    }
+    assert_eq!(f.approval_rules(), 0);
+    f.decide(&run, json!("deny"));
+    assert_eq!(f.oauth.count("/mcp"), calls);
+    assert_eq!(f.approval_rules(), 0);
+    // A second call still waits for its own click.
+    let run = f.tool_run(&server, "delete-again");
+    let again = f.pending_request(&run);
+    assert_eq!(again["policy"]["remember"], false);
+    assert_eq!(f.oauth.count("/mcp"), calls);
 }
 
 #[cfg(all(target_os = "macos", debug_assertions))]

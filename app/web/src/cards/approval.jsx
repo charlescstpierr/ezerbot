@@ -76,7 +76,9 @@ export function Card({ message, busy, onAction }) {
   const policy = request.policy;
   const outbound = policy?.protection === "outbound";
   const destructive = policy?.protection === "destructive";
-  const title = outbound ? "Envoi sous votre nom" : destructive ? "Confirmation d’une suppression" : "Approbation demandée";
+  // Disconnecting an account is a deletion: the card names the account and offers Confirmer / Annuler only.
+  const account = lifecycle && action.tool.startsWith("mcp_remove_") && typeof preview?.catalogue?.compte === "string" ? preview.catalogue : null;
+  const title = account ? `Déconnecter le compte ${account.service} ${account.compte} ?` : outbound ? "Envoi sous votre nom" : destructive ? "Confirmation d’une suppression" : "Approbation demandée";
   const showRemember = policy
     ? Boolean(policy.remember) && !screen && !lifecycle
     : !screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool);
@@ -104,16 +106,16 @@ export function Card({ message, busy, onAction }) {
               </>}
               <div className="min-w-0"><dt className="text-xs text-muted-foreground">Variables privées</dt><dd className="mt-1 ml-0 break-words">{preview.variables_privées.length ? `${preview.variables_privées.join(", ")} · valeurs masquées` : preview.catalogue ? "Les jetons reçus après votre consentement seront conservés dans le coffre." : "Aucune variable privée."}</dd></div>
             </dl>
-            {preview.catalogue && <div className="space-y-2 text-sm"><p><strong>{preview.catalogue.service}</strong> · {preview.catalogue.licence}</p><p>{preview.catalogue.permissions}</p><p className="text-xs text-muted-foreground">Portées OAuth : {preview.catalogue.portées}</p><p>{action.tool.startsWith("mcp_remove_") ? preview.catalogue.déconnexion : preview.catalogue.connexion}</p></div>}
+            {preview.catalogue && <div className="space-y-2 text-sm"><p><strong>{preview.catalogue.service}</strong> · {preview.catalogue.licence}</p>{account && <p>Compte : <strong>{account.compte}</strong></p>}<p>{preview.catalogue.permissions}</p><p className="text-xs text-muted-foreground">Portées OAuth : {preview.catalogue.portées}</p><p>{action.tool.startsWith("mcp_remove_") ? preview.catalogue.déconnexion : preview.catalogue.connexion}</p></div>}
             {action.tool.startsWith("mcp_remove_") && !preview.catalogue && <p className="text-sm">Le processus sera arrêté. La configuration, les règles permanentes et les variables privées de ce connecteur seront supprimées.</p>}
           </> : localToolNames[action.tool] ? <details><summary className="text-xs">Détails techniques de l’action</summary><p className="text-xs">Identifiant de l’outil : <code>{action.tool}</code></p>{argumentPreview}</details> : argumentPreview}
         <details className="text-xs text-muted-foreground"><summary>Empreinte et expiration</summary><p className="break-all">{action.args_digest}</p><p>{Number.isFinite(action.expires_at) ? new Date(action.expires_at).toLocaleString("fr-CA") : "Échéance indisponible"}</p></details>
         {action.tool === "write_file" && <SensitiveWarning preview={preview?.apercu_local} />}
         {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>{screen ? "Autoriser une fois et reprendre" : "Autoriser une fois"}</button>
+            <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>{account ? "Confirmer" : screen ? "Autoriser une fois et reprendre" : "Autoriser une fois"}</button>
             {policy?.remember && <button type="button" className="gb-retry" disabled={blocked} data-always-scope={policy.scope} onClick={() => decide({ always_allow: { scope: policy.scope } })}>Toujours autoriser</button>}
-            <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
+            <button type="button" className="gb-retry" onClick={() => decide("deny")}>{account ? "Annuler" : "Refuser"}</button>
           </div>
           {outbound && <p className="text-sm">Cet envoi part sous votre nom. Chaque envoi demande cette confirmation.</p>}
           {destructive && <p className="text-sm">Cette suppression demande une confirmation à chaque fois.</p>}

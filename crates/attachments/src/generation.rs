@@ -522,7 +522,8 @@ const PAGE_LEFT: f32 = 42.0;
 const CONTENT_W: f32 = 511.0;
 fn char_width(c: char, size: f32) -> Result<f32> {
     if c == pdf_font::PARTY {
-        return Ok(size + 1.5);
+        // Shrink the inline image gap with small fonts, just like the glyph itself.
+        return Ok(size + (size * 0.15).min(1.5));
     }
     let b = pdf_byte(c)?;
     Ok(pdf_font::face().widths[b as usize] as f32 * size / 1000.0)
@@ -607,7 +608,7 @@ fn draw_line(ops: &mut Vec<u8>, line: &str, mut x: f32, baseline: f32, size: f32
             ops.extend(
                 format!("q {size:.2} 0 0 {size:.2} {x:.2} {y:.2} cm /Im1 Do Q\n").as_bytes(),
             );
-            x += size + 1.5;
+            x += char_width(c, size)?;
         } else {
             buf.push(c);
         }
@@ -2523,6 +2524,32 @@ mod tests {
                 cells.iter().map(|s| s.chars().count()).sum::<usize>() * 2
             );
         }
+    }
+
+    #[test]
+    fn wide_pdf_tables_keep_party_glyph_inside_cell_padding() {
+        let mut page = Painter::new();
+        paint_table(&mut page, &[vec!["🎉".into(); 50]]).unwrap();
+        let ops = String::from_utf8(page.ops().clone()).unwrap();
+        let mut right = 0.0;
+        let mut seen = 0;
+        for op in ops.lines() {
+            let parts: Vec<_> = op.split_whitespace().collect();
+            if op.ends_with("re S") {
+                let x: f32 = parts[4].parse().unwrap();
+                let width: f32 = parts[6].parse().unwrap();
+                right = x + width - 4.0f32.min(width / 4.0);
+            } else if op.ends_with("cm /Im1 Do Q") {
+                let size: f32 = parts[1].parse().unwrap();
+                let x: f32 = parts[5].parse().unwrap();
+                assert!(
+                    x + char_width(pdf_font::PARTY, size).unwrap() <= right + 0.02,
+                    "glyphe hors cellule : {op}"
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 50);
     }
 
     #[test]

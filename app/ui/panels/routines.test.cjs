@@ -535,3 +535,49 @@ test('history names the simple trigger of a group that started each run', async 
   assert.match(h.t.content.textContent, /Horaire \(Chaque minute, à partir de l’activation\) · /);
   assert.match(h.t.content.textContent, /Webhook 2 · reçu le/);
 });
+
+// The harness clock reads 10 000 ms: the one-shot at 5 000 ms is in the past.
+const pinned = { ...groupRoutine, time_zone: 'UTC', trigger: { kind: 'group', members: [
+  { id: 'trigger-a', trigger: { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' } },
+  { id: 'trigger-b', trigger: everyMinute },
+  { id: 'trigger-c', trigger: { kind: 'once', at: 5000 } },
+] } };
+const savedTrigger = async (routineToEdit, change) => {
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [routineToEdit] };
+    sent.push({ url, body });
+    return { routine: routineToEdit, webhooks: [] };
+  });
+  await h.t.edit(routineToEdit);
+  change(h);
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  return { sent, h };
+};
+
+test('saving a group keeps the explicit timezone of a trigger even when it equals the routine timezone', async () => {
+  const { sent } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  const members = JSON.parse(JSON.stringify(sent.find(s => s.url === '/api/routines/update').body.trigger.members));
+  assert.deepEqual(members[0].trigger, { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' });
+  assert.equal(members[1].trigger.interval_ms, 120000);
+});
+
+test('a one-shot of the group that already fired and was not touched does not block saving the rest', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  assert.ok(sent.some(s => s.url === '/api/routines/update'), h.t.status.textContent);
+});
+
+test('a one-shot of the group moved into the past is still refused', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(labelled(h, 'Date et heure UTC')[3].children.find(c => c.tagName === 'INPUT'), '1970-01-01T00:00:01.000'));
+  assert.equal(sent.length, 0);
+  assert.match(h.t.status.textContent, /instant futur/);
+});
+
+test('reviewing a group before its activation offers no way to change its triggers', async () => {
+  const h = harness(async url => url.startsWith('/api/routines?') ? { routines: [groupRoutine] } : {});
+  await h.t.edit(groupRoutine, true);
+  const labels = h.t.content.querySelectorAll('button').map(b => b.textContent);
+  assert.ok(labels.includes('Activer cette routine'));
+  assert.ok(!labels.includes('Retirer ce déclencheur'));
+  assert.ok(!labels.includes('Ajouter un déclencheur'));
+});

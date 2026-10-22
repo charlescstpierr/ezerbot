@@ -1935,4 +1935,42 @@ mod occurrences_tests {
             before.len()
         );
     }
+
+    #[test]
+    fn a_fired_one_shot_of_a_group_does_not_block_editing_the_rest() {
+        let once = cron::Schedule::Once { at: 100_000 };
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", once.clone())]);
+        // The one-shot is past by the time the routine is renamed.
+        let mut edited = routine.clone();
+        edited.name = "Renamed".into();
+        let edited = routine::update(&conn, &edited, 500_000).unwrap();
+        assert_eq!(edited.name, "Renamed");
+        // Changing another member is fine too, and leaves the spent one alone.
+        let mut slower = edited.clone();
+        slower.trigger = group_of(vec![("a", every(2)), ("b", once)]);
+        routine::update(&conn, &slower, 500_001).unwrap();
+        // A new or rescheduled one-shot in the past is still refused.
+        let mut past = slower.clone();
+        past.trigger = group_of(vec![
+            ("a", every(2)),
+            ("b", cron::Schedule::Once { at: 200_000 }),
+        ]);
+        past.schedule_version = 3;
+        assert!(routine::update(&conn, &past, 500_002).is_err());
+    }
+
+    #[test]
+    fn a_member_remembers_its_trigger_at_each_version() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(5))]);
+        let mut edited = routine.clone();
+        edited.trigger = group_of(vec![("a", every(2)), ("b", every(5))]);
+        routine::update(&conn, &edited, 1_000).unwrap();
+        let at = |member: &str, version: u64| {
+            routine::member_trigger(&conn, &routine.routine_id, member, version).unwrap()
+        };
+        assert_eq!(at("a", 1), Some(every(1)));
+        assert_eq!(at("a", 2), Some(every(2)));
+        assert_eq!(at("b", 1), Some(every(5)));
+        assert_eq!(at("b", 2), None);
+    }
 }

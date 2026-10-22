@@ -2622,3 +2622,38 @@ fn leaving_the_group_revokes_the_token_of_its_webhook() {
         404
     );
 }
+
+#[test]
+fn history_keeps_naming_a_trigger_as_it_was_when_the_run_started() {
+    let mut f = Fixture::new(false);
+    let (r, _) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    f.tick_due(&r);
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Autre","prompt":"x","schedule":"@every 1h"}),
+    );
+    assert!(created["routine"]["routine_id"].is_string());
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    let group_now = stored["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let mut members = group_now["trigger"]["members"].clone();
+    members[0]["trigger"] = json!({"kind":"every","interval_ms":120000,"phase_ms":null});
+    f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":group_now["modified_at"],"schedule_version":group_now["schedule_version"],"trigger":{"kind":"group","members":members}}),
+    );
+    let history = f.history(&r);
+    let description = history["occurrences"][0]["trigger"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("Chaque minute"), "{description}");
+    assert!(!description.contains("2 minutes"), "{description}");
+}

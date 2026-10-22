@@ -468,27 +468,29 @@
         for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"]]) { const opt = node("option", "", label); opt.value = value; row.kind.append(opt); }
         row.kind.value = row.value.kind; row.expression.value = row.value.expression; row.once.value = row.value.once;
         for (const key of ["kind", "expression", "once"]) row[key].addEventListener("input", () => { row.value[key] = row[key].value; });
-        box.append(button("Retirer ce déclencheur", () => { rows.splice(index, 1); renderRows(); update(); }));
+        // While reviewing an activation nothing here may change: only what is read gets activated.
+        if (!resume) box.append(button("Retirer ce déclencheur", () => { rows.splice(index, 1); renderRows(); update(); }));
         groupRows.append(box);
       });
     }
-    const addRow = (value) => { rows.push({ id: value.id || "", value: { kind: value.kind, expression: value.expression, once: value.once } }); };
+    const addRow = (value) => { rows.push({ id: value.id || "", stored: { kind: value.kind, once: value.once }, value: { kind: value.kind, expression: value.expression, once: value.once } }); };
     const memberValue = (member) => ({ id: member.id, kind: member.trigger.kind === "once" ? "once" : member.trigger.kind === "webhook" ? "webhook" : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "" });
     if (r?.trigger.kind === "group") { for (const member of r.trigger.members) addRow(memberValue(member)); renderRows(); }
     groupBox.append(node("h4", "", "Déclencheurs du groupe"), node("p", "routines-note", "Au moins deux déclencheurs simples, sans groupe dans un groupe. La routine part dès que l’un d’eux part ; chaque départ est une occurrence nommée dans l’historique."), groupRows);
     const groupActions = node("div", "routines-actions");
-    groupActions.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
+    if (!resume) groupActions.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
     groupBox.append(groupActions);
     fields.append(groupBox);
     fields.append(node("p", "routines-note", "Exemples : 0 9 * * 1-5, @daily, @every 1h30m, @every 1h/10m. Un préfixe TZ= prime sur le champ Fuseau. Pour une seule fois, saisissez l’UTC ; l’aperçu le convertit dans le fuseau choisi. Le serveur valide l’horaire ; cet aperçu ne prédit pas le prochain départ."));
     const preview = node("p", "routines-preview"); preview.setAttribute("role", "status"); fields.append(preview);
     const enabled = r ? null : field("Activer à la création");
     if (enabled) { enabled.type = "checkbox"; enabled.checked = true; enabled.className = ""; enabled.parentElement.classList.add("routines-enabled"); }
-    function simple(genre, expressionText, onceText) {
+    function simple(genre, expressionText, onceText, spent = false) {
       if (genre === "once") {
         const at = Date.parse(`${onceText}Z`);
         if (!onceText || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
-        if (at <= Date.now()) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
+        // A one-shot of the group that already fired and is left as it was does not block an edit of the rest.
+        if (at <= Date.now() && !spent) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
         validZone(zone.value.trim());
         return { trigger: { kind: "once", at }, zone: zone.value.trim(), text: `Une fois : ${date(at, zone.value.trim())}` };
       }
@@ -498,10 +500,11 @@
     function parsed() {
       if (mode.value === "group") {
         if (rows.length < 2) throw new Error("Un groupe contient au moins deux déclencheurs. Ajoutez-en un autre ou choisissez un déclencheur simple.");
-        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once));
+        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once, Boolean(row.id) && row.value.kind === "once" && row.value.once === row.stored.once && row.stored.kind === "once"));
         const members = parts.map((part, index) => {
           // A TZ= prefix on one trigger belongs to that trigger, not to the whole routine.
-          const own = part.trigger.kind === "cron" && part.zone !== zone.value.trim() ? { ...part.trigger, time_zone: part.zone } : part.trigger;
+          // Only an explicit TZ= prefix pins that trigger, even to the zone the routine has too.
+          const own = part.trigger.kind === "cron" && /^(?:CRON_TZ|TZ)=\S+\s/.test(rows[index].value.expression.trim()) ? { ...part.trigger, time_zone: part.zone } : part.trigger;
           return rows[index].id ? { id: rows[index].id, trigger: own } : { trigger: own };
         });
         return { trigger: { kind: "group", members }, zone: validZone(zone.value.trim() || localZone), text: `Groupe : ${parts.map((part) => part.text).join(" · ")}` };

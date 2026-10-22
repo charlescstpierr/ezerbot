@@ -828,7 +828,7 @@ fn history(
             value["trigger"] = trigger;
         }
         if let Some(routine) = &routine {
-            name_trigger(&mut value, routine, &occurrence);
+            name_trigger(&tx, &mut value, routine, &occurrence)?;
         }
         if let Some(run) = run_id.map(|id| store::get(&tx, &id)).transpose()?.flatten() {
             value["run_id"] = json!(run.run_id);
@@ -845,23 +845,48 @@ fn history(
     )
 }
 /// In a group the history names which simple trigger made the occurrence: its
-/// kind, its place among the triggers of that kind, and its own schedule.
-fn name_trigger(value: &mut Value, routine: &Routine, occurrence: &Occurrence) {
-    let Schedule::Group { members } = &routine.trigger else {
-        return;
+/// kind, its place among the triggers of that kind, and its own schedule as it
+/// was when the occurrence was made, however the group was edited since.
+fn name_trigger(
+    conn: &Connection,
+    value: &mut Value,
+    routine: &Routine,
+    occurrence: &Occurrence,
+) -> Result<(), ApiError> {
+    if occurrence.member_id.is_empty() {
+        return Ok(());
+    }
+    let members = match &routine.trigger {
+        Schedule::Group { members } => members.as_slice(),
+        _ => &[],
     };
-    let Some(member) = members.iter().find(|m| m.id == occurrence.member_id) else {
-        return;
+    let current = members.iter().find(|m| m.id == occurrence.member_id);
+    let Some(made_by) = routine::member_trigger(
+        conn,
+        &routine.routine_id,
+        &occurrence.member_id,
+        occurrence.schedule_version,
+    )?
+    .or_else(|| current.map(|m| m.trigger.clone())) else {
+        return Ok(());
     };
-    let webhook = member.trigger == Schedule::Webhook;
-    let same: Vec<&cron::Member> = members
-        .iter()
-        .filter(|m| (m.trigger == Schedule::Webhook) == webhook)
-        .collect();
+    let webhook = made_by == Schedule::Webhook;
     let base = if webhook { "Webhook" } else { "Horaire" };
-    let label = match same.iter().position(|m| m.id == member.id) {
-        Some(place) if same.len() > 1 => format!("{base} {}", place + 1),
-        _ => base.to_owned(),
+    // The place among its siblings only exists while the member is in the group.
+    let label = match current {
+        Some(member) => {
+            let same: Vec<&cron::Member> = members
+                .iter()
+                .filter(|m| {
+                    (m.trigger == Schedule::Webhook) == (member.trigger == Schedule::Webhook)
+                })
+                .collect();
+            match same.iter().position(|m| m.id == member.id) {
+                Some(place) if same.len() > 1 => format!("{base} {}", place + 1),
+                _ => base.to_owned(),
+            }
+        }
+        None => base.to_owned(),
     };
     let mut trigger = if webhook {
         value["trigger"].take()
@@ -872,11 +897,12 @@ fn name_trigger(value: &mut Value, routine: &Routine, occurrence: &Occurrence) {
         trigger = json!({"kind":"webhook"});
     }
     trigger["label"] = json!(label);
-    trigger["trigger_id"] = json!(member.id);
+    trigger["trigger_id"] = json!(occurrence.member_id);
     if !webhook {
-        trigger["description"] = json!(cron::describe_fr(&member.trigger, &routine.time_zone).ok());
+        trigger["description"] = json!(cron::describe_fr(&made_by, &routine.time_zone).ok());
     }
     value["trigger"] = trigger;
+    Ok(())
 }
 pub fn state(ctx: &Context<'_>) -> Value {
     let load = || -> Result<Value, ApiError> {

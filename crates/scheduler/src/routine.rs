@@ -73,6 +73,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             materialized_after INTEGER NOT NULL,
             PRIMARY KEY (routine_id, member_id)
          );
+         CREATE TABLE IF NOT EXISTS scheduler_member_versions (
+            routine_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            trigger TEXT NOT NULL,
+            PRIMARY KEY (routine_id, member_id, version)
+         );
          INSERT INTO component_versions(component, version)
             VALUES ('scheduler.routine', 1) ON CONFLICT(component) DO NOTHING;",
     )?;
@@ -148,6 +155,45 @@ pub fn create(conn: &Connection, routine: &Routine) -> Result<Routine> {
 /// Keep one row per simple trigger of a group: its own schedule version and its
 /// own cursor, so editing one trigger never moves another's slots. A member
 /// that leaves the group keeps its row (not live), so its version only grows.
+/// The live members of a group whose trigger is the one already stored.
+fn unchanged_members(conn: &Connection, routine: &Routine) -> Result<HashSet<String>> {
+    let Schedule::Group { members } = &routine.trigger else {
+        return Ok(HashSet::new());
+    };
+    let mut kept = HashSet::new();
+    for member in members {
+        let same: bool = conn
+            .query_row(
+                "SELECT trigger=?3 FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
+                params![routine.routine_id, member.id, serde_json::to_string(&member.trigger)?],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if same {
+            kept.insert(member.id.clone());
+        }
+    }
+    Ok(kept)
+}
+
+/// The trigger of a group member as it was at `version`, for naming past occurrences.
+pub fn member_trigger(
+    conn: &Connection,
+    routine_id: &str,
+    member_id: &str,
+    version: u64,
+) -> Result<Option<Schedule>> {
+    Ok(conn
+        .query_row(
+            "SELECT trigger FROM scheduler_member_versions
+             WHERE routine_id=?1 AND member_id=?2 AND version=?3",
+            params![routine_id, member_id, version],
+            |row| json(row, 0),
+        )
+        .optional()?)
+}
+
 fn sync_members(
     conn: &Connection,
     routine: &Routine,
@@ -185,6 +231,13 @@ fn sync_members(
                 )?;
             }
         }
+        // History keeps naming the trigger as it was when an occurrence was made.
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduler_member_versions
+             SELECT routine_id, member_id, version, trigger FROM scheduler_members
+             WHERE routine_id=?1 AND member_id=?2",
+            params![routine.routine_id, member.id],
+        )?;
     }
     let live = conn
         .prepare("SELECT member_id FROM scheduler_members WHERE routine_id=?1 AND live=1")?
@@ -212,7 +265,7 @@ fn sync_members(
 pub fn update(conn: &Connection, routine: &Routine, now_ms: i64) -> Result<Routine> {
     let old = require(conn, &routine.routine_id)?;
     let now_ms = now_ms.max(old.modified_at);
-    validate(routine, now_ms)?;
+    validate_keeping(routine, now_ms, &unchanged_members(conn, routine)?)?;
     if routine.bot_id != old.bot_id || routine.conversation_id != old.conversation_id {
         return Err(Error::InvalidInput(
             "routine owner/conversation is immutable".into(),
@@ -334,6 +387,13 @@ pub(crate) fn require(conn: &Connection, id: &str) -> Result<Routine> {
 }
 
 pub(crate) fn validate(routine: &Routine, reference_ms: i64) -> Result<()> {
+    validate_keeping(routine, reference_ms, &HashSet::new())
+}
+
+/// [`validate`], except that the group members named in `kept` are unchanged
+/// since they were stored: a one-shot among them may have fired already, and that
+/// must not stop an edit of the rest of the routine.
+fn validate_keeping(routine: &Routine, reference_ms: i64, kept: &HashSet<String>) -> Result<()> {
     if [
         &routine.routine_id,
         &routine.bot_id,
@@ -355,13 +415,22 @@ pub(crate) fn validate(routine: &Routine, reference_ms: i64) -> Result<()> {
     }
     jiff::tz::TimeZone::get(&routine.time_zone)
         .map_err(|error| Error::InvalidInput(error.to_string()))?;
-    validate_trigger(&routine.trigger, &routine.time_zone, reference_ms)
+    validate_group(&routine.trigger, &routine.time_zone, reference_ms, kept)
 }
 
 /// A group is a flat list of at least two simple triggers, each valid on its own.
 /// Execution cadence is a local cost/safety policy, not a change to CR10's
 /// parser grammar. One model run per minute is the fastest supported cadence.
 pub(crate) fn validate_trigger(trigger: &Schedule, zone: &str, reference_ms: i64) -> Result<()> {
+    validate_group(trigger, zone, reference_ms, &HashSet::new())
+}
+
+fn validate_group(
+    trigger: &Schedule,
+    zone: &str,
+    reference_ms: i64,
+    kept: &HashSet<String>,
+) -> Result<()> {
     match trigger {
         Schedule::Webhook => Ok(()),
         Schedule::Group { members } => {
@@ -380,7 +449,11 @@ pub(crate) fn validate_trigger(trigger: &Schedule, zone: &str, reference_ms: i64
                 if matches!(member.trigger, Schedule::Group { .. }) {
                     return Err(Error::InvalidInput("a group cannot contain a group".into()));
                 }
-                validate_trigger(&member.trigger, zone, reference_ms)?;
+                let spent =
+                    matches!(member.trigger, Schedule::Once { .. }) && kept.contains(&member.id);
+                if !spent {
+                    validate_trigger(&member.trigger, zone, reference_ms)?;
+                }
             }
             Ok(())
         }

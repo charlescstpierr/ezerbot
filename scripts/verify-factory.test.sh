@@ -475,6 +475,65 @@ expect_status 2 "--comment sans numéro"
 run_script --comment abc 1
 expect_status 2 "--comment non numérique"
 
+# 19. Arbre de travail modifié : aucune preuve pour ce SHA.
+setup_repo
+printf '```verify\necho critere-ok\n```\n' >"$REPO/criteres.md"
+printf 'modif non commitée\n' >>"$REPO/readme"
+run_script 30 "$SHA" "$REPO/criteres.md"
+expect_status 1 "modification non indexée refusée"
+require_grep "arbre de travail modifié" "message arbre modifié"
+if [[ -s "$CARGO_STUB_LOG" ]]; then
+  bad "aucune étape cargo sur arbre modifié"
+else
+  ok "aucune étape cargo sur arbre modifié"
+fi
+git -C "$REPO" add readme
+run_script 30 "$SHA" "$REPO/criteres.md"
+expect_status 1 "modification indexée refusée"
+git -C "$REPO" checkout HEAD -- readme
+run_script 30 "$SHA" "$REPO/criteres.md"
+expect_status 0 "arbre propre accepté"
+
+# 20. Un échec en tête de pipeline n'est pas masqué par la suite du pipeline.
+setup_repo
+printf '```verify\nfalse | cat\n```\n' >"$REPO/criteres.md"
+run_script 31 "$REPO/criteres.md"
+expect_status 1 "pipeline en échec"
+require_grep "false | cat" "pipeline journalisé"
+require_grep "exit 1" "code de sortie du pipeline"
+
+# 21. Corps de ticket en CRLF, avec les outils du système.
+setup_repo
+printf '```verify\r\necho crlf-ok\r\n```\r\n' >"$REPO/criteres.md"
+run_script 32 "$REPO/criteres.md"
+expect_status 0 "corps CRLF"
+require_grep "+ echo crlf-ok" "commande sans retour chariot"
+
+# 22. Une ligne de résultat géante ne chasse ni les étapes ni le verdict du commentaire.
+setup_repo
+install_gh
+export GH_STATE="$REPO/gh-state"
+git -C "$REPO" remote add origin https://github.com/exemple/ezerbot.git
+cat >"$REPO/criteres.md" <<'EOF'
+```verify
+python3 -c 'print("x"*70000)'
+false
+```
+EOF
+run_script --comment 138 33 "$REPO/criteres.md"
+expect_status 1 "ligne géante puis échec"
+if python3 -c '
+import json, sys
+body = json.load(open(sys.argv[1], encoding="utf-8"))["body"]
+need = ("<!-- factory-proof -->", "- `false` — exit 1", "verify-factory: échec", "python3 -c")
+raise SystemExit(0 if len(body) <= 65536 and all(part in body for part in need) else 1)
+' "$GH_STATE/last.json"; then
+  ok "étapes et verdict publiés"
+else
+  bad "étapes et verdict publiés"
+fi
+unset GH_STATE
+
 if [[ "$fail_count" -ne 0 ]]; then
   printf '%s échec(s)\n' "$fail_count" >&2
   exit 1

@@ -25,6 +25,9 @@
 # passé en argument. Si gh répond sans bloc et qu'un fichier est donné, ce
 # fichier est utilisé. Chaque commande est exécutée et journalisée.
 #
+# L'arbre de travail doit être propre (fichiers suivis, indexés ou non) : les
+# vérifications portent sur l'arbre de travail, pas sur le seul commit.
+#
 # Sortie 0 seulement si toute la barrière passe et, le cas échéant, si le
 # commentaire a été publié. Ne fusionne rien.
 set -euo pipefail
@@ -152,11 +155,26 @@ emit() {
   printf '%s\n' "$1" >>"$RAW"
 }
 
+# Longueurs maximales d'une commande et d'un résultat dans le résumé, pour
+# que celui-ci reste loin de la limite de 65536 caractères d'un commentaire.
+CMD_MAX=200
+RESULT_MAX=300
+
+shorten() {
+  local text=$1 max=$2
+  if [[ ${#text} -gt $max ]]; then
+    text="${text:0:$max}…"
+  fi
+  printf '%s' "$text"
+}
+
 record_step() {
   local cmd=$1 code=$2 result=$3
   cmd=${cmd//\`/\'}
   result=${result//$'\n'/ }
   result=${result//\`/\'}
+  cmd=$(shorten "$cmd" "$CMD_MAX")
+  result=$(shorten "$result" "$RESULT_MAX")
   step_cmd+=("$cmd")
   step_code+=("$code")
   step_result+=("$result")
@@ -289,6 +307,16 @@ if idx == -1:
     emit(text, True)
 
 summary = text[:idx]
+summary_cap = 30000
+if len(summary) > summary_cap:
+    kept = []
+    size = 0
+    for line in summary.splitlines(keepends=True):
+        if size + len(line) > summary_cap - 200:
+            break
+        kept.append(line)
+        size += len(line)
+    summary = "".join(kept) + "\n[… étapes suivantes omises du résumé …]\n"
 rest = text[idx + len(sep):]
 fence, newline, after = rest.partition("\n")
 closer = "\n" + fence + "\n</details>\n"
@@ -300,7 +328,12 @@ notice = (
     "Journal complet : %s caractères. Début et fin conservés.\n\n" % len(raw)
 )
 omission = "\n[… milieu omis …]\n"
-lines = raw.splitlines(keepends=True)
+line_cap = 2000
+lines = []
+for line in raw.splitlines(keepends=True):
+    if len(line) > line_cap:
+        line = line[:line_cap] + "[… ligne tronquée …]\n"
+    lines.append(line)
 
 def assemble(head_count, tail_count):
     if head_count + tail_count >= len(lines):
@@ -394,6 +427,12 @@ if [[ -n "$sha_arg" ]]; then
   fi
 fi
 
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  emit "arbre de travail modifié: les vérifications ne porteraient pas sur le commit ${head_sha}"
+  git status --short --untracked-files=no >>"$RAW"
+  exit 1
+fi
+
 if ! rustc_version=$(rustc --version 2>&1); then
   emit "rustc introuvable"
   exit 1
@@ -419,8 +458,13 @@ has_verify_commands() {
 }
 
 body_file=$(mktemp)
+cr=$(printf '\r')
 normalize_body() {
-  sed -i 's/\r$//' "$1"
+  local tmp
+  tmp=$(mktemp)
+  sed "s/${cr}\$//" "$1" >"$tmp"
+  cat "$tmp" >"$1"
+  rm -f "$tmp"
 }
 
 if command -v gh >/dev/null 2>&1; then
@@ -492,7 +536,7 @@ run_strict() {
 
 run_shell() {
   local cmd=$1
-  run_captured "$cmd" env -u BASH_ENV bash --noprofile --norc -c "$cmd"
+  run_captured "$cmd" env -u BASH_ENV bash --noprofile --norc -o pipefail -c "$cmd"
   if [[ "$captured_status" -ne 0 ]]; then
     fail=1
   fi

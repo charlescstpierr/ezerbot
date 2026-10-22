@@ -130,7 +130,7 @@ Les familles et obligations du tableau proviennent de `evidence/parity.json`. La
 | Écrans de bot et reprise humaine | Contrat partiel | Non implémenté | ScreenLease et ownership des entrées | Deux bots en parallèle; contrôle humain; clic avec lease périmée |
 | Registre d'outils | Chemin client retracé | Outils internes livrés | Ajouter outils externes avec politique et journal d’effets | Refus explicites, effet incertain après panne et permissions |
 | Daemon local et supervision | Chemin client retracé | Non implémenté | Supervisor, générations, outbox et transports bornés | Ancien PID, changement de compte, credential expiré et reprise de résultat |
-| Shell et jobs background | Chemin client retracé | Non implémenté | ShellService avec politique OS explicite et groupe de processus | Cwd hors scope; kill descendants; sortie volumineuse; budget |
+| Shell et jobs background | Chemin client retracé | Shell local et tâches de fond livrés | ShellService avec politique OS explicite et groupe de processus | Cwd hors scope; kill descendants; sortie volumineuse; budget |
 | Fichiers et transferts | Chemin client retracé | Images locales livrées | Fichiers généraux, root handles, transferts et quotas | Vision réelle, purge, symlinks et transferts interrompus |
 | Panneau desktop-mount | Chemin client retracé | Non implémenté | Panneau flottant du bot; pas un montage de dossiers | Ouverture, déplacement, fermeture et scope du composeur |
 | Approvals et auto-review | Contrat partiel | Gate/règles locales livrées | Reviewer langage naturel et règles admin; outils externes à protéger | Décision utilisateur dans le chat principal, digest modifié et révocation |

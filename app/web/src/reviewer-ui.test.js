@@ -415,6 +415,20 @@ test("running local cards publish their committed phase and a visible stop affor
   assert.match(html, /gb-local-stop/);assert.match(html, /Annuler l’exécution/);
 });
 
+test("a background shell card stays En cours with Arrêter, then shows Terminée or Arrêtée", () => {
+  const call = { call_id: "c", name: "run_shell", arguments: { command: "sleep 90 && echo fini", cwd: "/tmp", background: true, timeout_ms: 100 } };
+  const html = (output) => renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "m", kind: "tool", payload: { run_id: "run", call, outcome: { status: "done", output } } } }));
+  const running = html({ status: "en cours", background: true, stdout: "partiel", stderr: "", exit_code: null, truncated: false });
+  assert.match(running, /En cours/); assert.match(running, />Arrêter</); assert.ok(running.includes("partiel"));
+  assert.match(running, /sans plafond de temps/); assert.ok(!running.includes("Code de sortie"));
+  const done = html({ status: "terminé", background: true, stdout: "fini\n", stderr: "", exit_code: 0, truncated: false });
+  assert.match(done, /Terminé/); assert.match(done, /Code de sortie : 0/); assert.ok(done.includes("fini")); assert.ok(!done.includes(">Arrêter</"));
+  const stopped = html({ status: "arrêtée", background: true, stdout: "", stderr: "", exit_code: null, truncated: true });
+  assert.match(stopped, /Arrêtée/); assert.match(stopped, /Sortie tronquée/); assert.ok(!stopped.includes("Code de sortie"));
+  const failed = html({ status: "échec", background: true, stdout: "", stderr: "raté", exit_code: 3 });
+  assert.match(failed, /Code de sortie non nul/); assert.match(failed, /Code de sortie : 3/);
+});
+
 test("interrupted tool cards are stopped, not left running or waiting", () => {
   const local = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "stopped", kind: "tool", payload: {
     run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "run_shell", arguments: {command:"sleep 20",cwd:"/tmp"} },

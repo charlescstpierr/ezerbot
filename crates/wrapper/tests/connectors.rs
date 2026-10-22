@@ -2468,6 +2468,33 @@ fn github_second_account_is_added_beside_the_first_with_its_own_secret() {
 }
 
 #[test]
+fn github_refused_second_account_stays_on_the_github_card() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id":"github","another":true}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("deny"));
+    let state = f.state();
+    let item = f.item("github");
+    let slots = item["slot_servers"].as_array().unwrap();
+    // Every GitHub server, even the refused slot's, belongs to the card.
+    let github: Vec<_> = state["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["name"] == "GitHub")
+        .collect();
+    assert_eq!(github.len(), 2);
+    assert!(github.iter().all(|s| slots.contains(&s["id"])));
+    assert_eq!(f.github_accounts().len(), 1);
+}
+
+#[test]
 fn github_sign_in_of_the_same_user_does_not_add_a_second_account() {
     let mut f = Fixture::new();
     f.github_connect();

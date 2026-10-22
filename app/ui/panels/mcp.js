@@ -299,7 +299,7 @@
   function render(state) {
     if (!list) return;
     const items = state.mcp?.catalogue || [];
-    const catalogueIds = new Set(items.flatMap(i => [i.server?.id, ...(i.accounts || []).map(a => a.server?.id)]).filter(Boolean));
+    const catalogueIds = new Set(items.flatMap(i => [i.server?.id, ...(i.accounts || []).map(a => a.server?.id), ...(i.slot_servers || [])]).filter(Boolean));
     const servers = (state.mcp?.servers || []).filter(s => !catalogueIds.has(s.id));
     const bots = (state.bots || []).filter(b => !b.deleted);
     // Catalogue updates are keyed independently of the custom-server list.

@@ -362,3 +362,13 @@ test("when the first slot is gone the card leads with the next account and names
   await card.all().find(n => n.tag === "button" && n.textContent === "Annuler").events.click();
   assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"github",account:"github:2"}});
 });
+
+test("a GitHub slot refused before its first connection is not a custom server", async () => {
+  const {first,item} = twoAccounts();
+  item.accounts = item.accounts.slice(0,1);
+  const refused = {id:"c3",name:"GitHub",status:"disconnected",command:"https://api.github.com",arguments:[],environment_names:[],enabled_bots:[],tools:[]};
+  item.slot_servers = ["c1","c3"];
+  const { root } = await mount([first,refused], {}, [item]);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0);
+  assert.match(root.textContent, /Aucun connecteur ajouté/);
+});

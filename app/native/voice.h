@@ -15,6 +15,8 @@
 @property(nonatomic, copy) NSString *language;
 @property(nonatomic, copy) NSString *transcript;
 @property(nonatomic, strong) NSData *audio;
+// Each word of a memo with the instant it starts in the audio, in milliseconds.
+@property(nonatomic, copy) NSArray<NSDictionary *> *words;
 @property(nonatomic, strong) NSURL *recordingURL;
 @property(nonatomic, strong) NSDate *started;
 @property(nonatomic, strong) NSTimer *timer;
@@ -67,6 +69,7 @@
         @"partial":@((BOOL)(self.transcriptionPlan.hasText && self.transcriptionPlan.missingCount > 0)),
         @"max_seconds":@(self.maxSeconds),
         @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO,
+        @"words":self.memo && [self.status isEqual:@"ready"] ? (self.words ?: @[]) : @[],
         // Only a memo or a local capture hands its audio over. A dictation keeps none.
         @"data":keepsAudio && [self.status isEqual:@"ready"] ? ([self.audio base64EncodedStringWithOptions:0] ?: @"") : @"" };
 }
@@ -85,11 +88,11 @@
     self.recognizer = nil;
 #endif
     [self removeTemporaryAudio];
-    self.audio = nil; self.transcriptionPlan = nil; self.transcript = nil; self.status = @"idle"; self.level = 0;
+    self.audio = nil; self.words = nil; self.transcriptionPlan = nil; self.transcript = nil; self.status = @"idle"; self.level = 0;
 }
 - (void)transcribe {
     if (!self.audio.length) { self.status = @"failed"; return; }
-    self.status = @"transcribing"; self.transcript = @"";
+    self.status = @"transcribing"; self.transcript = @""; self.words = nil;
     if (self.segmented) {
         self.transcriptionPlan = [[EzerbotMeetingTranscription alloc] initWithAudio:self.audio];
         if (!self.transcriptionPlan) { self.status = @"failed"; return; }
@@ -155,7 +158,16 @@
             if (result.isFinal) {
                 NSString *text = [result.bestTranscription.formattedString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                 if (owner.segmented) [owner completeMeetingSegment:text];
-                else { owner.transcript = text; owner.status = text.length ? @"ready" : @"failed"; }
+                else {
+                    owner.transcript = text; owner.status = text.length ? @"ready" : @"failed";
+                    // Speech times each recognized word from the start of the audio, in seconds.
+                    NSMutableArray *words = [NSMutableArray array];
+                    for (SFTranscriptionSegment *segment in result.bestTranscription.segments) {
+                        NSString *word = [segment.substring stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                        if (word.length) [words addObject:@{@"text":word,@"start_ms":@((NSUInteger)llround(MAX(0, segment.timestamp) * 1000))}];
+                    }
+                    owner.words = words;
+                }
             } else if (error) {
                 if (owner.segmented) [owner completeMeetingSegment:nil]; else owner.status = @"failed";
             }
@@ -175,6 +187,10 @@
         else [self completeMeetingSegment:index < self.fakeSegmentTexts.count ? self.fakeSegmentTexts[index] : @"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."];
     } else {
         self.transcript = @"Bonjour, voici mon mémo vocal pour préparer la réunion de demain."; self.status = @"ready";
+        NSMutableArray *words = [NSMutableArray array];
+        NSArray<NSString *> *spoken = [self.transcript componentsSeparatedByString:@" "];
+        for (NSUInteger i = 0; i < spoken.count; ++i) [words addObject:@{@"text":spoken[i],@"start_ms":@(i * 900 / spoken.count)}];
+        self.words = words;
     }
 #endif
 }

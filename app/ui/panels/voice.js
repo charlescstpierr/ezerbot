@@ -145,7 +145,7 @@
       await ensureConversation();
       if (rev !== revision) return;
       result.conversation_id = context.conversation.id;
-      const memo = await panels.api("/api/voice/memos", { conversation_id: context.conversation.id, upload_id: result.token, data: result.data, transcript: result.transcript, language: result.language || language() });
+      const memo = await panels.api("/api/voice/memos", { conversation_id: context.conversation.id, upload_id: result.token, data: result.data, transcript: result.transcript, language: result.language || language(), words: Array.isArray(result.words) ? result.words : [] });
       if (rev !== revision) {
         await panels.api("/api/voice/remove", {id:memo.id,conversation_id:result.conversation_id}).catch(() => {});
         return;

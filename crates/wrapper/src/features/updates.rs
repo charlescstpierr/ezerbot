@@ -214,8 +214,16 @@ fn begin_apply() -> Result<Value, ApiError> {
             unix: job.remote_unix,
         }
     };
-    let paths = updates::production_paths().map_err(into_api)?;
-    updates::validate_paths(&paths).map_err(into_api)?;
+    let paths = match updates::production_paths().and_then(|paths| {
+        updates::validate_paths(&paths)?;
+        Ok(paths)
+    }) {
+        Ok(paths) => paths,
+        Err(error) => {
+            note_failure(error);
+            return Ok(snapshot());
+        }
+    };
     publish(|job| {
         job.running = true;
         job.phase = Phase::Telechargement.id();
@@ -412,10 +420,6 @@ fn capture_blocked_saved() -> bool {
     }
 }
 
-fn into_api(error: UpdateError) -> ApiError {
-    ApiError::new(400, error.message)
-}
-
 fn snapshot() -> Value {
     let job = lock();
     let installed = updates::installed_commit();
@@ -497,6 +501,24 @@ mod tests {
             "La compilation a échoué. L’application actuelle est restée en place."
         );
         assert_eq!(failed["available"], true);
+        {
+            let mut restart = restart_lock();
+            reset(&mut restart);
+        }
+        // Un refus avant le lancement du fil reste lisible : l’état serveur le garde.
+        publish(|job| {
+            job.available = true;
+            job.phase = "disponible";
+            job.remote_sha = "a".repeat(40);
+        });
+        let refused = app.api("POST", "/api/updates/apply", b"{}").unwrap();
+        assert_eq!(refused["phase"], "erreur");
+        assert_eq!(refused["running"], false);
+        assert_eq!(refused["last_attempt"], "echec");
+        assert!(refused["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("Ezerbot.app"));
         {
             let mut restart = restart_lock();
             reset(&mut restart);

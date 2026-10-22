@@ -16,7 +16,7 @@ const CHANGED: &str =
     "L’espace Slack a changé depuis l’affichage du brouillon : rien n’a été publié.";
 
 pub(in super::super::super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_slack_drafts (request_id TEXT PRIMARY KEY,server_id TEXT NOT NULL,workspace TEXT NOT NULL,channel TEXT NOT NULL,thread TEXT,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft',call_id TEXT NOT NULL DEFAULT '');")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_slack_drafts (request_id TEXT PRIMARY KEY,server_id TEXT NOT NULL,workspace TEXT NOT NULL,generation INTEGER NOT NULL,channel TEXT NOT NULL,thread TEXT,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft',call_id TEXT NOT NULL DEFAULT '');")?;
     // A send that was in flight when the app stopped may or may not have reached Slack.
     conn.execute(
         "UPDATE wrapper_slack_drafts SET state='uncertain' WHERE state='sending'",
@@ -146,10 +146,11 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
         text: args.text,
     })
 }
-/// The workspace a draft card was prepared for, while it is still the connected one.
-fn held(ctx: &Context<'_>, workspace: &str) -> Result<Account, ApiError> {
+/// The workspace a draft card was prepared for, while it is still the connection it was
+/// prepared with: a new sign-in (another workspace of the same name, another user) is not.
+fn held(ctx: &Context<'_>, workspace: &str, generation: i64) -> Result<Account, ApiError> {
     match connected(ctx)? {
-        Some(account) if account.workspace == workspace => {
+        Some(account) if account.workspace == workspace && account.generation == generation => {
             // Another bot's activation does not authorize this one.
             if account.enabled {
                 Ok(account)
@@ -172,16 +173,16 @@ pub(in super::super::super) fn validate(
     // original call again.
     if let Some(run) = ctx.run_id {
         if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
-            let bound: Option<String> = ctx
+            let bound: Option<(String, i64)> = ctx
                 .connection
                 .query_row(
-                    "SELECT workspace FROM wrapper_slack_drafts WHERE request_id=?1",
+                    "SELECT workspace,generation FROM wrapper_slack_drafts WHERE request_id=?1",
                     [&request_id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if let Some(workspace) = bound {
-                return held(ctx, &workspace).map(|_| ());
+            if let Some((workspace, generation)) = bound {
+                return held(ctx, &workspace, generation).map(|_| ());
             }
         }
     }
@@ -206,12 +207,12 @@ pub(in super::super::super) fn prepare(
         draft.thread.as_deref(),
         &draft.text,
     );
-    let server = connected(ctx)?
-        .map(|account| account.server.id)
+    let (server, generation) = connected(ctx)?
+        .map(|account| (account.server.id, account.generation))
         .ok_or_else(|| invalid(&unavailable(ctx)))?;
     ctx.connection.execute(
-        "INSERT OR IGNORE INTO wrapper_slack_drafts(request_id,server_id,workspace,channel,thread,text,fingerprint,call_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![request_id, server, draft.workspace, draft.channel, draft.thread, draft.text, print, call.call_id],
+        "INSERT OR IGNORE INTO wrapper_slack_drafts(request_id,server_id,workspace,generation,channel,thread,text,fingerprint,call_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![request_id, server, draft.workspace, generation, draft.channel, draft.thread, draft.text, print, call.call_id],
     )?;
     Ok(display(&draft, &print))
 }
@@ -342,6 +343,7 @@ fn published(workspace: &str, channel: &str, thread: Option<&str>, text: &str) -
 struct Stored {
     server: String,
     workspace: String,
+    generation: i64,
     channel: String,
     thread: Option<String>,
     text: String,
@@ -354,13 +356,14 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     })?;
     let (request_id, _) = crate::features::forms::approval_identity(run, call)?;
     let row: Option<Stored> = ctx.connection.query_row(
-        "SELECT server_id,workspace,channel,thread,text,fingerprint,state FROM wrapper_slack_drafts WHERE request_id=?1",
+        "SELECT server_id,workspace,generation,channel,thread,text,fingerprint,state FROM wrapper_slack_drafts WHERE request_id=?1",
         [&request_id],
-        |r| Ok(Stored { server: r.get(0)?, workspace: r.get(1)?, channel: r.get(2)?, thread: r.get(3)?, text: r.get(4)?, print: r.get(5)?, state: r.get(6)? }),
+        |r| Ok(Stored { server: r.get(0)?, workspace: r.get(1)?, generation: r.get(2)?, channel: r.get(3)?, thread: r.get(4)?, text: r.get(5)?, print: r.get(6)?, state: r.get(7)? }),
     ).optional()?;
     let Some(Stored {
         server,
         workspace,
+        generation,
         channel,
         thread,
         text,
@@ -381,7 +384,7 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
         }
         _ => return Err(unconfirmed()),
     }
-    let account = match held(ctx, &workspace) {
+    let account = match held(ctx, &workspace, generation) {
         Ok(account)
             if account.server.id == server
                 && fingerprint(&workspace, &channel, thread.as_deref(), &text) == print =>
@@ -404,7 +407,7 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     match send(
         ctx,
         &account,
-        &workspace,
+        (&workspace, generation),
         &channel,
         thread.as_deref(),
         &text,
@@ -417,17 +420,22 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     }
 }
 /// Under the sign-in lock, the credentials in use are still those of the approved workspace.
-fn bound(ctx: &Context<'_>, account: &Account, workspace: &str) -> Result<String, ApiError> {
-    let same: Option<String> = ctx
+fn bound(
+    ctx: &Context<'_>,
+    account: &Account,
+    (workspace, generation): (&str, i64),
+) -> Result<String, ApiError> {
+    let same: Option<(Option<String>, i64)> = ctx
         .connection
         .query_row(
-            "SELECT account_email FROM wrapper_connector_catalogue WHERE server_id=?1 AND phase='connected'",
+            "SELECT account_email,generation FROM wrapper_connector_catalogue WHERE server_id=?1 AND phase='connected'",
             [&account.server.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?
-        .flatten();
-    if same.as_deref() != Some(workspace) {
+        .optional()?;
+    if !same
+        .is_some_and(|(name, current)| name.as_deref() == Some(workspace) && current == generation)
+    {
         return Err(invalid(CHANGED));
     }
     credentials(ctx, &account.server.id)?
@@ -437,7 +445,7 @@ fn bound(ctx: &Context<'_>, account: &Account, workspace: &str) -> Result<String
 fn send(
     ctx: &Context<'_>,
     account: &Account,
-    workspace: &str,
+    connection: (&str, i64),
     channel: &str,
     thread: Option<&str>,
     text: &str,
@@ -447,7 +455,7 @@ fn send(
     // A sign-in replaces the token under this lock: the send below keeps the one it took.
     let access = {
         let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
-        bound(ctx, account, workspace).map_err(not_published)?
+        bound(ctx, account, connection).map_err(not_published)?
     };
     // Looking a name up posts nothing: a failure here is a certain "not published".
     let id = channel_id(ctx, account, m, &access, channel).map_err(not_published)?;

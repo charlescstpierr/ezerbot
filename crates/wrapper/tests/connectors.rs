@@ -4692,3 +4692,28 @@ fn slack_message_without_the_write_permission_asks_to_reconnect_and_posts_nothin
         "refused"
     );
 }
+
+#[test]
+fn slack_message_is_refused_after_a_new_sign_in_even_to_a_workspace_of_the_same_name() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let (run, card) = f.slack_prepare(
+        "slack-draft-7",
+        json!({"channel":"C0GENERAL","text":"Bonjour"}),
+    );
+    // The connection lapses, then another sign-in names the same workspace and the bot is enabled again.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='slack'",
+            [],
+        )
+        .unwrap();
+    f.slack_connect();
+    assert_eq!(f.item("slack")["account"], "Atelier Ezerbot");
+    f.github_resolve(&card, "slack-send-6", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("espace Slack a changé"));
+    assert_eq!(f.slack_post_calls(), 0);
+    assert!(f.slack_posts().is_empty());
+}

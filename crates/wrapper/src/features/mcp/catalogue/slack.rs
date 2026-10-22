@@ -107,18 +107,20 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
 struct Account {
     server: Server,
     workspace: String,
+    /// Moves with every sign-in: a token is the one a draft was prepared with only while it holds.
+    generation: i64,
     enabled: bool,
 }
 fn connected(ctx: &Context<'_>) -> Result<Option<Account>, ApiError> {
-    let row: Option<(String, Option<String>)> = ctx
+    let row: Option<(String, Option<String>, i64)> = ctx
         .connection
         .query_row(
-            "SELECT server_id,account_email FROM wrapper_connector_catalogue WHERE id='slack' AND phase='connected'",
+            "SELECT server_id,account_email,generation FROM wrapper_connector_catalogue WHERE id='slack' AND phase='connected'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((server_id, workspace)) = row else {
+    let Some((server_id, workspace, generation)) = row else {
         return Ok(None);
     };
     Ok(super::super::servers(ctx.connection)?
@@ -129,6 +131,7 @@ fn connected(ctx: &Context<'_>) -> Result<Option<Account>, ApiError> {
                 .bot_id
                 .is_none_or(|bot| super::super::enabled(ctx.connection, &server.id, bot)),
             workspace: workspace.unwrap_or_else(|| "Slack".into()),
+            generation,
             server,
         }))
 }

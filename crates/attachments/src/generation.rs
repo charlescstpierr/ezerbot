@@ -2370,6 +2370,145 @@ mod tests {
         out
     }
 
+    struct PdfRun {
+        x: f32,
+        y: f32,
+        size: f32,
+        text: String,
+    }
+
+    struct PdfBox {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    }
+
+    struct PdfImage {
+        x: f32,
+        y: f32,
+        size: f32,
+    }
+
+    fn pdf_text_runs(bytes: &[u8]) -> Vec<PdfRun> {
+        let mut out = Vec::new();
+        for stream in content_streams(bytes) {
+            let mut i = 0;
+            while let Some(rel) = stream[i..].windows(7).position(|w| w == b"BT /F1 ") {
+                i += rel + 7;
+                let Some(tf) = stream[i..].windows(4).position(|w| w == b" Tf ") else {
+                    break;
+                };
+                let size = std::str::from_utf8(&stream[i..i + tf])
+                    .unwrap_or("")
+                    .trim()
+                    .parse()
+                    .unwrap_or(0.0);
+                i += tf + 4;
+                let Some(tm) = stream[i..].windows(5).position(|w| w == b" Tm (") else {
+                    break;
+                };
+                let header = std::str::from_utf8(&stream[i..i + tm]).unwrap_or("");
+                let nums: Vec<f32> = header
+                    .split_whitespace()
+                    .filter_map(|token| token.parse().ok())
+                    .collect();
+                let (x, y) = if nums.len() >= 2 {
+                    (nums[nums.len() - 2], nums[nums.len() - 1])
+                } else {
+                    (0.0, 0.0)
+                };
+                i += tm + 5;
+                let mut shown = String::new();
+                while i < stream.len() {
+                    match stream[i] {
+                        b'\\' => {
+                            i += 1;
+                            if i < stream.len() {
+                                shown.push(winansi_char(stream[i]));
+                                i += 1;
+                            }
+                        }
+                        b')' => {
+                            i += 1;
+                            break;
+                        }
+                        c => {
+                            shown.push(winansi_char(c));
+                            i += 1;
+                        }
+                    }
+                }
+                if !shown.is_empty() {
+                    out.push(PdfRun {
+                        x,
+                        y,
+                        size,
+                        text: shown,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn pdf_images(bytes: &[u8]) -> Vec<PdfImage> {
+        let mut out = Vec::new();
+        for stream in content_streams(bytes) {
+            let text = String::from_utf8_lossy(&stream);
+            for line in text.lines() {
+                let Some(idx) = line.find(" cm /Im1 Do") else {
+                    continue;
+                };
+                let nums: Vec<f32> = line[..idx]
+                    .split_whitespace()
+                    .filter_map(|token| token.parse().ok())
+                    .collect();
+                if nums.len() >= 6 {
+                    let n = nums.len();
+                    out.push(PdfImage {
+                        size: nums[n - 6],
+                        x: nums[n - 2],
+                        y: nums[n - 1],
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn box_containing(boxes: &[PdfBox], x: f32, y: f32) -> Option<&PdfBox> {
+        boxes.iter().find(|b| {
+            x + 0.2 >= b.x && x <= b.x + b.w + 0.2 && y + 0.2 >= b.y && y <= b.y + b.h + 0.2
+        })
+    }
+
+    fn pdf_stroke_boxes(bytes: &[u8]) -> Vec<PdfBox> {
+        let mut out = Vec::new();
+        for stream in content_streams(bytes) {
+            let text = String::from_utf8_lossy(&stream);
+            for line in text.lines() {
+                let Some(idx) = line.find(" re S") else {
+                    continue;
+                };
+                let nums: Vec<f32> = line[..idx]
+                    .split_whitespace()
+                    .filter_map(|token| token.parse().ok())
+                    .collect();
+                if nums.len() >= 4 {
+                    let n = nums.len();
+                    out.push(PdfBox {
+                        x: nums[n - 4],
+                        y: nums[n - 3],
+                        w: nums[n - 2],
+                        h: nums[n - 1],
+                    });
+                }
+            }
+        }
+        out
+    }
+
     fn md_cells(cell: &str, cols: usize) -> String {
         format!("|{}|", vec![cell; cols].join("|"))
     }
@@ -2491,6 +2630,132 @@ mod tests {
             pdf_shown(&pdf.bytes).chars().filter(|c| *c == 'W').count(),
             4_000
         );
+    }
+
+    fn assert_table_ink_inside_columns(cell: &str) {
+        let cols = 50;
+        let pdf = generate(&Request {
+            name: "Large".into(),
+            format: "pdf".into(),
+            content: format!(
+                "{}\n{}\n{}\n",
+                md_cells(cell, cols),
+                md_cells("---", cols),
+                md_cells(cell, cols)
+            ),
+        })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let runs = pdf_text_runs(&pdf.bytes);
+        let boxes = pdf_stroke_boxes(&pdf.bytes);
+        assert!(!runs.is_empty(), "aucun texte de cellule");
+        assert!(!boxes.is_empty(), "aucune cellule dessinée");
+        assert_ink_inside(&boxes, &runs, &pdf_images(&pdf.bytes));
+        let needle = cell.chars().next().expect("cellule");
+        assert_eq!(
+            pdf_shown(&pdf.bytes)
+                .chars()
+                .filter(|c| *c == needle)
+                .count(),
+            cols * 2 * cell.chars().filter(|c| *c == needle).count()
+        );
+    }
+
+    #[test]
+    fn pdf_wide_table_of_i_stays_inside_its_column() {
+        assert_table_ink_inside_columns("iiiiiiii");
+    }
+
+    #[test]
+    fn pdf_wide_table_wide_glyph_stays_inside_its_column() {
+        assert_table_ink_inside_columns("WWWWWWWW");
+    }
+
+    fn assert_ink_inside(boxes: &[PdfBox], runs: &[PdfRun], images: &[PdfImage]) {
+        for run in runs {
+            let Some(cell_box) = box_containing(boxes, run.x, run.y) else {
+                panic!(
+                    "texte hors de toute cellule à ({}, {}) : {}",
+                    run.x, run.y, run.text
+                );
+            };
+            let end = run.x + dejavu_width(&run.text, run.size);
+            let right = cell_box.x + cell_box.w;
+            assert!(
+                end <= right + 0.15,
+                "le texte dépasse la colonne ({end} > {right}) : {}",
+                run.text
+            );
+        }
+        for image in images {
+            let Some(cell_box) = box_containing(boxes, image.x, image.y) else {
+                panic!("image hors de toute cellule à ({}, {})", image.x, image.y);
+            };
+            let end = image.x + image.size + 1.5;
+            let right = cell_box.x + cell_box.w;
+            assert!(
+                end <= right + 0.15,
+                "l'image dépasse la colonne ({end} > {right})"
+            );
+        }
+    }
+
+    #[test]
+    fn pdf_skewed_table_keeps_wide_glyphs_inside_the_narrow_column() {
+        let wide = "W".repeat(40);
+        let mut cells = vec![wide; 50];
+        cells[0] = "‰🎉".into();
+        let row = format!("|{}|", cells.join("|"));
+        let pdf = generate(&Request {
+            name: "Biais".into(),
+            format: "pdf".into(),
+            content: format!("{row}\n{}\n{row}\n", md_cells("---", 50)),
+        })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let boxes = pdf_stroke_boxes(&pdf.bytes);
+        let narrow = boxes.iter().map(|b| b.w).fold(f32::MAX, f32::min);
+        assert!(narrow < 3.0, "la colonne étroite mesure {narrow} pt");
+        let runs = pdf_text_runs(&pdf.bytes);
+        let images = pdf_images(&pdf.bytes);
+        assert!(
+            runs.iter().any(|run| run.text.contains('‰')),
+            "le pour-mille doit être dessiné"
+        );
+        assert!(images.len() >= 2, "les deux emoji doivent être dessinés");
+        assert_ink_inside(&boxes, &runs, &images);
+        assert_eq!(
+            pdf_shown(&pdf.bytes).chars().filter(|c| *c == '‰').count(),
+            2
+        );
+    }
+
+    #[test]
+    fn pdf_fitting_table_keeps_ten_point_type_and_four_point_inset() {
+        let pdf = generate(&Request {
+            name: "Court".into(),
+            format: "pdf".into(),
+            content: "| Nom | Coût |\n| --- | --- |\n| Thé | 12 |\n".into(),
+        })
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let runs = pdf_text_runs(&pdf.bytes);
+        let boxes = pdf_stroke_boxes(&pdf.bytes);
+        assert!(runs.len() >= 4, "les quatre cellules doivent être lisibles");
+        for run in &runs {
+            assert!(
+                (run.size - 10.0).abs() < 0.011,
+                "taille {} pour {}",
+                run.size,
+                run.text
+            );
+            let Some(cell_box) = box_containing(&boxes, run.x, run.y) else {
+                panic!("texte hors cellule : {}", run.text);
+            };
+            assert!(
+                (run.x - (cell_box.x + 4.0)).abs() < 0.05,
+                "retrait {} pour {}",
+                run.x - cell_box.x,
+                run.text
+            );
+        }
     }
 
     #[test]

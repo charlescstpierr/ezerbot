@@ -113,6 +113,10 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 pub(crate) fn is_github_tool(name: &str) -> bool {
     catalogue::github::is_tool(name) || is_github_comment(name)
 }
+/// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::github::unavailable(ctx)
+}
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     if is_github_comment(&call.name) {
         catalogue::github::comment::call(ctx, call)

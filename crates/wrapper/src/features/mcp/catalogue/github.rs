@@ -23,6 +23,11 @@ const CODE_LIFETIME: u64 = 900;
 const PAGE: usize = 30;
 /// Characters of a file shown in the bubble; the rest is said to be cut.
 const EXCERPT: usize = 3000;
+const NOT_CONNECTED: &str =
+    "GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez.";
+/// What a read says once the account was disconnected, here or by a cancelled sign-in.
+const DISCONNECTED: &str =
+    "GitHub est déconnecté. Reconnectez GitHub dans Paramètres › Connecteurs, puis réessayez.";
 const RECONNECT: &str =
     "La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub dans Paramètres › Connecteurs.";
 
@@ -350,6 +355,31 @@ fn write_tokens(
         })
     })
 }
+/// Ask GitHub to revoke the user token. Revoking one normally takes the app's secret,
+/// which Ezerbot never holds, so GitHub may refuse: only an explicit success counts.
+pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
+    let Some(access) = env.get("ACCESS_TOKEN") else {
+        return false;
+    };
+    let url = if fake_base().is_some() {
+        endpoint(m, "revoke")
+    } else {
+        let Some(client) = client_id() else {
+            return false;
+        };
+        format!("https://api.github.com/applications/{client}/token")
+    };
+    matches!(
+        agent()
+            .request("DELETE", &url)
+            .set("Accept", "application/vnd.github+json")
+            .set("User-Agent", "Ezerbot")
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .set("Content-Type", "application/json")
+            .send_string(&json!({ "access_token": access }).to_string()),
+        Ok(response) if matches!(response.status(), 200 | 204)
+    )
+}
 fn forget_tokens(ctx: &Context<'_>, server: &Server) {
     if let Ok(vault) = crate::features::forms::vault(ctx) {
         let _ = vault.remove(&secret_name(&server.id));
@@ -593,21 +623,29 @@ pub(in super::super) fn call(
         },
     }
 }
+/// Why the GitHub tools are not offered to this bot: no account, a disconnected one,
+/// or a connected one this bot may not use.
+pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
+    match resolve(ctx) {
+        Err(error) => error.message,
+        Ok(_) => "GitHub n’est pas activé pour ce bot. Activez-le dans Paramètres › Connecteurs, puis réessayez.".into(),
+    }
+}
 /// The account this request resolved. Zero connected accounts is a sentence, not a call.
 fn resolve(ctx: &Context<'_>) -> Result<(Server, Manifest, String), ApiError> {
     let row: Option<(String, String, Option<String>)> = ctx.connection.query_row("SELECT server_id,phase,account_email FROM wrapper_connector_catalogue WHERE id='github'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let Some((id, phase_name, login)) = row else {
-        return Err(invalid("GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez."));
+        return Err(invalid(NOT_CONNECTED));
     };
     let login = match (phase_name.as_str(), login) {
         ("connected", Some(login)) => login,
         ("reconnect", _) => return Err(invalid(RECONNECT)),
-        _ => return Err(invalid("GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez.")),
+        _ => return Err(invalid(DISCONNECTED)),
     };
     let server = super::super::servers(ctx.connection)?
         .into_iter()
         .find(|s| s.id == id)
-        .ok_or_else(|| invalid("GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez."))?;
+        .ok_or_else(|| invalid(NOT_CONNECTED))?;
     Ok((server, manifest("github")?, login))
 }
 /// Run one authenticated call. An access past its expiry is renewed first, and a 401

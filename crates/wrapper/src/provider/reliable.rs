@@ -65,14 +65,23 @@ struct Worker {
     inner: Arc<Inner>,
     settled: Arc<Mutex<Settled>>,
 }
-impl Drop for Worker {
-    fn drop(&mut self) {
-        self.inner.transports.fetch_sub(1, Ordering::SeqCst);
+impl Worker {
+    /// Declared before the last send: once the caller holds the terminal event no
+    /// read is left to close, so dropping the caller must not count this socket.
+    fn finish(&self) {
         let mut settled = lock(&self.settled);
+        if settled.worker_done {
+            return;
+        }
         settled.worker_done = true;
         if settled.counted {
             self.inner.closing.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 fn send(tx: &SyncSender<Wire>, value: Wire) -> Result<()> {
@@ -105,6 +114,14 @@ impl Session {
     pub(crate) fn resume_turns(&self) {
         lock(&self.inner.paused_turns).clear();
     }
+    #[cfg(test)]
+    pub(crate) fn hold_worker_exits(&self, hold: bool) {
+        self.inner.held_exits.store(hold, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn closing_sockets(&self) -> usize {
+        self.inner.closing.load(Ordering::SeqCst)
+    }
     pub(super) fn reliable_stream(
         &self,
         body: Value,
@@ -132,7 +149,6 @@ impl Session {
                 reason: failure.message,
             });
         }
-        let _ = self.inner.transports.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::sync_channel(32);
         let abandoned = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Mutex::new(Settled {
@@ -161,7 +177,7 @@ impl Session {
         // reports the timeout, it cannot close a socket the worker is reading.
         let deadline = Instant::now() + limits.total;
         thread::spawn(move || {
-            let _worker = Worker {
+            let worker = Worker {
                 inner: session.inner.clone(),
                 settled: worker_settled,
             };
@@ -181,6 +197,7 @@ impl Session {
                     Ok(response) => response,
                     Err(failure) => {
                         send(&tx, Wire::Failure(failure.clone()))?;
+                        worker.finish();
                         return send(
                             &tx,
                             Wire::Event(ModelEvent::Failed {
@@ -236,11 +253,23 @@ impl Session {
                                 }),
                             )?;
                         }
+                        if matches!(
+                            event,
+                            ModelEvent::Completed
+                                | ModelEvent::Failed { .. }
+                                | ModelEvent::Incomplete { .. }
+                        ) {
+                            worker.finish();
+                        }
                         send(&tx, Wire::Event(event))
                     },
                 )
             })();
             let _ = result; // Receiver is the sole persistence owner; never log content/errors here.
+            #[cfg(test)]
+            while session.inner.held_exits.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
         });
         let _abandon = Abandon {
             flag: abandoned.clone(),
@@ -395,8 +424,10 @@ mod production_deadlines {
 
 #[cfg(test)]
 mod elapsed_interval {
+    use super::Session;
     use crate::{App, Endpoints, Provider};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use grokbot_engine::contracts::ModelEvent;
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::TcpListener,
@@ -511,6 +542,175 @@ mod elapsed_interval {
         assert!(
             elapsed >= 700 && blocked.elapsed() >= Duration::from_millis(700),
             "elapsed interval lost: {elapsed}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A transport that delivered its last event has nothing left to close: a burst
+    /// of finished turns must never be counted as sockets still shutting down.
+    #[test]
+    fn finished_workers_are_not_counted_as_closing_sockets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for _ in 0..24 {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    break;
+                };
+                thread::spawn(move || respond(&mut socket, &AtomicBool::new(false)));
+            }
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-burst-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "burst",
+                "account_id": "burst",
+                "client_id": "burst",
+                "access_token": token(),
+                "refresh_token": "burst-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&db, endpoints, false, true);
+        session.hold_worker_exits(true);
+        let mut peak = 0;
+        for burst in 0..8 {
+            let mut events = Vec::new();
+            session
+                .reliable_stream(
+                    serde_json::json!({"model": "gpt-test", "instructions": "Écris un titre", "input": []}),
+                    &AtomicBool::new(false),
+                    None,
+                    &mut |_, _| Ok(()),
+                    &mut |event| {
+                        events.push(event);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            peak = peak.max(session.closing_sockets());
+            assert!(
+                matches!(events.last(), Some(ModelEvent::Completed)),
+                "turn {burst} was refused or failed: {events:?}"
+            );
+        }
+        session.hold_worker_exits(false);
+        assert!(peak <= 4, "closing peaked at {peak}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The title cap bounds the request itself, not only the caller's wait: a
+    /// server that never answers loses its connection when the cap expires.
+    #[test]
+    fn a_slow_title_request_is_dropped_within_its_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed_tx, closed) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                line.clear();
+            }
+            socket
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            // Drain the body and never answer: only the client may end this call.
+            let mut byte = [0u8; 1];
+            loop {
+                match socket.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = closed_tx.send(Instant::now());
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-title-cap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "cap",
+                "account_id": "cap",
+                "client_id": "cap",
+                "access_token": token(),
+                "refresh_token": "cap-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&db, endpoints, false, true);
+        *super::lock(&session.inner.deadlines) = super::Deadlines {
+            first: Duration::from_secs(30),
+            stall: Duration::from_secs(30),
+            total: Duration::from_secs(2),
+        };
+        let started = Instant::now();
+        let mut events = Vec::new();
+        session
+            .reliable_stream(
+                serde_json::json!({"model": "gpt-test", "instructions": "Écris un titre", "input": []}),
+                &AtomicBool::new(false),
+                None,
+                &mut |_, _| Ok(()),
+                &mut |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(matches!(events.last(), Some(ModelEvent::Failed { .. })));
+        let dropped = closed
+            .recv_timeout(Duration::from_secs(6))
+            .expect("the title request was still open after its cap");
+        let open = dropped.duration_since(started);
+        assert!(
+            open >= Duration::from_millis(1500),
+            "the request ended before its cap, not because of it: {open:?} {events:?}"
+        );
+        assert!(
+            open <= Duration::from_secs(4),
+            "the request outlived the title cap by {open:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

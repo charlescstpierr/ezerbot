@@ -2005,4 +2005,18 @@ mod occurrences_tests {
             [1, 2, 1, 1]
         );
     }
+
+    #[test]
+    fn two_members_with_the_same_schedule_keep_their_own_missed_ranges() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(1))]);
+        tick(&conn, 7_230_000);
+        let ranges = missed_ranges(&conn, &routine.routine_id).unwrap();
+        let mut members: Vec<_> = ranges.iter().map(|r| r.member_id.as_str()).collect();
+        members.sort();
+        assert_eq!(members, ["a", "b"]);
+        assert_eq!(ranges[0].from_inclusive, ranges[1].from_inclusive);
+        assert_eq!(ranges[0].schedule_version, ranges[1].schedule_version);
+        let page = missed_ranges_page(&conn, &routine.routine_id, None).unwrap();
+        assert_eq!(page.items.len(), 2);
+    }
 }

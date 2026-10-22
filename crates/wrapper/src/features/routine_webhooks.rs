@@ -826,34 +826,12 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let published = (state == "published").then_some(base.clone()).flatten();
         let mut items = serde_json::Map::new();
         let mut stmt = ctx.connection.prepare(&format!(
-            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND {LIVE} ORDER BY w.rowid",
+            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND {LIVE} ORDER BY (SELECT x.key FROM json_each(r.trigger,'$.members') x WHERE json_extract(x.value,'$.id')=w.trigger_id), w.rowid",
         ))?;
+        // A group lists its webhooks in the order of its triggers, which is how history numbers them.
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        // Cards follow the order of the triggers in the group, which is also how history numbers them.
-        let mut rows = rows;
-        let mut places = std::collections::HashMap::new();
-        for (routine, _) in &rows {
-            if let std::collections::hash_map::Entry::Vacant(slot) = places.entry(routine.clone()) {
-                let ids: Vec<String> =
-                    match grokbot_scheduler::routine::get(ctx.connection, routine)?
-                        .map(|r| r.trigger)
-                    {
-                        Some(Schedule::Group { members }) => {
-                            members.into_iter().map(|m| m.id).collect()
-                        }
-                        _ => vec![],
-                    };
-                slot.insert(ids);
-            }
-        }
-        rows.sort_by_key(|(routine, trigger)| {
-            places[routine]
-                .iter()
-                .position(|id| id == trigger)
-                .unwrap_or(usize::MAX)
-        });
         for (routine, trigger) in rows {
             let entry = json!({"trigger_id":trigger,
                 "url":published.as_ref().map(|base| format!("{base}/{routine}/{trigger}")),

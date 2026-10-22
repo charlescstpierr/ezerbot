@@ -522,7 +522,7 @@
       try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
-    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value, group: JSON.stringify(rows.map((row) => row.value)) });
+    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value, group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
     const initial = baseline();
     form.addEventListener("input", update); form.addEventListener("change", update); update();
     const actions = node("div", "routines-actions");

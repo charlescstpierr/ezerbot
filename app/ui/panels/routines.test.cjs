@@ -589,3 +589,17 @@ test('missed ranges of two group members with the same version and start are bot
   assert.match(h.t.content.textContent, /Plages d’occurrences manquées \(2\)/);
   assert.equal(h.t.content.querySelectorAll('.routines-warning').length, 2);
 });
+
+test('replacing a webhook of a group by an identical one is saved, not mistaken for no change', async () => {
+  const two = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: { kind: 'webhook' } }, { id: 'trigger-b', trigger: { kind: 'webhook' } }] } };
+  const { sent, h } = await savedTrigger(two, h => {
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Retirer ce déclencheur').click();
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+    const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'webhook') && !el.children.some(o => o.value === 'group'));
+    type(kinds[kinds.length - 1], 'webhook');
+  });
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  const members = JSON.parse(JSON.stringify(update.body.trigger.members));
+  assert.deepEqual(members, [{ id: 'trigger-b', trigger: { kind: 'webhook' } }, { trigger: { kind: 'webhook' } }]);
+});

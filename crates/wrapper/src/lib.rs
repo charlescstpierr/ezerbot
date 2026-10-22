@@ -1121,6 +1121,9 @@ impl App {
             "INSERT INTO wrapper_bots (account_id, id, name, color, shape, description, instructions, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?8, ?5, ?6, ?7, ?7)",
             params![ACCOUNT, id, name, color, description, instructions, timestamp, shape],
         )?;
+        // A bot with no voice of its own takes one that no other bot uses. The bot exists
+        // either way: a failure here only leaves the voice for the next attribution.
+        let _ = features::voice_session::assign_missing(&self.connection);
         self.bot_response(id)
     }
 

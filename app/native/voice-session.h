@@ -235,11 +235,15 @@
     if ([command isEqual:@"options"]) {
         NSMutableArray *voices = [NSMutableArray array];
 #if defined(EZERBOT_RELEASE)
-        for (AVSpeechSynthesisVoice *voice in AVSpeechSynthesisVoice.speechVoices) {
-            if ([voice.language hasPrefix:@"fr"]) [voices addObject:@{@"id":voice.identifier,@"name":voice.name,@"language":voice.language}];
-        }
+        // Every voice the Mac can pronounce, French first: a bot without a choice is given the first free one.
+        for (AVSpeechSynthesisVoice *voice in AVSpeechSynthesisVoice.speechVoices) [voices addObject:@{@"id":voice.identifier,@"name":voice.name,@"language":voice.language}];
+        [voices sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            BOOL french = [a[@"language"] hasPrefix:@"fr"], otherFrench = [b[@"language"] hasPrefix:@"fr"];
+            return french == otherFrench ? NSOrderedSame : french ? NSOrderedAscending : NSOrderedDescending;
+        }];
 #else
-        [voices addObject:@{@"id":@"fake-fr-CA",@"name":@"Voix française de test",@"language":@"fr-CA"}];
+        [voices addObject:@{@"id":@"fake-fr-CA",@"name":@"Voix française de test (Canada)",@"language":@"fr-CA"}];
+        [voices addObject:@{@"id":@"fake-fr-FR",@"name":@"Voix française de test (France)",@"language":@"fr-FR"}];
 #endif
         reply(@{@"voices":voices}); return;
     }
@@ -294,14 +298,15 @@
         if (self.pendingBuffers) [self.player play];
 #endif
     } else if ([command isEqual:@"speak"]) {
-        NSString *text = body[@"text"], *identifier = body[@"voice"];
+        NSString *text = body[@"text"], *identifier = body[@"voice"], *language = body[@"language"] ?: @"";
         NSNumber *speed = body[@"speed"], *barge = body[@"barge"];
-        if (![text isKindOfClass:NSString.class] || !text.length || text.length > 1500 || ![identifier isKindOfClass:NSString.class] || ![speed isKindOfClass:NSNumber.class] || (barge && ![barge isKindOfClass:NSNumber.class]) || !isfinite(speed.doubleValue) || speed.doubleValue < 0.5 || speed.doubleValue > 1.5) { reply(@{@"status":@"invalid"}); return; }
+        if (![text isKindOfClass:NSString.class] || !text.length || text.length > 1500 || ![identifier isKindOfClass:NSString.class] || ![language isKindOfClass:NSString.class] || language.length > 32 || ![speed isKindOfClass:NSNumber.class] || (barge && ![barge isKindOfClass:NSNumber.class]) || !isfinite(speed.doubleValue) || speed.doubleValue < 0.5 || speed.doubleValue > 2) { reply(@{@"status":@"invalid"}); return; }
         if (![self.status isEqual:@"listening"] || (barge && barge.unsignedIntegerValue != self.barged)) { reply([self snapshot]); return; }
 #if defined(EZERBOT_RELEASE)
-        AVSpeechSynthesisVoice *voice = identifier.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:identifier] : [AVSpeechSynthesisVoice voiceWithLanguage:@"fr-CA"];
-        if (!voice && !identifier.length) voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"fr-FR"];
-        if (!voice || ![voice.language hasPrefix:@"fr"]) { [self fail:@"tts_unavailable"]; reply([self snapshot]); return; }
+        // No voice chosen: the Mac's voice for the bot's language, French when the language is Auto.
+        AVSpeechSynthesisVoice *voice = identifier.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:identifier] : [AVSpeechSynthesisVoice voiceWithLanguage:language.length ? language : @"fr-CA"];
+        if (!voice && !identifier.length) voice = [AVSpeechSynthesisVoice voiceWithLanguage:language.length ? language : @"fr-FR"];
+        if (!voice || (language.length && ![voice.language.lowercaseString hasPrefix:language.lowercaseString])) { [self fail:@"tts_unavailable"]; reply([self snapshot]); return; }
         AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithString:text];
         utterance.voice = voice; utterance.rate = AVSpeechUtteranceDefaultSpeechRate * speed.floatValue;
         [self.speechQueue addObject:utterance];

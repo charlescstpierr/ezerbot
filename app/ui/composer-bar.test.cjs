@@ -2,11 +2,11 @@
 // Optional: CHROME_BIN=/path/to/chrome node --test app/ui/composer-bar.test.cjs
 const assert = require("node:assert/strict");
 const { spawn, spawnSync } = require("node:child_process");
-const { existsSync, mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 
 const UI = __dirname;
 const FRAMES = [[1140, 780], [820, 560]];
@@ -316,21 +316,17 @@ function connectCdp(url) {
   });
 }
 
-async function pageTarget(port) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-    const found = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
-    if (found) return found;
-    await sleep(20);
-  }
-  throw new Error("chrome did not open a page target");
-}
+// One headless Chrome serves the whole file. The sweeps measure hundreds of widths and a
+// browser per width saturated the Mac. It starts on first use, runs in its own process group
+// so that its helpers die with it, and is killed when the file ends or the process exits.
+// It is never restarted: a browser that fails or hangs fails every later measure at once.
+let shared = null;
+let broken = null;
+let queue = Promise.resolve();
+let pages = 0;
 
-function measure(width, height, name, options) {
+function startChrome() {
   const directory = mkdtempSync(join(tmpdir(), "composer-bar-"));
-  const file = join(directory, "bar.html");
-  writeFileSync(file, page(name, options).replace("FRAMES_PLACEHOLDER", "null"));
   const chrome = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
@@ -340,68 +336,113 @@ function measure(width, height, name, options) {
     "--remote-allow-origins=*",
     `--remote-debugging-port=0`,
     `--user-data-dir=${join(directory, "profile")}`,
-    `--window-size=${width},${height}`,
+    "--window-size=1440,900",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], { stdio: ["ignore", "ignore", "pipe"], detached: true });
   chrome.on("error", () => {});
-  let stderr = "";
+  const started = { directory, chrome, stderr: "" };
   chrome.stderr.on("data", (chunk) => {
-    if (stderr.length < 4000) stderr += chunk;
+    if (started.stderr.length < 4000) started.stderr += chunk;
   });
-  const stop = () => {
-    if (chrome.exitCode === null) chrome.kill("SIGKILL");
+  started.port = debuggingPort(directory, chrome);
+  return started;
+}
+
+function stopChrome() {
+  const running = shared;
+  shared = null;
+  if (!running) return;
+  try { process.kill(-running.chrome.pid, "SIGKILL"); } catch { /* already gone */ }
+  rmSync(running.directory, { recursive: true, force: true });
+}
+
+process.on("exit", stopChrome);
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    stopChrome();
+    process.exit(1);
+  });
+}
+after(() => {
+  broken = new Error("composer-bar tests are over; Chrome is stopped");
+  stopChrome();
+});
+
+// Measurements run one after the other, even when a timed-out test is still looping.
+function measure(width, height, name, options) {
+  const run = queue.then(() => measureOnce(width, height, name, options));
+  queue = run.catch(() => {});
+  return run;
+}
+
+async function measureOnce(width, height, name, options) {
+  if (broken) throw broken;
+  if (!shared) shared = startChrome();
+  const running = shared;
+  const fail = (error) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    return new Error(`${detail}${running.stderr ? `\n${running.stderr.trim()}` : ""}`);
   };
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error, report) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      stop();
-      if (error) reject(error);
-      else resolve(report);
-    };
-    const timer = setTimeout(() => finish(new Error(`chrome did not report layout at ${width}×${height}`)), 20000);
-    (async () => {
-      const port = await debuggingPort(directory, chrome);
-      const target = await pageTarget(port);
-      const cdp = await connectCdp(target.webSocketDebuggerUrl);
-      try {
-        await cdp.send("Emulation.setDeviceMetricsOverride", {
-          width,
-          height,
-          deviceScaleFactor: 1,
-          mobile: false,
-          screenWidth: width,
-          screenHeight: height,
-        });
-        await cdp.send("Page.enable");
-        await cdp.send("Page.navigate", { url: pathToFileURL(file).href });
-        let text = "";
-        for (let attempt = 0; attempt < 50 && !text; attempt += 1) {
-          const evaluated = await cdp.send("Runtime.evaluate", {
-            expression: "document.getElementById('qa-result')?.textContent || ''",
-            returnByValue: true,
-          });
-          text = evaluated.result?.value || "";
-          if (!text) await sleep(40);
-        }
-        if (!text) throw new Error(`missing layout report at ${width}×${height}`);
-        const report = JSON.parse(text);
-        for (const theme of report.themes) {
-          if (theme.viewport[0] !== width || theme.viewport[1] !== height) {
-            throw new Error(`viewport is ${theme.viewport.join("×")}, expected ${width}×${height}`);
-          }
-        }
-        finish(null, report);
-      } finally {
-        cdp.close();
-      }
-    })().catch((error) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      finish(new Error(`${detail}${stderr ? `\n${stderr.trim()}` : ""}`));
+  let port;
+  try {
+    port = await running.port;
+  } catch (error) {
+    broken = fail(error);
+    throw broken;
+  }
+  const file = join(running.directory, `bar-${++pages}.html`);
+  writeFileSync(file, page(name, options).replace("FRAMES_PLACEHOLDER", "null"));
+  let target = null;
+  let cdp = null;
+  let timer;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        broken = new Error(`chrome did not report layout at ${width}×${height}`);
+        reject(broken);
+      }, 20000);
     });
-  });
+    const measured = (async () => {
+      target = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" }).then((response) => response.json());
+      cdp = await connectCdp(target.webSocketDebuggerUrl);
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: width,
+        screenHeight: height,
+      });
+      await cdp.send("Page.enable");
+      await cdp.send("Page.navigate", { url: pathToFileURL(file).href });
+      let text = "";
+      for (let attempt = 0; attempt < 50 && !text; attempt += 1) {
+        const evaluated = await cdp.send("Runtime.evaluate", {
+          expression: "document.getElementById('qa-result')?.textContent || ''",
+          returnByValue: true,
+        });
+        text = evaluated.result?.value || "";
+        if (!text) await sleep(40);
+      }
+      if (!text) throw new Error(`missing layout report at ${width}×${height}`);
+      const report = JSON.parse(text);
+      for (const theme of report.themes) {
+        if (theme.viewport[0] !== width || theme.viewport[1] !== height) {
+          throw new Error(`viewport is ${theme.viewport.join("×")}, expected ${width}×${height}`);
+        }
+      }
+      return report;
+    })();
+    measured.catch(() => {});
+    return await Promise.race([measured, timeout]);
+  } catch (error) {
+    throw fail(error);
+  } finally {
+    clearTimeout(timer);
+    cdp?.close();
+    if (target) await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`).catch(() => {});
+    rmSync(file, { force: true });
+  }
 }
 
 function forcedComposerWidth(width) {

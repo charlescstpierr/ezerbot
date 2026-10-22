@@ -11,17 +11,21 @@
     no_microphone:"Aucun microphone disponible. Branchez un microphone, puis réessayez.",
     audio_failed:"Le microphone a été déconnecté ou le traitement audio est indisponible. Rebranchez-le, puis relancez le mode voix.",
     failed:"La transcription a échoué. Le mode voix est arrêté ; relancez-le pour réessayer.",
-    tts_unavailable:"Cette voix française est indisponible sur ce Mac. Choisissez une autre voix dans Paramètres.",
+    tts_unavailable:"La voix de ce bot est indisponible sur ce Mac. Choisissez une autre voix dans les réglages du bot.",
     unavailable:"Le mode voix est disponible dans l’application Mac Ezerbot.",
-    invalid:"La synthèse vocale a échoué. Vérifiez la voix et la vitesse dans Paramètres.",
+    invalid:"La synthèse vocale a échoué. Vérifiez la voix et la vitesse dans les réglages du bot.",
     stale:"Cette session vocale n’est plus active. Relancez le mode voix.",
   };
   let ctx, token = "", settingsToken = "", conversationId, scopeKey, reader, epoch = 0, timer, ticking = false;
   const contextKey = context => context.conversation?.id || `new:${context.bot?.id || "grokbot"}`;
-  let button, bar, label, transcript, heldNotice, stop, leave, systemSettings, voiceSelect, speedInput, speedLabel, notice;
+  let button, bar, label, transcript, heldNotice, stop, leave, systemSettings;
   let phase = "idle", detail = "", liveText = "", lastUtterance = 0, lastBarge = 0, paused = false, sending = false;
   let inputHeld = false, followResumedReply = false;
-  let voicesLoaded = false, settingsDirty = false;
+  let voicesLoaded = false;
+  const botViews = new Set();
+  const noVoice = {voice:"",speed:1,language:"",chosen:false};
+  // Each bot speaks with its own voice, speed and language, whichever conversation it is in.
+  const botVoice = botId => ctx?.state?.voice?.bots?.[botId || ctx.bot?.id] || noVoice;
   const active = () => Boolean(token);
   let lastActive = false;
   errors.microphone_busy = "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.";
@@ -159,10 +163,10 @@
           if (rev !== epoch) return;
         }
       }
-      const chunks = reader.read(ctx.conversation?.messages || [], needsAction);
-      const settings = ctx.state.voice?.settings || {voice:"",speed:1};
-      for (const text of chunks) {
-        const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,barge:lastBarge});
+      const chunks = reader.readByAuthor(ctx.conversation?.messages || [], needsAction);
+      for (const {text, botId} of chunks) {
+        const settings = botVoice(botId);
+        const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,language:settings.language,barge:lastBarge});
         if (rev !== epoch) return;
         if (errors[receipt.status]) { fail(receipt.status); return; }
         if (receipt.barged > lastBarge) break; // Native STT already interrupted queued speech.
@@ -180,42 +184,77 @@
   function observe(next) {
     if (scopeKey && scopeKey !== contextKey(next)) exit();
     ctx = next;
-    if (!settingsDirty && ctx.state?.voice?.settings && voiceSelect) {
-      voiceSelect.value = ctx.state.voice.settings.voice;
-      speedInput.value = ctx.state.voice.settings.speed;
-      speedLabel.textContent = `Vitesse · ${Number(speedInput.value).toLocaleString("fr-CA")}×`;
-    }
     if (!voicesLoaded && (ctx.state?.voice?.debug_fake || window.webkit?.messageHandlers?.ezerbotVoiceSession)) loadVoices();
+    for (const view of botViews) view.render();
     render();
   }
+  // The Mac says which voices it can pronounce; the engine hands one to each bot without a choice.
   async function loadVoices() {
     voicesLoaded = true;
     try {
       const result = await bridge("options");
-      for (const voice of result.voices || []) { const option = el("option","",`${voice.name} · ${voice.language}`); option.value = voice.id; voiceSelect.append(option); }
-      voiceSelect.value = ctx.state.voice?.settings?.voice || "";
-    } catch { notice.textContent = "La liste des voix est indisponible. Rouvrez l’application pour réessayer."; }
+      await panels.api("/api/voice/voices", {voices:result.voices || []});
+      await panels.refresh();
+    } catch { voicesLoaded = false; for (const view of botViews) view.say("La liste des voix est indisponible. Rouvrez l’application pour réessayer."); }
+  }
+  const languageName = code => { try { return new Intl.DisplayNames(["fr"], {type:"language"}).of(code) || code; } catch { return code; } };
+  const languageOf = voice => String(voice.language || "").split("-")[0].toLowerCase();
+  const speedText = speed => `${Number(speed).toLocaleString("fr-CA")}×`;
+  function botSection(bot, container, context) {
+    ctx = ctx || context;
+    container.className = "setting-section voice-settings voice-bot-settings";
+    container.append(el("h3","","Voix"),el("p","","Le mode voix de ce bot parle avec cette voix, cette vitesse et cette langue. Transcription et lecture restent sur ce Mac ; l’audio n’est jamais transmis au modèle."));
+    if (!bot?.id || bot.deleted) { container.append(el("p","voice-settings-notice","Enregistrez d’abord ce bot : une voix lui sera attribuée.")); return; }
+    const current = el("p","voice-bot-current"); current.setAttribute("role","status");
+    const voiceLabel = el("label","","Voix"); const voiceSelect = el("select","text-input"); voiceSelect.name = "bot-voice"; voiceSelect.setAttribute("aria-label","Voix du bot"); voiceLabel.append(voiceSelect);
+    const languageLabel = el("label","","Langue de la voix"); const languageSelect = el("select","text-input"); languageSelect.name = "bot-voice-language"; languageSelect.setAttribute("aria-label","Langue de la voix"); languageLabel.append(languageSelect);
+    const speedLabel = el("label","","Vitesse · de 0,5 à 2"); const speedInput = el("input","text-input"); speedInput.type = "number"; speedInput.name = "bot-voice-speed"; speedInput.min = "0.5"; speedInput.max = "2"; speedInput.step = "0.1"; speedInput.setAttribute("aria-label","Vitesse de la voix"); speedLabel.append(speedInput);
+    const hint = el("p","voice-bot-hint");
+    const notice = el("p","voice-settings-notice"); notice.setAttribute("role","status");
+    const save = el("button","secondary-button","Enregistrer la voix"); save.type = "button";
+    let dirty = false;
+    const saved = () => ctx.state?.voice?.bots?.[bot.id] || noVoice;
+    const voices = () => ctx.state?.voice?.voices || [];
+    const fill = (select, entries, value) => {
+      select.replaceChildren(...entries.map(([id, text]) => { const option = el("option","",text); option.value = id; return option; }));
+      select.value = entries.some(([id]) => id === value) ? value : entries[0][0];
+    };
+    const fillVoices = (language, value) => fill(voiceSelect, [["","Voix du Mac par défaut"],...voices().filter(v => !language || languageOf(v) === language).map(v => [v.id,`${v.name} · ${v.language}`])], value);
+    function render() {
+      const setting = saved(), list = voices();
+      const codes = [...new Set(list.map(languageOf))].sort((a,b) => (b === "fr") - (a === "fr") || languageName(a).localeCompare(languageName(b),"fr"));
+      if (!dirty) {
+        fill(languageSelect, [["","Auto"],...codes.map(code => [code,languageName(code)])], setting.language);
+        fillVoices(languageSelect.value, setting.voice);
+        speedInput.value = setting.speed;
+      }
+      const shown = list.find(v => v.id === setting.voice);
+      current.textContent = !list.length ? "Les voix sont disponibles dans l’application Mac Ezerbot."
+        : `Voix de ${bot.name || "ce bot"} : ${shown ? shown.name : "voix du Mac par défaut"} · ${speedText(setting.speed)} · ${setting.language ? languageName(setting.language) : "langue Auto"}`;
+      hint.textContent = !list.length ? ""
+        : list.length === 1 ? "Une seule voix est installée sur ce Mac : tous les bots la partagent."
+        : setting.chosen ? "" : "Voix attribuée automatiquement, différente de celle des autres bots tant que c’est possible.";
+      voiceSelect.disabled = languageSelect.disabled = !list.length; save.disabled = !list.length;
+    }
+    languageSelect.onchange = () => { dirty = true; fillVoices(languageSelect.value, voiceSelect.value); };
+    voiceSelect.onchange = () => { dirty = true; };
+    speedInput.oninput = () => { dirty = true; };
+    save.onclick = async () => {
+      save.disabled = true; notice.textContent = "";
+      try {
+        await panels.api("/api/voice/bot", {bot_id:bot.id,voice:voiceSelect.value,speed:Number(speedInput.value),language:languageSelect.value});
+        dirty = false; await panels.refresh(); notice.textContent = "Voix enregistrée. Le mode voix de ce bot l’utilisera dès la prochaine phrase.";
+      } catch (error) { notice.textContent = error.message; }
+      finally { save.disabled = false; }
+    };
+    container.append(current,hint,voiceLabel,languageLabel,speedLabel,save,notice);
+    const view = {render, say(text) { notice.textContent = text; }};
+    botViews.add(view); render();
+    return () => botViews.delete(view);
   }
   panels.register({
     id:"voice-conversation",
-    settingsSection(container, context) {
-      ctx = context; container.className = "setting-section voice-settings";
-      container.append(el("h3","","Voix"),el("p","","Transcription et lecture françaises sur ce Mac. En mode voix, vos paroles sont envoyées automatiquement ; l’audio n’est jamais transmis au modèle."));
-      const voiceLabel = el("label","","Voix française"); voiceSelect = el("select","text-input"); voiceSelect.name = "conversation-voice"; voiceSelect.setAttribute("aria-label","Voix française");
-      const automatic = el("option","","Français · voix du Mac"); automatic.value = ""; voiceSelect.append(automatic); voiceLabel.append(voiceSelect);
-      const speedWrapper = el("label"); speedLabel = el("span","","Vitesse · 1×"); speedInput = el("input"); speedInput.type = "range"; speedInput.name = "conversation-voice-speed"; speedInput.min = "0.5"; speedInput.max = "1.5"; speedInput.step = "0.1"; speedInput.value = "1"; speedInput.setAttribute("aria-label","Vitesse de lecture"); speedWrapper.append(speedLabel,speedInput);
-      voiceSelect.onchange = () => { settingsDirty = true; };
-      speedInput.oninput = () => { settingsDirty = true; speedLabel.textContent = `Vitesse · ${Number(speedInput.value).toLocaleString("fr-CA")}×`; };
-      notice = el("p","voice-settings-notice"); notice.setAttribute("role","status");
-      const save = el("button","secondary-button","Enregistrer la voix"); save.type = "button";
-      save.onclick = async () => {
-        save.disabled = true;
-        try { await panels.api("/api/voice/settings", {voice:voiceSelect.value,speed:Number(speedInput.value)}); settingsDirty = false; await panels.refresh(); notice.textContent = "Voix enregistrée. Les prochaines phrases utiliseront ces réglages."; }
-        catch (error) { notice.textContent = error.message; }
-        finally { save.disabled = false; }
-      };
-      container.append(voiceLabel,speedWrapper,save,notice);
-    },
+    botSection,
     composer: {
       mount(container, context) {
         ctx = context;

@@ -304,49 +304,214 @@ fn conversation_voice_uses_the_durable_send_and_fake_model_then_records_synthesi
         .contains("plus actif"));
 }
 
+fn catalogue(f: &mut Fixture, ids: &[&str]) {
+    let voices: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"id":id,"name":format!("Voix {id}"),"language":"fr-CA"}))
+        .collect();
+    f.post("/api/voice/voices", json!({"voices":voices}));
+}
+fn bot_voice(f: &mut Fixture, bot: &str) -> Value {
+    f.app.api("GET", "/api/state", b"").unwrap()["voice"]["bots"][bot].clone()
+}
+fn new_bot(f: &mut Fixture, id: &str) {
+    f.post(
+        "/api/bots",
+        json!({"id":id,"name":id,"color":"orange","instructions":"Réponds."}),
+    );
+}
+
 #[test]
-fn voice_settings_validate_and_survive_restart_without_resuming_audio() {
+fn two_bots_without_a_choice_announce_two_different_voices_while_two_exist() {
     let mut f = Fixture::new();
-    assert_eq!(
-        f.app.api("GET", "/api/state", b"").unwrap()["voice"]["settings"]["speed"],
-        1.0
-    );
-    f.post(
-        "/api/voice/settings",
-        json!({"voice":"fake-fr-CA","speed":0.8}),
-    );
-    for body in [
-        json!({"voice":"fr","speed":2}),
-        json!({"voice":"bad\nvoice","speed":1}),
-        json!({"voice":"fr","speed":1,"command":"run"}),
-    ] {
-        assert_eq!(
-            f.app
-                .api(
-                    "POST",
-                    "/api/voice/settings",
-                    &serde_json::to_vec(&body).unwrap()
-                )
-                .unwrap_err()
-                .status,
-            400
-        );
+    catalogue(&mut f, &["voix-a", "voix-b"]);
+    new_bot(&mut f, "bot-chef");
+    let first = bot_voice(&mut f, "grokbot");
+    let second = bot_voice(&mut f, "bot-chef");
+    assert_ne!(first["voice"], second["voice"], "{first} {second}");
+    for bot in [&first, &second] {
+        assert!(["voix-a", "voix-b"].contains(&bot["voice"].as_str().unwrap()));
+        assert_eq!(bot["speed"], 1.0);
+        assert_eq!(bot["language"], "");
     }
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["voice"]["single"], false);
+    f.reopen();
+    assert_eq!(bot_voice(&mut f, "grokbot"), first);
+    assert_eq!(bot_voice(&mut f, "bot-chef"), second);
+    // No voice is left for a third bot: it shares one rather than staying silent.
+    new_bot(&mut f, "bot-tiers");
+    let third = bot_voice(&mut f, "bot-tiers");
+    assert!(["voix-a", "voix-b"].contains(&third["voice"].as_str().unwrap()));
+}
+
+#[test]
+fn with_a_single_voice_the_bots_share_it_and_the_setting_says_so() {
+    let mut f = Fixture::new();
+    catalogue(&mut f, &["voix-seule"]);
+    new_bot(&mut f, "bot-chef");
+    assert_eq!(bot_voice(&mut f, "grokbot")["voice"], "voix-seule");
+    assert_eq!(bot_voice(&mut f, "bot-chef")["voice"], "voix-seule");
+    assert_eq!(
+        f.app.api("GET", "/api/state", b"").unwrap()["voice"]["single"],
+        true
+    );
+}
+
+#[test]
+fn a_chosen_voice_speed_and_language_belong_to_the_bot_and_survive_restart() {
+    let mut f = Fixture::new();
+    catalogue(&mut f, &["voix-a", "voix-b"]);
+    new_bot(&mut f, "bot-chef");
+    let other = bot_voice(&mut f, "grokbot");
     f.post(
-        "/api/voice/session/debug",
-        json!({"command":"start","token":"restart"}),
+        "/api/voice/bot",
+        json!({"bot_id":"bot-chef","voice":"voix-b","speed":2.0,"language":"fr"}),
     );
     f.reopen();
-    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let chef = bot_voice(&mut f, "bot-chef");
     assert_eq!(
-        state["voice"]["settings"],
-        json!({"voice":"fake-fr-CA","speed":0.8})
+        (
+            chef["voice"].clone(),
+            chef["speed"].clone(),
+            chef["language"].clone()
+        ),
+        (json!("voix-b"), json!(2.0), json!("fr"))
     );
+    assert_eq!(
+        bot_voice(&mut f, "grokbot"),
+        other,
+        "the other bot is untouched"
+    );
+}
+
+#[test]
+fn a_speed_outside_half_to_two_is_refused_and_keeps_the_previous_speed() {
+    let mut f = Fixture::new();
+    catalogue(&mut f, &["voix-a", "voix-b"]);
+    f.post(
+        "/api/voice/bot",
+        json!({"bot_id":"grokbot","voice":"voix-a","speed":1.8,"language":""}),
+    );
+    for speed in [json!(2.5), json!(0.4), json!(-1), json!(100)] {
+        let message = f.denied(
+            "/api/voice/bot",
+            json!({"bot_id":"grokbot","voice":"voix-b","speed":speed,"language":"fr"}),
+        );
+        assert!(message.contains("0,5 à 2"), "{message}");
+        let kept = bot_voice(&mut f, "grokbot");
+        assert_eq!(
+            (
+                kept["voice"].clone(),
+                kept["speed"].clone(),
+                kept["language"].clone()
+            ),
+            (json!("voix-a"), json!(1.8), json!(""))
+        );
+    }
+    for body in [
+        json!({"bot_id":"grokbot","voice":"inconnue","speed":1}),
+        json!({"bot_id":"grokbot","voice":"bad\nvoice","speed":1}),
+        json!({"bot_id":"grokbot","voice":"voix-a","speed":1,"language":"fr CA"}),
+        json!({"bot_id":"grokbot","voice":"voix-a","speed":1,"command":"run"}),
+        json!({"bot_id":"absent","voice":"voix-a","speed":1}),
+    ] {
+        assert!(f
+            .app
+            .api(
+                "POST",
+                "/api/voice/bot",
+                &serde_json::to_vec(&body).unwrap()
+            )
+            .is_err());
+    }
+    assert_eq!(bot_voice(&mut f, "grokbot")["speed"], 1.8);
+    f.post(
+        "/api/voice/bot",
+        json!({"bot_id":"grokbot","voice":"voix-a","speed":0.5}),
+    );
+    assert_eq!(bot_voice(&mut f, "grokbot")["speed"], 0.5);
+}
+
+#[test]
+fn the_former_global_voice_becomes_the_voice_of_bots_without_one_only_once() {
+    let mut f = Fixture::new();
+    let db = f.dir.join("workspace.sqlite");
+    let legacy = |voice: &str, speed: f64| {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE wrapper_voice_settings SET voice=?1,speed=?2 WHERE id=1",
+                rusqlite::params![voice, speed],
+            )
+            .unwrap();
+    };
+    new_bot(&mut f, "bot-chef");
+    legacy("voix-b", 0.8);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "DELETE FROM wrapper_migrations WHERE id='voice-par-bot-v1'",
+            [],
+        )
+        .unwrap();
+    f.reopen();
+    catalogue(&mut f, &["voix-a", "voix-b"]);
+    for bot in ["grokbot", "bot-chef"] {
+        let carried = bot_voice(&mut f, bot);
+        assert_eq!(
+            (carried["voice"].clone(), carried["speed"].clone()),
+            (json!("voix-b"), json!(0.8))
+        );
+    }
+    // The next bot without a choice takes the voice that is left.
+    new_bot(&mut f, "bot-suivant");
+    assert_eq!(bot_voice(&mut f, "bot-suivant")["voice"], "voix-a");
+    // A later change of the old setting is not carried again.
+    legacy("voix-a", 1.4);
+    f.reopen();
+    assert_eq!(bot_voice(&mut f, "grokbot")["voice"], "voix-b");
+}
+
+#[test]
+fn voice_mode_refuses_a_speed_beyond_two_and_speaks_with_the_voice_it_is_given() {
+    let mut f = Fixture::new();
+    let route = "/api/voice/session/debug";
+    let options = f.post(route, json!({"command":"options"}));
+    assert!(options["voices"].as_array().unwrap().len() >= 2);
+    f.post(route, json!({"command":"start","token":"v"}));
+    for (voice, speed) in [("fake-fr-CA", 1.0), ("fake-fr-FR", 2.0)] {
+        let spoken = f.post(
+            route,
+            json!({"command":"speak","token":"v","text":"Bonjour.","voice":voice,"speed":speed}),
+        );
+        assert_eq!(
+            spoken["recorded_voices"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["voice"],
+            voice
+        );
+        assert_eq!(
+            spoken["recorded_voices"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["speed"],
+            speed
+        );
+    }
     assert!(f
         .denied(
-            "/api/voice/session/debug",
-            json!({"command":"status","token":"restart"})
+            route,
+            json!({"command":"speak","token":"v","text":"Encore.","voice":"fake-fr-FR","speed":2.5})
         )
+        .contains("Synthèse vocale"));
+    f.post(route, json!({"command":"cancel","token":"v"}));
+    f.reopen();
+    assert!(f
+        .denied(route, json!({"command":"status","token":"v"}))
         .contains("plus actif"));
 }
 

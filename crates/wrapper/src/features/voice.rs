@@ -222,7 +222,9 @@ pub fn state(ctx: &Context<'_>) -> Value {
         Ok(rows)
     })()
     .unwrap_or_default();
-    json!({"max_seconds":MAX_SECONDS,"microphone":microphone(ctx.connection).unwrap_or_default(),"drafts":drafts,"debug_fake":cfg!(debug_assertions),"settings":super::voice_session::settings(ctx.connection).unwrap_or_else(|_| json!({"voice":"","speed":1.0}))})
+    let bots = super::voice_session::state(ctx.connection)
+        .unwrap_or_else(|_| json!({"bots":{},"voices":[],"single":false}));
+    json!({"max_seconds":MAX_SECONDS,"microphone":microphone(ctx.connection).unwrap_or_default(),"drafts":drafts,"debug_fake":cfg!(debug_assertions),"bots":bots["bots"],"voices":bots["voices"],"single":bots["single"]})
 }
 
 pub fn routes(
@@ -240,8 +242,11 @@ pub fn routes(
         return Some(app.debug_voice_session.command(body).map(ApiResponse::Json));
     }
     match (method, path) {
-        ("POST", "/api/voice/settings") => {
-            Some(super::voice_session::save(&app.connection, body).map(ApiResponse::Json))
+        ("POST", "/api/voice/bot") => {
+            Some(super::voice_session::save_bot(&app.connection, body).map(ApiResponse::Json))
+        }
+        ("POST", "/api/voice/voices") => {
+            Some(super::voice_session::save_catalogue(&app.connection, body).map(ApiResponse::Json))
         }
         ("POST", "/api/voice/microphone") => {
             Some(save_microphone(&app.connection, body).map(ApiResponse::Json))

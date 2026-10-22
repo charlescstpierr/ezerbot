@@ -11,7 +11,9 @@ export function createVoiceReader(messages = []) {
   return {
     interrupt(messages = []) { muted = true; for (const m of messages) offsets.set(m.id, (m.body || "").length); },
     nextTurn() { muted = false; },
-    read(messages, paused = false) {
+    read(messages, paused = false) { return this.readByAuthor(messages, paused).map(chunk => chunk.text); },
+    // Each sentence keeps the bot that wrote it: in a group, replies come from several bots.
+    readByAuthor(messages, paused = false) {
       const chunks = [];
       for (const m of messages) {
         if (m.role !== "assistant" || ![undefined, null, "message", "reply"].includes(m.kind)) continue;
@@ -35,7 +37,7 @@ export function createVoiceReader(messages = []) {
             if (/[\uD800-\uDBFF]/.test(tail[length - 1])) length--;
           }
           const text = spokenText(tail.slice(0, length));
-          if (text) chunks.push(text);
+          if (text) chunks.push({text, botId:m.payload?.bot_id});
           consumed += length; tail = tail.slice(length);
         }
         offsets.set(m.id, start + consumed);

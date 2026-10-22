@@ -153,7 +153,10 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
         }
         item["accounts"] = json!(accounts);
         // A slot still waiting for its first approval belongs to this card too.
-        item["slot_servers"] = json!(rows.iter().map(|(row, _)| server_id(row)).collect::<Vec<_>>());
+        item["slot_servers"] = json!(rows
+            .iter()
+            .map(|(row, _)| server_id(row))
+            .collect::<Vec<_>>());
         items.push(item);
     }
     items.push(super::super::recall::item(ctx)?);

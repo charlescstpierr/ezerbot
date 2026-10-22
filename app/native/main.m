@@ -390,8 +390,9 @@ static void shell_task_reap(const ShellChild *child) {
         if (!shell || ![shell isWorkspaceURL:shell.webView.URL]) { reply(NO,@"La fenêtre principale n’est pas prête."); return; }
         [shell.webView callAsyncJavaScript:@"return await window.EzerbotFloatingMain.openConversation(id)"
             arguments:@{@"id":identifier} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id result, NSError *error) {
-                if (!error && [result boolValue]) { [shell showMain:nil]; reply(YES,nil); }
-                else reply(NO,@"Ce fil n’est plus disponible ou un envoi est en cours dans Ezerbot.");
+                NSDictionary *outcome = !error && [result isKindOfClass:NSDictionary.class] ? result : nil;
+                if ([outcome[@"opened"] isEqual:@YES]) { [shell showMain:nil]; reply(YES,nil); }
+                else reply(NO, [outcome[@"reason"] isKindOfClass:NSString.class] ? outcome[@"reason"] : nil);
             }];
     };
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];

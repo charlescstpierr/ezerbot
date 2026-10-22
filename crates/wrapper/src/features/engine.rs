@@ -1562,6 +1562,7 @@ impl RunServices for Services<'_> {
             run_id: self.host_mcp.then_some("mcp-host-"),
         };
         tools.extend(super::mcp::scoped_tools(&ctx));
+        tools.extend(super::recall::scoped_tools(&ctx));
         if self.host_mcp {
             tools.extend(super::routines_background::host_tools());
         }
@@ -1628,6 +1629,7 @@ impl RunServices for Services<'_> {
             || super::screen::is_tool(&call.name)
             || super::generated::is_external(&call.name)
             || super::images::is_external(&call.name)
+            || super::recall::is_tool(&call.name)
             || super::mcp::is_github_tool(&call.name)
     }
     fn external_unavailable_reason(
@@ -1643,6 +1645,8 @@ impl RunServices for Services<'_> {
             super::screen::validate(&ctx, call)
         } else if super::generated::is_external(&call.name) {
             super::generated::validate(&ctx, call)
+        } else if super::recall::is_tool(&call.name) {
+            super::recall::validate(&ctx, call)
         } else {
             super::local::validate(&ctx, call)
         };
@@ -1660,6 +1664,8 @@ impl RunServices for Services<'_> {
             super::generated::execute(&ctx, call, self.cancel.clone())
         } else if super::images::is_external(&call.name) {
             super::images::execute(&ctx, call, &self.cancel)
+        } else if super::recall::is_tool(&call.name) {
+            super::recall::execute(&ctx, call)
         } else if super::mcp::is_github_tool(&call.name) {
             super::mcp::run_github_tool(&ctx, call)
         } else {
@@ -1696,8 +1702,22 @@ impl RunServices for Services<'_> {
                 });
             }
         }
+        if super::mcp::is_github_comment(&call.name) {
+            if let Err(error) = super::mcp::validate_github_comment(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
         if super::generated::is_external(&call.name) {
             if let Err(error) = super::generated::validate(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
+        if super::recall::is_tool(&call.name) {
+            if let Err(error) = super::recall::validate(&self.ctx(conn, run), call) {
                 return Ok(ApprovalCheck::Denied {
                     reason: error.message,
                 });

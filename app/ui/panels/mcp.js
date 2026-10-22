@@ -35,6 +35,72 @@
     target?.focus({preventScroll:true});
     if (target && Number.isInteger(f.start) && Number.isInteger(f.end)) target.setSelectionRange?.(f.start,f.end,f.direction);
   }
+  // Réunions : une clé Recall.ai, pas de client OAuth. La clé part au coffre et ne revient jamais.
+  const meetingStatus = {joining:"authorizing",in_call:"connected",done:"disconnected",cancelled:"disconnected",failed:"error"};
+  function recallCard(item) {
+    const card = node("article", null, "mcp-server mcp-catalogue-card");
+    card.setAttribute("data-connector", item.id);
+    const heading = node("div", null, "mcp-heading");
+    const status = node("span", null, `mcp-status mcp-status-${item.status}`);
+    const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
+    status.append(dot, document.createTextNode(item.status === "connected" ? "Connecté" : "Déconnecté"));
+    heading.append(node("strong", item.name), status);
+    card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
+    const meeting = item.meeting;
+    const live = Boolean(meeting?.active);
+    const actions = node("div", null, "mcp-actions");
+    if (item.status !== "connected") {
+      const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"), node("p", `${item.license} · ${item.source}`, "mcp-note"));
+      const form = node("form", null, "mcp-form"); form.id = `connector-setup-${item.id}`;
+      const field = input(`${item.id}-key`, "Clé API Recall.ai", "password"); field.maxLength = 256;
+      form.append(label("Clé API Recall.ai — jamais réaffichée", field));
+      const connect = button("Connecter", event => { event?.preventDefault(); return form.requestSubmit(); }, "primary-button");
+      connect.type = "submit"; connect.setAttribute("form", form.id); connect.setAttribute("data-connector-action", "connect");
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const body = {key:field.value};
+        field.value = "";
+        try { await act("/api/recall/connect", body, connect); }
+        finally { delete body.key; }
+      });
+      card.append(setup, form);
+      actions.append(connect);
+    } else {
+      const form = node("form", null, "mcp-form"); form.id = `connector-invite-${item.id}`;
+      const link = input(`${item.id}-link`, "https://meet.google.com/…"); link.maxLength = 2048;
+      link.setAttribute("aria-label", "Lien de la réunion");
+      form.append(label("Lien Google Meet, Zoom ou Microsoft Teams", link), node("p", "Une carte de consentement s’affiche avant chaque invitation. Les participants voient le bot.", "mcp-note"));
+      const invite = button("Inviter le bot", event => { event?.preventDefault(); return form.requestSubmit(); }, live ? "secondary-button" : "primary-button");
+      invite.type = "submit"; invite.setAttribute("form", form.id); invite.setAttribute("data-connector-action", "invite");
+      invite.disabled = live;
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        if (live) return;
+        await act("/api/recall/join", {link:link.value}, invite);
+        // Le lien d'une invitation acceptée ou en attente de carte ne reste pas dans le champ ; un lien refusé reste à corriger.
+        if (!feedback.textContent) { const next = catalogueCards.get(item.id)?.node.querySelector("input"); if (next) next.value = ""; }
+      });
+      card.append(form);
+      actions.append(invite);
+      const remove = button("Déconnecter", () => act("/api/recall/disconnect", {}, remove)); remove.setAttribute("data-connector-action","disconnect");
+      actions.append(remove);
+    }
+    if (meeting) {
+      const line = node("p", null, "mcp-meeting"); line.setAttribute("data-meeting-state", meeting.state);
+      const badge = node("span", null, `mcp-status mcp-status-${meetingStatus[meeting.state] || "error"}`);
+      const meetingDot = node("span", null, "status-dot"); meetingDot.setAttribute("aria-hidden", "true");
+      badge.append(meetingDot, document.createTextNode(meeting.label));
+      line.append(node("strong", "Réunion "), badge, document.createTextNode(` · ${meeting.host} · vu par les participants comme « ${meeting.bot_name} »`));
+      card.append(line);
+      if (meeting.message) card.append(node("p", meeting.message, meeting.state === "failed" ? "mcp-error" : "mcp-note"));
+      if (live) {
+        const leave = button("Quitter la réunion", () => act("/api/recall/leave", {id:meeting.id}, leave), "primary-button"); leave.setAttribute("data-connector-action","leave");
+        actions.append(leave);
+      }
+    }
+    card.append(actions);
+    return card;
+  }
   function renderCatalogue(items, bots) {
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
@@ -50,6 +116,13 @@
       // loses browser focus/selection despite keeping the node and its value.
       if (previous?.key === cardKey) continue;
       const view = previous && rememberCard(previous.node);
+      if (item.kind === "recall") {
+        const recall = recallCard(item);
+        if (previous) previous.node.replaceWith(recall); else catalogue.append(recall);
+        catalogueCards.set(item.id,{key:cardKey,node:recall});
+        restoreCard(recall,view);
+        continue;
+      }
       const card = node("article", null, "mcp-server mcp-catalogue-card");
       card.setAttribute("data-connector", item.id);
       const heading = node("div", null, "mcp-heading");

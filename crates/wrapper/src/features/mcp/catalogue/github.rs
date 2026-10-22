@@ -8,6 +8,8 @@ use std::{
     io::Read,
     time::{Duration, Instant},
 };
+pub(in super::super) mod comment;
+pub(in super::super) use comment::TOOL as COMMENT_TOOL;
 
 /// Read tools of the closed list. None needs an approval card: they only read.
 const TOOL: &str = "github_list_issues";
@@ -75,7 +77,7 @@ fn send(request: ureq::Request, form: Option<&[(&str, &str)]>) -> Result<Reply, 
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", "Ezerbot")
         .set("X-GitHub-Api-Version", "2022-11-28");
-    let outcome = match form {
+    reply_of(match form {
         Some(fields) => request
             .set("Accept", "application/json")
             .set("Content-Type", "application/x-www-form-urlencoded")
@@ -85,7 +87,18 @@ fn send(request: ureq::Request, form: Option<&[(&str, &str)]>) -> Result<Reply, 
                     .finish(),
             ),
         None => request.call(),
-    };
+    })
+}
+fn send_json(request: ureq::Request, body: &Value) -> Result<Reply, ()> {
+    reply_of(
+        request
+            .set("Accept", "application/vnd.github+json")
+            .set("User-Agent", "Ezerbot")
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(body),
+    )
+}
+fn reply_of(outcome: Result<ureq::Response, ureq::Error>) -> Result<Reply, ()> {
     let response = match outcome {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(_) => return Err(()),
@@ -475,6 +488,7 @@ pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec>
             schema: (tool.schema)(),
             requires_approval: false,
         })
+        .chain(std::iter::once(comment::tool_spec()))
         .collect()
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
@@ -483,6 +497,8 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         .iter()
         .map(|tool| json!({"name":tool.short,"description":tool.summary,"inputSchema":(tool.schema)()}))
         .collect();
+    let mut tools = tools;
+    tools.push(comment::tool_definition());
     let tools = json!(tools);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
@@ -632,35 +648,36 @@ fn resolve(ctx: &Context<'_>) -> Result<(Server, Manifest, String), ApiError> {
         .ok_or_else(|| invalid(NOT_CONNECTED))?;
     Ok((server, manifest("github")?, login))
 }
-/// One authenticated read for the account this request resolved. An access past its
-/// expiry is renewed once before the call, a rejected one once after. Any status that
-/// says nothing about the target (limit, refusal, outage) is already a sentence here;
-/// 200 and 404 come back for the caller, which knows what was missing.
-fn read(ctx: &Context<'_>, route: &str, repo: &str) -> Result<(String, Reply), ApiError> {
-    let (server, m, login) = resolve(ctx)?;
-    super::ensure(ctx, &server)?;
-    let url = format!("{}/{route}", endpoint(m, "api"));
-    let fetch = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
-        let access = credentials(ctx, &server.id)?
-            .and_then(|env| env.get("ACCESS_TOKEN").cloned())
-            .ok_or_else(|| invalid(RECONNECT))?;
-        let reply = send(
-            agent()
-                .get(&url)
-                .set("Authorization", &format!("Bearer {access}")),
-            None,
-        )
-        .map_err(|_| unreachable_github())?;
+/// Run one authenticated call. An access past its expiry is renewed first, and a 401
+/// renews once more and calls again: a rejected call has not touched the provider.
+fn authorized(
+    ctx: &Context<'_>,
+    server: &Server,
+    m: Manifest,
+    bind: &dyn Fn(&Context<'_>) -> Result<(), ApiError>,
+    call: &dyn Fn(&str) -> Result<Reply, ApiError>,
+) -> Result<Reply, ApiError> {
+    super::ensure(ctx, server)?;
+    let attempt = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
+        // A sign-in replaces the account and its tokens under this lock: the check and the
+        // read of the credentials see one account, and the call below keeps that token.
+        let access = {
+            let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+            bind(ctx)?;
+            credentials(ctx, &server.id)?
+                .and_then(|env| env.get("ACCESS_TOKEN").cloned())
+                .ok_or_else(|| invalid(RECONNECT))?
+        };
+        let reply = call(&access)?;
         Ok((access, reply))
     };
-    let (used, mut reply) = fetch(ctx)?;
+    let (used, mut reply) = attempt(ctx)?;
     if reply.status == 401 {
-        // Rejected before its clock expiry: renew once and read once more.
         {
             let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
             let mut env = credentials(ctx, &server.id)?.ok_or_else(|| invalid(RECONNECT))?;
             if env.get("ACCESS_TOKEN") == Some(&used) {
-                if let Err(error) = refresh(ctx, &server, m, &mut env) {
+                if let Err(error) = refresh(ctx, server, m, &mut env) {
                     if error.status != 503 {
                         phase(ctx, &server.id, "reconnect", RECONNECT)?;
                     }
@@ -668,32 +685,52 @@ fn read(ctx: &Context<'_>, route: &str, repo: &str) -> Result<(String, Reply), A
                 }
             }
         }
-        reply = fetch(ctx)?.1;
+        reply = attempt(ctx)?.1;
         if reply.status == 401 {
             phase(ctx, &server.id, "reconnect", RECONNECT)?;
             return Err(invalid(RECONNECT));
         }
     }
+    Ok(reply)
+}
+fn limited(reply: &Reply) -> bool {
+    reply.exhausted
+        || reply.status == 429
+        || reply.body["message"]
+            .as_str()
+            .is_some_and(|m| m.to_lowercase().contains("rate limit"))
+}
+fn limit_error(reply: &Reply, login: &str) -> ApiError {
+    let wait = reply
+        .reset
+        .and_then(|at| at.checked_sub(wall_clock() / 1000))
+        .filter(|s| *s <= 86_400)
+        .map(|s| format!(" Réessayez dans environ {} min.", s.div_ceil(60).max(1)))
+        .unwrap_or_default();
+    invalid(&format!(
+        "GitHub limite le débit des requêtes pour le compte {login}.{wait}"
+    ))
+}
+/// One authenticated read for the account this request resolved. An access past its
+/// expiry is renewed once before the call, a rejected one once after. Any status that
+/// says nothing about the target (limit, refusal, outage) is already a sentence here;
+/// 200 and 404 come back for the caller, which knows what was missing.
+fn read(ctx: &Context<'_>, route: &str, repo: &str) -> Result<(String, Reply), ApiError> {
+    let (server, m, login) = resolve(ctx)?;
+    let url = format!("{}/{route}", endpoint(m, "api"));
+    let reply = authorized(ctx, &server, m, &|_| Ok(()), &|access| {
+        send(
+            agent()
+                .get(&url)
+                .set("Authorization", &format!("Bearer {access}")),
+            None,
+        )
+        .map_err(|_| unreachable_github())
+    })?;
     match reply.status {
         200 | 404 => (),
         403 if too_large(&reply.body) => (),
-        403 | 429
-            if reply.exhausted
-                || reply.status == 429
-                || reply.body["message"]
-                    .as_str()
-                    .is_some_and(|m| m.to_lowercase().contains("rate limit")) =>
-        {
-            let wait = reply
-                .reset
-                .and_then(|at| at.checked_sub(wall_clock() / 1000))
-                .filter(|s| *s <= 86_400)
-                .map(|s| format!(" Réessayez dans environ {} min.", s.div_ceil(60).max(1)))
-                .unwrap_or_default();
-            return Err(invalid(&format!(
-                "GitHub limite le débit des requêtes pour le compte {login}.{wait}"
-            )));
-        }
+        403 | 429 if limited(&reply) => return Err(limit_error(&reply, &login)),
         403 => {
             let sso = if reply.single_sign_on {
                 " Votre organisation exige une session SAML : autorisez-la chez GitHub."

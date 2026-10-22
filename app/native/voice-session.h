@@ -16,7 +16,9 @@
 @property(nonatomic, strong) NSTimer *silence;
 @property(nonatomic, strong) id changeObserver;
 @property(nonatomic, strong) NSMutableArray<NSString *> *spoken;
+@property(nonatomic, copy) NSDictionary *microphone;
 #if defined(EZERBOT_RELEASE)
+@property(nonatomic) AudioDeviceID chosenDevice;
 @property(nonatomic, strong) AVAudioEngine *engine;
 @property(nonatomic, strong) SFSpeechRecognizer *recognizer;
 @property(atomic, strong) SFSpeechAudioBufferRecognitionRequest *request;
@@ -40,7 +42,8 @@
 - (NSDictionary *)snapshot {
     return @{ @"token":self.token ?: @"", @"status":self.status ?: @"idle", @"transcript":self.transcript ?: @"",
         @"utterance_id":@(self.utterance), @"final_text":self.finalText ?: @"", @"barged":@(self.barged),
-        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused) };
+        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused),
+        @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO };
 }
 - (void)interrupt {
 #if defined(EZERBOT_RELEASE)
@@ -180,6 +183,11 @@
     if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio]) { [self fail:@"no_microphone"]; return; }
     self.engine = [[AVAudioEngine alloc] init];
     NSError *error = nil;
+    // The microphone chosen in the settings. Without a choice, the system default serves.
+    if (self.chosenDevice != kAudioObjectUnknown) {
+        AudioDeviceID device = self.chosenDevice; AudioUnit unit = self.engine.inputNode.audioUnit;
+        if (unit) AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device));
+    }
     // No raw microphone fallback while the speaker is active: avoid self-transcription.
     if (![self.engine.inputNode setVoiceProcessingEnabled:YES error:&error]) { [self fail:@"audio_failed"]; return; }
     AVAudioFormat *format = [self.engine.inputNode outputFormatForBus:0];
@@ -237,6 +245,11 @@
     }
     if ([command isEqual:@"start"]) {
         [self cancel]; self.token = token; self.utterance = 0; self.barged = 0;
+        NSString *requested = body[@"microphone"];
+        self.microphone = [EzerbotMicrophones resolve:[requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @""];
+#if defined(EZERBOT_RELEASE)
+        self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
+#endif
         self.spoken = [NSMutableArray array]; self.status = @"authorizing";
 #if defined(EZERBOT_RELEASE)
         NSUInteger generation = self.generation;

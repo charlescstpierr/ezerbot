@@ -457,7 +457,7 @@ fn fake_audio_denial_error_retry_cancel_stale_and_duration_cap() {
     assert_eq!(
         f.post(
             "/api/voice/debug",
-            json!({"command":"start","token":"b","scenario":"failed"})
+            json!({"command":"start","token":"b","scenario":"failed","purpose":"memo"})
         )["status"],
         "recording"
     );
@@ -484,4 +484,172 @@ fn fake_audio_denial_error_retry_cancel_stale_and_duration_cap() {
     );
     assert_eq!(capped["status"], "ready");
     assert_eq!(capped["too_long"], true);
+}
+
+const DEBUG: &str = "/api/voice/debug";
+
+fn microphone_ids(list: &Value) -> Vec<&str> {
+    list["microphones"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mic| mic["id"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn microphone_choice_is_listed_survives_restart_and_is_announced_when_dictating() {
+    let mut f = Fixture::new();
+    let list = f.post(DEBUG, json!({"command":"microphones"}));
+    assert_eq!(microphone_ids(&list), ["fake-built-in", "fake-usb"]);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        state["voice"]["microphone"], "",
+        "default microphone until chosen"
+    );
+
+    assert_eq!(
+        f.post("/api/voice/microphone", json!({"id":"fake-usb"}))["microphone"],
+        "fake-usb"
+    );
+    f.reopen();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(state["voice"]["microphone"], "fake-usb");
+
+    let started = f.post(
+        DEBUG,
+        json!({"command":"start","token":"mic","microphone":state["voice"]["microphone"],"purpose":"dictation"}),
+    );
+    assert_eq!(started["status"], "recording");
+    assert_eq!(started["microphone_id"], "fake-usb");
+    assert_eq!(started["microphone_name"], "Microphone USB (test)");
+    assert_eq!(started["microphone_fallback"], false);
+    f.post(DEBUG, json!({"command":"cancel","token":"mic"}));
+
+    assert!(f
+        .denied("/api/voice/microphone", json!({"id":"bad\nid"}))
+        .contains("Microphone invalide"));
+    assert_eq!(
+        f.app.api("GET", "/api/state", b"").unwrap()["voice"]["microphone"],
+        "fake-usb",
+        "a refused choice changes nothing"
+    );
+}
+
+#[test]
+fn a_removed_microphone_falls_back_to_the_default_and_can_be_forgotten() {
+    let mut f = Fixture::new();
+    f.post("/api/voice/microphone", json!({"id":"fake-usb"}));
+    f.post(
+        DEBUG,
+        json!({"command":"configure","unplugged":["fake-usb"]}),
+    );
+    let list = f.post(DEBUG, json!({"command":"microphones"}));
+    assert_eq!(microphone_ids(&list), ["fake-built-in"]);
+    let started = f.post(
+        DEBUG,
+        json!({"command":"start","token":"gone","microphone":"fake-usb","purpose":"dictation"}),
+    );
+    assert_eq!(started["status"], "recording", "dictation still starts");
+    assert_eq!(started["microphone_id"], "fake-built-in");
+    assert_eq!(started["microphone_name"], "Microphone intégré (test)");
+    assert_eq!(started["microphone_fallback"], true);
+    f.post(DEBUG, json!({"command":"cancel","token":"gone"}));
+
+    assert_eq!(
+        f.post("/api/voice/microphone", json!({"id":""}))["microphone"],
+        "",
+        "an empty choice is the default microphone"
+    );
+    f.post(DEBUG, json!({"command":"configure","unplugged":[]}));
+    let list = f.post(DEBUG, json!({"command":"microphones"}));
+    assert_eq!(microphone_ids(&list), ["fake-built-in", "fake-usb"]);
+}
+
+#[test]
+fn dictation_runs_five_minutes_then_hands_the_text_to_the_draft_while_the_memo_stays_at_one_minute()
+{
+    let mut f = Fixture::new();
+    let started = f.post(
+        DEBUG,
+        json!({"command":"start","token":"d","purpose":"dictation"}),
+    );
+    assert_eq!(started["max_seconds"], 300);
+    let early = f.post(DEBUG, json!({"command":"advance","token":"d","ms":299_000}));
+    assert_eq!(early["status"], "recording");
+    assert_eq!(early["too_long"], false);
+    let limit = f.post(DEBUG, json!({"command":"advance","token":"d","ms":1_000}));
+    assert_eq!(limit["status"], "ready");
+    assert_eq!(limit["too_long"], true);
+    assert_eq!(limit["elapsed_ms"], 300_000);
+    assert!(!limit["transcript"].as_str().unwrap().is_empty());
+    assert_eq!(
+        limit["data"], "",
+        "dictation audio never leaves the recorder"
+    );
+    f.post(DEBUG, json!({"command":"cancel","token":"d"}));
+
+    let memo = f.post(
+        DEBUG,
+        json!({"command":"start","token":"m","purpose":"memo"}),
+    );
+    assert_eq!(memo["max_seconds"], 60);
+    let capped = f.post(DEBUG, json!({"command":"advance","token":"m","ms":60_000}));
+    assert_eq!(capped["status"], "ready");
+    assert_eq!(capped["too_long"], true);
+    assert_eq!(capped["elapsed_ms"], 60_000);
+    assert_ne!(capped["data"], "", "the memo keeps its audio");
+}
+
+#[test]
+fn dictation_memo_and_local_capture_still_exclude_each_other() {
+    let mut f = Fixture::new();
+    f.post(
+        DEBUG,
+        json!({"command":"start","token":"d","purpose":"dictation"}),
+    );
+    assert!(f
+        .denied(
+            DEBUG,
+            json!({"command":"start","token":"m","purpose":"memo"})
+        )
+        .contains("déjà en cours"));
+    assert!(f
+        .denied(
+            DEBUG,
+            json!({"command":"start","token":"r","purpose":"meeting","consent":true})
+        )
+        .contains("déjà en cours"));
+    f.post(DEBUG, json!({"command":"cancel","token":"d"}));
+    let meeting = f.post(
+        DEBUG,
+        json!({"command":"start","token":"r","purpose":"meeting","consent":true}),
+    );
+    assert_eq!(meeting["max_seconds"], 600);
+    assert!(f
+        .denied(
+            DEBUG,
+            json!({"command":"start","token":"d","purpose":"dictation"})
+        )
+        .contains("réunion"));
+}
+
+#[test]
+fn the_voice_mode_listens_to_the_chosen_microphone_or_the_default_one_when_it_is_unknown() {
+    let mut f = Fixture::new();
+    let route = "/api/voice/session/debug";
+    let chosen = f.post(
+        route,
+        json!({"command":"start","token":"s","microphone":"fake-usb"}),
+    );
+    assert_eq!(chosen["status"], "listening");
+    assert_eq!(chosen["microphone_id"], "fake-usb");
+    assert_eq!(chosen["microphone_fallback"], false);
+    f.post(route, json!({"command":"cancel","token":"s"}));
+    let fallback = f.post(
+        route,
+        json!({"command":"start","token":"g","microphone":"unknown-mic"}),
+    );
+    assert_eq!(fallback["microphone_id"], "fake-built-in");
+    assert_eq!(fallback["microphone_fallback"], true);
 }

@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -314,6 +314,21 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             raise SystemExit(f"la visionneuse de l’image générée est incomplète: {viewer}")
         state["viewer"] = viewer["labels"]
         return state
+    if sphere == "dictee":
+        # Tous les micros sont branchés au départ : la preuve du repli débranche le micro choisi puis le rebranche.
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """async () => { await window.GrokbotPanels.api("/api/voice/debug", {command: "configure", unplugged: []}); document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+        return wait_js(
+            evidence,
+            """() => {
+              const panel = document.querySelector('[data-panel="voice"].voice-microphone-settings');
+              const options = panel ? [...panel.querySelectorAll(".voice-microphone-option")] : [];
+              if (options.length !== 3) return null;
+              panel.scrollIntoView({block: "center"});
+              return {ok: true, heading: panel.querySelector("h3").textContent, options: options.map((node) => node.dataset.id)};
+            }""",
+            "réglage du microphone non prêt",
+        )
     if sphere == "pages":
         # Une conversation neuve à chaque passage : la capture « avant » la montre sans Page, « après » est prise à l’envoi.
         eval_js(evidence, close_overlays_js())
@@ -382,12 +397,73 @@ def pages_request(evidence: Path) -> dict:
     return state
 
 
+def dictation_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
+    if index == 0:
+        state = eval_js(
+            evidence,
+            """async () => {
+              const option = document.querySelector('.voice-microphone-option[data-id="fake-usb"] input');
+              option.click();
+              await new Promise((resolve) => setTimeout(resolve, 600));
+              const marked = [...document.querySelectorAll(".voice-microphone-option")].find((node) => node.dataset.selected === "true");
+              return {chosen: marked?.dataset.id, mark: marked?.querySelector(".voice-microphone-mark")?.textContent};
+            }""",
+        )
+        if state.get("chosen") != "fake-usb" or state.get("mark") != "Choisi":
+            raise SystemExit(f"le micro choisi n’est pas marqué: {state}")
+    if index == 1:
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """async () => { await window.GrokbotPanels.api("/api/voice/debug", {command: "configure", unplugged: ["fake-usb"]}); document.getElementById("settings-button").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const panel = document.querySelector('[data-panel="voice"].voice-microphone-settings');
+              const notice = panel?.querySelector(".voice-settings-notice")?.textContent || "";
+              const marked = panel ? [...panel.querySelectorAll(".voice-microphone-option")].find((node) => node.dataset.selected === "true") : null;
+              if (!notice.includes("n’est plus disponible")) return null;
+              panel.scrollIntoView({block: "center"});
+              return {ok: true, notice, chosen: marked?.dataset.id, ids: [...panel.querySelectorAll(".voice-microphone-option")].map((node) => node.dataset.id)};
+            }""",
+            "phrase de repli absente",
+        )
+        if state["notice"] != "Le microphone choisi n’est plus disponible. Ezerbot utilise le microphone par défaut." or state["chosen"] != "" or "fake-usb" in state["ids"]:
+            raise SystemExit(f"repli du micro incorrect: {state}")
+        eval_js(evidence, """async () => { await window.GrokbotPanels.api("/api/voice/debug", {command: "configure", unplugged: []}); return true; }""")
+    if index == 2:
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """() => { document.getElementById("voice-microphone").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const text = document.querySelector(".voice-status")?.textContent || "";
+              const time = document.querySelector(".voice-time")?.textContent || "";
+              return text.startsWith("Écoute en cours · Microphone intégré (test)") && time.endsWith("/ 5:00") ? {ok: true, text, time} : null;
+            }""",
+            "dictée non démarrée sur le micro par défaut",
+        )
+    if index == 3:
+        eval_js(evidence, """() => { document.getElementById("voice-microphone").click(); return true; }""")
+        wait_js(
+            evidence,
+            """() => {
+              const text = document.querySelector(".voice-status")?.textContent || "";
+              const editor = document.querySelector('.gb-editor[aria-label="Votre message"]')?.innerText || "";
+              const sent = document.querySelectorAll('[data-message-id]').length;
+              return text.startsWith("Transcription ajoutée au brouillon") && editor.includes("mémo vocal") && !sent ? {ok: true} : null;
+            }""",
+            "texte absent du brouillon, ou message parti tout seul",
+        )
+
+
 def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     size = f"{width}x{height}"
     if sphere == "reunions-routines":
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
+    if sphere == "dictee":
+        return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -406,6 +482,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)
+        if sphere == "dictee":
+            dictation_step(evidence, index)
         if sphere == "reunions-routines" and index == 1:
             eval_js(
                 evidence,

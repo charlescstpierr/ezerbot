@@ -43,3 +43,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Bibliothèque](./bibliotheque.md) couvre la bibliothèque de fichiers d’un bot : dépôt, liste, retrait et avertissement de troncature.
 - [Images générées](./images.md) couvre la demande d’un dessin, l’image dans la carte et la visionneuse.
 - [Pages](./pages.md) couvre une Page locale écrite par le bot : affichage à côté du fil, choix interactif et texte décodé.
+- [Dictée et microphone](./dictee.md) couvre le réglage du microphone, son repli quand il disparaît et la dictée qui pose le texte dans le brouillon.

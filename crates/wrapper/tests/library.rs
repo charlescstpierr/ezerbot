@@ -175,9 +175,13 @@ impl Fixture {
     }
 
     fn ask(&mut self, conversation: &str, message: &str) {
+        self.ask_about(conversation, message, QUESTION);
+    }
+
+    fn ask_about(&mut self, conversation: &str, message: &str, body: &str) {
         self.post(
             "/api/send",
-            json!({"conversation_id": conversation, "message_id": message, "body": QUESTION}),
+            json!({"conversation_id": conversation, "message_id": message, "body": body}),
         );
     }
 
@@ -533,6 +537,55 @@ fn removal_hides_the_file_from_the_next_thread() {
     assert_eq!(huge.status, 400);
     assert_eq!(huge.message, "Le document dépasse la limite de 20 Mo.");
     assert!(f.listed("bot-a").is_empty());
+}
+
+#[test]
+fn a_generic_request_still_recalls_the_only_large_file_as_a_flagged_excerpt() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    let text = format!("{TARIFF} {}", "remplissage ".repeat(2_000));
+    f.deposit("bot-a", FILE_NAME, text.as_bytes());
+    let conversation = f.conversation("bot-a");
+    f.ask_about(&conversation, "question-resume", "Résume ce fichier");
+    let prompt = f.library_prompt(&conversation);
+    assert!(
+        prompt.contains(FILE_NAME) && prompt.contains("42 euros"),
+        "le fichier unique reste transmis : {prompt}"
+    );
+    assert!(
+        prompt.contains("excerpt") && prompt.contains("Extrait partiel"),
+        "le rappel annonce un extrait partiel : {prompt}"
+    );
+}
+
+#[test]
+fn two_named_files_both_reach_the_model() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.bot("bot-a", "Alpha");
+    let filler = "remplissage ".repeat(2_000);
+    f.deposit(
+        "bot-a",
+        "alpha.md",
+        format!("MARQUEUR-ALPHA {filler}").as_bytes(),
+    );
+    f.deposit(
+        "bot-a",
+        "beta.md",
+        format!("MARQUEUR-BETA {filler}").as_bytes(),
+    );
+    let conversation = f.conversation("bot-a");
+    f.ask_about(
+        &conversation,
+        "question-compare",
+        "Compare alpha.md et beta.md",
+    );
+    let prompt = f.library_prompt(&conversation);
+    assert!(
+        prompt.contains("MARQUEUR-ALPHA") && prompt.contains("MARQUEUR-BETA"),
+        "chaque fichier demandé garde une part du rappel : {prompt}"
+    );
 }
 
 #[test]

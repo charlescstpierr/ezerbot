@@ -192,9 +192,9 @@ def main() -> None:
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
         }
-        if args.sphere != "images":
+        if args.sphere not in ("images", "pages"):
             # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
-            # La sphère images garde le faux OpenAI du run : lui seul sait répondre à un dessin.
+            # Les sphères images et pages gardent le faux OpenAI du run : lui seul sait répondre à un dessin ou écrire une Page.
             child_env["EZERBOT_FAKE_SIGNIN"] = "1"
         print(
             f"run: {binary} --port 0 --db {db}",

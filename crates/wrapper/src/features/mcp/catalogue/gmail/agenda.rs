@@ -8,9 +8,11 @@ pub(super) const TOOL: &str = "calendar_list_events";
 pub(super) const MODEL: &str = "Google Agenda · lire les rendez-vous d’un jour de l’agenda principal (lecture seule, compte Gmail connecté dans Ezerbot ; demain par défaut, ou aujourd’hui). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte, le fuseau et l’heure de chaque rendez-vous.";
 pub(super) const SUMMARY: &str = "Lire les rendez-vous d’un jour (demain par défaut) de l’agenda principal du compte Google connecté, en lecture seule.";
 const CALENDAR: &str = "calendar/v3/calendars/primary";
-/// Events asked for in one page, for a day and for the watch.
-const LISTED: u32 = 25;
+/// Events asked for in one page, for a day and for the watch, and how many pages are
+/// followed: a listing that is not read to its end is said so, never passed off as whole.
+const LISTED: u32 = 250;
 const WATCHED: u32 = 100;
+const PAGES: usize = 10;
 const DAY: &str = "Jour invalide : choisissez « demain » (par défaut) ou « aujourd_hui ».";
 
 /// Serializes the watch: two callers must not both see an event as new.
@@ -84,6 +86,32 @@ fn fetch(ctx: &Context<'_>, account: &Account, route: &str) -> Result<Value, Api
         return Err(unreadable());
     }
     Ok(reply.body)
+}
+/// The pages of one listing, followed by their token. `true` when the listing was read to
+/// its end: a page shorter than the limit proves nothing, only the missing token does.
+fn fetch_all(
+    ctx: &Context<'_>,
+    account: &Account,
+    pairs: &[(&str, String)],
+) -> Result<(Vec<Value>, bool), ApiError> {
+    let mut items = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..PAGES {
+        let mut page = pairs.to_vec();
+        if let Some(token) = &token {
+            page.push(("pageToken", token.clone()));
+        }
+        let body = fetch(ctx, account, &format!("{CALENDAR}/events?{}", query(&page)))?;
+        items.extend(body["items"].as_array().cloned().unwrap_or_default());
+        match body["nextPageToken"]
+            .as_str()
+            .filter(|next| !next.is_empty() && next.len() <= 2048)
+        {
+            Some(next) => token = Some(next.to_owned()),
+            None => return Ok((items, true)),
+        }
+    }
+    Ok((items, false))
 }
 /// The IANA zone of the primary calendar, or the Mac's when Google names none that is known.
 fn calendar_zone(ctx: &Context<'_>, account: &Account) -> Result<String, ApiError> {
@@ -172,24 +200,21 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
     let next = day
         .checked_add(Span::new().days(1))
         .map_err(|_| unreadable())?;
-    let body = fetch(
+    let (items, complete) = fetch_all(
         ctx,
         &account,
-        &format!(
-            "{CALENDAR}/events?{}",
-            query(&[
-                ("timeMin", bound(day)?),
-                ("timeMax", bound(next)?),
-                ("singleEvents", "true".into()),
-                ("orderBy", "startTime".into()),
-                ("maxResults", LISTED.to_string()),
-            ])
-        ),
+        &[
+            ("timeMin", bound(day)?),
+            ("timeMax", bound(next)?),
+            ("singleEvents", "true".into()),
+            ("orderBy", "startTime".into()),
+            ("maxResults", LISTED.to_string()),
+        ],
     )?;
     let email = account.email.as_str();
     let mut events = Vec::new();
     let mut lines = Vec::new();
-    for item in body["items"].as_array().into_iter().flatten() {
+    for item in &items {
         if item["status"] == "cancelled" {
             continue;
         }
@@ -200,13 +225,20 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
         };
         let end = moment(&item["end"], &zone_name).map_or(start, |(end, _, _)| end);
         let title = title(item);
+        // The hours are those of the agenda's zone, the one the heading names; an event told
+        // in another zone says so rather than showing a time of that zone unlabelled.
         let hours = if all_day {
             "toute la journée".to_owned()
         } else {
-            let hour = |ms: i64| told(ms, &start_zone)[11..16].to_owned();
+            let hour = |ms: i64| told(ms, &zone_name)[11..16].to_owned();
             format!("{}–{}", hour(start), hour(end))
         };
-        lines.push(format!("{}. {hours} · {title}", lines.len() + 1));
+        let elsewhere = if start_zone == zone_name {
+            String::new()
+        } else {
+            format!(" · fuseau de l’événement : {start_zone}")
+        };
+        lines.push(format!("{}. {hours} · {title}{elsewhere}", lines.len() + 1));
         events.push(json!({"id":id,"titre":title,"debut":told(start,&start_zone),"fin":told(end,&start_zone),"fuseau":start_zone,"journee":all_day}));
     }
     let heading = format!(
@@ -217,12 +249,19 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
             format!("Rendez-vous de {label} ({day})")
         }
     );
+    let cut = (!complete).then(|| {
+        format!(
+            "Liste tronquée : seuls les {} premiers rendez-vous sont donnés.",
+            events.len()
+        )
+    });
     let text = std::iter::once(heading)
         .chain(lines)
+        .chain(cut)
         .collect::<Vec<_>>()
         .join("\n");
     Ok(
-        json!({"compte":email,"fuseau":zone_name,"jour":day.to_string(),"evenements":events,"texte":text}),
+        json!({"compte":email,"fuseau":zone_name,"jour":day.to_string(),"evenements":events,"tronque":!complete,"texte":text}),
     )
 }
 
@@ -278,40 +317,39 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
         return Ok(Vec::new());
     };
     let zone = calendar_zone(ctx, &account)?;
-    let changed = fetch(
+    let (changed, _) = fetch_all(
         ctx,
         &account,
-        &format!(
-            "{CALENDAR}/events?{}",
-            query(&[
-                ("updatedMin", utc(updated_floor)?),
-                ("showDeleted", "true".into()),
-                ("singleEvents", "false".into()),
-                ("orderBy", "updated".into()),
-                ("maxResults", WATCHED.to_string()),
-            ])
-        ),
+        &[
+            ("updatedMin", utc(updated_floor)?),
+            ("showDeleted", "true".into()),
+            ("singleEvents", "false".into()),
+            ("orderBy", "updated".into()),
+            ("maxResults", WATCHED.to_string()),
+        ],
     )?;
-    let begun = if now > started_floor {
-        Some(fetch(
+    // Google ignores the milliseconds of `timeMax` and excludes it: what begins within the
+    // current second is read at the next call, so the window ends on a whole second.
+    let upper = now / 1000 * 1000;
+    let begun = if upper - 1 > started_floor {
+        Some(fetch_all(
             ctx,
             &account,
-            &format!(
-                "{CALENDAR}/events?{}",
-                query(&[
-                    ("timeMin", utc(started_floor)?),
-                    ("timeMax", utc(now)?),
-                    ("singleEvents", "true".into()),
-                    ("orderBy", "startTime".into()),
-                    ("maxResults", WATCHED.to_string()),
-                ])
-            ),
+            &[
+                ("timeMin", utc(started_floor)?),
+                ("timeMax", utc(upper)?),
+                ("singleEvents", "true".into()),
+                ("orderBy", "startTime".into()),
+                ("maxResults", WATCHED.to_string()),
+            ],
         )?)
     } else {
         None
     };
+    // A change is delivered once per version, whatever case the cursor makes of it: the
+    // same version listed again at the boundary of the floor is not a "modified" event.
     let mut stmt = ctx.connection.prepare(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_calendar_delivered WHERE account_id=?1 AND event_id=?2 AND cas=?3 AND stamp=?4)",
+        "SELECT EXISTS(SELECT 1 FROM wrapper_calendar_delivered WHERE account_id=?1 AND event_id=?2 AND stamp=?4 AND ((cas='begins')=(?3='begins')))",
     )?;
     let mut delivered = |seen: &Seen| -> Result<bool, ApiError> {
         Ok(stmt.query_row(
@@ -321,12 +359,16 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
     };
     let mut fresh: Vec<Seen> = Vec::new();
     let mut newest = updated_floor;
-    for item in changed["items"].as_array().into_iter().flatten() {
-        let Some(updated) = item["updated"].as_str().and_then(instant) else {
-            continue;
+    for item in &changed {
+        let cancelled = item["status"] == "cancelled";
+        // A tombstone may carry nothing but its identifier: it has one version, stamped 0.
+        let updated = match item["updated"].as_str().and_then(instant) {
+            Some(updated) => updated,
+            None if cancelled => 0,
+            None => continue,
         };
         newest = newest.max(updated);
-        let cas = if item["status"] == "cancelled" {
+        let cas = if cancelled {
             CalendarCase::Annule
         } else if item["created"].as_str().and_then(instant) > Some(updated_floor) {
             CalendarCase::Cree
@@ -339,17 +381,17 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
             }
         }
     }
-    // A full page leaves more to read: the floor stops at what was read, not at now.
-    let mut started = now;
-    if let Some(begun) = &begun {
-        let full = begun["items"].as_array().map_or(0, Vec::len) as u32 >= WATCHED;
+    // The cursor stops behind the whole second it has not read, and behind what a listing
+    // cut short has not reached; the ledger absorbs what is read twice.
+    let mut started = upper - 1;
+    if let Some((items, complete)) = &begun {
         let mut last = started_floor;
-        for item in begun["items"].as_array().into_iter().flatten() {
+        for item in items {
             let Some((start, _, _)) = moment(&item["start"], &zone) else {
                 continue;
             };
             last = last.max(start);
-            if item["status"] == "cancelled" || start <= started_floor || start > now {
+            if item["status"] == "cancelled" || start <= started_floor || start >= upper {
                 continue;
             }
             if let Some(seen) = calendar_event(item, CalendarCase::Commence, &zone, start) {
@@ -358,8 +400,8 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
                 }
             }
         }
-        if full {
-            started = last;
+        if !complete {
+            started = (last - 1).max(started_floor);
         }
     } else {
         started = started_floor;

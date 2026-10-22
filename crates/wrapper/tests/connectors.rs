@@ -111,6 +111,8 @@ struct GmailScript {
     agenda: Vec<Value>,
     /// Status of every calendar request; 200 answers normally.
     agenda_status: u16,
+    /// Events per page of a listing, whatever `maxResults` asks; 0 gives as many as asked.
+    agenda_page: usize,
     /// Files of the Drive: id, name, mimeType, modifiedTime and the text they hold.
     files: Vec<Value>,
     /// Method and address of every calendar and Drive request, in order.
@@ -119,21 +121,27 @@ struct GmailScript {
 const AGENDA_ZONE: &str = "America/Toronto";
 impl GmailScript {
     /// The events of a listing: the changes since `updatedMin`, or the events of a window.
-    fn events(all: &[Value], listing: &str) -> Value {
+    fn events(all: &[Value], listing: &str, page: usize) -> Value {
         let q: std::collections::HashMap<_, _> = url::form_urlencoded::parse(listing.as_bytes())
             .into_owned()
             .collect();
         let stamp = |v: &Value| v.as_str().unwrap().parse::<jiff::Timestamp>().unwrap();
+        // A tombstone may carry nothing but its identifier and status.
+        let changed = |e: &Value| {
+            e["updated"]
+                .as_str()
+                .map_or(jiff::Timestamp::MAX, |t| t.parse().unwrap())
+        };
         let start = |e: &Value| stamp(&e["start"]["dateTime"]);
         let mut items: Vec<Value> = if let Some(min) = q.get("updatedMin") {
             let min = min.parse::<jiff::Timestamp>().unwrap();
             let deleted = q.get("showDeleted").is_some_and(|s| s == "true");
             let mut kept: Vec<Value> = all
                 .iter()
-                .filter(|e| stamp(&e["updated"]) >= min && (deleted || e["status"] != "cancelled"))
+                .filter(|e| changed(e) >= min && (deleted || e["status"] != "cancelled"))
                 .cloned()
                 .collect();
-            kept.sort_by_key(|e| stamp(&e["updated"]));
+            kept.sort_by_key(changed);
             kept
         } else {
             assert_eq!(q["singleEvents"], "true");
@@ -151,8 +159,16 @@ impl GmailScript {
             kept.sort_by_key(start);
             kept
         };
-        items.truncate(q["maxResults"].parse().unwrap());
-        json!({"items":items})
+        let offset: usize = q.get("pageToken").map_or(0, |t| t.parse().unwrap());
+        let wanted: usize = q["maxResults"].parse().unwrap();
+        let limit = if page > 0 { wanted.min(page) } else { wanted };
+        let rest = items.split_off(offset.min(items.len()));
+        let more = rest.len() > limit;
+        let mut answer = json!({"items":rest.into_iter().take(limit).collect::<Vec<_>>()});
+        if more {
+            answer["nextPageToken"] = json!((offset + limit).to_string());
+        }
+        answer
     }
     /// A Drive search by exact name, or the content of one file by media or export.
     fn file(files: &[Value], rest: &str) -> (u16, Value) {
@@ -578,7 +594,7 @@ impl OAuth {
                                 json!({"id":"charles@example.test","timeZone":AGENDA_ZONE}),
                             )
                         } else if let Some(listing) = rest.strip_prefix("/events?") {
-                            (200, GmailScript::events(&g.agenda, listing))
+                            (200, GmailScript::events(&g.agenda, listing, g.agenda_page))
                         } else {
                             (404, json!({}))
                         }
@@ -4381,4 +4397,217 @@ fn calendar_events_stop_when_gmail_is_not_connected_and_start_over_after_a_disco
         watched, 0,
         "a disconnected account keeps no trace of its agenda"
     );
+}
+
+/// A listing of the watch with its floors set back an hour, as after a Mac left closed.
+fn rewind_agenda(f: &Fixture, ms: i64) {
+    f.db()
+        .execute(
+            "UPDATE wrapper_calendar_watch SET updated_ms=?1,started_ms=?1",
+            [ms - 3_600_000],
+        )
+        .unwrap();
+}
+fn ids(
+    events: &[grokbot_wrapper::features::mcp::CalendarEvent],
+) -> Vec<(&str, grokbot_wrapper::features::mcp::CalendarCase)> {
+    events.iter().map(|e| (e.id.as_str(), e.cas)).collect()
+}
+
+#[test]
+fn calendar_version_listed_again_at_the_floor_is_not_delivered_as_modified() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    // The newest change is a creation: the floor now sits on its own timestamp.
+    f.agenda(vec![agenda_event(
+        "boundary",
+        "Nouveau",
+        &agenda_at(1, 10),
+        ms - 1_800_000,
+        ms - 1_800_000,
+        "confirmed",
+    )]);
+    assert_eq!(ids(&agenda_events(&f).unwrap()), [("boundary", Cree)]);
+    // Google lists it again (the floor is inclusive): the same version is not a second event.
+    assert!(agenda_events(&f).unwrap().is_empty());
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn calendar_watch_follows_page_tokens_for_changes_and_starts() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 2;
+    let ms = now_ms();
+    rewind_agenda(&f, ms);
+    let mut all = Vec::new();
+    for n in 1..=5 {
+        all.push(agenda_event(
+            &format!("c{n}"),
+            "Changé",
+            &agenda_at(1, 8 + n as i8),
+            ms - 7_200_000,
+            ms - 3_000_000 + n * 1000,
+            "confirmed",
+        ));
+    }
+    let long_ago = ms - 90_000_000;
+    for n in 1..=3 {
+        let begun = jiff::Zoned::now()
+            .with_time_zone(agenda_zone())
+            .checked_sub(jiff::Span::new().minutes(10 * n))
+            .unwrap();
+        all.push(agenda_event(
+            &format!("s{n}"),
+            "Commencé",
+            &begun,
+            long_ago,
+            long_ago,
+            "confirmed",
+        ));
+    }
+    f.agenda(all);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(
+        ids(&events),
+        [
+            ("c1", Modifie),
+            ("c2", Modifie),
+            ("c3", Modifie),
+            ("c4", Modifie),
+            ("c5", Modifie),
+            ("s3", Commence),
+            ("s2", Commence),
+            ("s1", Commence),
+        ],
+        "every page of both listings is read, whatever the page size"
+    );
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn agenda_day_follows_pages_and_says_when_it_is_cut() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let old = now_ms() - 86_400_000;
+    let day = |n: i64| {
+        agenda_event(
+            &format!("d{n:02}"),
+            &format!("Rendez-vous {n}"),
+            &agenda_at(1, 6)
+                .checked_add(jiff::Span::new().minutes(n * 30))
+                .unwrap(),
+            old,
+            old,
+            "confirmed",
+        )
+    };
+    f.agenda((1..=3).map(day).collect());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 2;
+    let run = f.github_call("pages", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(
+        output["evenements"].as_array().unwrap().len(),
+        3,
+        "the second page is read"
+    );
+    assert_eq!(output["tronque"], false);
+    // Past the pages that are followed, the answer says it is not the whole day.
+    f.agenda((1..=14).map(day).collect());
+    f.oauth.seen.lock().unwrap().gmail.agenda_page = 1;
+    let run = f.github_call("cut", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["tronque"], true);
+    assert_eq!(output["evenements"].as_array().unwrap().len(), 10);
+    assert!(
+        output["texte"].as_str().unwrap().contains("Liste tronquée"),
+        "{output}"
+    );
+}
+
+#[test]
+fn calendar_start_within_the_current_second_is_read_at_the_next_call() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let conn = f.db();
+    let at = |now_ms: i64| grokbot_wrapper::features::Context {
+        connection: &conn,
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: now_ms as u64,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    };
+    let base = (now_ms() / 1000 + 100) * 1000;
+    let poll = |now: i64| grokbot_wrapper::features::mcp::calendar_events(&at(now)).unwrap();
+    assert!(poll(base).is_empty());
+    let start = base + 10_000;
+    let old = now_ms() - 86_400_000;
+    let begins = jiff::Timestamp::from_millisecond(start)
+        .unwrap()
+        .to_zoned(agenda_zone());
+    f.agenda(vec![agenda_event(
+        "tick",
+        "À la seconde",
+        &begins,
+        old,
+        old,
+        "confirmed",
+    )]);
+    // Google excludes the second it is given as `timeMax`: half a second after the start,
+    // the appointment is not listed yet, and it must not be lost for that.
+    assert!(poll(start + 500).is_empty());
+    assert_eq!(ids(&poll(start + 1500)), [("tick", Commence)]);
+    assert!(poll(start + 2500).is_empty());
+}
+
+#[test]
+fn calendar_cancellation_without_an_update_timestamp_is_delivered_once() {
+    use grokbot_wrapper::features::mcp::CalendarCase::*;
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    rewind_agenda(&f, now_ms());
+    f.agenda(vec![json!({"id":"tombstone","status":"cancelled"})]);
+    let events = agenda_events(&f).unwrap();
+    assert_eq!(ids(&events), [("tombstone", Annule)]);
+    assert_eq!(events[0].fuseau, AGENDA_ZONE);
+    assert!(agenda_events(&f).unwrap().is_empty());
+    assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn agenda_hours_are_those_of_the_calendar_and_another_event_zone_is_named() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let old = now_ms() - 86_400_000;
+    let paris = jiff::tz::TimeZone::get("Europe/Paris").unwrap();
+    let start = agenda_at(1, 9).with_time_zone(paris);
+    let mut event = agenda_event("paris", "Appel Paris", &start, old, old, "confirmed");
+    event["start"]["timeZone"] = json!("Europe/Paris");
+    f.agenda(vec![
+        event,
+        agenda_event("local", "Café", &agenda_at(1, 12), old, old, "confirmed"),
+    ]);
+    let run = f.github_call("zones", CALENDAR_TOOL, json!({}));
+    let output = done(&f, &run);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("09:00–10:00 · Appel Paris · fuseau de l’événement : Europe/Paris"),
+        "{text}"
+    );
+    assert!(
+        text.contains("12:00–13:00 · Café\n") || text.ends_with("12:00–13:00 · Café"),
+        "{text}"
+    );
+    // The event itself keeps its own zone for a routine.
+    assert_eq!(output["evenements"][0]["fuseau"], "Europe/Paris");
 }

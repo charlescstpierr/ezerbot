@@ -25,12 +25,12 @@ fn speech_fixtures_are_valid_pcm() {
     }
 }
 
-/// Mac only: requires Speech permission and installed en-US/fr-CA locales.
+/// Mac only, opt-in: requires Speech permission and installed en-US/fr-CA locales.
+///
+/// Run it explicitly on a Mac with:
+/// `cargo test -p grokbot-wrapper --test voice_ui -- --ignored french_audio_recognized_on_device_after_english`
 #[test]
-#[cfg_attr(
-    not(target_os = "macos"),
-    ignore = "Mac seulement : reconnaissance Apple hors ligne"
-)]
+#[ignore = "opt-in Mac : permission Speech + locales en-US/fr-CA; lancer avec `cargo test -p grokbot-wrapper --test voice_ui -- --ignored`"]
 fn french_audio_recognized_on_device_after_english() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     assert!(std::process::Command::new("bash")

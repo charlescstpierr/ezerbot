@@ -114,9 +114,10 @@
     card.append(actions);
     return card;
   }
-  // The first request names the service alone; a GitHub account other than the first is named by its slot.
+  // The first request names the service alone; an account other than the first (GitHub, Gmail) is named by its slot.
   const slotBody = item => item.slot && item.slot !== item.id ? {id:item.id,account:item.slot} : {id:item.id};
-  const accountStatus = {connected:"Connecté",authorizing:"En attente de votre autorisation chez GitHub",reconnect:"À reconnecter",error:"En erreur",saved:"Connexion enregistrée · à démarrer"};
+  const accountStatus = {connected:"Connecté",authorizing:"En attente de votre autorisation",reconnect:"À reconnecter",error:"En erreur",saved:"Connexion enregistrée · à démarrer"};
+  const waitingFor = item => item.device_flow ? "En attente de votre autorisation chez GitHub" : "En attente de votre autorisation dans le navigateur";
   function renderCatalogue(items, bots) {
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
@@ -251,8 +252,8 @@
         }
       }
       const others = (item.accounts || []).filter(account => account.id !== item.slot);
-      if (item.device_flow && item.configured && item.status === "connected" && !(item.accounts || []).some(account => account.status === "authorizing")) {
-        const another = button("Connecter un autre compte", () => act("/api/connectors/connect", {id:item.id,another:true}, another));
+      if (item.multi_account && item.configured && item.status === "connected" && !(item.accounts || []).some(account => account.status === "authorizing")) {
+        const another = button(item.device_flow ? "Connecter un autre compte" : "Ajouter un autre compte", () => act("/api/connectors/connect", {id:item.id,another:true}, another));
         another.setAttribute("data-connector-action", "add-account"); actions.append(another);
       }
       card.append(actions);
@@ -263,11 +264,11 @@
     }
     filterCatalogue();
   }
-  // A GitHub account beside the first one: its login, its own code wait, disconnect and bot switches.
+  // An account beside the first one: its login or address, its own wait, disconnect and bot switches.
   function accountBlock(item, account, copyButton, deviceBlock, bots) {
     const block = node("section", null, "mcp-account"); block.setAttribute("data-account", account.id);
     const who = account.account || "nouveau compte";
-    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte GitHub · ${who} · ${accountStatus[account.status] || "Déconnecté"}`, "mcp-note"));
+    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte ${item.name} · ${who} · ${(account.status === "authorizing" ? waitingFor(item) : accountStatus[account.status]) || "Déconnecté"}`, "mcp-note"));
     if (account.message && !account.device) block.append(node("p", account.message, account.warning ? "mcp-warning" : ["error","reconnect"].includes(account.status) ? "mcp-error" : "mcp-note"));
     if (account.device) block.append(deviceBlock(account.device, `${item.name} (${who})`, "authorize-account"));
     const actions = node("div", null, "mcp-actions");

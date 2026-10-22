@@ -4,7 +4,8 @@
 //! first connection. Tokens are written once, after Google names the account, and a
 //! vault that refuses the write keeps nothing: there is no file copy. The tools are a
 //! fixed list: reads, and one send that waits on a draft card (`email`). A new message is
-//! also a normalized event, delivered once.
+//! also a normalized event, delivered once. Several Google accounts may be connected, each
+//! in its own slot with its own secret: a conversation keeps the account Charles named.
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, sync::Mutex, time::Duration};
@@ -35,6 +36,9 @@ pub(super) const RECONNECT: &str =
 const MODEL: &str = "Gmail · lire les derniers courriels de la boîte de réception (lecture seule, compte Gmail connecté dans Ezerbot ; cinq par défaut, dix au plus). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte et donne expéditeur, objet et date de chaque courriel ; le champ `courriels` porte le texte de chacun pour le résumer.";
 const SUMMARY: &str = "Lire les derniers courriels de la boîte de réception Gmail (cinq par défaut), en lecture seule, avec le compte Gmail connecté.";
 
+/// Said to the model with every tool: how several Google accounts are told apart.
+pub(super) const ACCOUNTS_NOTE: &str = "Plusieurs comptes Google peuvent être connectés : tant que Charles n’en a pas choisi un pour cette conversation, l’outil répond qu’il faut lui demander lequel (sans appeler Google). Rappelez alors l’outil avec `compte` = l’adresse choisie ; ce choix vaut pour la suite de la conversation jusqu’à ce que Charles en nomme un autre.";
+
 /// Serializes the watch: two callers must not both see a message as new.
 static WATCH: Mutex<()> = Mutex::new(());
 
@@ -42,6 +46,8 @@ static WATCH: Mutex<()> = Mutex::new(());
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MailEvent {
     pub id: String,
+    /// The address of the Google account whose inbox it arrived in.
+    pub compte: String,
     pub expediteur: String,
     pub objet: String,
     pub date: String,
@@ -65,16 +71,35 @@ pub(super) fn not_configured() -> ApiError {
     invalid("Le client Google d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion à Gmail reste indisponible tant que ce client n’est pas préparé.")
 }
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY,since_ms INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_gmail_mailbox (account_id TEXT PRIMARY KEY,since_ms INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS wrapper_gmail_delivered (account_id TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(account_id,message_id));CREATE TABLE IF NOT EXISTS wrapper_google_account_choice (conversation_id TEXT PRIMARY KEY,account_id TEXT NOT NULL);")?;
     email::migrate(conn)
 }
-/// What the connection forgets about the mailbox once it is disconnected.
-pub(super) fn forget_mailbox(tx: &rusqlite::Transaction<'_>, server: &str) -> Result<(), ApiError> {
-    for table in ["wrapper_gmail_delivered", "wrapper_gmail_mailbox"] {
+/// What the connection forgets about its account once it is disconnected: the mailbox it
+/// watched, and the conversations that had chosen it (they are asked again, never sent to
+/// another account).
+pub(super) fn forget_account(tx: &rusqlite::Transaction<'_>, server: &str) -> Result<(), ApiError> {
+    for table in [
+        "wrapper_gmail_delivered",
+        "wrapper_gmail_mailbox",
+        "wrapper_google_account_choice",
+    ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE account_id=(SELECT lower(account_email) FROM wrapper_connector_catalogue WHERE server_id=?1)"),
             [server],
         )?;
+    }
+    Ok(())
+}
+/// One connection per Google address: a sign-in that names an address another slot holds
+/// adds nothing, and no token is written for it.
+pub(super) fn refuse_twin(ctx: &Context<'_>, server: &Server, email: &str) -> Result<(), ApiError> {
+    let twin: bool = ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE (id='gmail' OR id GLOB 'gmail:*') AND lower(account_email)=lower(?1) AND server_id!=?2 AND phase IN ('connected','reconnect'))",
+        params![email, server.id],
+        |r| r.get(0),
+    )?;
+    if twin {
+        return Err(invalid(&format!("Le compte Google {email} est déjà connecté. Aucun jeton n’a été enregistré en double : pour en ajouter un autre, choisissez une autre adresse sur la page de connexion de Google.")));
     }
     Ok(())
 }
@@ -148,9 +173,14 @@ pub(super) fn refused_write(ctx: &Context<'_>) -> ApiError {
     })
 }
 
+/// The `compte` field every Gmail tool accepts.
+pub(super) fn account_property() -> Value {
+    json!({"type":"string","description":"Adresse du compte Google à utiliser, seulement quand plusieurs comptes sont connectés et que Charles en a nommé un. Ne la devinez pas : l’outil dit s’il faut demander lequel."})
+}
 fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
-        "count":{"type":"integer","minimum":1,"maximum":MOST,"description":"Nombre de courriels à lire, du plus récent au plus ancien ; cinq si omis."}
+        "count":{"type":"integer","minimum":1,"maximum":MOST,"description":"Nombre de courriels à lire, du plus récent au plus ancien ; cinq si omis."},
+        "compte":account_property()
     }})
 }
 /// Model-facing tools, advertised only while Gmail is connected and enabled for the bot.
@@ -158,7 +188,7 @@ pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec>
     vec![
         grokbot_engine::contracts::ToolSpec {
             name: TOOL.into(),
-            description: MODEL.into(),
+            description: format!("{MODEL} {ACCOUNTS_NOTE}"),
             schema: schema(),
             requires_approval: false,
         },
@@ -194,23 +224,15 @@ struct Account {
     /// Enabled for the bot that asks.
     enabled: bool,
 }
-/// The account that holds a live connection, or the sentence that says why there is none.
-fn account(ctx: &Context<'_>) -> Result<Account, ApiError> {
-    let row: Option<(String, String, Option<String>)> = ctx.connection.query_row(
-        "SELECT server_id,phase,account_email FROM wrapper_connector_catalogue WHERE id='gmail'",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
-    let Some((server_id, phase, email)) = row else {
-        return Err(invalid(NOT_CONNECTED));
-    };
-    let (true, Some(email)) = (phase == "connected", email) else {
-        return Err(invalid(if phase == "disconnected" {
-            DISCONNECTED
-        } else {
-            RECONNECT
-        }));
-    };
+/// Every Gmail slot: its server, its phase and the address it names, the first one first.
+fn rows(ctx: &Context<'_>) -> Result<Vec<(String, String, Option<String>)>, ApiError> {
+    let mut stmt = ctx.connection.prepare("SELECT server_id,phase,account_email FROM wrapper_connector_catalogue WHERE id='gmail' OR id GLOB 'gmail:*' ORDER BY id='gmail' DESC,rowid")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+fn build(ctx: &Context<'_>, server_id: &str, email: String) -> Result<Account, ApiError> {
     let server = super::super::servers(ctx.connection)?
         .into_iter()
         .find(|s| s.id == server_id)
@@ -225,9 +247,154 @@ fn account(ctx: &Context<'_>) -> Result<Account, ApiError> {
         enabled,
     })
 }
-/// The account a bot may read with: connected, and given to that bot.
-fn usable(ctx: &Context<'_>) -> Result<Account, ApiError> {
-    let account = account(ctx)?;
+/// The accounts that hold a live connection, the first one first.
+fn connected(ctx: &Context<'_>) -> Result<Vec<Account>, ApiError> {
+    rows(ctx)?
+        .into_iter()
+        .filter_map(|(server_id, phase, email)| {
+            let email = email.filter(|_| phase == "connected")?;
+            Some(build(ctx, &server_id, email))
+        })
+        .collect()
+}
+/// What a request says when no account can be used: nothing connected, an account to
+/// reconnect or one that was disconnected.
+fn nobody(ctx: &Context<'_>) -> ApiError {
+    let rows = rows(ctx).unwrap_or_default();
+    let any = |wanted: &str| rows.iter().any(|(_, phase, _)| phase == wanted);
+    invalid(if rows.is_empty() {
+        NOT_CONNECTED
+    } else if any("connected") {
+        ENABLE
+    } else if any("reconnect") {
+        RECONNECT
+    } else {
+        DISCONNECTED
+    })
+}
+/// The account of one slot while it still holds a live connection, or the sentence that
+/// says why it does not.
+fn slot(ctx: &Context<'_>, server_id: &str) -> Result<Account, ApiError> {
+    let row: Option<(String, Option<String>)> = ctx.connection.query_row(
+        "SELECT phase,account_email FROM wrapper_connector_catalogue WHERE server_id=?1 AND (id='gmail' OR id GLOB 'gmail:*')",
+        [server_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    let Some((phase, email)) = row else {
+        return Err(invalid(DISCONNECTED));
+    };
+    let (true, Some(email)) = (phase == "connected", email) else {
+        return Err(invalid(if phase == "disconnected" {
+            DISCONNECTED
+        } else {
+            RECONNECT
+        }));
+    };
+    build(ctx, server_id, email)
+}
+/// What a request resolves to: one account to call, or the question to put to Charles.
+enum Pick {
+    Use(Box<Account>),
+    Ask(Value),
+}
+/// The account this request resolved. Zero usable accounts is a sentence, not a call;
+/// several without a choice is a question, and no provider is called before it is answered.
+/// The choice is kept per conversation, for every Google service of that user.
+fn pick(ctx: &Context<'_>, named: Option<&str>) -> Result<Pick, ApiError> {
+    let usable: Vec<Account> = connected(ctx)?.into_iter().filter(|a| a.enabled).collect();
+    if usable.is_empty() {
+        return Err(nobody(ctx));
+    }
+    let addresses = || usable.iter().map(|a| a.email.as_str()).collect::<Vec<_>>();
+    let named = named.map(str::trim).filter(|n| !n.is_empty());
+    let chosen = if let Some(name) = named {
+        let Some(found) = usable
+            .iter()
+            .position(|a| a.email.eq_ignore_ascii_case(name))
+        else {
+            return Err(invalid(&format!(
+                "Aucun compte Google connecté ne s’appelle {}. Comptes disponibles : {}.",
+                clean(name, 100),
+                addresses().join(", ")
+            )));
+        };
+        if let Some(conversation) = ctx.conversation_id {
+            ctx.connection.execute(
+                "INSERT INTO wrapper_google_account_choice(conversation_id,account_id) VALUES (?1,?2) ON CONFLICT(conversation_id) DO UPDATE SET account_id=excluded.account_id",
+                params![conversation, usable[found].email.to_lowercase()],
+            )?;
+        }
+        found
+    } else {
+        // What the conversation chose comes before any default: a chosen account that can no
+        // longer be used is said so, never silently replaced by another one.
+        let remembered: Option<String> = match ctx.conversation_id {
+            Some(conversation) => ctx
+                .connection
+                .query_row(
+                    "SELECT account_id FROM wrapper_google_account_choice WHERE conversation_id=?1",
+                    [conversation],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        let mut found = None;
+        if let Some(id) = remembered {
+            found = usable.iter().position(|a| a.email.to_lowercase() == id);
+            if found.is_none() {
+                let lost = rows(ctx)?
+                    .into_iter()
+                    .find(|(_, _, email)| email.as_ref().is_some_and(|e| e.to_lowercase() == id));
+                if let Some((_, phase, Some(email))) = lost {
+                    let why = if phase == "connected" {
+                        "n’est plus activé pour ce bot"
+                    } else {
+                        "doit être reconnecté (Paramètres › Connecteurs)"
+                    };
+                    return Err(invalid(&format!(
+                        "Le compte Google {email} choisi pour cette conversation {why}. Nommez un autre compte pour continuer avec lui."
+                    )));
+                }
+            }
+        }
+        match found.or((usable.len() == 1).then_some(0)) {
+            Some(found) => found,
+            None => {
+                let addresses = addresses();
+                return Ok(Pick::Ask(json!({
+                    "choix_requis":true,
+                    "comptes":addresses,
+                    "texte":format!("Plusieurs comptes Google sont connectés : {}. Demandez à Charles lequel utiliser, puis rappelez cet outil avec le champ `compte`. Rien n’a été lu ni envoyé.", addresses.join(", ")),
+                })));
+            }
+        }
+    };
+    Ok(Pick::Use(Box::new(
+        usable
+            .into_iter()
+            .nth(chosen)
+            .expect("a position of this list"),
+    )))
+}
+/// The account for a tool that cannot answer with a question first.
+fn resolve(ctx: &Context<'_>, named: Option<&str>) -> Result<Account, ApiError> {
+    match pick(ctx, named)? {
+        Pick::Use(account) => Ok(*account),
+        Pick::Ask(question) => Err(invalid(question["texte"].as_str().unwrap_or(""))),
+    }
+}
+/// The account a draft was prepared for, while it is still that address and still given
+/// to the bot. Another account's activation does not authorize this one.
+fn held(ctx: &Context<'_>, email: &str) -> Result<Account, ApiError> {
+    let all = connected(ctx)?;
+    if all.is_empty() {
+        return Err(nobody(ctx));
+    }
+    let account = all
+        .into_iter()
+        .find(|a| a.email.eq_ignore_ascii_case(email))
+        .ok_or_else(email::changed)?;
     if account.enabled {
         Ok(account)
     } else {
@@ -236,7 +403,7 @@ fn usable(ctx: &Context<'_>) -> Result<Account, ApiError> {
 }
 /// Why the Gmail tool is not offered to this bot, as a sentence rather than an unknown tool.
 pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
-    match usable(ctx) {
+    match pick(ctx, None) {
         Err(error) => error.message,
         Ok(_) => ENABLE.into(),
     }
@@ -280,7 +447,7 @@ fn exchange(
             let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
             // The token of a replacement account is never read for a request that was
             // bound to another one, nor for a bot that is no longer given Gmail.
-            let current = self::account(ctx)?;
+            let current = slot(ctx, &server.id)?;
             if current.email != account.email || !current.enabled {
                 return Err(invalid(&format!(
                     "Le compte Gmail a changé pendant {during} : rien n’a été {nothing}. Réessayez."
@@ -384,7 +551,7 @@ fn plain_text(part: &Value, depth: u8, budget: &mut u16) -> Option<String> {
         .find_map(|child| plain_text(child, depth - 1, budget))
 }
 /// A message and the instant Gmail received it, in milliseconds.
-fn mail_of(message: &Value) -> Option<(MailEvent, i64)> {
+fn mail_of(message: &Value, account: &str) -> Option<(MailEvent, i64)> {
     let id = message_id(message["id"].as_str()?)?.to_owned();
     let payload = &message["payload"];
     let text = plain_text(payload, 8, &mut 64)
@@ -397,6 +564,7 @@ fn mail_of(message: &Value) -> Option<(MailEvent, i64)> {
     Some((
         MailEvent {
             id,
+            compte: account.to_owned(),
             expediteur: clean(header(payload, "From").unwrap_or("inconnu"), 200),
             objet: clean(header(payload, "Subject").unwrap_or("(sans objet)"), 300),
             date: clean(header(payload, "Date").unwrap_or(""), 100),
@@ -445,7 +613,7 @@ fn message(
     if reply.status == 404 {
         return Ok(None);
     }
-    mail_of(&reply.body)
+    mail_of(&reply.body, &account.email)
         .map(Some)
         .ok_or_else(|| invalid("La réponse de Gmail est illisible."))
 }
@@ -472,6 +640,7 @@ fn list_recent(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
     #[serde(deny_unknown_fields)]
     struct Args {
         count: Option<u32>,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid(
@@ -484,7 +653,10 @@ fn list_recent(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
             "Nombre de courriels invalide : choisissez entre 1 et 10.",
         ));
     }
-    let account = usable(ctx)?;
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => *account,
+        Pick::Ask(question) => return Ok(question),
+    };
     let mut mails = Vec::new();
     for id in latest_ids(ctx, &account, count)? {
         mails.extend(message(ctx, &account, &id)?.map(|(mail, _)| mail));
@@ -513,12 +685,32 @@ fn list_recent(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
     Ok(json!({"compte":email,"courriels":courriels,"texte":text}))
 }
 
-/// The messages that arrived since the last call, the oldest first, each identifier
-/// once. The first call only learns what the inbox already holds, so nothing old is
-/// "new". The consumer owns what it receives: a returned message is not returned again.
+/// The messages that arrived since the last call in each connected Google account, the
+/// oldest first within an account, each identifier once. The first call only learns what an
+/// inbox already holds, so nothing old is "new". The consumer owns what it receives: a
+/// returned message is not returned again.
 pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
     let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
-    let account = account(ctx)?;
+    let accounts = connected(ctx)?;
+    if accounts.is_empty() {
+        return Err(nobody(ctx));
+    }
+    let mut events = Vec::new();
+    let mut failure = None;
+    for account in &accounts {
+        match watch(ctx, account) {
+            Ok(mut fresh) => events.append(&mut fresh),
+            // An account that cannot be read now is tried again next time; the others go on.
+            Err(error) => failure = failure.or(Some(error)),
+        }
+    }
+    match failure {
+        Some(error) if events.is_empty() => Err(error),
+        _ => Ok(events),
+    }
+}
+/// What arrived in one account's inbox since the last look.
+fn watch(ctx: &Context<'_>, account: &Account) -> Result<Vec<MailEvent>, ApiError> {
     let owner = account.email.to_lowercase();
     let since: Option<i64> = ctx
         .connection
@@ -528,12 +720,12 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
             |r| r.get(0),
         )
         .optional()?;
-    let listed = latest_ids(ctx, &account, WATCHED)?;
+    let listed = latest_ids(ctx, account, WATCHED)?;
     let Some(since) = since else {
         // The first look learns the box. Its floor is when the newest message arrived: an
         // older message that only enters the window later (after an archive) is not new.
         let floor = match listed.first() {
-            Some(id) => message(ctx, &account, id)?.map(|(_, received)| received),
+            Some(id) => message(ctx, account, id)?.map(|(_, received)| received),
             None => None,
         }
         .unwrap_or(ctx.now_ms as i64);
@@ -565,7 +757,7 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
     let mut handled = Vec::new();
     let mut newest = since;
     for id in fresh {
-        match message(ctx, &account, &id) {
+        match message(ctx, account, &id) {
             Ok(mail) => {
                 // A message received before the floor is known mail, not an arrival.
                 if let Some((mail, received)) =

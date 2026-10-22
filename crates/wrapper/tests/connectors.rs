@@ -135,8 +135,27 @@ struct GmailScript {
     send_status: u16,
     /// The messages the provider delivered, as the RFC 822 text it was given.
     sent: Vec<String>,
+    /// The address the next sign-in names; the first user when absent.
+    next_user: Option<String>,
+    /// Whose access token it is, by token.
+    owners: std::collections::HashMap<String, String>,
+    /// The inbox of a user other than the first, by address.
+    inboxes: std::collections::HashMap<String, Vec<Value>>,
 }
 impl GmailScript {
+    /// The address that owns the access token of the latest request.
+    fn owner(&self) -> String {
+        self.authorization
+            .last()
+            .and_then(|(_, a)| a.strip_prefix("Bearer "))
+            .and_then(|token| self.owners.get(token))
+            .cloned()
+            .unwrap_or_else(|| "charles@example.test".to_owned())
+    }
+    /// The inbox the latest request reads.
+    fn mailbox(&self) -> &Vec<Value> {
+        self.inboxes.get(&self.owner()).unwrap_or(&self.inbox)
+    }
     /// One message as Gmail's `format=full` returns it: a text part and an HTML part.
     fn message(entry: &Value) -> Value {
         let encoded = |text: &str| URL_SAFE_NO_PAD.encode(text);
@@ -435,9 +454,20 @@ impl OAuth {
                                 let access =
                                     format!("gmail-access-secret-never-visible-{}", g.serial);
                                 g.live_tokens.push(access.clone());
+                                let user = g.next_user.take();
+                                let refresh = match &user {
+                                    Some(user) => {
+                                        format!("gmail-refresh-secret-never-visible-{user}")
+                                    }
+                                    None => "gmail-refresh-secret-never-visible".to_owned(),
+                                };
+                                g.owners.insert(
+                                    access.clone(),
+                                    user.unwrap_or_else(|| "charles@example.test".to_owned()),
+                                );
                                 (
                                     200,
-                                    json!({"access_token":access,"refresh_token":"gmail-refresh-secret-never-visible","expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
+                                    json!({"access_token":access,"refresh_token":refresh,"expires_in":3600,"token_type":"Bearer","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify"}),
                                 )
                             }
                             Some("refresh_token")
@@ -463,10 +493,7 @@ impl OAuth {
                             json!({"error":{"code":401,"message":"Invalid Credentials"}}),
                         )
                     } else if url == "/gmail/api/gmail/v1/users/me/profile" {
-                        (
-                            200,
-                            json!({"emailAddress":"charles@example.test","messagesTotal":6}),
-                        )
+                        (200, json!({"emailAddress":g.owner(),"messagesTotal":6}))
                     } else if post && url == "/gmail/api/gmail/v1/users/me/messages/send" {
                         match g.send_status {
                             0 | 200 => {
@@ -503,7 +530,7 @@ impl OAuth {
                             during();
                         }
                         let ids: Vec<Value> = g
-                            .inbox
+                            .mailbox()
                             .iter()
                             .take(wanted)
                             .map(|m| json!({"id":m["id"],"threadId":m["id"]}))
@@ -513,7 +540,7 @@ impl OAuth {
                         .strip_prefix("/gmail/api/gmail/v1/users/me/messages/")
                         .and_then(|rest| rest.strip_suffix("?format=full"))
                     {
-                        match g.inbox.iter().find(|m| m["id"] == one) {
+                        match g.mailbox().iter().find(|m| m["id"] == one) {
                             Some(entry) => (200, GmailScript::message(entry)),
                             None => (404, json!({"error":{"code":404}})),
                         }
@@ -822,7 +849,11 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        let auth = url::Url::parse(&auth).unwrap();
+        self.callback_to(id, &auth, deny, wrong_state)
+    }
+    /// The browser comes back from the authorization URL of one account slot.
+    fn callback_to(&mut self, id: &str, auth: &str, deny: bool, wrong_state: bool) -> u16 {
+        let auth = url::Url::parse(auth).unwrap();
         let fields: std::collections::HashMap<_, _> = auth.query_pairs().into_owned().collect();
         assert_eq!(fields["code_challenge_method"], "S256");
         {
@@ -4812,4 +4843,492 @@ fn gmail_email_is_refused_when_the_account_changed_or_lost_the_bot_after_the_car
     assert!(reason.contains("pas activé"), "{reason}");
     assert_eq!(f.email_sends(), 0);
     assert!(f.delivered_mail().is_empty());
+}
+
+const SECOND_GOOGLE: &str = "travail@example.test";
+impl Fixture {
+    fn gmail_accounts(&mut self) -> Vec<Value> {
+        self.item("gmail")["accounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+    /// A second Google sign-in beside the first, with its own inbox and its tools given
+    /// to the default bot.
+    fn gmail_add_account(&mut self, address: &str) {
+        self.gmail_sign_in_as(address);
+        wait("second google account", || {
+            self.gmail_accounts()
+                .iter()
+                .filter(|a| a["status"] == "connected")
+                .count()
+                == 2
+        });
+        let second = self.gmail_accounts()[1].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":second["server"]["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    /// « Ajouter un autre compte » up to the browser's return, for the address Google names.
+    fn gmail_sign_in_as(&mut self, address: &str) {
+        self.with_google_client();
+        {
+            let mut seen = self.oauth.seen.lock().unwrap();
+            seen.gmail.next_user = Some(address.to_owned());
+            seen.gmail
+                .inboxes
+                .entry(address.to_owned())
+                .or_insert_with(|| {
+                    (1..=3)
+                        .rev()
+                        .map(|n| {
+                            json!({
+                                "id":format!("m{n}"),
+                                "from":format!("Équipe <equipe{n}@example.test>"),
+                                "subject":format!("Dossier de travail {n}"),
+                                "date":format!("Wed, 21 Oct 2026 08:0{n}:00 +0000"),
+                                "text":format!("Texte du dossier {n}."),
+                            })
+                        })
+                        .collect()
+                });
+        }
+        let run = self.post(
+            "/api/connectors/connect",
+            json!({"id":"gmail","another":true}),
+        )["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.decide(&run, json!("allow_once"));
+        let waiting = self
+            .gmail_accounts()
+            .into_iter()
+            .find(|a| a["status"] == "authorizing")
+            .expect("the new slot waits for the browser");
+        let url = waiting["authorization_url"].as_str().unwrap().to_owned();
+        assert_eq!(self.callback_to("gmail", &url, false, false), 200);
+    }
+    fn gmail_ask(&mut self, conversation: &str, id: &str, account: Option<&str>) -> Value {
+        let mut arguments = json!({});
+        if let Some(account) = account {
+            arguments["compte"] = json!(account);
+        }
+        let run = self.github_call_in(conversation, id, GMAIL_TOOL, arguments);
+        done(self, &run)
+    }
+    fn gmail_bearers(&self, route: &str) -> Vec<String> {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .gmail
+            .authorization
+            .iter()
+            .filter(|(u, _)| u.contains(route))
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+    fn gmail_token_of(&self, address: &str) -> String {
+        let seen = self.oauth.seen.lock().unwrap();
+        seen.gmail
+            .owners
+            .iter()
+            .find(|(_, owner)| owner.as_str() == address)
+            .map(|(token, _)| token.clone())
+            .unwrap_or_else(|| seen.gmail.live_tokens[0].clone())
+    }
+}
+
+#[test]
+fn gmail_second_google_account_is_added_beside_the_first_with_its_own_secret() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let first = f.gmail_secret().unwrap();
+    f.gmail_add_account(SECOND_GOOGLE);
+    let accounts = f.gmail_accounts();
+    assert_eq!(accounts.len(), 2);
+    // Both addresses are shown, each on its own connected slot.
+    assert_eq!(accounts[0]["account"], "charles@example.test");
+    assert_eq!(accounts[1]["account"], SECOND_GOOGLE);
+    assert!(accounts.iter().all(|a| a["status"] == "connected"));
+    assert_ne!(accounts[0]["server"]["id"], accounts[1]["server"]["id"]);
+    // The first account is untouched and each address has a secret of its own.
+    assert_eq!(f.gmail_secret().unwrap(), first);
+    let second = f.vault_secret(&accounts[1]["server"]).unwrap();
+    assert!(second["ACCESS_TOKEN"]
+        .as_str()
+        .unwrap()
+        .starts_with("gmail-access-secret"));
+    assert_ne!(second["ACCESS_TOKEN"], first["ACCESS_TOKEN"]);
+    assert_ne!(second["REFRESH_TOKEN"], first["REFRESH_TOKEN"]);
+    // The card keeps following the first account; the list carries both.
+    let item = f.item("gmail");
+    assert_eq!(item["status"], "connected");
+    assert_eq!(item["account"], "charles@example.test");
+    // Two accounts share one list of tools.
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    assert_eq!(tools.iter().filter(|t| t.name == GMAIL_TOOL).count(), 1);
+    // The tokens are in the vault only: not in the state, not in the database file.
+    let public = f.state().to_string();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in GMAIL_SECRETS {
+        assert!(!public.contains(secret));
+        assert!(!database
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+    }
+}
+
+#[test]
+fn gmail_sign_in_of_an_address_already_connected_adds_nothing() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    // Google names the first address again, as when Charles picks the same account.
+    f.oauth.seen.lock().unwrap().gmail.next_user = None;
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id":"gmail","another":true}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    let url = f
+        .gmail_accounts()
+        .into_iter()
+        .find(|a| a["status"] == "authorizing")
+        .unwrap()["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(f.callback_to("gmail", &url, false, false), 400);
+    wait("refused twin", || {
+        f.gmail_accounts()
+            .iter()
+            .any(|a| a["status"] == "reconnect")
+    });
+    let accounts = f.gmail_accounts();
+    let twin = accounts
+        .iter()
+        .find(|a| a["status"] == "reconnect")
+        .unwrap();
+    assert!(twin["message"].as_str().unwrap().contains("déjà connecté"));
+    assert_eq!(twin["has_tokens"], false);
+    assert_eq!(accounts[0]["status"], "connected");
+    assert_eq!(accounts[0]["account"], "charles@example.test");
+}
+
+#[test]
+fn gmail_asks_which_google_account_then_reads_with_the_named_one() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    let conversation = f.github_conversation();
+    let before = f.gmail_requests("/messages");
+
+    // Two accounts and no choice: the question, and Google is not called.
+    let question = f.gmail_ask(&conversation, "gask-1", None);
+    assert_eq!(question["choix_requis"], true);
+    assert_eq!(
+        question["comptes"],
+        json!(["charles@example.test", SECOND_GOOGLE])
+    );
+    assert!(question["texte"].as_str().unwrap().contains("lequel"));
+    assert!(question.get("courriels").is_none());
+    assert_eq!(f.gmail_requests("/messages"), before);
+
+    // Named: the read is that account's, and the answer says which.
+    let second = f.gmail_ask(&conversation, "gask-2", Some(SECOND_GOOGLE));
+    assert_eq!(second["compte"], SECOND_GOOGLE);
+    assert_eq!(second["courriels"][0]["objet"], "Dossier de travail 3");
+    assert!(second["texte"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("compte Gmail : {SECOND_GOOGLE}")));
+    let token = f.gmail_token_of(SECOND_GOOGLE);
+    let used = f.gmail_bearers("/messages/m3");
+    assert_eq!(used.last().unwrap(), &format!("Bearer {token}"));
+
+    // The choice holds for the rest of the conversation, with no new question.
+    let again = f.gmail_ask(&conversation, "gask-3", None);
+    assert_eq!(again["compte"], SECOND_GOOGLE);
+    assert_eq!(again["courriels"][0]["objet"], "Dossier de travail 3");
+
+    // Another conversation starts without a choice.
+    let other = f.github_conversation();
+    assert_eq!(f.gmail_ask(&other, "gask-4", None)["choix_requis"], true);
+
+    // Naming the first account switches this conversation to it, with its own token.
+    let first = f.gmail_ask(&conversation, "gask-5", Some("Charles@Example.test"));
+    assert_eq!(first["compte"], "charles@example.test");
+    assert_eq!(
+        first["courriels"][0]["objet"],
+        "Courriel 6 <b>important</b>"
+    );
+    assert_eq!(
+        f.gmail_ask(&conversation, "gask-6", None)["compte"],
+        "charles@example.test"
+    );
+    let token = f.gmail_token_of("charles@example.test");
+    let used = f.gmail_bearers("/messages/m6");
+    assert_eq!(used.last().unwrap(), &format!("Bearer {token}"));
+
+    // A name that is not connected is refused with the accounts there are.
+    let run = f.github_call_in(
+        &conversation,
+        "gask-7",
+        GMAIL_TOOL,
+        json!({"compte":"inconnu@example.test"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("inconnu@example.test") && reason.contains(SECOND_GOOGLE),
+        "{reason}"
+    );
+}
+
+#[test]
+fn gmail_with_one_google_account_reads_without_a_question() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let conversation = f.github_conversation();
+    let read = f.gmail_ask(&conversation, "gsingle-1", None);
+    assert_eq!(read["compte"], "charles@example.test");
+    assert!(read.get("choix_requis").is_none());
+}
+
+#[test]
+fn gmail_disconnecting_the_second_google_account_leaves_the_first_able_to_read() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let first = f.gmail_secret().unwrap();
+    f.gmail_add_account(SECOND_GOOGLE);
+    let accounts = f.gmail_accounts();
+    let second_server = accounts[1]["server"].clone();
+    let conversation = f.github_conversation();
+    f.gmail_ask(&conversation, "ggone-1", Some(SECOND_GOOGLE));
+
+    let run = f.post(
+        "/api/connectors/disconnect",
+        json!({"id":"gmail","account":accounts[1]["id"]}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+
+    // Only the second secret went; the first one is byte for byte what it was.
+    assert!(f.vault_secret(&second_server).is_none());
+    assert_eq!(f.gmail_secret().unwrap(), first);
+    let left = f.gmail_accounts();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["account"], "charles@example.test");
+    assert_eq!(f.item("gmail")["status"], "connected");
+    // The conversation that had chosen the account that went away is not sent to another
+    // one silently: with a single account left there is nothing to ask, and it reads.
+    let read = f.gmail_ask(&conversation, "ggone-2", None);
+    assert_eq!(read["compte"], "charles@example.test");
+    assert!(read.get("choix_requis").is_none());
+    let token = f.gmail_token_of("charles@example.test");
+    assert_eq!(
+        f.gmail_bearers("/messages/m6").last().unwrap(),
+        &format!("Bearer {token}")
+    );
+    // The account that went away keeps nothing: no secret, no watch.
+    let state = f.state().to_string();
+    for secret in GMAIL_SECRETS {
+        assert!(!state.contains(secret));
+    }
+    let watched: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM wrapper_gmail_mailbox WHERE account_id=?1",
+            [SECOND_GOOGLE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(watched, 0);
+}
+
+#[test]
+fn gmail_email_asks_which_google_account_and_goes_out_under_the_chosen_one() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    // No choice: no card opens, and the reason is the question.
+    let conversation = f.github_conversation();
+    let run = f.github_call_in(
+        &conversation,
+        "gmail-ask",
+        GMAIL_SEND_TOOL,
+        json!({"to":["moi"],"subject":"Essai","body":"Bonjour"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("charles@example.test") && reason.contains(SECOND_GOOGLE),
+        "{reason}"
+    );
+    assert_eq!(f.email_sends(), 0);
+
+    let (run, card) = f.github_prepare(
+        "gmail-second",
+        GMAIL_SEND_TOOL,
+        json!({"to":["moi"],"subject":"Essai","body":"Bonjour du second","compte":SECOND_GOOGLE}),
+    );
+    assert_eq!(card["arguments"]["brouillon"]["de"], SECOND_GOOGLE);
+    assert_eq!(card["arguments"]["brouillon"]["a"], json!([SECOND_GOOGLE]));
+    assert_eq!(f.email_sends(), 0);
+    f.github_resolve(&card, "gmail-second-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert_eq!(done(&f, &run)["compte"], SECOND_GOOGLE);
+    let sent = f.delivered_mail();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].starts_with(&format!("From: {SECOND_GOOGLE}\r\n")),
+        "{}",
+        sent[0]
+    );
+    let token = f.gmail_token_of(SECOND_GOOGLE);
+    assert_eq!(
+        f.gmail_bearers("/messages/send").last().unwrap(),
+        &format!("Bearer {token}")
+    );
+}
+
+#[test]
+fn gmail_existing_draft_still_sends_under_its_account_when_another_is_added() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, card) = f.prepare_email("gmail-keep", "Essai", "Bonjour");
+    // A second account makes a fresh call ambiguous, never the draft bound to the first.
+    f.gmail_add_account(SECOND_GOOGLE);
+    f.github_resolve(&card, "gmail-keep-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert_eq!(done(&f, &run)["compte"], "charles@example.test");
+    let sent = f.delivered_mail();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].starts_with("From: charles@example.test\r\n"));
+    let token = f.gmail_token_of("charles@example.test");
+    assert_eq!(
+        f.gmail_bearers("/messages/send").last().unwrap(),
+        &format!("Bearer {token}")
+    );
+}
+
+#[test]
+fn gmail_new_messages_are_watched_for_each_google_account_and_name_it() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    assert!(f.new_mail().is_empty());
+    f.add_mail("m7", "Pour le premier");
+    f.oauth
+        .seen
+        .lock()
+        .unwrap()
+        .gmail
+        .inboxes
+        .get_mut(SECOND_GOOGLE)
+        .unwrap()
+        .insert(
+            0,
+            json!({"id":"m4","from":"Chef <chef@example.test>","subject":"Pour le second","date":"Wed, 21 Oct 2026 11:00:00 +0000","text":"Texte."}),
+        );
+    let events = f.new_mail();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let first = events.iter().find(|e| e.id == "m7").unwrap();
+    assert_eq!(first.compte, "charles@example.test");
+    let second = events.iter().find(|e| e.id == "m4").unwrap();
+    assert_eq!(second.compte, SECOND_GOOGLE);
+    // Each message is delivered once.
+    assert!(f.new_mail().is_empty());
+}
+
+#[test]
+fn slack_does_not_gain_a_second_account() {
+    let mut f = Fixture::new();
+    f.with_slack_client();
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"slack","another":true}"#,
+        )
+        .unwrap_err();
+    assert!(
+        error.message.contains("ne garde qu’un compte"),
+        "{}",
+        error.message
+    );
+    assert!(f.item("slack").get("accounts").is_none());
+}
+
+#[test]
+fn gmail_second_account_wait_is_cancelled_by_its_own_button_and_leaves_the_first_alone() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let first = f.gmail_secret().unwrap();
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id":"gmail","another":true}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    let waiting = f
+        .gmail_accounts()
+        .into_iter()
+        .find(|a| a["status"] == "authorizing")
+        .expect("the new slot waits for the browser");
+    // One wait at a time: a second request is refused while the first one waits.
+    let again = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"gmail","another":true}"#,
+        )
+        .unwrap_err();
+    assert!(again.message.contains("attend déjà"), "{}", again.message);
+
+    let result = f.post(
+        "/api/connectors/cancel",
+        json!({"id":"gmail","account":waiting["id"]}),
+    );
+    assert!(result["message"].as_str().unwrap().contains("annulée"));
+    // Nothing was kept for the cancelled wait, and the first account is as it was.
+    assert_eq!(f.oauth.count("/gmail/token"), 1, "only the first sign-in");
+    assert_eq!(f.gmail_secret().unwrap(), first);
+    assert!(f
+        .gmail_accounts()
+        .iter()
+        .all(|a| a["status"] != "authorizing"));
+    // Nothing is waiting any more: cancelling again changes nothing.
+    assert!(f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/cancel",
+            json!({"id":"gmail","account":waiting["id"]})
+                .to_string()
+                .as_bytes(),
+        )
+        .is_err());
+    // And the slot is free for the real second account.
+    f.gmail_add_account(SECOND_GOOGLE);
+    assert_eq!(f.gmail_accounts().len(), 2);
 }

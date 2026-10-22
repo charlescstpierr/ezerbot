@@ -31,7 +31,8 @@ fn schema() -> Value {
         "to":{"type":"array","minItems":1,"items":{"type":"string"},"description":"Adresses des destinataires (À), une adresse seule par entrée. Écrivez « moi » pour le compte Gmail connecté."},
         "cc":{"type":"array","items":{"type":"string"},"description":"Adresses en copie (Cc), si besoin."},
         "subject":{"type":"string","description":"Objet exact du courriel, que Charles pourra corriger avant l’envoi."},
-        "body":{"type":"string","description":"Corps exact du courriel, en texte, que Charles pourra corriger avant l’envoi."}
+        "body":{"type":"string","description":"Corps exact du courriel, en texte, que Charles pourra corriger avant l’envoi."},
+        "compte":account_property()
     },"required":["to","subject"]})
 }
 pub(super) fn tool_definition() -> Value {
@@ -44,7 +45,7 @@ pub(super) fn tool_definition() -> Value {
 pub(super) fn tool_spec() -> ToolSpec {
     ToolSpec {
         name: TOOL.into(),
-        description: "Gmail · préparer un courriel avec le compte Gmail connecté. Une carte brouillon montre De, À, Cc, Objet et Corps, que Charles peut corriger ; rien n’est envoyé avant son clic sur Envoyer, et Annuler n’envoie rien. Le résultat dit quel objet et quel corps sont partis. Si l’envoi est refusé, limité ou sans accusé de réception, le courriel n’est pas considéré comme parti : dites-le tel quel.".into(),
+        description: format!("Gmail · préparer un courriel avec le compte Gmail connecté. Une carte brouillon montre De, À, Cc, Objet et Corps, que Charles peut corriger ; rien n’est envoyé avant son clic sur Envoyer, et Annuler n’envoie rien. Le résultat dit quel objet et quel corps sont partis. Si l’envoi est refusé, limité ou sans accusé de réception, le courriel n’est pas considéré comme parti : dites-le tel quel. {ACCOUNTS_NOTE}"),
         schema: schema(),
         requires_approval: true,
     }
@@ -152,13 +153,14 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
         subject: String,
         #[serde(default)]
         body: String,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
         invalid("Arguments invalides : indiquez les destinataires (une adresse par entrée), l’objet et le corps du courriel.")
     })?;
     check_subject(ctx, &args.subject)?;
     check_body(ctx, &args.body)?;
-    let account = usable(ctx)?;
+    let account = resolve(ctx, args.compte.as_deref())?;
     let to = recipients(ctx, &args.to, &account.email)?;
     let cc: Vec<String> = recipients(ctx, &args.cc, &account.email)?
         .into_iter()
@@ -178,19 +180,9 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
         body: args.body,
     })
 }
-fn changed() -> ApiError {
+pub(super) fn changed() -> ApiError {
     invalid("Le compte Gmail a changé depuis l’affichage du brouillon : rien n’a été envoyé.")
 }
-/// The account the draft was made for, still connected and still given to the bot.
-fn held(ctx: &Context<'_>, login: &str) -> Result<Account, ApiError> {
-    let account = usable(ctx)?;
-    if account.email.eq_ignore_ascii_case(login) {
-        Ok(account)
-    } else {
-        Err(changed())
-    }
-}
-
 /// Checked before any card: a bad address or a missing account never opens one.
 pub(in super::super::super) fn validate(
     ctx: &Context<'_>,

@@ -258,7 +258,8 @@ fn webhook(mut request: Request, app: &mut App) {
     for (name, value) in headers {
         response.add_header(Header::from_bytes(name, value).expect("webhook response header"));
     }
-    if let Err(error) = request.respond(response) {
+    // An unread body must not leak into the next request of a kept-alive socket.
+    if let Err(error) = respond_remote(request, response) {
         eprintln!("Réponse webhook interrompue : {error}");
     }
 }

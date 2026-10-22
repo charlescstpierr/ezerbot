@@ -216,7 +216,7 @@ pub fn authorize(
     let row: Option<String> = app
         .connection
         .query_row(
-            "SELECT w.token FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 WHERE w.trigger_id=?1 AND w.routine_id=?2",
+            "SELECT w.token FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook' WHERE w.trigger_id=?1 AND w.routine_id=?2",
             params![trigger_id, routine_id],
             |r| r.get(0),
         )
@@ -279,6 +279,9 @@ fn record(
         |r| r.get(0),
     )?;
     if !live {
+        return Ok(Reply::error(404, "Webhook introuvable."));
+    }
+    if routine.trigger != Schedule::Webhook {
         return Ok(Reply::error(404, "Webhook introuvable."));
     }
     if !routine.enabled {
@@ -604,7 +607,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
 pub fn wanted(app: &App) -> bool {
     app.connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM wrapper_routine_webhooks)",
+            "SELECT EXISTS(SELECT 1 FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook')",
             [],
             |r| r.get(0),
         )
@@ -677,6 +680,7 @@ pub fn routes(
         let tx = write_transaction(&app.connection)?;
         let owned = grokbot_scheduler::routine::get(&tx, &input.routine_id)?
             .filter(|r| r.bot_id == input.bot_id)
+            .filter(|r| r.trigger == Schedule::Webhook)
             .ok_or_else(|| bad(404, "Routine introuvable."))?;
         let (trigger_id, token) = trigger_of(&tx, &owned.routine_id)?;
         let value = if path == "/api/routines/webhook/token" {
@@ -708,7 +712,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let published = (state == "published").then_some(base.clone()).flatten();
         let mut items = serde_json::Map::new();
         let mut stmt = ctx.connection.prepare(
-            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0",
+            "SELECT w.routine_id,w.trigger_id FROM wrapper_routine_webhooks w JOIN scheduler_routines r ON r.routine_id=w.routine_id AND r.deleted=0 AND json_extract(r.trigger,'$.kind')='webhook'",
         )?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?

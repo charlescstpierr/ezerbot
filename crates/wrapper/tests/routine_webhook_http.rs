@@ -9,6 +9,7 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use support::wait;
@@ -23,13 +24,12 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        // The clock alone can repeat across parallel tests: add a counter.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "ezerbot-webhook-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         // Behaviour is switched by files, so a test can stop Tailscale between calls.
@@ -405,6 +405,10 @@ fn funnel_publishes_only_after_approval_and_only_on_its_own_port() {
     assert!(commands.contains("--https=8443"));
     assert!(!commands.contains("--https=443"));
     assert!(!commands.contains("serve --bg"));
+    // The iPhone keeps its own private address, distinct from the public webhook URL.
+    let private = host.get("/api/iphone/tailscale");
+    assert_eq!(private["url"], format!("https://{DNS}"));
+    assert_ne!(private["url"], funnel["public_base"]);
     // Tailscale stopping later withdraws the public URL from the panel.
     host.tailscale("stopped");
     assert_eq!(

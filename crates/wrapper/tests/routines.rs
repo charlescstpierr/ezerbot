@@ -2137,3 +2137,29 @@ fn a_webhook_routine_resumes_after_a_pause_without_a_future_slot() {
     f.app.tick(now() + 86_400_000);
     assert_eq!(f.count(), 0);
 }
+
+#[test]
+fn a_webhook_whose_routine_a_bot_moved_to_a_schedule_answers_nothing() {
+    let mut f = Fixture::new(false);
+    let (r, url, bearer) = webhook_routine(&mut f, "Moved");
+    assert!(features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).is_ok());
+    let moved = f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "update_routine",
+            json!({"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"schedule":"@every 1h"}),
+        )
+        .unwrap();
+    assert!(matches!(moved, ToolOutcome::Done { .. }));
+    assert_eq!(
+        features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer))
+            .unwrap_err()
+            .status,
+        404
+    );
+    assert!(f.app.api("GET", "/api/state", b"").unwrap()["routine_webhooks"]["items"]
+        .as_object()
+        .unwrap()
+        .is_empty());
+}

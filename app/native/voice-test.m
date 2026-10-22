@@ -11,7 +11,7 @@ int main(void) {
         for (NSString *status in @[@"idle",@"ready",@"failed",@"mic_denied"]) assert(![EzerbotVoice captureStatusActive:status]);
         __block NSDictionary *result;
         void (^reply)(NSDictionary *) = ^(NSDictionary *value) { result = value; };
-        [voice command:@{@"command":@"start",@"token":@"one",@"language":@"fr"} reply:reply];
+        [voice command:@{@"command":@"start",@"token":@"one",@"language":@"fr",@"purpose":@"memo"} reply:reply];
         assert([result[@"status"] isEqual:@"recording"]);
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
         [voice command:@{@"command":@"status",@"token":@"one"} reply:reply];
@@ -25,12 +25,45 @@ int main(void) {
         [voice command:@{@"command":@"cancel",@"token":@"one"} reply:reply];
         assert([result[@"status"] isEqual:@"idle"]);
         assert([result[@"data"] length] == 0);
-        [voice command:@{@"command":@"start",@"token":@"two",@"language":@"fr"} reply:reply];
+        // The memo stays at one minute and keeps its audio.
+        [voice command:@{@"command":@"start",@"token":@"two",@"language":@"fr",@"purpose":@"memo"} reply:reply];
+        assert(voice.maxSeconds == 60 && [result[@"max_seconds"] intValue] == 60);
         voice.started = [NSDate dateWithTimeIntervalSinceNow:-61];
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
         [voice command:@{@"command":@"status",@"token":@"two"} reply:reply];
         assert([result[@"status"] isEqual:@"ready"] && [result[@"too_long"] boolValue]);
+        assert([result[@"data"] length] > 44);
         [voice cancel];
+        // Dictation runs five minutes, then stops with its text. Its audio never leaves the recorder.
+        [voice command:@{@"command":@"start",@"token":@"dictation",@"language":@"fr",@"purpose":@"dictation"} reply:reply];
+        assert(voice.maxSeconds == 300 && [result[@"max_seconds"] intValue] == 300);
+        voice.started = [NSDate dateWithTimeIntervalSinceNow:-299];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+        [voice command:@{@"command":@"status",@"token":@"dictation"} reply:reply];
+        assert([result[@"status"] isEqual:@"recording"] && ![result[@"too_long"] boolValue]);
+        voice.started = [NSDate dateWithTimeIntervalSinceNow:-301];
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+        [voice command:@{@"command":@"status",@"token":@"dictation"} reply:reply];
+        assert([result[@"status"] isEqual:@"ready"] && [result[@"too_long"] boolValue]);
+        assert([result[@"transcript"] hasPrefix:@"Bonjour"] && [result[@"data"] length] == 0);
+        [voice cancel];
+        // The microphone: listed, announced, and replaced by the default one when it is gone.
+        [voice command:@{@"command":@"microphones",@"token":@""} reply:reply];
+        assert(([[result[@"microphones"] valueForKey:@"id"] isEqualToArray:@[@"fake-built-in",@"fake-usb"]]));
+        [voice command:@{@"command":@"start",@"token":@"usb",@"microphone":@"fake-usb"} reply:reply];
+        assert([result[@"microphone_id"] isEqual:@"fake-usb"] && [result[@"microphone_name"] isEqual:@"Microphone USB (test)"] && ![result[@"microphone_fallback"] boolValue]);
+        [voice cancel];
+        EzerbotMicrophones.fakeUnplugged = @[@"fake-usb"];
+        [voice command:@{@"command":@"microphones",@"token":@""} reply:reply];
+        assert(([[result[@"microphones"] valueForKey:@"id"] isEqualToArray:@[@"fake-built-in"]]));
+        [voice command:@{@"command":@"start",@"token":@"gone",@"microphone":@"fake-usb"} reply:reply];
+        assert([result[@"status"] isEqual:@"recording"] && [result[@"microphone_id"] isEqual:@"fake-built-in"] && [result[@"microphone_fallback"] boolValue]);
+        [voice cancel];
+        // A local capture keeps the microphone of the recording already delivered.
+        [voice command:@{@"command":@"start",@"token":@"meeting-mic",@"purpose":@"meeting",@"consent":@YES,@"microphone":@"fake-usb"} reply:reply];
+        assert([result[@"microphone_id"] isEqual:@"fake-built-in"] && ![result[@"microphone_fallback"] boolValue]);
+        [voice cancel];
+        EzerbotMicrophones.fakeUnplugged = @[];
         [voice command:@{@"command":@"start",@"token":@"meeting",@"purpose":@"meeting"} reply:reply];
         assert([result[@"status"] isEqual:@"consent_required"]);
         [voice command:@{@"command":@"start",@"token":@"meeting",@"purpose":@"meeting",@"consent":@YES} reply:reply];
@@ -92,7 +125,14 @@ int main(void) {
         empty.fakeSegmentFailures = [NSIndexSet indexSetWithIndex:1];
         [empty command:@{@"command":@"retry",@"token":@"empty"} reply:reply];
         assert([result[@"status"] isEqual:@"ready"] && [result[@"partial"] boolValue]);
-        [segmented cancel]; [tail cancel]; [empty cancel];
+        // A dictation longer than a minute is cut like a meeting: a lost passage is marked, not the whole text.
+        EzerbotVoice *dictation = [[EzerbotVoice alloc] init]; dictation.maxSeconds = 300; dictation.token = @"long";
+        dictation.audio = [EzerbotMeetingTranscription waveFromPCM:[NSMutableData dataWithLength:121*32000]];
+        dictation.fakeSegmentTexts = @[@"Début",@"Milieu",@"Fin"]; dictation.fakeSegmentFailures = [NSIndexSet indexSetWithIndex:1]; [dictation transcribe];
+        assert([dictation.status isEqual:@"ready"] && dictation.transcriptionPlan.missingCount == 1);
+        [dictation command:@{@"command":@"status",@"token":@"long"} reply:reply];
+        assert([result[@"partial"] boolValue] && [result[@"data"] length] == 0 && [result[@"transcript"] containsString:@"[Passage non transcrit de 1:00 à 2:00]"]);
+        [segmented cancel]; [tail cancel]; [empty cancel]; [dictation cancel];
         assert(!segmented.audio && !segmented.transcriptionPlan);
         puts("voice/meeting native debug: PCM chunks, partial failure, deadline, silent tail, targeted retry, consent, pause/resume, caps OK; no permissions");
     }

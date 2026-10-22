@@ -20,6 +20,8 @@ empty_hooks!(
     link_attachments
 );
 pub const MAX_SECONDS: u32 = 60;
+/// Dictation is transcribed on the Mac and never kept, so it outlasts the memo.
+pub const DICTATION_SECONDS: u32 = 300;
 // AVAudioRecorder stops at 60s; allow one final CoreAudio buffer plus its
 // padded WAV header. The displayed duration remains capped at 60s.
 const MAX_CAPTURE_SECONDS: u32 = MAX_SECONDS + 1;
@@ -30,10 +32,42 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         "CREATE TABLE IF NOT EXISTS wrapper_voice_memos (
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT,
         transcript TEXT NOT NULL, language TEXT NOT NULL, duration_ms INTEGER NOT NULL,
-        audio BLOB NOT NULL, created_at INTEGER NOT NULL);",
+        audio BLOB NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS wrapper_voice_microphone (id INTEGER PRIMARY KEY CHECK(id=1), microphone TEXT NOT NULL);
+        INSERT OR IGNORE INTO wrapper_voice_microphone VALUES(1,'');",
     )?;
     super::voice_session::migrate(conn)?;
     Ok(())
+}
+
+/// The microphone is a setting of the Mac: dictation, memo and voice mode share
+/// it. Empty means the system default. The device itself is named by Cocoa.
+pub fn microphone(conn: &Connection) -> Result<String, ApiError> {
+    Ok(conn.query_row(
+        "SELECT microphone FROM wrapper_voice_microphone WHERE id=1",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+fn save_microphone(conn: &Connection, body: &[u8]) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Choice {
+        id: String,
+    }
+    let input: Choice = parse(body)?;
+    if input.id.len() > 256 || input.id.chars().any(char::is_control) {
+        return Err(ApiError::new(
+            400,
+            "Microphone invalide. Choisissez un microphone de la liste.",
+        ));
+    }
+    conn.execute(
+        "UPDATE wrapper_voice_microphone SET microphone=?1 WHERE id=1",
+        [&input.id],
+    )?;
+    Ok(json!({"microphone":input.id}))
 }
 
 /// Accept only bounded mono PCM16 WAV, not arbitrary bytes labelled audio/wav.
@@ -188,7 +222,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         Ok(rows)
     })()
     .unwrap_or_default();
-    json!({"max_seconds":MAX_SECONDS,"drafts":drafts,"debug_fake":cfg!(debug_assertions),"settings":super::voice_session::settings(ctx.connection).unwrap_or_else(|_| json!({"voice":"","speed":1.0}))})
+    json!({"max_seconds":MAX_SECONDS,"microphone":microphone(ctx.connection).unwrap_or_default(),"drafts":drafts,"debug_fake":cfg!(debug_assertions),"settings":super::voice_session::settings(ctx.connection).unwrap_or_else(|_| json!({"voice":"","speed":1.0}))})
 }
 
 pub fn routes(
@@ -208,6 +242,9 @@ pub fn routes(
     match (method, path) {
         ("POST", "/api/voice/settings") => {
             Some(super::voice_session::save(&app.connection, body).map(ApiResponse::Json))
+        }
+        ("POST", "/api/voice/microphone") => {
+            Some(save_microphone(&app.connection, body).map(ApiResponse::Json))
         }
         ("POST", "/api/voice/memos") => Some((|| {
             #[derive(Deserialize)]
@@ -325,10 +362,40 @@ pub(crate) struct DebugVoice {
     started: u64,
     attempts: u32,
     meeting: bool,
+    memo: bool,
     accumulated: u64,
+    skew: u64,
+    unplugged: Vec<String>,
+    microphone: (String, String, bool),
 }
+/// The fixture's microphones. The first one is the system default.
+#[cfg(debug_assertions)]
+const MICROPHONES: [(&str, &str); 2] = [
+    ("fake-built-in", "Microphone intégré (test)"),
+    ("fake-usb", "Microphone USB (test)"),
+];
 #[cfg(debug_assertions)]
 impl DebugVoice {
+    /// The clock the recording cap reads. `advance` moves it, so no test waits
+    /// five real minutes.
+    fn now(&self) -> u64 {
+        crate::now() + self.skew
+    }
+    fn available(&self) -> Vec<(&'static str, &'static str)> {
+        MICROPHONES
+            .into_iter()
+            .filter(|(id, _)| !self.unplugged.iter().any(|gone| gone == id))
+            .collect()
+    }
+    fn max_seconds(&self) -> u32 {
+        if self.meeting {
+            super::meetings::MAX_SECONDS
+        } else if self.memo {
+            MAX_SECONDS
+        } else {
+            DICTATION_SECONDS
+        }
+    }
     pub fn command(&mut self, body: &[u8]) -> Result<Value, ApiError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -344,10 +411,24 @@ impl DebugVoice {
             purpose: Option<String>,
             #[serde(default)]
             consent: bool,
+            #[serde(default)]
+            microphone: String,
+            #[serde(default)]
+            unplugged: Option<Vec<String>>,
+            #[serde(default)]
+            ms: u64,
         }
         let command: Command = parse(body)?;
         if let Some(scenario) = command.scenario {
             self.scenario = scenario;
+        }
+        if command.command == "microphones" {
+            let microphones: Vec<Value> = self
+                .available()
+                .into_iter()
+                .map(|(id, name)| json!({"id":id,"name":name}))
+                .collect();
+            return Ok(json!({"microphones":microphones,"fake":true}));
         }
         if command.command == "start" {
             if matches!(
@@ -364,6 +445,7 @@ impl DebugVoice {
                 ));
             }
             self.meeting = command.purpose.as_deref() == Some("meeting");
+            self.memo = command.purpose.as_deref() == Some("memo");
             if self.meeting && !command.consent {
                 return Err(ApiError::new(
                     403,
@@ -372,8 +454,20 @@ impl DebugVoice {
             }
             self.accumulated = 0;
             self.token = command.token;
-            self.started = crate::now();
+            self.started = self.now();
             self.attempts = 0;
+            // A local capture keeps the microphone of the recording already
+            // delivered: the choice only applies to dictation and memos.
+            let available = self.available();
+            let chosen = available
+                .iter()
+                .find(|(id, _)| !self.meeting && *id == command.microphone);
+            let (id, name) = chosen.or(available.first()).copied().unwrap_or(("", ""));
+            self.microphone = (
+                id.into(),
+                name.into(),
+                !self.meeting && !command.microphone.is_empty() && chosen.is_none(),
+            );
             self.status = match self.scenario.as_str() {
                 "denied" => "mic_denied",
                 "speech_denied" => "speech_denied",
@@ -384,22 +478,26 @@ impl DebugVoice {
             .into();
         } else if command.command == "configure" {
             // Test-only scenario selection never exists in release.
+            if let Some(unplugged) = command.unplugged {
+                self.unplugged = unplugged;
+            }
         } else if command.token != self.token {
             return Err(ApiError::new(409, "Cette dictée n’est plus active."));
         } else {
             match command.command.as_str() {
                 "cancel" => self.status = "idle".into(),
+                "advance" => self.skew += command.ms,
                 "pause" if self.meeting && self.status == "recording" => {
-                    self.accumulated += crate::now().saturating_sub(self.started);
+                    self.accumulated += self.now().saturating_sub(self.started);
                     self.status = "paused".into();
                 }
                 "resume" if self.meeting && self.status == "paused" => {
-                    self.started = crate::now();
+                    self.started = self.now();
                     self.status = "recording".into();
                 }
                 "stop" | "retry" => {
                     if self.status == "recording" {
-                        self.accumulated += crate::now().saturating_sub(self.started);
+                        self.accumulated += self.now().saturating_sub(self.started);
                     }
                     self.attempts += 1;
                     self.status = if self.scenario == "failed" && self.attempts == 1 {
@@ -413,15 +511,10 @@ impl DebugVoice {
                 _ => return Err(ApiError::new(400, "Commande vocale inconnue.")),
             }
         }
-        let cap = if self.meeting {
-            super::meetings::MAX_SECONDS
-        } else {
-            MAX_SECONDS
-        } as u64
-            * 1000;
+        let cap = self.max_seconds() as u64 * 1000;
         let elapsed = self.accumulated
             + if self.status == "recording" {
-                crate::now().saturating_sub(self.started)
+                self.now().saturating_sub(self.started)
             } else {
                 0
             };
@@ -454,7 +547,10 @@ impl DebugVoice {
             json!({"status":if self.status.is_empty() {"idle"} else {&self.status},"token":self.token,
             "elapsed_ms":if segmented {121_000} else if self.scenario == "too_long" {cap} else {elapsed.min(cap)},"level":if self.status == "recording" {0.2+(elapsed % 700) as f64/1000.0} else {0.0},
             "transcript":transcript,"partial":partial,"missing_segments":if partial {1} else {0},
-            "data":if ready && self.scenario != "no_audio" {STANDARD.encode(&audio)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
+            "max_seconds":self.max_seconds(),
+            "microphone_id":self.microphone.0,"microphone_name":self.microphone.1,"microphone_fallback":self.microphone.2,
+            // Only a memo or a local capture hands its audio over; a dictation keeps none.
+            "data":if ready && self.scenario != "no_audio" && (self.memo || self.meeting) {STANDARD.encode(&audio)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
             "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }

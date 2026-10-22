@@ -98,8 +98,10 @@
     const rev = ++epoch;
     render(); panels.composerChanged();
     try {
-      const result = await bridge("start");
+      const requested = window.EzerbotMicrophone?.current() ?? "";
+      const result = await bridge("start", {microphone:requested});
       if (rev !== epoch) return;
+      if (result.microphone_fallback) window.EzerbotMicrophone?.fellBack(requested);
       if (errors[result.status]) { fail(result.status); return; }
       phase = result.status; render(); schedule(rev);
     } catch (error) { if (rev === epoch) fail("failed", error.message); }
@@ -160,7 +162,7 @@
       const chunks = reader.read(ctx.conversation?.messages || [], needsAction);
       const settings = ctx.state.voice?.settings || {voice:"",speed:1};
       for (const text of chunks) {
-        const receipt = await bridge("speak", {text,...settings,barge:lastBarge});
+        const receipt = await bridge("speak", {text,voice:settings.voice,speed:settings.speed,barge:lastBarge});
         if (rev !== epoch) return;
         if (errors[receipt.status]) { fail(receipt.status); return; }
         if (receipt.barged > lastBarge) break; // Native STT already interrupted queued speech.

@@ -13,7 +13,7 @@ class Element {
 const all = n => [n,...n.children.flatMap(all)];
 const cls = (n,c) => all(n).find(x => x.className === c);
 function fixture() {
-  let panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend;
+  let startExtras={}, notices=[], panel, timer, keydown, source={status:"idle",transcript:"",utterance_id:0,barged:0}, scenario="", nextSend;
   const calls=[], sends=[], follows=[];
   let dictationRefreshes=0;
   const root=new Element("div"), send=new Element("button"), settings=new Element("div"), composer=new Element("div"), controls=new Element("div");controls.className="voice-controls";root.append(controls,send,settings,composer);
@@ -21,7 +21,7 @@ function fixture() {
   const bridge=async body => {
     calls.push(body);
     if(body.command === "options")return {voices:[]};
-    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0};
+    if(body.command === "start")source={status:scenario || "listening",token:body.token,transcript:"",utterance_id:0,barged:0,...startExtras};
     if(body.command === "speak")source.speaking=true;
     if(body.command === "interrupt") { source.speaking=false;source.transcript=""; }
     if(body.command === "cancel")source.status="idle";
@@ -31,17 +31,17 @@ function fixture() {
   };
   const panels={
     register(p){ panel=p;p.settingsSection(settings,context);p.composer.mount(composer,context);p.onState(context.state,context);},
-    composerChanged(){}, notify(){}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/conversations")return {conversation:{id:"created"}};},
+    composerChanged(){}, notify(text){notices.push(text);}, async refresh(){}, async api(path,body){calls.push({path,...body});if(path==="/api/conversations")return {conversation:{id:"created"}};},
     openConversation(id){context={...context,conversation:{id,messages:[]}};panel.onState(context.state,context);return true;},
     async sendVoice(text,id){sends.push({text,id});nextSend?.();},
     followVoiceReply(id){follows.push(id);},
   };
   runInNewContext(readFileSync(new URL("../../ui/panels/voice-conversation.js",import.meta.url),"utf8"),{
-    window:{GrokbotPanels:panels,EzerbotDictation:{refresh(){dictationRefreshes++;},cancel(){} },GrokbotChat:{createVoiceReader,voiceNeedsAction},webkit:{messageHandlers:{ezerbotVoiceSession:{postMessage:bridge}}},addEventListener(){}},
+    window:{GrokbotPanels:panels,EzerbotMicrophone:{current:()=>context.state.voice.microphone||"",fellBack(id){notices.push("repli:"+id);}},EzerbotDictation:{refresh(){dictationRefreshes++;},cancel(){} },GrokbotChat:{createVoiceReader,voiceNeedsAction},webkit:{messageHandlers:{ezerbotVoiceSession:{postMessage:bridge}}},addEventListener(){}},
     document:{createElement:tag=>new Element(tag),getElementById:()=>send,querySelector:()=>controls,addEventListener(name,fn){if(name==="keydown")keydown=fn;}},
     crypto:{randomUUID:()=>"token"},setTimeout(fn){timer=fn;return 1;},clearTimeout(){timer=null;},
   });
-  return {root,calls,sends,follows,panel,setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
+  return {root,calls,sends,follows,notices,panel,set startExtras(value){startExtras=value;},setMeetingActive(value){panels.meetingActive=()=>value;panel.onState(context.state,context);},get dictationRefreshes(){return dictationRefreshes;},get source(){return source;},set scenario(s){scenario=s;},set nextSend(fn){nextSend=fn;},get context(){return context;},
     setContext(c){context=c;panel.onState(c.state,c);},tick:async()=>timer?.(),keydown:e=>keydown(e)};
 }
 test("end-to-end voice sends only the recognized utterance once, reads streamed sentences, pauses on approval",async()=>{
@@ -134,4 +134,20 @@ test("permission denial and transcription errors stop safely and give French rec
   assert.equal(f.calls.at(-1).token,"token");assert.equal(f.calls.at(-1).reason,"mic_denied");
   f.scenario="";await cls(f.root,"voice-session-toggle").onclick();f.source.status="failed";await f.tick();
   assert.match(cls(f.root,"voice-session-state").textContent,/transcription a échoué/);assert.equal(f.sends.length,0);
+});
+
+test("the voice mode listens to the chosen microphone and never sends it as a voice setting",async()=>{
+  const f=fixture(); f.context.state.voice.microphone="usb";
+  await cls(f.root,"voice-session-toggle").onclick();
+  assert.equal(f.calls.find(c=>c.command==="start").microphone,"usb");
+  f.context.conversation.messages.push({id:"r",role:"assistant",kind:"message",state:"streaming",body:"Bonjour. Je vous écoute"});
+  await f.tick();
+  const speak=f.calls.find(c=>c.command==="speak");
+  assert.deepEqual(Object.keys(speak).filter(k=>!["command","token","text","barge","voice","speed"].includes(k)),[],"the microphone is not a voice setting");
+});
+test("a microphone gone when the voice mode starts is announced and the mode still runs",async()=>{
+  const f=fixture(); f.context.state.voice.microphone="usb"; f.startExtras={microphone_fallback:true};
+  await cls(f.root,"voice-session-toggle").onclick();
+  assert.deepEqual(f.notices,["repli:usb"],"only the missing choice is forgotten");
+  assert.equal(cls(f.root,"voice-session-toggle").attributes["aria-pressed"],"true");
 });

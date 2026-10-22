@@ -51,6 +51,7 @@ pub(crate) struct DebugSession {
     barged: u64,
     paused: bool,
     fault: Option<String>,
+    microphone: Value,
     queue: Vec<String>,
     spoken: Vec<String>,
     until: u64,
@@ -76,6 +77,8 @@ impl DebugSession {
             voice: String,
             #[serde(default)]
             barge: Option<u64>,
+            #[serde(default)]
+            microphone: String,
             #[serde(default = "default_speed")]
             speed: f64,
         }
@@ -91,11 +94,12 @@ impl DebugSession {
         if c.command == "start" {
             let source = self.source.command(
                 &serde_json::to_vec(
-                    &json!({"command":"start","token":c.token,"scenario":c.scenario}),
+                    &json!({"command":"start","token":c.token,"scenario":c.scenario,"microphone":c.microphone}),
                 )
                 .unwrap(),
             )?;
             self.token = c.token;
+            self.microphone = json!({"microphone_id":source["microphone_id"],"microphone_name":source["microphone_name"],"microphone_fallback":source["microphone_fallback"]});
             self.active = source["status"] == "recording";
             self.transcript.clear();
             self.final_text.clear();
@@ -180,7 +184,7 @@ impl DebugSession {
         Ok(
             json!({"status":if self.active {self.fault.as_deref().unwrap_or("listening")} else {"idle"},"token":self.token,"transcript":self.transcript,
             "utterance_id":self.utterance,"final_text":self.final_text,"barged":self.barged,"speaking":!self.queue.is_empty() && !self.paused,
-            "paused":self.paused,"recorded_speech":self.spoken,"fake":true}),
+            "paused":self.paused,"recorded_speech":self.spoken,"microphone_id":self.microphone["microphone_id"],"microphone_name":self.microphone["microphone_name"],"microphone_fallback":self.microphone["microphone_fallback"],"fake":true}),
         )
     }
 }

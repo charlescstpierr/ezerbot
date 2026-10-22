@@ -209,7 +209,7 @@ fn post(
         .set("Accept", "application/json, text/event-stream")
         .send_json(json!({
             "model": model,
-            "input": description,
+            "input": [{"role": "user", "content": description}],
             "store": false,
             "stream": true,
             "instructions": "Tu es un assistant utile.",

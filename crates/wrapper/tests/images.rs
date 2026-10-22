@@ -192,7 +192,7 @@ fn assert_image_contract(fixture: &Fixture, prompt: &str, size: &str) {
     assert_eq!(seen.image_urls[0], "/backend-api/codex/responses");
     let call = &seen.image_calls[0];
     assert_eq!(call["model"], "gpt-6.1-sol");
-    assert_eq!(call["input"], prompt);
+    assert_eq!(call["input"], json!([{"role": "user", "content": prompt}]));
     assert_eq!(call["stream"], true);
     assert!(call["instructions"]
         .as_str()

@@ -440,93 +440,109 @@ fn read_granted_tree_with(
     let canonical = root.canonicalize().map_err(io_error)?;
     let mut files = Vec::new();
     let mut skipped = Vec::new();
-    walk_granted(ctx, root, root, &mut files, &mut skipped, intervene)?;
+    walk_granted(
+        ctx,
+        root,
+        Path::new(""),
+        &opened,
+        &mut files,
+        &mut skipped,
+        intervene,
+    )?;
     intervene(root);
     confirm_import_root(root, &canonical, identity)?;
     Ok(GrantedTree { files, skipped })
 }
 
+#[cfg(unix)]
 fn walk_granted(
     ctx: &Context<'_>,
-    root: &Path,
     dir: &Path,
+    prefix: &Path,
+    opened: &fs::File,
     files: &mut Vec<(String, Vec<u8>)>,
     skipped: &mut Vec<(String, String)>,
     intervene: &mut dyn FnMut(&Path),
 ) -> Result<(), ApiError> {
-    for entry in fs::read_dir(dir).map_err(io_error)? {
+    use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let entries = Dir::read_from(opened).map_err(|e| io_error(e.into()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| io_error(e.into()))?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
         if files.len() + skipped.len() >= 1000 {
             return Err(ApiError::new(
                 400,
                 "too-many-files: maximum 1000 per request",
             ));
         }
-        let entry = entry.map_err(io_error)?;
-        let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(io_error)?;
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if meta.file_type().is_symlink() {
-            skipped.push((relative, "symlink".into()));
-            continue;
-        }
-        // Path prefix covers the data directory itself (nlink == 1). The inode
-        // check inside is_app_data covers a hard link that lives elsewhere.
-        if is_app_data(ctx, &path)? {
+        let component = std::ffi::OsStr::from_bytes(name.to_bytes());
+        let path = dir.join(component);
+        let relative_path = prefix.join(component);
+        let relative = relative_path.to_string_lossy().replace('\\', "/");
+        if path.starts_with(data_dir(ctx)?) {
             skipped.push((relative, "app-data".into()));
             continue;
         }
-        if meta.is_dir() {
-            if open_dir_nofollow(&path).is_err() {
+        let metadata =
+            statat(opened, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io_error(e.into()))?;
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::Symlink => {
                 skipped.push((relative, "symlink".into()));
                 continue;
             }
-            walk_granted(ctx, root, &path, files, skipped, intervene)?;
-            continue;
-        }
-        if !meta.is_file() {
-            continue;
+            FileType::Directory | FileType::RegularFile => {}
+            _ => continue,
         }
         intervene(&path);
-        if fs::symlink_metadata(&path)
-            .ok()
-            .is_some_and(|fresh| fresh.file_type().is_symlink())
-        {
-            skipped.push((relative, "symlink".into()));
-            continue;
-        }
-        match read_bytes_checked(&path, |opened| {
-            if protected_identity(ctx, opened)? {
-                return Err(ApiError::new(403, "app-data"));
-            }
-            Ok(())
-        }) {
-            Ok(bytes) => files.push((relative, bytes)),
-            Err(error) if error.message == "app-data" => {
-                skipped.push((relative, "app-data".into()));
-            }
-            Err(error) if error.message == "Fichier trop volumineux (1 Mio maximum)." => {
-                skipped.push((relative, "too-large".into()));
-            }
-            Err(error) if error.message == "Seuls les fichiers ordinaires sont lisibles." => {
+        // Resolve exactly one component against the retained parent, including
+        // after a directory rename. Never reopen an ancestor by pathname.
+        let fd = match openat(
+            opened,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::LOOP) => {
                 skipped.push((relative, "symlink".into()));
+                continue;
             }
-            Err(error) => {
-                if fs::symlink_metadata(&path)
-                    .ok()
-                    .is_some_and(|fresh| fresh.file_type().is_symlink())
-                {
-                    skipped.push((relative, "symlink".into()));
-                } else {
-                    return Err(error);
+            Err(error) => return Err(io_error(error.into())),
+        };
+        let file = fs::File::from(fd);
+        let metadata = file.metadata().map_err(io_error)?;
+        if protected_identity(ctx, &metadata)? {
+            skipped.push((relative, "app-data".into()));
+        } else if metadata.is_dir() {
+            walk_granted(ctx, &path, &relative_path, &file, files, skipped, intervene)?;
+        } else if metadata.is_file() {
+            match read_opened_bytes(file, |_| Ok(())) {
+                Ok(bytes) => files.push((relative, bytes)),
+                Err(error) if error.message == "Fichier trop volumineux (1 Mio maximum)." => {
+                    skipped.push((relative, "too-large".into()));
                 }
+                Err(error) => return Err(error),
             }
         }
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn walk_granted(
+    _: &Context<'_>,
+    _: &Path,
+    _: &Path,
+    _: &fs::File,
+    _: &mut Vec<(String, Vec<u8>)>,
+    _: &mut Vec<(String, String)>,
+    _: &mut dyn FnMut(&Path),
+) -> Result<(), ApiError> {
+    Err(ApiError::new(400, "L’import local requiert macOS ou Unix."))
 }
 
 fn confirm_import_root(
@@ -595,6 +611,12 @@ fn read_bytes_checked(
         options.custom_flags(0x20000 | 0x800);
     }
     let file = options.open(path).map_err(io_error)?;
+    read_opened_bytes(file, check)
+}
+fn read_opened_bytes(
+    file: fs::File,
+    check: impl FnOnce(&fs::Metadata) -> Result<(), ApiError>,
+) -> Result<Vec<u8>, ApiError> {
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() {
         return Err(ApiError::new(
@@ -1236,6 +1258,40 @@ mod tests {
             .skipped
             .iter()
             .any(|(path, reason)| path == "note.md" && reason == "symlink"));
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_nested_directory_swapped_for_a_symlink_does_not_escape_the_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-nested-swap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let folder = root.join("skills");
+        let nested = folder.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("note.md"), "local").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("note.md"), "OUTSIDE GRANT").unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        let mut swapped = false;
+        let result = read_granted_tree_with(&app.feature_context(), &folder, &mut |path| {
+            if !swapped && path == nested.join("note.md") {
+                fs::rename(&nested, folder.join("original")).unwrap();
+                std::os::unix::fs::symlink(&outside, &nested).unwrap();
+                swapped = true;
+            }
+        });
+        assert!(swapped);
+        let tree = result.unwrap();
+        assert_eq!(
+            tree.files,
+            vec![("nested/note.md".into(), b"local".to_vec())]
+        );
         drop(app);
         fs::remove_dir_all(root).unwrap();
     }

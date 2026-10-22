@@ -289,12 +289,16 @@ fn confirmation_body(conn: &Connection, r: &Routine) -> Result<String, ApiError>
             let s = library::get_version(conn, skill_id, *version)?
                 .filter(|s| s.bot_id == r.bot_id && !s.deleted)
                 .ok_or_else(|| ApiError::new(404, "Pinned skill version not found for this bot"))?;
+            let mut text = s.content.body;
+            for file in s.content.files {
+                text.push_str(&format!("\n\nAnnexe : {}\n{}", file.path, file.content));
+            }
             (
                 format!(
                     "> **Skill :**\n{}\n> \n> **Instructions :**",
                     quoted_data(&format!("{} · version {version}", s.content.name))
                 ),
-                s.content.body,
+                text,
             )
         }
     };

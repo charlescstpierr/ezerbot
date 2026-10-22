@@ -137,6 +137,8 @@ fn import_reports_per_file_and_survives_restart() {
             {"path":"deploy/SKILL.md", "content":"---\nname: Deploy\n---\nSecond body"}
         ]}),
     );
+    assert_eq!(report_status(&updated, 0), "annex");
+    assert_eq!(updated["report"][0]["status"]["skill_id"], id);
     assert_eq!(updated["report"][1]["status"]["skill_id"], id);
     let versions = post(
         &mut app,
@@ -149,7 +151,353 @@ fn import_reports_per_file_and_survives_restart() {
         .as_str()
         .unwrap()
         .ends_with("Second body"));
+    assert_eq!(
+        versions["versions"][1]["content"]["files"][0]["path"],
+        "README.md"
+    );
+    assert_eq!(
+        versions["versions"][1]["content"]["files"][0]["content"],
+        "# Deploy\nreadme"
+    );
+    assert_eq!(listing(&mut app, "grokbot").len(), 2);
+}
+
+#[test]
+fn folder_import_keeps_modele_as_an_annex() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\ndescription: Suit le modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex},
+            {"path":"dossier/nested/note.md", "content":"Ceci n'est pas une annexe."},
+            {"path":"notes.csv", "content":"a,b\n1,2"}
+        ]}),
+    );
+    assert_eq!(
+        report_status(&report, 1),
+        "annex",
+        "modele.md doit être une annexe, pas une skill séparée"
+    );
+    let id = report["report"][0]["status"]["skill_id"].clone();
+    assert_eq!(report["report"][1]["status"]["skill_id"], id);
+    assert_eq!(report_status(&report, 2), "written");
+    assert_eq!(report_status(&report, 3), "written");
+    assert_ne!(report["report"][2]["status"]["skill_id"], id);
+    let versions = post(
+        &mut app,
+        "/api/skills/versions",
+        json!({"bot_id":"grokbot", "skill_id": id}),
+    );
+    let files = versions["versions"][0]["content"]["files"]
+        .as_array()
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "modele.md");
+    assert_eq!(files[0]["content"], annex);
     assert_eq!(listing(&mut app, "grokbot").len(), 3);
+}
+
+#[test]
+fn restoring_a_version_brings_back_its_annex() {
+    let db = Database::new();
+    let mut app = db.open();
+    let old_annex = "Réponds exactement : Ancienne consigne.";
+    let new_annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let first = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nPremier corps"},
+            {"path":"dossier/modele.md", "content": old_annex}
+        ]}),
+    );
+    let id = first["report"][0]["status"]["skill_id"].clone();
+    post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nSecond corps"},
+            {"path":"dossier/modele.md", "content": new_annex}
+        ]}),
+    );
+    let restored = request(
+        &mut app,
+        "/api/skills/restore",
+        json!({"bot_id":"grokbot", "skill_id": id, "expected_version": 2, "version": 1}),
+    )
+    .expect("la restauration doit ramener le corps et l'annexe de la version 1");
+    assert_eq!(restored["skill"]["version"], 3);
+    assert!(restored["skill"]["content"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Premier corps"));
+    assert_eq!(
+        restored["skill"]["content"]["files"][0]["path"],
+        "modele.md"
+    );
+    assert_eq!(
+        restored["skill"]["content"]["files"][0]["content"],
+        old_annex
+    );
+}
+
+#[test]
+fn applied_skill_puts_the_annex_in_context_and_the_reply_follows_it() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\ndescription: Suit le modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let plain = post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": conversation, "message_id": "sans-skill", "body": "bonjour"}),
+    );
+    assert!(plain["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("Bien reçu"));
+    assert!(!app
+        .context_preview(&conversation)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains("skill_appliquee") || block.text.contains(annex)));
+    let sent = request(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-skill",
+            "body": "Lance la skill « Modèle ».",
+            "apply_skill_id": id
+        }),
+    )
+    .expect("l'envoi qui applique la skill doit aboutir");
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant" && message["id"] != "reply-sans-skill")
+        .unwrap();
+    assert_eq!(reply["body"], "Le modèle annexe est suivi.");
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .expect("le contexte de la réponse doit contenir l'annexe appliquée");
+    assert!(applied.text.contains("modele.md"));
+    assert!(applied.text.contains(annex));
+    assert!(preview
+        .iter()
+        .any(|block| { block.source == ContextSource::SkillIndex && !block.text.contains(annex) }));
+}
+
+#[test]
+fn a_long_body_does_not_push_the_annex_out_of_the_reply() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content": format!("---\nname: Modèle\n---\n{}", "x".repeat(20_000))},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let sent = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-long",
+            "body": "Lance la skill.",
+            "apply_skill_id": id
+        }),
+    );
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert_eq!(
+        reply["body"], "Le modèle annexe est suivi.",
+        "un corps long ne doit pas chasser l'annexe du contexte de 16 000 caractères"
+    );
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .unwrap();
+    assert!(applied.text.contains(annex));
+    assert!(
+        applied.text.contains("corps tronqué"),
+        "le corps doit annoncer sa troncature"
+    );
+    assert!(!applied.text.contains(&"x".repeat(20_000)));
+}
+
+#[test]
+fn a_long_display_name_keeps_the_annex_inside_the_fence() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let name = "N".repeat(20_000);
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content": format!("---\nname: {name}\n---\n{}", "x".repeat(20_000))},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"].as_str().unwrap();
+    let conversation = conversation(&mut app, "grokbot");
+    let sent = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": conversation,
+            "message_id": "lance-titre",
+            "body": "Lance la skill.",
+            "apply_skill_id": id
+        }),
+    );
+    let reply = sent["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert_eq!(reply["body"], "Le modèle annexe est suivi.");
+    let preview = app.context_preview(&conversation).unwrap();
+    let applied = preview
+        .iter()
+        .find(|block| block.text.contains("skill_appliquee"))
+        .expect("le titre long ne doit pas chasser l'annexe");
+    assert!(applied.text.contains(annex));
+    assert!(applied.text.contains("corps tronqué"));
+    assert!(!applied.text.contains(&name));
+    assert!(!applied.text.contains(&"x".repeat(20_000)));
+}
+
+#[test]
+fn a_group_launch_injects_the_annex_and_stays_inside_its_conversation() {
+    let db = Database::new();
+    let mut app = db.open();
+    let annex = "Réponds exactement : Le modèle annexe est suivi.";
+    let report = post(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "files":[
+            {"path":"dossier/SKILL.md", "content":"---\nname: Modèle\n---\nCorps du modèle"},
+            {"path":"dossier/modele.md", "content": annex}
+        ]}),
+    );
+    let id = report["report"][0]["status"]["skill_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    create_bot(&mut app);
+    let group = post(
+        &mut app,
+        "/api/conversations",
+        json!({"bot_ids":["grokbot", "other"], "title":"Groupe"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": group,
+            "message_id": "lance-groupe",
+            "body": "Lance la skill dans le groupe.",
+            "apply_skill_id": id
+        }),
+    );
+    for _ in 0..8 {
+        app.tick(0);
+    }
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let messages = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == group)
+        .unwrap()["messages"]
+        .as_array()
+        .unwrap();
+    assert!(
+        messages.iter().any(|message| message["role"] == "assistant"
+            && message["body"] == "Le modèle annexe est suivi."),
+        "le tour de groupe doit suivre l'annexe, messages={messages:?}"
+    );
+
+    let elsewhere = conversation(&mut app, "grokbot");
+    let third = conversation(&mut app, "grokbot");
+    let plain = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": elsewhere,
+            "message_id": "lance-groupe",
+            "body": "bonjour"
+        }),
+    );
+    assert!(plain["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap()["body"]
+        .as_str()
+        .unwrap()
+        .starts_with("Bien reçu"));
+    assert!(!app
+        .context_preview(&elsewhere)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains("skill_appliquee")));
+
+    let other = add(&mut app, "grokbot", "Autre", "Un autre corps.");
+    request(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": third,
+            "message_id": "lance-groupe",
+            "body": "Autre skill, même identifiant de message.",
+            "apply_skill_id": other["skill_id"]
+        }),
+    )
+    .expect("le même message_id dans une autre conversation ne doit pas répondre 409");
+    assert!(!app
+        .context_preview(&third)
+        .unwrap()
+        .iter()
+        .any(|block| block.text.contains(annex)));
 }
 
 #[test]
@@ -1876,4 +2224,363 @@ fn imported_long_fields_can_be_resubmitted_unchanged_by_full_editor_form() {
     .unwrap_err();
     assert_eq!(error.status, 400);
     assert_eq!(error.message, "name-too-large");
+}
+
+#[test]
+fn importing_a_granted_folder_skips_a_real_symlink_and_rejects_an_open_path() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-folder-import-{stamp}"));
+    let chosen = scratch.join("choisi");
+    let outside = scratch.join("dehors");
+    let folder = chosen.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("secret.md");
+    std::fs::write(&secret, "secret hors dossier").unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    std::os::unix::fs::symlink(&secret, folder.join("lien.md")).unwrap();
+    std::os::unix::fs::symlink(&outside, chosen.join("echappe")).unwrap();
+    let link = scratch.join("lien-dossier");
+    std::os::unix::fs::symlink(&chosen, &link).unwrap();
+
+    let db = Database::new();
+    let mut app = db.open();
+    let rejected = request(
+        &mut app,
+        "/api/skills/import",
+        json!({"bot_id":"grokbot", "directory": outside}),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.message, "La requête JSON est invalide.");
+    assert!(listing(&mut app, "grokbot").is_empty());
+
+    let ungranted = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": chosen}),
+    )
+    .unwrap_err();
+    assert_eq!(ungranted.status, 403);
+    assert_eq!(
+        ungranted.message,
+        "Accordez d’abord ce dossier dans les fichiers locaux."
+    );
+
+    let linked = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": link}),
+    )
+    .unwrap_err();
+    assert_eq!(linked.status, 400);
+    assert_eq!(linked.message, "Un lien symbolique n’est pas importé.");
+    assert!(listing(&mut app, "grokbot").is_empty());
+
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": chosen}));
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let skipped = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/lien.md")
+        .unwrap();
+    assert_eq!(skipped["status"]["status"], "skipped");
+    assert_eq!(skipped["status"]["reason"], "symlink");
+    assert!(report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| { item["file_name"] == "echappe" && item["status"]["reason"] == "symlink" }));
+    assert!(report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| { !item["file_name"].as_str().unwrap().starts_with("echappe/") }));
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(!saved.contains("secret hors dossier"));
+
+    let sibling = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": outside}),
+    )
+    .unwrap_err();
+    assert_eq!(sibling.status, 403);
+
+    let app_data = post(&mut app, "/api/local/folders/add", json!({"path": &db.0}));
+    let data_dir = db.0.canonicalize().unwrap();
+    let data = app_data["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|folder| {
+            let text = folder.as_str()?;
+            (std::path::Path::new(text) == data_dir.as_path()).then_some(text)
+        })
+        .unwrap();
+    let protected = request(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": data}),
+    )
+    .unwrap_err();
+    assert_eq!(protected.status, 403);
+    assert_eq!(
+        protected.message,
+        "Les données d’Ezerbot ne s’importent pas comme skills."
+    );
+    let still = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(!still.contains("secret hors dossier"));
+}
+
+#[test]
+fn a_granted_folder_that_contains_app_data_does_not_import_it() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let parent = std::env::temp_dir().join(format!("grokbot-contains-data-{stamp}"));
+    let data = parent.join("donnees");
+    let folder = parent.join("dossier");
+    let _guard = scopeguard(&parent);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        data.join("SKILL.md"),
+        "---\nname: Piege\n---\nsecret dans les donnees",
+    )
+    .unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let mut app = App::open(&data.join("app.sqlite")).unwrap();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &parent}));
+    assert_eq!(added["contains_app_data"], true);
+    let stored = added["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|folder| folder.as_str())
+        .unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    assert!(report["report"].as_array().unwrap().iter().any(|item| {
+        item["file_name"].as_str().unwrap().starts_with("donnees")
+            && item["status"]["reason"] == "app-data"
+    }));
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(!saved.contains("secret dans les donnees"));
+    assert!(!saved.contains("Piege"));
+}
+
+#[test]
+fn a_hard_link_to_a_protected_file_is_not_imported() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-hardlink-import-{stamp}"));
+    let chosen = scratch.join("choisi");
+    let folder = chosen.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let secret = db.0.join("secret.md");
+    std::fs::write(&secret, "secret par lien dur").unwrap();
+    std::fs::hard_link(&secret, folder.join("copie.md")).unwrap();
+    let source = folder.join("source.md");
+    std::fs::write(&source, "annexe reliee").unwrap();
+    std::fs::hard_link(&source, folder.join("reliee.md")).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &chosen}));
+    assert_eq!(added["contains_app_data"], false);
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let linked = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/copie.md")
+        .unwrap();
+    assert_eq!(linked["status"]["reason"], "app-data");
+    let saved = serde_json::to_string(&listing(&mut app, "grokbot")).unwrap();
+    assert!(saved.contains("annexe interne"));
+    assert!(saved.contains("annexe reliee"));
+    assert!(!saved.contains("secret par lien dur"));
+}
+
+#[test]
+fn a_granted_skill_folder_keeps_its_annexes_when_chosen_directly() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-root-bundle-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &folder}));
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let annex = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/modele.md")
+        .unwrap();
+    assert_eq!(annex["status"]["status"], "annex");
+    let saved = listing(&mut app, "grokbot");
+    assert_eq!(
+        saved.len(),
+        1,
+        "l'annexe ne devient pas une skill: {saved:?}"
+    );
+}
+
+#[test]
+fn a_granted_folder_does_not_read_unsupported_files_or_exceed_its_byte_budget() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-byte-budget-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("video.mp4"), vec![0u8; 1024]).unwrap();
+    // Twenty annex-sized files of about 1 MiB cannot all be retained.
+    for index in 0..20 {
+        std::fs::write(
+            folder.join(format!("annexe-{index:02}.md")),
+            "a".repeat(1_000_000),
+        )
+        .unwrap();
+    }
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(
+        &mut app,
+        "/api/local/folders/add",
+        json!({"path": &scratch}),
+    );
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let items = report["report"].as_array().unwrap();
+    let video = items
+        .iter()
+        .find(|item| item["file_name"] == "dossier/video.mp4")
+        .unwrap();
+    assert_eq!(video["status"]["reason"], "unsupported");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["status"]["reason"] == "too-large"),
+        "l'excédent d'octets doit être signalé sans être lu: {items:?}"
+    );
+}
+
+#[test]
+fn a_granted_folder_with_an_oversized_primary_does_not_turn_its_annexes_into_skills() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-big-primary-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SKILL.md"),
+        format!("---\nname: Gros\n---\n{}", "a".repeat(1_100_000)),
+    )
+    .unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe").unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(
+        &mut app,
+        "/api/local/folders/add",
+        json!({"path": &scratch}),
+    );
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let items = report["report"].as_array().unwrap();
+    for name in ["dossier/SKILL.md", "dossier/modele.md"] {
+        let item = items.iter().find(|item| item["file_name"] == name).unwrap();
+        assert_eq!(item["status"]["status"], "skipped", "{name}: {items:?}");
+        assert_eq!(item["status"]["reason"], "too-large");
+    }
+    assert!(listing(&mut app, "grokbot").is_empty());
+}
+
+fn scopeguard(path: &std::path::Path) -> impl Drop {
+    struct Guard(std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    Guard(path.to_path_buf())
 }

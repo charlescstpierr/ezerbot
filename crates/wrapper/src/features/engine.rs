@@ -40,6 +40,8 @@ struct SendMessage {
     mentions: Vec<super::multibot::Mention>,
     #[serde(default)]
     simulate_loss: bool,
+    #[serde(default)]
+    apply_skill_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +394,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 text,
                 app.provider.connected() || !app.provider.simulation_allowed(),
             )?;
+            if let Some(skill_id) = &input.apply_skill_id {
+                super::skills::record_launch(
+                    &tx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    skill_id,
+                )?;
+            }
             super::conversations::append_entry(
                 &tx,
                 &input.conversation_id,

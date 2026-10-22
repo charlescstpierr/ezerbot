@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -222,6 +222,36 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               return search && text.includes("faits actifs") ? {ok: true, excerpt: text.slice(0, 240)} : null;
             }""",
             "mémoire du bot non prête",
+        )
+    if sphere == "bibliotheque":
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+        wait_js(
+            evidence,
+            """() => (document.querySelector('[aria-label="Modifier Ezerbot"]') ? {ok: true} : null)""",
+            "liste des bots non prête",
+        )
+        eval_js(
+            evidence,
+            """() => {
+              const edit = document.querySelector('[aria-label="Modifier Ezerbot"]');
+              if (!edit) throw new Error("Modifier Ezerbot absent");
+              edit.click();
+              return true;
+            }""",
+        )
+        return wait_js(
+            evidence,
+            """() => {
+              const dialog = document.getElementById("bot-dialog");
+              const section = document.querySelector('[aria-label="Bibliothèque du bot"]');
+              if (!dialog?.open || !section) return null;
+              section.scrollIntoView({block: "start"});
+              const drop = section.querySelector('[aria-label="Déposer un fichier dans la bibliothèque"]');
+              const text = section.innerText || "";
+              return drop && text.includes("Plafond : 20 Mo") ? {ok: true, excerpt: text.slice(0, 240)} : null;
+            }""",
+            "bibliothèque du bot non prête",
         )
     raise SystemExit(f"sphère inconnue: {sphere}")
 

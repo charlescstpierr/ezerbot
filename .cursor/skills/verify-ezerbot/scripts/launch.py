@@ -173,6 +173,8 @@ def main() -> None:
             "TMPDIR": str(home / "tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
+            # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
+            "EZERBOT_FAKE_SIGNIN": "1",
         }
         print(
             f"run: {binary} --port 0 --db {db}",

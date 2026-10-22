@@ -28,6 +28,7 @@ pub mod priority {
     pub const INSTRUCTIONS: u32 = 20;
     pub const SKILLS: u32 = 30;
     pub const MEMORY: u32 = 40;
+    pub const LIBRARY: u32 = 45;
     pub const SUMMARY: u32 = 50;
     pub const HISTORY: u32 = 90;
     pub const CURRENT: u32 = 100;
@@ -92,6 +93,7 @@ pub mod forms;
 pub mod generated;
 pub mod images;
 pub mod iphone;
+pub mod library;
 pub mod local;
 pub mod mcp;
 pub mod meetings;
@@ -146,6 +148,7 @@ registry!(
     routines_background,
     delegation,
     attachments,
+    library,
     generated,
     images,
     mcp,

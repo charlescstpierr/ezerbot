@@ -49,3 +49,8 @@ test("debug safety refusal disables switch and a failed request preserves saved 
   f.input().checked = true; await f.input().onchange();
   assert.equal(f.input().checked, false); assert.match(f.section.textContent, /Refus de configuration/);
 });
+test("the agent setting says its first pass after the wake catches up the slots due during the outage", () => {
+  const f = fixture({ available: true, enabled: true, installed: true });
+  assert.match(f.section.textContent, /À son premier passage après le réveil, l’agent rattrape les créneaux dus pendant l’extinction ou la veille du Mac, dans l’ordre, même si Ezerbot est resté fermé/);
+  assert.doesNotMatch(f.section.textContent, /même fenêtre de rattrapage/);
+});

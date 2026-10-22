@@ -7,6 +7,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 - `parametres-ouvrir` ouvre le dialogue Paramètres depuis le bas de la barre latérale.
 - `connecteurs-section` montre le titre Connecteurs et l’ajout d’un serveur, sans en enregistrer.
 - `connecteurs-vide` laisse la liste des serveurs personnels vide sur une base neuve.
+- `connecteurs-github` montre la carte GitHub sans champ d’identifiant ni de secret ; sans `client_id` de build, elle dit que l’application GitHub d’Ezerbot n’est pas configurée.
 
 ## How to get to it (user POV)
 
@@ -33,4 +34,5 @@ Preconditions:
 - Le dialogue est modal. Un clic sur la marque ne ferme pas Paramètres ; utiliser `[data-close-dialog]` ou « Terminé ».
 - La section est montée dans `#settings-extensions` avec `data-panel="mcp"`. Chercher ce panneau, pas un lien de navigation séparé.
 - Enregistrer un connecteur lancerait une commande locale. Cette sphère ne soumet pas le formulaire.
+- La carte GitHub se connecte par un code à 8 caractères validé chez GitHub avec un vrai compte : la preuve automatisée n’y va pas. Sans `EZERBOT_GITHUB_CLIENT_ID`, un clic sur Connecter est refusé avec une phrase, sans carte d’approbation.
 - Le catalogue peut être long. La capture doit avoir fait défiler le titre Connecteurs dans le dialogue, pas seulement ouvert Paramètres en haut.

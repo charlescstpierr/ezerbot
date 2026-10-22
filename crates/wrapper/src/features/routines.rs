@@ -529,9 +529,11 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
     if r.trigger != Schedule::Webhook {
         routine_webhooks::forget(ctx.connection, &r.routine_id)?;
     }
+    occurrences::retire_catch_up(ctx.connection, &r.routine_id)?;
     if model {
         // Model changes cannot silently repurpose an active, confirmed routine.
         routine::set_enabled(ctx.connection, &r.routine_id, false, clock(ctx)?)?;
+        occurrences::retire_catch_up(ctx.connection, &r.routine_id)?;
         r = owned(ctx.connection, &r.bot_id, &r.routine_id)?;
         ctx.connection.execute("INSERT INTO wrapper_routine_provenance VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET model_edited_at=excluded.model_edited_at",params![r.routine_id,clock(ctx)?])?;
         ask_confirmation(ctx, &r)?;
@@ -736,6 +738,7 @@ pub fn routes(
                     "/api/routines/delete" => {
                         routine::delete(&tx, &r.routine_id)?;
                         routine_webhooks::forget(&tx, &r.routine_id)?;
+                        occurrences::retire_catch_up(&tx, &r.routine_id)?;
                         close_confirmation(
                             &tx,
                             &r.routine_id,
@@ -745,6 +748,7 @@ pub fn routes(
                     }
                     "/api/routines/pause" => {
                         routine::set_enabled(&tx, &r.routine_id, false, clock(&ctx)?)?;
+                        occurrences::retire_catch_up(&tx, &r.routine_id)?;
                         json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
                     }
                     _ => unreachable!(),
@@ -837,7 +841,8 @@ pub fn state(ctx: &Context<'_>) -> Value {
                     .expect("routine object")
                     .remove("body");
                 let running:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences WHERE routine_id=?1 AND status IN ('pending','running'))",[&r.routine_id],|row|row.get(0))?;
-                list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation,"running":running}));
+                let queue = occurrences::queue(ctx.connection, &r.routine_id)?;
+                list.push(json!({"routine":metadata,"error":error,"confirmation_conversation_id":confirmation,"running":running,"queue":queue}));
             }
         }
         Ok(json!({"items":list}))
@@ -1296,17 +1301,59 @@ fn validate_dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<(), ApiError> 
     prompt(ctx.connection, &r.bot_id, &r.body)?;
     Ok(())
 }
+/// The app is closing. With the background agent off nothing is asked to run
+/// until the next tick, so the slots due meanwhile follow the limited rule.
+/// With the agent on, the planner stays meant to run: no absence is recorded and
+/// the whole gap is caught up at the next tick, wherever it comes from.
+pub fn depart(ctx: &Context<'_>) {
+    if let Ok(now) = clock(ctx) {
+        record_departure(ctx.connection, now);
+    }
+}
+/// [`depart`] for a process that is being stopped: it has only the database path.
+pub fn depart_database(db: &std::path::Path, now_ms: i64) {
+    if let Ok(conn) = Connection::open(db) {
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(400));
+        record_departure(&conn, now_ms);
+    }
+}
+fn record_departure(conn: &Connection, now_ms: i64) {
+    let agent: bool = conn
+        .query_row(
+            "SELECT enabled=1 AND installed=1 FROM wrapper_routines_background WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !agent {
+        let _ = occurrences::begin_absence(conn, now_ms);
+    }
+}
+/// Keeps the host's pulse for the next gap while it is busy and does not
+/// materialize, without ever closing a gap that [`tick`] has yet to see.
+pub fn heartbeat(ctx: &Context<'_>) {
+    if let Ok(now) = clock(ctx) {
+        let _ = occurrences::heartbeat(ctx.connection, now);
+    }
+}
 pub fn tick(ctx: &Context<'_>) {
     let needed:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE deleted=0 AND enabled=1) OR EXISTS(SELECT 1 FROM scheduler_occurrences WHERE status IN ('pending','running'))",[],|row|row.get(0)).unwrap_or(false);
     if !needed {
+        // Nothing to materialize, so nothing can be hidden: this tick is the pulse.
+        if let Ok(now) = clock(ctx) {
+            let _ = occurrences::record_tick(ctx.connection, now);
+        }
         return;
     }
     let work = || -> Result<Vec<Occurrence>, ApiError> {
         let tx = write_transaction(ctx.connection)?;
         // Reconcile old attachments before expiring pending outbox intent. This
         // repairs a crash even if its late window has elapsed since creation.
+        // Only an occurrence with an engine run can need it: a long catch-up
+        // queue must not cost one lookup per slot on every tick.
         let mut stmt = tx.prepare(
-            "SELECT occurrence_id FROM scheduler_occurrences WHERE status IN ('pending','running')",
+            "SELECT occurrence_id FROM scheduler_occurrences o WHERE status IN ('pending','running')
+             AND EXISTS (SELECT 1 FROM engine_runs e WHERE e.trigger_kind='occurrence' AND e.trigger_ref=o.occurrence_id)",
         )?;
         let ids = stmt
             .query_map([], |r| r.get::<_, String>(0))?
@@ -1319,11 +1366,19 @@ pub fn tick(ctx: &Context<'_>) {
                 react(&tx, &run)?;
             }
         }
+        // A pause, an edit or a deletion stops the catch-up queue: what has not
+        // started is Missed, not a failure the panel would report.
+        tx.execute("UPDATE scheduler_occurrences AS o SET status='missed' WHERE o.status='pending' AND o.catch_up=1 AND o.manual_nonce IS NULL AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR r.enabled=0 OR r.schedule_version!=o.schedule_version))",[])?;
         // Retire suppressed intent immediately instead of holding an idle write
         // lock every tick until the one-hour late window elapses.
         tx.execute("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR r.schedule_version!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",[])?;
         tx.execute("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR r.schedule_version!=o.schedule_version))))",[])?;
-        let pending = occurrences::materialize_due(&tx, clock(ctx)?, &CatchUpPolicy::default())?;
+        let now = clock(ctx)?;
+        occurrences::materialize(&tx, now, &CatchUpPolicy::default())?;
+        // After materializing, which read the previous tick: this one ends any
+        // deliberate absence and becomes the reference for the next gap.
+        occurrences::record_tick(&tx, now)?;
+        let pending = occurrences::pending_heads(&tx)?;
         tx.commit()?;
         Ok(pending)
     };
@@ -1349,7 +1404,19 @@ pub fn tick(ctx: &Context<'_>) {
         }
         match dispatch(ctx, &o) {
             Ok(Dispatch::Deferred(reason)) => {
-                let _=ctx.connection.execute("INSERT INTO wrapper_routine_errors VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",params![o.routine_id,reason]);
+                // Waiting behind the previous run is how a catch-up queue
+                // works, not a diagnostic; the panel shows the count instead.
+                let queued: bool = ctx
+                    .connection
+                    .query_row(
+                        "SELECT catch_up=1 FROM scheduler_occurrences WHERE occurrence_id=?1",
+                        [&o.occurrence_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if !queued {
+                    let _=ctx.connection.execute("INSERT INTO wrapper_routine_errors VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",params![o.routine_id,reason]);
+                }
             }
             Ok(Dispatch::Processed) => {
                 let _ = ctx.connection.execute(

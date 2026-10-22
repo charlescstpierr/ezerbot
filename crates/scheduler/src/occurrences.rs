@@ -7,6 +7,23 @@
 //! `reports/cron-detail.md` CR16 only proves client-side manual cooldown, not
 //! durable deduplication. Nonces, unique scheduled slots and the Q4 catch-up
 //! policy below are local guarantees, not claims about Grok's server.
+//!
+//! Catch-up (docs/specs/routines.md, « Rattrapage »). A slot's identity is the
+//! routine, its schedule version and the planned instant: the unique
+//! `scheduler_scheduled_slot` index claims it once, so a second wake, a second
+//! tick or a future remote executor finds it claimed and never starts it again.
+//! Three kinds of due slot exist at a tick:
+//! - ordinary: no gap since the last tick and no deliberate absence. The 60-minute
+//!   window applies, and only the newest slot is runnable;
+//! - gap: the host did not tick for longer than [`TICK_GAP_MS`] while it was meant
+//!   to run (Mac off or asleep, agent crashed). Every slot due in the gap queues
+//!   as a pending, `catch_up` occurrence and starts in chronological order;
+//! - deliberate absence: the app was quit while the background agent was off
+//!   ([`begin_absence`]). The limited rule applies: the newest slot if it falls in
+//!   the last 60 minutes, the others are missed.
+//!
+//! Time is always passed in, never read, so the "was meant to run" fact and the
+//! clock are injectable.
 use crate::{cron, routine};
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -45,7 +62,15 @@ pub struct Occurrence {
 
 /// At most this many individual missed slots plus one newest slot are inserted
 /// per routine/tick. Remaining missed slots are preserved as compact ranges.
+/// This bounds only the limited rule; a gap queues every slot it contains.
 pub const MAX_MISSED_PER_TICK: usize = 100;
+
+/// A host that ticks every 500 ms and an agent that passes every minute never
+/// leave a longer silence while meant to run. Longer means the Mac was off or asleep.
+pub const TICK_GAP_MS: i64 = 120_000;
+/// The heartbeat is written at most this often, so an idle app does not take the
+/// write lock on every 500 ms tick.
+const HEARTBEAT_EVERY_MS: i64 = 5_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissedRange {
@@ -75,6 +100,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'missed', 'failed')),
             run_id TEXT UNIQUE,
             reason TEXT,
+            catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
             CHECK (status NOT IN ('running', 'done') OR run_id IS NOT NULL),
             CHECK (status != 'failed' OR reason IS NOT NULL)
          );
@@ -97,21 +123,50 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS scheduler_range_history
             ON scheduler_missed_ranges(routine_id, from_inclusive DESC, schedule_version DESC);
+         CREATE TABLE IF NOT EXISTS scheduler_presence (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_tick_at INTEGER,
+            absent_since INTEGER
+         );
+         INSERT OR IGNORE INTO scheduler_presence(id) VALUES (1);
          INSERT INTO component_versions(component, version)
             VALUES ('scheduler.occurrences', 1) ON CONFLICT(component) DO NOTHING;",
     )?;
+    // Upgrade databases made before catch-up existed: their pending slots keep
+    // the ordinary window.
+    let has_catch_up = conn
+        .prepare("PRAGMA table_info(scheduler_occurrences)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "catch_up");
+    if !has_catch_up {
+        conn.execute_batch(
+            "ALTER TABLE scheduler_occurrences
+             ADD COLUMN catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1));",
+        )?;
+    }
     routine::check_schema(conn, "scheduler.occurrences")
 }
 
-/// Materialize bounded individual history plus compact missed ranges. Only one
-/// newest, unexpired scheduled slot per routine is runnable. The cursor is the
-/// last slot (not tick time), retaining unphased interval anchors across polls.
-/// Caller transaction is mandatory: per-routine savepoints must not commit one.
+/// Materialize due slots. Ordinary and absence slots keep bounded individual
+/// history plus compact missed ranges, and only one newest, unexpired scheduled
+/// slot per routine is runnable. Slots due in a gap all queue (see the module
+/// doc). The cursor is the last slot (not tick time), retaining unphased interval
+/// anchors across polls. Caller transaction is mandatory: per-routine savepoints
+/// must not commit one.
 pub fn materialize_due(
     conn: &Connection,
     now_ms: i64,
     policy: &CatchUpPolicy,
 ) -> Result<Vec<Occurrence>> {
+    materialize(conn, now_ms, policy)?;
+    pending(conn)
+}
+
+/// [`materialize_due`] without reading the whole queue back: a host that only
+/// dispatches the head of each queue uses [`pending_heads`] afterwards.
+pub fn materialize(conn: &Connection, now_ms: i64, policy: &CatchUpPolicy) -> Result<()> {
     if conn.is_autocommit() {
         return Err(Error::InvalidInput(
             "materialization requires a caller-owned transaction".into(),
@@ -125,16 +180,18 @@ pub fn materialize_due(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let earliest = now_ms.saturating_sub(i64::from(policy.late_minutes.max(1)) * 60_000);
+    // The window never expires a queued catch-up slot: it was owed, not late.
     conn.execute(
         "UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL
-         AND (scheduled_at_utc < ?1 OR EXISTS (
+         AND ((catch_up=0 AND scheduled_at_utc < ?1) OR EXISTS (
             SELECT 1 FROM scheduler_routines r WHERE r.routine_id=scheduler_occurrences.routine_id
             AND (scheduled_at_utc <= r.active_since OR scheduler_occurrences.schedule_version!=r.schedule_version)
          ))", [earliest],
     )?;
+    let presence = Presence::read(conn)?;
     for id in ids {
         conn.execute_batch("SAVEPOINT scheduler_materialize_one")?;
-        match materialize_one(conn, &id, now_ms, earliest) {
+        match materialize_one(conn, &id, now_ms, earliest, &presence) {
             Ok(()) => conn.execute_batch("RELEASE scheduler_materialize_one")?,
             Err(error) => {
                 conn.execute_batch(
@@ -147,16 +204,99 @@ pub fn materialize_due(
             }
         }
     }
+    // Only the newest ordinary slot stays runnable. A queued catch-up slot is
+    // never superseded: every slot of a gap runs, in order.
     conn.execute(
-        "UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL
+        "UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL AND catch_up=0
          AND EXISTS (SELECT 1 FROM scheduler_occurrences newer WHERE newer.routine_id=scheduler_occurrences.routine_id
-            AND newer.status='pending' AND newer.manual_nonce IS NULL
+            AND newer.status='pending' AND newer.manual_nonce IS NULL AND newer.catch_up=0
             AND newer.scheduled_at_utc > scheduler_occurrences.scheduled_at_utc)", [],
     )?;
-    pending(conn)
+    Ok(())
 }
 
-fn materialize_one(conn: &Connection, id: &str, now_ms: i64, earliest: i64) -> Result<()> {
+/// What the host knows about itself between ticks. Both fields are written by
+/// the host (see [`record_tick`] and [`begin_absence`]), never inferred here
+/// from a sleep log.
+struct Presence {
+    last_tick_at: Option<i64>,
+    absent_since: Option<i64>,
+}
+
+impl Presence {
+    fn read(conn: &Connection) -> Result<Self> {
+        Ok(conn
+            .query_row(
+                "SELECT last_tick_at, absent_since FROM scheduler_presence WHERE id=1",
+                [],
+                |row| {
+                    Ok(Self {
+                        last_tick_at: row.get(0)?,
+                        absent_since: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or(Self {
+                last_tick_at: None,
+                absent_since: None,
+            }))
+    }
+}
+
+/// The user quit the app while the background agent was off: nothing was asked
+/// to run until the next tick. Slots due after `at_ms` follow the limited rule.
+/// The earliest start wins, so a repeated call cannot shorten an absence.
+pub fn begin_absence(conn: &Connection, at_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE scheduler_presence SET absent_since=MIN(COALESCE(absent_since, ?1), ?1) WHERE id=1",
+        [at_ms],
+    )?;
+    Ok(())
+}
+
+/// The host ticked at `now_ms`. Call it after [`materialize`] for the same tick:
+/// the gap and the absence are read from the previous values. It ends a
+/// deliberate absence, and is written at most every few seconds otherwise.
+pub fn record_tick(conn: &Connection, now_ms: i64) -> Result<()> {
+    let stale: bool = conn.query_row(
+        "SELECT COALESCE(absent_since IS NOT NULL OR last_tick_at IS NULL
+            OR ABS(?1 - last_tick_at) >= ?2, 1) FROM scheduler_presence WHERE id=1",
+        params![now_ms, HEARTBEAT_EVERY_MS],
+        |row| row.get(0),
+    )?;
+    if stale {
+        conn.execute(
+            "UPDATE scheduler_presence SET last_tick_at=?1, absent_since=NULL WHERE id=1",
+            [now_ms],
+        )?;
+    }
+    Ok(())
+}
+
+/// A pulse from a host that is busy and not materializing, such as a background
+/// pass waiting on a long run. It never advances the last tick across a gap: the
+/// slots of a sleep during the run must still be seen as a gap by the next
+/// [`materialize`], which [`record_tick`] alone is entitled to close.
+pub fn heartbeat(conn: &Connection, now_ms: i64) -> Result<()> {
+    let silent: bool = conn.query_row(
+        "SELECT COALESCE(?1 - last_tick_at > ?2, 0) FROM scheduler_presence WHERE id=1",
+        params![now_ms, TICK_GAP_MS],
+        |row| row.get(0),
+    )?;
+    if silent {
+        return Ok(());
+    }
+    record_tick(conn, now_ms)
+}
+
+fn materialize_one(
+    conn: &Connection,
+    id: &str,
+    now_ms: i64,
+    earliest: i64,
+    presence: &Presence,
+) -> Result<()> {
     let routine = routine::require(conn, id)?;
     let cursor: i64 = conn.query_row(
         "SELECT materialized_after FROM scheduler_routines WHERE routine_id=?1",
@@ -176,13 +316,54 @@ fn materialize_one(conn: &Connection, id: &str, now_ms: i64, earliest: i64) -> R
     if first > now_ms {
         return Ok(());
     }
-    let latest = latest_due(&routine.trigger, &routine.time_zone, first, now_ms)?;
+    let (trigger, zone) = (&routine.trigger, routine.time_zone.as_str());
+    // Time splits into ordinary, gap and absence, in that order. A slot is in
+    // the gap if it is after the last tick and the host stayed silent too long.
+    let absent_from = presence.absent_since.unwrap_or(i64::MAX);
+    let gap_from = presence
+        .last_tick_at
+        .filter(|tick| now_ms.saturating_sub(*tick) > TICK_GAP_MS)
+        .unwrap_or(i64::MAX)
+        .min(absent_from);
+    let ordinary_until = gap_from.min(now_ms);
+    let gap_until = absent_from.min(now_ms);
+    let (mut last, mut next) = (first, Some(first));
+    if first <= ordinary_until {
+        let latest = latest_due(trigger, zone, first, ordinary_until)?;
+        settle_limited(conn, &routine, first, latest, earliest)?;
+        (last, next) = (latest, cron::next_after(trigger, zone, latest)?);
+    }
+    while let Some(slot) = next.filter(|slot| *slot <= gap_until) {
+        insert_slot(conn, &routine, slot, "pending", true)?;
+        (last, next) = (slot, cron::next_after(trigger, zone, slot)?);
+    }
+    if let Some(slot) = next.filter(|slot| *slot <= now_ms) {
+        last = latest_due(trigger, zone, slot, now_ms)?;
+        settle_limited(conn, &routine, slot, last, earliest)?;
+    }
+    conn.execute(
+        "UPDATE scheduler_routines SET materialized_after=?2 WHERE routine_id=?1 AND schedule_version=?3",
+        params![id, last, routine.schedule_version],
+    )?;
+    Ok(())
+}
+
+/// The limited rule on `first..=latest`: only `latest` can run, and only inside
+/// the window. Every earlier slot is Missed, individually up to the bound and as
+/// a compact range beyond it.
+fn settle_limited(
+    conn: &Connection,
+    routine: &routine::Routine,
+    first: i64,
+    latest: i64,
+    earliest: i64,
+) -> Result<()> {
     let mut slot = first;
     for _ in 0..MAX_MISSED_PER_TICK {
         if slot == latest {
             break;
         }
-        insert_slot(conn, &routine, slot, "missed")?;
+        insert_slot(conn, routine, slot, "missed", false)?;
         slot = cron::next_after(&routine.trigger, &routine.time_zone, slot)?
             .ok_or_else(|| Error::InvalidInput("schedule exhausted before latest slot".into()))?;
     }
@@ -192,7 +373,7 @@ fn materialize_one(conn: &Connection, id: &str, now_ms: i64, earliest: i64) -> R
              (routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
             params![
-                id,
+                routine.routine_id,
                 routine.schedule_version,
                 slot,
                 latest,
@@ -203,19 +384,15 @@ fn materialize_one(conn: &Connection, id: &str, now_ms: i64, earliest: i64) -> R
     }
     insert_slot(
         conn,
-        &routine,
+        routine,
         latest,
         if latest >= earliest {
             "pending"
         } else {
             "missed"
         },
-    )?;
-    conn.execute(
-        "UPDATE scheduler_routines SET materialized_after=?2 WHERE routine_id=?1 AND schedule_version=?3",
-        params![id, latest, routine.schedule_version],
-    )?;
-    Ok(())
+        false,
+    )
 }
 
 fn insert_slot(
@@ -223,13 +400,20 @@ fn insert_slot(
     routine: &routine::Routine,
     slot: i64,
     status: &str,
+    catch_up: bool,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO scheduler_occurrences
-         (occurrence_id, routine_id, schedule_version, scheduled_at_utc, status)
-         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4)
+         (occurrence_id, routine_id, schedule_version, scheduled_at_utc, status, catch_up)
+         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(routine_id, schedule_version, scheduled_at_utc) WHERE manual_nonce IS NULL DO NOTHING",
-        params![routine.routine_id, routine.schedule_version, slot, status],
+        params![
+            routine.routine_id,
+            routine.schedule_version,
+            slot,
+            status,
+            catch_up
+        ],
     )?;
     Ok(())
 }
@@ -484,6 +668,65 @@ pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
     ))?;
     let rows = query.query_map([], from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// What [`pending`] returns, minus the slots queued behind an older scheduled
+/// slot of the same routine. A routine runs one occurrence at a time, oldest
+/// first, so a host dispatches only these and the queue costs one row per
+/// routine per tick, however long it is. Manual launches are never queued.
+pub fn pending_heads(conn: &Connection) -> Result<Vec<Occurrence>> {
+    let mut query = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM scheduler_occurrences o WHERE status='pending'
+         AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
+                            AND (enabled=1 OR (o.manual_nonce IS NOT NULL
+                                 AND o.manual_nonce NOT LIKE 'webhook:%')))
+         AND (manual_nonce IS NOT NULL OR NOT EXISTS (
+            SELECT 1 FROM scheduler_occurrences older WHERE older.routine_id=o.routine_id
+            AND older.status='pending' AND older.manual_nonce IS NULL
+            AND (older.scheduled_at_utc, older.occurrence_id) < (o.scheduled_at_utc, o.occurrence_id)))
+         ORDER BY scheduled_at_utc, occurrence_id"
+    ))?;
+    let rows = query.query_map([], from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Scheduled occurrences of an active routine that have not started yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queue {
+    pub waiting: u64,
+    /// Planned instant of the next one to start.
+    pub next_at: Option<i64>,
+}
+
+/// The queue the panel shows. Slots of a paused, deleted or edited routine are
+/// not waiting any more, even before the host has retired them.
+pub fn queue(conn: &Connection, routine_id: &str) -> Result<Queue> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), MIN(o.scheduled_at_utc) FROM scheduler_occurrences o
+         JOIN scheduler_routines r ON r.routine_id=o.routine_id
+         WHERE o.routine_id=?1 AND o.status='pending' AND o.manual_nonce IS NULL
+         AND r.enabled=1 AND r.deleted=0 AND o.schedule_version=r.schedule_version",
+        [routine_id],
+        |row| {
+            Ok(Queue {
+                waiting: row.get(0)?,
+                next_at: row.get(1)?,
+            })
+        },
+    )?)
+}
+
+/// A pause, a schedule edit or a deletion stops what has not started: the queued
+/// catch-up slots become Missed, and the history says so. Ordinary pending slots
+/// keep their existing treatment (the host fails them as "paused or edited").
+pub fn retire_catch_up(conn: &Connection, routine_id: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE scheduler_occurrences SET status='missed'
+         WHERE routine_id=?1 AND status='pending' AND catch_up=1 AND manual_nonce IS NULL
+         AND NOT EXISTS (SELECT 1 FROM scheduler_routines r WHERE r.routine_id=?1 AND r.deleted=0
+            AND r.enabled=1 AND r.schedule_version=scheduler_occurrences.schedule_version)",
+        [routine_id],
+    )?)
 }
 
 /// Attach only the run obtained from the engine's unique occurrence trigger.
@@ -1109,5 +1352,208 @@ mod occurrences_tests {
         assert!(result.is_err());
         assert!(list(&conn, &routine.routine_id).unwrap().is_empty());
         assert_eq!(tick(&conn, 60_000).len(), 1);
+    }
+
+    fn host_tick(conn: &Connection, now: i64) -> Vec<Occurrence> {
+        with_tx(conn, |conn| {
+            materialize(conn, now, &CatchUpPolicy::default())?;
+            record_tick(conn, now)?;
+            pending_heads(conn)
+        })
+        .unwrap()
+    }
+
+    fn statuses(conn: &Connection, routine: &Routine) -> Vec<(i64, OccurrenceStatus)> {
+        list(conn, &routine.routine_id)
+            .unwrap()
+            .into_iter()
+            .map(|o| (o.scheduled_at_utc, o.status))
+            .collect()
+    }
+
+    #[test]
+    fn a_gap_queues_every_slot_in_order_and_a_second_wake_adds_none() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        let heads = host_tick(&conn, 10 * 60_000 + 5_000); // the host was silent for 9 minutes
+        let all = list(&conn, &routine.routine_id).unwrap();
+        let slots: Vec<i64> = all.iter().map(|o| o.scheduled_at_utc).collect();
+        assert_eq!(slots, (1..=10).map(|n| n * 60_000).collect::<Vec<_>>());
+        assert!(all
+            .iter()
+            .skip(1)
+            .all(|o| o.status == OccurrenceStatus::Pending));
+        // One routine runs one occurrence at a time, oldest first.
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scheduled_at_utc, 60_000);
+        let again = host_tick(&conn, 10 * 60_000 + 6_000);
+        assert_eq!(again, heads);
+        assert_eq!(list(&conn, &routine.routine_id).unwrap().len(), 10);
+        attach_run(&conn, &heads[0].occurrence_id, "run-1").unwrap();
+        assert_eq!(
+            host_tick(&conn, 10 * 60_000 + 7_000)[0].scheduled_at_utc,
+            120_000
+        );
+    }
+
+    #[test]
+    fn queued_slots_neither_expire_nor_are_superseded() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        host_tick(&conn, 4 * 60_000); // 3 minutes of silence: 120 s, 180 s and 240 s are owed
+                                      // Hours later the window would have expired an ordinary slot.
+        let waiting = tick(&conn, 4 * 60_000 + 5 * 3_600_000);
+        for owed in [120_000, 180_000, 240_000] {
+            assert!(waiting.iter().any(|o| o.scheduled_at_utc == owed), "{owed}");
+        }
+        let all = statuses(&conn, &routine);
+        assert!(all[1..4]
+            .iter()
+            .all(|(_, status)| *status == OccurrenceStatus::Pending));
+    }
+
+    #[test]
+    fn no_gap_keeps_the_ordinary_window_and_newest_only() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        host_tick(&conn, 90_000); // 30 s later: not a gap
+        let heads = host_tick(&conn, 190_000); // 100 s of silence is not a gap either
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scheduled_at_utc, 180_000);
+        assert!(statuses(&conn, &routine)
+            .iter()
+            .filter(|(at, _)| *at < 180_000)
+            .all(|(_, status)| *status == OccurrenceStatus::Missed));
+    }
+
+    #[test]
+    fn a_deliberate_absence_runs_only_the_newest_slot_inside_the_window() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        begin_absence(&conn, 61_000).unwrap();
+        begin_absence(&conn, 3_600_000).unwrap(); // a later call cannot shorten it
+        let now = 3 * 3_600_000 + 5_000;
+        let heads = host_tick(&conn, now);
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scheduled_at_utc, 3 * 3_600_000);
+        let all = statuses(&conn, &routine);
+        assert!(all[..all.len() - 1]
+            .iter()
+            .all(|(_, status)| *status == OccurrenceStatus::Missed));
+        let absent: Option<i64> = conn
+            .query_row("SELECT absent_since FROM scheduler_presence", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(absent, None, "the first tick ends the absence");
+        // The gap after it is a real gap again.
+        let later = host_tick(&conn, now + 10 * 60_000);
+        assert_eq!(later.len(), 1, "{later:?}");
+    }
+
+    #[test]
+    fn an_absence_does_not_swallow_slots_that_were_due_before_it_began() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        // The Mac slept from 1 min to 6 min; the app was then quit with the agent off.
+        begin_absence(&conn, 6 * 60_000).unwrap();
+        host_tick(&conn, 10 * 60_000);
+        let all = statuses(&conn, &routine);
+        let at = |t: i64| all.iter().find(|(slot, _)| *slot == t).unwrap().1.clone();
+        assert_eq!(at(2 * 60_000), OccurrenceStatus::Pending);
+        assert_eq!(at(6 * 60_000), OccurrenceStatus::Pending);
+        assert_eq!(at(7 * 60_000), OccurrenceStatus::Missed);
+        assert_eq!(at(10 * 60_000), OccurrenceStatus::Pending);
+    }
+
+    #[test]
+    fn the_queue_counts_waiting_slots_and_a_pause_retires_them_as_missed() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        let heads = host_tick(&conn, 6 * 60_000); // the 60 s slot, then five owed slots
+        attach_run(&conn, &heads[0].occurrence_id, "run-1").unwrap();
+        assert_eq!(
+            queue(&conn, &routine.routine_id).unwrap(),
+            Queue {
+                waiting: 5,
+                next_at: Some(120_000)
+            }
+        );
+        let heads = pending_heads(&conn).unwrap();
+        attach_run(&conn, &heads[0].occurrence_id, "run-2").unwrap();
+        assert_eq!(queue(&conn, &routine.routine_id).unwrap().waiting, 4);
+        routine::set_enabled(&conn, &routine.routine_id, false, 6 * 60_000).unwrap();
+        assert_eq!(queue(&conn, &routine.routine_id).unwrap().waiting, 0);
+        assert_eq!(retire_catch_up(&conn, &routine.routine_id).unwrap(), 4);
+        assert_eq!(retire_catch_up(&conn, &routine.routine_id).unwrap(), 0);
+        let all = statuses(&conn, &routine);
+        assert!(matches!(all[0].1, OccurrenceStatus::Running { .. }));
+        assert!(matches!(all[1].1, OccurrenceStatus::Running { .. }));
+        assert!(all[2..]
+            .iter()
+            .all(|(_, status)| *status == OccurrenceStatus::Missed));
+        // Resuming does not bring the paused period back.
+        routine::set_enabled(&conn, &routine.routine_id, true, 20 * 60_000).unwrap();
+        assert!(host_tick(&conn, 20 * 60_000 + 1_000).is_empty());
+    }
+
+    #[test]
+    fn a_one_shot_due_in_the_gap_is_queued_once() {
+        let (conn, mut routine) = setup();
+        routine.trigger = cron::Schedule::Once { at: 2 * 3_600_000 };
+        routine::update(&conn, &routine, 0).unwrap();
+        host_tick(&conn, 1_000);
+        let heads = host_tick(&conn, 4 * 3_600_000);
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scheduled_at_utc, 2 * 3_600_000);
+        attach_run(&conn, &heads[0].occurrence_id, "run-1").unwrap();
+        assert!(host_tick(&conn, 4 * 3_600_000 + 1_000).is_empty());
+        assert_eq!(list(&conn, &routine.routine_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_busy_pulse_never_hides_a_gap_from_the_next_materialization() {
+        let (conn, routine) = setup();
+        host_tick(&conn, 60_000);
+        heartbeat(&conn, 90_000).unwrap(); // a normal pulse advances
+        let last = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT last_tick_at FROM scheduler_presence", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(last(&conn), 90_000);
+        heartbeat(&conn, 10 * 60_000).unwrap(); // the Mac slept through the pass
+        assert_eq!(last(&conn), 90_000);
+        heartbeat(&conn, 10 * 60_000 + 1_000).unwrap();
+        assert_eq!(last(&conn), 90_000);
+        host_tick(&conn, 10 * 60_000 + 2_000);
+        let owed = statuses(&conn, &routine);
+        assert!(owed
+            .iter()
+            .filter(|(at, _)| (120_000..=600_000).contains(at))
+            .all(|(_, status)| *status == OccurrenceStatus::Pending));
+        assert_eq!(last(&conn), 10 * 60_000 + 2_000);
+    }
+
+    #[test]
+    fn the_heartbeat_is_throttled_and_a_database_without_catch_up_upgrades() {
+        let (conn, _) = setup();
+        let last = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT last_tick_at FROM scheduler_presence", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        record_tick(&conn, 10_000).unwrap();
+        record_tick(&conn, 12_000).unwrap();
+        assert_eq!(last(&conn), 10_000);
+        record_tick(&conn, 15_000).unwrap();
+        assert_eq!(last(&conn), 15_000);
+        conn.execute_batch("ALTER TABLE scheduler_occurrences DROP COLUMN catch_up")
+            .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(pending(&conn).unwrap().len(), 0);
     }
 }

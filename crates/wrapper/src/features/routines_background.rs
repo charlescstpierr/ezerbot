@@ -553,14 +553,56 @@ fn drive(app: &mut App) -> Result<(), ApiError> {
             return Err(fail("Le passage a atteint sa limite. Les routines reprendront avec leur budget conservé au prochain réveil ou à l’ouverture d’Ezerbot."));
         }
         let ctx = app.feature_context();
+        // A long run is not a silence: the next pass must not take it for a gap.
+        super::routines::heartbeat(&ctx);
         super::engine::tick_routines(&ctx);
         let active: bool = ctx.connection.query_row("WITH RECURSIVE threads(id) AS (SELECT conversation_id FROM scheduler_routines UNION SELECT c.id FROM wrapper_conversations c JOIN threads t ON c.parent_id=t.id) SELECT EXISTS(SELECT 1 FROM engine_runs e JOIN threads t ON e.conversation_id=t.id WHERE e.status IN ('queued','running','interrupted'))", [], |r|r.get(0))?;
         if !active && !app.provider.has_run_workers() {
+            // The catch-up queue runs one slot at a time: start the next one
+            // now rather than waiting a minute for the next pass.
+            if queue_advanced(&ctx) {
+                continue;
+            }
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// Scheduled slots of active routines that have not started yet.
+fn waiting(ctx: &Context<'_>) -> i64 {
+    ctx.connection
+        .query_row(
+            "SELECT COUNT(*) FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id
+             WHERE o.status='pending' AND o.manual_nonce IS NULL AND r.enabled=1 AND r.deleted=0
+             AND o.schedule_version=r.schedule_version",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+/// Scheduled occurrences that a dispatch has taken out of the queue. A tick may
+/// also materialize a new slot, so the queue length alone cannot show progress.
+fn started(ctx: &Context<'_>) -> i64 {
+    ctx.connection
+        .query_row(
+            "SELECT COUNT(*) FROM scheduler_occurrences WHERE manual_nonce IS NULL
+             AND status IN ('running','done','failed')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+/// Dispatch the next queued slot, and say whether one started. Stops at a slot
+/// that cannot start, so a refusal never keeps the pass alive.
+fn queue_advanced(ctx: &Context<'_>) -> bool {
+    if waiting(ctx) == 0 {
+        return false;
+    }
+    let before = started(ctx);
+    super::routines::tick(ctx);
+    started(ctx) > before
 }
 
 fn pass_deadline() -> Duration {

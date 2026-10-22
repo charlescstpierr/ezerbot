@@ -109,6 +109,13 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
     Ok(id)
 }
 
+/// The GitHub read tools: a native adapter, run outside any SQLite writer.
+pub(crate) fn is_github_tool(name: &str) -> bool {
+    catalogue::github::is_tool(name)
+}
+pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    catalogue::github::call(ctx, &call.name, &call.arguments)
+}
 pub(crate) fn is_lifecycle(name: &str) -> bool {
     name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")
 }
@@ -361,6 +368,10 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
             .bot_id
             .is_some_and(|bot| enabled(ctx.connection, &server.id, bot))
         {
+            continue;
+        }
+        if catalogue::is_native(ctx, &server.id) {
+            result.extend(catalogue::native_tools(ctx, &server));
             continue;
         }
         let handle = ctx
@@ -641,6 +652,9 @@ fn state_servers(ctx: &Context<'_>) -> Result<Vec<Value>, ApiError> {
                 }
                 Err(_) => "busy",
             },
+            None if catalogue::native_status(ctx, &server.id).is_some() => {
+                catalogue::native_status(ctx, &server.id).unwrap_or("disconnected")
+            }
             None if server.error.as_deref() == Some(crate::mcp::DISCONNECTED) => "crashed",
             None if server.error.is_some() => "error",
             None => "disconnected",
@@ -678,6 +692,7 @@ pub fn routes(
                 | "/api/mcp/restart"
                 | "/api/mcp/remove"
                 | "/api/connectors/connect"
+                | "/api/connectors/cancel"
                 | "/api/connectors/disconnect"
         )
     {

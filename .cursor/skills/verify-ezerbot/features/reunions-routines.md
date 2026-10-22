@@ -7,6 +7,7 @@ Les réunions règlent la durée de conservation de l’audio gardé. Les routin
 - `reunions-retention` montre le sélecteur `#meeting-retention` (1, 7 et 30 jours).
 - `routines-ouvrir` ouvre le dialogue Routines du bot par défaut.
 - `routines-liste` montre le titre Routines et le choix du bot, sans créer de routine.
+- `routines-regle` montre, sous le choix du bot, la règle de rattrapage : extinction ou veille rattrapées dans l’ordre, fenêtre de 60 minutes sinon, une pause ne se rattrape pas.
 - `routines-webhook` (hors parcours groupé) : une routine au déclencheur Webhook montre, dans le dialogue Routines, la publication Tailscale Funnel (URL `https`, rappel Bearer, jeton masqué) ou la raison sans URL. Voir « Gotchas ».
 
 ## How to get to it (user POV)
@@ -26,6 +27,7 @@ Preconditions:
 - **Capture réunions.** Run `screenshot <preuves>/spheres/reunions-routines/reunions-<theme>-<largeur>x<hauteur>.png` pour chaque thème et chaque taille.
 - **Ouvrir les routines.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { const button = [...document.querySelectorAll("[data-panel=routines] button")].find((node) => node.textContent.includes("Gérer les routines")); button.click(); return true; }'`.
 - **Dialogue.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => ({open: document.querySelector("dialog.routines-dialog").open, title: document.getElementById("routines-title").textContent, bot: document.querySelector("[aria-label=\\"Bot des routines\\"]").value})'`. `open` est vrai, le titre est `Routines`, le bot sélectionné est `grokbot`.
+- **Règle de rattrapage.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => document.querySelector("dialog.routines-dialog .routines-note").textContent'`. Le texte commence par `Les routines horaires partent quand le moteur local est ouvert` et finit par `Une pause ne se rattrape pas.`
 - **Capture routines.** Run `screenshot <preuves>/spheres/reunions-routines/routines-<theme>-<largeur>x<hauteur>.png`.
 - **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere reunions-routines`.
 

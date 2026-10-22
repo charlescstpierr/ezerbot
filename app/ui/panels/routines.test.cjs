@@ -41,7 +41,7 @@ function harness(api) {
   const context = vm.createContext({ window, document, Intl, Date: class extends Date { static now() { return clock; } }, crypto: { randomUUID: () => `intent-${++sequence}` }, sessionStorage: { getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v) }, console, TextEncoder });
   // Expose lexical state only in this test VM; production has no test API.
   const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8').replace('  panels.register({', `
-  window.test = { runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
+  window.test = { renderList, runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
     setup(r) { dialog = document.createElement('dialog'); botSelect = document.createElement('select'); botSelect.value = r.bot_id;
       content = document.createElement('div'); status = document.createElement('p'); toolbar = document.createElement('div'); notices = document.createElement('div');
       dialog.append(notices, status, content); document.body.append(dialog);
@@ -331,4 +331,22 @@ test('confirmation read errors are French and actionable', async () => {
   assert.match(h.t.status.textContent, /Confirmation indisponible/);
   assert.match(h.t.status.textContent, /Réessayer/);
   assert.doesNotMatch(h.t.status.textContent, /database busy/);
+});
+
+test('the list shows how many catch-up occurrences wait and when the next one is planned', () => {
+  const h = harness(async () => ({}));
+  const queued = (queue) => { h.panels.state.routines.items = [{ routine, queue }]; h.t.renderList(); return h.t.content.querySelectorAll('[data-queue]'); };
+  assert.equal(queued({ waiting: 0, next_at: null }).length, 0);
+  const [one] = queued({ waiting: 1, next_at: Date.UTC(2026, 9, 22, 14, 0, 0) });
+  assert.match(one.textContent, /^1 occurrence en attente · prochaine prévue /);
+  assert.match(one.textContent, /14:00:00/);
+  const [many] = queued({ waiting: 3, next_at: Date.UTC(2026, 9, 22, 15, 0, 0) });
+  assert.match(many.textContent, /^3 occurrences en attente/);
+  assert.equal(many.attributes.role, 'status');
+});
+
+test('the panel states the catch-up rule: the queue after an outage, the sixty-minute window otherwise, and that a pause is not caught up', () => {
+  const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8');
+  const note = /"(Les routines horaires partent quand[^"]*)"/.exec(source)[1];
+  assert.equal(note, 'Les routines horaires partent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé. Si le Mac était éteint ou en veille, ou si l’agent activé n’a pas pu tourner, chaque créneau dû est rattrapé au prochain passage, dans l’ordre. Si le Mac était allumé et que ni l’app ni l’agent ne tournait, un seul créneau des 60 dernières minutes est rattrapé ; les autres sont marqués manqués. Une pause ne se rattrape pas.');
 });

@@ -537,3 +537,66 @@ fn deadline_checkpoints_elapsed_budget_and_cannot_replay_forever() {
         .unwrap()
         .contains("échoué"));
 }
+
+#[test]
+fn first_wake_after_an_outage_catches_up_every_slot_in_order_without_opening_the_app() {
+    const HOUR: i64 = 3_600_000;
+    let mut f = Fixture::new();
+    f.configure(true);
+    let created = f.post("/api/routines",json!({"bot_id":"grokbot","name":"Bilan horaire","prompt":"Rédige le bilan de test.","schedule":"@every 1h","time_zone":"UTC","enabled":true}));
+    let id = created["routine"]["routine_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.stop();
+    // Le Mac est resté éteint : le dernier passage date de 4 h, et deux créneaux horaires sont dus.
+    let db = rusqlite::Connection::open(&f.database).unwrap();
+    db.execute(
+        "UPDATE scheduler_routines SET materialized_after=materialized_after-?1, active_since=active_since-?2 WHERE routine_id=?3",
+        rusqlite::params![5 * HOUR / 2, 4 * HOUR, id],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE scheduler_presence SET last_tick_at=?1 WHERE id=1",
+        [now() - 4 * HOUR],
+    )
+    .unwrap();
+    drop(db);
+    for summary in ["Premier bilan.", "Second bilan."] {
+        f.fake
+            .seen
+            .lock()
+            .unwrap()
+            .responses
+            .push_back(tool("complete_task", json!({ "summary": summary })));
+    }
+    assert!(f.wake().status.success());
+    assert!(f.wake().status.success()); // un second passage ne relance rien
+    f.open();
+    let slots: Vec<(i64, String)> = f.history(&id)["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .map(|o| {
+            (
+                o["scheduled_at_utc"].as_i64().unwrap(),
+                o["status"]["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(slots.len(), 2, "{slots:?}");
+    assert!(slots[0].0 < slots[1].0);
+    assert_eq!(slots[1].0 - slots[0].0, HOUR);
+    assert!(
+        slots.iter().all(|(_, status)| status == "done"),
+        "{slots:?}"
+    );
+    assert_eq!(
+        one_row(
+            &f.database,
+            "SELECT count(*) FROM engine_runs WHERE trigger_kind='occurrence'"
+        ),
+        2
+    );
+}

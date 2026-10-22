@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -329,6 +329,27 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "réglage du microphone non prêt",
         )
+    if sphere == "voix-bots":
+        # Deux bots sans choix : Ezerbot et Chef. Les voix de test sont attribuées dès que la liste est lue.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.api("/api/bots", {id: "bot-chef", name: "Chef", color: "orange", instructions: "Réponds en recettes."});
+              await panels.refresh();
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """() => {
+              const voice = window.GrokbotPanels?.state?.voice;
+              return voice?.voices?.length === 2 && voice.bots?.grokbot?.voice && voice.bots["bot-chef"]?.voice ? {ok: true} : null;
+            }""",
+            "voix des bots non attribuées",
+        )
+        return open_bot_voice(evidence, "Ezerbot")
     if sphere == "pages":
         # Une conversation neuve à chaque passage : la capture « avant » la montre sans Page, « après » est prise à l’envoi.
         eval_js(evidence, close_overlays_js())
@@ -397,6 +418,52 @@ def pages_request(evidence: Path) -> dict:
     return state
 
 
+def open_bot_voice(evidence: Path, name: str) -> dict:
+    """Ouvre « Modifier <bot> » depuis les Paramètres et rend la voix affichée dans la section Voix du bot."""
+    eval_js(evidence, close_overlays_js())
+    eval_js(evidence, """() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+    wait_js(evidence, f"""() => (document.querySelector('[aria-label="Modifier {name}"]') ? {{ok: true}} : null)""", "liste des bots non prête")
+    eval_js(evidence, f"""() => {{ document.querySelector('[aria-label="Modifier {name}"]').click(); return true; }}""")
+    return wait_js(
+        evidence,
+        """() => {
+          const section = document.querySelector(".voice-bot-settings");
+          const current = section?.querySelector(".voice-bot-current")?.textContent || "";
+          if (!document.getElementById("bot-dialog")?.open || !current.includes("Voix de")) return null;
+          section.scrollIntoView({block: "center"});
+          const speed = section.querySelector('[name="bot-voice-speed"]');
+          return {ok: true, current, hint: section.querySelector(".voice-bot-hint").textContent, max: speed.max, language: section.querySelector('[name="bot-voice-language"]').value};
+        }""",
+        f"section Voix de {name} non prête",
+    )
+
+
+def voice_bots_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 voix d’Ezerbot, 1 voix de Chef (autre), 2 vitesse 2,5 refusée pour Chef."""
+    if index == 0:
+        return
+    if index == 1:
+        first = eval_js(evidence, """() => document.querySelector(".voice-bot-current").textContent""")
+        second = open_bot_voice(evidence, "Chef")
+        if not first.startswith("Voix de Ezerbot") or first.split(" : ")[1] == second["current"].split(" : ")[1] or "attribuée automatiquement" not in second["hint"]:
+            raise SystemExit(f"les deux bots n’annoncent pas deux voix différentes: {first} / {second}")
+    if index == 2:
+        before = eval_js(evidence, """() => document.querySelector(".voice-bot-current").textContent""")
+        state = eval_js(
+            evidence,
+            """async () => {
+              const section = document.querySelector(".voice-bot-settings");
+              const speed = section.querySelector('[name="bot-voice-speed"]');
+              speed.value = "2.5"; speed.dispatchEvent(new Event("input"));
+              [...section.querySelectorAll("button")].find((node) => node.textContent === "Enregistrer la voix").click();
+              await new Promise((resolve) => setTimeout(resolve, 600));
+              return {notice: section.querySelector(".voice-settings-notice").textContent, current: section.querySelector(".voice-bot-current").textContent};
+            }""",
+        )
+        if "Vitesse refusée" not in state["notice"] or state["current"] != before:
+            raise SystemExit(f"la vitesse au-delà de 2 n’est pas refusée telle quelle: {state}")
+
+
 def dictation_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
     if index == 0:
@@ -462,6 +529,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
+    if sphere == "voix-bots":
+        return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
@@ -484,6 +553,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             pages_request(evidence)
         if sphere == "dictee":
             dictation_step(evidence, index)
+        if sphere == "voix-bots":
+            voice_bots_step(evidence, index)
         if sphere == "reunions-routines" and index == 1:
             eval_js(
                 evidence,

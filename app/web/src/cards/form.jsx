@@ -88,12 +88,12 @@ export function Card({ message, busy, onAction }) {
       if (value === "" && !field.required) return [];
       return [[field.name, field.field_type.kind === "number" ? Number(value) : value]];
     }));
-    if (site) form.reset();
-    await act(site ? "forms.site" : "forms.submit", { values });
+    const accepted = await act(site ? "forms.site" : "forms.submit", { values });
+    if (site && accepted) form.reset();
   }
   return (
     <HumanInputCard message={message} title={site ? `Site confirmé : ${request.kind.origin}` : "Informations demandées"} input={input}>
-      {site && <p className="mb-3 text-sm">Jamais montré à votre bot. Rempli directement sur {request.kind.origin}.</p>}
+      {site && <p className="mb-3 text-sm">Jamais montré à votre bot. Enregistré de façon sécurisée dans le coffre local.</p>}
       {pending && <form className="space-y-3" onSubmit={submit}>
         <fieldset className="space-y-3" disabled={disabled}>
           {fields.map((field, index) => <label className="block space-y-1 text-sm" key={field.name}>

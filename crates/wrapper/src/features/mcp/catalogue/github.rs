@@ -9,11 +9,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Read tool of the closed list. It needs no approval card: it only reads.
-pub(in super::super) const TOOL: &str = "github_list_issues";
+/// Read tools of the closed list. None needs an approval card: they only read.
+const TOOL: &str = "github_list_issues";
+const PULL_TOOL: &str = "github_get_pull_request";
+const REPOSITORY_TOOL: &str = "github_read_repository";
+pub(in super::super) fn is_tool(name: &str) -> bool {
+    matches!(name, TOOL | PULL_TOOL | REPOSITORY_TOOL)
+}
 pub(super) const DEVICE_PAGE: &str = "https://github.com/login/device";
 const CODE_LIFETIME: u64 = 900;
 const PAGE: usize = 30;
+/// Characters of a file shown in the bubble; the rest is said to be cut.
+const EXCERPT: usize = 3000;
 const RECONNECT: &str =
     "La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub dans Paramètres › Connecteurs.";
 
@@ -380,31 +387,73 @@ fn account_of(m: Manifest, access: &str) -> Result<(String, String), ApiError> {
     }
 }
 
-fn tool_definition() -> Value {
-    json!({
-        "name":"list_issues",
-        "description":"Lister les issues d’un dépôt GitHub (une page de 30), en lecture seule, avec le compte GitHub connecté.",
-        "inputSchema":schema(),
-    })
+struct Tool {
+    name: &'static str,
+    short: &'static str,
+    summary: &'static str,
+    model: &'static str,
+    schema: fn() -> Value,
 }
-fn schema() -> Value {
+const TOOLS: [Tool; 3] = [
+    Tool {
+        name: TOOL,
+        short: "list_issues",
+        summary: "Lister les issues d’un dépôt GitHub (une page de 30), en lecture seule, avec le compte GitHub connecté.",
+        model: "GitHub · lister les issues d’un dépôt `propriétaire/dépôt` (lecture seule, une page de 30, compte GitHub connecté dans Ezerbot). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte et donne numéro, titre, état et auteur de chaque issue.",
+        schema: issues_schema,
+    },
+    Tool {
+        name: PULL_TOOL,
+        short: "get_pull_request",
+        summary: "Lire une pull request d’un dépôt GitHub (titre, état, auteur, branche de base), en lecture seule, avec le compte GitHub connecté.",
+        model: "GitHub · lire une pull request d’un dépôt `propriétaire/dépôt` (lecture seule, compte GitHub connecté dans Ezerbot). Sans `number`, lit la plus récente. Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte et donne titre, état, auteur et branche de base.",
+        schema: pull_schema,
+    },
+    Tool {
+        name: REPOSITORY_TOOL,
+        short: "read_repository",
+        summary: "Lire un dépôt GitHub (description, branche par défaut) et un extrait de son README ou d’un fichier nommé, en lecture seule, avec le compte GitHub connecté.",
+        model: "GitHub · lire un dépôt `propriétaire/dépôt` : description, branche par défaut et un extrait du README, ou du fichier `path` s’il est nommé (lecture seule, compte GitHub connecté dans Ezerbot). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte et dit si le fichier a été tronqué.",
+        schema: repository_schema,
+    },
+];
+fn issues_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
         "state":{"type":"string","enum":["open","closed","all"],"description":"État des issues ; open par défaut."}
     },"required":["repository"]})
 }
-/// Model-facing tool, advertised only while GitHub is connected and enabled for the bot.
-pub(in super::super) fn tool_spec() -> grokbot_engine::contracts::ToolSpec {
-    grokbot_engine::contracts::ToolSpec {
-        name: TOOL.into(),
-        description: "GitHub · lister les issues d’un dépôt `propriétaire/dépôt` (lecture seule, une page de 30, compte GitHub connecté dans Ezerbot). Reprenez le champ `texte` du résultat tel quel dans votre réponse : il nomme le compte et donne numéro, titre, état et auteur de chaque issue.".into(),
-        schema: schema(),
-        requires_approval: false,
-    }
+fn pull_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"properties":{
+        "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
+        "number":{"type":"integer","minimum":1,"description":"Numéro de la pull request ; la plus récente si omis."}
+    },"required":["repository"]})
+}
+fn repository_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"properties":{
+        "repository":{"type":"string","description":"Dépôt au format propriétaire/dépôt."},
+        "path":{"type":"string","description":"Chemin d’un fichier du dépôt, par exemple docs/guide.md ; le README si omis."}
+    },"required":["repository"]})
+}
+/// Model-facing tools, advertised only while GitHub is connected and enabled for the bot.
+pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec> {
+    TOOLS
+        .iter()
+        .map(|tool| grokbot_engine::contracts::ToolSpec {
+            name: tool.name.into(),
+            description: tool.model.into(),
+            schema: (tool.schema)(),
+            requires_approval: false,
+        })
+        .collect()
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
 pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiError> {
-    let tools = json!([tool_definition()]);
+    let tools: Vec<Value> = TOOLS
+        .iter()
+        .map(|tool| json!({"name":tool.short,"description":tool.summary,"inputSchema":(tool.schema)()}))
+        .collect();
+    let tools = json!(tools);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
         params![server.id, tools.to_string()],
@@ -416,7 +465,7 @@ pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiErr
         "Connecté. Activez les outils pour les bots de votre choix.",
     )?;
     Ok(
-        json!({"message":"GitHub est connecté. Activez ses outils pour un bot : les lectures partent sans carte d’approbation.","outils":tools}),
+        json!({"message":"GitHub est connecté. Activez ses outils pour un bot : les lectures (issues, pull requests, dépôts) partent sans carte d’approbation.","outils":tools}),
     )
 }
 
@@ -513,9 +562,15 @@ fn clean(text: &str, limit: usize) -> String {
 
 pub(in super::super) fn call(
     ctx: &Context<'_>,
+    name: &str,
     arguments: &Value,
 ) -> grokbot_engine::contracts::ToolOutcome {
-    match list_issues(ctx, arguments) {
+    let result = match name {
+        TOOL => list_issues(ctx, arguments),
+        PULL_TOOL => read_pull_request(ctx, arguments),
+        _ => read_repository(ctx, arguments),
+    };
+    match result {
         Ok(output) => grokbot_engine::contracts::ToolOutcome::Done { output },
         Err(error) => grokbot_engine::contracts::ToolOutcome::Failed {
             reason: error.message,
@@ -539,33 +594,15 @@ fn resolve(ctx: &Context<'_>) -> Result<(Server, Manifest, String), ApiError> {
         .ok_or_else(|| invalid("GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis réessayez."))?;
     Ok((server, manifest("github")?, login))
 }
-fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Args {
-        repository: String,
-        state: Option<String>,
-    }
-    let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
-        invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt.")
-    })?;
-    let Some((owner, name)) = repository(args.repository.trim()) else {
-        return Err(invalid(
-            "Dépôt invalide : écrivez-le sous la forme propriétaire/dépôt.",
-        ));
-    };
-    let state = match args.state.as_deref().unwrap_or("open") {
-        s @ ("open" | "closed" | "all") => s,
-        _ => return Err(invalid("État invalide : open, closed ou all.")),
-    };
+/// One authenticated read for the account this request resolved. An access past its
+/// expiry is renewed once before the call, a rejected one once after. Any status that
+/// says nothing about the target (limit, refusal, outage) is already a sentence here;
+/// 200 and 404 come back for the caller, which knows what was missing.
+fn read(ctx: &Context<'_>, route: &str, repo: &str) -> Result<(String, Reply), ApiError> {
     let (server, m, login) = resolve(ctx)?;
-    // An access past its expiry is renewed here, once, before the read.
     super::ensure(ctx, &server)?;
-    let url = format!(
-        "{}/repos/{owner}/{name}/issues?state={state}&per_page={PAGE}",
-        endpoint(m, "api")
-    );
-    let read = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
+    let url = format!("{}/{route}", endpoint(m, "api"));
+    let fetch = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
         let access = credentials(ctx, &server.id)?
             .and_then(|env| env.get("ACCESS_TOKEN").cloned())
             .ok_or_else(|| invalid(RECONNECT))?;
@@ -578,7 +615,7 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
         .map_err(|_| unreachable_github())?;
         Ok((access, reply))
     };
-    let (used, mut reply) = read(ctx)?;
+    let (used, mut reply) = fetch(ctx)?;
     if reply.status == 401 {
         // Rejected before its clock expiry: renew once and read once more.
         {
@@ -593,16 +630,15 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
                 }
             }
         }
-        reply = read(ctx)?.1;
+        reply = fetch(ctx)?.1;
         if reply.status == 401 {
             phase(ctx, &server.id, "reconnect", RECONNECT)?;
             return Err(invalid(RECONNECT));
         }
     }
-    let repo = format!("{owner}/{name}");
     match reply.status {
-        200 => (),
-        404 => return Err(invalid(&format!("Le dépôt {repo} est introuvable pour le compte {login}, ou l’application GitHub d’Ezerbot n’y est pas installée. Vérifiez le nom et les dépôts choisis chez GitHub."))),
+        200 | 404 => (),
+        403 if too_large(&reply.body) => (),
         403 | 429
             if reply.exhausted
                 || reply.status == 429
@@ -616,14 +652,69 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
                 .filter(|s| *s <= 86_400)
                 .map(|s| format!(" Réessayez dans environ {} min.", s.div_ceil(60).max(1)))
                 .unwrap_or_default();
-            return Err(invalid(&format!("GitHub limite le débit des requêtes pour le compte {login}.{wait}")));
+            return Err(invalid(&format!(
+                "GitHub limite le débit des requêtes pour le compte {login}.{wait}"
+            )));
         }
         403 => {
-            let sso = if reply.single_sign_on { " Votre organisation exige une session SAML : autorisez-la chez GitHub." } else { "" };
+            let sso = if reply.single_sign_on {
+                " Votre organisation exige une session SAML : autorisez-la chez GitHub."
+            } else {
+                ""
+            };
             return Err(invalid(&format!("Accès refusé à {repo} pour le compte {login}. Si le dépôt appartient à une organisation, autorisez la session SAML ou élargissez l’installation de l’application GitHub d’Ezerbot.{sso}")));
         }
-        500..=599 => return Err(ApiError::new(503, "GitHub est indisponible pour le moment. Réessayez plus tard.")),
-        code => return Err(invalid(&format!("GitHub a répondu de façon inattendue (code {code}). Réessayez plus tard."))),
+        500..=599 => {
+            return Err(ApiError::new(
+                503,
+                "GitHub est indisponible pour le moment. Réessayez plus tard.",
+            ))
+        }
+        code => {
+            return Err(invalid(&format!(
+                "GitHub a répondu de façon inattendue (code {code}). Réessayez plus tard."
+            )))
+        }
+    }
+    Ok((login, reply))
+}
+/// The contents API refuses a file past 1 MB in its JSON form.
+fn too_large(body: &Value) -> bool {
+    body["errors"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|e| e["code"] == "too_large"))
+}
+fn repository_missing(repo: &str, login: &str) -> ApiError {
+    invalid(&format!("Le dépôt {repo} est introuvable pour le compte {login}, ou l’application GitHub d’Ezerbot n’y est pas installée. Vérifiez le nom et les dépôts choisis chez GitHub."))
+}
+fn repository_argument(text: &str) -> Result<(&str, &str), ApiError> {
+    repository(text.trim())
+        .ok_or_else(|| invalid("Dépôt invalide : écrivez-le sous la forme propriétaire/dépôt."))
+}
+
+fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        repository: String,
+        state: Option<String>,
+    }
+    let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
+        invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt.")
+    })?;
+    let (owner, name) = repository_argument(&args.repository)?;
+    let state = match args.state.as_deref().unwrap_or("open") {
+        s @ ("open" | "closed" | "all") => s,
+        _ => return Err(invalid("État invalide : open, closed ou all.")),
+    };
+    let repo = format!("{owner}/{name}");
+    let (login, reply) = read(
+        ctx,
+        &format!("repos/{owner}/{name}/issues?state={state}&per_page={PAGE}"),
+        &repo,
+    )?;
+    if reply.status != 200 {
+        return Err(repository_missing(&repo, &login));
     }
     let items = reply
         .body
@@ -673,5 +764,203 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
     }
     Ok(
         json!({"compte":login,"depot":repo,"etat":state,"issues":issues,"autres_issues":reply.next_page,"texte":text}),
+    )
+}
+
+fn read_pull_request(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        repository: String,
+        number: Option<u64>,
+    }
+    let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
+        invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt et, si besoin, le numéro de la pull request.")
+    })?;
+    let (owner, name) = repository_argument(&args.repository)?;
+    if args
+        .number
+        .is_some_and(|n| n == 0 || n > u64::from(u32::MAX))
+    {
+        return Err(invalid(
+            "Numéro invalide : indiquez le numéro de la pull request.",
+        ));
+    }
+    let repo = format!("{owner}/{name}");
+    let route = match args.number {
+        Some(number) => format!("repos/{owner}/{name}/pulls/{number}"),
+        None => {
+            format!("repos/{owner}/{name}/pulls?state=all&sort=created&direction=desc&per_page=1")
+        }
+    };
+    let (login, reply) = read(ctx, &route, &repo)?;
+    if reply.status != 200 {
+        return Err(match args.number {
+            Some(number) => invalid(&format!("La pull request #{number} de {repo} est introuvable pour le compte {login} : le numéro n’existe pas, ou l’application GitHub d’Ezerbot n’est pas installée sur ce dépôt.")),
+            None => repository_missing(&repo, &login),
+        });
+    }
+    // Without a number the route lists one pull request, the latest.
+    let pull = match (&reply.body, args.number) {
+        (Value::Array(items), None) => match items.first() {
+            Some(pull) => pull,
+            None => {
+                let text = format!("Aucune pull request dans {repo} (compte GitHub : {login}).");
+                return Ok(json!({"compte":login,"depot":repo,"texte":text}));
+            }
+        },
+        (body, Some(_)) if body.is_object() => body,
+        _ => return Err(invalid("La réponse de GitHub est illisible.")),
+    };
+    let Some(number) = pull["number"].as_u64() else {
+        return Err(invalid("La réponse de GitHub est illisible."));
+    };
+    let merged = pull["merged"] == true || pull["merged_at"].is_string();
+    let (state, label) = if merged {
+        ("merged", "fusionnée")
+    } else if pull["state"] == "closed" {
+        ("closed", "fermée")
+    } else {
+        ("open", "ouverte")
+    };
+    let title = clean(pull["title"].as_str().unwrap_or(""), 200);
+    let author = clean(pull["user"]["login"].as_str().unwrap_or("inconnu"), 100);
+    let base = clean(pull["base"]["ref"].as_str().unwrap_or("inconnue"), 100);
+    let text = format!(
+        "Pull request #{number} de {repo} · compte GitHub : {login}\nTitre : {title}\nÉtat : {label}\nAuteur : {author}\nBranche de base : {base}"
+    );
+    Ok(
+        json!({"compte":login,"depot":repo,"numero":number,"titre":title,"etat":state,"auteur":author,"branche_base":base,"texte":text}),
+    )
+}
+
+/// A file path inside the repository: relative, no `.` or `..`, no control character.
+fn file_path(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (!text.is_empty()
+        && text.len() <= 300
+        && !text.chars().any(|c| c.is_control() || c == '\\')
+        && text
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".."))
+    .then_some(text)
+}
+fn contents_route(owner: &str, name: &str, path: &str) -> String {
+    let mut url = url::Url::parse("https://github.invalid/").expect("static base");
+    if let Ok(mut segments) = url.path_segments_mut() {
+        segments
+            .extend(["repos", owner, name, "contents"])
+            .extend(path.split('/'));
+    }
+    url.path().trim_start_matches('/').to_owned()
+}
+/// Printable text of a file, cut to the excerpt: only tabs and line breaks survive.
+fn excerpt(text: &str) -> (String, bool) {
+    let cut = text.chars().nth(EXCERPT).is_some();
+    let shown = text
+        .chars()
+        .filter(|c| *c != '\r')
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\n' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(EXCERPT)
+        .collect();
+    (shown, cut)
+}
+
+fn read_repository(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        repository: String,
+        path: Option<String>,
+    }
+    let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| {
+        invalid("Arguments invalides : indiquez le dépôt sous la forme propriétaire/dépôt et, si besoin, le chemin d’un fichier.")
+    })?;
+    let (owner, name) = repository_argument(&args.repository)?;
+    let path = match args.path.as_deref() {
+        Some(text) => Some(file_path(text).ok_or_else(|| {
+            invalid("Chemin invalide : indiquez un fichier du dépôt, par exemple docs/guide.md.")
+        })?),
+        None => None,
+    };
+    let repo = format!("{owner}/{name}");
+    let (login, info) = read(ctx, &format!("repos/{owner}/{name}"), &repo)?;
+    if info.status != 200 {
+        return Err(repository_missing(&repo, &login));
+    }
+    let description = info.body["description"]
+        .as_str()
+        .map(|d| clean(d, 300))
+        .filter(|d| !d.trim().is_empty());
+    let branch = clean(
+        info.body["default_branch"].as_str().unwrap_or("inconnue"),
+        100,
+    );
+    let route = match path {
+        Some(path) => contents_route(owner, name, path),
+        None => format!("repos/{owner}/{name}/readme"),
+    };
+    let wanted = path.unwrap_or("README");
+    let (_, file) = read(ctx, &route, &repo)?;
+    let unreadable = |why: &str| {
+        invalid(&format!(
+            "Impossible d’afficher {wanted} dans {repo} : {why}"
+        ))
+    };
+    match file.status {
+        200 => (),
+        404 if path.is_none() => {
+            return Err(invalid(&format!("Le dépôt {repo} n’a pas de README (branche par défaut : {branch}).")))
+        }
+        404 => {
+            return Err(invalid(&format!("Le fichier {wanted} est introuvable dans {repo} (branche par défaut : {branch}). Vérifiez le chemin.")))
+        }
+        _ => return Err(unreadable("ce fichier est trop volumineux pour être lu ici (plus de 1 Mo).")),
+    }
+    if file.body.is_array() {
+        return Err(unreadable(
+            "c’est un dossier, pas un fichier. Nommez un fichier de ce dossier.",
+        ));
+    }
+    if file.body["type"] != "file" || file.body["encoding"] != "base64" {
+        return Err(unreadable("ce n’est pas un fichier que l’on peut lire ici (lien, sous-module ou fichier trop volumineux)."));
+    }
+    let decoded = {
+        use base64::Engine;
+        let packed: String = file.body["content"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        base64::engine::general_purpose::STANDARD.decode(packed)
+    };
+    let text = decoded
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|text| !text.contains('\0'))
+        .ok_or_else(|| unreadable("ce n’est pas un fichier texte, aucun extrait n’est affiché."))?;
+    let file_name = path
+        .map(str::to_owned)
+        .or_else(|| file.body["path"].as_str().map(|p| clean(p, 300)))
+        .unwrap_or_else(|| "README".into());
+    let (shown, cut) = excerpt(&text);
+    let mut out = format!(
+        "Dépôt {repo} · compte GitHub : {login}\nDescription : {}\nBranche par défaut : {branch}\nExtrait de {file_name} :\n{shown}",
+        description.as_deref().unwrap_or("aucune description"),
+    );
+    if cut {
+        out.push_str(&format!(
+            "\n[Le fichier est trop long : seul le début est affiché ({EXCERPT} premiers caractères).]"
+        ));
+    }
+    Ok(
+        json!({"compte":login,"depot":repo,"description":description,"branche_par_defaut":branch,"fichier":file_name,"extrait":shown,"tronque":cut,"texte":out}),
     )
 }

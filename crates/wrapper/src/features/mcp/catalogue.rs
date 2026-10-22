@@ -36,14 +36,14 @@ pub(super) fn native_status(ctx: &Context<'_>, server: &str) -> Option<&'static 
         }
     })
 }
-/// Read tool of the native connection, offered to a bot only while it is connected
+/// Read tools of the native connection, offered to a bot only while it is connected
 /// and enabled for that bot.
 pub(super) fn native_tools(
     ctx: &Context<'_>,
     server: &Server,
 ) -> Vec<grokbot_engine::contracts::ToolSpec> {
     if native_status(ctx, &server.id) == Some("connected") {
-        vec![github::tool_spec()]
+        github::tool_specs()
     } else {
         Vec::new()
     }

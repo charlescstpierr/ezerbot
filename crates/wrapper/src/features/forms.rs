@@ -628,7 +628,10 @@ pub fn check_tool_approval(
             },
         );
     }
-    if super::mcp::is_lifecycle(&call.name) || super::screen::is_tool(&call.name) {
+    if super::mcp::is_lifecycle(&call.name)
+        || super::screen::is_tool(&call.name)
+        || super::recall::is_consent(&call.name)
+    {
         return Ok(ApprovalCheck::Ask);
     }
     // Skill revisions always require the user's explicit click, even if an
@@ -1134,7 +1137,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 };
                 return Err(ApiError::new(400, message));
             }
-            if (super::mcp::is_lifecycle(tool) || super::screen::is_tool(tool))
+            if (super::mcp::is_lifecycle(tool)
+                || super::screen::is_tool(tool)
+                || super::recall::is_consent(tool))
                 && matches!(
                     input.decision,
                     ApprovalDecision::AlwaysAllow { .. } | ApprovalDecision::Never { .. }
@@ -1404,19 +1409,30 @@ fn request_value(
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
         let publication = super::mcp::is_github_comment(tool);
+        let consent = super::recall::is_consent(tool);
         if tool == super::routines_background::ACTION
             || tool == super::routine_webhooks::ACTION
             || super::mcp::is_lifecycle(tool)
             || publication
+            || consent
         {
-            // A draft shows the result of its own call, never the run's latest one.
-            let call_id = publication
-                .then(|| super::mcp::github_comment_call(ctx, &request.id))
-                .flatten();
-            let result: Option<String> = ctx.connection.query_row(
-                "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND (?2 IS NULL OR json_extract(payload,'$.call_id')=?2) ORDER BY seq DESC LIMIT 1",
-                params![&request.run_id, call_id], |r| r.get(0),
-            ).optional()?;
+            // A draft or a consent card shows the result of its own call, never the run's
+            // latest one (an invitation shares its turn with other tools).
+            let call_id = if consent {
+                approved_call_id(ctx, request)?
+            } else if publication {
+                super::mcp::github_comment_call(ctx, &request.id)
+            } else {
+                None
+            };
+            let result: Option<String> = if consent && call_id.is_none() {
+                None
+            } else {
+                ctx.connection.query_row(
+                    "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND (?2 IS NULL OR json_extract(payload,'$.call_id')=?2) ORDER BY seq DESC LIMIT 1",
+                    params![&request.run_id, call_id], |r| r.get(0),
+                ).optional()?
+            };
             value[if publication {
                 "publication_result"
             } else {
@@ -1429,6 +1445,15 @@ fn request_value(
         }
         if let Some(display) = super::mcp::call_display(ctx, tool, &value["arguments"]) {
             value["connector"] = display;
+        }
+        if let Some(display) = super::recall::call_display(
+            ctx,
+            tool,
+            &value["arguments"],
+            &request.route.requesting_bot_id,
+            request.run_id.starts_with("mcp-host-"),
+        ) {
+            value["recall"] = display;
         }
         let policy = policy_for_request(ctx, request)?;
         if policy.scope == "action" {
@@ -1446,8 +1471,31 @@ fn request_value(
     Ok(value)
 }
 
+/// Identifiant d’appel que cette carte d’approbation lie : l’identité de la carte
+/// est un condensat de (run, appel, empreinte), retrouvé parmi les appels du run.
+fn approved_call_id(
+    ctx: &Context<'_>,
+    request: &HumanInputRequest,
+) -> Result<Option<String>, ApiError> {
+    let mut q = ctx
+        .connection
+        .prepare("SELECT payload FROM engine_run_events WHERE run_id=?1 AND kind='tool_call'")?;
+    let payloads = q
+        .query_map([&request.run_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(call) = serde_json::from_str::<ToolCall>(&payload) else {
+            continue;
+        };
+        if approval_identity(&request.run_id, &call).is_ok_and(|(id, _)| id == request.id) {
+            return Ok(Some(call.call_id));
+        }
+    }
+    Ok(None)
+}
+
 /// One classifier for the gate, the card and the decision route.
-fn bot_display_name(ctx: &Context<'_>, bot_id: &str) -> String {
+pub(crate) fn bot_display_name(ctx: &Context<'_>, bot_id: &str) -> String {
     ctx.connection
         .query_row(
             "SELECT name FROM wrapper_bots WHERE account_id=?1 AND id=?2",
@@ -1483,6 +1531,7 @@ fn approval_policy(
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
         || tool == super::routine_webhooks::ACTION
+        || super::recall::is_consent(tool)
         || tool == "propose_skill"
         || super::local::is_read(tool)
     {
@@ -1579,6 +1628,7 @@ fn policy_for_request(
     // their (possibly large) bodies on every state poll.
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
+        || super::recall::is_consent(tool)
         || tool == "propose_skill"
         || super::local::is_read(tool)
     {

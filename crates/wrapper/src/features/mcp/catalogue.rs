@@ -466,7 +466,7 @@ pub(super) fn preview(ctx: &Context<'_>, server: &Server, action: &str) -> Optio
         let connection = if remove {
             ""
         } else {
-            "Slack s’ouvre dans le navigateur : vous choisissez l’espace de travail et autorisez le client Slack d’Ezerbot à lire vos canaux. Seul l’identifiant public du client est envoyé, avec une preuve PKCE : aucun secret n’existe dans Ezerbot. Le jeton reçu est conservé dans le trousseau macOS, jamais dans un fichier. Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
+            "Slack s’ouvre dans le navigateur : vous choisissez l’espace de travail et autorisez le client Slack d’Ezerbot à lire vos canaux. Seul l’identifiant public du client est envoyé, avec une preuve PKCE : aucun secret n’existe dans Ezerbot. Le jeton reçu est conservé dans le coffre local (le trousseau macOS quand il est disponible). Une nouvelle identification réinitialise l’activation par bot et les règles de ce service."
         };
         let mut card = json!({"id":m.id,"service":m.name,"action":action,"transport":"https","variables_privées":names,"permissions":m.permissions,"portées":scopes_label(m),"source":m.source,"licence":m.license,"révision":revision,"connexion":connection});
         card["déconnexion"] = match private.get("EMAIL").filter(|_| remove) {

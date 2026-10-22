@@ -30,9 +30,20 @@ test("une réponse avec du texte avant et après un appel compte chaque fragment
   assert.equal(mark.parentNode.textContent, `Avant ${rare}`);
 });
 
-test("un lien Markdown rendu compte une seule occurrence", () => {
-  const root = article({ id: "m-bot", name: "Ezerbot", body: rare });
-  assert.equal(findInRendered(root, rare).length, 1);
+test("le texte d’un lien Markdown rendu est compté, pas les boutons du corps", () => {
+  const document = createDocument();
+  const root = article({ id: "m-bot", name: "Ezerbot", body: `Voir ${rare} et `, document });
+  const bubble = root.querySelector("[data-find-body]");
+  const link = document.createElement("button");
+  link.setAttribute("data-streamdown", "link");
+  link.textContent = rare;
+  const copy = document.createElement("button");
+  copy.textContent = rare;
+  bubble.append(link, copy);
+  const found = findInRendered(root, rare);
+  assert.deepEqual(found.map((match) => match.indexInMessage), [0, 1]);
+  const mark = highlightOccurrence(root, rare, 1);
+  assert.equal(mark.parentNode, link);
 });
 
 test("une longue réponse à beaucoup de correspondances se traite en temps linéaire", () => {

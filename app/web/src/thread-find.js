@@ -83,7 +83,8 @@ export function matchRanges(text, query) {
 
 function isChrome(element) {
   const tag = element.tagName;
-  if (tag === "BUTTON" || tag === "HEADER" || tag === "FOOTER" || tag === "TIME") return true;
+  if (tag === "BUTTON") return element.getAttribute?.("data-streamdown") !== "link";
+  if (tag === "HEADER" || tag === "FOOTER" || tag === "TIME") return true;
   return String(element.className || "").split(/\s+/).some((name) => name === "gb-meta" || name === "gb-actions" || name === "gb-status");
 }
 

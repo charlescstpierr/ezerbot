@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { after } from "node:test";
+import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createServer } from "vite";
+import react from "@vitejs/plugin-react";
 
 function mount(api) {
   const document = { createElement: () => ({}), getElementById: () => null };
@@ -62,7 +67,7 @@ test("Envoyer transmet le titre et le corps corrigés d’une issue, sans « Tou
   assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
 });
 
-test("Envoyer transmet l’objet et le corps corrigés d’un courriel, et la carte nomme les trois échecs", async () => {
+test("Envoyer transmet l’objet et le corps corrigés d’un courriel, Annuler n’en transmet aucun", async () => {
   const calls = [];
   const panels = mount(async (path, body) => { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; });
   const mail = { ...message, id: "draft-5", payload: { ...message.payload, entry_id: "draft-5", kind: { kind: "approval", tool: "gmail_send_email" } } };
@@ -73,7 +78,47 @@ test("Envoyer transmet l’objet et le corps corrigés d’un courriel, et la ca
   await panels.panel.onCardAction(other, "forms.decide", { decision: "deny" }, context(panels));
   assert.equal(Object.hasOwn(calls[1].body, "title"), false);
   assert.equal(Object.hasOwn(calls[1].body, "text"), false);
-  const card = readFileSync(new URL("./cards/draft.jsx", import.meta.url), "utf8");
-  for (const word of ["draft.objet", "draft.de", "draft.cc", "Objet (modifiable)", "Corps du courriel", "Refusé", "Trop de messages", "Envoi non confirmé"]) assert.ok(card.includes(word), word);
-  assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
+});
+
+const vite = await createServer({
+  root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
+  plugins: [react()], server: { middlewareMode: true }, logLevel: "error",
+  optimizeDeps: { noDiscovery: true },
+});
+after(() => vite.close());
+const { DraftCard } = await vite.ssrLoadModule("/src/cards/draft.jsx");
+
+function renderEmailDraft({ status, etat, publication_result }) {
+  const request = {
+    entry_id: "mail", status: { status }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "gmail_send_email" },
+    arguments: { brouillon: { service: "gmail", action: "Envoyer un courriel", de: "charles@example.test", a: ["ami@example.test"], cc: ["bruno@example.test"], objet: "Objet proposé", texte: "Corps proposé", empreinte: "abc", ...(etat ? { etat } : {}) } },
+    ...(publication_result ? { publication_result } : {}),
+  };
+  const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
+  globalThis.window = { GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(DraftCard, { message: { id: "mail", kind: "approval", payload: request }, input, disabled: false, expired: false }));
+  } finally { delete globalThis.window; }
+}
+
+test("la carte brouillon d’un courriel montre De, À, Cc, Objet et Corps, Envoyer et Annuler, sans « Toujours »", () => {
+  const html = renderEmailDraft({ status: "pending" });
+  for (const label of [">De<", ">À<", ">Cc<", "Objet (modifiable)", "Corps du courriel (modifiable)", ">Envoyer<", ">Annuler<"]) assert.ok(html.includes(label), label);
+  for (const value of ["charles@example.test", "ami@example.test", "bruno@example.test", "value=\"Objet proposé\"", ">Corps proposé</textarea>"]) assert.ok(html.includes(value), value);
+  assert.ok(!html.includes("Toujours"));
+});
+
+test("Refusé, Trop de messages et Envoi non confirmé s’affichent en alerte, jamais comme un courriel envoyé", () => {
+  for (const [etat, reason] of [
+    ["refused", "Refusé · Google a refusé d’envoyer ce courriel. Aucun courriel n’est parti."],
+    ["rate_limited", "Trop de messages · Google limite le nombre de courriels envoyés. Aucun courriel n’est parti."],
+    ["unconfirmed", "Envoi non confirmé · l’accusé de réception de Google manque : le courriel est peut-être parti."],
+  ]) {
+    const html = renderEmailDraft({ status: "resolved", etat, publication_result: { status: "failed", reason } });
+    assert.ok(html.includes(`role="alert">${reason}</p>`), etat);
+    assert.ok(!html.includes("Courriel envoyé"), etat);
+    assert.ok(!html.includes(">Envoyer<"), etat);
+    assert.ok(!html.includes("Toujours"), etat);
+  }
 });

@@ -179,13 +179,17 @@ export function findCountLabel(count, index) {
 // WebKit avant Safari 17.2 n’a pas les Custom Highlights : la sélection native
 // montre alors l’occurrence, sans toucher aux nœuds que React met à jour. Tant
 // qu’un champ de saisie a le focus, on la laisse en place : la déplacer dans le
-// fil sortirait la frappe du champ de recherche.
+// fil sortirait la frappe du champ de recherche. Un contour sur le corps du
+// message actif (data-find-active) montre alors où est l’occurrence.
 const selected = new WeakMap();
+const outlined = new WeakMap();
 
 export function clearFindMarks(root) {
   const document = root?.ownerDocument;
   const view = document?.defaultView;
   view?.CSS?.highlights?.delete("gb-find-current");
+  outlined.get(document)?.removeAttribute("data-find-active");
+  outlined.delete(document);
   const range = selected.get(document);
   if (!range) return;
   selected.delete(document);
@@ -207,10 +211,18 @@ function highlightRange(ranges, start, end) {
   range.setStart(first.node, Math.max(0, start - first.start));
   range.setEnd(last.node, Math.min(last.node.nodeValue.length, end - last.start));
   if (painted) view.CSS.highlights.set("gb-find-current", new view.Highlight(range));
-  else if (!document.activeElement?.matches?.("input, textarea, [contenteditable]")) {
-    selection.removeAllRanges();
-    selection.addRange(range);
-    selected.set(document, range);
+  else {
+    let body = first.node.parentElement;
+    while (body && body.getAttribute("data-find-body") === null) body = body.parentElement;
+    if (body) {
+      body.setAttribute("data-find-active", "");
+      outlined.set(document, body);
+    }
+    if (!document.activeElement?.matches?.("input, textarea, [contenteditable]")) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      selected.set(document, range);
+    }
   }
   return {
     textContent: range.toString(),

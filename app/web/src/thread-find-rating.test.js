@@ -111,6 +111,7 @@ function createDocument() {
     }
     setAttribute(name, value) { this.attrs.set(name, String(value)); }
     getAttribute(name) { return this.attrs.get(name) ?? null; }
+    removeAttribute(name) { this.attrs.delete(name); }
     append(...items) {
       for (const item of items) {
         const node = typeof item === "string" ? document.createTextNode(item) : item;
@@ -416,6 +417,21 @@ test("sans Custom Highlights, la frappe dans le champ de recherche garde la sél
   document.activeElement = null;
   highlightOccurrence(root, rare, 0);
   assert.equal(ranges.length, 1);
+});
+
+test("sans Custom Highlights, un contour montre le message actif même pendant la frappe", () => {
+  const root = article({ id: "m-bot", name: "Ezerbot", body: `Oui ${rare}` });
+  const document = root.ownerDocument;
+  const view = document.defaultView;
+  delete view.CSS;
+  delete view.Highlight;
+  view.getSelection = () => ({ rangeCount: 0, removeAllRanges() {}, addRange() {} });
+  document.activeElement = { matches: (selector) => selector.split(", ").includes("input") };
+  const body = root.querySelector("[data-find-body]");
+  assert.ok(highlightOccurrence(root, rare, 0));
+  assert.equal(body.getAttribute("data-find-active"), "");
+  clearFindMarks(root);
+  assert.equal(body.getAttribute("data-find-active"), null);
 });
 
 test("un vote que le Mac refuse n’entre ni dans l’export ni dans l’essai suivant", async () => {

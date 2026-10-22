@@ -17,6 +17,10 @@ pub const VAULT_FILE_MODE: u32 = 0o600;
 pub const MAX_SECRET_NAME_CHARACTERS: usize = 128;
 pub const MAX_SECRET_PURPOSE_CHARACTERS: usize = 500;
 pub const MIN_SECRET_VALUE_CHARACTERS: usize = 8;
+/// Site form fields shorter than this never join GLOBAL masking: a value like
+/// "a" or "42" would otherwise mask JSON keys, IDs and prose everywhere.
+/// Kept strictly longer than redact::MASK.
+pub const MIN_SITE_MASK_CHARACTERS: usize = 6;
 pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
@@ -330,7 +334,7 @@ impl Vault {
                                     serde_json::Value::String(text) => text.clone(),
                                     other => other.to_string(),
                                 })
-                                .filter(|v| !v.is_empty()),
+                                .filter(|v| v.encode_utf16().count() >= MIN_SITE_MASK_CHARACTERS),
                         );
                     }
                 }

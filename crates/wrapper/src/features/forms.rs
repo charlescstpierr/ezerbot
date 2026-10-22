@@ -1085,9 +1085,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                 requests::receipt(&tx, &input.entry_id, &submission)?
             } else {
                 let target = input.origin.as_deref().unwrap_or("");
-                let fill = clock(&ctx) < *expires_at && !input.refused && target == origin;
+                let store = clock(&ctx) < *expires_at && !input.refused && target == origin;
                 let envelope = json!({"origin":origin,"values":input.values}).to_string();
-                if fill {
+                if store {
                     requests::validate_values(fields, &input.values)?;
                     if envelope.len() > MAX_SECRET_VALUE_BYTES {
                         return Err(ApiError::new(413,
@@ -1103,7 +1103,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     input.refused,
                 )?;
                 let receipt = attach(&tx, &request, receipt)?;
-                if fill {
+                if store {
                     // Local-only envelope, bound to this immutable request and origin.
                     vault(&ctx)?.set(
                         &format!("SITE_{}", request.id.to_uppercase()),

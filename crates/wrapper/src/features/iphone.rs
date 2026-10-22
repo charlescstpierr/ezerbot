@@ -250,6 +250,7 @@ pub fn remote(
                     | "/api/conversations/delete"
                     | "/api/preferences"
                     | "/api/forms/submit"
+                    | "/api/forms/site-submit"
                     | "/api/forms/cancel"
                     | "/api/forms/skill-content"
                     | "/api/approvals/resolve"

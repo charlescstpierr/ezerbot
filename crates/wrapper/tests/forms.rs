@@ -1586,13 +1586,17 @@ fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
         .set(
             "SITE_SHORT",
             "Formulaire de site privé",
-            r#"{"origin":"https://example.org","values":{"pin":".","empty":"","count":42}}"#,
+            r#"{"origin":"https://example.org","values":{"pin":"a","empty":"","count":42,"code":"long-code-77"}}"#,
         )
         .unwrap();
-    assert_eq!(grokbot_forms::redact::redact(&vault, ".").unwrap(), "[...]");
+    // Values shorter than the minimum never join global masking: JSON keys stay readable.
     assert_eq!(
-        grokbot_forms::redact::redact(&vault, "42").unwrap(),
-        "[...]"
+        grokbot_forms::redact::redact(&vault, r#"{"name":"a","id":42}"#).unwrap(),
+        r#"{"name":"a","id":42}"#
+    );
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, "code long-code-77").unwrap(),
+        "code [...]"
     );
 
     let mut replay = body;

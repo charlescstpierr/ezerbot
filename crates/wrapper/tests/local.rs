@@ -1566,3 +1566,78 @@ fn attached_interpreter_code_still_asks_when_a_permanent_shell_rule_exists() {
         assert!(note.exists(), "{command}");
     }
 }
+
+#[test]
+fn forge_cli_sends_still_ask_when_a_permanent_shell_rule_exists() {
+    // Nonexistent repositories: even a regression could not post anywhere.
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send(
+        "read",
+        "run_shell",
+        f.shell("gh pr view 7 --repo ezerbot-inexistant-0/rien"),
+    );
+    f.finish("read");
+    assert!(requests::list_for_run(&f.db(), &f.run("read").run_id)
+        .unwrap()
+        .is_empty());
+    for (id, command) in [
+        (
+            "issue-comment",
+            "gh issue comment 1 --repo ezerbot-inexistant-0/rien --body bonjour",
+        ),
+        (
+            "pr-comment",
+            "gh pr comment 7 -R ezerbot-inexistant-0/rien -b salut",
+        ),
+        (
+            "repo-first",
+            "gh -R ezerbot-inexistant-0/rien issue comment 1 -b salut",
+        ),
+        (
+            "pr-review",
+            "gh pr review 7 -R ezerbot-inexistant-0/rien --approve",
+        ),
+        (
+            "api-post",
+            "gh api -X POST repos/ezerbot-inexistant-0/rien/issues/1/comments",
+        ),
+        (
+            "api-field",
+            "gh api repos/ezerbot-inexistant-0/rien/issues/1/comments -f body=salut",
+        ),
+        (
+            "glab-note",
+            "glab mr note 3 -R ezerbot-inexistant-0/rien -m salut",
+        ),
+    ] {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert_eq!(f.outcome(id)["status"], "failed", "{command}");
+    }
+}

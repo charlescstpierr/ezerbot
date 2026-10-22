@@ -618,16 +618,18 @@ mod elapsed_interval {
             socket
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .unwrap();
+            // Drain the body and never answer: only the client may end this call.
             let mut byte = [0u8; 1];
             loop {
                 match socket.read(&mut byte) {
                     Ok(0) => break,
+                    Ok(_) => {}
                     Err(error)
                         if matches!(
                             error.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) => {}
-                    Ok(_) | Err(_) => break,
+                    Err(_) => break,
                 }
             }
             let _ = closed_tx.send(Instant::now());
@@ -684,10 +686,14 @@ mod elapsed_interval {
         let dropped = closed
             .recv_timeout(Duration::from_secs(6))
             .expect("the title request was still open after its cap");
+        let open = dropped.duration_since(started);
         assert!(
-            dropped.duration_since(started) <= Duration::from_secs(4),
-            "the request outlived the title cap by {:?}",
-            dropped.duration_since(started)
+            open >= Duration::from_millis(1500),
+            "the request ended before its cap, not because of it: {open:?} {events:?}"
+        );
+        assert!(
+            open <= Duration::from_secs(4),
+            "the request outlived the title cap by {open:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

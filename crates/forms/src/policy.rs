@@ -318,6 +318,9 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
     if is_mailer(base) {
         scan.outbound = true;
     }
+    if matches!(base, "gh" | "glab") {
+        classify_forge_cli(&tokens[index + 1..], scan);
+    }
     if base == "eval" {
         scan.unproven = true;
         scan_shell_at(&tokens[index + 1..].join(" "), scan, depth + 1);
@@ -330,6 +333,45 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
         if let Some(script) = shell_script(&tokens, index) {
             scan_shell_at(&script, scan, depth + 1);
         }
+    }
+}
+
+/// `gh` and `glab` act as the signed-in user. Only plain reads can be remembered;
+/// comments, reviews, replies and creations are sends under the user's name.
+fn classify_forge_cli(args: &[String], scan: &mut ShellScan) {
+    const READS: &[&str] = &[
+        "view", "list", "status", "diff", "checks", "search", "browse",
+    ];
+    const SENDS: &[&str] = &["comment", "review", "reply", "create", "note", "post"];
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|token| !token.starts_with('-'))
+        .collect();
+    if words.iter().any(|word| SENDS.contains(word)) {
+        scan.outbound = true;
+    }
+    if words.first() == Some(&"api")
+        && args.iter().any(|token| {
+            [
+                "-f",
+                "-F",
+                "-X",
+                "--field",
+                "--raw-field",
+                "--input",
+                "--method",
+            ]
+            .iter()
+            .any(|flag| token.starts_with(flag))
+        })
+    {
+        scan.outbound = true;
+    }
+    let plain_read = args.first().is_some_and(|token| !token.starts_with('-'))
+        && words.get(1).is_some_and(|action| READS.contains(action));
+    if !plain_read {
+        scan.unproven = true;
     }
 }
 
@@ -960,6 +1002,37 @@ mod tests {
         ] {
             let policy = describe("run_shell", &json!({"command": command}), None);
             assert!(policy.remember, "{command}");
+        }
+    }
+
+    #[test]
+    fn forge_cli_comments_and_writes_are_sends_under_the_users_name() {
+        for command in [
+            "gh issue comment 123 --repo owner/repo --body hello",
+            "gh pr comment 7 -b hi",
+            "gh pr review 7 --approve",
+            "gh issue create --title t --body b",
+            "gh -R owner/repo issue comment 1 -b hi",
+            "gh api repos/o/r/issues/1/comments -f body=hi",
+            "gh api -X POST repos/o/r/issues/1/comments",
+            "glab mr note 3 -m hi",
+            "sudo gh issue comment 1 -b hi",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert_eq!(policy.protection, Some(Protection::Outbound), "{command}");
+        }
+        for command in [
+            "gh pr view 7",
+            "gh issue list --repo owner/repo",
+            "gh pr diff 7",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(policy.remember, "{command}");
+        }
+        for command in ["gh pr merge 7", "gh api repos/o/r", "gh auth logout"] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
         }
     }
 

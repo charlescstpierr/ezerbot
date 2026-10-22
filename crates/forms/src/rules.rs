@@ -779,6 +779,8 @@ mod tests {
             "r\\m note",
             "eval 'rm note'",
             "git rm -f note",
+            "gh issue comment 123 --repo owner/repo --body hello",
+            "gh pr comment 7 -b hi",
             "perl -e'unlink \"note\"'",
             "exec rm note",
             "xargs rm",

@@ -473,6 +473,42 @@ fn standing_permissions_apply_to_future_commands_and_are_revocable() {
     f.finish("third");
 }
 #[test]
+fn a_removed_secret_never_returns_through_the_approval_policy() {
+    const SECRET: &str = "jeton-secret-valeur-8123";
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.post(
+        "/api/secrets/put",
+        json!({"bot_id":"grokbot","name":"jeton","description":"Jeton de test","value":SECRET}),
+    );
+    f.send("masked", "run_shell", f.shell(&format!("printf {SECRET}")));
+    let r = f.request("masked");
+    let card = |f: &mut Fixture| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let card = state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["id"] == r.id)
+            .unwrap()
+            .clone();
+        (state.to_string(), card)
+    };
+    let (before, shown) = card(&mut f);
+    assert!(!before.contains(SECRET));
+    assert_eq!(shown["policy"]["remember"], false, "{shown}");
+    f.post(
+        "/api/secrets/delete",
+        json!({"bot_id":"grokbot","name":"jeton"}),
+    );
+    let (after, shown) = card(&mut f);
+    assert!(!after.contains(SECRET), "{after}");
+    assert_eq!(shown["policy"]["remember"], false);
+    assert_eq!(shown["policy"]["pattern"], "");
+    f.decide(&r, json!("deny"));
+    f.finish("masked");
+}
+#[test]
 fn files_create_read_list_grants_symlink_escape_and_stale_write() {
     let mut f = Fixture::new();
     f.settings(false, true);

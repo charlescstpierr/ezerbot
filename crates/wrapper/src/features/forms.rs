@@ -1460,6 +1460,13 @@ fn approval_policy(
         policy.pattern.clear();
         return policy;
     }
+    if policy.scope == "pattern" && policy.pattern.contains(grokbot_forms::redact::MASK) {
+        // An already masked command is not the command that would run.
+        policy.remember = false;
+        policy.scope = "none".into();
+        policy.pattern.clear();
+        policy.label = "Commande".into();
+    }
     if policy.scope == "pattern" {
         if let Ok(secrets) = vault(ctx) {
             let visible = json!(policy.pattern);
@@ -1549,7 +1556,21 @@ fn policy_for_request(
         Some(arguments) => arguments,
         None => display_arguments(ctx, &request.id)?,
     };
-    Ok(approval_policy(ctx, tool, &arguments))
+    let mut policy = approval_policy(ctx, tool, &arguments);
+    if policy.scope == "pattern" {
+        // The journal keeps the command as the model wrote it. The stored
+        // display is the permanently redacted copy: a command that differs
+        // was masked, and must not come back through public policy metadata
+        // or a rule key once its secret has left the vault.
+        let shown = display_arguments(ctx, &request.id)?;
+        if shown.get("command") != arguments.get("command") {
+            policy.remember = false;
+            policy.scope = "none".into();
+            policy.pattern.clear();
+            policy.label = "Commande".into();
+        }
+    }
+    Ok(policy)
 }
 // Presentation metadata only: the digest remains the sole binding of a subject
 // rule. Do not change the persisted approval contract to add a human label.

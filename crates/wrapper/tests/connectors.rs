@@ -43,6 +43,10 @@ struct GithubScript {
     authorized: Option<String>,
     live_access: String,
     live_refresh: String,
+    /// Every access token the provider still accepts: one per connected account.
+    live_tokens: Vec<String>,
+    /// The next sign-in is again the first user, as when Charles picks the same login.
+    same_user_next: bool,
     renewals: u32,
     refresh: &'static str,
     issues: &'static str,
@@ -67,6 +71,8 @@ impl Default for GithubScript {
             authorized: None,
             live_access: String::new(),
             live_refresh: String::new(),
+            live_tokens: Vec::new(),
+            same_user_next: false,
             renewals: 0,
             refresh: "ok",
             issues: "ok",
@@ -116,9 +122,15 @@ impl OAuth {
                 let mut extra: Vec<Header> = Vec::new();
                 let (status, mut data) = if url.starts_with("/github/") {
                     let g = &mut seen.github;
+                    let who = auth.clone();
                     if let Some(auth) = auth {
                         g.authorization.push((url.clone(), auth));
                     }
+                    let is_live = |g: &GithubScript| {
+                        g.authorization.last().is_some_and(|(_, a)| {
+                            g.live_tokens.iter().any(|t| *a == format!("Bearer {t}"))
+                        })
+                    };
                     if url == "/github/device" {
                         g.serial += 1;
                         (
@@ -133,10 +145,17 @@ impl OAuth {
                                 if let Some(reply) = g.polls.pop_front() {
                                     (200, reply)
                                 } else if g.authorized.as_deref() == Some(code.as_str()) {
-                                    g.live_access =
-                                        format!("ghu_access-secret-never-visible-{}", g.serial);
-                                    g.live_refresh =
-                                        format!("ghr_refresh-secret-never-visible-{}", g.serial);
+                                    let user = if g.same_user_next { 1 } else { g.serial };
+                                    g.same_user_next = false;
+                                    g.live_access = format!(
+                                        "ghu_access-secret-never-visible-{user}-{}",
+                                        g.serial
+                                    );
+                                    g.live_refresh = format!(
+                                        "ghr_refresh-secret-never-visible-{user}-{}",
+                                        g.serial
+                                    );
+                                    g.live_tokens.push(g.live_access.clone());
                                     (
                                         200,
                                         json!({"access_token":g.live_access,"refresh_token":g.live_refresh,"expires_in":28800,"refresh_token_expires_in":15897600,"token_type":"bearer","scope":""}),
@@ -162,8 +181,11 @@ impl OAuth {
                                 }
                                 _ => {
                                     g.renewals += 1;
+                                    let old = g.live_access.clone();
+                                    g.live_tokens.retain(|t| *t != old);
                                     g.live_access =
                                         format!("ghu_renewed-access-secret-{}", g.renewals);
+                                    g.live_tokens.push(g.live_access.clone());
                                     g.live_refresh =
                                         format!("ghr_renewed-refresh-secret-{}", g.renewals);
                                     (
@@ -175,7 +197,16 @@ impl OAuth {
                             _ => (400, json!({"error":"unsupported_grant_type"})),
                         }
                     } else if url == "/github/user" {
-                        (200, json!({"login":"charles-test","id":4242}))
+                        // The user a token belongs to is the number after its prefix.
+                        let user = who.as_deref().and_then(|a| {
+                            a.rsplit_once('-')
+                                .and_then(|(rest, _)| rest.rsplit_once('-'))
+                                .map(|(_, user)| user.to_owned())
+                        });
+                        match user.as_deref() {
+                            Some("2") => (200, json!({"login":"autre-compte","id":4343})),
+                            _ => (200, json!({"login":"charles-test","id":4242})),
+                        }
                     } else if url == "/github/revoke" {
                         if g.revoke == "ok" {
                             (200, json!({"revoked":true}))
@@ -183,8 +214,7 @@ impl OAuth {
                             (404, json!({"message":"Not Found"}))
                         }
                     } else if post && url == "/github/api/repos/charles/essai/issues/12/comments" {
-                        let live = format!("Bearer {}", g.live_access);
-                        if g.authorization.last().is_some_and(|(_, a)| *a == live) {
+                        if is_live(g) {
                             let sent: Value = serde_json::from_str(&body).unwrap();
                             g.comments.push(sent.clone());
                             (
@@ -195,10 +225,19 @@ impl OAuth {
                             (401, json!({"message":"Bad credentials"}))
                         }
                     } else if url.starts_with("/github/api/repos/charles/essai/issues") {
-                        let live = format!("Bearer {}", g.live_access);
-                        let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
+                        let known = is_live(g);
                         if !known {
                             (401, json!({"message":"Bad credentials"}))
+                        } else if g
+                            .authorization
+                            .last()
+                            .is_some_and(|(_, a)| a.contains("-2-"))
+                        {
+                            // The second account sees other issues than the first.
+                            (
+                                200,
+                                json!([{"number":21,"title":"Tâche du compte de travail","state":"open","user":{"login":"carole"}}]),
+                            )
                         } else {
                             match g.issues {
                                 "missing" => (404, json!({"message":"Not Found"})),
@@ -234,8 +273,7 @@ impl OAuth {
                     } else if url.starts_with("/github/api/repos/charles/essai")
                         && !url.starts_with("/github/api/repos/charles/essai/issues")
                     {
-                        let live = format!("Bearer {}", g.live_access);
-                        let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
+                        let known = is_live(g);
                         let path = url
                             .trim_start_matches("/github/api/repos/charles/essai")
                             .split('?')
@@ -1015,11 +1053,22 @@ impl Fixture {
     /// One chat turn that makes the model call a GitHub tool. Both model replies are
     /// queued first: nothing here waits for a human decision.
     fn github_call(&mut self, id: &str, tool: &str, arguments: Value) -> String {
-        let conversation = self.post("/api/conversations", json!({"title":"GitHub"}))
-            ["conversation"]["id"]
+        let conversation = self.github_conversation();
+        self.github_call_in(&conversation, id, tool, arguments)
+    }
+    fn github_conversation(&mut self) -> String {
+        self.post("/api/conversations", json!({"title":"GitHub"}))["conversation"]["id"]
             .as_str()
             .unwrap()
-            .to_owned();
+            .to_owned()
+    }
+    fn github_call_in(
+        &mut self,
+        conversation: &str,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> String {
         self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
         self.script(vec![json!({"type":"response.completed"})]);
         self.post(
@@ -1989,12 +2038,23 @@ const GITHUB_COMMENT_TOOL: &str = "github_add_issue_comment";
 impl Fixture {
     /// One chat turn in which the bot prepares a comment. The run stops on its card.
     fn github_prepare_comment(&mut self, id: &str, text: &str) -> (String, Value) {
+        self.github_prepare_comment_as(id, text, None)
+    }
+    fn github_prepare_comment_as(
+        &mut self,
+        id: &str,
+        text: &str,
+        account: Option<&str>,
+    ) -> (String, Value) {
         let conversation = self.post("/api/conversations", json!({"title":"Commentaire"}))
             ["conversation"]["id"]
             .as_str()
             .unwrap()
             .to_owned();
-        let arguments = json!({"repository":"charles/essai","issue":12,"text":text});
+        let mut arguments = json!({"repository":"charles/essai","issue":12,"text":text});
+        if let Some(account) = account {
+            arguments["compte"] = json!(account);
+        }
         self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GITHUB_COMMENT_TOOL,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
         self.script(vec![json!({"type":"response.completed"})]);
         self.post(
@@ -2313,4 +2373,399 @@ fn github_draft_card_shows_only_the_result_of_its_own_call() {
         "the listing's result is not a publication"
     );
     assert_eq!(f.github_requests("/comments"), 0);
+}
+
+impl Fixture {
+    fn github_accounts(&mut self) -> Vec<Value> {
+        self.item("github")["accounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+    /// A second sign-in beside the first, with its tools enabled for the default bot.
+    fn github_add_account(&mut self) {
+        let run = self.post(
+            "/api/connectors/connect",
+            json!({"id":"github","another":true}),
+        )["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.decide(&run, json!("allow_once"));
+        self.github_authorize();
+        wait("second account", || {
+            self.github_accounts()
+                .iter()
+                .filter(|a| a["status"] == "connected")
+                .count()
+                == 2
+        });
+        let second = self.github_accounts()[1].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":second["server"]["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn vault_secret(&self, server: &Value) -> Option<Value> {
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{}_ENV", server["id"].as_str().unwrap()).to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn github_ask(&mut self, conversation: &str, id: &str, account: Option<&str>) -> Value {
+        let mut arguments = json!({"repository":"charles/essai"});
+        if let Some(account) = account {
+            arguments["compte"] = json!(account);
+        }
+        let run = self.github_call_in(conversation, id, GITHUB_TOOL, arguments);
+        done(self, &run)
+    }
+}
+
+#[test]
+fn github_second_account_is_added_beside_the_first_with_its_own_secret() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let first = f.github_secret().unwrap();
+    f.github_add_account();
+    let accounts = f.github_accounts();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(accounts[0]["account"], "charles-test");
+    assert_eq!(accounts[1]["account"], "autre-compte");
+    assert!(accounts.iter().all(|a| a["status"] == "connected"));
+    // The first account is untouched, and each login has a secret of its own.
+    assert_eq!(f.github_secret().unwrap(), first);
+    let second = f.vault_secret(&accounts[1]["server"]).unwrap();
+    assert!(second["ACCESS_TOKEN"].as_str().unwrap().starts_with("ghu_"));
+    assert_ne!(second["ACCESS_TOKEN"], first["ACCESS_TOKEN"]);
+    assert_ne!(second["REFRESH_TOKEN"], first["REFRESH_TOKEN"]);
+    assert_ne!(accounts[0]["server"]["id"], accounts[1]["server"]["id"]);
+    // The card keeps following the first account; the list carries both.
+    let item = f.item("github");
+    assert_eq!(item["status"], "connected");
+    assert_eq!(item["account"], "charles-test");
+    // Two accounts share one list of tools.
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    assert_eq!(tools.iter().filter(|t| t.name == GITHUB_TOOL).count(), 1);
+    // No token reaches the state or the database file.
+    let public = f.state().to_string();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in GITHUB_SECRETS {
+        assert!(!public.contains(secret));
+        assert!(!database
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+    }
+}
+
+#[test]
+fn github_refused_second_account_stays_on_the_github_card() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id":"github","another":true}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("deny"));
+    let state = f.state();
+    let item = f.item("github");
+    let slots = item["slot_servers"].as_array().unwrap();
+    // Every GitHub server, even the refused slot's, belongs to the card.
+    let github: Vec<_> = state["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["name"] == "GitHub")
+        .collect();
+    assert_eq!(github.len(), 2);
+    assert!(github.iter().all(|s| slots.contains(&s["id"])));
+    assert_eq!(f.github_accounts().len(), 1);
+}
+
+#[test]
+fn github_sign_in_of_the_same_user_does_not_add_a_second_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.oauth.seen.lock().unwrap().github.same_user_next = true;
+    let run = f.post(
+        "/api/connectors/connect",
+        json!({"id":"github","another":true}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    f.github_authorize();
+    wait("refused twin", || {
+        f.github_accounts()
+            .iter()
+            .any(|a| a["status"] == "reconnect")
+    });
+    let accounts = f.github_accounts();
+    let twin = accounts
+        .iter()
+        .find(|a| a["status"] == "reconnect")
+        .unwrap();
+    assert!(twin["message"].as_str().unwrap().contains("déjà connecté"));
+    assert_eq!(twin["has_tokens"], false);
+    assert_eq!(accounts[0]["status"], "connected");
+}
+
+#[test]
+fn github_asks_which_account_then_keeps_the_answer_for_the_conversation() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.github_add_account();
+    let conversation = f.github_conversation();
+    let before = f.github_requests("/issues");
+
+    // Two accounts, no choice yet: a question, and GitHub is not called.
+    let question = f.github_ask(&conversation, "ask-1", None);
+    assert_eq!(question["choix_requis"], true);
+    assert_eq!(question["comptes"], json!(["charles-test", "autre-compte"]));
+    assert!(question["texte"].as_str().unwrap().contains("lequel"));
+    assert_eq!(f.github_requests("/issues"), before);
+
+    // Named: the list is that account's, and the bubble says which.
+    let listing = f.github_ask(&conversation, "ask-2", Some("autre-compte"));
+    assert_eq!(listing["compte"], "autre-compte");
+    assert_eq!(listing["issues"][0]["titre"], "Tâche du compte de travail");
+    assert!(listing["texte"]
+        .as_str()
+        .unwrap()
+        .contains("compte GitHub : autre-compte"));
+    assert_eq!(f.github_requests("/issues"), before + 1);
+
+    // The choice holds for the rest of the conversation, with no new question.
+    let again = f.github_ask(&conversation, "ask-3", None);
+    assert_eq!(again["compte"], "autre-compte");
+    assert_eq!(f.github_requests("/issues"), before + 2);
+
+    // Another conversation starts without a choice.
+    let other = f.github_conversation();
+    assert_eq!(f.github_ask(&other, "ask-4", None)["choix_requis"], true);
+
+    // Naming the first account switches the conversation to it.
+    let first = f.github_ask(&conversation, "ask-5", Some("charles-test"));
+    assert_eq!(first["compte"], "charles-test");
+    assert_eq!(first["issues"][0]["titre"], "Corriger le <b>bouton</b>");
+    assert_eq!(
+        f.github_ask(&conversation, "ask-6", None)["compte"],
+        "charles-test"
+    );
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let second_token = seen.github.live_tokens[1].clone();
+        let used: Vec<_> = seen
+            .github
+            .authorization
+            .iter()
+            .filter(|(u, _)| u.contains("/issues"))
+            .map(|(_, a)| a.clone())
+            .collect();
+        assert_eq!(used.len(), 4);
+        assert_eq!(used[0], format!("Bearer {second_token}"));
+        assert_eq!(used[1], format!("Bearer {second_token}"));
+        assert_ne!(used[2], format!("Bearer {second_token}"));
+    }
+
+    // A name that is not connected is refused with the accounts there are.
+    let run = f.github_call_in(
+        &conversation,
+        "ask-7",
+        GITHUB_TOOL,
+        json!({"repository":"charles/essai","compte":"inconnu"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("inconnu") && reason.contains("autre-compte"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn github_with_one_account_lists_without_a_question() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let conversation = f.github_conversation();
+    let listing = f.github_ask(&conversation, "single-1", None);
+    assert_eq!(listing["compte"], "charles-test");
+    assert!(listing.get("choix_requis").is_none());
+}
+
+#[test]
+fn github_disconnecting_the_second_account_removes_only_its_secret() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let first = f.github_secret().unwrap();
+    f.github_add_account();
+    let accounts = f.github_accounts();
+    let second_server = accounts[1]["server"].clone();
+    let conversation = f.github_conversation();
+    f.github_ask(&conversation, "gone-1", Some("autre-compte"));
+
+    let run = f.post(
+        "/api/connectors/disconnect",
+        json!({"id":"github","account":accounts[1]["id"]}),
+    )["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+
+    assert!(f.vault_secret(&second_server).is_none());
+    assert_eq!(f.github_secret().unwrap(), first);
+    let left = f.github_accounts();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["account"], "charles-test");
+    assert_eq!(f.item("github")["status"], "connected");
+    // The first account still lists, with no question, in the conversation that had
+    // chosen the account that went away.
+    let listing = f.github_ask(&conversation, "gone-2", None);
+    assert_eq!(listing["compte"], "charles-test");
+    assert!(listing.get("choix_requis").is_none());
+    let state = f.state().to_string();
+    for secret in GITHUB_SECRETS {
+        assert!(!state.contains(secret));
+    }
+}
+
+#[test]
+fn github_comment_goes_out_under_the_chosen_account_and_asks_first_when_there_are_two() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.github_add_account();
+    // No choice: no card opens, and the reason is the question.
+    let conversation = f.github_conversation();
+    let run = f.github_call_in(
+        &conversation,
+        "comment-ask",
+        GITHUB_COMMENT_TOOL,
+        json!({"repository":"charles/essai","issue":12,"text":"Bonjour."}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("charles-test") && reason.contains("autre-compte"),
+        "{reason}"
+    );
+    assert_eq!(f.github_requests("/comments"), 0);
+
+    let (run, card) =
+        f.github_prepare_comment_as("comment-2", "Bonjour du second.", Some("autre-compte"));
+    assert_eq!(card["arguments"]["brouillon"]["login"], "autre-compte");
+    assert_eq!(f.github_requests("/comments"), 0);
+    f.github_resolve(&card, "send-second", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert_eq!(done(&f, &run)["compte"], "autre-compte");
+    let seen = f.oauth.seen.lock().unwrap();
+    let second_token = seen.github.live_tokens[1].clone();
+    let (_, auth) = seen
+        .github
+        .authorization
+        .iter()
+        .rev()
+        .find(|(u, _)| u.ends_with("/comments"))
+        .unwrap();
+    assert_eq!(*auth, format!("Bearer {second_token}"));
+    assert_eq!(seen.github.comments.len(), 1);
+}
+
+#[test]
+fn github_draft_is_not_sent_when_its_account_lost_the_bot_activation() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-off", "Texte du brouillon.");
+    // Another account keeps the shared tools available while the first is switched off.
+    f.github_add_account();
+    let first = f.github_accounts()[0]["server"]["id"].clone();
+    f.post(
+        "/api/mcp/select",
+        json!({"id":first,"bot_id":"grokbot","enabled":false}),
+    );
+    f.github_resolve(&card, "send-off", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(reason.contains("plus activés"), "{reason}");
+    assert_eq!(f.github_requests("/comments"), 0);
+    assert!(f.published_comments().is_empty());
+}
+
+#[test]
+fn github_existing_draft_still_sends_with_its_account_when_another_account_is_added() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-two", "Texte du brouillon.");
+    // A second account makes a fresh call ambiguous, never the draft already bound to the first.
+    f.github_add_account();
+    f.github_resolve(&card, "send-two", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert_eq!(done(&f, &run)["compte"], "charles-test");
+    let seen = f.oauth.seen.lock().unwrap();
+    let first_token = seen.github.live_tokens[0].clone();
+    let (_, auth) = seen
+        .github
+        .authorization
+        .iter()
+        .rev()
+        .find(|(u, _)| u.ends_with("/comments"))
+        .unwrap();
+    assert_eq!(*auth, format!("Bearer {first_token}"));
+    assert_eq!(seen.github.comments.len(), 1);
+}
+
+#[test]
+fn github_conversation_choice_is_not_replaced_by_another_account_when_it_needs_reconnecting() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.github_add_account();
+    let conversation = f.github_conversation();
+    assert_eq!(
+        f.github_ask(&conversation, "keep-1", Some("charles-test"))["compte"],
+        "charles-test"
+    );
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    let before = f.github_requests("/issues");
+    let run = f.github_call_in(
+        &conversation,
+        "keep-2",
+        GITHUB_TOOL,
+        json!({"repository":"charles/essai"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("charles-test") && reason.contains("reconnecté"),
+        "{reason}"
+    );
+    assert_eq!(
+        f.github_requests("/issues"),
+        before,
+        "the other account is not called"
+    );
+    // Naming the other account still works and becomes the conversation's choice.
+    let other = f.github_ask(&conversation, "keep-3", Some("autre-compte"));
+    assert_eq!(other["compte"], "autre-compte");
+    assert_eq!(
+        f.github_ask(&conversation, "keep-4", None)["compte"],
+        "autre-compte"
+    );
 }

@@ -1911,6 +1911,7 @@ impl Session {
             capability_fallback,
             notices,
             &AtomicBool::new(false),
+            None,
             &mut |_| {},
         )
     }
@@ -1921,6 +1922,7 @@ impl Session {
         capability_fallback: bool,
         notices: &mut Vec<String>,
         abandoned: &AtomicBool,
+        deadline: Option<Instant>,
         on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
@@ -1929,7 +1931,13 @@ impl Session {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
             }
-            let attempt = self.request(&token, &mut body)?.send_json(body.clone());
+            let mut request = self.request(&token, &mut body)?;
+            if let Some(deadline) = deadline {
+                // A deadline replaces ureq's per-read timeout, so a stream that
+                // sends a byte before each read timeout cannot hold the socket.
+                request = request.timeout(deadline.saturating_duration_since(Instant::now()));
+            }
+            let attempt = request.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {
                 Ok(response) => {
                     on_status(response.status());

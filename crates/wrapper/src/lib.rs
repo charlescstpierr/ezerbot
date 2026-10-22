@@ -15,11 +15,14 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod features;
 
+/// Mise à jour locale depuis `main`. Le dossier des conversations n’est pas le dépôt de travail.
+pub mod updates;
+
 // The model gateway keeps the root compatibility name while generation belongs
 // to its feature module (including the offline simulated reply).
 pub(crate) use features::engine::demo_reply;
 
-pub use provider::{Endpoints, Provider, ToolCall};
+pub use provider::{database_path_from_home, default_database_path, Endpoints, Provider, ToolCall};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -122,7 +125,7 @@ pub fn body_limit(path: &str) -> usize {
         "/api/attachments" => ATTACHMENT_BODY_LIMIT,
         // Base64 upload plus a bounded filename/JSON envelope; decoded bytes
         // retain the same 20 MiB limit as images.
-        "/api/documents" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
+        "/api/documents" | "/api/library" => ATTACHMENT_BODY_LIMIT.div_ceil(3) * 4 + 4096,
         "/api/voice/memos" => features::voice::MAX_WAV_BYTES.div_ceil(3) * 4 + 128 * 1024,
         "/api/meetings/finalize" => features::meetings::MAX_WAV_BYTES.div_ceil(3) * 4 + 256 * 1024,
         "/api/skills" | "/api/skills/update" | "/api/skills/import" => SKILL_IMPORT_BODY_LIMIT,
@@ -135,7 +138,7 @@ pub fn body_limit(path: &str) -> usize {
 
 /// Shared size error for direct API calls, declared lengths and chunked bodies.
 pub fn too_large(path: &str) -> ApiError {
-    if path == "/api/documents" {
+    if path == "/api/documents" || path == "/api/library" {
         return ApiError::new(413, "Le document dépasse la limite de 20 Mo.");
     }
     let limit = body_limit(path);
@@ -217,6 +220,13 @@ CREATE TABLE IF NOT EXISTS wrapper_messages (
     message_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     UNIQUE (account_id, conversation_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS wrapper_reactions (
+    account_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (account_id, conversation_id, message_id)
 );
 CREATE TABLE IF NOT EXISTS wrapper_remote (
     account_id TEXT NOT NULL,
@@ -334,6 +344,16 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     pub kind: String,
     pub parent_id: Option<String>,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<GroupAvatar>,
+}
+
+/// Pastille d’un groupe : une couleur d’accent et un signe court.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupAvatar {
+    pub color: String,
+    pub mark: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -697,6 +717,8 @@ struct CreateConversation {
     title: Option<String>,
     bot_id: Option<String>,
     bot_ids: Option<Vec<String>>,
+    description: Option<String>,
+    avatar: Option<GroupAvatar>,
 }
 
 #[derive(Deserialize)]
@@ -749,6 +771,8 @@ struct UpdateConversation {
     id: String,
     title: Option<String>,
     favorite: Option<bool>,
+    description: Option<String>,
+    avatar: Option<GroupAvatar>,
 }
 
 #[derive(Deserialize)]
@@ -782,6 +806,13 @@ const ACCENTS: [&str; 9] = [
 ];
 const DEFAULT_SHAPE: &str = "galet";
 const SHAPES: [&str; 6] = ["galet", "goutte", "nuage", "carre", "fantome", "etoile"];
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
+        features::local::shutdown(&self.connection, &self.db_path);
+    }
+}
 
 pub struct App {
     db_path: PathBuf,
@@ -865,6 +896,12 @@ impl App {
                 "TEXT NOT NULL DEFAULT 'chat'",
             ),
             ("wrapper_conversations", "parent_id", "TEXT"),
+            (
+                "wrapper_conversations",
+                "group_description",
+                "TEXT NOT NULL DEFAULT ''",
+            ),
+            ("wrapper_conversations", "group_avatar", "TEXT"),
         ] {
             let present: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
@@ -881,6 +918,7 @@ impl App {
         seed_default_bot(&connection)?;
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
+        features::local::startup(&connection)?;
         features::screen::startup(path);
         features::demonstrations::startup(&connection, path)?;
         features::engine::startup(&connection)?;
@@ -889,6 +927,7 @@ impl App {
             // Keep the app usable; the Stockage panel exposes the actionable error.
             eprintln!("Nettoyage automatique interrompu : {error}");
         }
+        features::updates::remember_database(path);
         Ok(Self {
             db_path: path.to_path_buf(),
             connection,
@@ -908,6 +947,14 @@ impl App {
         let mut ctx = self.feature_context();
         ctx.now_ms = now_ms;
         features::tick(&ctx);
+    }
+
+    /// Deliver an approval wake without launching queued background tasks.
+    #[doc(hidden)]
+    pub fn tick_suspended(&mut self, now_ms: u64) {
+        let mut ctx = self.feature_context();
+        ctx.now_ms = now_ms;
+        features::engine::tick_suspended(&ctx);
     }
 
     #[doc(hidden)]
@@ -1323,6 +1370,41 @@ fn valid_bot_name(name: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(name.into())
+}
+
+fn valid_group_description(description: &str) -> Result<String, ApiError> {
+    let description = description.trim();
+    let forbidden = description
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t');
+    if description.is_empty() || description.chars().count() > 280 || forbidden {
+        return Err(ApiError::new(
+            400,
+            "La description du groupe doit contenir entre 1 et 280 caractères.",
+        ));
+    }
+    Ok(description.into())
+}
+
+fn valid_group_avatar(avatar: &GroupAvatar) -> Result<GroupAvatar, ApiError> {
+    let color = valid_bot_color(&avatar.color)?.to_owned();
+    let mark = avatar.mark.trim();
+    let allowed = (1..=4).contains(&mark.chars().count())
+        && !mark.chars().any(|c| c.is_whitespace() || c.is_control());
+    if !allowed {
+        return Err(ApiError::new(
+            400,
+            "Le signe de l’avatar contient de un à quatre caractères, sans espace.",
+        ));
+    }
+    Ok(GroupAvatar {
+        color,
+        mark: mark.into(),
+    })
+}
+
+fn stored_group_avatar(raw: Option<String>) -> Option<GroupAvatar> {
+    raw.and_then(|value| serde_json::from_str(&value).ok())
 }
 
 fn valid_bot_color(color: &str) -> Result<&'static str, ApiError> {

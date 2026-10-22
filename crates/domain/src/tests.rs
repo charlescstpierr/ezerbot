@@ -516,3 +516,9 @@ fn compteurs_epoque_et_transcription() {
         }
     );
 }
+
+#[test]
+fn version_du_crate_non_vide() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(!version.is_empty());
+}

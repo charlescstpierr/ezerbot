@@ -1,0 +1,45 @@
+# Ezerbot verification map
+
+This directory is the maintained source for verifying the user-facing behavior of Ezerbot. Read the index before driving the app, then use the matching feature file as the recipe.
+
+## Baseline preconditions
+
+- Lancer l’instance avec `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves>`.
+- `HOME` et `CFFIXED_USER_HOME` sont un répertoire `mktemp` neuf. Le refus est immédiat si ce `HOME` est le vrai dossier personnel ou si un chemin touche `~/Library/Application Support/Grokbot`.
+- Le faux OpenAI de bouclage et le fichier `workspace.codex-auth.json` fictif sont déjà en place. Ne pas copier d’identifiants ChatGPT.
+- Poser `CHROME_DEVTOOLS_AXI_SESSION` sur l’identifiant du run.
+- Lancer `bash .cursor/skills/verify-ezerbot/scripts/doctor.sh --evidence <preuves>` et exiger `doctor: ok`, la bonne URL, le bon port et le commit extrait.
+- Ne jamais piloter une instance qui n’a pas été démarrée par ce run, ni ouvrir `Ezerbot.app`.
+
+## Driving conventions
+
+- Partir de l’état de base, sauf précondition contraire du fichier de sphère.
+- Préférer les rôles ARIA, les noms accessibles et les identifiants stables (`#settings-button`, `[data-panel]`, `[data-theme-choice]`, `[data-picker]`) aux coordonnées.
+- Traiter chaque commande comme littérale.
+- Passer les actions navigateur par `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves>`.
+- Le harness sous-jacent est `chrome-devtools-axi`. Le substitut `EZERBOT_VERIFY_BROWSER=chrome-headless` parle les mêmes commandes et ne prouve pas le Mac.
+- Restaurer l’écran d’accueil après une sphère modale. Ne pas supprimer les preuves au nettoyage.
+
+## Proof and skip reporting
+
+- Capturer l’action et l’état qui en résulte, pas seulement le dernier écran.
+- Chaque thème (`dark`, `light`) et chaque taille (`1140x780`, `820x560`) produit un PNG et le texte visible à côté.
+- Une préférence de thème n’est prouvée qu’une fois `aria-pressed` relu après fermeture et réouverture des Paramètres, et une fois `--canvas` égal à `#14161a` (sombre) ou `#ffffff` (clair).
+- Noter l’identifiant de sphère et l’entrée utilisée avec chaque artefact.
+- Un chemin inaccessible se rapporte avec la commande tentée et la précondition manquante.
+- Ne pas déclarer une entrée sautée comme vérifiée par un autre chemin.
+
+## Feature entry contract
+
+Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exactement quatre H2, dans cet ordre : `Sub-features`, `How to get to it (user POV)`, `Driving it with chrome-devtools-axi`, `Gotchas`.
+
+## Features
+
+- [Accueil](./accueil.md) couvre la marque, la nouvelle conversation vide, le compositeur et les deux thèmes.
+- [Paramètres et connecteurs](./parametres-connecteurs.md) couvre l’ouverture des Paramètres et la section Connecteurs.
+- [Modèles](./modeles.md) couvre le menu Modèle du compositeur branché sur le faux catalogue.
+- [Réunions et routines](./reunions-routines.md) couvre la rétention audio et le dialogue Routines.
+- [Mémoire](./memoire.md) couvre la mémoire automatique et la mémoire du bot Ezerbot.
+- [Bibliothèque](./bibliotheque.md) couvre la bibliothèque de fichiers d’un bot : dépôt, liste, retrait et avertissement de troncature.
+- [Images générées](./images.md) couvre la demande d’un dessin, l’image dans la carte et la visionneuse.
+- [Pages](./pages.md) couvre une Page locale écrite par le bot : affichage à côté du fil, choix interactif et texte décodé.

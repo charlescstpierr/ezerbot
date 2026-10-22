@@ -296,6 +296,29 @@ pub fn normalize_name(name: &str) -> String {
     normalized
 }
 
+/// Body hash when a skill has no annexes, so existing rows stay comparable.
+/// Annex bytes are part of the digest: the same body with different files is
+/// a different bundle.
+pub fn content_digest(body: &str, files: &[SkillFile]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    if !files.is_empty() {
+        let mut files = files.to_vec();
+        files.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.content.cmp(&right.content))
+        });
+        for file in files {
+            hasher.update([0]);
+            hasher.update(file.path.as_bytes());
+            hasher.update([0]);
+            hasher.update(file.content.as_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn add(conn: &Connection, bot_id: &str, content: &SkillContent) -> Result<Skill> {
     if bot_id.trim().is_empty() {
         return Err(Error::InvalidInput("skill bot_id must not be empty".into()));
@@ -326,7 +349,7 @@ pub fn add(conn: &Connection, bot_id: &str, content: &SkillContent) -> Result<Sk
             ":body": content.body,
             ":origin": serde_json::to_string(&content.origin)?,
             ":files": serde_json::to_string(&content.files)?,
-            ":digest": format!("{:x}", Sha256::digest(content.body.as_bytes())),
+            ":digest": content_digest(&content.body, &content.files),
         },
         read_skill,
     )?)
@@ -402,7 +425,7 @@ fn revise(
     if let Some(content) = content {
         skill.content = content.clone();
         skill.content.name = validated_name(&content.name)?;
-        skill.digest = format!("{:x}", Sha256::digest(content.body.as_bytes()));
+        skill.digest = content_digest(&content.body, &content.files);
     } else {
         skill.deleted = true;
     }

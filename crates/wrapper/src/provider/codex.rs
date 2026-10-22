@@ -7,7 +7,7 @@ use super::*;
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const SCOPE: &str = "openid profile email offline_access";
 const AUTH_CLAIM: &str = "https://api.openai.com/auth";
-pub(super) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 
 pub(super) fn authorization_query(attempt: &Attempt) -> Vec<(&'static str, String)> {
     vec![
@@ -20,7 +20,7 @@ pub(super) fn authorization_query(attempt: &Attempt) -> Vec<(&'static str, Strin
         ("state", attempt.state.clone()),
         ("id_token_add_organizations", "true".into()),
         ("codex_cli_simplified_flow", "true".into()),
-        ("originator", "pi".into()),
+        ("originator", "ezerbot".into()),
     ]
 }
 
@@ -75,7 +75,51 @@ pub(super) fn update_profile(
 }
 
 impl Session {
+    /// Account-scoped discovery, never ~/.codex models or tokens. An unavailable
+    /// catalogue falls back to the known ChatGPT models; the Responses probe
+    /// still has to succeed before the UI can claim a connection.
+    pub(super) fn fetch_codex_models(&self) -> Result<Vec<Model>, Failure> {
+        use std::io::Read;
+        let token = self.bearer(false)?;
+        let request = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(8))
+            .redirects(0)
+            .build()
+            .get(&format!(
+                "{}/models?client_version=99.0.0",
+                self.inner.endpoints.api
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("originator", "ezerbot")
+            .set("User-Agent", "ezerbot/0.1.0");
+        let discovered = account_headers(request, &token)?
+            .call()
+            .ok()
+            .and_then(|response| {
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .take(1_048_577)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                (bytes.len() <= 1_048_576)
+                    .then(|| serde_json::from_slice::<Value>(&bytes).ok())
+                    .flatten()
+            })
+            .map(|body| parse_models(&body))
+            .unwrap_or_default();
+        if discovered.is_empty() {
+            return Ok(models());
+        }
+        let mut discovered = discovered;
+        discovered.sort_by_key(|model| model.slug != DEFAULT_MODEL);
+        Ok(discovered)
+    }
+
     pub(super) fn complete_codex(&self, attempt: &Attempt, code: &str) -> Result<(), Failure> {
+        let before = self
+            .read()
+            .and_then(|credentials| credentials.refresh_token);
         let response = agent()
             .post(&self.inner.endpoints.token)
             .send_form(&[
@@ -102,20 +146,16 @@ impl Session {
         if attempt.cancel.load(Ordering::SeqCst) {
             return Err(Failure::other("Connexion annulée."));
         }
-        let _guard = lock(&self.inner.credentials);
-        let mut credentials = self.load_or_create().map_err(|_| {
-            Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
-        })?;
-        update_profile(&mut credentials, &tokens)?;
-        credentials.client_id = Some(CLIENT.into());
-        credentials.access_token = Some(tokens.access_token);
-        credentials.refresh_token = tokens.refresh_token;
-        credentials.id_token = tokens.id_token;
-        credentials.scopes = SCOPE.into();
-        credentials.expires_at = seconds() + tokens.expires_in;
-        credentials.saved_at = seconds();
-        self.write(&credentials).map_err(|_| {
-            Failure::other("Impossible d’enregistrer la connexion Codex sur ce Mac.")
+        self.store_signin(before.as_deref(), |credentials| {
+            update_profile(credentials, &tokens)?;
+            credentials.client_id = Some(CLIENT.into());
+            credentials.access_token = Some(tokens.access_token);
+            credentials.refresh_token = tokens.refresh_token;
+            credentials.id_token = tokens.id_token;
+            credentials.scopes = SCOPE.into();
+            credentials.expires_at = seconds() + tokens.expires_in;
+            credentials.saved_at = seconds();
+            Ok(())
         })?;
         self.reset_probe();
         self.inner.local_revoked.store(false, Ordering::SeqCst);
@@ -128,11 +168,13 @@ impl Session {
     /// revue des approbations). Seule la variante Codex adapte le corps Responses.
     pub(super) fn request(&self, token: &str, body: &mut Value) -> Result<ureq::Request, Failure> {
         if self.inner.local_revoked.load(Ordering::SeqCst) {
-            return Err(Failure::signin());
+            return Err(Failure::other(
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.",
+            ));
         }
         let limits = *lock(&self.inner.deadlines);
         // ureq 2.12.1 applies `.timeout()` on every body read and ignores
-        // `.timeout_read()`. The session loop already enforces `limits.total`.
+        // `.timeout_read()`. The foreground stream sets its own deadline per request.
         let mut request = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
             .timeout_write(Duration::from_secs(15))
@@ -142,14 +184,8 @@ impl Session {
             .set("Authorization", &format!("Bearer {token}"));
         if self.inner.codex {
             prepare_body(body)?;
-            let access = claims(token).ok_or_else(Failure::signin)?;
-            let account = access[AUTH_CLAIM]["chatgpt_account_id"]
-                .as_str()
-                .ok_or_else(Failure::signin)?;
-            request = request
-                .set("chatgpt-account-id", account)
-                .set("originator", "pi")
-                // Même famille d’en-têtes que pi; identité de l’application explicite.
+            request = account_headers(request, token)?
+                .set("originator", "ezerbot")
                 .set("User-Agent", "ezerbot/0.1.0")
                 .set("OpenAI-Beta", "responses=experimental");
             if let Some(session) = body["prompt_cache_key"].as_str() {
@@ -158,6 +194,7 @@ impl Session {
                     .set("x-client-request-id", session);
             }
         }
+        crate::upstream::request_options(self.inner.file.parent().unwrap_or(Path::new(".")), body);
         Ok(request.set("Content-Type", "application/json").set(
             "Accept",
             if body["stream"] == true {
@@ -167,6 +204,67 @@ impl Session {
             },
         ))
     }
+
+    /// Bearer and account headers for an image call: the same `chatgpt-account-id`
+    /// and residency headers the chat request carries.
+    pub(crate) fn image_auth(&self) -> Result<(String, Headers), Failure> {
+        if !self
+            .read()
+            .is_some_and(|credentials| credentials.usable(self.inner.codex))
+        {
+            return Err(Failure::signin());
+        }
+        let token = self.bearer(false)?;
+        let headers = account_header_pairs(&token)?;
+        let valid = headers.iter().any(|(name, id)| {
+            *name == "chatgpt-account-id"
+                && !id.is_empty()
+                && id.len() <= 256
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        });
+        if !valid {
+            return Err(Failure::signin());
+        }
+        Ok((token, headers))
+    }
+}
+
+/// Request headers as name and value pairs.
+pub(crate) type Headers = Vec<(&'static str, String)>;
+
+/// The JWT is obtained only by Ezerbot's own OAuth flow. Residency is required
+/// for regional workspaces, just as in Hermes' codex_account_headers.
+fn account_header_pairs(token: &str) -> Result<Headers, Failure> {
+    let access = claims(token).ok_or_else(Failure::signin)?;
+    let auth = &access[AUTH_CLAIM];
+    let account = auth["chatgpt_account_id"]
+        .as_str()
+        .ok_or_else(Failure::signin)?;
+    let mut headers = vec![("chatgpt-account-id", account.to_owned())];
+    if let Some(region) = auth["chatgpt_data_residency"]
+        .as_str()
+        .filter(|region| !region.trim().is_empty())
+        .or_else(|| auth["chatgpt_compute_residency"].as_str())
+    {
+        let region = region.trim();
+        if !region.is_empty()
+            && region.len() <= 64
+            && region
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        {
+            headers.push(("x-openai-internal-codex-residency", region.to_owned()));
+        }
+    }
+    Ok(headers)
+}
+
+fn account_headers(request: ureq::Request, token: &str) -> Result<ureq::Request, Failure> {
+    Ok(account_header_pairs(token)?
+        .into_iter()
+        .fold(request, |request, (name, value)| request.set(name, &value)))
 }
 
 /// Only typed, validated quota fields ever leave this module. Never return the
@@ -185,6 +283,49 @@ struct Quota {
     primary: Option<UsageWindow>,
     secondary: Option<UsageWindow>,
     checked_at: u64,
+}
+
+/// Minimum age of a read before an explicit refresh, or a window past its reset, may read again.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Minimum age of a read before ordinary polling may read again.
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// `stale`: a window reset after the last read, so that read cannot know the new quota.
+fn read_due(age: Option<Duration>, refresh: bool, stale: bool) -> bool {
+    age.is_none_or(|age| {
+        age >= if refresh || stale {
+            REFRESH_INTERVAL
+        } else {
+            POLL_INTERVAL
+        }
+    })
+}
+
+impl Quota {
+    fn windows(&self) -> [(&'static str, &Option<UsageWindow>); 2] {
+        [("primary", &self.primary), ("secondary", &self.secondary)]
+    }
+
+    /// Names of the windows whose reset has passed: unknown until OpenAI confirms it.
+    fn lapsed(&self, now: u64) -> Vec<&'static str> {
+        self.windows()
+            .into_iter()
+            .filter(|(_, w)| {
+                w.as_ref()
+                    .is_some_and(|w| w.reset_at.is_some_and(|r| r <= now))
+            })
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// True when a window reset after this read, which only a new read can settle.
+    fn reset_since_read(&self, now: u64) -> bool {
+        self.windows().into_iter().any(|(_, w)| {
+            w.as_ref()
+                .and_then(|w| w.reset_at)
+                .is_some_and(|reset| reset <= now && self.checked_at < reset)
+        })
+    }
 }
 
 #[derive(Default)]
@@ -214,7 +355,8 @@ fn quota_window(value: &Value, now: u64) -> Result<Option<UsageWindow>, Failure>
             .as_u64()
             .and_then(|n| now.checked_add(n))
     } else {
-        Some(value["reset_at"].as_u64().ok_or_else(invalid)?)
+        let at = crate::upstream::reset_seconds(&value["reset_at"]).ok_or_else(invalid)?;
+        Some(u64::try_from(at).map_err(|_| invalid())?)
     };
     if reset.is_some_and(|n| n == 0 || n > 253_402_300_799) {
         return Err(invalid());
@@ -249,29 +391,31 @@ impl Session {
             .ok_or_else(|| Failure::other("Le point d’accès au quota Codex est indisponible."))?;
         for attempt in 0..2 {
             let token = self.bearer(attempt > 0)?;
-            let access = claims(&token).ok_or_else(Failure::signin)?;
-            let account = access[AUTH_CLAIM]["chatgpt_account_id"]
-                .as_str()
-                .ok_or_else(Failure::signin)?;
             if self.inner.local_revoked.load(Ordering::SeqCst) {
-                return Err(Failure::signin());
+                return Err(Failure::other(
+                    "La déconnexion est en cours sur ce Mac. Réessayez.",
+                ));
             }
-            let response = ureq::AgentBuilder::new()
+            let request = ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(5))
                 .timeout(Duration::from_secs(12))
                 .redirects(0)
                 .build()
                 .get(&format!("{base}/wham/usage"))
                 .set("Authorization", &format!("Bearer {token}"))
-                .set("chatgpt-account-id", account)
                 .set("User-Agent", "ezerbot/0.1.0")
-                .set("Accept", "application/json")
-                .call();
+                .set("originator", "ezerbot")
+                .set("Accept", "application/json");
+            let response = account_headers(request, &token)?.call();
             let response = match response {
-                Ok(response) => response,
+                Ok(response) if (200..300).contains(&response.status()) => response,
                 Err(ureq::Error::Status(401, _)) if attempt == 0 => continue,
-                Err(ureq::Error::Status(401 | 403, _)) => return Err(Failure::signin()),
-                Err(_) => {
+                Err(ureq::Error::Status(401 | 403, _)) => {
+                    return Err(Failure::other(
+                        "Impossible de lire le quota Codex. La session enregistrée sur ce Mac est conservée.",
+                    ))
+                }
+                _ => {
                     return Err(Failure::other(
                         "Impossible de lire le quota Codex. Réessayez dans un instant.",
                     ))
@@ -308,7 +452,9 @@ impl Session {
                 checked_at: now,
             });
         }
-        Err(Failure::signin())
+        Err(Failure::other(
+            "Impossible de lire le quota Codex. Réessayez dans un instant.",
+        ))
     }
 
     /// Nonblocking, coalesced and throttled: ordinary /api/state polling must
@@ -318,10 +464,13 @@ impl Session {
             return json!({"status":"signin"});
         }
         let mut cache = lock(&self.inner.quota);
+        let now = seconds();
         let age = cache.attempted.map(|t| t.elapsed());
-        if !cache.loading
-            && age.is_none_or(|age| age >= Duration::from_secs(if refresh { 5 } else { 60 }))
-        {
+        let stale = cache
+            .quota
+            .as_ref()
+            .is_some_and(|q| q.reset_since_read(now));
+        if !cache.loading && read_due(age, refresh, stale) {
             cache.loading = true;
             cache.attempted = Some(Instant::now());
             let session = self.clone();
@@ -348,13 +497,23 @@ impl Session {
         }
         if let Some(quota) = &cache.quota {
             // An expired window is unknown until OpenAI confirms the reset;
-            // never manufacture a fresh 100% quota locally.
-            let expired = [&quota.primary, &quota.secondary]
+            // never manufacture a fresh 100% quota locally. The others stay.
+            let lapsed = quota.lapsed(now);
+            let live = quota
+                .windows()
                 .into_iter()
-                .flatten()
-                .any(|w| w.reset_at.is_some_and(|reset| reset <= seconds()));
-            if !expired {
+                .filter(|(name, w)| w.is_some() && !lapsed.contains(name))
+                .count();
+            if lapsed.is_empty() {
                 return json!({"status":"ready", "quota":quota, "refreshing":cache.loading});
+            }
+            if live > 0 {
+                let mut shown = json!(quota);
+                for name in &lapsed {
+                    shown[*name] = Value::Null;
+                }
+                shown["unavailable"] = json!(lapsed);
+                return json!({"status":"ready", "quota":shown, "refreshing":cache.loading});
             }
         }
         if let Some(error) = &cache.error {
@@ -381,9 +540,20 @@ fn prepare_body(body: &mut Value) -> Result<(), Failure> {
         object.insert("instructions".into(), json!("Tu es un assistant utile."));
     }
     object.insert("include".into(), json!(["reasoning.encrypted_content"]));
-    object.entry("text").or_insert(json!({}))["verbosity"] = json!("low");
-    object.insert("tool_choice".into(), json!("auto"));
-    object.insert("parallel_tool_calls".into(), json!(true));
+    // Do not turn every answer into a short summary. Leave verbosity to the
+    // model unless a caller explicitly requested a level.
+    // Codex rejects tool_choice when the call has no tools (connection probe, titles).
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+    {
+        object.insert("tool_choice".into(), json!("auto"));
+        object.insert("parallel_tool_calls".into(), json!(true));
+    } else {
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+    }
     // Le backend Codex refuse ces champs, même dans les petits appels internes.
     object.remove("max_output_tokens");
     object.remove("temperature");
@@ -467,7 +637,116 @@ mod tests {
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
         assert_eq!(body["tools"][0]["name"], "remember");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["prompt_cache_key"], "conversation");
         assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn body_omits_tool_choice_when_the_call_has_no_tools() {
+        let mut body = json!({
+            "model": DEFAULT_MODEL,
+            "instructions": "Test de connexion. Réponds seulement OK.",
+            "input": [{"role": "user", "content": "Réponds seulement OK."}],
+            "tool_choice": "required",
+            "parallel_tool_calls": true
+        });
+        prepare_body(&mut body).unwrap();
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+        assert!(body.get("tools").is_none());
+
+        let mut empty = json!({"model": DEFAULT_MODEL, "instructions": "Consignes", "tools": []});
+        prepare_body(&mut empty).unwrap();
+        assert!(empty.get("tool_choice").is_none(), "{empty}");
+        assert!(empty.get("parallel_tool_calls").is_none(), "{empty}");
+    }
+
+    fn secs(milliseconds: u64) -> Option<Duration> {
+        Some(Duration::from_millis(milliseconds))
+    }
+
+    #[test]
+    fn a_first_read_is_always_due() {
+        assert!(read_due(None, false, false));
+    }
+
+    #[test]
+    fn ordinary_polling_waits_sixty_seconds() {
+        assert!(!read_due(secs(0), false, false));
+        assert!(!read_due(secs(5_000), false, false));
+        assert!(!read_due(secs(59_999), false, false));
+        assert!(read_due(secs(60_000), false, false));
+    }
+
+    #[test]
+    fn an_explicit_refresh_waits_five_seconds() {
+        assert!(!read_due(secs(0), true, false));
+        assert!(!read_due(secs(4_999), true, false));
+        assert!(read_due(secs(5_000), true, false));
+    }
+
+    #[test]
+    fn a_window_reset_since_the_last_read_waits_five_seconds() {
+        assert!(!read_due(secs(4_999), false, true));
+        assert!(read_due(secs(5_000), false, true));
+    }
+
+    fn window(reset_at: Option<u64>) -> Option<UsageWindow> {
+        Some(UsageWindow {
+            used_percent: 10.0,
+            remaining_percent: 90.0,
+            limit_window_seconds: 18_000,
+            reset_at,
+        })
+    }
+
+    fn quota(primary: Option<u64>, secondary: Option<u64>, checked_at: u64) -> Quota {
+        Quota {
+            plan: None,
+            primary: window(primary),
+            secondary: secondary.and_then(|at| window(Some(at))),
+            checked_at,
+        }
+    }
+
+    #[test]
+    fn only_the_windows_past_their_reset_lapse() {
+        let q = quota(Some(100), Some(200), 50);
+        assert!(q.lapsed(99).is_empty());
+        assert_eq!(q.lapsed(100), ["primary"]);
+        assert_eq!(q.lapsed(200), ["primary", "secondary"]);
+        assert!(quota(None, None, 50).lapsed(1_000).is_empty());
+    }
+
+    #[test]
+    fn a_read_taken_after_the_reset_does_not_ask_for_another_one_early() {
+        let q = quota(Some(100), None, 99);
+        assert!(!q.reset_since_read(99));
+        assert!(q.reset_since_read(100));
+        let after = quota(Some(100), None, 100);
+        assert!(!after.reset_since_read(500));
+    }
+
+    #[test]
+    fn reset_at_keeps_its_three_formats_and_rejects_the_rest() {
+        let at = |reset: Value| {
+            quota_window(
+                &json!({"used_percent":1, "limit_window_seconds":60, "reset_at":reset}),
+                0,
+            )
+            .map(|w| w.and_then(|w| w.reset_at))
+        };
+        for reset in [
+            json!(4102444800u64),
+            json!("4102444800"),
+            json!("2100-01-01T00:00:00Z"),
+        ] {
+            assert_eq!(at(reset).ok().flatten(), Some(4_102_444_800));
+        }
+        for reset in [json!("2100-01-01"), json!(-1), json!("x"), json!(2.5)] {
+            assert!(at(reset).is_err());
+        }
     }
 }

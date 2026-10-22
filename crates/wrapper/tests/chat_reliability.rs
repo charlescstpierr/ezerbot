@@ -31,6 +31,8 @@ enum Fault {
     RefreshHang,
     RefreshExpired,
     Incomplete,
+    Drip(Duration),
+    Paced,
 }
 struct Fake {
     base: String,
@@ -43,6 +45,7 @@ struct Fake {
     summaries: Arc<AtomicUsize>,
     partial_released: Arc<AtomicBool>,
     partial_finished: Arc<AtomicBool>,
+    drip_closed: Arc<Mutex<Option<Duration>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 fn event(stream: &mut TcpStream, value: Value) {
@@ -55,6 +58,36 @@ fn hold(stream: &mut TcpStream, stop: &AtomicBool, keepalive: bool) {
             break;
         }
         std::thread::sleep(Duration::from_millis(30));
+    }
+}
+/// One byte every `every`, never a full event. Records how long after the
+/// headers the client closed its side of the connection.
+fn drip(
+    stream: &mut TcpStream,
+    stop: &AtomicBool,
+    every: Duration,
+    closed: &Mutex<Option<Duration>>,
+) {
+    let started = Instant::now();
+    let mut next = started + every;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+    let mut probe = [0u8; 1];
+    while !stop.load(Ordering::SeqCst) {
+        let gone = match stream.read(&mut probe) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(error) => !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        };
+        if gone || (Instant::now() >= next && stream.write_all(b":").is_err()) {
+            *closed.lock().unwrap() = Some(started.elapsed());
+            return;
+        }
+        if Instant::now() >= next {
+            next += every;
+        }
     }
 }
 fn token() -> String {
@@ -80,6 +113,8 @@ impl Fake {
         let (summary_slow, summary_count) = (slow_summary.clone(), summaries.clone());
         let partial_released = Arc::new(AtomicBool::new(false));
         let partial_finished = Arc::new(AtomicBool::new(false));
+        let drip_closed = Arc::new(Mutex::new(None));
+        let drip_seen = drip_closed.clone();
         let (s, q, b, r, side, late, finished) = (
             stop.clone(),
             queue.clone(),
@@ -106,6 +141,7 @@ impl Fake {
                     finished.clone(),
                 );
                 let (summary_slow, summary_count) = (summary_slow.clone(), summary_count.clone());
+                let drip_closed = drip_seen.clone();
                 workers.push(std::thread::spawn(move || {
                     // Accepted sockets can inherit O_NONBLOCK on BSD/macOS.
                     // Only the listener is polled; request parsing must block.
@@ -116,7 +152,7 @@ impl Fake {
                     let mut length=0; loop { line.clear(); if reader.read_line(&mut line).expect("fake request-header read failed")==0 || line=="\r\n" { break; }
                         if let Some((name,v))=line.split_once(':') { if name.eq_ignore_ascii_case("content-length") { length=v.trim().parse().unwrap(); } } }
                     let mut bytes=vec![0;length]; if reader.read_exact(&mut bytes).is_err() { return; }
-                    if path.ends_with("/models") { let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{\"models\":[]}}"); return; }
+                    if path.split('?').next().unwrap_or("").ends_with("/models") { let _=write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{{\"models\":[]}}"); return; }
                     if path=="/token" {
                         let refresh = *r.lock().unwrap();
                         match refresh {
@@ -169,6 +205,11 @@ impl Fake {
                             }
                         },
                         Fault::Keepalive => hold(&mut socket,&s,true),
+                        Fault::Drip(every) => drip(&mut socket,&s,every,&drip_closed),
+                        Fault::Paced => {
+                            for _ in 0..5 { event(&mut socket,json!({"type":"response.output_text.delta","delta":"Lent. "})); std::thread::sleep(Duration::from_millis(400)); }
+                            event(&mut socket,json!({"type":"response.completed"}));
+                        },
                         Fault::EndlessEvents => { while !s.load(Ordering::SeqCst) { event(&mut socket,json!({"type":"response.in_progress"})); std::thread::sleep(Duration::from_millis(25)); } },
                         Fault::ToolStall => { event(&mut socket,json!({"type":"response.output_item.added","item":{"type":"function_call","id":"fc","call_id":"waiting","name":"local_exec"}})); hold(&mut socket,&s,true); },
                         Fault::ToolApproval => { event(&mut socket,json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc","call_id":"ask","name":"run_shell","arguments":"{\"command\":\"echo faux\",\"cwd\":\"/tmp\",\"timeout_ms\":1000,\"output_limit\":1024}"}})); event(&mut socket,json!({"type":"response.completed"})); },
@@ -194,6 +235,7 @@ impl Fake {
             summaries,
             partial_released,
             partial_finished,
+            drip_closed,
             thread: Some(thread),
         }
     }
@@ -249,10 +291,13 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        // Populate the static catalogue before launching a turn.
+        // Settle the initial probe before queueing the chat's transport fault.
+        // Account-scoped catalogue discovery is a GET, never a Responses fault.
         until(|| {
-            app.api("GET", "/api/state", b"").unwrap()["provider"]["models_ready"] == true
-                || !signed
+            let state = app.api("GET", "/api/state", b"").unwrap();
+            !signed
+                || (state["provider"]["models_ready"] == true
+                    && state["provider"]["connected"] == true)
         });
         Self {
             fake,
@@ -351,6 +396,41 @@ fn every_transport_hang_ends_with_a_persisted_french_error_and_retry_works() {
     }
 }
 #[test]
+fn a_dripping_stream_is_cut_at_the_total_deadline() {
+    // Production: one byte every 50 s against a 60 s total. Scaled by 1/20 here.
+    let total = Duration::from_secs(3);
+    let mut f = Fixture::with_deadlines(true, total, total, total);
+    f.send(Fault::Drip(Duration::from_millis(2600)));
+    let failed = f.settled();
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert_eq!(
+        failed["error"], "La réponse a dépassé le délai maximal. Réessayez.",
+        "{failed}"
+    );
+    until(|| f.fake.drip_closed.lock().unwrap().is_some());
+    let closed = f.fake.drip_closed.lock().unwrap().unwrap();
+    assert!(
+        closed <= total + Duration::from_millis(1200),
+        "the connection stayed open {closed:?} against a {total:?} total deadline"
+    );
+    f.fake.queue.lock().unwrap().push_back(Fault::Happy);
+    post(
+        &mut f.app,
+        "/api/regenerate",
+        json!({"conversation_id":f.chat,"message_id":"question"}),
+    );
+    assert_eq!(f.settled()["state"], "echoed");
+}
+#[test]
+fn a_stream_that_ends_before_the_total_deadline_is_untouched() {
+    let total = Duration::from_secs(3);
+    let mut f = Fixture::with_deadlines(true, total, total, total);
+    f.send(Fault::Paced);
+    let reply = f.settled();
+    assert_eq!(reply["state"], "echoed", "{reply}");
+    assert_eq!(reply["body"], "Lent. Lent. Lent. Lent. Lent. ", "{reply}");
+}
+#[test]
 fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
     // Cancellation, not network-deadline timing, is the subject of this test.
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
@@ -388,6 +468,9 @@ fn stop_is_immediate_and_late_worker_cannot_mutate_the_turn() {
 #[test]
 fn refresh_hang_never_blocks_state_or_dispatches_after_cancellation() {
     let mut f = Fixture::new(true);
+    // Opening the app confirms OpenAI once. That probe is not the hung refresh.
+    until(|| f.provider.status()["connected"] == true);
+    f.fake.seen.lock().unwrap().clear();
     save_token(&f.db, true);
     *f.fake.refresh.lock().unwrap() = Some(Fault::RefreshHang);
     f.send(Fault::Happy);
@@ -414,6 +497,9 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
     for expired in [false, true] {
         let mut f = Fixture::new(expired);
         if expired {
+            // Finish the initial quota read before expiring the shared token;
+            // otherwise it can race the chat for the refresh lock.
+            until(|| f.provider.codex_usage(false)["status"] == "ready");
             save_token(&f.db, true);
             *f.fake.refresh.lock().unwrap() = Some(Fault::RefreshExpired);
         }
@@ -449,7 +535,8 @@ fn group_without_signin_gets_a_card_and_an_empty_catalogue_cannot_queue_forever(
         let mut f = Fixture::new(signed);
         if signed {
             std::fs::write(f.db.with_extension("chatgpt-auth.json"),json!({"host_id":"fake","client_id":"fake","access_token":"fake","refresh_token":"fake","expires_at":4102444800u64,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
-            f.provider.select_backend("sharing").unwrap();
+            f.provider = Provider::with_endpoints(&f.db, f.fake.endpoints(), false);
+            f.app = App::open_with(&f.db, f.provider.clone()).unwrap();
             until(|| f.provider.status()["models_ready"] == true);
         }
         post(
@@ -705,23 +792,23 @@ fn sharing_connection_probe_does_not_impose_a_sixteen_token_reasoning_limit() {
 }
 
 #[test]
-fn connection_probe_accepts_a_reasoning_token_cap_as_proof_of_reachability() {
+fn incomplete_reasoning_probe_is_reachable_but_not_a_confirmed_connection() {
     let mut f = Fixture::new(true);
     f.fake.queue.lock().unwrap().push_back(Fault::Incomplete);
     post(&mut f.app, "/api/provider/test", json!({}));
-    until(|| f.provider.status()["connection_test"]["state"] == "ok");
-    assert_eq!(
-        f.provider.status()["connection_test"]["message"],
-        "OK — ChatGPT répond."
-    );
+    until(|| f.provider.status()["connection_test"]["state"] == "failed");
+    assert_eq!(f.provider.status()["connected"], false);
 }
 
 #[test]
 fn signing_out_fences_an_inflight_connection_test_result() {
     let mut f = Fixture::with_deadline(true, Duration::from_secs(10));
+    // The automatic open probe must finish before this test arms a partial reply.
+    until(|| f.provider.status()["connected"] == true);
+    let before = f.fake.seen.lock().unwrap().len();
     f.fake.queue.lock().unwrap().push_back(Fault::Partial);
     post(&mut f.app, "/api/provider/test", json!({}));
-    until(|| !f.fake.seen.lock().unwrap().is_empty());
+    until(|| f.fake.seen.lock().unwrap().len() > before);
     assert_eq!(f.provider.status()["connection_test"]["state"], "running");
     f.provider.signout().unwrap();
     f.fake.partial_released.store(true, Ordering::SeqCst);
@@ -745,7 +832,7 @@ fn connection_test_without_an_account_explains_the_required_action_without_netwo
     );
     assert_eq!(
         result["provider"]["connection_test"]["message"],
-        "Aucun compte connecté. Connectez-vous via Codex ci-dessus."
+        "Aucun compte connecté. Connectez votre compte ChatGPT ci-dessus."
     );
     assert!(f.fake.seen.lock().unwrap().is_empty());
 }
@@ -925,12 +1012,11 @@ fn four_abandoned_sockets_refuse_the_next_turn_until_they_close() {
 }
 
 #[test]
-fn four_blocked_reads_accept_another_turn_once_the_read_timeout_elapses() {
+fn four_blocked_reads_accept_another_turn_once_the_total_deadline_elapses() {
     // ureq 2.12.1 lets `.timeout()` replace `.timeout_read()` on each body
-    // read. The overall deadline stays at the production 10 minutes; only the
-    // read timeout may release these abandoned sockets.
-    let read = Duration::from_secs(3);
-    let mut f = Fixture::with_deadlines(true, read, read, Duration::from_secs(600));
+    // read, so the total deadline alone releases these abandoned sockets.
+    let total = Duration::from_secs(3);
+    let mut f = Fixture::with_deadlines(true, total, total, total);
     let mut held = vec![];
     for n in 0..4 {
         let chat = post(&mut f.app, "/api/conversations", json!({}))["conversation"]["id"]
@@ -1001,8 +1087,7 @@ fn four_blocked_reads_accept_another_turn_once_the_read_timeout_elapses() {
     );
     assert_eq!(refusal["state"], "failed", "{refusal}");
     // The server never sends another byte. Later turns stay refused until
-    // ureq's read timeout closes the sockets — well before the 10 minute
-    // overall deadline.
+    // ureq's total deadline closes the sockets.
     let recover = Instant::now();
     let mut attempt = 0u32;
     let mut chat = String::new();
@@ -1011,7 +1096,7 @@ fn four_blocked_reads_accept_another_turn_once_the_read_timeout_elapses() {
     loop {
         assert!(
             recover.elapsed() < Duration::from_secs(8),
-            "fifth turn still blocked after {:?} (read timeout {read:?}, overall deadline 600s): {reply}",
+            "fifth turn still blocked after {:?} (total deadline {total:?}): {reply}",
             recover.elapsed()
         );
         let in_flight = !reply.is_null() && reply["state"] == "streaming";

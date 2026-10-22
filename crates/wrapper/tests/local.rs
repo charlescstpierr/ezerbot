@@ -10,6 +10,7 @@ use grokbot_wrapper::{App, Provider};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
+    os::unix::process::CommandExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -156,6 +157,41 @@ impl Fixture {
     fn shell(&self, command: &str) -> Value {
         json!({"command":command,"cwd":self.root(),"timeout_ms":2000,"output_limit":1024})
     }
+    fn reply(&self, text: &str) {
+        self.script(vec![
+            json!({"type":"response.output_text.delta","delta":text}),
+            json!({"type":"response.completed"}),
+        ]);
+    }
+    fn messages(&mut self) -> Vec<Value> {
+        self.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|conversation| conversation["id"] == self.chat)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+    fn tool_output(&mut self, call_id: &str) -> Value {
+        self.messages()
+            .into_iter()
+            .find(|message| {
+                message["kind"] == "tool" && message["payload"]["call"]["call_id"] == call_id
+            })
+            .unwrap_or_else(|| panic!("carte absente pour {call_id}"))["payload"]["outcome"]
+            ["output"]
+            .clone()
+    }
+}
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -1138,4 +1174,1020 @@ fn file_error_and_bot_isolation_are_per_call_failures() {
     f.send("disabled", "read_file", json!({"path":f.path}));
     f.finish("disabled");
     assert_eq!(f.outcome("disabled")["status"], "failed");
+}
+
+#[test]
+fn background_shell_answers_before_the_command_finishes_then_the_card_shows_the_code() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let marker = f.root().join("fini.txt");
+    let mut args = f.shell("sleep 2 && echo fini && touch fini.txt");
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(100);
+    f.send("long", "run_shell", args);
+    let request = f.request("long");
+    assert!(f
+        .messages()
+        .iter()
+        .any(|message| message["kind"] == "approval"));
+    f.reply("bonjour");
+    let started = std::time::Instant::now();
+    f.decide(&request, json!("allow_once"));
+    loop {
+        f.app.tick(now());
+        let replied = f.messages().iter().any(|message| {
+            message["role"] == "assistant"
+                && message["body"].as_str().unwrap_or("").contains("bonjour")
+        });
+        if replied {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "le tour est resté bloqué par la commande"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !marker.exists(),
+        "la commande a fini avant la réponse du bot"
+    );
+    assert_eq!(f.tool_output("long")["status"], "en cours");
+    assert!(f.tool_output("long")["exit_code"].is_null());
+    f.finish("long");
+    assert_eq!(f.outcome("long")["output"]["status"], "en cours");
+    let mut output = Value::Null;
+    for _ in 0..150 {
+        output = f.tool_output("long");
+        if output["status"] == "terminé" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert_eq!(output["status"], "terminé");
+    assert_eq!(output["exit_code"], json!(0));
+    assert!(output["stdout"].as_str().unwrap_or("").contains("fini"));
+    assert!(marker.exists());
+}
+
+#[test]
+fn stop_kills_only_that_group_and_quitting_marks_the_other_stopped() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    for (id, file) in [("one", "one"), ("two", "two")] {
+        let mut args = f.shell(&format!(
+            "echo $$ > {file}.pid; sleep 12; touch {file}.done"
+        ));
+        args["background"] = json!(true);
+        args["timeout_ms"] = json!(100);
+        f.send(id, "run_shell", args);
+        let request = f.request(id);
+        f.reply("ok");
+        f.decide(&request, json!("allow_once"));
+        f.finish(id);
+    }
+    let read_pid = |f: &Fixture, name: &str| -> u32 {
+        let path = f.root().join(format!("{name}.pid"));
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("pid absent : {name}");
+    };
+    let one = read_pid(&f, "one");
+    let two = read_pid(&f, "two");
+    assert!(process_alive(one) && process_alive(two));
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("one").run_id, "call_id": "one"}),
+    );
+    for _ in 0..100 {
+        if !process_alive(one) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!process_alive(one));
+    assert!(process_alive(two));
+    let mut stopped = Value::Null;
+    for _ in 0..100 {
+        stopped = f.tool_output("one");
+        if stopped["status"] == "arrêtée" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(stopped["status"], "arrêtée");
+    assert!(stopped["exit_code"].is_null());
+    assert_eq!(f.tool_output("two")["status"], "en cours");
+    f.reopen();
+    for _ in 0..150 {
+        if !process_alive(two) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!process_alive(two), "quitter l’app laisse le processus");
+    let mut other = Value::Null;
+    for _ in 0..50 {
+        other = f.tool_output("two");
+        if other["status"] == "arrêtée" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(other["status"], "arrêtée");
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!f.root().join("one.done").exists());
+    assert!(!f.root().join("two.done").exists());
+    assert_eq!(f.tool_output("one")["status"], "arrêtée");
+    assert_eq!(f.tool_output("two")["status"], "arrêtée");
+}
+
+#[test]
+fn foreground_shell_keeps_its_timeout_ceiling_and_background_shows_a_nonzero_code() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let mut args = f.shell("touch trop-long");
+    args["timeout_ms"] = json!(120_001);
+    f.send("ceiling", "run_shell", args);
+    f.reply("non");
+    f.finish("ceiling");
+    assert_eq!(f.outcome("ceiling")["status"], "failed");
+    assert!(f.outcome("ceiling")["reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("120"));
+    assert!(requests::list_for_run(&f.db(), &f.run("ceiling").run_id)
+        .unwrap()
+        .is_empty());
+    assert!(!f.root().join("trop-long").exists());
+    let mut args = f.shell("echo raté >&2; exit 3");
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(120_001);
+    f.send("code", "run_shell", args);
+    let request = f.request("code");
+    f.reply("vu");
+    f.decide(&request, json!("allow_once"));
+    f.finish("code");
+    let mut output = Value::Null;
+    for _ in 0..80 {
+        output = f.tool_output("code");
+        if output["status"] == "échec" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(output["status"], "échec");
+    assert_eq!(output["exit_code"], json!(3));
+    assert!(output["stderr"].as_str().unwrap_or("").contains("raté"));
+}
+
+#[test]
+fn background_output_cap_is_marked_on_the_card() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let mut args = f.shell("yes x | head -c 8000");
+    args["background"] = json!(true);
+    args["output_limit"] = json!(1024);
+    f.send("cap", "run_shell", args);
+    let request = f.request("cap");
+    f.reply("vu");
+    f.decide(&request, json!("allow_once"));
+    f.finish("cap");
+    let mut output = Value::Null;
+    for _ in 0..100 {
+        output = f.tool_output("cap");
+        if output["truncated"] == true {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(output["truncated"], true);
+    assert!(output["stdout"].as_str().unwrap_or("").len() <= 1024);
+}
+
+#[test]
+fn crash_while_a_background_command_is_starting_recovers_on_the_next_launch() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("seed", "run_shell", f.shell("echo seed"));
+    let request = f.request("seed");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("seed");
+    let run_id = f.run("seed").run_id.clone();
+    let marker = f.root().join("orphan.done");
+    let token = "ezerbot-shell-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("sleep 30; touch {}", marker.display()),
+            token,
+        ])
+        .current_dir(f.root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = child.id();
+    let started =
+        grokbot_wrapper::features::local::shell_leader_started(pgid).expect("identité du chef");
+    f.db()
+        .execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,'crash','null',NULL)",
+            [&run_id],
+        )
+        .unwrap();
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid,leader,started) VALUES (?1,'crash','en cours',NULL,?2,?3,?4)",
+            params![run_id, pgid, token, started],
+        )
+        .unwrap();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    let mut reaped = false;
+    for _ in 0..100 {
+        if child.try_wait().unwrap().is_some() {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(reaped, "le processus orphelin tourne encore");
+    assert!(!marker.exists(), "la commande interrompue a continué");
+    let (status, exit_code): (String, Option<i64>) = f
+        .db()
+        .query_row(
+            "SELECT status, exit_code FROM wrapper_shell_tasks WHERE call_id='crash'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    assert!(exit_code.is_none());
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM engine_external_tools WHERE call_id='crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
+    assert_eq!(outcome["output"]["status"], "arrêtée");
+    assert!(outcome["output"]["exit_code"].is_null());
+    f.reopen();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='crash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    let stop = f.app.api(
+        "POST",
+        "/api/local/tasks/stop",
+        serde_json::to_vec(&json!({"run_id": run_id, "call_id": "crash"}))
+            .unwrap()
+            .as_slice(),
+    );
+    assert_eq!(stop.unwrap_err().status, 409);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn reused_pgid_of_another_group_survives_restart() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("seed", "run_shell", f.shell("echo seed"));
+    let request = f.request("seed");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("seed");
+    let run_id = f.run("seed").run_id.clone();
+    let marker = f.root().join("reused.done");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("sleep 30; touch {}", marker.display()),
+            "unrelated-group",
+        ])
+        .current_dir(f.root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = child.id();
+    let started = grokbot_wrapper::features::local::shell_leader_started(pgid)
+        .expect("identité du groupe réutilisé");
+    f.db()
+        .execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,'reuse','null',NULL)",
+            [&run_id],
+        )
+        .unwrap();
+    // The row still names this pid, with the real start time of whoever holds
+    // it now, but the watchdog token belongs to a group that already exited.
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_shell_tasks(run_id,call_id,status,exit_code,pgid,leader,started) VALUES (?1,'reuse','en cours',NULL,?2,?3,?4)",
+            params![
+                run_id,
+                pgid,
+                "ezerbot-shell-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                started
+            ],
+        )
+        .unwrap();
+    grokbot_wrapper::features::local::startup(&f.db()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "un groupe réutilisé a été tué"
+    );
+    assert!(process_alive(pgid));
+    assert!(!marker.exists());
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='reuse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "arrêtée");
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM engine_external_tools WHERE call_id='reuse'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outcome: Value = serde_json::from_str(&outcome).unwrap();
+    assert_eq!(outcome["output"]["status"], "arrêtée");
+    assert!(outcome["output"]["exit_code"].is_null());
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .status();
+    let _ = child.wait();
+    assert!(!marker.exists());
+}
+
+#[test]
+fn unreadable_vault_stops_the_background_process() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let marker = f.root().join("vault.done");
+    let mut args = f.shell(&format!(
+        "echo $$ > vault.pid; sleep 30; touch {}",
+        marker.display()
+    ));
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(100);
+    f.send("vault", "run_shell", args);
+    let request = f.request("vault");
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish("vault");
+    let pid = {
+        let path = f.root().join("vault.pid");
+        let mut found = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    found = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        found.expect("pid absent")
+    };
+    assert!(process_alive(pid));
+    std::fs::write(f.path.with_extension("secrets.json"), b"coffre illisible").unwrap();
+    let mut dead = false;
+    for _ in 0..150 {
+        if !process_alive(pid) {
+            dead = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        dead,
+        "le processus continue alors que la tâche n’est plus arrêtable"
+    );
+    let status: String = f
+        .db()
+        .query_row(
+            "SELECT status FROM wrapper_shell_tasks WHERE call_id='vault'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(status, "en cours");
+    let stop = f.app.api(
+        "POST",
+        "/api/local/tasks/stop",
+        serde_json::to_vec(&json!({"run_id": f.run("vault").run_id, "call_id": "vault"}))
+            .unwrap()
+            .as_slice(),
+    );
+    assert_eq!(stop.unwrap_err().status, 409);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn a_removed_secret_never_returns_through_the_approval_policy() {
+    const SECRET: &str = "jeton-secret-valeur-8123";
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.post(
+        "/api/secrets/put",
+        json!({"bot_id":"grokbot","name":"jeton","description":"Jeton de test","value":SECRET}),
+    );
+    f.send("masked", "run_shell", f.shell(&format!("printf {SECRET}")));
+    let r = f.request("masked");
+    let card = |f: &mut Fixture| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let card = state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["id"] == r.id)
+            .unwrap()
+            .clone();
+        (state.to_string(), card)
+    };
+    let (before, shown) = card(&mut f);
+    assert!(!before.contains(SECRET));
+    assert_eq!(shown["policy"]["remember"], false, "{shown}");
+    f.post(
+        "/api/secrets/delete",
+        json!({"bot_id":"grokbot","name":"jeton"}),
+    );
+    let (after, shown) = card(&mut f);
+    assert!(!after.contains(SECRET), "{after}");
+    assert_eq!(shown["policy"]["remember"], false);
+    assert_eq!(shown["policy"]["pattern"], "");
+    f.decide(&r, json!("deny"));
+    f.finish("masked");
+}
+
+fn approval_policy(f: &mut Fixture, id: &str) -> Value {
+    let run = f.run(id).run_id;
+    f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == f.chat)
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .find(|m| m["kind"] == "approval" && m["payload"]["run_id"] == run)
+        .expect("carte d’approbation")["payload"]["policy"]
+        .clone()
+}
+
+#[test]
+fn always_allow_same_command_skips_the_card_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("first", "run_shell", f.shell("printf oui"));
+    let card = f.request("first");
+    let policy = approval_policy(&mut f, "first");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    assert_eq!(policy["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("first");
+    assert_eq!(f.outcome("first")["output"]["stdout"], "oui");
+    let other_cwd = f.root().join("ailleurs");
+    std::fs::create_dir(&other_cwd).unwrap();
+    let mut same = f.shell("printf oui");
+    same["cwd"] = json!(other_cwd);
+    same["timeout_ms"] = json!(1500);
+    f.send("same", "run_shell", same);
+    f.finish("same");
+    assert!(requests::list_for_run(&f.db(), &f.run("same").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("same")["output"]["stdout"], "oui");
+    f.reopen();
+    f.send("restarted", "run_shell", f.shell("printf oui"));
+    f.finish("restarted");
+    assert!(requests::list_for_run(&f.db(), &f.run("restarted").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("restarted")["output"]["stdout"], "oui");
+    let rules = f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"run_shell",
+            "args_digest":"printf oui","scope":"pattern"
+        }),
+    );
+    assert_eq!(rules["rules"], json!([]));
+    f.send("revoked", "run_shell", f.shell("printf oui"));
+    let again = f.request("revoked");
+    assert!(matches!(
+        again.status,
+        grokbot_forms::requests::RequestStatus::Pending
+    ));
+    f.decide(&again, json!("deny"));
+    f.finish("revoked");
+    assert_eq!(f.outcome("revoked")["status"], "failed");
+}
+
+#[test]
+fn destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    f.send("rm", "run_shell", f.shell("rm victime.txt"));
+    wait("rm asked or finished", || {
+        let status = f.run("rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(
+        f.run("rm").status,
+        RunStatus::AwaitingApproval,
+        "une suppression ne suit pas la règle permanente"
+    );
+    assert!(target.exists());
+    let card = f.request("rm");
+    let policy = approval_policy(&mut f, "rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    let refused = f.app.api(
+        "POST",
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card.entry_id,
+            "submission_id": "always-rm",
+            "conversation_id": card.route.target_conversation_id,
+            "decision": {"always_allow":{"scope":"global"}}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    assert!(refused.is_err());
+    assert!(target.exists());
+    f.decide(&card, json!("allow_once"));
+    f.finish("rm");
+    assert!(!target.exists());
+}
+
+#[test]
+fn exact_shell_key_and_unproven_commands_stay_on_the_card() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("pattern", "run_shell", f.shell("printf oui"));
+    let card = f.request("pattern");
+    assert_eq!(approval_policy(&mut f, "pattern")["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("pattern");
+    f.send("spaced", "run_shell", f.shell("printf  oui"));
+    let spaced = f.request("spaced");
+    assert_eq!(approval_policy(&mut f, "spaced")["pattern"], "printf  oui");
+    f.decide(&spaced, json!("deny"));
+    f.finish("spaced");
+    f.send("global", "run_shell", f.shell("printf encore"));
+    let global = f.request("global");
+    f.decide(&global, json!({"always_allow":{"scope":"global"}}));
+    f.finish("global");
+    let cases = [
+        ("semi", "printf ok; rm note", Some("destructive")),
+        ("and", "cd /tmp && printf ok", None),
+        ("exec", "find . -exec ls {} +", None),
+        ("git", "git clean -fd", Some("destructive")),
+        ("interp", "bash -c 'printf oui'", None),
+        ("mail", "sendmail someone", Some("outbound")),
+    ];
+    for (id, command, protection) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte obligatoire", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        if let Some(kind) = protection {
+            assert_eq!(policy["protection"], kind, "{command}");
+        }
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+    }
+}
+
+#[test]
+fn git_deletions_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+    ]);
+    git(&["branch", "vieille"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    for (id, command) in [
+        ("rm", "git rm -f note"),
+        ("c-rm", "git -C . rm note"),
+        ("restore", "git restore note"),
+        ("checkout", "git checkout -- note"),
+        ("checkout-tree", "git checkout HEAD note"),
+        ("branch", "git branch -D vieille"),
+        ("stash", "git stash drop"),
+        ("worktree", "git worktree remove ../ailleurs"),
+    ] {
+        std::fs::write(f.root().join("note"), "modifiée").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(
+            std::fs::read_to_string(f.root().join("note")).unwrap(),
+            "modifiée",
+            "{command}"
+        );
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        assert_eq!(policy["protection"], "destructive", "{command}");
+        assert_eq!(policy["label"], "Suppression à confirmer", "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"pattern"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", "vieille"])
+        .current_dir(f.root())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).contains("vieille"));
+    // Non-destructive git commands follow the permanent rule without a card.
+    for (id, command) in [("list", "git stash list"), ("plain-branch", "git branch")] {
+        f.send(id, "run_shell", f.shell(command));
+        f.finish(id);
+        assert!(
+            requests::list_for_run(&f.db(), &f.run(id).run_id)
+                .unwrap()
+                .is_empty(),
+            "{command}"
+        );
+        assert_eq!(f.outcome(id)["status"], "done", "{command}");
+    }
+}
+
+#[test]
+fn settled_read_card_keeps_its_policy_and_shows_its_decision() {
+    let mut f = Fixture::new();
+    f.settings(true, true);
+    let file = f.root().join("lu.txt");
+    std::fs::write(&file, "Bonjour\n").unwrap();
+    f.send("read", "read_file", json!({"path":file}));
+    let card = f.request("read");
+    let pending = approval_policy(&mut f, "read");
+    assert_eq!(pending["remember"], false);
+    assert_eq!(pending["scope"], "none");
+    assert!(pending.get("protection").is_none());
+    f.decide(&card, json!("allow_once"));
+    f.finish("read");
+    assert_eq!(f.outcome("read")["output"]["content"], "Bonjour\n");
+    assert_eq!(approval_policy(&mut f, "read"), pending);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let decision = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["id"] == card.id)
+        .unwrap()["decision"]
+        .clone();
+    assert_eq!(decision, json!("allow_once"));
+}
+
+#[test]
+fn attached_interpreter_code_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    std::fs::write(f.root().join("script.pl"), "print \"script\";\n").unwrap();
+    f.send("plain", "run_shell", f.shell("perl script.pl"));
+    let card = f.request("plain");
+    let policy = approval_policy(&mut f, "plain");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("plain");
+    assert_eq!(f.outcome("plain")["output"]["stdout"], "script");
+    f.send("plain-again", "run_shell", f.shell("perl script.pl"));
+    f.finish("plain-again");
+    assert!(
+        requests::list_for_run(&f.db(), &f.run("plain-again").run_id)
+            .unwrap()
+            .is_empty()
+    );
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let note = f.root().join("note");
+    for (id, command) in [
+        ("perl-e", "perl -e'unlink \"note\"'"),
+        ("perl-ne", "perl -ne 'unlink \"note\"' script.pl"),
+        ("python-bc", "python3 -Bc 'import os; os.remove(\"note\")'"),
+        ("awk", "awk 'BEGIN{system(\"rm note\")}'"),
+        ("checkout-one", "git checkout note"),
+    ] {
+        std::fs::write(&note, "garde").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(note.exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(note.exists(), "{command}");
+    }
+}
+
+#[test]
+fn git_inline_aliases_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send("plain", "run_shell", f.shell("git -C . status --short"));
+    f.finish("plain");
+    assert!(requests::list_for_run(&f.db(), &f.run("plain").run_id)
+        .unwrap()
+        .is_empty());
+    let cases = [
+        ("alias", "git -c alias.wipe=rm wipe -q note"),
+        ("glued", "git -calias.wipe=rm wipe -q note"),
+        ("dir", "git -C . -c alias.wipe=rm wipe -q note"),
+        (
+            "env",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=rm git wipe -q note",
+        ),
+    ];
+    for (id, command) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(f.root().join("note").exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    // The alias really deletes: only the human's one-time approval runs it.
+    f.send(
+        "once",
+        "run_shell",
+        f.shell("git -c alias.wipe=rm wipe -q note"),
+    );
+    let card = f.request("once");
+    f.decide(&card, json!("allow_once"));
+    f.finish("once");
+    assert!(!f.root().join("note").exists());
+}
+
+#[test]
+fn forge_cli_sends_still_ask_when_a_permanent_shell_rule_exists() {
+    // Nonexistent repositories: even a regression could not post anywhere.
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send(
+        "read",
+        "run_shell",
+        f.shell("gh pr view 7 --repo ezerbot-inexistant-0/rien"),
+    );
+    f.finish("read");
+    assert!(requests::list_for_run(&f.db(), &f.run("read").run_id)
+        .unwrap()
+        .is_empty());
+    for (id, command) in [
+        (
+            "issue-comment",
+            "gh issue comment 1 --repo ezerbot-inexistant-0/rien --body bonjour",
+        ),
+        (
+            "pr-comment",
+            "gh pr comment 7 -R ezerbot-inexistant-0/rien -b salut",
+        ),
+        (
+            "repo-first",
+            "gh -R ezerbot-inexistant-0/rien issue comment 1 -b salut",
+        ),
+        (
+            "pr-review",
+            "gh pr review 7 -R ezerbot-inexistant-0/rien --approve",
+        ),
+        (
+            "api-post",
+            "gh api -X POST repos/ezerbot-inexistant-0/rien/issues/1/comments",
+        ),
+        (
+            "api-field",
+            "gh api repos/ezerbot-inexistant-0/rien/issues/1/comments -f body=salut",
+        ),
+        (
+            "glab-note",
+            "glab mr note 3 -R ezerbot-inexistant-0/rien -m salut",
+        ),
+    ] {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert_eq!(f.outcome(id)["status"], "failed", "{command}");
+    }
+}
+
+#[test]
+fn background_destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    let mut args = f.shell("rm victime.txt");
+    args["background"] = json!(true);
+    f.send("bg-rm", "run_shell", args);
+    wait("background rm asked or finished", || {
+        let status = f.run("bg-rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(f.run("bg-rm").status, RunStatus::AwaitingApproval);
+    assert!(target.exists());
+    let card = f.request("bg-rm");
+    let policy = approval_policy(&mut f, "bg-rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    f.decide(&card, json!("deny"));
+    f.finish("bg-rm");
+    assert!(target.exists());
 }

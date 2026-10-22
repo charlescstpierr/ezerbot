@@ -100,6 +100,37 @@ fn reply(app: &mut App) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Allowlisted option lines may accompany a refusal. Nothing else may.
+fn assert_allowlisted(log: &str, requests: usize, refusals: usize) {
+    let request_lines: Vec<_> = log
+        .lines()
+        .filter(|line| line.starts_with("OpenAI request "))
+        .collect();
+    let refusal_lines: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("OpenAI refus"))
+        .collect();
+    let other: Vec<_> = log
+        .lines()
+        .filter(|line| {
+            !line.starts_with("OpenAI request ")
+                && !line.contains("OpenAI refus")
+                && !line.contains("upstream turn=")
+        })
+        .collect();
+    assert_eq!(request_lines.len(), requests, "{log}");
+    assert_eq!(refusal_lines.len(), refusals, "{log}");
+    assert!(other.is_empty(), "{other:?}\n{log}");
+    assert!(request_lines.iter().all(|line| {
+        line.starts_with("OpenAI request model=")
+            && line.contains(" effort=")
+            && !line.contains("private")
+            && !line.contains('@')
+            && !line.contains("Bearer")
+            && !line.contains("token")
+    }));
+}
+
 #[test]
 fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
     for (status, code, expected_kind) in [
@@ -107,7 +138,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         (403, "subscription_sharing_user_not_eligible", "other"),
         (503, "subscription_sharing_usage_unavailable", "other"),
         (503, "subscription_sharing_user_unavailable", "other"),
-        (403, "subscription_sharing_invalid_user", "signin"),
+        (403, "subscription_sharing_invalid_user", "other"),
         (429, "usage_limit_reached", "limit"),
         (403, "usage_not_included", "other"),
         (429, "rate_limit_exceeded", "other"),
@@ -121,7 +152,7 @@ fn each_http_mapping_logs_only_metadata_once_without_retrying_limits() {
         assert_eq!(error.kind, expected_kind, "{code}");
         assert_eq!(fixture.server.seen.lock().unwrap().bodies.len(), 1);
         let log = fixture.log();
-        assert_eq!(log.lines().count(), 1);
+        assert_allowlisted(&log, 1, 1);
         assert!(log.ends_with(&format!("OpenAI refus : statut={status} code={code} param=prompt_cache_key request_id=req_quota_test\n")),"{log}");
         assert!(!log.contains("private") && !log.contains("@"));
         if expected_kind == "limit" {
@@ -144,14 +175,16 @@ fn successful_calls_do_not_log_and_bad_metadata_cannot_inject_lines() {
     let fixture = Fixture::new();
     fixture.reply(ScriptedResponse::json(200, json!({"id":"ok"})));
     fixture.raw().unwrap();
-    assert!(fixture.log().is_empty());
+    let success = fixture.log();
+    assert_allowlisted(&success, 1, 0);
+    assert!(success.contains("OpenAI request model=gpt-test effort=default\n"));
     fixture.server.seen.lock().unwrap().request_id = Some("req_bad@example.test".into());
     fixture.reply(ScriptedResponse::json(400,json!({"error":{"code":"bad\nprivate-access","param":"quota@example.test","message":"private-refresh"}})));
     fixture.raw().unwrap_err();
-    assert!(fixture
-        .log()
-        .ends_with("statut=400 code=- param=- request_id=-\n"));
-    assert_eq!(fixture.log().lines().count(), 1);
+    let log = fixture.log();
+    assert_allowlisted(&log, 2, 1);
+    assert!(log.ends_with("statut=400 code=- param=- request_id=-\n"));
+    assert!(!log.contains("private") && !log.contains('@') && !log.contains("refresh"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -237,7 +270,7 @@ fn streamed_mappings_keep_http_request_id_and_durable_limit_action_after_restart
             ("subscription_sharing_user_not_eligible", "other"),
             ("subscription_sharing_usage_unavailable", "other"),
             ("subscription_sharing_user_unavailable", "other"),
-            ("subscription_sharing_invalid_user", "signin"),
+            ("subscription_sharing_invalid_user", "other"),
             ("rate_limit_exceeded", "other"),
             ("usage_limit_reached", "limit"),
             ("usage_not_included", "other"),
@@ -317,24 +350,33 @@ fn each_unauthorized_attempt_is_logged_including_a_recovered_failure() {
     ));
     fixture.reply(ScriptedResponse::json(200, json!({"id":"ok"})));
     fixture.raw().unwrap();
-    assert_eq!(fixture.log().lines().count(), 1);
+    // The 401 is logged, then the recovered attempt records only its options.
+    assert_allowlisted(&fixture.log(), 2, 1);
     for _ in 0..2 {
         fixture.reply(ScriptedResponse::json(
             401,
             json!({"error":{"code":"expired"}}),
         ));
     }
-    assert_eq!(fixture.raw().unwrap_err().kind, "signin");
-    assert_eq!(fixture.log().lines().count(), 3);
-    assert!(fixture
-        .log()
+    assert_eq!(fixture.raw().unwrap_err().kind, "other");
+    assert!(fixture.provider.connected());
+    let saved: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.directory.join("workspace.chatgpt-auth.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(saved["refresh_token"].is_string());
+    let log = fixture.log();
+    assert_allowlisted(&log, 4, 3);
+    assert!(log
         .lines()
+        .filter(|line| line.contains("OpenAI refus"))
         .all(|line| line.ends_with("statut=401 code=expired param=- request_id=req_quota_test")));
 }
 
 #[test]
 #[cfg(unix)]
 fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
+    use base64::Engine;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     struct Child(std::process::Child);
@@ -345,6 +387,32 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
         }
     }
     let fixture = Fixture::new();
+    // The real binary is the ChatGPT OAuth session. The loopback fixture above
+    // still speaks the old sharing file, which this process never reads.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = format!(
+        "e30.{}.e30",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id":"quota-test"}}).to_string()
+        )
+    );
+    std::fs::write(
+        fixture.directory.join("workspace.codex-auth.json"),
+        json!({
+            "host_id":"test-host",
+            "client_id":"app_EMoamEEZ73f0CkXaXp7hrann",
+            "account_id":"quota-test",
+            "access_token": token,
+            "refresh_token":"private-refresh",
+            "expires_at": now + 3600,
+            "welcomed": true
+        })
+        .to_string(),
+    )
+    .unwrap();
     fixture.reply(ScriptedResponse::json(
         429,
         json!({"error":{"code":"subscription_sharing_usage_limit_exceeded", "reset_at":"2026-10-20T18:00:00Z"}}),
@@ -416,17 +484,35 @@ fn native_stderr_log_handle_does_not_duplicate_or_overwrite_diagnostics() {
     // from another handle would leave this offset stale and overwrite the log.
     writeln!(log, "native shutdown").unwrap();
     let contents = fixture.log();
-    assert_eq!(
-        contents
-            .lines()
-            .filter(|line| !line.contains("upstream turn="))
-            .count(),
-        3
+    let kept: Vec<_> = contents
+        .lines()
+        .filter(|line| !line.contains("upstream turn="))
+        .collect();
+    // startup, connection probe, the refused turn, its single refusal, shutdown.
+    assert_eq!(kept.len(), 5, "{contents}");
+    assert_eq!(kept[0], "native startup");
+    assert!(
+        kept[1].starts_with("OpenAI request model=") && kept[1].contains(" effort="),
+        "{contents}"
     );
+    assert!(
+        kept[2].starts_with("OpenAI request model=") && kept[2].contains(" effort="),
+        "{contents}"
+    );
+    assert!(
+        kept[3].contains(
+            "statut=429 code=subscription_sharing_usage_limit_exceeded param=- request_id=req_quota_test"
+        ),
+        "{kept:?}\n{contents}"
+    );
+    assert_eq!(contents.matches("OpenAI refus").count(), 1, "{contents}");
+    assert_eq!(kept[4], "native shutdown");
     assert!(contents.contains("code=started") && contents.contains("code=failed"));
     assert!(contents.starts_with("native startup\n"));
-    assert!(contents.contains("statut=429 code=subscription_sharing_usage_limit_exceeded param=- request_id=req_quota_test\n"));
     assert!(contents.ends_with("native shutdown\n"));
+    assert!(!contents.contains("private"));
+    assert!(!contents.contains("quota-test"));
+    assert!(!contents.contains(&token));
 }
 
 #[test]
@@ -459,13 +545,4 @@ fn http_limit_card_and_account_survive_restart_then_signout_hides_identity() {
 
 fn durable_limit(reply: &Value, kind: &str) -> bool {
     reply["state"] == "failed" && reply["error_kind"] == kind
-}
-
-#[test]
-fn durable_limit_ignores_an_error_kind_while_the_reply_is_still_streaming() {
-    let streaming = json!({"state":"streaming","error_kind":"limit"});
-    assert!(!durable_limit(&streaming, "limit"));
-    let settled = json!({"state":"failed","error_kind":"limit"});
-    assert!(durable_limit(&settled, "limit"));
-    assert!(!durable_limit(&settled, "other"));
 }

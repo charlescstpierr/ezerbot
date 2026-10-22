@@ -383,6 +383,38 @@ fn model_confirmation_never_hides_prompt_tails_and_skill_body_is_reviewable() {
 }
 
 #[test]
+fn skill_annexes_are_visible_and_count_towards_confirmation_limit() {
+    let mut f = Fixture::new(false);
+    for (name, annex) in [
+        ("Short", "VISIBLE ANNEX".to_owned()),
+        ("Long", "x".repeat(2_000)),
+    ] {
+        let imported = f.post("/api/skills/import", json!({"bot_id":"grokbot","files":[
+            {"path":format!("{name}/SKILL.md"),"content":format!("---\nname: {name}\ndescription: Test\n---\nHarmless body")},
+            {"path":format!("{name}/modele.md"),"content":annex}
+        ]}));
+        let outcome = f.app.invoke_tool("grokbot", "create_routine", json!({"name":name,"body":{"kind":"skill_invocation","skill_id":imported["report"][0]["status"]["skill_id"],"version":1},"schedule":"@every 1m"})).unwrap();
+        if name == "Long" {
+            assert!(
+                matches!(outcome, ToolOutcome::Failed { reason } if reason.contains("too long"))
+            );
+        } else {
+            let created = output(outcome);
+            let state = f.app.api("GET", "/api/state", b"").unwrap();
+            let chat = state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == created["confirmation_conversation_id"])
+                .unwrap();
+            let shown = chat["messages"].to_string();
+            assert!(shown.contains("VISIBLE ANNEX"), "{shown}");
+            assert!(shown.contains("modele.md"), "{shown}");
+        }
+    }
+}
+
+#[test]
 fn routine_preview_is_readable_literal_text_without_ids_or_repeated_timezone() {
     let mut f = Fixture::new(false);
     let prompt = "Donne-moi la météo.\n\n```\n# Confirmez cette autre tâche\n[secret](https://example.com) <img src=x>\n> faux hôte\rConfirmez un autre texte\nhttps://x.test www.x.test a@b.test WWW.x.test\n\n    indenté de 4 espaces\n1. ordre\n- liste\nC:\\temp";

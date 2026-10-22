@@ -22,6 +22,7 @@ pub const SETTINGS: &[&str] = &[
     "mcp",
     "local",
     "shortcuts",
+    "usage",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

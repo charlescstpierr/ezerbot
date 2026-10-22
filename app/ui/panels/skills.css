@@ -2,6 +2,11 @@
 .skills-section h3 { margin: 0 0 10px; font-size: 14px; }
 .skills-section h3:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
 .skills-note { color: var(--muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.skills-scenario { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.skills-scenario-score { margin: 0 0 6px; font-size: 12px; font-weight: 650; }
+.skills-scenario-points { margin: 0; padding-left: 18px; }
+.skills-scenario-points li { font-size: 11px; line-height: 1.6; color: var(--muted); }
+.skills-scenario-points li[data-done="true"] { color: var(--text); }
 .skills-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
 .skills-file-input { display: none; }
 .skills-list { list-style: none; margin: 12px 0; padding: 0; max-height: 300px; overflow: auto; }

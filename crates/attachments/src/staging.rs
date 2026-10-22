@@ -138,6 +138,10 @@ fn blob_directory(base_path: &Path) -> PathBuf {
     PathBuf::from(directory)
 }
 
+pub fn content_path(base_path: &Path, attachment: &Attachment) -> Result<PathBuf> {
+    blob_path(base_path, &attachment.sha256)
+}
+
 fn blob_path(base_path: &Path, sha256: &str) -> Result<PathBuf> {
     if !valid_digest(sha256) {
         return Err(Error::InvalidInput("invalid attachment SHA-256".into()));

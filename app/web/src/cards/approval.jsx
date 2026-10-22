@@ -29,6 +29,31 @@ export function Card({ message, busy, onAction }) {
   const blocked = !previewAvailable || localApprovalBlocked(action.tool, preview);
   // entry_id, not an echo of a redacted preview, binds the canonical action.
   const decide = (decision) => act("forms.decide", { decision });
+  const backgroundTask = request.background_task;
+  if (backgroundTask) {
+    const decision = request.decision;
+    const always = Boolean(decision && typeof decision === "object" && decision.always_allow);
+    const once = decision === "allow_once";
+    const refused = input.status === "denied" || decision === "deny" || Boolean(decision?.never);
+    const state = once ? "Autorisé une fois" : always ? "Toujours autorisé" : refused ? "Refusé" : "";
+    const bot = backgroundTask.bot_name || "le bot";
+    return (
+      <HumanInputCard message={message} title={`Autoriser ${bot} à exécuter une tâche en arrière-plan ?`} input={input}>
+        <div className="space-y-3">
+          <div className="gb-background-box">
+            <p className="gb-background-kind">{backgroundTask.kind}</p>
+            <p className="gb-background-summary">{backgroundTask.summary}</p>
+          </div>
+          {state && <p className={refused ? "gb-status-alert" : "gb-status-ok"} role="status">{state}</p>}
+          {pending && <div className="flex flex-wrap gap-2">
+            <button type="button" className="gb-retry gb-retry-primary" disabled={disabled} onClick={() => decide("allow_once")}>Autoriser une fois</button>
+            {request.policy?.remember && <button type="button" className="gb-retry" disabled={disabled} data-always-scope="global" onClick={() => decide({ always_allow: { scope: "global" } })}>Toujours autoriser</button>}
+            <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
+          </div>}
+        </div>
+      </HumanInputCard>
+    );
+  }
   if (action.tool === "propose_skill") return <SkillProposal message={message} input={input} disabled={disabled} expired={expired} />;
   const review = request.review;
   const automatic = !screen && !localToolNames[action.tool] && !review?.pending && ((review?.answer?.decision === "allow" && input.status === "resolved")
@@ -37,6 +62,7 @@ export function Card({ message, busy, onAction }) {
   if (screen && !pending) return null;
   if (automatic) return (
     <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
+      {input.status === "resolved" && <p className="gb-status-ok" role="status">Autorisé une fois</p>}
       <p className="text-sm" role="status"><strong className={input.status === "denied" ? "gb-status-alert" : undefined}>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
       <p className="mt-1 text-xs text-muted-foreground">{request.connector ? <>Connecteur : <strong>{request.connector.server}</strong><br />Outil : <code>{request.connector.tool}</code></> : <>Outil : <code>{action.tool}</code></>}</p>
       {preview == null ? <p className="mt-2 text-xs text-muted-foreground">Aperçu de l’action indisponible.</p> : <div className="mt-2 space-y-2 text-xs text-muted-foreground">
@@ -47,8 +73,15 @@ export function Card({ message, busy, onAction }) {
     </article>
   );
   const reviewing = review?.pending && review.started_at + 12000 > Date.now();
+  const policy = request.policy;
+  const outbound = policy?.protection === "outbound";
+  const destructive = policy?.protection === "destructive";
+  const title = outbound ? "Envoi sous votre nom" : destructive ? "Confirmation d’une suppression" : "Approbation demandée";
+  const showRemember = policy
+    ? Boolean(policy.remember) && !screen && !lifecycle
+    : !screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool);
   return (
-    <HumanInputCard message={message} title="Approbation demandée" input={input} showDelivery={!background && !lifecycle}>
+    <HumanInputCard message={message} title={title} input={input} showDelivery={!background && !lifecycle}>
       <div className="space-y-3" data-follow-actions={background || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
@@ -79,9 +112,12 @@ export function Card({ message, busy, onAction }) {
         {pending && <fieldset className="space-y-3 border-0 p-0 m-0" disabled={disabled}>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="gb-retry gb-retry-primary" disabled={blocked} onClick={() => decide("allow_once")}>{screen ? "Autoriser une fois et reprendre" : "Autoriser une fois"}</button>
+            {policy?.remember && <button type="button" className="gb-retry" disabled={blocked} data-always-scope={policy.scope} onClick={() => decide({ always_allow: { scope: policy.scope } })}>Toujours autoriser</button>}
             <button type="button" className="gb-retry" onClick={() => decide("deny")}>Refuser</button>
           </div>
-          {!screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool) && <details>
+          {outbound && <p className="text-sm">Cet envoi part sous votre nom. Chaque envoi demande cette confirmation.</p>}
+          {destructive && <p className="text-sm">Cette suppression demande une confirmation à chaque fois.</p>}
+          {showRemember && <details>
             <summary className="text-sm">Mémoriser une règle…</summary>
             <label className="mt-2 block space-y-1 text-sm"><span>Portée pour ce bot et cet outil</span><select className={inputClass} id={`${message.id}-approval-scope`} value={scope} onChange={(event) => setScope(event.target.value)}><option value="subject">Seulement ces arguments identiques</option><option value="global">Toutes les actions de cet outil</option></select></label>
             <p className="my-2 text-xs text-muted-foreground">Les prochaines demandes correspondantes seront traitées automatiquement. Vous pouvez retirer la règle dans les réglages.</p>

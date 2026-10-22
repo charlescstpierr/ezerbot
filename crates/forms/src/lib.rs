@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod approvals;
+pub mod policy;
 pub mod redact;
 pub mod requests;
 pub mod reviewer;

@@ -41,10 +41,16 @@ for line in sys.stdin:
             continue
         if mode == "slow-list" and changed:
             time.sleep(2)
-        result = {"tools": [
+        tools = [
             {"name": "echo", "description": "Catalogue actualisé." if changed else "Répéter un texte sans effet externe.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
             {"name": "addition", "description": "Additionner deux nombres.", "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}}
-        ]}
+        ]
+        if mode == "protected":
+            tools = [
+                {"name": name, "description": "Action protégée du connecteur fictif.", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}
+                for name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage", "echo")
+            ]
+        result = {"tools": tools}
         if mode == "change-during-list" and not changed:
             changed = True
             print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
@@ -88,6 +94,8 @@ for line in sys.stdin:
                 result["structuredContent"] = {"value": int(os.environ["NUMERIC_TOKEN"])}
         elif name == "addition":
             result = {"content": [{"type": "text", "text": str(args.get("a", 0) + args.get("b", 0))}]}
+        elif name in ("send_email", "post_message", "create_comment", "delete_file", "sendEmail", "deleteFile", "chat.postMessage"):
+            result = {"content": [{"type": "text", "text": f"{name}:{args.get('text', '')}"}]}
         else:
             response["error"] = {"code": -32602, "message": "Outil inconnu"}
             result = None

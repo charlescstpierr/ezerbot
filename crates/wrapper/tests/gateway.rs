@@ -1146,3 +1146,121 @@ fn simulated_gateway_keeps_existing_rich_reply_and_stops_on_callback_error() {
         .is_err());
     assert_eq!(count, 1);
 }
+
+#[test]
+fn completed_envelope_recovers_the_full_final_text_without_repeating_deltas() {
+    let fixture = Fixture::new();
+    let item = json!({"id":"final","type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Réponse complète, pas un résumé."}]});
+    fixture.events(&[json!({"type":"response.completed","response":{"output":[item.clone()]}})]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "Réponse complète, pas un résumé.".into()
+            },
+            ModelEvent::Completed
+        ]
+    );
+    fixture.events(&[
+        json!({"type":"response.output_text.delta","item_id":"final","delta":"Réponse complète, pas un résumé."}),
+        json!({"type":"response.completed","response":{"output":[item]}})
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "Réponse complète, pas un résumé.".into()
+            },
+            ModelEvent::Completed
+        ]
+    );
+}
+
+#[test]
+fn commentary_phase_is_not_concatenated_into_the_visible_answer() {
+    let fixture = Fixture::new();
+    fixture.events(&[
+        json!({"type":"response.output_item.added","item":{"id":"msg_c","type":"message","role":"assistant","phase":"commentary"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_c","delta":"je réfléchis"}),
+        json!({"type":"response.output_text.done","item_id":"msg_c","text":"je réfléchis"}),
+        json!({"type":"response.output_item.done","item":{"id":"msg_c","type":"message","phase":"commentary","content":[{"type":"output_text","text":"je réfléchis"}]}}),
+        json!({"type":"response.output_item.added","item":{"id":"msg_f","type":"message","role":"assistant","phase":"final_answer"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_f","delta":"17 × 23 = "}),
+        json!({"type":"response.output_text.delta","item_id":"msg_f","delta":"391."}),
+        json!({"type":"response.output_text.done","item_id":"msg_f","text":"17 × 23 = 391."}),
+        json!({"type":"response.output_item.done","item":{"id":"msg_f","type":"message","phase":"final_answer","content":[{"type":"output_text","text":"17 × 23 = 391."}]}}),
+        json!({"type":"response.completed"}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "17 × 23 = ".into()
+            },
+            ModelEvent::TextDelta {
+                text: "391.".into()
+            },
+            ModelEvent::Completed,
+        ]
+    );
+}
+
+#[test]
+fn message_text_present_only_in_done_events_is_emitted_once() {
+    let fixture = Fixture::new();
+    fixture.events(&[
+        json!({"type":"response.output_item.added","item":{"id":"msg_f","type":"message","role":"assistant"}}),
+        json!({"type":"response.output_text.done","item_id":"msg_f","text":"seulement la fin"}),
+        json!({"type":"response.output_item.done","item":{"id":"msg_f","type":"message","content":[{"type":"output_text","text":"seulement la fin"}]}}),
+        json!({"type":"response.completed"}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "seulement la fin".into()
+            },
+            ModelEvent::Completed,
+        ]
+    );
+}
+
+#[test]
+fn done_text_does_not_repeat_deltas_and_commentary_only_is_one_reply() {
+    let fixture = Fixture::new();
+    fixture.events(&[
+        json!({"type":"response.output_item.added","item":{"id":"msg","type":"message","role":"assistant"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg","delta":"Bon"}),
+        json!({"type":"response.output_text.delta","item_id":"msg","delta":"jour"}),
+        json!({"type":"response.output_text.done","item_id":"msg","text":"Bonjour"}),
+        json!({"type":"response.output_item.done","item":{"id":"msg","type":"message","content":[{"type":"output_text","text":"Bonjour"}]}}),
+        json!({"type":"response.completed"}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta { text: "Bon".into() },
+            ModelEvent::TextDelta {
+                text: "jour".into()
+            },
+            ModelEvent::Completed,
+        ]
+    );
+    fixture.events(&[
+        json!({"type":"response.output_item.added","item":{"id":"msg_c","type":"message","phase":"commentary"}}),
+        json!({"type":"response.output_text.delta","item_id":"msg_c","delta":"brouillon "}),
+        json!({"type":"response.output_text.delta","item_id":"msg_c","delta":"inutile"}),
+        json!({"type":"response.output_text.done","item_id":"msg_c","text":"brouillon inutile"}),
+        json!({"type":"response.output_item.done","item":{"id":"msg_c","type":"message","phase":"commentary","content":[{"type":"output_text","text":"brouillon inutile"}]}}),
+        json!({"type":"response.completed"}),
+    ]);
+    assert_eq!(
+        fixture.collect(&request()),
+        [
+            ModelEvent::TextDelta {
+                text: "brouillon inutile".into()
+            },
+            ModelEvent::Completed,
+        ]
+    );
+}

@@ -41,6 +41,18 @@ if [[ $# != 0 ]]; then
 fi
 
 cd "$project_dir"
+# Embarque le commit dans le binaire. Une mise à jour peut imposer le commit de main
+# via EZERBOT_GIT_COMMIT avant d’appeler ce script ; on ne lance pas git reset ici.
+if [[ -z "${EZERBOT_GIT_COMMIT:-}" ]]; then
+  if git_commit="$(git -C "$project_dir" rev-parse HEAD 2>/dev/null)" && [[ "$git_commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    export EZERBOT_GIT_COMMIT="$git_commit"
+  fi
+fi
+if [[ -z "${EZERBOT_GIT_COMMIT_UNIX:-}" ]]; then
+  if git_unix="$(git -C "$project_dir" log -1 --format=%ct 2>/dev/null)" && [[ "$git_unix" =~ ^[0-9]+$ ]]; then
+    export EZERBOT_GIT_COMMIT_UNIX="$git_unix"
+  fi
+fi
 # The chat bundle (app/ui/chat.js, chat.css) is committed; rebuild it when its toolchain is installed.
 if [[ -d "$project_dir/app/web/node_modules" ]] && command -v npm >/dev/null; then
   npm --prefix "$project_dir/app/web" run build
@@ -106,6 +118,19 @@ clang -fobjc-arc -Wall -Wextra -Werror -O2 -framework Cocoa \
   "$project_dir/app/native/icon.m" -o "$project_dir/app/build/draw-icon"
 "$project_dir/app/build/draw-icon" "$iconset"
 iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/Grokbot.icns"
+if [[ -n "${EZERBOT_GIT_COMMIT:-}" ]]; then
+  python3 - "$bundle/Contents/Info.plist" "$EZERBOT_GIT_COMMIT" "${EZERBOT_GIT_COMMIT_UNIX:-}" <<'PY'
+import plistlib, sys
+path, commit, unix = sys.argv[1:]
+with open(path, "rb") as handle:
+    data = plistlib.load(handle)
+data["EzerbotGitCommit"] = commit
+if unix:
+    data["EzerbotGitCommitUnix"] = unix
+with open(path, "wb") as handle:
+    plistlib.dump(data, handle, fmt=plistlib.FMT_XML)
+PY
+fi
 plutil -lint "$bundle/Contents/Info.plist"
 # A rebuild may reuse a bundle generated before the native executable was renamed.
 rm -f "$bundle/Contents/MacOS/Grokbot"

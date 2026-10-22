@@ -1,8 +1,8 @@
 .voice-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
-/* Mémo vocal : la case reste la commande, présentée comme un bouton bascule à onde sonore. */
+/* Mémo vocal : bulle à trois barres, distincte du casque du mode voix. La case reste la commande. */
 /* Icône seule dans le compositeur : le libellé reste dans aria-label, title et le texte, pour laisser le nom du bot. */
 .voice-mode { position: relative; display: flex; align-items: center; justify-content: center; gap: 0; width: 32px; height: 32px; padding: 0; border-radius: 8px; font-size: 0; color: var(--muted); cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
-.voice-mode::before { content: ""; width: 16px; height: 16px; flex: 0 0 auto; background: currentColor; -webkit-mask: var(--voice-wave) center / contain no-repeat; mask: var(--voice-wave) center / contain no-repeat; --voice-wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2'/%3E%3C/svg%3E"); }
+.voice-mode::before { content: ""; width: 16px; height: 16px; flex: 0 0 auto; background: currentColor; -webkit-mask: var(--voice-memo) center / contain no-repeat; mask: var(--voice-memo) center / contain no-repeat; --voice-memo: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4h10a4 4 0 0 1 4 4v5a4 4 0 0 1-4 4h-5l-4.5 3.5V17H7a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z'/%3E%3Cpath d='M9 9v3'/%3E%3Cpath d='M12 8v5'/%3E%3Cpath d='M15 9v3'/%3E%3C/svg%3E"); }
 .voice-mode input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
 .voice-mode:hover { background: var(--soft); color: var(--text); }
 .voice-mode:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); }
@@ -26,7 +26,6 @@
 .voice-region .attachment-retry { font-size: 11px; align-self: center; }
 .voice-status-row[hidden] { display: none; }
 @media (max-width: 900px) {
-  .voice-controls { gap: 0; }
   .voice-region { margin-left: 10px; margin-right: 10px; }
 }
 @media (max-height: 640px) {

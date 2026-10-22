@@ -781,6 +781,12 @@ fn add_remote(ctx: &Context<'_>, add: Add) -> Result<Value, ApiError> {
             "Le jeton est invalide : 2 Ko au plus, sans espace ni caractère de contrôle.",
         ));
     }
+    // A shorter value is only masked when it is a whole string: it could leak inside a sentence.
+    if !token.is_empty() && !strong_secret(token) {
+        return Err(invalid(
+            "Le jeton est trop court pour être masqué de façon fiable : 8 caractères au moins.",
+        ));
+    }
     if !token.is_empty() && (name.contains(token) || endpoint.contains(token)) {
         return Err(invalid(
             "Gardez le jeton uniquement dans son champ, pas dans le nom ni dans l’adresse.",

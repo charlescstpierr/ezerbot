@@ -1397,6 +1397,19 @@ fn only_https_or_confirmed_loopback_addresses_are_accepted() {
         )
         .unwrap_err();
     assert!(error.message.contains("par adresse"));
+    // A token too short to be masked inside a sentence is refused, not stored.
+    let error = f
+        .try_post(
+            "/api/mcp/add",
+            json!({"name":"Court","url":"https://exemple.fr/mcp","token":"abc123"}),
+        )
+        .unwrap_err();
+    assert!(error.message.contains("trop court"), "{}", error.message);
+    assert!(!f.state()["mcp"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["name"] == "Court"));
 }
 
 #[test]

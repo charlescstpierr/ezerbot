@@ -48,7 +48,10 @@ case "$1" in
     fi ;;
   funnel)
     [ "$mode" = refused ] && exit 1
-    [ "$mode" = unconfirmed ] || touch "$ROOT/funnel-on" ;;
+    case "$*" in
+      *" off") rm -f "$ROOT/funnel-on" ;;
+      *) [ "$mode" = unconfirmed ] || touch "$ROOT/funnel-on" ;;
+    esac ;;
   serve)
     if [ "$2" = status ] && [ -f "$ROOT/funnel-on" ]; then
       printf '%s\n' '{{"TCP":{{"8443":{{"HTTPS":true}}}},"Web":{{"{dns}:8443":{{"Handlers":{{"/hooks":{{"Proxy":"http://127.0.0.1:'"$(cat "$ROOT/hook-port")"'"}}}}}}}},"AllowFunnel":{{"{dns}:8443":true}}}}'
@@ -417,6 +420,15 @@ fn funnel_publishes_only_after_approval_and_only_on_its_own_port() {
         "tailscale_stopped"
     );
     assert!(host.state()["routine_webhooks"]["items"][&hook.routine_id]["url"].is_null());
+    // A refused withdrawal never records "off": the endpoint may still be public.
+    host.tailscale("running");
+    host.get("/api/routines/funnel");
+    host.tailscale("refused");
+    host.approve_funnel(false);
+    let stuck = host.get("/api/routines/funnel");
+    assert_eq!(stuck["state"], "withdraw_failed");
+    assert_eq!(stuck["enabled"], true);
+    assert!(stuck["public_base"].is_null());
     // Withdrawing goes through the same approval card and the same dedicated port.
     host.tailscale("running");
     host.approve_funnel(false);
@@ -498,4 +510,29 @@ fn an_hourly_routine_still_exists_lists_and_is_not_a_webhook() {
         .as_object()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn a_stalled_authenticated_upload_does_not_freeze_the_host() {
+    use std::io::Write;
+    let host = Host::new();
+    let hook = host.webhook_routine("Lente");
+    host.wait_listener();
+    let mut stalled =
+        std::net::TcpStream::connect(host.hook.trim_start_matches("http://")).unwrap();
+    write!(
+        stalled,
+        "POST /hooks/{}/{} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{{\"par",
+        hook.routine_id, hook.trigger_id, hook.token
+    )
+    .unwrap();
+    stalled.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // The local API and a second webhook call keep answering while the upload hangs.
+    let started = std::time::Instant::now();
+    assert!(host.state()["routine_webhooks"]["listener"]["listening"] == true);
+    assert_eq!(host.call(&hook, Some(&hook.token), None, b"{}").0, 200);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(host.runs(&hook), 1);
+    drop(stalled);
 }

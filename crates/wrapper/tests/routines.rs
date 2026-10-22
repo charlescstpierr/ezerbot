@@ -2165,3 +2165,42 @@ fn a_webhook_whose_routine_a_bot_moved_to_a_schedule_answers_nothing() {
             .is_empty()
     );
 }
+
+#[test]
+fn a_queued_webhook_call_obeys_pause_and_edit_cutoffs_unlike_a_manual_launch() {
+    let mut f = Fixture::new(false);
+    let (r, url, bearer) = webhook_routine(&mut f, "Cutoff");
+    let hook = features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).unwrap();
+    let id = json!({"bot_id":"grokbot","routine_id":r.routine_id});
+    // Pause before the host tick launches the accepted call.
+    assert_eq!(
+        features::routine_webhooks::accept(&mut f.app, &hook, None, b"{}").status,
+        200
+    );
+    f.post("/api/routines/pause", id.clone());
+    f.app.tick(now());
+    assert_eq!(f.count(), 0);
+    assert_eq!(
+        f.history(&r)["occurrences"][0]["status"]["status"],
+        "failed"
+    );
+    // A manual launch is not a webhook call: it still runs on a paused routine.
+    f.post(
+        "/api/routines/run-now",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"nonce":"click-1"}),
+    );
+    f.app.tick(now());
+    assert_eq!(f.count(), 1);
+    // An edit that changes the trigger cuts an accepted call off too.
+    let resumed = f.post("/api/routines/resume", id)["routine"].clone();
+    assert_eq!(
+        features::routine_webhooks::accept(&mut f.app, &hook, None, b"{}").status,
+        200
+    );
+    f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":resumed["modified_at"],"schedule_version":resumed["schedule_version"],"schedule":"@every 1h"}),
+    );
+    f.app.tick(now());
+    assert_eq!(f.count(), 1);
+}

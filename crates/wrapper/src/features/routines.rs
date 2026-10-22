@@ -500,7 +500,10 @@ pub(super) fn create_for_template(
         time_zone: local_zone(),
         enabled,
     };
-    create(ctx, input, Origin::User)
+    let r = create(ctx, input, Origin::User)?;
+    // An imported webhook routine needs its trigger and token like a panel-made one.
+    routine_webhooks::sync(ctx.connection, &r, clock(ctx)?)?;
+    Ok(r)
 }
 fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError> {
     let mut r = owned(ctx.connection, &input.bot_id, &input.routine_id)?;
@@ -680,7 +683,7 @@ pub fn routes(
                 let existing: Option<String> = tx.query_row("SELECT occurrence_id FROM wrapper_routine_launches WHERE routine_id=?1 AND nonce=?2",params![input.routine_id,input.nonce],|r|r.get(0)).optional()?;
                 let existing = match existing {
                     Some(id) => Some(id),
-                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND manual_nonce NOT LIKE 'scheduler-error:%' AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
+                    None => tx.query_row("SELECT occurrence_id FROM scheduler_occurrences WHERE routine_id=?1 AND (manual_nonce IS NULL OR manual_nonce NOT LIKE 'webhook:%') AND (status IN ('pending','running') OR (manual_nonce IS NOT NULL AND manual_nonce NOT LIKE 'scheduler-error:%' AND scheduled_at_utc>=?2)) ORDER BY scheduled_at_utc DESC,occurrence_id DESC LIMIT 1",params![input.routine_id,clock(&ctx)?.saturating_sub(3000)],|r|r.get(0)).optional()?,
                 };
                 let occurrence = match existing {
                     Some(id) => occurrences::get(&tx, &id)?
@@ -1165,7 +1168,11 @@ fn react(conn: &Connection, run: &Run) -> Result<(), ApiError> {
         return Ok(());
     };
     if matches!(o.status, OccurrenceStatus::Pending) {
-        let runnable: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE routine_id=?1 AND deleted=0 AND (?2 OR (enabled=1 AND schedule_version=?3 AND active_since<?4)))",params![o.routine_id,o.manual_nonce.is_some(),o.schedule_version,o.scheduled_at_utc],|row|row.get(0))?;
+        let webhook = o
+            .manual_nonce
+            .as_deref()
+            .is_some_and(routine_webhooks::is_call_nonce);
+        let runnable: bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_routines WHERE routine_id=?1 AND deleted=0 AND (?2 OR (enabled=1 AND schedule_version=?3 AND (?5 OR active_since<?4))))",params![o.routine_id,o.manual_nonce.is_some() && !webhook,o.schedule_version,o.scheduled_at_utc,webhook],|row|row.get(0))?;
         if !runnable && run.status == RunStatus::Queued {
             occurrences::mark_failed(conn, occurrence_id, "Occurrence no longer runnable")?;
             if !run.status.is_terminal() {
@@ -1230,11 +1237,14 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
     }
     // The host tick is serial with HTTP mutations. Recheck dispatchability after
     // materialization so pause/edit/delete cannot launch stale scheduled intent.
-    if o.manual_nonce.is_none() && (!r.enabled || r.schedule_version != o.schedule_version) {
+    // A webhook call is automatic intent: pause and edit cut it off, unlike a manual launch.
+    let webhook = routine_webhooks::is_call_nonce(o.manual_nonce.as_deref().unwrap_or_default());
+    if (o.manual_nonce.is_none() || webhook)
+        && (!r.enabled || r.schedule_version != o.schedule_version)
+    {
         occurrences::mark_failed(ctx.connection, &o.occurrence_id, "Routine paused or edited")?;
         return Ok(Dispatch::Deferred("Routine paused or edited"));
     }
-    let webhook = routine_webhooks::call_of(ctx.connection, &o.occurrence_id)?.is_some();
     if o.manual_nonce.is_none() || webhook {
         let active:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM engine_runs WHERE conversation_id=?1 AND status NOT IN ('finished','failed','cancelled'))",[&r.conversation_id],|row|row.get(0))?;
         // Preserve only the newest pending intent through scheduler catch-up;
@@ -1307,8 +1317,8 @@ pub fn tick(ctx: &Context<'_>) {
         }
         // Retire suppressed intent immediately instead of holding an idle write
         // lock every tick until the one-hour late window elapses.
-        tx.execute("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR (o.manual_nonce IS NULL AND (r.enabled=0 OR r.schedule_version!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",[])?;
-        tx.execute("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR (o.manual_nonce IS NULL AND (r.enabled=0 OR r.schedule_version!=o.schedule_version))))",[])?;
+        tx.execute("INSERT INTO wrapper_routine_errors SELECT o.routine_id,'Routine paused or edited' FROM scheduler_occurrences o WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR r.schedule_version!=o.schedule_version)))) GROUP BY o.routine_id ON CONFLICT(routine_id) DO UPDATE SET error=excluded.error",[])?;
+        tx.execute("UPDATE scheduler_occurrences AS o SET status='failed',reason='Routine paused or edited' WHERE o.status='pending' AND EXISTS(SELECT 1 FROM scheduler_routines r WHERE r.routine_id=o.routine_id AND (r.deleted=1 OR ((o.manual_nonce IS NULL OR o.manual_nonce LIKE 'webhook:%') AND (r.enabled=0 OR r.schedule_version!=o.schedule_version))))",[])?;
         let pending = occurrences::materialize_due(&tx, clock(ctx)?, &CatchUpPolicy::default())?;
         tx.commit()?;
         Ok(pending)

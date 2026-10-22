@@ -306,7 +306,7 @@
     const state = node("p", funnel?.state === "published" ? "routines-note" : "routines-warning", !funnel ? "Vérification de Tailscale en cours…" : funnel.state === "published" ? "Publié par Tailscale Funnel." : funnel.reason || "Publication non confirmée.");
     state.setAttribute("role", "status"); state.dataset.funnelState = funnel?.state || "loading"; box.append(state);
     const actions = node("div", "routines-actions");
-    if (funnel && funnel.state === "published") actions.append(button("Retirer la publication…", () => publishFunnel(false)));
+    if (funnel && ["published", "withdraw_failed"].includes(funnel.state)) actions.append(button("Retirer la publication…", () => publishFunnel(false)));
     else if (funnel && ["off", "refused", "unconfirmed"].includes(funnel.state)) actions.append(button("Publier avec Tailscale Funnel…", () => publishFunnel(true), "primary-button"));
     actions.append(button("Vérifier Tailscale", () => { funnel = null; signature = ""; renderList(); void loadFunnel(); }));
     if (funnelBusy) actions.querySelectorAll("button").forEach((el) => { el.disabled = true; });

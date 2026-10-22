@@ -478,7 +478,8 @@ pub fn pending(conn: &Connection) -> Result<Vec<Occurrence>> {
     let mut query = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM scheduler_occurrences WHERE status='pending'
          AND routine_id IN (SELECT routine_id FROM scheduler_routines WHERE deleted=0
-                            AND (enabled=1 OR scheduler_occurrences.manual_nonce IS NOT NULL))
+                            AND (enabled=1 OR (scheduler_occurrences.manual_nonce IS NOT NULL
+                                 AND scheduler_occurrences.manual_nonce NOT LIKE 'webhook:%')))
          ORDER BY scheduled_at_utc, occurrence_id"
     ))?;
     let rows = query.query_map([], from_row)?;

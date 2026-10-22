@@ -206,10 +206,15 @@ fn payload(
     }
 }
 
+/// How long an authenticated sender may take to deliver its body.
+const WEBHOOK_BODY_DEADLINE: Duration = Duration::from_secs(10);
+
 /// One webhook call. The caller is authenticated from its headers alone: a body
-/// is read only for a valid token, so a stalled anonymous client cannot hold the
-/// single host thread. Funnel proxies here; the listener itself is loopback.
-fn webhook(mut request: Request, app: &mut App) {
+/// is read only for a valid token, so an anonymous client cannot hold the
+/// single host thread. The read itself runs off the host thread under a
+/// deadline, so a stalled authenticated upload cannot freeze the app either.
+/// Funnel proxies here; the listener itself is loopback.
+fn webhook(request: Request, app: &mut App) {
     use grokbot_wrapper::features::routine_webhooks as hooks;
     let header = |name: &str| {
         request
@@ -221,30 +226,48 @@ fn webhook(mut request: Request, app: &mut App) {
     let (authorization, key) = (header("Authorization"), header("Idempotency-Key"));
     let method = request.method().as_str().to_owned();
     let url = request.url().to_owned();
-    let reply = match hooks::authorize(app, &method, &url, authorization.as_deref()) {
-        Err(reply) => reply,
+    let too_big = request.body_length().is_some_and(|n| n > hooks::BODY_LIMIT);
+    let (request, reply) = match hooks::authorize(app, &method, &url, authorization.as_deref()) {
+        Err(reply) => (Some(request), reply),
+        Ok(_) if too_big => (
+            Some(request),
+            hooks::Reply {
+                status: 413,
+                body: json!({"error": "Le corps dépasse la borne du prompt d’une routine."}),
+            },
+        ),
         Ok(call) => {
-            if request.body_length().is_some_and(|n| n > hooks::BODY_LIMIT) {
-                hooks::Reply {
-                    status: 413,
-                    body: json!({"error": "Le corps dépasse la borne du prompt d’une routine."}),
-                }
-            } else {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut request = request;
                 let mut body = Vec::new();
-                match request
+                let read = request
                     .as_reader()
                     .take((hooks::BODY_LIMIT + 1) as u64)
-                    .read_to_end(&mut body)
-                {
-                    Ok(_) => hooks::accept(app, &call, key.as_deref(), &body),
-                    Err(_) => hooks::Reply {
+                    .read_to_end(&mut body);
+                let _ = sender.send((request, read.map(|_| body)));
+            });
+            match receiver.recv_timeout(WEBHOOK_BODY_DEADLINE) {
+                Ok((request, Ok(body))) => {
+                    let reply = hooks::accept(app, &call, key.as_deref(), &body);
+                    (Some(request), reply)
+                }
+                Ok((request, Err(_))) => (
+                    Some(request),
+                    hooks::Reply {
                         status: 400,
                         body: json!({"error": "Le corps de la requête est illisible."}),
                     },
+                ),
+                // The reader thread ends with the client's connection; nothing is accepted.
+                Err(_) => {
+                    eprintln!("Webhook abandonné : corps non reçu en {WEBHOOK_BODY_DEADLINE:?}.");
+                    return;
                 }
             }
         }
     };
+    let Some(request) = request else { return };
     let mut response = Response::from_data(reply.body.to_string().into_bytes())
         .with_status_code(StatusCode(reply.status));
     let mut headers = vec![

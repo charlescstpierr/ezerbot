@@ -141,6 +141,12 @@ fn trigger_of(conn: &Connection, routine_id: &str) -> Result<(String, String), A
     .ok_or_else(|| bad(404, "Cette routine n’a pas de webhook."))
 }
 
+/// Webhook occurrences reuse the manual-nonce identity but, unlike a manual
+/// launch, obey pause and edit cutoffs.
+pub(crate) fn is_call_nonce(nonce: &str) -> bool {
+    nonce.starts_with("webhook:")
+}
+
 /// The call that started this occurrence, if it came from a webhook.
 pub(crate) fn call_of(
     conn: &Connection,
@@ -466,6 +472,13 @@ fn check(conn: &Connection) -> Result<Funnel, ApiError> {
             public_base: None,
         });
     }
+    if attempt.as_deref() == Some("withdraw_failed") {
+        return Ok(Funnel {
+            state: "withdraw_failed",
+            reason: Some("Tailscale n’a pas pu retirer la publication Funnel : l’adresse publique peut rester joignable. Réessayez de la retirer.".into()),
+            public_base: None,
+        });
+    }
     if attempt.as_deref() == Some("refused") {
         return Ok(Funnel {
             state: "refused",
@@ -535,11 +548,32 @@ fn publish(ctx: &Context<'_>, enabled: bool) -> Result<Value, ApiError> {
         Err(error) if error.status == 504 => "sent",
         _ => "refused",
     };
-    conn.execute(
-        "UPDATE wrapper_routine_funnel SET enabled=?1,attempt=?2 WHERE id=1",
-        params![enabled, attempt],
-    )?;
+    if enabled {
+        conn.execute(
+            "UPDATE wrapper_routine_funnel SET enabled=1,attempt=?1 WHERE id=1",
+            [attempt],
+        )?;
+    }
     if !enabled {
+        // Only a confirmed withdrawal records "off": otherwise the endpoint may
+        // still be public and the panel must keep offering the retry.
+        let still_public = attempt != "refused" && machine().is_ok_and(|dns| confirmed(&dns));
+        if attempt == "refused" || still_public {
+            conn.execute(
+                "UPDATE wrapper_routine_funnel SET attempt='withdraw_failed' WHERE id=1",
+                [],
+            )?;
+            let funnel = check(conn)?;
+            store(conn, &funnel)?;
+            return Err(bad(
+                502,
+                "Tailscale n’a pas pu retirer la publication Funnel. Réessayez.",
+            ));
+        }
+        conn.execute(
+            "UPDATE wrapper_routine_funnel SET enabled=0,attempt='sent' WHERE id=1",
+            [],
+        )?;
         store(
             conn,
             &Funnel {
@@ -548,14 +582,7 @@ fn publish(ctx: &Context<'_>, enabled: bool) -> Result<Value, ApiError> {
                 public_base: None,
             },
         )?;
-        return if attempt == "refused" {
-            Err(bad(
-                502,
-                "Tailscale n’a pas pu retirer la publication Funnel. Réessayez.",
-            ))
-        } else {
-            Ok(json!({"message":"Publication Funnel retirée."}))
-        };
+        return Ok(json!({"message":"Publication Funnel retirée."}));
     }
     let funnel = check(conn)?;
     store(conn, &funnel)?;

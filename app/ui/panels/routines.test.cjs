@@ -415,3 +415,12 @@ test('a routine editor offers a Webhook trigger without schedule fields', async 
   assert.ok(select, 'the trigger selector lists webhook');
   assert.equal(select.value, 'webhook');
 });
+
+test('a withdrawal Tailscale refused keeps offering the retry and shows no public URL', async () => {
+  const h = webhookHarness({ state: 'withdraw_failed', reason: 'Tailscale n’a pas pu retirer la publication Funnel : l’adresse publique peut rester joignable. Réessayez de la retirer.', public_base: null });
+  await h.t.loadFunnel();
+  assert.match(h.t.content.textContent, /peut rester joignable/);
+  assert.match(h.t.content.textContent, /Retirer la publication/);
+  assert.doesNotMatch(h.t.content.textContent, /Publier avec Tailscale Funnel/);
+  assert.doesNotMatch(h.t.content.textContent, /https:\/\//);
+});

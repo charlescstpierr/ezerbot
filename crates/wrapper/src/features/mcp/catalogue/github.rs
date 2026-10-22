@@ -8,9 +8,11 @@ use std::{
     io::Read,
     time::{Duration, Instant},
 };
+pub(in super::super) mod comment;
 
 /// Read tool of the closed list. It needs no approval card: it only reads.
 pub(in super::super) const TOOL: &str = "github_list_issues";
+pub(in super::super) use comment::TOOL as COMMENT_TOOL;
 pub(super) const DEVICE_PAGE: &str = "https://github.com/login/device";
 const CODE_LIFETIME: u64 = 900;
 const PAGE: usize = 30;
@@ -63,7 +65,7 @@ fn send(request: ureq::Request, form: Option<&[(&str, &str)]>) -> Result<Reply, 
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", "Ezerbot")
         .set("X-GitHub-Api-Version", "2022-11-28");
-    let outcome = match form {
+    reply_of(match form {
         Some(fields) => request
             .set("Accept", "application/json")
             .set("Content-Type", "application/x-www-form-urlencoded")
@@ -73,7 +75,18 @@ fn send(request: ureq::Request, form: Option<&[(&str, &str)]>) -> Result<Reply, 
                     .finish(),
             ),
         None => request.call(),
-    };
+    })
+}
+fn send_json(request: ureq::Request, body: &Value) -> Result<Reply, ()> {
+    reply_of(
+        request
+            .set("Accept", "application/vnd.github+json")
+            .set("User-Agent", "Ezerbot")
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(body),
+    )
+}
+fn reply_of(outcome: Result<ureq::Response, ureq::Error>) -> Result<Reply, ()> {
     let response = match outcome {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(_) => return Err(()),
@@ -404,7 +417,7 @@ pub(in super::super) fn tool_spec() -> grokbot_engine::contracts::ToolSpec {
 }
 /// The connection has no process: it is native, and its tools are this fixed list.
 pub(super) fn attach(ctx: &Context<'_>, server: &Server) -> Result<Value, ApiError> {
-    let tools = json!([tool_definition()]);
+    let tools = json!([tool_definition(), comment::tool_definition()]);
     ctx.connection.execute(
         "UPDATE wrapper_mcp_servers SET tools_json=?2,error=NULL WHERE id=?1",
         params![server.id, tools.to_string()],
@@ -493,6 +506,63 @@ pub(super) fn refresh(
     Ok(())
 }
 
+/// Run one authenticated call. An access past its expiry is renewed first, and a 401
+/// renews once more and calls again: a rejected call has not touched the provider.
+fn authorized(
+    ctx: &Context<'_>,
+    server: &Server,
+    m: Manifest,
+    call: &dyn Fn(&str) -> Result<Reply, ApiError>,
+) -> Result<Reply, ApiError> {
+    super::ensure(ctx, server)?;
+    let attempt = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
+        let access = credentials(ctx, &server.id)?
+            .and_then(|env| env.get("ACCESS_TOKEN").cloned())
+            .ok_or_else(|| invalid(RECONNECT))?;
+        let reply = call(&access)?;
+        Ok((access, reply))
+    };
+    let (used, mut reply) = attempt(ctx)?;
+    if reply.status == 401 {
+        {
+            let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut env = credentials(ctx, &server.id)?.ok_or_else(|| invalid(RECONNECT))?;
+            if env.get("ACCESS_TOKEN") == Some(&used) {
+                if let Err(error) = refresh(ctx, server, m, &mut env) {
+                    if error.status != 503 {
+                        phase(ctx, &server.id, "reconnect", RECONNECT)?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        reply = attempt(ctx)?.1;
+        if reply.status == 401 {
+            phase(ctx, &server.id, "reconnect", RECONNECT)?;
+            return Err(invalid(RECONNECT));
+        }
+    }
+    Ok(reply)
+}
+fn limited(reply: &Reply) -> bool {
+    reply.exhausted
+        || reply.status == 429
+        || reply.body["message"]
+            .as_str()
+            .is_some_and(|m| m.to_lowercase().contains("rate limit"))
+}
+fn limit_error(reply: &Reply, login: &str) -> ApiError {
+    let wait = reply
+        .reset
+        .and_then(|at| at.checked_sub(wall_clock() / 1000))
+        .filter(|s| *s <= 86_400)
+        .map(|s| format!(" Réessayez dans environ {} min.", s.div_ceil(60).max(1)))
+        .unwrap_or_default();
+    invalid(&format!(
+        "GitHub limite le débit des requêtes pour le compte {login}.{wait}"
+    ))
+}
+
 fn repository(text: &str) -> Option<(&str, &str)> {
     let (owner, name) = text.split_once('/')?;
     let part = |s: &str| {
@@ -559,65 +629,24 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
         _ => return Err(invalid("État invalide : open, closed ou all.")),
     };
     let (server, m, login) = resolve(ctx)?;
-    // An access past its expiry is renewed here, once, before the read.
-    super::ensure(ctx, &server)?;
     let url = format!(
         "{}/repos/{owner}/{name}/issues?state={state}&per_page={PAGE}",
         endpoint(m, "api")
     );
-    let read = |ctx: &Context<'_>| -> Result<(String, Reply), ApiError> {
-        let access = credentials(ctx, &server.id)?
-            .and_then(|env| env.get("ACCESS_TOKEN").cloned())
-            .ok_or_else(|| invalid(RECONNECT))?;
-        let reply = send(
+    let reply = authorized(ctx, &server, m, &|access| {
+        send(
             agent()
                 .get(&url)
                 .set("Authorization", &format!("Bearer {access}")),
             None,
         )
-        .map_err(|_| unreachable_github())?;
-        Ok((access, reply))
-    };
-    let (used, mut reply) = read(ctx)?;
-    if reply.status == 401 {
-        // Rejected before its clock expiry: renew once and read once more.
-        {
-            let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
-            let mut env = credentials(ctx, &server.id)?.ok_or_else(|| invalid(RECONNECT))?;
-            if env.get("ACCESS_TOKEN") == Some(&used) {
-                if let Err(error) = refresh(ctx, &server, m, &mut env) {
-                    if error.status != 503 {
-                        phase(ctx, &server.id, "reconnect", RECONNECT)?;
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        reply = read(ctx)?.1;
-        if reply.status == 401 {
-            phase(ctx, &server.id, "reconnect", RECONNECT)?;
-            return Err(invalid(RECONNECT));
-        }
-    }
+        .map_err(|_| unreachable_github())
+    })?;
     let repo = format!("{owner}/{name}");
     match reply.status {
         200 => (),
         404 => return Err(invalid(&format!("Le dépôt {repo} est introuvable pour le compte {login}, ou l’application GitHub d’Ezerbot n’y est pas installée. Vérifiez le nom et les dépôts choisis chez GitHub."))),
-        403 | 429
-            if reply.exhausted
-                || reply.status == 429
-                || reply.body["message"]
-                    .as_str()
-                    .is_some_and(|m| m.to_lowercase().contains("rate limit")) =>
-        {
-            let wait = reply
-                .reset
-                .and_then(|at| at.checked_sub(wall_clock() / 1000))
-                .filter(|s| *s <= 86_400)
-                .map(|s| format!(" Réessayez dans environ {} min.", s.div_ceil(60).max(1)))
-                .unwrap_or_default();
-            return Err(invalid(&format!("GitHub limite le débit des requêtes pour le compte {login}.{wait}")));
-        }
+        403 | 429 if limited(&reply) => return Err(limit_error(&reply, &login)),
         403 => {
             let sso = if reply.single_sign_on { " Votre organisation exige une session SAML : autorisez-la chez GitHub." } else { "" };
             return Err(invalid(&format!("Accès refusé à {repo} pour le compte {login}. Si le dépôt appartient à une organisation, autorisez la session SAML ou élargissez l’installation de l’application GitHub d’Ezerbot.{sso}")));

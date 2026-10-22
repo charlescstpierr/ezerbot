@@ -47,6 +47,8 @@ struct GithubScript {
     more: bool,
     token_times: Vec<std::time::Instant>,
     authorization: Vec<(String, String)>,
+    /// Bodies of the comments the provider accepted, in order.
+    comments: Vec<Value>,
 }
 impl Default for GithubScript {
     fn default() -> Self {
@@ -64,6 +66,7 @@ impl Default for GithubScript {
             more: false,
             token_times: Vec::new(),
             authorization: Vec::new(),
+            comments: Vec::new(),
         }
     }
 }
@@ -86,6 +89,7 @@ impl OAuth {
                     continue;
                 };
                 let url = req.url().to_owned();
+                let post = *req.method() == tiny_http::Method::Post;
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let mut seen = captured.lock().unwrap();
@@ -162,6 +166,18 @@ impl OAuth {
                         }
                     } else if url == "/github/user" {
                         (200, json!({"login":"charles-test","id":4242}))
+                    } else if post && url == "/github/api/repos/charles/essai/issues/12/comments" {
+                        let live = format!("Bearer {}", g.live_access);
+                        if g.authorization.last().is_some_and(|(_, a)| *a == live) {
+                            let sent: Value = serde_json::from_str(&body).unwrap();
+                            g.comments.push(sent.clone());
+                            (
+                                201,
+                                json!({"id":777,"html_url":"https://github.com/charles/essai/issues/12#issuecomment-777","body":sent["body"],"user":{"login":"charles-test"}}),
+                            )
+                        } else {
+                            (401, json!({"message":"Bad credentials"}))
+                        }
                     } else if url.starts_with("/github/api/repos/charles/essai/issues") {
                         let live = format!("Bearer {}", g.live_access);
                         let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
@@ -1396,4 +1412,265 @@ fn github_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_c
     }
     std::env::remove_var("GROKBOT_TEST_KEYCHAIN");
     grokbot_forms::vault::enable_os_vault(false);
+}
+
+const GITHUB_COMMENT_TOOL: &str = "github_add_issue_comment";
+
+impl Fixture {
+    /// One chat turn in which the bot prepares a comment. The run stops on its card.
+    fn github_prepare_comment(&mut self, id: &str, text: &str) -> (String, Value) {
+        let conversation = self.post("/api/conversations", json!({"title":"Commentaire"}))
+            ["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let arguments = json!({"repository":"charles/essai","issue":12,"text":text});
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":GITHUB_COMMENT_TOOL,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Commente l’issue 12 de charles/essai."}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        wait("comment card", || {
+            self.app.tick(0);
+            !requests::list_for_run(&self.db(), &run).unwrap().is_empty()
+        });
+        let request = requests::list_for_run(&self.db(), &run).unwrap().remove(0);
+        let card = self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == request.entry_id)
+            .unwrap()
+            .clone();
+        (run, card)
+    }
+    fn github_resolve(
+        &mut self,
+        card: &Value,
+        submission: &str,
+        decision: Value,
+        text: Option<&str>,
+    ) -> Result<Value, grokbot_wrapper::ApiError> {
+        let mut body = json!({"entry_id":card["entry_id"],"conversation_id":card["route"]["target_conversation_id"],"submission_id":submission,"decision":decision});
+        if let Some(text) = text {
+            body["text"] = json!(text);
+        }
+        self.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            body.to_string().as_bytes(),
+        )
+    }
+    fn github_settle(&mut self, run: &str) {
+        wait("comment run", || {
+            self.app.tick(0);
+            store::required(&self.db(), run)
+                .unwrap()
+                .status
+                .is_terminal()
+        });
+    }
+    fn published_comments(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().github.comments.clone()
+    }
+}
+
+#[test]
+fn github_comment_waits_on_a_draft_card_and_nothing_leaves_before_send() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let tool = tools
+        .iter()
+        .find(|t| t.name == GITHUB_COMMENT_TOOL)
+        .expect("the comment tool is in the closed list");
+    assert!(tool.requires_approval);
+
+    let (run, card) = f.github_prepare_comment("draft-1", "Bonjour du brouillon.");
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["depot"], "charles/essai");
+    assert_eq!(draft["numero"], 12);
+    assert_eq!(draft["login"], "charles-test");
+    assert_eq!(draft["texte"], "Bonjour du brouillon.");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert!(
+        f.published_comments().is_empty(),
+        "nothing before the click"
+    );
+    assert_eq!(f.github_requests("/comments"), 0);
+
+    // There is no “Toujours”: neither a standing allow nor a standing refusal.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.github_requests("/comments"), 0);
+
+    // Annuler publishes nothing.
+    f.github_resolve(&card, "cancel-1", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.github_requests("/comments"), 0);
+    assert!(f.published_comments().is_empty());
+}
+
+#[test]
+fn github_comment_publishes_the_corrected_text_once_under_the_displayed_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-2", "Bonjour du brouillon.");
+    assert_eq!(f.github_requests("/comments"), 0);
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+
+    f.github_resolve(&card, "send-1", json!("allow_once"), Some("Bonjour validé"))
+        .unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["numero"], 12);
+    assert_eq!(output["texte"], "Bonjour validé");
+    assert!(output["url"].as_str().unwrap().contains("issuecomment-777"));
+    assert_eq!(f.published_comments().len(), 1);
+    assert_eq!(f.published_comments()[0]["body"], "Bonjour validé");
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .github
+            .authorization
+            .iter()
+            .rev()
+            .find(|(u, _)| u.ends_with("/comments"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.github.live_access));
+    }
+
+    // The settled card shows the text that left, bound to a new fingerprint.
+    let settled = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["entry_id"] == card["entry_id"])
+        .unwrap()
+        .clone();
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Bonjour validé");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+
+    // A second Envoyer on the same card never calls GitHub again: the same click is
+    // answered with its first receipt, another click is refused.
+    f.github_resolve(&card, "send-1", json!("allow_once"), Some("Autre texte"))
+        .unwrap();
+    assert!(f
+        .github_resolve(&card, "send-2", json!("allow_once"), Some("Autre texte"))
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.github_requests("/comments"), 1);
+    assert_eq!(f.published_comments()[0]["body"], "Bonjour validé");
+
+    // The model learned what was published, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Bonjour validé"));
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+
+    // Reading issues still starts without any card.
+    let listing = f.github_list("list-after-comment", "charles/essai");
+    assert!(matches!(f.outcome(&listing), ToolOutcome::Done { .. }));
+}
+
+#[test]
+fn github_comment_sends_the_proposed_text_when_it_is_not_edited_and_refuses_blank_edits() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let (run, card) = f.github_prepare_comment("draft-3", "Texte proposé par le bot.");
+    for (index, text) in ["", "   \n"].into_iter().enumerate() {
+        let error = f
+            .github_resolve(
+                &card,
+                &format!("blank-{index}"),
+                json!("allow_once"),
+                Some(text),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 400, "{text:?}");
+    }
+    assert_eq!(f.github_requests("/comments"), 0);
+    let still = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["entry_id"] == card["entry_id"])
+        .unwrap()
+        .clone();
+    assert_eq!(still["status"]["status"], "pending");
+
+    f.github_resolve(&card, "send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.published_comments().len(), 1);
+    assert_eq!(
+        f.published_comments()[0]["body"],
+        "Texte proposé par le bot."
+    );
+}
+
+#[test]
+fn github_comment_refuses_a_bad_target_without_a_card() {
+    let mut f = Fixture::new();
+    // A bad target opens no card and calls nothing.
+    let conversation = f.post("/api/conversations", json!({"title":"Sans compte"}))["conversation"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.github_connect();
+    let _ = conversation;
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let conversation = f.post("/api/conversations", json!({"title":"Cible"}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":"fc-bad","call_id":"bad","name":GITHUB_COMMENT_TOOL,"arguments":json!({"repository":"../etc/passwd","issue":12,"text":"x"}).to_string()}}),json!({"type":"response.completed"})]);
+    f.script(vec![json!({"type":"response.completed"})]);
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"bad","body":"Commente."}),
+    );
+    let run: String = f.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')='bad'",[],|r|r.get(0)).unwrap();
+    f.github_settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("propriétaire/dépôt"), "{reason}");
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.github_requests("/comments"), 0);
 }

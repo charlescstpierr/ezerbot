@@ -141,6 +141,8 @@ impl OAuth {
                                     json!({"error":"bad_refresh_token","error_description":"secret-must-not-leak"}),
                                 ),
                                 "down" => (503, json!({})),
+                                "limited" => (429, json!({"message":"rate limit"})),
+                                "forbidden" => (403, json!({"message":"API rate limit exceeded"})),
                                 _ if fields.get("refresh_token") != Some(&g.live_refresh) => {
                                     (200, json!({"error":"bad_refresh_token"}))
                                 }
@@ -1349,11 +1351,20 @@ fn github_keeps_its_tokens_when_the_renewal_is_only_unreachable() {
     let mut f = Fixture::new();
     f.github_connect();
     f.expire_github();
-    f.oauth.seen.lock().unwrap().github.refresh = "down";
-    let run = f.github_list("unreachable", "charles/essai");
-    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
-    assert_eq!(f.item("github")["status"], "connected");
-    assert!(f.github_secret().unwrap()["REFRESH_TOKEN"].is_string());
+    for (index, script) in ["down", "limited", "forbidden"].into_iter().enumerate() {
+        f.oauth.seen.lock().unwrap().github.refresh = script;
+        let run = f.github_list(&format!("unreachable-{index}"), "charles/essai");
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{script}"
+        );
+        assert_eq!(f.item("github")["status"], "connected", "{script}");
+        assert_eq!(f.item("github")["has_tokens"], true, "{script}");
+        assert!(
+            f.github_secret().unwrap()["REFRESH_TOKEN"].is_string(),
+            "{script}"
+        );
+    }
 }
 
 #[cfg(all(target_os = "macos", debug_assertions))]

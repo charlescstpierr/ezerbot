@@ -460,7 +460,17 @@ pub(super) fn refresh(
         ]),
     );
     let reply = match reply {
-        Ok(reply) if reply.status < 500 => reply,
+        // A rate limit or an outage says nothing about the refresh token: keep it.
+        Ok(reply)
+            if reply.status < 500
+                && !matches!(reply.status, 403 | 429)
+                && !matches!(
+                    reply.body["error"].as_str(),
+                    Some("rate_limit_exceeded" | "slow_down")
+                ) =>
+        {
+            reply
+        }
         _ => return Err(unreachable_github()),
     };
     if reply.status != 200 || reply.body["error"].is_string() {

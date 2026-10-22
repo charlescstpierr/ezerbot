@@ -786,6 +786,27 @@ fn denied_expired_and_cancelled_approvals_resume_without_effect_or_new_request()
 }
 
 #[test]
+fn state_reports_how_each_approval_was_decided() {
+    let mut f = Fixture::new();
+    let once = f.approval("once", json!({"path":"one"}));
+    let always = f.approval("always", json!({"path":"two"}));
+    let waiting = f.approval("waiting", json!({"path":"three"}));
+    f.decide(&once, "once", json!("allow_once"));
+    f.decide(
+        &always,
+        "always",
+        json!({"always_allow":{"scope":"global"}}),
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let requests = state["forms"]["requests"].as_array().unwrap();
+    let decision =
+        |id: &str| requests.iter().find(|request| request["id"] == id).unwrap()["decision"].clone();
+    assert_eq!(decision(&once.id), json!("allow_once"));
+    assert!(decision(&always.id)["always_allow"].is_object());
+    assert!(decision(&waiting.id).is_null());
+}
+
+#[test]
 fn auto_review_before_real_gate_suspension_is_wakeable() {
     let mut f = Fixture::new();
     let first = f.approval("first", json!({"path":"one"}));

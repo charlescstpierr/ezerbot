@@ -1407,8 +1407,9 @@ fn request_value(
                 "summary": grokbot_forms::policy::background_summary(tool, &arguments),
                 "bot_name": bot_display_name(ctx, &request.route.requesting_bot_id),
             });
-            value["decision"] = decision_value(ctx, &request.entry_id)?;
         }
+        // The card names how it was authorized: once, or always.
+        value["decision"] = decision_value(ctx, &request.entry_id)?;
         value["policy"] = json!(policy);
     }
     Ok(value)

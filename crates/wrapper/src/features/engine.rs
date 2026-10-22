@@ -2453,15 +2453,15 @@ impl<'a> RedactedDeltas<'a> {
         Ok(state)
     }
     fn refresh(&mut self) -> grokbot_engine::contracts::Result<()> {
-        for metadata in self.vault.list()? {
-            if let Some(value) = self.vault.get(&metadata.name)? {
-                self.tail = self.tail.max(value.chars().count());
-                if !self.known.contains(&value) {
-                    self.known.push(value);
-                }
-            }
-        }
-        self.known.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        self.known = self.vault.values_for_redaction()?;
+        self.tail = self
+            .known
+            .iter()
+            .map(|value| value.chars().count())
+            .max()
+            .unwrap_or(0);
+        self.known
+            .sort_by_key(|value| std::cmp::Reverse(value.len()));
         Ok(())
     }
     fn flush(

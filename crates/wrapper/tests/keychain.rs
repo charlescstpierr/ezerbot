@@ -290,37 +290,42 @@ fn real_keychain_migration_persistence_rotation_and_deletion() {
 }
 
 #[test]
-fn locked_keychain_falls_back_without_dialog_then_recovers_and_denied_delete_is_not_claimed() {
+fn locked_keychain_refuses_plaintext_and_unconfirmed_delete_is_not_claimed() {
     let f = Fixture::new();
     let vault = f.vault();
     vault
         .set("TOKEN", "Test", "valeur-factice-before-lock")
         .unwrap();
     f.security(&["lock-keychain"]);
-    vault
+    let created = vault
         .set("NEW_TOKEN", "Secours", "valeur-factice-fallback")
-        .unwrap();
-    vault
+        .unwrap_err()
+        .to_string();
+    assert!(created.contains("trousseau"));
+    assert!(!created.contains("valeur-factice"));
+    let rotated = vault
         .set("TOKEN", "Rotation en secours", "valeur-factice-latest-file")
-        .unwrap();
+        .unwrap_err()
+        .to_string();
+    assert!(!rotated.contains("valeur-factice"));
     assert_eq!(vault.storage_status().backend, "file_fallback");
+    let plaintext = fs::read_to_string(f.file()).unwrap();
+    assert!(!plaintext.contains("valeur-factice-fallback"));
+    assert!(!plaintext.contains("valeur-factice-latest-file"));
+    assert!(Vault::open(&f.file())
+        .unwrap()
+        .get("NEW_TOKEN")
+        .unwrap()
+        .is_none());
     let error = vault.remove("TOKEN").unwrap_err().to_string();
     assert!(error.contains("Suppression non confirmée"));
     assert!(!error.contains("valeur-factice"));
-    assert_eq!(
-        Vault::open(&f.file())
-            .unwrap()
-            .get("NEW_TOKEN")
-            .unwrap()
-            .as_deref(),
-        Some("valeur-factice-fallback")
-    );
     f.security(&["unlock-keychain", "-p", PASSWORD]);
-    assert_eq!(f.vault().list().unwrap().len(), 2);
     assert_eq!(
         vault.get("TOKEN").unwrap().as_deref(),
-        Some("valeur-factice-latest-file")
+        Some("valeur-factice-before-lock")
     );
+    assert!(vault.get("NEW_TOKEN").unwrap().is_none());
     assert_eq!(vault.storage_status().backend, "keychain");
     assert!(Vault::open(&f.file()).unwrap().list().unwrap().is_empty());
 }
@@ -468,9 +473,13 @@ fn invalid_debug_override_never_falls_through_to_login_and_french_notice_is_visi
     let host = f.launch(&f.home.join("missing.keychain-db"));
     let state = host.state();
     assert_eq!(state["forms"]["storage"]["backend"], "file_fallback");
-    assert!(state["forms"]["storage"]["notice"]
-        .as_str()
-        .unwrap()
-        .contains("non chiffré"));
+    assert_eq!(
+        state["forms"]["storage"]["label"],
+        "Trousseau macOS indisponible"
+    );
+    let notice = state["forms"]["storage"]["notice"].as_str().unwrap();
+    assert!(notice.contains("ne sont pas enregistrés"));
+    assert!(!notice.contains("fichier de secours"));
+    assert!(!notice.contains("non chiffré"));
     assert_eq!(state["forms"]["secrets"][0]["name"], "TOKEN");
 }

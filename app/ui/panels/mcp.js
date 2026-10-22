@@ -339,9 +339,11 @@
       status.append(dot, document.createTextNode(({connected:"Connecté",busy:"Occupé",starting:"Démarrage en cours",disconnected:"Déconnecté",crashed:"Serveur arrêté",error:"En erreur"})[server.status] || "État inconnu"));
       heading.append(node("strong", server.name), status);
       card.append(heading);
-      const config = node("details"); config.append(node("summary", "Configuration locale"));
-      config.append(node("pre", [server.command, ...server.arguments].join("\n")));
-      config.append(node("p", server.environment_names.length ? `Variables privées : ${server.environment_names.join(", ")} · valeurs masquées` : "Aucune variable privée.", "mcp-note"));
+      const config = node("details"); config.append(node("summary", server.url ? "Adresse du serveur" : "Configuration locale"));
+      config.append(node("pre", server.url || [server.command, ...server.arguments].join("\n")));
+      config.append(node("p", server.url
+        ? (server.environment_names.length ? "Jeton privé conservé dans le coffre · valeur masquée, jamais réaffichée." : "Aucun jeton.")
+        : (server.environment_names.length ? `Variables privées : ${server.environment_names.join(", ")} · valeurs masquées` : "Aucune variable privée."), "mcp-note"));
       card.append(config);
       if (server.error) card.append(node("p", server.error, "mcp-error"));
       const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
@@ -353,11 +355,11 @@
       }
       card.append(choices);
       const tools = node("details"); tools.append(node("summary", `Outils (${server.tools.length})${["connected","busy"].includes(server.status) ? "" : " · dernier catalogue connu"}`));
-      if (!server.tools.length) tools.append(node("p", "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
+      if (!server.tools.length) tools.append(node("p", server.url ? "Connectez le serveur pour découvrir ses outils." : "Démarrez le connecteur pour découvrir ses outils.", "mcp-note"));
       for (const tool of server.tools) { const item = node("p"); item.append(node("strong",tool.name),node("span",` — ${tool.description || "Sans description"}`)); tools.append(item); }
       card.append(tools);
       const actions = node("div", null, "mcp-actions");
-      const restart = button(["connected","busy","starting"].includes(server.status) ? "Redémarrer…" : "Démarrer…", () => act("/api/mcp/restart",{id:server.id},restart));
+      const restart = button(["connected","busy","starting"].includes(server.status) ? (server.url ? "Reconnecter…" : "Redémarrer…") : (server.url ? "Connecter…" : "Démarrer…"), () => act("/api/mcp/restart",{id:server.id},restart));
       const remove = button("Supprimer…", () => act("/api/mcp/remove",{id:server.id},remove));
       actions.append(restart,remove); card.append(actions); list.append(card);
     }
@@ -376,7 +378,33 @@
       const name = input("name", "Par exemple : Atelier local"); name.required = true; name.maxLength = 60;
       const command = input("command", "/chemin/vers/le/serveur"); command.required = true;
       const args = node("textarea"); args.name = "arguments"; args.rows = 3; args.placeholder = "/chemin/serveur.py\n--option"; args.spellcheck = false;
-      form.append(label("Nom du connecteur",name),label("Commande (sans interpréteur de shell)",command),label("Arguments — un par ligne",args));
+      // Deux façons d'ajouter un serveur : une commande locale, ou l'adresse HTTPS d'un serveur distant.
+      let mode = "command";
+      const modes = node("fieldset", null, "mcp-bots"); modes.append(node("legend", "Type de serveur"));
+      const modeChoices = {};
+      for (const [id, caption] of [["command","Commande locale"],["url","Adresse HTTPS"]]) {
+        const choice = input("transport", "", "radio"); choice.checked = id === mode; choice.setAttribute("aria-label", caption);
+        choice.addEventListener("change", () => setMode(id));
+        modeChoices[id] = choice; modes.append(label(caption, choice));
+      }
+      const url = input("url", "https://exemple.fr/mcp"); url.maxLength = 2048; url.setAttribute("aria-label", "Adresse du serveur MCP");
+      const token = input("token", "Jeton d’accès (facultatif)", "password"); token.maxLength = 2048; token.setAttribute("aria-label", "Jeton d’accès du serveur");
+      const onThisMac = input("on-this-mac", "", "checkbox"); onThisMac.setAttribute("aria-label", "Ce serveur est sur ce Mac");
+      const localField = label("Ce serveur tourne sur ce Mac — requis pour une adresse http://127.0.0.1", onThisMac);
+      localField.hidden = true;
+      const remote = node("div", null, "mcp-remote");
+      remote.append(label("Adresse HTTPS du serveur",url),label("Jeton d’accès — conservé dans le coffre, jamais réaffiché",token),localField,node("p","HTTPS est exigé. http:// n’est accepté que pour 127.0.0.1, sur ce Mac. Le jeton n’est envoyé qu’à cette adresse ; une redirection est refusée. Les outils du serveur demandent votre approbation à chaque nouvel usage.","mcp-note"));
+      url.addEventListener("input", () => { localField.hidden = !/^\s*http:/i.test(url.value); });
+      const local = node("div", null, "mcp-local");
+      local.append(label("Commande (sans interpréteur de shell)",command),label("Arguments — un par ligne",args));
+      function setMode(next) {
+        mode = next;
+        for (const [id, choice] of Object.entries(modeChoices)) choice.checked = id === next;
+        local.hidden = next !== "command"; remote.hidden = next !== "url";
+        command.required = next === "command"; url.required = next === "url";
+      }
+      setMode(mode);
+      form.append(label("Nom du connecteur",name),modes,remote,local);
       const env = node("div",null,"mcp-environment");
       const addEnv = () => {
         const row = node("div",null,"mcp-env-row");
@@ -384,7 +412,7 @@
         const v = input("env-value", "Valeur privée", "password"); v.setAttribute("aria-label","Valeur privée de la variable");
         row.append(k,v,button("Retirer",()=> {v.value="";row.remove();})); env.append(row);
       };
-      form.append(node("p","Variables d’environnement privées : conservées sur ce Mac (trousseau macOS ou fichier local, selon Paramètres), jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal. Les valeurs de 8 caractères ou plus sont masquées dans tous les résultats, même si ce connecteur est inactif. Pour les valeurs plus courtes, seuls les champs texte identiques de ce serveur sont masqués ; les nombres et booléens restent inchangés.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
+      local.append(node("p","Variables d’environnement privées : conservées sur ce Mac (trousseau macOS ou fichier local, selon Paramètres), jamais réaffichées. Le serveur reçoit uniquement ces variables et un environnement système minimal. Les valeurs de 8 caractères ou plus sont masquées dans tous les résultats, même si ce connecteur est inactif. Pour les valeurs plus courtes, seuls les champs texte identiques de ce serveur sont masqués ; les nombres et booléens restent inchangés.","mcp-note"),env,button("Ajouter une variable privée",addEnv));
       const submit = node("button","Enregistrer le connecteur","primary-button"); submit.type = "submit";
       form.append(submit); details.append(form); section.append(details);
       feedback = node("p",null,"mcp-error"); feedback.setAttribute("role","status"); section.append(feedback);
@@ -392,6 +420,19 @@
         event.preventDefault(); submit.disabled=true; feedback.textContent=""; feedback.className="mcp-error";
         const environment = Object.create(null);
         let invalid = false;
+        if (mode === "url") {
+          const body = {name:name.value,url:url.value,token:token.value,on_this_mac:onThisMac.checked};
+          token.value = "";
+          try {
+            await panels.api("/api/mcp/add",body);
+            form.reset(); setMode("command"); localField.hidden = true; details.open=false;
+            await panels.refresh();
+            feedback.className="mcp-note";
+            feedback.textContent="Serveur enregistré. Activez-le pour un bot, puis connectez-le : une approbation s’ouvre avant tout envoi du jeton.";
+          } catch (e) { feedback.textContent=e.message || "Le serveur n’a pas pu être enregistré."; }
+          finally { delete body.token; token.value=""; submit.disabled=false; }
+          return;
+        }
         for (const row of env.children) {
           const [k,v] = row.querySelectorAll("input");
           if (!k.value.trim() || Object.hasOwn(environment,k.value.trim())) invalid=true;

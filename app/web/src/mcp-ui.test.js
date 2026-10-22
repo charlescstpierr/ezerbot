@@ -450,3 +450,54 @@ test("a GitHub slot refused before its first connection is not a custom server",
   assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0);
   assert.match(root.textContent, /Aucun connecteur ajouté/);
 });
+
+const pickAddress = root => {
+  const radio = root.all().find(n => n.type === "radio" && n.getAttribute("aria-label") === "Adresse HTTPS");
+  radio.checked = true;
+  radio.events.change();
+};
+
+test("MCP by address submits the URL, the secret and the Mac confirmation, then empties the secret field", async () => {
+  const { root, calls } = await mount();
+  pickAddress(root);
+  const field = name => root.all().find(n => n.name === name);
+  const command = field("command"), url = field("url"), token = field("token");
+  assert.equal(token.type, "password");
+  assert.equal(command.required, false, "a command is not required for an address");
+  assert.equal(url.required, true);
+  field("name").value = "Serveur distant";
+  url.value = "http://127.0.0.1:8080/mcp"; url.events.input();
+  field("on-this-mac").checked = true;
+  token.value = "jeton-factice-alpha";
+  await root.all().find(n => n.tag === "form").events.submit({ preventDefault() {} });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/mcp/add");
+  assert.deepEqual(calls[0].body, {name:"Serveur distant",url:"http://127.0.0.1:8080/mcp",token:"jeton-factice-alpha",on_this_mac:true});
+  assert.equal(token.value, "", "the secret is not kept in the field after the request");
+  const feedback = root.all().find(n => n.attrs.role === "status");
+  assert.equal(feedback.className, "mcp-note");
+  assert.match(feedback.textContent, /Serveur enregistré/);
+  assert.ok(!root.textContent.includes("jeton-factice-alpha"));
+});
+
+test("the confirmation « sur ce Mac » only appears for an http address", async () => {
+  const { root } = await mount();
+  pickAddress(root);
+  const url = root.all().find(n => n.name === "url");
+  const confirmation = root.all().find(n => n.tag === "label" && n.textContent.includes("sur ce Mac"));
+  assert.equal(confirmation.hidden, true);
+  url.value = "https://exemple.fr/mcp"; url.events.input();
+  assert.equal(confirmation.hidden, true);
+  url.value = "http://127.0.0.1:8080/mcp"; url.events.input();
+  assert.equal(confirmation.hidden, false);
+});
+
+test("a server added by address shows its address and a masked token, never a command", async () => {
+  const server = {id:"distant",name:"Serveur distant",status:"disconnected",command:"",url:"https://exemple.fr/mcp",arguments:[],environment_names:["ACCESS_TOKEN"],enabled_bots:[],tools:[]};
+  const { root } = await mount([server]);
+  assert.match(root.textContent, /Adresse du serveur/);
+  assert.ok(root.all().some(n => n.tag === "pre" && n.textContent === "https://exemple.fr/mcp"));
+  assert.match(root.textContent, /Jeton privé conservé dans le coffre/);
+  assert.ok(!root.textContent.includes("ACCESS_TOKEN"));
+  assert.ok(root.all().some(n => n.tag === "button" && n.textContent === "Connecter…"));
+});

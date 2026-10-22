@@ -1,7 +1,7 @@
 //! Local JSON-RPC 2.0 / newline-delimited stdio client (REA NM04, NM07).
 //! No shell, inherited credentials or server-request execution.
 mod http;
-pub(crate) use http::AUTH_REQUIRED;
+pub(crate) use http::{approved_endpoint, AUTH_REQUIRED};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -141,7 +141,11 @@ impl Client {
             frames,
             next: 0,
             catalog_dirty: false,
-            environment: HashMap::from([("ACCESS_TOKEN".into(), token)]),
+            environment: if token.is_empty() {
+                HashMap::new()
+            } else {
+                HashMap::from([("ACCESS_TOKEN".into(), token)])
+            },
         }
     }
     fn send(&mut self, value: Value) -> Result<()> {

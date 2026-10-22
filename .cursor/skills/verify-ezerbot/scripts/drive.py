@@ -180,7 +180,7 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const retention = document.getElementById("meeting-retention");
               if (!retention) return null;
               retention.scrollIntoView({block: "center"});
-              const heading = retention.closest("section")?.querySelector("h3")?.textContent || "";
+              const heading = retention.closest("section, .setting-section")?.querySelector("h3")?.textContent || "";
               const routines = document.querySelector('[data-panel="routines"] h3')?.textContent || "";
               return heading.includes("Réunions") && routines === "Routines" ? {ok: true, heading, routines} : null;
             }""",

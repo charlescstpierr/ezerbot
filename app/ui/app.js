@@ -291,6 +291,7 @@
       openBotDialog(bot);
     } else if (kind === "settings") {
       $("settings-dialog").showModal();
+      for (const panel of panels.values()) panelCall(panel, panel.onSettingsLink, id);
       const target = ({ account: $("provider-section"), appearance: $("settings-appearance"), bots: $("settings-bots"), shortcuts: $("settings-shortcuts") })[id]
         || $("settings-extensions").querySelector(`[data-panel="${id}"]`);
       focusLinkTarget(target);

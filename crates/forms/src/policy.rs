@@ -310,6 +310,11 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
         scan.destructive = true;
     }
     let base = basename(&tokens[index]);
+    if base == "git" && git_checkout_one_operand(&tokens, index) {
+        // `git checkout <name>` switches branch or overwrites a tracked file:
+        // the text alone cannot tell which, so it is never remembered.
+        scan.unproven = true;
+    }
     if is_mailer(base) {
         scan.outbound = true;
     }
@@ -559,6 +564,17 @@ fn git_is_destructive(tokens: &[String], index: usize) -> bool {
             .is_some_and(|op| matches!(op, "remove" | "prune")),
         _ => false,
     }
+}
+
+fn git_checkout_one_operand(tokens: &[String], index: usize) -> bool {
+    git_subcommand(tokens, index) == Some("checkout")
+        && checkout_operands(
+            tokens[index + 1..]
+                .iter()
+                .skip_while(|token| token.as_str() != "checkout")
+                .skip(1)
+                .map(String::as_str),
+        ) == 1
 }
 
 /// Counts positional operands, skipping options and the branch name that
@@ -890,6 +906,17 @@ mod tests {
         }
         assert!(!shell_is_destructive("printf 'r\\m'"));
         assert!(!shell_is_destructive("echo \"\\$HOME rm\""));
+    }
+
+    #[test]
+    fn single_operand_checkout_is_never_remembered() {
+        // `note` may be a tracked file: checking it out overwrites local work.
+        for command in ["git checkout note", "git checkout autre"] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+            assert!(policy.protection.is_none(), "{command}");
+        }
+        assert!(describe("run_shell", &json!({"command": "git status"}), None).remember);
     }
 
     #[test]

@@ -29,6 +29,13 @@ int main(void) {
         assert([result[@"transcript"] length] == 0);
         [voice command:@{@"command":@"status",@"token":@"old"} reply:reply];
         assert([result[@"status"] isEqual:@"stale"]);
+        // The voice mode listens to the chosen microphone, or to the default one when it is gone.
+        [voice command:@{@"command":@"start",@"token":@"mic",@"microphone":@"fake-usb"} reply:reply];
+        assert([result[@"microphone_id"] isEqual:@"fake-usb"] && ![result[@"microphone_fallback"] boolValue]);
+        EzerbotMicrophones.fakeUnplugged = @[@"fake-usb"];
+        [voice command:@{@"command":@"start",@"token":@"gone",@"microphone":@"fake-usb"} reply:reply];
+        assert([result[@"status"] isEqual:@"listening"] && [result[@"microphone_id"] isEqual:@"fake-built-in"] && [result[@"microphone_fallback"] boolValue]);
+        EzerbotMicrophones.fakeUnplugged = @[]; [voice cancel];
         puts("voice session native debug: French options, recording synthesis, live transcript, immediate barge-in, stale chunk, cleanup OK; no permissions or audio");
     }
 }

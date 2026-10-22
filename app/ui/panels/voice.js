@@ -15,16 +15,35 @@
     meeting_busy: "Une réunion est en cours. Arrêtez-la avant de dicter.",
     microphone_busy: "Une autre capture utilise déjà le microphone. Arrêtez-la avant de continuer.",
   };
+  const fallbackPhrase = "Le microphone choisi n’est plus disponible. Ezerbot utilise le microphone par défaut.";
+  const holdMs = 500;
   const node = (tag, cls, text) => { const el = document.createElement(tag); el.className = cls || ""; if (text) el.textContent = text; return el; };
   const key = (ctx) => ctx.conversation?.id || `new:${ctx.bot?.id || "grokbot"}`;
   let context, control, memoMode, mic, region, row, statusText, meter, timer, cancel, retry, settings, list;
   let session = null, phase = "idle", revision = 0, timeout, processing = false, pendingMemo = null, memoItems = [];
+  let pressedAt = null, pressStarted = false, releaseStops = false, capSeconds = 300, microphoneName = "", partial = false;
+  // The microphone is a setting of the Mac. A choice saved here wins over the state until the state catches up.
+  let chosenOverride = null, microphoneList, microphoneNotice, microphonesLoaded = false;
   const consumed = new Set();
   // Keep successful local uploads across an older in-flight /api/state reply.
   // Send/remove receipts, not a stale polling snapshot, relinquish ownership.
   const localMemos = new Map();
   const live = () => ["authorizing", "recording", "transcribing", "saving"].includes(phase);
+  const chosenMicrophone = () => chosenOverride ?? context?.state?.voice?.microphone ?? "";
+  const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+  const limit = (seconds) => seconds >= 120 && seconds % 60 === 0 ? `${seconds / 60} minutes` : `${seconds} secondes`;
   window.EzerbotDictation = { active: live, refresh: render, cancel() { reset(); changed(); } };
+  // Dictation and the voice mode share one choice. A microphone that is gone is forgotten at once and said so once.
+  async function forgetMicrophone() {
+    if (!chosenMicrophone()) return;
+    chosenOverride = "";
+    panels.notify(fallbackPhrase);
+    if (microphoneNotice) microphoneNotice.textContent = fallbackPhrase;
+    try { await panels.api("/api/voice/microphone", { id: "" }); await panels.refresh(); }
+    catch (error) { panels.notify(error.message); }
+    renderMicrophones();
+  }
+  window.EzerbotMicrophone = { current: chosenMicrophone, fellBack: forgetMicrophone };
   const tones = { mic_denied: "danger", speech_denied: "danger", no_microphone: "danger", failed: "danger", upload_failed: "danger", offline_unavailable: "warning", limited: "warning" };
   const language = () => document.documentElement.lang || "fr";
   async function bridge(command, extra = {}) {
@@ -60,7 +79,7 @@
     settings.hidden = !["mic_denied", "speech_denied", "offline_unavailable"].includes(phase);
     meter.hidden = !recording;
     timer.hidden = !recording;
-    statusText.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording: "Écoute en cours · Échap pour arrêter", transcribing:"Transcription sur ce Mac…",saving:"Enregistrement du mémo…",ready:"Transcription ajoutée au brouillon. Relisez-la avant d’envoyer.",limited:"Limite de 60 secondes atteinte. L’enregistrement est arrêté ; relisez la transcription avant d’envoyer."}[phase] || "");
+    statusText.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording: `Écoute en cours · ${microphoneName ? `${microphoneName} · ` : ""}Échap pour arrêter`, transcribing:"Transcription sur ce Mac…",saving:"Enregistrement du mémo…",ready:partial ? "Transcription ajoutée au brouillon, avec un passage non transcrit. Relisez-la avant d’envoyer." : "Transcription ajoutée au brouillon. Relisez-la avant d’envoyer.",limited:`Limite de ${limit(capSeconds)} atteinte. L’enregistrement est arrêté ; relisez la transcription avant d’envoyer.`}[phase] || "");
     const existing = new Map([...list.children].map((el) => [el.dataset.id, el]));
     for (const item of memoItems) {
       if (existing.has(item.id)) { existing.delete(item.id); continue; }
@@ -81,7 +100,7 @@
     }
   }
   function reset() {
-    clearTimeout(timeout); revision++; processing = false; pendingMemo = null;
+    clearTimeout(timeout); revision++; processing = false; pendingMemo = null; releaseStops = false; microphoneName = ""; partial = false;
     if (session) bridge("cancel").catch(() => {});
     session = null; phase = "idle";
   }
@@ -110,9 +129,10 @@
     reset();
     try {
       session = { token: crypto.randomUUID(), key: key(context), memo: memoMode.checked };
+      capSeconds = session.memo ? 60 : 300;
       phase = "authorizing"; changed();
       const rev = revision;
-      const result = await bridge("start");
+      const result = await bridge("start", { purpose: session.memo ? "memo" : "dictation", microphone: chosenMicrophone() });
       if (rev === revision) await accept(result, rev);
     } catch (error) { phase = "idle"; panels.notify(error.message || "La dictée n’a pas pu démarrer."); changed(); }
   }
@@ -147,7 +167,11 @@
     if (rev !== revision || !session || session.key !== key(context)) return;
     if (result.token && result.token !== session.token) return;
     phase = result.status;
-    timer.textContent = `${Math.floor((result.elapsed_ms || 0) / 60000)}:${String(Math.floor((result.elapsed_ms || 0) / 1000) % 60).padStart(2,"0")} / 1:00`;
+    if (result.max_seconds) capSeconds = result.max_seconds;
+    if (result.microphone_name) microphoneName = result.microphone_name;
+    partial = Boolean(result.partial);
+    if (result.microphone_fallback) forgetMicrophone();
+    timer.textContent = `${clock(result.elapsed_ms || 0)} / ${clock(capSeconds * 1000)}`;
     const level = Math.max(0, Math.min(1, result.level || 0));
     meter.style.setProperty("--level", String(level)); meter.setAttribute("aria-valuenow", level.toFixed(2));
     if (phase === "ready" && !processing) {
@@ -159,6 +183,8 @@
     }
     if (["stale", "invalid"].includes(phase)) { reset(); panels.notify("Cette dictée n’est plus active. Recommencez."); }
     changed();
+    // A press released before the microphone was ready stops as soon as it is.
+    if (phase === "recording" && releaseStops) { releaseStops = false; stop(); return; }
     if (live()) timeout = setTimeout(() => poll(rev), 120);
   }
   async function poll(rev) {
@@ -176,8 +202,52 @@
     try { await accept(await bridge("stop"), rev); }
     catch { if (rev === revision) { phase = "failed"; changed(); } }
   }
+  function renderMicrophones(choices = microphoneChoices) {
+    if (!microphoneList) return;
+    microphoneChoices = choices;
+    const chosen = chosenMicrophone();
+    microphoneList.replaceChildren();
+    for (const choice of [{ id: "", name: "Microphone par défaut du Mac" }, ...choices]) {
+      const selected = choice.id === chosen;
+      const option = node("label", "voice-microphone-option"); option.dataset.id = choice.id; option.dataset.selected = String(selected);
+      const radio = node("input"); radio.type = "radio"; radio.name = "voice-microphone"; radio.checked = selected;
+      radio.onchange = () => chooseMicrophone(choice.id);
+      option.append(radio, node("span", "voice-microphone-name", choice.name));
+      if (selected) option.append(node("span", "voice-microphone-mark", "Choisi"));
+      microphoneList.append(option);
+    }
+  }
+  let microphoneChoices = [];
+  async function chooseMicrophone(id) {
+    try {
+      await panels.api("/api/voice/microphone", { id });
+      chosenOverride = id; microphoneNotice.textContent = "";
+      await panels.refresh();
+    } catch (error) { microphoneNotice.textContent = error.message; }
+    renderMicrophones();
+  }
+  async function loadMicrophones() {
+    if (!microphoneList) return;
+    if (!window.webkit?.messageHandlers?.ezerbotVoice && !context?.state?.voice?.debug_fake) {
+      microphoneNotice.textContent = errors.unavailable; return;
+    }
+    microphonesLoaded = true;
+    try {
+      const result = await bridge("microphones");
+      renderMicrophones(result.microphones || []);
+      if (chosenMicrophone() && !(result.microphones || []).some((choice) => choice.id === chosenMicrophone())) await forgetMicrophone();
+    } catch { microphoneNotice.textContent = "La liste des microphones est indisponible. Rouvrez l’application pour réessayer."; }
+  }
   panels.register({
     id: "voice",
+    settingsSection(container, ctx) {
+      context = ctx; container.className = "setting-section voice-microphone-settings";
+      container.append(node("h3", "", "Microphone"), node("p", "", "Choisissez le microphone qu’Ezerbot écoute quand vous lui parlez."));
+      microphoneList = node("div", "voice-microphone-list"); microphoneList.setAttribute("role", "radiogroup"); microphoneList.setAttribute("aria-label", "Microphone");
+      microphoneNotice = node("p", "voice-settings-notice"); microphoneNotice.setAttribute("role", "status");
+      container.append(microphoneList, microphoneNotice);
+      renderMicrophones(); loadMicrophones();
+    },
     composer: {
       mount(container, ctx) {
         context = ctx;
@@ -185,7 +255,25 @@
         const label = node("label", "voice-mode"); label.title = "Mémo vocal"; label.setAttribute("aria-label", "Mémo vocal"); memoMode = node("input"); memoMode.type = "checkbox"; memoMode.setAttribute("aria-label", "Mémo vocal");
         label.append(memoMode, document.createTextNode("Mémo vocal"));
         mic = node("button", "icon-button voice-mic"); mic.id = "voice-microphone"; mic.type = "button";
-        mic.onclick = () => phase === "recording" ? stop() : start();
+        // A short press toggles. A press held for half a second talks until release.
+        mic.onpointerdown = (event) => {
+          if (event.button) return;
+          mic.setPointerCapture?.(event.pointerId);
+          pressedAt = event.timeStamp; pressStarted = !mic.disabled && !live();
+          if (pressStarted) start();
+        };
+        mic.onpointerup = mic.onpointercancel = (event) => {
+          const held = pressedAt !== null && pressStarted && event.timeStamp - pressedAt >= holdMs;
+          pressedAt = null;
+          if (!held) return;
+          if (phase === "recording") stop(); else if (live()) releaseStops = true;
+        };
+        mic.onclick = (event) => {
+          // The press already did the work of its own click; a keyboard click has no pointer.
+          if (event?.detail > 0 && pressStarted) { pressStarted = false; return; }
+          pressStarted = false;
+          return phase === "recording" ? stop() : start();
+        };
         control.append(label, mic); window.EzerbotVoiceMode?.mountToggle?.(control);
         document.getElementById("send-button").before(control);
         region = node("section", "voice-region"); region.setAttribute("aria-label", "Dictée et mémos vocaux");
@@ -203,7 +291,13 @@
         settings = node("button", "attachment-retry", "Ouvrir Réglages Système"); settings.type = "button"; settings.onclick = () => bridge("settings").catch(() => panels.notify("Ouvrez Réglages Système › Confidentialité et sécurité › Microphone."));
         row.append(statusText, meter, timer, cancel, retry, settings);
         list = node("div", "voice-memo-list"); region.append(row, list); container.append(region);
-        document.addEventListener("keydown", (event) => { if (event.key === "Escape" && phase === "recording") { event.preventDefault(); event.stopImmediatePropagation(); stop(); } }, true);
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && phase === "recording") { event.preventDefault(); event.stopImmediatePropagation(); stop(); return; }
+          if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key?.toLowerCase() !== "d") return;
+          if (phase === "recording") { event.preventDefault(); event.stopImmediatePropagation(); stop(); }
+          else if (!mic.disabled && !live()) { event.preventDefault(); event.stopImmediatePropagation(); start(); }
+        }, true);
+        document.getElementById("settings-button")?.addEventListener?.("click", () => loadMicrophones());
         window.addEventListener("beforeunload", reset);
         window.addEventListener("grokbot:meeting-change", render);
         render();
@@ -215,6 +309,8 @@
     onState(state, ctx) {
       if (session && session.key !== key(ctx)) reset();
       context = ctx;
+      if (chosenOverride !== null && state.voice?.microphone === chosenOverride) chosenOverride = null;
+      if (microphoneList && !microphonesLoaded) loadMicrophones(); else renderMicrophones();
       const drafts = new Map([...(state.voice?.drafts || []), ...localMemos.values()].map((memo) => [memo.id, memo]));
       memoItems = [...drafts.values()].filter((m) => m.conversation_id === ctx.conversation?.id && !consumed.has(m.id));
       render();

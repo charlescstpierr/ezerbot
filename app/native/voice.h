@@ -2,8 +2,10 @@
 // The WebView bridge accepts main-frame, loopback-origin commands only (main.m).
 #import <Cocoa/Cocoa.h>
 #import "meeting-transcription.h"
+#import "microphones.h"
 #if defined(EZERBOT_RELEASE)
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <Speech/Speech.h>
 #endif
 
@@ -21,12 +23,19 @@
 @property(nonatomic) double elapsed;
 @property(nonatomic) double level;
 @property(nonatomic) BOOL meeting;
+@property(nonatomic) BOOL memo;
 @property(nonatomic) NSUInteger maxSeconds;
+@property(nonatomic, copy) NSDictionary *microphone;
 @property(nonatomic) double pausedElapsed;
 @property(nonatomic, strong) EzerbotMeetingTranscription *transcriptionPlan;
 @property(nonatomic, strong) NSURL *segmentURL;
 #if defined(EZERBOT_RELEASE)
 @property(nonatomic, strong) AVAudioRecorder *recorder;
+// A microphone other than the system default records through the engine, which can name its device.
+@property(nonatomic, strong) AVAudioEngine *engine;
+@property(nonatomic, strong) AVAudioFile *engineFile;
+@property(nonatomic, strong) AVAudioConverter *engineConverter;
+@property(nonatomic) AudioDeviceID chosenDevice;
 @property(nonatomic, strong) SFSpeechRecognizer *recognizer;
 @property(nonatomic, strong) SFSpeechRecognitionTask *recognitionTask;
 #else
@@ -45,13 +54,21 @@
 + (BOOL)captureStatusActive:(NSString *)status {
     return [@[@"authorizing",@"recording",@"paused",@"transcribing",@"listening"] containsObject:status ?: @""];
 }
+// A recording longer than a minute is cut into Speech-sized segments, like a meeting.
+- (BOOL)segmented {
+    return self.meeting || self.maxSeconds > 60;
+}
 - (NSDictionary *)snapshot {
+    BOOL keepsAudio = self.meeting || self.memo;
     return @{ @"status":self.status ?: @"idle", @"token":self.token ?: @"",
         @"language":self.language ?: @"fr", @"transcript":self.transcript ?: @"",
         @"elapsed_ms":@(self.elapsed * 1000), @"level":@(self.level), @"too_long":@(self.tooLong),
         @"missing_segments":@(self.transcriptionPlan.missingCount),
         @"partial":@((BOOL)(self.transcriptionPlan.hasText && self.transcriptionPlan.missingCount > 0)),
-        @"data":[self.status isEqual:@"ready"] ? ([self.audio base64EncodedStringWithOptions:0] ?: @"") : @"" };
+        @"max_seconds":@(self.maxSeconds),
+        @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO,
+        // Only a memo or a local capture hands its audio over. A dictation keeps none.
+        @"data":keepsAudio && [self.status isEqual:@"ready"] ? ([self.audio base64EncodedStringWithOptions:0] ?: @"") : @"" };
 }
 - (void)removeTemporaryAudio {
     if (self.recordingURL) [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
@@ -63,6 +80,7 @@
     [self.timer invalidate]; self.timer = nil;
 #if defined(EZERBOT_RELEASE)
     [self.recorder stop]; self.recorder = nil;
+    [self stopEngine];
     [self.recognitionTask cancel]; self.recognitionTask = nil;
     self.recognizer = nil;
 #endif
@@ -72,7 +90,7 @@
 - (void)transcribe {
     if (!self.audio.length) { self.status = @"failed"; return; }
     self.status = @"transcribing"; self.transcript = @"";
-    if (self.meeting) {
+    if (self.segmented) {
         self.transcriptionPlan = [[EzerbotMeetingTranscription alloc] initWithAudio:self.audio];
         if (!self.transcriptionPlan) { self.status = @"failed"; return; }
 #if !defined(EZERBOT_RELEASE)
@@ -94,7 +112,7 @@
 }
 - (void)segmentTimedOut {
     if (![self.status isEqual:@"transcribing"]) return;
-    if (self.meeting) { [self completeMeetingSegment:nil]; return; }
+    if (self.segmented) { [self completeMeetingSegment:nil]; return; }
     ++self.generation;
 #if defined(EZERBOT_RELEASE)
     [self.recognitionTask cancel]; self.recognitionTask = nil;
@@ -103,7 +121,7 @@
 }
 - (void)transcribeSegment {
     NSData *segment = nil;
-    if (self.meeting) {
+    if (self.segmented) {
         segment = [self.transcriptionPlan nextAudio];
         if (!segment) {
             self.transcript = self.transcriptionPlan.transcript;
@@ -116,11 +134,11 @@
 #if defined(EZERBOT_RELEASE)
     // Strictly on-device, never fall back to a server.
     if (!self.recognizer.supportsOnDeviceRecognition) {
-        if (self.meeting) { [self completeMeetingSegment:nil]; return; }
+        if (self.segmented) { [self completeMeetingSegment:nil]; return; }
         self.status = @"offline_unavailable"; return;
     }
     NSURL *source = self.recordingURL;
-    if (self.meeting) {
+    if (self.segmented) {
         if (self.segmentURL) [[NSFileManager defaultManager] removeItemAtURL:self.segmentURL error:nil];
         self.segmentURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ezerbot-meeting-%@.wav",NSUUID.UUID.UUIDString]]];
         if (![segment writeToURL:self.segmentURL options:NSDataWritingAtomic error:nil]) { [self completeMeetingSegment:nil]; return; }
@@ -136,10 +154,10 @@
             if (!owner || owner.generation != generation || ![owner.status isEqual:@"transcribing"]) return;
             if (result.isFinal) {
                 NSString *text = [result.bestTranscription.formattedString stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-                if (owner.meeting) [owner completeMeetingSegment:text];
+                if (owner.segmented) [owner completeMeetingSegment:text];
                 else { owner.transcript = text; owner.status = text.length ? @"ready" : @"failed"; }
             } else if (error) {
-                if (owner.meeting) [owner completeMeetingSegment:nil]; else owner.status = @"failed";
+                if (owner.segmented) [owner completeMeetingSegment:nil]; else owner.status = @"failed";
             }
         });
     }];
@@ -149,7 +167,7 @@
     });
 #else
     (void)generation;
-    if (self.meeting) {
+    if (self.segmented) {
         NSUInteger index = self.transcriptionPlan.currentIndex;
         [self.fakeRecognizedSegments addObject:@(index)];
         if ([self.fakeSegmentTimeouts containsIndex:index]) [self segmentTimedOut];
@@ -160,12 +178,65 @@
     }
 #endif
 }
+#if defined(EZERBOT_RELEASE)
+- (void)stopEngine {
+    if (!self.engine) return;
+    [self.engine.inputNode removeTapOnBus:0];
+    [self.engine stop];
+    self.engine = nil; self.engineConverter = nil;
+    self.engineFile = nil; // Releasing the file finalizes the WAV header.
+}
+// Records 16 kHz mono PCM16 from the chosen device. AVAudioRecorder cannot name its device.
+- (BOOL)beginEngineRecording {
+    AVAudioEngine *engine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode *input = engine.inputNode;
+    AudioDeviceID device = self.chosenDevice;
+    AudioUnit unit = input.audioUnit;
+    if (!unit || AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device)) != noErr) return NO;
+    AVAudioFormat *source = [input outputFormatForBus:0];
+    AVAudioFormat *target = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16 sampleRate:16000 channels:1 interleaved:YES];
+    if (!source.sampleRate || !source.channelCount) return NO;
+    AVAudioConverter *converter = [[AVAudioConverter alloc] initFromFormat:source toFormat:target];
+    NSDictionary *settings = @{AVFormatIDKey:@(kAudioFormatLinearPCM),AVSampleRateKey:@16000,AVNumberOfChannelsKey:@1,
+        AVLinearPCMBitDepthKey:@16,AVLinearPCMIsFloatKey:@NO,AVLinearPCMIsBigEndianKey:@NO};
+    NSError *error = nil;
+    AVAudioFile *file = [[AVAudioFile alloc] initForWriting:self.recordingURL settings:settings commonFormat:AVAudioPCMFormatInt16 interleaved:YES error:&error];
+    if (!converter || !file || error) return NO;
+    __weak EzerbotVoice *weakSelf = self;
+    __weak AVAudioEngine *weakEngine = engine;
+    [input installTapOnBus:0 bufferSize:4096 format:source block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+        (void)when;
+        EzerbotVoice *owner = weakSelf;
+        if (!owner || !weakEngine || owner.engine != weakEngine) return;
+        AVAudioFrameCount capacity = (AVAudioFrameCount)ceil(buffer.frameLength * target.sampleRate / source.sampleRate) + 64;
+        AVAudioPCMBuffer *converted = [[AVAudioPCMBuffer alloc] initWithPCMFormat:target frameCapacity:capacity];
+        __block BOOL supplied = NO;
+        NSError *convertError = nil;
+        AVAudioConverterOutputStatus status = [converter convertToBuffer:converted error:&convertError withInputFromBlock:^AVAudioBuffer *(AVAudioPacketCount count, AVAudioConverterInputStatus *inputStatus) {
+            (void)count;
+            if (supplied) { *inputStatus = AVAudioConverterInputStatus_NoDataNow; return nil; }
+            supplied = YES; *inputStatus = AVAudioConverterInputStatus_HaveData; return buffer;
+        }];
+        if (convertError || status == AVAudioConverterOutputStatus_Error || !converted.frameLength) return;
+        [file writeFromBuffer:converted error:nil];
+        const int16_t *samples = converted.int16ChannelData[0];
+        double energy = 0;
+        for (AVAudioFrameCount i = 0; i < converted.frameLength; ++i) energy += (samples[i] / 32768.0) * (samples[i] / 32768.0);
+        owner.level = MAX(0, MIN(1, sqrt(energy / converted.frameLength) * 4));
+    }];
+    self.engine = engine; self.engineFile = file; self.engineConverter = converter;
+    [engine prepare];
+    if (![engine startAndReturnError:&error]) { [self stopEngine]; return NO; }
+    return YES;
+}
+#endif
 - (void)stop {
     if (![@[@"recording",@"paused"] containsObject:self.status]) return;
     [self.timer invalidate]; self.timer = nil; self.level = 0;
 #if defined(EZERBOT_RELEASE)
     self.elapsed = MIN(self.maxSeconds, MAX(self.elapsed, self.recorder.currentTime));
     [self.recorder stop]; self.recorder = nil;
+    [self stopEngine];
     self.audio = [NSData dataWithContentsOfURL:self.recordingURL];
 #endif
     [self transcribe];
@@ -178,9 +249,13 @@
     NSDictionary *settings = @{AVFormatIDKey:@(kAudioFormatLinearPCM),AVSampleRateKey:@16000,AVNumberOfChannelsKey:@1,
         AVLinearPCMBitDepthKey:@16,AVLinearPCMIsFloatKey:@NO,AVLinearPCMIsBigEndianKey:@NO};
     NSError *error = nil;
-    self.recorder = [[AVAudioRecorder alloc] initWithURL:self.recordingURL settings:settings error:&error];
-    self.recorder.meteringEnabled = YES;
-    if (error || ![self.recorder recordForDuration:self.maxSeconds]) { self.status = @"no_microphone"; [self removeTemporaryAudio]; return; }
+    if (self.chosenDevice != kAudioObjectUnknown) {
+        if (![self beginEngineRecording]) { [self stopEngine]; self.status = @"no_microphone"; [self removeTemporaryAudio]; return; }
+    } else {
+        self.recorder = [[AVAudioRecorder alloc] initWithURL:self.recordingURL settings:settings error:&error];
+        self.recorder.meteringEnabled = YES;
+        if (error || ![self.recorder recordForDuration:self.maxSeconds]) { self.status = @"no_microphone"; [self removeTemporaryAudio]; return; }
+    }
     [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:self.recordingURL.path error:nil];
 #else
     NSString *fixturePath = NSProcessInfo.processInfo.environment[@"GROKBOT_FAKE_AUDIO_WAV"];
@@ -196,8 +271,10 @@
         if (![owner.status isEqual:@"recording"]) return;
         owner.elapsed = MIN(owner.maxSeconds, -owner.started.timeIntervalSinceNow);
 #if defined(EZERBOT_RELEASE)
-        [owner.recorder updateMeters];
-        owner.level = MAX(0, MIN(1, pow(10, [owner.recorder averagePowerForChannel:0] / 20.0)));
+        if (owner.recorder) {
+            [owner.recorder updateMeters];
+            owner.level = MAX(0, MIN(1, pow(10, [owner.recorder averagePowerForChannel:0] / 20.0)));
+        } // The engine's tap sets its own level.
 #else
         owner.level = 0.2 + fmod(owner.elapsed, 0.7);
 #endif
@@ -208,11 +285,20 @@
     NSString *command = body[@"command"];
     NSString *token = body[@"token"];
     if (![command isKindOfClass:NSString.class] || ![token isKindOfClass:NSString.class] || token.length > 128) { reply(@{@"status":@"invalid"}); return; }
+    if ([command isEqual:@"microphones"]) { reply(@{@"microphones":[EzerbotMicrophones available]}); return; }
     if ([command isEqual:@"start"]) {
         if (self.status && [@[@"authorizing",@"recording",@"paused",@"transcribing"] containsObject:self.status]) { reply(@{@"status":self.meeting && ![body[@"purpose"] isEqual:@"meeting"] ? @"meeting_busy" : @"busy"}); return; }
         BOOL meeting = [body[@"purpose"] isEqual:@"meeting"];
         if (meeting && ![body[@"consent"] isEqual:@YES]) { reply(@{@"status":@"consent_required"}); return; }
-        [self cancel]; self.token = token; self.meeting = meeting; self.maxSeconds = meeting ? 600 : 60;
+        NSString *purpose = body[@"purpose"], *requested = body[@"microphone"];
+        [self cancel]; self.token = token; self.meeting = meeting; self.memo = [purpose isEqual:@"memo"];
+        // The memo stays at a minute, a local capture at ten, and a dictation, never kept, gets five.
+        self.maxSeconds = meeting ? 600 : self.memo ? 60 : 300;
+        // The choice serves dictation and memo. A local capture keeps the microphone of the recording already delivered.
+        self.microphone = [EzerbotMicrophones resolve:meeting || ![requested isKindOfClass:NSString.class] || requested.length > 256 ? @"" : requested];
+#if defined(EZERBOT_RELEASE)
+        self.chosenDevice = meeting ? kAudioObjectUnknown : [EzerbotMicrophones deviceForResolved:self.microphone];
+#endif
         NSString *language = body[@"language"];
         self.language = [language isKindOfClass:NSString.class] && language.length > 0 && language.length <= 32 ? language : @"fr";
         self.elapsed = 0; self.tooLong = NO;
@@ -265,9 +351,9 @@
         if (![self.recorder record]) { [self stop]; }
 #endif
     }
-    else if ([command isEqual:@"retry"] && ([self.status isEqual:@"failed"] || (self.meeting && [self.status isEqual:@"ready"] && self.transcriptionPlan.missingCount))) {
+    else if ([command isEqual:@"retry"] && ([self.status isEqual:@"failed"] || (self.segmented && [self.status isEqual:@"ready"] && self.transcriptionPlan.missingCount))) {
         ++self.generation;
-        if (self.meeting && self.transcriptionPlan) {
+        if (self.segmented && self.transcriptionPlan) {
             [self.transcriptionPlan retryMissing]; self.status = @"transcribing"; [self transcribeSegment];
         } else [self transcribe];
     }

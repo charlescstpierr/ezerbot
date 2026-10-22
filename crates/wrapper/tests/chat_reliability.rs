@@ -495,7 +495,9 @@ fn refresh_hang_never_blocks_state_or_dispatches_after_cancellation() {
 #[test]
 fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
     for expired in [false, true] {
-        let mut f = Fixture::new(expired);
+        // Session errors, not deadlines, are under test. A parallel hung refresh
+        // can hold the process-wide auth lock beyond the default two seconds.
+        let mut f = Fixture::with_deadline(expired, Duration::from_secs(10));
         if expired {
             // Finish the initial quota read before expiring the shared token;
             // otherwise it can race the chat for the refresh lock.
@@ -507,7 +509,8 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
         let reply = f.settled();
         assert_eq!(
             reply["error_kind"],
-            if expired { "signin_expired" } else { "signin" }
+            if expired { "signin_expired" } else { "signin" },
+            "{reply}"
         );
         if expired {
             assert!(reply["error"]

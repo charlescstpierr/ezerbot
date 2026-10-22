@@ -177,7 +177,12 @@ pub(in super::super::super) fn call_id(ctx: &Context<'_>, request_id: &str) -> O
         .ok()
 }
 /// Under the connection lock, the credentials in use are still those of the approved account.
-fn bound(ctx: &Context<'_>, server: &str, login: &str, account: &str) -> Result<(), ApiError> {
+pub(super) fn bound(
+    ctx: &Context<'_>,
+    server: &str,
+    login: &str,
+    account: &str,
+) -> Result<(), ApiError> {
     let row: Option<(String, Option<String>, Option<String>)> = ctx.connection.query_row(
         "SELECT phase,account_email,account_id FROM wrapper_connector_catalogue WHERE server_id=?1",
         [server],

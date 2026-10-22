@@ -123,7 +123,7 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 
 /// The GitHub read tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_github_tool(name: &str) -> bool {
-    catalogue::github::is_tool(name) || is_github_comment(name)
+    catalogue::github::is_tool(name) || is_github_draft(name)
 }
 /// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
@@ -132,35 +132,58 @@ pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     if is_github_comment(&call.name) {
         catalogue::github::comment::call(ctx, call)
+    } else if is_github_issue(&call.name) {
+        catalogue::github::issue::call(ctx, call)
     } else {
         catalogue::github::call(ctx, &call.name, &call.arguments)
     }
 }
-/// The one publishing tool of the connection: it opens a draft card and sends nothing
+/// The publishing tools of the connection: each opens a draft card and sends nothing
 /// until that card is validated.
+pub(crate) fn is_github_draft(name: &str) -> bool {
+    is_github_comment(name) || is_github_issue(name)
+}
 pub(crate) fn is_github_comment(name: &str) -> bool {
     name == catalogue::github::COMMENT_TOOL
 }
-pub(crate) fn validate_github_comment(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
-    catalogue::github::comment::validate(ctx, call)
+pub(crate) fn is_github_issue(name: &str) -> bool {
+    name == catalogue::github::ISSUE_TOOL
+}
+pub(crate) fn validate_github_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
+    if is_github_issue(&call.name) {
+        catalogue::github::issue::validate(ctx, call)
+    } else {
+        catalogue::github::comment::validate(ctx, call)
+    }
 }
 /// Content of the draft card, stored with the approval request.
-pub(crate) fn github_comment_display(
+pub(crate) fn github_draft_display(
     ctx: &Context<'_>,
     request_id: &str,
     call: &ToolCall,
 ) -> Result<Value, ApiError> {
-    catalogue::github::comment::prepare(ctx, request_id, call)
+    if is_github_issue(&call.name) {
+        catalogue::github::issue::prepare(ctx, request_id, call)
+    } else {
+        catalogue::github::comment::prepare(ctx, request_id, call)
+    }
 }
-pub(crate) fn github_comment_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+pub(crate) fn github_draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
     catalogue::github::comment::call_id(ctx, request_id)
 }
-pub(crate) fn edit_github_comment(
+/// What Charles corrected on a draft card: a comment has a text, an issue a title and a body.
+pub(crate) fn edit_github_draft(
     ctx: &Context<'_>,
     request_id: &str,
-    text: &str,
+    tool: &str,
+    title: Option<&str>,
+    text: Option<&str>,
 ) -> Result<(), ApiError> {
-    catalogue::github::comment::edit(ctx, request_id, text)
+    if is_github_issue(tool) {
+        catalogue::github::issue::edit(ctx, request_id, title, text)
+    } else {
+        catalogue::github::comment::edit(ctx, request_id, text.unwrap_or_default())
+    }
 }
 pub(crate) fn is_lifecycle(name: &str) -> bool {
     name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")

@@ -1705,8 +1705,8 @@ impl RunServices for Services<'_> {
                 });
             }
         }
-        if super::mcp::is_github_comment(&call.name) {
-            if let Err(error) = super::mcp::validate_github_comment(&self.ctx(conn, run), call) {
+        if super::mcp::is_github_draft(&call.name) {
+            if let Err(error) = super::mcp::validate_github_draft(&self.ctx(conn, run), call) {
                 return Ok(ApprovalCheck::Denied {
                     reason: error.message,
                 });

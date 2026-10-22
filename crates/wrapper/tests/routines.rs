@@ -1969,3 +1969,241 @@ fn past_once_resume_is_refused_and_creation_time_is_server_owned() {
         400
     );
 }
+
+// Rattrapage au réveil (docs/specs/routines.md). L’horloge est injectée au tick,
+// et « le planificateur était censé tourner » par l’état de l’agent à la fermeture.
+const HOUR: i64 = 3_600_000;
+
+impl Fixture {
+    fn create_every(&mut self, schedule: &str) -> Routine {
+        serde_json::from_value(
+            self.post(
+                "/api/routines",
+                json!({"bot_id":"grokbot","name":"Bilan","prompt":"Bilan du matin","schedule":schedule}),
+            )["routine"]
+                .clone(),
+        )
+        .unwrap()
+    }
+    fn agent(&self, enabled: bool) {
+        self.db()
+            .execute(
+                "UPDATE wrapper_routines_background SET enabled=?1,installed=?1 WHERE id=1",
+                [enabled],
+            )
+            .unwrap();
+    }
+    /// Heure prévue de chaque run lancé, dans l’ordre de lancement.
+    fn launched_slots(&self) -> Vec<i64> {
+        let db = self.db();
+        let mut stmt = db
+            .prepare("SELECT o.scheduled_at_utc FROM engine_runs e JOIN scheduler_occurrences o ON o.occurrence_id=e.trigger_ref WHERE e.trigger_kind='occurrence' ORDER BY e.rowid")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .unwrap()
+    }
+    fn statuses(&mut self, r: &Routine) -> Vec<(i64, String)> {
+        let h = self.history(r);
+        let mut rows: Vec<_> = h["occurrences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["scheduled_at_utc"].as_i64().unwrap(),
+                    o["status"]["status"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+    /// Plusieurs ticks : un créneau de la file part par tick et par routine.
+    fn tick_until_quiet(&mut self, at: i64) {
+        for _ in 0..6 {
+            self.app.tick(at as u64);
+        }
+    }
+}
+
+#[test]
+fn slots_missed_while_the_mac_was_off_run_in_order_once_when_the_agent_was_enabled() {
+    let mut f = Fixture::new(false);
+    f.agent(true);
+    let r = f.create_every("@every 1h");
+    f.app.tick((r.modified_at + 10_000) as u64);
+    f.reopen(); // Mac éteint, application fermée, agent activé.
+    let wake = r.modified_at + 150 * 60_000; // +1 h et +2 h sont dus pendant le trou.
+    f.tick_until_quiet(wake);
+    let (first, second) = (r.modified_at + HOUR, r.modified_at + 2 * HOUR);
+    assert_eq!(f.launched_slots(), vec![first, second]);
+    let statuses = f.statuses(&r);
+    assert_eq!(statuses.len(), 2);
+    assert!(
+        statuses.iter().all(|(_, status)| status != "missed"),
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    // Un second redémarrage ne relance pas le même créneau.
+    f.reopen();
+    f.tick_until_quiet(wake + 60_000);
+    assert_eq!(f.count(), 2);
+    assert_eq!(f.launched_slots(), vec![first, second]);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let thread = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == r.conversation_id)
+        .unwrap();
+    assert!(thread["messages"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn a_paused_routine_produces_no_run_for_the_slots_of_the_same_gap() {
+    let mut f = Fixture::new(false);
+    f.agent(true);
+    let r = f.create_every("@every 1h");
+    f.app.tick((r.modified_at + 10_000) as u64);
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id}),
+    );
+    f.reopen();
+    f.tick_until_quiet(r.modified_at + 150 * 60_000);
+    assert_eq!(f.count(), 0);
+    assert!(f.statuses(&r).is_empty());
+}
+
+#[test]
+fn app_closed_with_the_agent_off_keeps_the_sixty_minute_window() {
+    let mut f = Fixture::new(false);
+    f.agent(false);
+    let r = f.create_every("@every 1h");
+    f.app.tick((r.modified_at + 10_000) as u64);
+    let mut ctx = f.app.feature_context();
+    ctx.now_ms = (r.modified_at + 20_000) as u64;
+    features::routines::depart(&ctx); // l’utilisateur quitte, rien n’est chargé de tourner
+    f.tick_until_quiet(r.modified_at + 150 * 60_000); // Mac allumé, application rouverte
+    let (old, recent) = (r.modified_at + HOUR, r.modified_at + 2 * HOUR);
+    assert_eq!(f.launched_slots(), vec![recent]);
+    let statuses = f.statuses(&r);
+    assert_eq!(statuses[0], (old, "missed".to_owned()), "{statuses:?}");
+    assert_ne!(statuses[1].1, "missed", "{statuses:?}");
+    // Le trou suivant n’est pas une absence : la rouverture l’a close.
+    f.tick_until_quiet(r.modified_at + 400 * 60_000);
+    assert!(f.launched_slots().len() > 2);
+}
+
+#[test]
+fn quitting_the_app_records_an_absence_only_while_the_agent_is_off() {
+    for (agent, absent) in [(false, true), (true, false)] {
+        let mut f = Fixture::new(false);
+        f.agent(agent);
+        f.create_every("@every 1h");
+        f.reopen();
+        let recorded: bool = f
+            .db()
+            .query_row(
+                "SELECT absent_since IS NOT NULL FROM scheduler_presence WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, absent, "agent enabled: {agent}");
+        f.app.tick(now());
+        let closed: bool = f
+            .db()
+            .query_row(
+                "SELECT absent_since IS NULL FROM scheduler_presence WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(closed, "the first tick ends the absence");
+    }
+}
+
+#[test]
+fn the_panel_counts_the_queue_and_a_pause_turns_what_has_not_started_into_missed() {
+    let mut f = Fixture::new(false);
+    f.agent(true);
+    let r = f.create_every("@every 1h");
+    f.app.tick((r.modified_at + 10_000) as u64);
+    f.reopen();
+    f.app.tick((r.modified_at + 210 * 60_000) as u64); // +1 h, +2 h, +3 h dus ; un seul part
+    let queue = |f: &mut Fixture| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let item = state["routines"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["routine"]["routine_id"] == r.routine_id)
+            .unwrap()
+            .clone();
+        (item["queue"].clone(), item["error"].clone())
+    };
+    let (waiting, error) = queue(&mut f);
+    assert_eq!(waiting["waiting"], 2);
+    assert_eq!(waiting["next_at"], r.modified_at + 2 * HOUR);
+    assert!(error.is_null(), "a queue is not a diagnostic: {error}");
+    f.post(
+        "/api/routines/pause",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id}),
+    );
+    assert_eq!(queue(&mut f).0["waiting"], 0);
+    f.tick_until_quiet(r.modified_at + 211 * 60_000);
+    let statuses = f.statuses(&r);
+    assert_ne!(statuses[0].1, "missed", "{statuses:?}");
+    assert_eq!(statuses[1].1, "missed", "{statuses:?}");
+    assert_eq!(statuses[2].1, "missed", "{statuses:?}");
+    assert_eq!(f.count(), 1);
+}
+
+#[test]
+fn editing_the_schedule_does_not_replay_the_slots_of_the_old_version() {
+    let mut f = Fixture::new(false);
+    f.agent(true);
+    let r = f.create_every("@every 1h");
+    f.app.tick((r.modified_at + 10_000) as u64);
+    f.reopen();
+    f.app.tick((r.modified_at + 210 * 60_000) as u64);
+    f.post(
+        "/api/routines/update",
+        json!({"bot_id":r.bot_id,"routine_id":r.routine_id,"modified_at":r.modified_at,
+        "schedule_version":r.schedule_version,"schedule":"@every 5h"}),
+    );
+    f.tick_until_quiet(r.modified_at + 211 * 60_000);
+    assert_eq!(f.count(), 1);
+    let statuses = f.statuses(&r);
+    assert!(
+        statuses[1..].iter().all(|(_, status)| status == "missed"),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn a_one_shot_date_due_during_the_gap_starts_once_at_wake() {
+    let mut f = Fixture::new(false);
+    f.agent(true);
+    let at = now() as i64 + HOUR;
+    let r: Routine = serde_json::from_value(
+        f.post(
+            "/api/routines",
+            json!({"bot_id":"grokbot","name":"Une fois","prompt":"Rappel","trigger":{"kind":"once","at":at}}),
+        )["routine"]
+            .clone(),
+    )
+    .unwrap();
+    f.app.tick((r.modified_at + 10_000) as u64);
+    f.reopen();
+    f.tick_until_quiet(at + 90 * 60_000);
+    f.reopen();
+    f.tick_until_quiet(at + 100 * 60_000);
+    assert_eq!(f.launched_slots(), vec![at]);
+}

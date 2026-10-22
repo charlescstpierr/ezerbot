@@ -29,6 +29,48 @@ struct SeenOAuth {
     revoke_error: bool,
     sse: bool,
     token_scope: Option<String>,
+    github: GithubScript,
+}
+/// Scripted GitHub App provider: device flow, user, refresh and one REST route.
+struct GithubScript {
+    serial: u32,
+    device_expires_in: u64,
+    device_interval: u64,
+    /// Replies to successive device polls before authorization; then pending.
+    polls: std::collections::VecDeque<Value>,
+    authorized: Option<String>,
+    live_access: String,
+    live_refresh: String,
+    renewals: u32,
+    refresh: &'static str,
+    issues: &'static str,
+    /// `ok`, or `missing` for a repository the account cannot see.
+    repo: &'static str,
+    more: bool,
+    long_readme: bool,
+    token_times: Vec<std::time::Instant>,
+    authorization: Vec<(String, String)>,
+}
+impl Default for GithubScript {
+    fn default() -> Self {
+        Self {
+            serial: 0,
+            device_expires_in: 900,
+            device_interval: 0,
+            polls: Default::default(),
+            authorized: None,
+            live_access: String::new(),
+            live_refresh: String::new(),
+            renewals: 0,
+            refresh: "ok",
+            issues: "ok",
+            repo: "ok",
+            more: false,
+            long_readme: false,
+            token_times: Vec::new(),
+            authorization: Vec::new(),
+        }
+    }
 }
 struct OAuth {
     base: String,
@@ -57,7 +99,181 @@ impl OAuth {
                     url::form_urlencoded::parse(body.as_bytes())
                         .into_owned()
                         .collect();
-                let (status, mut data) = if url.ends_with("/register") {
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.to_string());
+                let mut extra: Vec<Header> = Vec::new();
+                let (status, mut data) = if url.starts_with("/github/") {
+                    let g = &mut seen.github;
+                    if let Some(auth) = auth {
+                        g.authorization.push((url.clone(), auth));
+                    }
+                    if url == "/github/device" {
+                        g.serial += 1;
+                        (
+                            200,
+                            json!({"device_code":format!("device-secret-{}-never-visible",g.serial),"user_code":format!("WDJB-MJH{}",g.serial),"verification_uri":"https://github.com/login/device","expires_in":g.device_expires_in,"interval":g.device_interval}),
+                        )
+                    } else if url == "/github/token" {
+                        g.token_times.push(std::time::Instant::now());
+                        match fields.get("grant_type").map(String::as_str) {
+                            Some("urn:ietf:params:oauth:grant-type:device_code") => {
+                                let code = fields.get("device_code").cloned().unwrap_or_default();
+                                if let Some(reply) = g.polls.pop_front() {
+                                    (200, reply)
+                                } else if g.authorized.as_deref() == Some(code.as_str()) {
+                                    g.live_access =
+                                        format!("ghu_access-secret-never-visible-{}", g.serial);
+                                    g.live_refresh =
+                                        format!("ghr_refresh-secret-never-visible-{}", g.serial);
+                                    (
+                                        200,
+                                        json!({"access_token":g.live_access,"refresh_token":g.live_refresh,"expires_in":28800,"refresh_token_expires_in":15897600,"token_type":"bearer","scope":""}),
+                                    )
+                                } else if code
+                                    == format!("device-secret-{}-never-visible", g.serial)
+                                {
+                                    (200, json!({"error":"authorization_pending"}))
+                                } else {
+                                    (200, json!({"error":"expired_token"}))
+                                }
+                            }
+                            Some("refresh_token") => match g.refresh {
+                                "dead" => (
+                                    200,
+                                    json!({"error":"bad_refresh_token","error_description":"secret-must-not-leak"}),
+                                ),
+                                "down" => (503, json!({})),
+                                "limited" => (429, json!({"message":"rate limit"})),
+                                "forbidden" => (403, json!({"message":"API rate limit exceeded"})),
+                                _ if fields.get("refresh_token") != Some(&g.live_refresh) => {
+                                    (200, json!({"error":"bad_refresh_token"}))
+                                }
+                                _ => {
+                                    g.renewals += 1;
+                                    g.live_access =
+                                        format!("ghu_renewed-access-secret-{}", g.renewals);
+                                    g.live_refresh =
+                                        format!("ghr_renewed-refresh-secret-{}", g.renewals);
+                                    (
+                                        200,
+                                        json!({"access_token":g.live_access,"refresh_token":g.live_refresh,"expires_in":28800,"token_type":"bearer","scope":""}),
+                                    )
+                                }
+                            },
+                            _ => (400, json!({"error":"unsupported_grant_type"})),
+                        }
+                    } else if url == "/github/user" {
+                        (200, json!({"login":"charles-test","id":4242}))
+                    } else if url.starts_with("/github/api/repos/charles/essai/issues") {
+                        let live = format!("Bearer {}", g.live_access);
+                        let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
+                        if !known {
+                            (401, json!({"message":"Bad credentials"}))
+                        } else {
+                            match g.issues {
+                                "missing" => (404, json!({"message":"Not Found"})),
+                                "forbidden" => (
+                                    403,
+                                    json!({"message":"Resource not accessible by integration"}),
+                                ),
+                                "limit" => {
+                                    extra.push(
+                                        Header::from_bytes("X-RateLimit-Remaining", "0").unwrap(),
+                                    );
+                                    extra.push(
+                                        Header::from_bytes("X-RateLimit-Reset", "4102444800")
+                                            .unwrap(),
+                                    );
+                                    (403, json!({"message":"API rate limit exceeded"}))
+                                }
+                                _ => {
+                                    if g.more {
+                                        extra.push(Header::from_bytes("Link", "<https://api.github.com/repositories/1/issues?page=2>; rel=\"next\"").unwrap());
+                                    }
+                                    (
+                                        200,
+                                        json!([
+                                            {"number":12,"title":"Corriger le <b>bouton</b>","state":"open","user":{"login":"alice"}},
+                                            {"number":13,"title":"Une demande de fusion","state":"open","user":{"login":"bob"},"pull_request":{"url":"x"}},
+                                            {"number":9,"title":"Ancien problème","state":"closed","user":{"login":"charles-test"}}
+                                        ]),
+                                    )
+                                }
+                            }
+                        }
+                    } else if url.starts_with("/github/api/repos/charles/essai")
+                        && !url.starts_with("/github/api/repos/charles/essai/issues")
+                    {
+                        let live = format!("Bearer {}", g.live_access);
+                        let known = g.authorization.last().is_some_and(|(_, a)| *a == live);
+                        let path = url
+                            .trim_start_matches("/github/api/repos/charles/essai")
+                            .split('?')
+                            .next()
+                            .unwrap()
+                            .to_owned();
+                        let file = |text: &str, name: &str| {
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+                            let wrapped: Vec<&str> = encoded
+                                .as_bytes()
+                                .chunks(60)
+                                .map(|c| std::str::from_utf8(c).unwrap())
+                                .collect();
+                            json!({"type":"file","name":name,"path":name,"encoding":"base64","size":text.len(),"content":wrapped.join("\n")+"\n"})
+                        };
+                        if !known {
+                            (401, json!({"message":"Bad credentials"}))
+                        } else if g.repo == "missing" {
+                            (404, json!({"message":"Not Found"}))
+                        } else {
+                            match path.as_str() {
+                                "" => (
+                                    200,
+                                    json!({"full_name":"charles/essai","description":"Dépôt d’essai d’Ezerbot","default_branch":"trunk"}),
+                                ),
+                                "/pulls/7" => (
+                                    200,
+                                    json!({"number":7,"title":"Ajouter le <i>guide</i>","state":"open","merged":false,"user":{"login":"alice"},"base":{"ref":"trunk"},"head":{"ref":"guide"}}),
+                                ),
+                                "/pulls/8" => (
+                                    200,
+                                    json!({"number":8,"title":"Corriger la faute","state":"closed","merged":true,"user":{"login":"bob"},"base":{"ref":"trunk"}}),
+                                ),
+                                "/pulls" => (
+                                    200,
+                                    json!([{"number":9,"title":"La plus récente","state":"open","user":{"login":"alice"},"base":{"ref":"trunk"}}]),
+                                ),
+                                "/readme" if g.long_readme => (
+                                    200,
+                                    file(
+                                        &format!("# Essai\n{}", "ligne du fichier\n".repeat(2000)),
+                                        "README.md",
+                                    ),
+                                ),
+                                "/readme" => (
+                                    200,
+                                    file("# Essai\nBonjour depuis le README.\n", "README.md"),
+                                ),
+                                "/contents/docs/guide.md" => {
+                                    (200, file("# Guide\nPremière ligne du guide.\n", "guide.md"))
+                                }
+                                "/contents/docs" => {
+                                    (200, json!([{"type":"file","name":"guide.md"}]))
+                                }
+                                "/contents/logo.png" => (
+                                    200,
+                                    json!({"type":"file","name":"logo.png","encoding":"base64","size":4,"content":"/9j/4A=="}),
+                                ),
+                                _ => (404, json!({"message":"Not Found"})),
+                            }
+                        }
+                    } else {
+                        (404, json!({}))
+                    }
+                } else if url.ends_with("/register") {
                     (200, json!({"client_id":"fake-notion-client"}))
                 } else if url.ends_with("/token") {
                     if seen.token_error {
@@ -128,22 +344,24 @@ impl OAuth {
                 } else {
                     data.to_string()
                 };
-                let _ = req.respond(
-                    Response::from_string(text)
-                        .with_status_code(status)
-                        .with_header(
-                            Header::from_bytes(
-                                "Content-Type",
-                                if sse {
-                                    "text/event-stream"
-                                } else {
-                                    "application/json"
-                                },
-                            )
-                            .unwrap(),
+                let mut response = Response::from_string(text)
+                    .with_status_code(status)
+                    .with_header(
+                        Header::from_bytes(
+                            "Content-Type",
+                            if sse {
+                                "text/event-stream"
+                            } else {
+                                "application/json"
+                            },
                         )
-                        .with_header(Header::from_bytes("Mcp-Session-Id", "fake-session").unwrap()),
-                );
+                        .unwrap(),
+                    )
+                    .with_header(Header::from_bytes("Mcp-Session-Id", "fake-session").unwrap());
+                for header in extra {
+                    response.add_header(header);
+                }
+                let _ = req.respond(response);
             }
         });
         Self { base, seen, stop }
@@ -227,7 +445,7 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        let body = if id != "notion" && self.item(id)["has_client"] != true {
+        let body = if !matches!(id, "notion" | "github") && self.item(id)["has_client"] != true {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
         } else {
             json!({"id":id})
@@ -243,6 +461,11 @@ impl Fixture {
                 .unwrap()
                 .status
                 .is_terminal()
+        });
+    }
+    fn wait_approval(&self, run: &str) {
+        wait("approval", || {
+            !requests::list_for_run(&self.db(), run).unwrap().is_empty()
         });
     }
     fn decide(&mut self, run: &str, decision: Value) {
@@ -327,6 +550,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::env::remove_var("GROKBOT_FAKE_CONNECTORS");
+        std::env::remove_var("EZERBOT_GITHUB_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
@@ -475,7 +699,7 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     assert_eq!(f.oauth.count("/token"), 0);
     assert_eq!(f.callback("gmail", true, false), 400);
     assert_eq!(f.item("gmail")["status"], "reconnect");
-    for id in ["gmail", "calendar", "drive", "slack", "notion", "github"] {
+    for id in ["gmail", "calendar", "drive", "slack", "notion"] {
         f.oauth.seen.lock().unwrap().token_scope = if id == "notion" {
             Some(String::new())
         } else {
@@ -635,37 +859,37 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     // Bad token response is not logged, reflected or persisted.
     f.db()
         .execute(
-            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='github'",
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='calendar'",
             [],
         )
         .unwrap();
     f.oauth.seen.lock().unwrap().token_error = true;
-    let run = f.connect("github");
+    let run = f.connect("calendar");
     f.decide(&run, json!("allow_once"));
-    assert_eq!(f.callback("github", false, false), 400);
-    assert_eq!(f.item("github")["status"], "reconnect");
+    assert_eq!(f.callback("calendar", false, false), 400);
+    assert_eq!(f.item("calendar")["status"], "reconnect");
     // A restart invalidates an unfinished, one-time callback without contacting
     // the service or reviving an old browser session.
     let before = f.oauth.count("/token");
-    let pending = f.connect("github");
+    let pending = f.connect("calendar");
     f.decide(&pending, json!("allow_once"));
-    assert_eq!(f.item("github")["status"], "authorizing");
+    assert_eq!(f.item("calendar")["status"], "authorizing");
     let provider = Provider::with_endpoints(&f.path, f.ai.endpoints(), false);
     f.app = App::open_with(&f.path, provider.clone()).unwrap();
     f.provider = provider;
-    assert_eq!(f.item("github")["status"], "reconnect");
-    assert!(f.item("github")["authorization_url"].is_null());
+    assert_eq!(f.item("calendar")["status"], "reconnect");
+    assert!(f.item("calendar")["authorization_url"].is_null());
     assert_eq!(f.oauth.count("/token"), before + 1); // only the failed refresh above
                                                      // Disconnect also cancels pending authorization and removes its vault value.
-    let pending = f.connect("github");
+    let pending = f.connect("calendar");
     f.decide(&pending, json!("allow_once"));
-    let removed = f.post("/api/connectors/disconnect", json!({"id":"github"}))["run_id"]
+    let removed = f.post("/api/connectors/disconnect", json!({"id":"calendar"}))["run_id"]
         .as_str()
         .unwrap()
         .to_owned();
     f.decide(&removed, json!("allow_once"));
-    assert_eq!(f.item("github")["status"], "disconnected");
-    assert!(f.item("github")["authorization_url"].is_null());
+    assert_eq!(f.item("calendar")["status"], "disconnected");
+    assert!(f.item("calendar")["authorization_url"].is_null());
     let public = f.state().to_string();
     for secret in [
         "access-secret",
@@ -685,4 +909,858 @@ fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
         store::required(&f.db(), &run).unwrap().status,
         RunStatus::Finished
     );
+}
+
+const GITHUB_TOOL: &str = "github_list_issues";
+const GITHUB_PULL: &str = "github_get_pull_request";
+const GITHUB_REPO: &str = "github_read_repository";
+const GITHUB_SECRETS: [&str; 5] = [
+    "ghu_access-secret",
+    "ghr_refresh-secret",
+    "ghu_renewed",
+    "ghr_renewed",
+    "device-secret-",
+];
+
+impl Fixture {
+    /// The public client of the GitHub App is build configuration, never a form field.
+    fn with_github_client(&self) {
+        std::env::set_var("EZERBOT_GITHUB_CLIENT_ID", "Iv1.fixturepublicid");
+    }
+    fn github_start(&mut self) {
+        self.with_github_client();
+        let run = self.connect("github");
+        self.decide(&run, json!("allow_once"));
+    }
+    fn github_device(&mut self) -> Value {
+        self.item("github")["device"].clone()
+    }
+    fn github_authorize(&self) {
+        let mut seen = self.oauth.seen.lock().unwrap();
+        let code = format!("device-secret-{}-never-visible", seen.github.serial);
+        seen.github.authorized = Some(code);
+    }
+    fn github_connect(&mut self) {
+        self.github_start();
+        self.github_authorize();
+        wait("github connected", || {
+            self.item("github")["status"] == "connected"
+        });
+        let server = self.item("github")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn github_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='github'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn assert_no_github_token_kept(&self) {
+        let kept = self.github_secret().unwrap_or_default();
+        assert!(kept.get("ACCESS_TOKEN").is_none() && kept.get("REFRESH_TOKEN").is_none());
+    }
+    fn github_requests(&self, part: &str) -> usize {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, _)| url.contains(part))
+            .count()
+    }
+    /// One chat turn that asks the bot to list issues.
+    fn github_list(&mut self, id: &str, repository: &str) -> String {
+        self.github_call(id, GITHUB_TOOL, json!({"repository":repository}))
+    }
+    /// One chat turn that makes the model call a GitHub tool. Both model replies are
+    /// queued first: nothing here waits for a human decision.
+    fn github_call(&mut self, id: &str, tool: &str, arguments: Value) -> String {
+        let conversation = self.post("/api/conversations", json!({"title":"GitHub"}))
+            ["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":format!("Lis {arguments}.")}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        wait("github run", || {
+            self.app.tick(0);
+            store::required(&self.db(), &run)
+                .unwrap()
+                .status
+                .is_terminal()
+        });
+        assert!(
+            requests::list_for_run(&self.db(), &run).unwrap().is_empty(),
+            "a read must not open an approval card"
+        );
+        run
+    }
+    fn expire_github(&self) {
+        self.db()
+            .execute(
+                "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='github'",
+                [],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn github_card_has_no_client_fields_and_explains_a_missing_application() {
+    let mut f = Fixture::new();
+    let github = f.item("github");
+    assert_eq!(github["needs_client"], false);
+    assert_eq!(github["configured"], false);
+    assert_eq!(github["redirect_uri"], Value::Null);
+    for other in ["gmail", "calendar", "drive", "slack"] {
+        assert_eq!(f.item(other)["needs_client"], true);
+        assert_eq!(f.item(other)["configured"], true);
+    }
+    assert_eq!(f.item("notion")["needs_client"], false);
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    for body in [
+        br#"{"id":"github"}"#.as_slice(),
+        br#"{"id":"github","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(
+            error.message.contains("n’est pas configurée"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("fixture-oauth-secret"));
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.github_requests("/device"), 0);
+    assert_eq!(f.item("github")["status"], "disconnected");
+    // Even with the application configured, a typed secret is refused, not stored.
+    f.with_github_client();
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"github","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(f.github_secret().is_none());
+    assert_eq!(f.item("github")["configured"], true);
+}
+
+#[test]
+fn github_device_flow_shows_a_copyable_code_paces_polling_and_never_sends_a_secret() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().github.polls.extend([
+        json!({"error":"authorization_pending"}),
+        json!({"error":"slow_down","interval":1}),
+    ]);
+    f.with_github_client();
+    let run = f.connect("github");
+    // The approval names the permissions before any browser or code appears.
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    assert_eq!(request["connector"]["tool"], "Connecter GitHub");
+    assert_eq!(request["connector"]["catalogue_id"], "github");
+    let catalogue = &request["arguments"]["catalogue"];
+    assert_eq!(catalogue["service"], "GitHub");
+    assert_eq!(catalogue["action"], "Connecter GitHub");
+    let permissions = catalogue["permissions"].as_str().unwrap();
+    for word in [
+        "Issues",
+        "pull requests",
+        "contenu des dépôts en lecture",
+        "dépôts que vous choisirez chez GitHub",
+    ] {
+        assert!(permissions.contains(word), "{word}: {permissions}");
+    }
+    assert!(catalogue["connexion"]
+        .as_str()
+        .unwrap()
+        .contains("github.com/login/device"));
+    assert_eq!(
+        f.github_requests("/device"),
+        0,
+        "no code before the approval"
+    );
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.github_requests("/device"), 1);
+    let item = f.item("github");
+    assert_eq!(item["status"], "authorizing");
+    assert_eq!(item["device"]["user_code"], "WDJB-MJH1");
+    assert_eq!(
+        item["device"]["verification_uri"],
+        "https://github.com/login/device"
+    );
+    assert!(item["device"]["expires_at"].as_u64().unwrap() > 1_000_000_000_000);
+    assert_eq!(item["authorization_url"], "https://github.com/login/device");
+    assert!(f.github_secret().is_none());
+    wait("three polls", || f.github_requests("/github/token") >= 2);
+    f.github_authorize();
+    wait("connected", || f.item("github")["status"] == "connected");
+    let item = f.item("github");
+    assert_eq!(item["account"], "charles-test");
+    assert_eq!(item["device"], Value::Null);
+    assert_eq!(item["has_tokens"], true);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let times = &seen.github.token_times;
+        assert!(times.len() >= 3);
+        assert!(
+            times[2].duration_since(times[1]) >= Duration::from_millis(950),
+            "slow_down must stretch the polling interval"
+        );
+        assert_eq!(seen.requests[0].1, "client_id=Iv1.fixturepublicid");
+        for (_, body) in &seen.requests {
+            assert!(!body.contains("client_secret"), "{body}");
+        }
+        let poll = seen
+            .requests
+            .iter()
+            .find(|(url, _)| url == "/github/token")
+            .unwrap();
+        assert!(poll
+            .1
+            .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"));
+        assert!(poll.1.contains("client_id=Iv1.fixturepublicid"));
+    }
+    let kept = f.github_secret().unwrap();
+    assert!(kept["ACCESS_TOKEN"].as_str().unwrap().starts_with("ghu_"));
+    assert!(kept["REFRESH_TOKEN"].as_str().unwrap().starts_with("ghr_"));
+    assert_eq!(f.github_secret().unwrap().get("CLIENT_SECRET"), None);
+    let public = f.state().to_string();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in GITHUB_SECRETS {
+        assert!(!public.contains(secret));
+        assert!(!database
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+    }
+    // The other services keep their client: Gmail still asks for one.
+    assert_eq!(f.item("gmail")["needs_client"], true);
+    assert_eq!(f.item("gmail")["has_client"], false);
+}
+
+#[test]
+fn github_wait_ends_without_a_token_on_cancel_refusal_expiry_and_restart() {
+    let mut f = Fixture::new();
+    // Cancel while the code is shown.
+    f.github_start();
+    let cancelled = f.github_device().clone();
+    assert_eq!(f.item("github")["status"], "authorizing");
+    let result = f.post("/api/connectors/cancel", json!({"id":"github"}));
+    assert!(result["message"].as_str().unwrap().contains("annulée"));
+    assert_eq!(f.item("github")["status"], "disconnected");
+    assert_eq!(f.item("github")["device"], Value::Null);
+    f.github_authorize();
+    std::thread::sleep(Duration::from_millis(400));
+    let polls = f.github_requests("/github/token");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        polls,
+        f.github_requests("/github/token"),
+        "the dead code is no longer polled"
+    );
+    f.assert_no_github_token_kept();
+    assert_eq!(f.item("github")["status"], "disconnected");
+    // Cancelling something that is not waiting changes nothing.
+    assert!(f
+        .app
+        .api("POST", "/api/connectors/cancel", br#"{"id":"gmail"}"#)
+        .is_err());
+    // Refusal at GitHub.
+    f.oauth.seen.lock().unwrap().github.authorized = None;
+    f.oauth
+        .seen
+        .lock()
+        .unwrap()
+        .github
+        .polls
+        .push_back(json!({"error":"access_denied"}));
+    f.github_start();
+    wait("refusal", || f.item("github")["status"] == "reconnect");
+    assert!(f.item("github")["message"]
+        .as_str()
+        .unwrap()
+        .contains("refusé"));
+    f.assert_no_github_token_kept();
+    // Expiry, then a fresh code succeeds while the old one stays dead.
+    f.oauth.seen.lock().unwrap().github.device_expires_in = 1;
+    f.github_start();
+    let expiring = f.github_device();
+    wait("expiry", || f.item("github")["status"] == "reconnect");
+    assert!(f.item("github")["message"]
+        .as_str()
+        .unwrap()
+        .contains("expiré"));
+    f.assert_no_github_token_kept();
+    let polls = f.github_requests("/github/token");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(polls, f.github_requests("/github/token"));
+    f.oauth.seen.lock().unwrap().github.device_expires_in = 900;
+    f.github_start();
+    let fresh = f.github_device();
+    assert_ne!(fresh["user_code"], expiring["user_code"]);
+    assert_ne!(fresh["user_code"], cancelled["user_code"]);
+    // Restart while waiting: nothing resumes, and authorizing the old code does nothing.
+    let provider = Provider::with_endpoints(&f.path, f.ai.endpoints(), false);
+    f.app = App::open_with(&f.path, provider.clone()).unwrap();
+    f.provider = provider;
+    assert_eq!(f.item("github")["status"], "reconnect");
+    assert_eq!(f.item("github")["device"], Value::Null);
+    assert!(f.item("github")["authorization_url"].is_null());
+    f.github_authorize();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(f.item("github")["status"], "reconnect");
+    f.assert_no_github_token_kept();
+    let requests = f.oauth.seen.lock().unwrap();
+    assert!(requests
+        .requests
+        .iter()
+        .all(|(_, b)| !b.contains("client_secret")));
+}
+
+#[test]
+fn github_lists_one_page_of_issues_without_an_approval_card_and_names_the_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.oauth.seen.lock().unwrap().github.more = true;
+    let before = f.github_requests("/issues");
+    let run = f.github_list("list-issues", "charles/essai");
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["autres_issues"], true);
+    let issues = output["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 2, "pull requests are not issues");
+    assert_eq!(issues[0]["numero"], 12);
+    assert_eq!(issues[0]["titre"], "Corriger le <b>bouton</b>");
+    assert_eq!(issues[0]["etat"], "open");
+    assert_eq!(issues[0]["auteur"], "alice");
+    let text = output["texte"].as_str().unwrap();
+    assert!(text.contains("compte GitHub : charles-test"));
+    assert!(text.contains("#12 · Corriger le <b>bouton</b> · ouverte · par alice"));
+    assert!(text.contains("#9 · Ancien problème · fermée · par charles-test"));
+    assert!(text.contains("première page"));
+    assert_eq!(f.github_requests("/issues"), before + 1);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (url, auth) = seen
+            .github
+            .authorization
+            .iter()
+            .rev()
+            .find(|(u, _)| u.contains("/issues"))
+            .unwrap();
+        assert!(url.contains("per_page=30"));
+        assert_eq!(*auth, format!("Bearer {}", seen.github.live_access));
+    }
+    // The model saw the listing, never a token or a device code.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("charles-test") && inputs.contains("Ancien problème"));
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+fn done(f: &Fixture, run: &str) -> Value {
+    match f.outcome(run) {
+        ToolOutcome::Done { output } => output,
+        other => panic!("{other:?}"),
+    }
+}
+fn failed(f: &Fixture, run: &str) -> String {
+    match f.outcome(run) {
+        ToolOutcome::Failed { reason } => reason,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn github_reads_a_pull_request_without_a_card_and_names_the_account() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let before = f.github_requests("/pulls/7");
+    let run = f.github_call(
+        "pull-7",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":7}),
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["numero"], 7);
+    assert_eq!(output["titre"], "Ajouter le <i>guide</i>");
+    assert_eq!(output["etat"], "open");
+    assert_eq!(output["auteur"], "alice");
+    assert_eq!(output["branche_base"], "trunk");
+    let text = output["texte"].as_str().unwrap();
+    for part in [
+        "compte GitHub : charles-test",
+        "#7",
+        "Ajouter le <i>guide</i>",
+        "État : ouverte",
+        "Auteur : alice",
+        "Branche de base : trunk",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert_eq!(f.github_requests("/pulls/7"), before + 1);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let (_, auth) = seen
+            .github
+            .authorization
+            .iter()
+            .rev()
+            .find(|(u, _)| u.contains("/pulls/7"))
+            .unwrap();
+        assert_eq!(*auth, format!("Bearer {}", seen.github.live_access));
+    }
+    // A merged pull request says so; without a number, the latest one is read.
+    let run = f.github_call(
+        "pull-8",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":8}),
+    );
+    let merged = done(&f, &run);
+    assert_eq!(merged["etat"], "merged");
+    assert!(merged["texte"]
+        .as_str()
+        .unwrap()
+        .contains("État : fusionnée"));
+    let run = f.github_call(
+        "pull-latest",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai"}),
+    );
+    let latest = done(&f, &run);
+    assert_eq!(latest["numero"], 9);
+    assert_eq!(latest["titre"], "La plus récente");
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("charles-test") && inputs.contains("Branche de base : trunk"));
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_reads_a_repository_readme_or_a_named_file_and_truncates_a_long_one() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let run = f.github_call("readme", GITHUB_REPO, json!({"repository":"charles/essai"}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "charles-test");
+    assert_eq!(output["depot"], "charles/essai");
+    assert_eq!(output["description"], "Dépôt d’essai d’Ezerbot");
+    assert_eq!(output["branche_par_defaut"], "trunk");
+    assert_eq!(output["fichier"], "README.md");
+    assert_eq!(output["tronque"], false);
+    assert_eq!(output["extrait"], "# Essai\nBonjour depuis le README.\n");
+    let text = output["texte"].as_str().unwrap();
+    for part in [
+        "compte GitHub : charles-test",
+        "Dépôt d’essai d’Ezerbot",
+        "Branche par défaut : trunk",
+        "README.md",
+        "Bonjour depuis le README.",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert!(!text.contains("tronqué"));
+    // A named file, in a folder.
+    let run = f.github_call(
+        "guide",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai","path":"docs/guide.md"}),
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["fichier"], "docs/guide.md");
+    assert!(output["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("Première ligne du guide."));
+    assert_eq!(f.github_requests("/contents/docs/guide.md"), 1);
+    // A long file is cut, and the bubble says so.
+    f.oauth.seen.lock().unwrap().github.long_readme = true;
+    let run = f.github_call("long", GITHUB_REPO, json!({"repository":"charles/essai"}));
+    let output = done(&f, &run);
+    assert_eq!(output["tronque"], true);
+    let excerpt = output["extrait"].as_str().unwrap();
+    assert!(excerpt.starts_with("# Essai\nligne du fichier"));
+    assert!(
+        excerpt.chars().count() <= 4000,
+        "{}",
+        excerpt.chars().count()
+    );
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("Le fichier est trop long : seul le début est affiché"),
+        "{text}"
+    );
+    assert!(text.chars().count() < 4600);
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    for secret in GITHUB_SECRETS {
+        assert!(!inputs.contains(secret));
+        assert!(!f.state().to_string().contains(secret));
+    }
+}
+
+#[test]
+fn github_pull_request_and_repository_tools_are_reads_without_approval() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    for name in [GITHUB_TOOL, GITHUB_PULL, GITHUB_REPO] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        assert!(!tool.requires_approval, "{name}");
+    }
+    assert_eq!(
+        tools
+            .iter()
+            .filter(|t| t.name.starts_with("github_"))
+            .count(),
+        3,
+        "the list of GitHub tools is closed"
+    );
+    // The closed list is also what the connection card reports.
+    let listed = f.item("github")["server"]["tools"].to_string();
+    for name in ["list_issues", "get_pull_request", "read_repository"] {
+        assert!(listed.contains(name), "{name}: {listed}");
+    }
+}
+
+#[test]
+fn github_pull_request_and_file_failures_are_french_sentences_without_a_retry_loop() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    // A missing pull request: one call, one sentence.
+    let before = f.github_requests("/pulls/404");
+    let run = f.github_call(
+        "pull-missing",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":404}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("introuvable") && reason.contains("404"),
+        "{reason}"
+    );
+    assert_eq!(f.github_requests("/pulls/404"), before + 1);
+    // A missing file: the repository is read once, the file once.
+    let repo_calls = f.github_requests("/repos/charles/essai");
+    let before = f.github_requests("/contents/absent.md");
+    let run = f.github_call(
+        "file-missing",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai","path":"absent.md"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("absent.md") && reason.contains("introuvable"),
+        "{reason}"
+    );
+    assert_eq!(f.github_requests("/contents/absent.md"), before + 1);
+    assert_eq!(f.github_requests("/repos/charles/essai"), repo_calls + 2);
+    // A folder and a binary file are not excerpts.
+    for (id, path, words) in [
+        ("folder", "docs", "dossier"),
+        ("binary", "logo.png", "texte"),
+    ] {
+        let run = f.github_call(
+            id,
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":path}),
+        );
+        let reason = failed(&f, &run);
+        assert!(reason.contains(words), "{path}: {reason}");
+    }
+    // A missing repository is named once, and the file is never asked for.
+    f.oauth.seen.lock().unwrap().github.repo = "missing";
+    let repo_calls = f.github_requests("/repos/charles/essai");
+    let files = f.github_requests("/contents");
+    let run = f.github_call(
+        "repo-missing",
+        GITHUB_REPO,
+        json!({"repository":"charles/essai"}),
+    );
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("introuvable") && reason.contains("charles/essai"),
+        "{reason}"
+    );
+    assert!(reason.contains("charles-test"), "{reason}");
+    assert_eq!(f.github_requests("/repos/charles/essai"), repo_calls + 1);
+    assert_eq!(f.github_requests("/contents"), files);
+    let run = f.github_call(
+        "pull-no-repo",
+        GITHUB_PULL,
+        json!({"repository":"charles/essai","number":7}),
+    );
+    assert!(failed(&f, &run).contains("introuvable"));
+    f.oauth.seen.lock().unwrap().github.repo = "ok";
+    // Bad arguments never reach GitHub.
+    let calls = f.oauth.seen.lock().unwrap().requests.len();
+    for (id, tool, arguments) in [
+        (
+            "bad-pull-name",
+            GITHUB_PULL,
+            json!({"repository":"../etc/passwd","number":1}),
+        ),
+        (
+            "bad-pull-number",
+            GITHUB_PULL,
+            json!({"repository":"charles/essai","number":0}),
+        ),
+        (
+            "bad-repo-name",
+            GITHUB_REPO,
+            json!({"repository":"charles"}),
+        ),
+        (
+            "bad-path",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":"../secret"}),
+        ),
+        (
+            "abs-path",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","path":"/etc/passwd"}),
+        ),
+        (
+            "extra",
+            GITHUB_REPO,
+            json!({"repository":"charles/essai","ref":"main"}),
+        ),
+    ] {
+        let run = f.github_call(id, tool, arguments);
+        let reason = failed(&f, &run);
+        assert!(!reason.contains("ghu_") && !reason.is_empty(), "{id}");
+    }
+    assert_eq!(f.oauth.seen.lock().unwrap().requests.len(), calls);
+    // The issue listing of the first slice still works beside them.
+    let run = f.github_list("still-lists", "charles/essai");
+    assert_eq!(done(&f, &run)["issues"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn github_read_failures_are_french_sentences_and_the_provider_is_not_called_again() {
+    let mut f = Fixture::new();
+    // Zero account: the chat says to connect, and nothing is called.
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    assert!(tools.iter().all(|t| t.name != GITHUB_TOOL));
+    f.github_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let tool = tools.iter().find(|t| t.name == GITHUB_TOOL).unwrap();
+    assert!(!tool.requires_approval);
+    for (index, (script, words)) in [
+        ("missing", "introuvable"),
+        ("forbidden", "refus"),
+        ("limit", "limite"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.oauth.seen.lock().unwrap().github.issues = script;
+        let before = f.github_requests("/issues");
+        let run = f.github_list(&format!("failure-{index}"), "charles/essai");
+        let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+            panic!("{script}");
+        };
+        assert!(reason.to_lowercase().contains(words), "{script}: {reason}");
+        assert_eq!(
+            f.github_requests("/issues"),
+            before + 1,
+            "{script}: no retry loop"
+        );
+        assert!(!reason.contains("ghu_"));
+    }
+    f.oauth.seen.lock().unwrap().github.issues = "ok";
+    let before = f.github_requests("/issues");
+    let run = f.github_list("bad-name", "../etc/passwd");
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.github_requests("/issues"), before);
+    // Disconnected GitHub: a short sentence, no provider call.
+    let removal = f.post("/api/connectors/disconnect", json!({"id":"github"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&removal, json!("allow_once"));
+    assert_eq!(f.item("github")["status"], "disconnected");
+    assert!(f.item("github")["message"]
+        .as_str()
+        .unwrap()
+        .contains("non confirmée"));
+    f.assert_no_github_token_kept();
+}
+
+#[test]
+fn github_renews_an_expired_access_once_and_a_dead_refresh_asks_to_reconnect() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    let old_refresh = f.github_secret().unwrap()["REFRESH_TOKEN"].clone();
+    f.expire_github();
+    let tokens = f.github_requests("/github/token");
+    let run = f.github_list("renewed", "charles/essai");
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.github_requests("/github/token"), tokens + 1);
+    {
+        let seen = f.oauth.seen.lock().unwrap();
+        let refresh = seen
+            .requests
+            .iter()
+            .rev()
+            .find(|(u, b)| u == "/github/token" && b.contains("grant_type=refresh_token"))
+            .unwrap();
+        assert!(refresh.1.contains("client_id=Iv1.fixturepublicid"));
+        assert!(!refresh.1.contains("client_secret"));
+    }
+    let kept = f.github_secret().unwrap();
+    assert_ne!(
+        kept["REFRESH_TOKEN"], old_refresh,
+        "the old refresh token is replaced in the same write"
+    );
+    assert!(kept["ACCESS_TOKEN"]
+        .as_str()
+        .unwrap()
+        .starts_with("ghu_renewed"));
+    assert_eq!(f.item("github")["status"], "connected");
+    // A later read does not renew again.
+    let run = f.github_list("not-renewed-again", "charles/essai");
+    assert!(matches!(f.outcome(&run), ToolOutcome::Done { .. }));
+    assert_eq!(f.github_requests("/github/token"), tokens + 1);
+    // Dead refresh: reconnect, tokens dropped, the old access is never replayed.
+    f.expire_github();
+    f.oauth.seen.lock().unwrap().github.refresh = "dead";
+    let issues = f.github_requests("/issues");
+    let run = f.github_list("dead-refresh", "charles/essai");
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("a dead refresh must fail the read");
+    };
+    assert!(reason.contains("Reconnectez"), "{reason}");
+    assert_eq!(f.github_requests("/issues"), issues);
+    assert_eq!(f.item("github")["status"], "reconnect");
+    assert_eq!(f.item("github")["has_tokens"], false);
+    f.assert_no_github_token_kept();
+    let tokens = f.github_requests("/github/token");
+    let run = f.github_list("after-dead-refresh", "charles/essai");
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(
+        f.github_requests("/github/token"),
+        tokens,
+        "no further renewal attempt"
+    );
+    assert_eq!(f.github_requests("/issues"), issues);
+    assert!(!f.state().to_string().contains("secret-must-not-leak"));
+}
+
+#[test]
+fn github_keeps_its_tokens_when_the_renewal_is_only_unreachable() {
+    let mut f = Fixture::new();
+    f.github_connect();
+    f.expire_github();
+    for (index, script) in ["down", "limited", "forbidden"].into_iter().enumerate() {
+        f.oauth.seen.lock().unwrap().github.refresh = script;
+        let run = f.github_list(&format!("unreachable-{index}"), "charles/essai");
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{script}"
+        );
+        assert_eq!(f.item("github")["status"], "connected", "{script}");
+        assert_eq!(f.item("github")["has_tokens"], true, "{script}");
+        assert!(
+            f.github_secret().unwrap()["REFRESH_TOKEN"].is_string(),
+            "{script}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[test]
+fn github_connection_fails_closed_when_the_keychain_refuses_and_writes_no_file_copy() {
+    let mut f = Fixture::new();
+    f.with_github_client();
+    let missing = std::env::temp_dir().join("ezerbot-absent-keychain-for-github.keychain-db");
+    std::env::set_var("GROKBOT_TEST_KEYCHAIN", &missing);
+    grokbot_forms::vault::enable_os_vault(true);
+    let run = f.connect("github");
+    f.decide(&run, json!("allow_once"));
+    f.github_authorize();
+    wait("keychain refusal", || {
+        f.item("github")["status"] == "reconnect"
+    });
+    let message = f.item("github")["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("trousseau"), "{message}");
+    assert!(f.item("github")["has_tokens"] == false);
+    let vault_file = f.path.with_extension("secrets.json");
+    let file = std::fs::read(&vault_file).unwrap_or_default();
+    let database = std::fs::read(&f.path).unwrap();
+    for secret in GITHUB_SECRETS {
+        assert!(!file.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        assert!(!database
+            .windows(secret.len())
+            .any(|w| w == secret.as_bytes()));
+        assert!(!f.state().to_string().contains(secret));
+    }
+    std::env::remove_var("GROKBOT_TEST_KEYCHAIN");
+    grokbot_forms::vault::enable_os_vault(false);
 }

@@ -1630,6 +1630,7 @@ impl RunServices for Services<'_> {
             || super::generated::is_external(&call.name)
             || super::images::is_external(&call.name)
             || super::recall::is_tool(&call.name)
+            || super::mcp::is_github_tool(&call.name)
     }
     fn external_unavailable_reason(
         &self,
@@ -1662,6 +1663,8 @@ impl RunServices for Services<'_> {
             super::images::execute(&ctx, call, &self.cancel)
         } else if super::recall::is_tool(&call.name) {
             super::recall::execute(&ctx, call)
+        } else if super::mcp::is_github_tool(&call.name) {
+            super::mcp::run_github_tool(&ctx, call)
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };

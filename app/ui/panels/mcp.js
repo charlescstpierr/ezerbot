@@ -128,15 +128,13 @@
       const heading = node("div", null, "mcp-heading");
       const status = node("span", null, `mcp-status mcp-status-${item.status}`);
       const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
-      status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:"Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Déconnecté"})[item.status] || "Déconnecté"));
+      status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:item.device_flow ? "En attente de votre autorisation chez GitHub" : "Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Déconnecté"})[item.status] || "Déconnecté"));
       heading.append(node("strong", item.name), status);
       card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
-      if (item.message) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
+      if (item.message && !(item.device_flow && item.device)) card.append(node("p", item.message, item.warning ? "mcp-warning" : ["error","reconnect"].includes(item.status) ? "mcp-error" : "mcp-note"));
       const setup = node("details"); setup.append(node("summary", "Installation et autorisations détaillées"), node("p", item.setup, "mcp-note"));
-      const copyable = (caption, value) => {
-        setup.append(node("p", caption, "mcp-note"));
-        const row = node("div", null, "mcp-copy-row");
+      const copyButton = (caption, value) => {
         let resetCopy;
         const copy = button("Copier", async () => {
           clearTimeout(resetCopy);
@@ -144,10 +142,16 @@
           catch { feedback.textContent = "Sélectionnez le texte pour le copier. La copie automatique n’est pas disponible."; feedback.scrollIntoView?.({block:"nearest"}); }
         });
         copy.setAttribute("aria-label", `Copier ${caption.toLowerCase()} — ${item.name}`);
-        row.append(node("code", value), copy); setup.append(row);
+        return copy;
+      };
+      const copyable = (caption, value) => {
+        setup.append(node("p", caption, "mcp-note"));
+        const row = node("div", null, "mcp-copy-row");
+        row.append(node("code", value), copyButton(caption, value)); setup.append(row);
       };
       if (item.redirect_uri) copyable("URL de retour OAuth", item.redirect_uri);
       if (item.id === "notion") setup.append(node("p", "Autorisations choisies pendant le consentement Notion.", "mcp-note"));
+      else if (item.device_flow) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
       else copyable("Portées OAuth", item.scopes_label || item.scopes);
       setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
       let form, client, secret;
@@ -163,6 +167,18 @@
         setup.append(form);
       }
       card.append(setup);
+      if (item.device_flow && !item.configured) card.append(node("p", "L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir ici : Connecter restera indisponible tant qu’elle n’est pas préparée.", "mcp-warning"));
+      if (item.device_flow && item.device) {
+        const device = node("div", null, "mcp-device"); device.setAttribute("role", "group"); device.setAttribute("aria-label", "Code de connexion GitHub");
+        const until = new Date(item.device.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
+        const row = node("div", null, "mcp-copy-row");
+        row.append(node("code", item.device.user_code, "mcp-device-code"), copyButton("le code de connexion", item.device.user_code));
+        device.append(node("p", "Entrez ce code sur github.com/login/device :", "mcp-note"), row, node("p", `Le code est valable jusqu’à ${until}. Ezerbot termine la connexion dès que vous avez autorisé l’application chez GitHub.`, "mcp-note"));
+        const page = node("a", "Ouvrir github.com/login/device", "secondary-button");
+        page.href = item.device.verification_uri; page.target = "_blank"; page.rel = "noopener noreferrer"; page.setAttribute("data-connector-action", "authorize");
+        device.append(page);
+        card.append(device);
+      }
       const actions = node("div", null, "mcp-actions");
       const connect = button(item.status === "disconnected" ? "Connecter" : "Reconnecter", event => {
         event?.preventDefault();
@@ -183,13 +199,16 @@
         });
       }
       if (item.status !== "authorizing") actions.append(connect);
-      if (item.authorization_url && item.status === "authorizing") {
+      if (item.device_flow && item.status === "authorizing") {
+        const cancel = button("Annuler", () => act("/api/connectors/cancel", {id:item.id}, cancel)); cancel.setAttribute("data-connector-action", "cancel"); actions.append(cancel);
+      }
+      if (item.authorization_url && item.status === "authorizing" && !item.device) {
         const link = node("a", "Ouvrir la page de connexion", "secondary-button");
         link.href = item.authorization_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.setAttribute("data-connector-action","authorize");
         actions.append(link);
       }
       if (item.server) {
-        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); remove.setAttribute("data-connector-action","disconnect"); actions.append(remove);
+        const remove = button("Déconnecter", () => act("/api/connectors/disconnect", {id:item.id}, remove)); remove.setAttribute("data-connector-action","disconnect"); if (!(item.device_flow && item.status === "authorizing")) actions.append(remove);
         if (item.status === "connected" || item.server.tools.length) {
           const choices = node("fieldset", null, "mcp-bots"); choices.append(node("legend", "Activer les outils pour"));
           for (const bot of bots) {

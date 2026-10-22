@@ -235,7 +235,7 @@
     toolbar.append(button("Nouvelle routine", () => edit(null), "primary-button"), button("Actualiser", reload));
     status = node("p", "routines-note"); status.setAttribute("role", "status");
     content = node("div", "routines-content"); notices = node("div", "routines-live-notices");
-    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé dans Paramètres. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
+    dialog.append(header, label, node("p", "routines-note", "Les routines horaires partent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé. Si le Mac était éteint ou en veille, ou si l’agent activé n’a pas pu tourner, chaque créneau dû est rattrapé au prochain passage, dans l’ordre. Si le Mac était allumé et que ni l’app ni l’agent ne tournait, un seul créneau des 60 dernières minutes est rattrapé ; les autres sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
       revision++; current = null; content.replaceChildren();
@@ -294,6 +294,10 @@
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
+      if (item.queue?.waiting > 0) {
+        const waiting = node("p", "routines-note", `${item.queue.waiting} ${item.queue.waiting > 1 ? "occurrences" : "occurrence"} en attente · prochaine prévue ${date(item.queue.next_at, r.time_zone)}`);
+        waiting.dataset.queue = String(item.queue.waiting); waiting.setAttribute("role", "status"); row.append(waiting);
+      }
       if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error }, true)}`));

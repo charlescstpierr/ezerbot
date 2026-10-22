@@ -73,7 +73,10 @@ pub(crate) fn image_endpoint(api: &str) -> Result<String, ()> {
     match (url.scheme(), host) {
         ("http", "127.0.0.1") => {
             let port = url.port().ok_or(())?;
-            if !matches!(url.path(), "/v1" | "/v1/") {
+            if !matches!(
+                url.path(),
+                "/v1" | "/v1/" | "/backend-api/codex" | "/backend-api/codex/"
+            ) {
                 return Err(());
             }
             Ok(format!(
@@ -605,6 +608,10 @@ mod tests {
     fn endpoint_accepts_only_loopback_and_the_production_image_host() {
         assert_eq!(
             image_endpoint("http://127.0.0.1:1455/v1").unwrap(),
+            "http://127.0.0.1:1455/backend-api/codex/responses"
+        );
+        assert_eq!(
+            image_endpoint("http://127.0.0.1:1455/backend-api/codex").unwrap(),
             "http://127.0.0.1:1455/backend-api/codex/responses"
         );
         assert_eq!(

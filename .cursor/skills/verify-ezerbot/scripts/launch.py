@@ -118,6 +118,7 @@ def allocate_run_root(evidence: Path) -> tuple[Path, Path, dict[str, str]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lance un Ezerbot isolé pour la vérification")
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--sphere", default="accueil")
     args = parser.parse_args()
     repo = repo_root()
     session = session_id()
@@ -190,9 +191,11 @@ def main() -> None:
             "TMPDIR": str(home / "tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
-            # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
-            "EZERBOT_FAKE_SIGNIN": "1",
         }
+        if args.sphere != "images":
+            # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
+            # La sphère images garde le faux OpenAI du run : lui seul sait répondre à un dessin.
+            child_env["EZERBOT_FAKE_SIGNIN"] = "1"
         print(
             f"run: {binary} --port 0 --db {db}",
             flush=True,

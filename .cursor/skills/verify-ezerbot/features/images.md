@@ -22,6 +22,7 @@ Preconditions:
 - Badge `#mode-badge-text` égal à `ChatGPT`.
 - Le faux OpenAI répond à une demande contenant « dessine » par un appel `generate_image`, à l’appel d’image par un PNG de dégradé, puis par « Voici l’image. ».
 
+- **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere images`. Sans `--sphere images`, le wrapper répond « OK » à tout et l’image n’est jamais demandée.
 - **Envoyer.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { document.getElementById("new-chat").click(); return true; }'`, saisir `Dessine un phare au crépuscule` dans `.gb-editor[aria-label="Votre message"]`, puis cliquer `#send-button`.
 - **Attendre l’image.** `.gb-generated-image-card[data-image-state="done"] img` est chargée (`naturalWidth` > 0) et la carte contient un seul `.gb-image-cell`.
 - **Agrandir.** Cliquer `.gb-image-cell` : `dialog.gb-image-viewer` s’ouvre avec les boutons « Enregistrer l’image… » et « Copier l’image ».

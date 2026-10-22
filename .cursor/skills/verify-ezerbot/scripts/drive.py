@@ -155,7 +155,10 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               // La carte Réunions n'a qu'un champ de clé masqué (aucune clé enregistrée sur une base neuve).
               const keys = [...panel.querySelectorAll('[data-connector="reunions"] input')];
               const reunions = keys.length === 1 && keys[0].type === "password";
-              return heading === "Connecteurs" && add && reunions ? {ok: true, heading, reunions} : null;
+              // Gmail et GitHub n'ont ni champ d'identifiant ni de secret ; sans client de build, la carte Gmail le dit.
+              const gmail = panel.querySelector('[data-connector="gmail"]');
+              const gmailFree = !!gmail && !gmail.querySelector("form") && gmail.querySelectorAll('input:not([type="checkbox"])').length === 0;
+              return heading === "Connecteurs" && add && reunions && gmailFree ? {ok: true, heading, reunions, gmailFree} : null;
             }""",
             "connecteurs non prêts",
         )

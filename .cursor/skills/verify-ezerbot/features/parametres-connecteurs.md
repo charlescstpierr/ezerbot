@@ -11,6 +11,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 - `connecteurs-recherche` filtre le catalogue : « git » ne laisse que GitHub, une recherche vide rend toutes les cartes, une chaîne absente affiche « Aucun service ne correspond à … ».
 - `connecteurs-mcp-https` : le formulaire « Ajouter un serveur MCP » propose « Commande locale » (par défaut) ou « Adresse HTTPS » (adresse, jeton en champ mot de passe, case « sur ce Mac » visible seulement pour une adresse `http:`). Un serveur ajouté par adresse montre son adresse, « Jeton privé conservé dans le coffre », jamais le jeton, et « Connecter… » ouvre l’approbation avec « Adresse du service ».
 - `connecteurs-github` montre la carte GitHub sans champ d’identifiant ni de secret ; sans `client_id` de build, elle dit que l’application GitHub d’Ezerbot n’est pas configurée.
+- `connecteurs-gmail` montre la carte Gmail sans champ d’identifiant ni de secret ; sans client Google de build (`EZERBOT_GOOGLE_CLIENT_ID`), elle dit que le client Google d’Ezerbot n’est pas configuré. Connecter ouvre le navigateur sur Google : la preuve automatisée n’y va pas.
 - `connecteurs-github-comptes` : une fois un compte connecté, la carte GitHub offre « Connecter un autre compte ». Chaque compte a sa ligne `[data-account]` (login, code à entrer pendant l’attente, Déconnecter, activation par bot). La preuve automatisée n’y va pas : elle exige deux comptes GitHub.
 
 ## How to get to it (user POV)
@@ -42,5 +43,6 @@ Preconditions:
 - La section est montée dans `#settings-extensions` avec `data-panel="mcp"`. Chercher ce panneau, pas un lien de navigation séparé.
 - Enregistrer un connecteur lancerait une commande locale. Cette sphère ne soumet pas le formulaire.
 - Pour jouer deux comptes sans compte réel, lancer un wrapper de debug à part (HOME et `--db` jetables) avec `GROKBOT_FAKE_CONNECTORS=http://127.0.0.1:<port>` et `EZERBOT_GITHUB_CLIENT_ID` : le fournisseur de boucle sert `/github/device`, `/github/token` et `/github/user`. Ces variables ne sont pas transmises par `launch.sh`.
+- La carte Gmail se connecte par la page Google (client public d’Ezerbot, PKCE, retour sur `127.0.0.1`) avec un vrai compte : la preuve automatisée ne clique pas sur Connecter. Pour voir la carte configurée sans compte, lancer un wrapper de debug à part (HOME et `--db` jetables) avec `EZERBOT_GOOGLE_CLIENT_ID` ; `launch.sh` ne transmet pas cette variable.
 - La carte GitHub se connecte par un code à 8 caractères validé chez GitHub avec un vrai compte : la preuve automatisée n’y va pas. Sans `EZERBOT_GITHUB_CLIENT_ID`, un clic sur Connecter est refusé avec une phrase, sans carte d’approbation.
 - Le catalogue peut être long. La capture doit avoir fait défiler le titre Connecteurs dans le dialogue, pas seulement ouvert Paramètres en haut.

@@ -40,6 +40,8 @@ struct SendMessage {
     mentions: Vec<super::multibot::Mention>,
     #[serde(default)]
     simulate_loss: bool,
+    #[serde(default)]
+    apply_skill_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +394,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 text,
                 app.provider.connected() || !app.provider.simulation_allowed(),
             )?;
+            if let Some(skill_id) = &input.apply_skill_id {
+                super::skills::record_launch(
+                    &tx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    skill_id,
+                )?;
+            }
             super::conversations::append_entry(
                 &tx,
                 &input.conversation_id,
@@ -1073,22 +1083,32 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
-    tick_selected(ctx, false);
+    tick_selected(ctx, false, false);
 }
 pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
-    tick_selected(ctx, true);
+    tick_selected(ctx, true, false);
 }
-fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
+/// Resume a run parked on an approval without starting queued child tasks.
+/// The desktop loop uses [`tick`], which also launches those children.
+pub fn tick_suspended(ctx: &super::Context<'_>) {
+    tick_selected(ctx, false, true);
+}
+fn tick_selected(ctx: &super::Context<'_>, routines_only: bool, suspended_only: bool) {
     // run() commits Resumed and the matching receipt together. Merely scanning
     // pending wakes must NEVER mark them Delivered (SR01/SR02).
-    for status in [
-        RunStatus::Queued,
-        RunStatus::Running,
-        RunStatus::Interrupted,
-        RunStatus::AwaitingHumanInput,
-        RunStatus::AwaitingApproval,
-        RunStatus::AwaitingChildren,
-    ] {
+    let mut statuses = vec![RunStatus::AwaitingHumanInput, RunStatus::AwaitingApproval];
+    if !suspended_only {
+        statuses.splice(
+            0..0,
+            [
+                RunStatus::Queued,
+                RunStatus::Running,
+                RunStatus::Interrupted,
+            ],
+        );
+        statuses.push(RunStatus::AwaitingChildren);
+    }
+    for status in statuses {
         if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
             for run in runs {
                 if routines_only {
@@ -1687,6 +1707,15 @@ impl RunServices for Services<'_> {
             }
         }
         Ok(decision)
+    }
+    fn approval_denied(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+        reason: String,
+    ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+        super::delegation::approval_denied(&self.ctx(conn, run), call, run, reason)
     }
     fn request_approval(
         &mut self,

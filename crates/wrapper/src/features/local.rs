@@ -414,6 +414,281 @@ pub fn granted(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<String>, Api
     }
     Ok(None)
 }
+
+/// A skill-folder import may read this directory only when it is a real
+/// directory inside a folder the user already granted. The path itself must
+/// not be a symlink: canonicalize would follow it. Links inside the tree are
+/// left to `read_directory`, which records them and does not open the target.
+pub(super) fn readable_granted_dir(ctx: &Context<'_>, path: &str) -> Result<PathBuf, ApiError> {
+    let requested = absolute(path)?;
+    let meta = fs::symlink_metadata(&requested).map_err(io_error)?;
+    if meta.file_type().is_symlink() {
+        return Err(ApiError::new(400, "Un lien symbolique n’est pas importé."));
+    }
+    if !meta.is_dir() {
+        return Err(ApiError::new(400, "Choisissez un dossier existant."));
+    }
+    let resolved = requested.canonicalize().map_err(io_error)?;
+    if is_app_data(ctx, &resolved)? {
+        return Err(ApiError::new(
+            403,
+            "Les données d’Ezerbot ne s’importent pas comme skills.",
+        ));
+    }
+    let mut stmt = ctx
+        .connection
+        .prepare("SELECT path FROM wrapper_local_folders")?;
+    for folder in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let folder = folder?;
+        // A replaced or symlinked grant does not authorize a different folder.
+        if Path::new(&folder).canonicalize().ok().as_deref() == Some(Path::new(&folder))
+            && resolved.starts_with(&folder)
+        {
+            return Ok(resolved);
+        }
+    }
+    Err(ApiError::new(
+        403,
+        "Accordez d’abord ce dossier dans les fichiers locaux.",
+    ))
+}
+
+#[derive(Debug)]
+pub(super) struct GrantedTree {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Read a granted skill folder. Symlinks are not followed. A directory that
+/// contains Ezerbot's data is walked, but every entry inside that data
+/// directory is skipped. A hard link is refused when its device and inode
+/// belong to a protected file. Bytes are read with `O_NOFOLLOW|O_NONBLOCK`
+/// from a regular file only. After the walk, the root must still be the same
+/// directory: a swap discards everything that was read.
+pub(super) fn read_granted_tree(ctx: &Context<'_>, root: &Path) -> Result<GrantedTree, ApiError> {
+    read_granted_tree_with(ctx, root, &mut |_| {})
+}
+
+fn read_granted_tree_with(
+    ctx: &Context<'_>,
+    root: &Path,
+    intervene: &mut dyn FnMut(&Path),
+) -> Result<GrantedTree, ApiError> {
+    let opened = open_dir_nofollow(root)?;
+    // `root` is the canonical path the grant authorized. O_NOFOLLOW guards only
+    // its last component: an ancestor swapped for a symlink since that check
+    // would have opened a directory elsewhere. The handle must still be there.
+    if opened_path(&opened).as_deref() != Some(root) {
+        return Err(ApiError::new(
+            409,
+            "Le dossier a changé pendant la lecture.",
+        ));
+    }
+    let opened_meta = opened.metadata().map_err(io_error)?;
+    let identity = dev_ino(&opened_meta);
+    let canonical = root.canonicalize().map_err(io_error)?;
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    walk_granted(
+        ctx,
+        root,
+        Path::new(""),
+        &opened,
+        &mut files,
+        &mut skipped,
+        intervene,
+    )?;
+    intervene(root);
+    confirm_import_root(root, &canonical, identity)?;
+    Ok(GrantedTree { files, skipped })
+}
+
+/// All the text a folder import keeps in memory. Files beyond it are reported,
+/// not read; it matches the request cap of an uploaded import.
+const TREE_BYTES: usize = grokbot_skills::import::IMPORT_REQUEST_BYTES;
+
+/// Same extensions as the skill importer. Anything else is refused unread.
+fn skill_text_name(name: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+    name.rfind('.').is_some_and(|dot| {
+        dot > 0
+            && matches!(
+                &name[dot + 1..],
+                "txt" | "md" | "markdown" | "csv" | "json" | "yaml" | "yml"
+            )
+    })
+}
+
+#[cfg(unix)]
+fn walk_granted(
+    ctx: &Context<'_>,
+    dir: &Path,
+    prefix: &Path,
+    opened: &fs::File,
+    files: &mut Vec<(String, Vec<u8>)>,
+    skipped: &mut Vec<(String, String)>,
+    intervene: &mut dyn FnMut(&Path),
+) -> Result<(), ApiError> {
+    use rustix::fs::{openat, statat, AtFlags, Dir, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let entries = Dir::read_from(opened).map_err(|e| io_error(e.into()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| io_error(e.into()))?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        if files.len() + skipped.len() >= 1000 {
+            return Err(ApiError::new(
+                400,
+                "too-many-files: maximum 1000 per request",
+            ));
+        }
+        let component = std::ffi::OsStr::from_bytes(name.to_bytes());
+        let path = dir.join(component);
+        let relative_path = prefix.join(component);
+        let relative = relative_path.to_string_lossy().replace('\\', "/");
+        if path.starts_with(data_dir(ctx)?) {
+            skipped.push((relative, "app-data".into()));
+            continue;
+        }
+        let metadata =
+            statat(opened, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io_error(e.into()))?;
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::Symlink => {
+                skipped.push((relative, "symlink".into()));
+                continue;
+            }
+            FileType::RegularFile if !skill_text_name(name.to_bytes()) => {
+                // Never open what the importer would refuse: a video or an
+                // archive must not be read into memory first.
+                skipped.push((relative, "unsupported".into()));
+                continue;
+            }
+            FileType::Directory | FileType::RegularFile => {}
+            _ => continue,
+        }
+        intervene(&path);
+        // Resolve exactly one component against the retained parent, including
+        // after a directory rename. Never reopen an ancestor by pathname.
+        let fd = match openat(
+            opened,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::LOOP) => {
+                skipped.push((relative, "symlink".into()));
+                continue;
+            }
+            Err(error) => return Err(io_error(error.into())),
+        };
+        let file = fs::File::from(fd);
+        let metadata = file.metadata().map_err(io_error)?;
+        if protected_identity(ctx, &metadata)? {
+            skipped.push((relative, "app-data".into()));
+        } else if metadata.is_dir() {
+            walk_granted(ctx, &path, &relative_path, &file, files, skipped, intervene)?;
+        } else if metadata.is_file() {
+            let retained: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
+            if retained.saturating_add(metadata.len().min(1048576) as usize) > TREE_BYTES {
+                skipped.push((relative, "too-large".into()));
+                continue;
+            }
+            match read_opened_bytes(file, |_| Ok(())) {
+                Ok(bytes) if retained + bytes.len() > TREE_BYTES => {
+                    skipped.push((relative, "too-large".into()));
+                }
+                Ok(bytes) => files.push((relative, bytes)),
+                Err(error) if error.message == "Fichier trop volumineux (1 Mio maximum)." => {
+                    skipped.push((relative, "too-large".into()));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn walk_granted(
+    _: &Context<'_>,
+    _: &Path,
+    _: &Path,
+    _: &fs::File,
+    _: &mut Vec<(String, Vec<u8>)>,
+    _: &mut Vec<(String, String)>,
+    _: &mut dyn FnMut(&Path),
+) -> Result<(), ApiError> {
+    Err(ApiError::new(400, "L’import local requiert macOS ou Unix."))
+}
+
+fn confirm_import_root(
+    root: &Path,
+    canonical: &Path,
+    identity: (u64, u64),
+) -> Result<(), ApiError> {
+    let changed = || ApiError::new(409, "Le dossier a changé pendant la lecture.");
+    let opened = open_dir_nofollow(root).map_err(|_| changed())?;
+    let meta = opened.metadata().map_err(|_| changed())?;
+    let again = root.canonicalize().map_err(|_| changed())?;
+    if again.as_path() != canonical || dev_ino(&meta) != identity {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+/// Where an opened directory lives now, asked of the handle and not of a name.
+fn opened_path(file: &fs::File) -> Option<PathBuf> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = rustix::fs::getpath(file).ok()?;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+fn dev_ino(meta: &fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
+}
+
+fn open_dir_nofollow(path: &Path) -> Result<fs::File, ApiError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_DIRECTORY | O_NOFOLLOW. A symlink swapped in at the root cannot be opened.
+        options.custom_flags(0x10000 | 0x20000);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100000 | 0x100);
+    }
+    options.open(path).map_err(io_error)
+}
+
 fn read_bytes(path: &Path) -> Result<Vec<u8>, ApiError> {
     read_bytes_checked(path, |_| Ok(()))
 }
@@ -435,6 +710,12 @@ fn read_bytes_checked(
         options.custom_flags(0x20000 | 0x800);
     }
     let file = options.open(path).map_err(io_error)?;
+    read_opened_bytes(file, check)
+}
+fn read_opened_bytes(
+    file: fs::File,
+    check: impl FnOnce(&fs::Metadata) -> Result<(), ApiError>,
+) -> Result<Vec<u8>, ApiError> {
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() {
         return Err(ApiError::new(
@@ -1219,6 +1500,142 @@ mod tests {
             }
         }
         drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_symlink_is_not_read() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-swap-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let folder = root.join("skills");
+        fs::create_dir_all(&folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        let local = folder.join("note.md");
+        fs::write(&local, "contenu local").unwrap();
+        let secret = root.join("dehors.md");
+        fs::write(&secret, "secret remplace").unwrap();
+        let ctx = app.feature_context();
+        let tree = read_granted_tree_with(&ctx, &folder, &mut |path| {
+            if path == local {
+                fs::remove_file(&local).unwrap();
+                std::os::unix::fs::symlink(&secret, &local).unwrap();
+            }
+        })
+        .unwrap();
+        let blob = format!("{:?}", tree.files);
+        assert!(!blob.contains("secret remplace"), "{blob}");
+        assert!(tree
+            .skipped
+            .iter()
+            .any(|(path, reason)| path == "note.md" && reason == "symlink"));
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_nested_directory_swapped_for_a_symlink_does_not_escape_the_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-nested-swap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let folder = root.join("skills");
+        let nested = folder.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let nested = folder.join("nested");
+        fs::write(nested.join("note.md"), "local").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("note.md"), "OUTSIDE GRANT").unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        let mut swapped = false;
+        let result = read_granted_tree_with(&app.feature_context(), &folder, &mut |path| {
+            if !swapped && path == nested.join("note.md") {
+                fs::rename(&nested, folder.join("original")).unwrap();
+                std::os::unix::fs::symlink(&outside, &nested).unwrap();
+                swapped = true;
+            }
+        });
+        assert!(swapped);
+        let tree = result.unwrap();
+        assert_eq!(
+            tree.files,
+            vec![("nested/note.md".into(), b"local".to_vec())]
+        );
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_ancestor_swapped_before_the_open_does_not_redirect_the_import() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-ancestor-swap-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let nested = root.join("granted/nested");
+        fs::create_dir_all(nested.join("skill")).unwrap();
+        fs::write(nested.join("skill/note.md"), "local").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("skill")).unwrap();
+        fs::write(outside.join("skill/note.md"), "OUTSIDE GRANT").unwrap();
+        let authorized = nested.join("skill").canonicalize().unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        // The grant was checked on `authorized`; then an ancestor changes.
+        fs::rename(&nested, root.join("granted/original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &nested).unwrap();
+        let error =
+            read_granted_tree_with(&app.feature_context(), &authorized, &mut |_| {}).unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(!format!("{error:?}").contains("OUTSIDE GRANT"));
+        drop(app);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_root_replaced_during_the_walk_discards_what_was_read() {
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-swap-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("data")).unwrap();
+        let folder = root.join("skills");
+        fs::create_dir_all(&folder).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let app = App::open(&root.join("data/app.sqlite")).unwrap();
+        fs::write(folder.join("note.md"), "contenu local").unwrap();
+        let elsewhere = root.join("ailleurs");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("secret.md"), "secret deplace").unwrap();
+        let ctx = app.feature_context();
+        let error = read_granted_tree_with(&ctx, &folder, &mut |path| {
+            if path == folder {
+                let moved = root.join("deplace");
+                fs::rename(&folder, &moved).unwrap();
+                std::os::unix::fs::symlink(&elsewhere, &folder).unwrap();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert_eq!(error.message, "Le dossier a changé pendant la lecture.");
+        assert!(!error.message.contains("secret deplace"));
+        drop(app);
+        fs::remove_file(&folder).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

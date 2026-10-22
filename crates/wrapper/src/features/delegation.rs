@@ -263,7 +263,7 @@ pub fn tools() -> Vec<ToolSpec> {
                     "selected_images":strings
                 },"required":["texts","entry_ids","fact_ids","skill_ids"]}
             },"required":["child_bot","objective","selected_context"]}),
-            requires_approval: false,
+            requires_approval: true,
         },
         ToolSpec {
             name: "list_delegation_context".into(),
@@ -451,7 +451,7 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
                     },
                 )?;
                 if matches!(outcome, ToolOutcome::Suspend { .. }) {
-                    record_failed_call(ctx, call, &parent)?;
+                    record_failed_call(ctx, call, &parent, DELEGATION_FAILURE)?;
                 }
                 Ok(outcome)
             }
@@ -462,7 +462,33 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
     }))
 }
 
-fn record_failed_call(ctx: &Context<'_>, call: &ToolCall, parent: &Run) -> Result<()> {
+pub(super) fn approval_denied(
+    ctx: &Context<'_>,
+    call: &ToolCall,
+    parent: &Run,
+    reason: String,
+) -> Result<ToolOutcome> {
+    let failed = ToolOutcome::Failed {
+        reason: reason.clone(),
+    };
+    if call.name != "delegate" {
+        return Ok(failed);
+    }
+    let outcome = batch_outcome(ctx, call, parent, failed)?;
+    if matches!(outcome, ToolOutcome::Suspend { .. }) {
+        // The shared child result replaces this output on resume; retain the
+        // denial alongside sibling summaries without creating a child task.
+        record_failed_call(ctx, call, parent, &reason)?;
+    }
+    Ok(outcome)
+}
+
+fn record_failed_call(
+    ctx: &Context<'_>,
+    call: &ToolCall,
+    parent: &Run,
+    reason: &str,
+) -> Result<()> {
     let id = format!(
         "delegation_{}",
         args_digest("delegation", &json!([parent.run_id, call.call_id]))?
@@ -487,7 +513,7 @@ fn record_failed_call(ctx: &Context<'_>, call: &ToolCall, parent: &Run) -> Resul
         id
     };
     ctx.connection.execute("INSERT OR IGNORE INTO wrapper_delegation_calls(id,parent_run_id,digest,objective,refusal,created_at)
-        VALUES (?1,?2,?3,'',?4,?5)",params![id,parent.run_id,digest,DELEGATION_FAILURE,ctx.now_ms])?;
+        VALUES (?1,?2,?3,'',?4,?5)",params![id,parent.run_id,digest,reason,ctx.now_ms])?;
     Ok(())
 }
 

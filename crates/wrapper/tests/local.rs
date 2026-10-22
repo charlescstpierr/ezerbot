@@ -1610,3 +1610,584 @@ fn unreadable_vault_stops_the_background_process() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(!marker.exists());
 }
+
+#[test]
+fn a_removed_secret_never_returns_through_the_approval_policy() {
+    const SECRET: &str = "jeton-secret-valeur-8123";
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.post(
+        "/api/secrets/put",
+        json!({"bot_id":"grokbot","name":"jeton","description":"Jeton de test","value":SECRET}),
+    );
+    f.send("masked", "run_shell", f.shell(&format!("printf {SECRET}")));
+    let r = f.request("masked");
+    let card = |f: &mut Fixture| {
+        let state = f.app.api("GET", "/api/state", b"").unwrap();
+        let card = state["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["id"] == r.id)
+            .unwrap()
+            .clone();
+        (state.to_string(), card)
+    };
+    let (before, shown) = card(&mut f);
+    assert!(!before.contains(SECRET));
+    assert_eq!(shown["policy"]["remember"], false, "{shown}");
+    f.post(
+        "/api/secrets/delete",
+        json!({"bot_id":"grokbot","name":"jeton"}),
+    );
+    let (after, shown) = card(&mut f);
+    assert!(!after.contains(SECRET), "{after}");
+    assert_eq!(shown["policy"]["remember"], false);
+    assert_eq!(shown["policy"]["pattern"], "");
+    f.decide(&r, json!("deny"));
+    f.finish("masked");
+}
+
+fn approval_policy(f: &mut Fixture, id: &str) -> Value {
+    let run = f.run(id).run_id;
+    f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == f.chat)
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .find(|m| m["kind"] == "approval" && m["payload"]["run_id"] == run)
+        .expect("carte d’approbation")["payload"]["policy"]
+        .clone()
+}
+
+#[test]
+fn always_allow_same_command_skips_the_card_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("first", "run_shell", f.shell("printf oui"));
+    let card = f.request("first");
+    let policy = approval_policy(&mut f, "first");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    assert_eq!(policy["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("first");
+    assert_eq!(f.outcome("first")["output"]["stdout"], "oui");
+    let other_cwd = f.root().join("ailleurs");
+    std::fs::create_dir(&other_cwd).unwrap();
+    let mut same = f.shell("printf oui");
+    same["cwd"] = json!(other_cwd);
+    same["timeout_ms"] = json!(1500);
+    f.send("same", "run_shell", same);
+    f.finish("same");
+    assert!(requests::list_for_run(&f.db(), &f.run("same").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("same")["output"]["stdout"], "oui");
+    f.reopen();
+    f.send("restarted", "run_shell", f.shell("printf oui"));
+    f.finish("restarted");
+    assert!(requests::list_for_run(&f.db(), &f.run("restarted").run_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.outcome("restarted")["output"]["stdout"], "oui");
+    let rules = f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id":"grokbot","target_bot_id":"grokbot","tool":"run_shell",
+            "args_digest":"printf oui","scope":"pattern"
+        }),
+    );
+    assert_eq!(rules["rules"], json!([]));
+    f.send("revoked", "run_shell", f.shell("printf oui"));
+    let again = f.request("revoked");
+    assert!(matches!(
+        again.status,
+        grokbot_forms::requests::RequestStatus::Pending
+    ));
+    f.decide(&again, json!("deny"));
+    f.finish("revoked");
+    assert_eq!(f.outcome("revoked")["status"], "failed");
+}
+
+#[test]
+fn destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    f.send("rm", "run_shell", f.shell("rm victime.txt"));
+    wait("rm asked or finished", || {
+        let status = f.run("rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(
+        f.run("rm").status,
+        RunStatus::AwaitingApproval,
+        "une suppression ne suit pas la règle permanente"
+    );
+    assert!(target.exists());
+    let card = f.request("rm");
+    let policy = approval_policy(&mut f, "rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    let refused = f.app.api(
+        "POST",
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card.entry_id,
+            "submission_id": "always-rm",
+            "conversation_id": card.route.target_conversation_id,
+            "decision": {"always_allow":{"scope":"global"}}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    assert!(refused.is_err());
+    assert!(target.exists());
+    f.decide(&card, json!("allow_once"));
+    f.finish("rm");
+    assert!(!target.exists());
+}
+
+#[test]
+fn exact_shell_key_and_unproven_commands_stay_on_the_card() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("pattern", "run_shell", f.shell("printf oui"));
+    let card = f.request("pattern");
+    assert_eq!(approval_policy(&mut f, "pattern")["pattern"], "printf oui");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("pattern");
+    f.send("spaced", "run_shell", f.shell("printf  oui"));
+    let spaced = f.request("spaced");
+    assert_eq!(approval_policy(&mut f, "spaced")["pattern"], "printf  oui");
+    f.decide(&spaced, json!("deny"));
+    f.finish("spaced");
+    f.send("global", "run_shell", f.shell("printf encore"));
+    let global = f.request("global");
+    f.decide(&global, json!({"always_allow":{"scope":"global"}}));
+    f.finish("global");
+    let cases = [
+        ("semi", "printf ok; rm note", Some("destructive")),
+        ("and", "cd /tmp && printf ok", None),
+        ("exec", "find . -exec ls {} +", None),
+        ("git", "git clean -fd", Some("destructive")),
+        ("interp", "bash -c 'printf oui'", None),
+        ("mail", "sendmail someone", Some("outbound")),
+    ];
+    for (id, command, protection) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte obligatoire", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        if let Some(kind) = protection {
+            assert_eq!(policy["protection"], kind, "{command}");
+        }
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+    }
+}
+
+#[test]
+fn git_deletions_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+    ]);
+    git(&["branch", "vieille"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    for (id, command) in [
+        ("rm", "git rm -f note"),
+        ("c-rm", "git -C . rm note"),
+        ("restore", "git restore note"),
+        ("checkout", "git checkout -- note"),
+        ("checkout-tree", "git checkout HEAD note"),
+        ("branch", "git branch -D vieille"),
+        ("stash", "git stash drop"),
+        ("worktree", "git worktree remove ../ailleurs"),
+    ] {
+        std::fs::write(f.root().join("note"), "modifiée").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(
+            std::fs::read_to_string(f.root().join("note")).unwrap(),
+            "modifiée",
+            "{command}"
+        );
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        assert_eq!(policy["protection"], "destructive", "{command}");
+        assert_eq!(policy["label"], "Suppression à confirmer", "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"pattern"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", "vieille"])
+        .current_dir(f.root())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).contains("vieille"));
+    // Non-destructive git commands follow the permanent rule without a card.
+    for (id, command) in [("list", "git stash list"), ("plain-branch", "git branch")] {
+        f.send(id, "run_shell", f.shell(command));
+        f.finish(id);
+        assert!(
+            requests::list_for_run(&f.db(), &f.run(id).run_id)
+                .unwrap()
+                .is_empty(),
+            "{command}"
+        );
+        assert_eq!(f.outcome(id)["status"], "done", "{command}");
+    }
+}
+
+#[test]
+fn settled_read_card_keeps_its_policy_and_shows_its_decision() {
+    let mut f = Fixture::new();
+    f.settings(true, true);
+    let file = f.root().join("lu.txt");
+    std::fs::write(&file, "Bonjour\n").unwrap();
+    f.send("read", "read_file", json!({"path":file}));
+    let card = f.request("read");
+    let pending = approval_policy(&mut f, "read");
+    assert_eq!(pending["remember"], false);
+    assert_eq!(pending["scope"], "none");
+    assert!(pending.get("protection").is_none());
+    f.decide(&card, json!("allow_once"));
+    f.finish("read");
+    assert_eq!(f.outcome("read")["output"]["content"], "Bonjour\n");
+    assert_eq!(approval_policy(&mut f, "read"), pending);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let decision = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["id"] == card.id)
+        .unwrap()["decision"]
+        .clone();
+    assert_eq!(decision, json!("allow_once"));
+}
+
+#[test]
+fn attached_interpreter_code_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    std::fs::write(f.root().join("script.pl"), "print \"script\";\n").unwrap();
+    f.send("plain", "run_shell", f.shell("perl script.pl"));
+    let card = f.request("plain");
+    let policy = approval_policy(&mut f, "plain");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("plain");
+    assert_eq!(f.outcome("plain")["output"]["stdout"], "script");
+    f.send("plain-again", "run_shell", f.shell("perl script.pl"));
+    f.finish("plain-again");
+    assert!(
+        requests::list_for_run(&f.db(), &f.run("plain-again").run_id)
+            .unwrap()
+            .is_empty()
+    );
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let note = f.root().join("note");
+    for (id, command) in [
+        ("perl-e", "perl -e'unlink \"note\"'"),
+        ("perl-ne", "perl -ne 'unlink \"note\"' script.pl"),
+        ("python-bc", "python3 -Bc 'import os; os.remove(\"note\")'"),
+        ("awk", "awk 'BEGIN{system(\"rm note\")}'"),
+        ("checkout-one", "git checkout note"),
+    ] {
+        std::fs::write(&note, "garde").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(note.exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(note.exists(), "{command}");
+    }
+}
+
+#[test]
+fn git_inline_aliases_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send("plain", "run_shell", f.shell("git -C . status --short"));
+    f.finish("plain");
+    assert!(requests::list_for_run(&f.db(), &f.run("plain").run_id)
+        .unwrap()
+        .is_empty());
+    let cases = [
+        ("alias", "git -c alias.wipe=rm wipe -q note"),
+        ("glued", "git -calias.wipe=rm wipe -q note"),
+        ("dir", "git -C . -c alias.wipe=rm wipe -q note"),
+        (
+            "env",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=rm git wipe -q note",
+        ),
+    ];
+    for (id, command) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(f.root().join("note").exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    // The alias really deletes: only the human's one-time approval runs it.
+    f.send(
+        "once",
+        "run_shell",
+        f.shell("git -c alias.wipe=rm wipe -q note"),
+    );
+    let card = f.request("once");
+    f.decide(&card, json!("allow_once"));
+    f.finish("once");
+    assert!(!f.root().join("note").exists());
+}
+
+#[test]
+fn forge_cli_sends_still_ask_when_a_permanent_shell_rule_exists() {
+    // Nonexistent repositories: even a regression could not post anywhere.
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send(
+        "read",
+        "run_shell",
+        f.shell("gh pr view 7 --repo ezerbot-inexistant-0/rien"),
+    );
+    f.finish("read");
+    assert!(requests::list_for_run(&f.db(), &f.run("read").run_id)
+        .unwrap()
+        .is_empty());
+    for (id, command) in [
+        (
+            "issue-comment",
+            "gh issue comment 1 --repo ezerbot-inexistant-0/rien --body bonjour",
+        ),
+        (
+            "pr-comment",
+            "gh pr comment 7 -R ezerbot-inexistant-0/rien -b salut",
+        ),
+        (
+            "repo-first",
+            "gh -R ezerbot-inexistant-0/rien issue comment 1 -b salut",
+        ),
+        (
+            "pr-review",
+            "gh pr review 7 -R ezerbot-inexistant-0/rien --approve",
+        ),
+        (
+            "api-post",
+            "gh api -X POST repos/ezerbot-inexistant-0/rien/issues/1/comments",
+        ),
+        (
+            "api-field",
+            "gh api repos/ezerbot-inexistant-0/rien/issues/1/comments -f body=salut",
+        ),
+        (
+            "glab-note",
+            "glab mr note 3 -R ezerbot-inexistant-0/rien -m salut",
+        ),
+    ] {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert_eq!(f.outcome(id)["status"], "failed", "{command}");
+    }
+}
+
+#[test]
+fn background_destructive_shell_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let target = f.root().join("victime.txt");
+    std::fs::write(&target, "garde").unwrap();
+    let mut args = f.shell("rm victime.txt");
+    args["background"] = json!(true);
+    f.send("bg-rm", "run_shell", args);
+    wait("background rm asked or finished", || {
+        let status = f.run("bg-rm").status;
+        status == RunStatus::AwaitingApproval || status.is_terminal()
+    });
+    assert_eq!(f.run("bg-rm").status, RunStatus::AwaitingApproval);
+    assert!(target.exists());
+    let card = f.request("bg-rm");
+    let policy = approval_policy(&mut f, "bg-rm");
+    assert_eq!(policy["remember"], false);
+    assert_eq!(policy["protection"], "destructive");
+    f.decide(&card, json!("deny"));
+    f.finish("bg-rm");
+    assert!(target.exists());
+}

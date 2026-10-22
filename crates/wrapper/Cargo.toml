@@ -32,6 +32,7 @@ sha2 = "0.10"
 base64 = "0.22"
 flate2 = "1"
 getrandom = "0.2"
+rustix = { version = "1", features = ["fs"] }
 # Already locked via jsonwebtoken: RFC 8291 encryption and VAPID ES256.
 ring = "0.17"
 # Existing locked URL parser; endpoint validation must not use string heuristics.

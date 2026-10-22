@@ -27,5 +27,5 @@ export function screenActionState({ outcome, approval_status: approval, run_stat
   return { label: "En cours…" };
 }
 export function screenDecisionLabel(approval) {
-  return { resolved: "Autorisée par vous", denied: "Refusée par vous", cancelled: "Approbation annulée", expired: "Approbation expirée" }[approval] || null;
+  return { resolved: "Autorisé une fois", denied: "Refusée par vous", cancelled: "Approbation annulée", expired: "Approbation expirée" }[approval] || null;
 }

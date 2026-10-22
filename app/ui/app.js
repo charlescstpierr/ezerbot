@@ -1,6 +1,6 @@
 "use strict";
 
-(async () => {
+(() => {
   const $ = (id) => document.getElementById(id);
   const ui = {
     list: $("conversation-list"), search: $("search"), input: null,
@@ -61,7 +61,9 @@
     try { return window.GrokbotChat.createRatingTable?.(localStorage) || null; }
     catch { return null; }
   }
-  const ratings = await openRatings() || { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
+  // Le démarrage n’attend pas le Mac : la table native remplace la table vide dès qu’elle est lue.
+  let ratings = { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
+  const ratingsReady = openRatings().then((table) => { if (table) ratings = table; }, () => {});
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };
   let followAfterLayout = null;
@@ -1565,7 +1567,8 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function exportConversation() {
+  async function exportConversation() {
+    await ratingsReady;
     const conversation = currentConversation();
     if (!conversation) return;
     const notations = ratings.list().filter((row) => row.conversation_id === conversation.id);
@@ -1574,7 +1577,8 @@
     closeMenu();
   }
 
-  function exportRatings() {
+  async function exportRatings() {
+    await ratingsReady;
     downloadJson(ratings.exportDocument(), "ezerbot-notations.json");
     closeMenu();
   }
@@ -1633,6 +1637,7 @@
   async function rateGood(message) {
     const conversation = currentConversation();
     if (!conversation || !message?.id) return;
+    await ratingsReady;
     try { await ratings.recordGood({ conversationId: conversation.id, messageId: message.id, runId: message.payload?.run_id || null }); }
     catch { notify("Impossible d’enregistrer la notation."); return; }
     notify("Bon résultat enregistré.");
@@ -1869,6 +1874,7 @@
   $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;
+    await ratingsReady;
     const selected = [...$("rating-form").querySelectorAll('input[name="motif"]')].find((input) => input.checked);
     try { await ratings.recordBad({
       conversationId: pendingRating.conversationId,

@@ -417,6 +417,7 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   assert.equal(rows[1].details, DETAILS);
 
   app.document.getElementById("export-ratings-button").click();
+  await new Promise((resolve) => setImmediate(resolve));
   const exported = JSON.parse(await app.blobs.at(-1).text());
   assert.equal(exported.notations.length, 2);
   assert.equal(exported.notations[1].motif, MOTIF);
@@ -426,6 +427,7 @@ test("⌘F trouve le mot rare, Fermer n’enregistre pas, l’export contient l�
   assert.equal(JSON.stringify(exported).includes("voteGrokBotFeedback"), false);
 
   app.document.getElementById("export-button").click();
+  await new Promise((resolve) => setImmediate(resolve));
   const conversation = JSON.parse(await app.blobs.at(-1).text());
   assert.equal(conversation.notations[1].motif, MOTIF);
   assert.equal(conversation.notations[1].run_id, "run-avant");

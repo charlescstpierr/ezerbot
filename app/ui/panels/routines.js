@@ -136,6 +136,10 @@
   let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
   let historyView = null, uncertainResume = null, notices, hostOnline = true;
+  // Funnel is asked live (never trusted from an old poll); a Bearer token is kept
+  // in memory only while it is shown, right after its creation or regeneration.
+  let funnel = null, funnelLoading = false, funnelBusy = false, regenerating = null;
+  const revealed = new Map();
   // Retain the intent across a page reload, without storing prompts or outputs.
   let savedLaunches = [];
   try { savedLaunches = JSON.parse(sessionStorage.getItem("ezerbot.routine-launches") || "[]"); } catch { /* Optional browser storage. */ }
@@ -238,7 +242,7 @@
     dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé dans Paramètres. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
-      revision++; current = null; content.replaceChildren();
+      revision++; current = null; content.replaceChildren(); revealed.clear(); regenerating = null;
       for (const { entry, scrollTop, focus } of covered.splice(0)) {
         entry.classList.remove("routines-covered");
         if (restoreCovered && entry.open) {
@@ -264,13 +268,21 @@
       return snapshot;
     });
     message(""); dialog.showModal(); hostOnline = panels.connected !== false; renderNotices(); renderList();
-    void reload();
+    void reload(); void loadFunnel();
+  }
+  const webhookItems = () => panels.state.routine_webhooks?.items || {};
+  async function loadFunnel() {
+    if (funnelLoading || !Object.keys(webhookItems()).length) return;
+    const token = revision; funnelLoading = true;
+    try { funnel = await panels.api("/api/routines/funnel"); }
+    catch (error) { funnel = { state: "unconfirmed", reason: `Tailscale n’a pas pu être vérifié : ${frenchError(error)}`, public_base: null }; }
+    finally { funnelLoading = false; if (active(token)) { signature = ""; renderList(); } }
   }
   async function reload() {
     if (busy || reloading) return;
     const token = revision; reloading = true;
     try {
-      await panels.refresh();
+      await panels.refresh(); void loadFunnel();
       // Explicit refresh must repair cached running states too, not only /state.
       for (const { routine: r } of items()) {
         if (!active(token) || busy) break;
@@ -283,18 +295,78 @@
     } catch (error) { if (active(token)) message(`Actualisation impossible : ${frenchError(error)}`, true, reload); }
     finally { reloading = false; if (active(token)) kick(); }
   }
+  async function copy(text, done) {
+    try { await panels.copyText(text); panels.notify(done); }
+    catch { panels.notify("La copie a échoué. Sélectionnez le texte et copiez-le à la main."); }
+  }
+  function funnelPanel() {
+    const box = node("section", "routines-funnel"), listener = panels.state.routine_webhooks?.listener;
+    box.append(node("h3", "", "Publication sur Internet · Tailscale Funnel"), node("p", "routines-note", "Seul le chemin des webhooks devient public, sur son propre port HTTPS. L’adresse privée de l’iPhone (Tailscale Serve) ne change pas, et chaque appel exige son jeton Bearer. L’écoute vit tant qu’Ezerbot est ouvert : un appel reçu pendant que l’app est fermée est perdu."));
+    if (listener?.error) { const warning = node("p", "routines-error", listener.error); warning.setAttribute("role", "alert"); box.append(warning); }
+    const state = node("p", funnel?.state === "published" ? "routines-note" : "routines-warning", !funnel ? "Vérification de Tailscale en cours…" : funnel.state === "published" ? "Publié par Tailscale Funnel." : funnel.reason || "Publication non confirmée.");
+    state.setAttribute("role", "status"); state.dataset.funnelState = funnel?.state || "loading"; box.append(state);
+    const actions = node("div", "routines-actions");
+    if (funnel && funnel.state === "published") actions.append(button("Retirer la publication…", () => publishFunnel(false)));
+    else if (funnel && ["off", "refused", "unconfirmed"].includes(funnel.state)) actions.append(button("Publier avec Tailscale Funnel…", () => publishFunnel(true), "primary-button"));
+    actions.append(button("Vérifier Tailscale", () => { funnel = null; signature = ""; renderList(); void loadFunnel(); }));
+    if (funnelBusy) actions.querySelectorAll("button").forEach((el) => { el.disabled = true; });
+    box.append(actions); return box;
+  }
+  async function publishFunnel(enabled) {
+    if (funnelBusy) return;
+    funnelBusy = true; signature = ""; renderList();
+    try {
+      const result = await panels.api("/api/routines/funnel", { enabled });
+      if (result.conversation_id) { openThread(result.conversation_id, result.approval_message_id); panels.notify("Confirmez l’action dans la carte d’approbation."); }
+    } catch (error) { message(`Publication impossible : ${error.message}`, true); }
+    finally { funnelBusy = false; signature = ""; renderList(); }
+  }
+  function webhookBlock(r) {
+    const info = webhookItems()[r.routine_id], box = node("div", "routines-webhook");
+    box.append(node("h4", "", "Webhook"));
+    const url = funnel?.state === "published" && funnel.public_base && info ? `${funnel.public_base}/${r.routine_id}/${info.trigger_id}` : "";
+    if (url) {
+      const line = node("p", "routines-webhook-url"); line.append(node("code", "", url));
+      box.append(node("p", "routines-note", "URL publique (HTTPS)"), line, button("Copier l’URL", () => copy(url, "URL copiée.")));
+    } else box.append(node("p", "routines-warning", funnel ? `Pas d’URL publique : ${funnel.reason || "publication non confirmée."}` : "Aucune URL publique n’est affichée avant la confirmation de Tailscale."));
+    box.append(node("p", "routines-note", "Appelez l’URL en POST avec l’en-tête Authorization: Bearer <jeton>. Le jeton n’est pas dans l’URL. Le corps JSON est transmis au bot ; une clé Idempotency-Key évite un second départ lors d’un nouvel essai."));
+    const secret = revealed.get(r.routine_id), token = node("p", "routines-webhook-token");
+    token.append(node("span", "", "Jeton Bearer : "), node("code", "", secret || "••••••••••••••••"));
+    box.append(token);
+    if (secret) box.append(node("p", "routines-warning", "Copiez ce jeton maintenant. Il sera masqué ensuite, mais il restera copiable."));
+    const actions = node("div", "routines-actions");
+    actions.append(button("Copier le jeton", async () => {
+      try { const reply = await panels.api("/api/routines/webhook/token", idBody(r)); await copy(reply.token, "Jeton copié."); }
+      catch (error) { message(`Copie impossible : ${error.message}`, true); }
+    }));
+    if (secret) actions.append(button("Masquer le jeton", () => { revealed.delete(r.routine_id); signature = ""; renderList(); }));
+    actions.append(button("Régénérer le jeton…", () => { regenerating = r.routine_id; signature = ""; renderList(); }));
+    box.append(actions);
+    if (regenerating === r.routine_id) {
+      const confirm = node("div", "routines-delete");
+      confirm.append(node("p", "routines-warning", "Régénérer le jeton ? L’ancien jeton cesse de fonctionner tout de suite : mettez à jour l’appelant."), button("Régénérer", async () => {
+        try { const reply = await panels.api("/api/routines/webhook/regenerate", idBody(r)); revealed.set(r.routine_id, reply.token); regenerating = null; message("Jeton régénéré. L’ancien jeton est refusé."); }
+        catch (error) { message(`Régénération impossible : ${error.message}`, true); }
+        signature = ""; renderList();
+      }, "danger-button"), button("Garder le jeton", () => { regenerating = null; signature = ""; renderList(); }));
+      box.append(confirm);
+    }
+    return box;
+  }
   function renderList() {
     if (!dialog?.open || view !== "list") return;
     const list = items();
-    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories]]);
+    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories], funnel, funnelBusy, [...revealed.keys()], regenerating, webhookItems(), panels.state.routine_webhooks?.listener]);
     if (signature === next) return;
     signature = next; toolbar.hidden = false; content.replaceChildren();
     if (panels.state.routines?.error) content.append(node("p", "routines-error", panels.state.routines.error));
     if (!list.length) content.append(node("p", "routines-note", "Aucune routine pour ce bot."));
+    if (list.some((item) => item.routine.trigger?.kind === "webhook")) content.append(funnelPanel());
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
       if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
+      if (r.trigger?.kind === "webhook") row.append(webhookBlock(r));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error }, true)}`));
       const actions = node("div", "routines-actions");
@@ -361,8 +433,8 @@
     const skillHint = node("p", "routines-note", availableSkills.length ? "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions." : "Aucune skill pour ce bot : créez-en une dans Modifier le bot › Skills."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
-    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
-    mode.value = r?.trigger.kind === "once" ? "once" : "schedule";
+    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
+    mode.value = r?.trigger.kind === "once" ? "once" : r?.trigger.kind === "webhook" ? "webhook" : "schedule";
     const expression = field("Cron (5 champs), alias ou @every");
     expression.value = r?.trigger.kind === "cron" ? r.trigger.expression : r?.trigger.kind === "every" ? `@every ${r.trigger.interval_ms}ms${r.trigger.phase_ms === null || r.trigger.phase_ms === undefined ? "" : `/${r.trigger.phase_ms}ms`}` : "0 9 * * *";
     const once = field("Date et heure UTC"); once.type = "datetime-local"; once.step = "0.001";
@@ -380,12 +452,13 @@
         validZone(zone.value.trim());
         return { trigger: { kind: "once", at }, zone: zone.value.trim(), text: `Une fois : ${date(at, zone.value.trim())}` };
       }
+      if (mode.value === "webhook") return { trigger: { kind: "webhook" }, zone: validZone(zone.value.trim() || localZone), text: "Webhook : démarre à chaque appel authentifié par le jeton Bearer. Le jeton et l’URL s’affichent après l’enregistrement." };
       return schedule(expression.value, zone.value.trim());
     }
     function update() {
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
-      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once";
+      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = mode.value === "webhook";
       try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
@@ -441,9 +514,11 @@
         if (latest.modified_at !== reviewed.modified_at || latest.schedule_version !== reviewed.schedule_version) throw new Error("La routine a changé depuis votre lecture. Revenez à la liste et relisez-la avant de l’activer.");
       }
       sent = true;
-      await panels.api(path, payload);
+      const reply = await panels.api(path, payload);
+      if (reply?.webhook?.token && reply.routine) revealed.set(reply.routine.routine_id, reply.webhook.token);
       if (active(token)) { view = "list"; current = null; signature = ""; message(success); }
       try { await panels.refresh(); } catch { if (active(token)) message(`${success} Liste à actualiser.`, true); }
+      if (reply?.webhook) void loadFunnel();
     } catch (error) {
       if (active(token)) {
         const conflict = /Stale routine edit|changé depuis votre lecture|Routine changed|409/i.test(error.message);
@@ -600,7 +675,7 @@
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status; row.dataset.occurrenceId = o.occurrence_id;
       row.tabIndex = -1; row.dataset.historyFocus = `occurrence-${o.occurrence_id}`;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
+      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
       if (o.conversation_id) {
         const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));

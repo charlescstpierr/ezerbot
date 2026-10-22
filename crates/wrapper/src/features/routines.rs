@@ -13,7 +13,7 @@
 //! A body is {kind:inline_prompt,prompt} or {kind:skill_invocation,skill_id,version};
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
-use super::{write_transaction, Context};
+use super::{routine_webhooks, write_transaction, Context};
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
     contracts::{
@@ -72,6 +72,16 @@ pub fn local_zone() -> String {
 }
 fn yes() -> bool {
     true
+}
+/// A webhook is public-facing: only the user adds one, from the panel.
+fn refuse_model_webhook(model: bool, trigger: &Schedule) -> Result<(), ApiError> {
+    if model && *trigger == Schedule::Webhook {
+        return Err(ApiError::new(
+            400,
+            "Un déclencheur webhook s’ajoute depuis le panneau Routines, pas par un bot.",
+        ));
+    }
+    Ok(())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -441,6 +451,8 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
     let name = crate::valid_title(&input.name)?;
     let body = body(input.body, input.prompt)?;
     prompt(ctx.connection, &input.bot_id, &body)?;
+    let trigger = schedule(input.trigger, input.schedule)?;
+    refuse_model_webhook(origin == Origin::Model, &trigger)?;
     let id = format!("routine-{}", random(ctx.connection)?);
     let conversation = format!("routine-{}", random(ctx.connection)?);
     let now = clock(ctx)?;
@@ -452,7 +464,7 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
             conversation_id: conversation,
             name,
             body,
-            trigger: schedule(input.trigger, input.schedule)?,
+            trigger,
             time_zone: input.time_zone,
             enabled: input.enabled,
             origin,
@@ -503,6 +515,7 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
     }
     if input.trigger.is_some() || input.schedule.is_some() {
         r.trigger = schedule(input.trigger, input.schedule)?;
+        refuse_model_webhook(model, &r.trigger)?;
     }
     if let Some(zone) = input.time_zone {
         r.time_zone = zone;
@@ -536,7 +549,10 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
 fn enable(ctx: &Context<'_>, r: &Routine) -> Result<(), ApiError> {
     require_bot(ctx.connection, &r.bot_id)?;
     prompt(ctx.connection, &r.bot_id, &r.body)?;
-    if !r.enabled && cron::next_after(&r.trigger, &r.time_zone, clock(ctx)?)?.is_none() {
+    if !r.enabled
+        && r.trigger != Schedule::Webhook
+        && cron::next_after(&r.trigger, &r.time_zone, clock(ctx)?)?.is_none()
+    {
         return Err(ApiError::new(
             400,
             "Schedule has no future slot; choose a new time",
@@ -645,10 +661,14 @@ pub fn routes(
         ctx.connection = &tx;
         let result = match route {
             "/api/routines" => {
-                json!({"routine":routine_value(&tx,&create(&ctx,parse(bytes)?,Origin::User)?)?})
+                let r = create(&ctx, parse(bytes)?, Origin::User)?;
+                let webhook = routine_webhooks::sync(&tx, &r, clock(&ctx)?)?;
+                json!({"routine":routine_value(&tx,&r)?,"webhook":webhook})
             }
             "/api/routines/update" => {
-                json!({"routine":routine_value(&tx,&edit(&ctx,parse(bytes)?,false)?)?})
+                let r = edit(&ctx, parse(bytes)?, false)?;
+                let webhook = routine_webhooks::sync(&tx, &r, clock(&ctx)?)?;
+                json!({"routine":routine_value(&tx,&r)?,"webhook":webhook})
             }
             "/api/routines/run-now" => {
                 let input: Manual = parse(bytes)?;
@@ -708,6 +728,7 @@ pub fn routes(
                 match route {
                     "/api/routines/delete" => {
                         routine::delete(&tx, &r.routine_id)?;
+                        routine_webhooks::forget(&tx, &r.routine_id)?;
                         close_confirmation(
                             &tx,
                             &r.routine_id,
@@ -764,6 +785,9 @@ fn history(
             [&occurrence.occurrence_id],
             |r| r.get(0),
         )?;
+        if let Some(trigger) = routine_webhooks::history_trigger(&tx, &occurrence.occurrence_id)? {
+            value["trigger"] = trigger;
+        }
         if let Some(run) = run_id.map(|id| store::get(&tx, &id)).transpose()?.flatten() {
             value["run_id"] = json!(run.run_id);
             value["conversation_id"] = json!(run.conversation_id);
@@ -1210,7 +1234,8 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
         occurrences::mark_failed(ctx.connection, &o.occurrence_id, "Routine paused or edited")?;
         return Ok(Dispatch::Deferred("Routine paused or edited"));
     }
-    if o.manual_nonce.is_none() {
+    let webhook = routine_webhooks::call_of(ctx.connection, &o.occurrence_id)?.is_some();
+    if o.manual_nonce.is_none() || webhook {
         let active:bool=ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM engine_runs WHERE conversation_id=?1 AND status NOT IN ('finished','failed','cancelled'))",[&r.conversation_id],|row|row.get(0))?;
         // Preserve only the newest pending intent through scheduler catch-up;
         // never overlap automatic runs in this routine's conversation.
@@ -1220,7 +1245,10 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
             ));
         }
     }
-    let text = prompt(ctx.connection, &r.bot_id, &r.body)?;
+    let mut text = prompt(ctx.connection, &r.bot_id, &r.body)?;
+    if let Some(context) = routine_webhooks::run_context(ctx.connection, &o.occurrence_id)? {
+        text.push_str(&context);
+    }
     let mut launch = Context {
         connection: ctx.connection,
         provider: ctx.provider,

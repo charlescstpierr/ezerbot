@@ -1969,3 +1969,171 @@ fn past_once_resume_is_refused_and_creation_time_is_server_owned() {
         400
     );
 }
+
+fn webhook_routine(f: &mut Fixture, prompt: &str) -> (Routine, String, String) {
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Hook","prompt":prompt,"trigger":{"kind":"webhook"}}),
+    );
+    let r: Routine = serde_json::from_value(created["routine"].clone()).unwrap();
+    let url = format!(
+        "/hooks/{}/{}",
+        r.routine_id,
+        created["webhook"]["trigger_id"].as_str().unwrap()
+    );
+    let bearer = format!("Bearer {}", created["webhook"]["token"].as_str().unwrap());
+    (r, url, bearer)
+}
+
+#[test]
+fn webhook_body_reaches_the_model_as_untrusted_data_and_the_thread_shows_it() {
+    let mut f = Fixture::new(true);
+    let (r, url, bearer) = webhook_routine(&mut f, "HOOK_PROMPT");
+    let hook = features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).unwrap();
+    f.events(vec![
+        call("done", "complete_task", json!({"summary":"Reçu"})),
+        complete(),
+    ]);
+    f.events(vec![complete()]);
+    let reply =
+        features::routine_webhooks::accept(&mut f.app, &hook, None, br#"{"issue":"HOOK_BODY_42"}"#);
+    assert_eq!(reply.status, 200);
+    f.app.tick(now());
+    f.wait_run(&r);
+    assert_eq!(
+        f.run(&r).task_status,
+        Some(TaskStatus::Done {
+            summary: "Reçu".into()
+        })
+    );
+    let history = f.history(&r);
+    assert_eq!(history["occurrences"][0]["status"]["status"], "done");
+    assert_eq!(history["occurrences"][0]["trigger"]["label"], "Webhook");
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(seen.bodies.iter().any(|b| {
+            let text = b.to_string();
+            text.contains("HOOK_PROMPT")
+                && text.contains("HOOK_BODY_42")
+                && text.contains("webhook-body")
+                && text.contains("non fiable")
+        }));
+    }
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let thread = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == r.conversation_id)
+        .unwrap()["messages"]
+        .to_string();
+    assert!(thread.contains("HOOK_BODY_42"));
+    assert!(!thread.contains(bearer.trim_start_matches("Bearer ")));
+}
+
+#[test]
+fn webhook_calls_of_one_routine_run_one_at_a_time_in_order() {
+    let mut f = Fixture::new(true);
+    let (r, url, bearer) = webhook_routine(&mut f, "Serial");
+    let hook = features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).unwrap();
+    for _ in 0..2 {
+        f.events(vec![
+            call("done", "complete_task", json!({"summary":"Reçu"})),
+            complete(),
+        ]);
+        f.events(vec![complete()]);
+    }
+    for n in 0..2 {
+        let body = format!("{{\"n\":{n}}}");
+        let reply = features::routine_webhooks::accept(&mut f.app, &hook, None, body.as_bytes());
+        assert_eq!(reply.status, 200);
+    }
+    assert_eq!(f.history(&r)["occurrences"].as_array().unwrap().len(), 2);
+    f.app.tick(now());
+    // The first run is still active in the routine thread: the second call waits.
+    assert_eq!(f.count(), 1);
+    wait("both webhook calls ran, one after the other", || {
+        f.app.tick(now());
+        f.count() == 2
+    });
+    let statuses: Vec<String> = f.history(&r)["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["status"]["status"].to_string())
+        .collect();
+    assert_eq!(statuses.len(), 2);
+}
+
+#[test]
+fn a_bot_can_neither_create_nor_switch_a_routine_to_a_webhook_trigger() {
+    let mut f = Fixture::new(false);
+    let refused = f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "create_routine",
+            json!({"name":"Public","prompt":"Report","trigger":{"kind":"webhook"}}),
+        )
+        .unwrap();
+    assert!(matches!(refused, ToolOutcome::Failed { .. }));
+    let r = f.create("Original");
+    let switched = f
+        .app
+        .invoke_tool(
+            "grokbot",
+            "update_routine",
+            json!({"routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"trigger":{"kind":"webhook"}}),
+        )
+        .unwrap();
+    assert!(matches!(switched, ToolOutcome::Failed { .. }));
+    let listed = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert_eq!(listed["routines"][0]["trigger"]["kind"], "every");
+}
+
+#[test]
+fn deleting_or_leaving_the_webhook_trigger_kills_its_token() {
+    let mut f = Fixture::new(false);
+    let (r, url, bearer) = webhook_routine(&mut f, "Temporary");
+    assert!(features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer)).is_ok());
+    let edited = f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"schedule":"@every 1h"}),
+    );
+    assert_eq!(edited["routine"]["trigger"]["kind"], "every");
+    assert_eq!(
+        features::routine_webhooks::authorize(&f.app, "POST", &url, Some(&bearer))
+            .unwrap_err()
+            .status,
+        404
+    );
+    let (r2, url2, bearer2) = webhook_routine(&mut f, "Deleted");
+    f.post(
+        "/api/routines/delete",
+        json!({"bot_id":"grokbot","routine_id":r2.routine_id}),
+    );
+    assert_eq!(
+        features::routine_webhooks::authorize(&f.app, "POST", &url2, Some(&bearer2))
+            .unwrap_err()
+            .status,
+        404
+    );
+}
+
+#[test]
+fn a_webhook_routine_resumes_after_a_pause_without_a_future_slot() {
+    let mut f = Fixture::new(false);
+    let (r, _, _) = webhook_routine(&mut f, "Pausable");
+    let id = json!({"bot_id":"grokbot","routine_id":r.routine_id});
+    let paused = f.post("/api/routines/pause", id.clone())["routine"].clone();
+    assert_eq!(paused["enabled"], false);
+    assert_eq!(
+        f.post("/api/routines/resume", id)["routine"]["enabled"],
+        true
+    );
+    f.app.tick(now() + 86_400_000);
+    assert_eq!(f.count(), 0);
+}

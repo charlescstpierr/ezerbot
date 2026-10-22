@@ -6,7 +6,8 @@ const vm = require('node:vm');
 
 class Element {
   constructor(tag, document) { this.ownerDocument = document; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.listeners = {}; this.scrollTop = 0; this.open = true; this.isConnected = true; this.classList = { toggle() {}, add() {}, remove() {} }; }
-  append(...children) { this.children.push(...children); }
+  append(...children) { for (const child of children) if (child instanceof Element) child.parentElement = this; this.children.push(...children); }
+  get firstChild() { return this.children[0]; }
   contains(value) { return !!value && (this === value || this.children.some(c => c instanceof Element && c.contains(value))); }
   replaceChildren(...children) { if (this.contains(this.ownerDocument.activeElement)) this.ownerDocument.activeElement = this.ownerDocument.body; this.children = children; }
   setAttribute(key, value) { this.attributes[key] = value; }
@@ -41,7 +42,7 @@ function harness(api) {
   const context = vm.createContext({ window, document, Intl, Date: class extends Date { static now() { return clock; } }, crypto: { randomUUID: () => `intent-${++sequence}` }, sessionStorage: { getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v) }, console, TextEncoder });
   // Expose lexical state only in this test VM; production has no test API.
   const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8').replace('  panels.register({', `
-  window.test = { runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
+  window.test = { runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError, renderList, loadFunnel, revealed,
     setup(r) { dialog = document.createElement('dialog'); botSelect = document.createElement('select'); botSelect.value = r.bot_id;
       content = document.createElement('div'); status = document.createElement('p'); toolbar = document.createElement('div'); notices = document.createElement('div');
       dialog.append(notices, status, content); document.body.append(dialog);
@@ -331,4 +332,86 @@ test('confirmation read errors are French and actionable', async () => {
   assert.match(h.t.status.textContent, /Confirmation indisponible/);
   assert.match(h.t.status.textContent, /Réessayer/);
   assert.doesNotMatch(h.t.status.textContent, /database busy/);
+});
+
+const hook = { ...routine, name: 'Déploiement', trigger: { kind: 'webhook' }, enabled: true, body: { kind: 'inline_prompt', prompt: 'Traite l’appel reçu.' } };
+function webhookHarness(funnel, extra = {}) {
+  const h = harness(async url => {
+    if (url === '/api/routines/funnel') return funnel;
+    if (extra.api) return extra.api(url);
+    throw new Error(`inattendu : ${url}`);
+  });
+  h.panels.state.routines.items = [{ routine: hook }];
+  h.panels.state.routine_webhooks = { listener: { port: 47864, listening: true, error: null }, funnel: {}, items: { [hook.routine_id]: { trigger_id: 'trigger-abc', url: null } } };
+  return h;
+}
+
+test('a published webhook shows its HTTPS Funnel URL and the Bearer reminder, with the token masked', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' });
+  await h.t.loadFunnel();
+  const text = h.t.content.textContent;
+  assert.match(text, /https:\/\/mac\.qa\.ts\.net:8443\/hooks\/routine-test\/trigger-abc/);
+  assert.match(text, /Authorization: Bearer <jeton>/);
+  assert.match(text, /Jeton Bearer : ••••/);
+  assert.match(text, /Webhook : démarre à chaque appel|Webhook/);
+  assert.doesNotMatch(text, /ezwh_/);
+  assert.match(text, /Retirer la publication/);
+});
+
+test('without a confirmed Funnel the panel gives the reason and no public URL', async () => {
+  for (const [state, reason] of [['tailscale_stopped', 'Tailscale est arrêté ou déconnecté du tailnet.'], ['refused', 'Le tailnet a refusé Funnel.'], ['unconfirmed', 'La publication Funnel n’est pas encore confirmée par Tailscale.']]) {
+    const h = webhookHarness({ state, reason, public_base: null });
+    await h.t.loadFunnel();
+    const text = h.t.content.textContent;
+    assert.match(text, new RegExp(reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(text, /Pas d’URL publique/);
+    assert.doesNotMatch(text, /https:\/\//);
+  }
+});
+
+test('a stale published poll never shows an URL until the live check confirms it', async () => {
+  const h = webhookHarness({ state: 'tailscale_stopped', reason: 'Tailscale est arrêté ou déconnecté du tailnet.', public_base: null });
+  h.panels.state.routine_webhooks.items[hook.routine_id].url = 'https://old.ts.net:8443/hooks/x/y';
+  h.panels.state.routine_webhooks.funnel = { state: 'published', public_base: 'https://old.ts.net:8443/hooks' };
+  h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /old\.ts\.net/);
+  await h.t.loadFunnel();
+  assert.doesNotMatch(h.t.content.textContent, /old\.ts\.net/);
+});
+
+test('the token is shown in clear after creation, then masked and still copyable', async () => {
+  const copied = [];
+  const h = webhookHarness({ state: 'off', reason: 'Le webhook n’est pas publié sur Internet.', public_base: null }, {
+    api: async url => {
+      if (url === '/api/routines') return { routine: hook, webhook: { trigger_id: 'trigger-abc', token: 'ezwh_secret_token' } };
+      if (url === '/api/routines/webhook/token') return { token: 'ezwh_secret_token' };
+      throw new Error(`inattendu : ${url}`);
+    },
+  });
+  h.panels.copyText = async text => { copied.push(text); };
+  await h.t.mutate('/api/routines', { bot_id: 'grokbot', name: 'Déploiement', trigger: { kind: 'webhook' } }, 'Routine créée.');
+  assert.match(h.t.content.textContent, /ezwh_secret_token/);
+  assert.match(h.t.content.textContent, /Copiez ce jeton maintenant/);
+  h.t.revealed.clear(); h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /ezwh_/);
+  assert.match(h.t.content.textContent, /Jeton Bearer : ••••/);
+  const copy = h.t.content.querySelectorAll('button').find(b => b.textContent === 'Copier le jeton');
+  await copy.click();
+  assert.deepEqual(copied, ['ezwh_secret_token']);
+});
+
+test('history names the Webhook trigger and its reception time', async () => {
+  const received = { ...occurrence('hook-run', 'done', 'webhook:trigger-abc:call:1'), trigger: { kind: 'webhook', label: 'Webhook', received_at: 1_760_000_000_000 } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([received]) });
+  await h.t.showHistory(hook);
+  assert.match(h.t.content.textContent, /Webhook · reçu le/);
+  assert.doesNotMatch(h.t.content.textContent, /Manuel|Planifié/);
+});
+
+test('a routine editor offers a Webhook trigger without schedule fields', async () => {
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => ({ routines: [hook] }) });
+  await h.t.edit(hook);
+  const select = h.t.content.querySelectorAll('select').find(el => el.children.some(o => o.value === 'webhook'));
+  assert.ok(select, 'the trigger selector lists webhook');
+  assert.equal(select.value, 'webhook');
 });

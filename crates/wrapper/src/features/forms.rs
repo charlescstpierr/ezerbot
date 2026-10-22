@@ -1385,7 +1385,10 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
-        if tool == super::routines_background::ACTION || super::mcp::is_lifecycle(tool) {
+        if tool == super::routines_background::ACTION
+            || tool == super::routine_webhooks::ACTION
+            || super::mcp::is_lifecycle(tool)
+        {
             let result: Option<String> = ctx.connection.query_row(
                 "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
                 [&request.run_id], |r| r.get(0),
@@ -1451,6 +1454,7 @@ fn approval_policy(
     let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
+        || tool == super::routine_webhooks::ACTION
         || tool == "propose_skill"
         || super::local::is_read(tool)
     {

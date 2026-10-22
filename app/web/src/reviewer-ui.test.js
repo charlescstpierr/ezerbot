@@ -288,6 +288,28 @@ test("connector lifecycle cards show the provider-specific action and its result
   } finally {delete globalThis.window;}
 });
 
+test("the webhook publication card names Funnel, the public path and the private iPhone address, and shows its result", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    for (const enabled of [true,false]) {
+      const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"webhooks",kind:"approval",payload:{
+        entry_id:"webhooks",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+        kind:{kind:"approval",tool:"routines_webhook_publish",expires_at:Date.now()+60000},
+        arguments:{enabled},policy:{remember:false,scope:"none",pattern:"",label:"routines_webhook_publish"},
+      }}}));
+      assert.ok(html.includes(enabled?"Publier les webhooks sur Internet":"Retirer la publication des webhooks"));
+      if(enabled){assert.ok(html.includes("Tailscale Funnel"));assert.ok(html.includes("jeton Bearer"));assert.ok(html.includes("iPhone"));}
+      assert.ok(html.includes("Autoriser une fois"));assert.ok(!html.includes("Toujours autoriser"));assert.ok(!html.includes("agent de routines"));
+    }
+    const done=renderToStaticMarkup(React.createElement(Card,{message:{id:"webhooks",kind:"approval",payload:{
+      entry_id:"webhooks",status:{status:"resolved"},route:{requesting_bot_id:"grokbot"},
+      kind:{kind:"approval",tool:"routines_webhook_publish"},arguments:{enabled:true},
+      configuration_result:{status:"failed",reason:"Le tailnet a refusé Funnel."},
+    }}}));
+    assert.ok(done.includes("Échec : Le tailnet a refusé Funnel."));
+  } finally {delete globalThis.window;}
+});
+
 test("managed Google approvals describe the adapter without inventing an empty argument list", () => {
   globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
   try {
@@ -596,7 +618,7 @@ test("human fallback is attributed to the reviewer; pending review has decorativ
 test("resolved permission cards show the green decision for every action type", () => {
   globalThis.window = { GrokbotForms: { view() {} } };
   try {
-    for (const tool of ["test_generic_tool", "run_shell", "mcp_start_test", "routines_background_configure", "propose_skill"]) {
+    for (const tool of ["test_generic_tool", "run_shell", "mcp_start_test", "routines_background_configure", "routines_webhook_publish", "propose_skill"]) {
       for (const [decision, label] of [["allow_once", "Autorisé une fois"], [{ always_allow: { scope: "global" } }, "Toujours autorisé"]]) {
         const html = renderToStaticMarkup(React.createElement(Card, { message: {
           id: "allowed", kind: "approval", payload: {

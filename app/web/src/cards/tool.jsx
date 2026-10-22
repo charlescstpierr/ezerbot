@@ -80,8 +80,9 @@ function LocalCard({ message, run, onAction, busy }) {
   const pending = !outcome && !stopped;
   if (!outcome && runStatus === "awaiting_approval") return <article className="gb-message gb-engine-card gb-local-card gb-local-waiting" data-message-id={message.id} data-card-kind="tool"><p>Accord requis dans la carte d’approbation.</p></article>;
   const failure = outcome?.status === "failed" ? localFailureView(outcome.reason, approvalStatus, runStatus) : null;
+  const running = output?.background === true && output?.status === "en cours";
   const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
-  const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé"].includes(output?.status) ? "warning" : outcome ? "success" : "neutral");
+  const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé", "arrêtée"].includes(output?.status) ? "warning" : running || !outcome ? "neutral" : "success");
   return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || (pending && runStatus === "running" ? "running" : "")}>
     <div className="gb-local-header"><strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
     {authority?.kind === "rule" && <p>Autorisée automatiquement par une règle « Toujours » (Paramètres › Autorisations permanentes).</p>}
@@ -90,6 +91,7 @@ function LocalCard({ message, run, onAction, busy }) {
     {failure && <p className="gb-local-failure" data-tone={failure.tone} role={failure.tone === "warning" ? "alert" : "status"}>{failure.message}</p>}
     {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
     {pending && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
+    {running && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.task.stop")}>Arrêter</button>}
     {output?.exit_code != null && <p>Code de sortie : {output.exit_code}</p>}
     {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
     {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}

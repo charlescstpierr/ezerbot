@@ -103,6 +103,7 @@ pub mod notifications;
 pub mod routines;
 pub mod routines_background;
 pub mod screen;
+mod shell_tasks;
 pub mod skills;
 pub mod storage;
 pub mod templates;

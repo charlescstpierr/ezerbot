@@ -3346,8 +3346,14 @@ fn slack_connects_with_the_public_client_and_pkce_and_sends_no_client_secret() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(connection.contains("conservé dans le coffre"), "{connection}");
-    assert!(!connection.contains("jamais dans un fichier"), "{connection}");
+    assert!(
+        connection.contains("conservé dans le coffre"),
+        "{connection}"
+    );
+    assert!(
+        !connection.contains("jamais dans un fichier"),
+        "{connection}"
+    );
     f.decide(&run, json!("allow_once"));
     let item = f.item("slack");
     assert_eq!(item["status"], "authorizing");

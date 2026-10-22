@@ -1469,3 +1469,64 @@ fn settled_read_card_keeps_its_policy_and_shows_its_decision() {
         .clone();
     assert_eq!(decision, json!("allow_once"));
 }
+
+#[test]
+fn attached_interpreter_code_still_asks_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    std::fs::write(f.root().join("script.pl"), "print \"script\";\n").unwrap();
+    f.send("plain", "run_shell", f.shell("perl script.pl"));
+    let card = f.request("plain");
+    let policy = approval_policy(&mut f, "plain");
+    assert_eq!(policy["remember"], true);
+    assert_eq!(policy["scope"], "pattern");
+    f.decide(&card, json!({"always_allow":{"scope":"pattern"}}));
+    f.finish("plain");
+    assert_eq!(f.outcome("plain")["output"]["stdout"], "script");
+    f.send("plain-again", "run_shell", f.shell("perl script.pl"));
+    f.finish("plain-again");
+    assert!(
+        requests::list_for_run(&f.db(), &f.run("plain-again").run_id)
+            .unwrap()
+            .is_empty()
+    );
+    f.send("allow-shell", "run_shell", f.shell("printf oui"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    let note = f.root().join("note");
+    for (id, command) in [
+        ("perl-e", "perl -e'unlink \"note\"'"),
+        ("perl-ne", "perl -ne 'unlink \"note\"' script.pl"),
+        ("python-bc", "python3 -Bc 'import os; os.remove(\"note\")'"),
+        ("awk", "awk 'BEGIN{system(\"rm note\")}'"),
+        ("checkout-one", "git checkout note"),
+    ] {
+        std::fs::write(&note, "garde").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(note.exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(note.exists(), "{command}");
+    }
+}

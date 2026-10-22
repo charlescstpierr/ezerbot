@@ -521,7 +521,21 @@ fn leave_meeting(
     } else {
         "done"
     };
-    set_state(ctx.connection, &meeting.id, state, None)?;
+    if meeting.bot_id.is_none() {
+        // L’identifiant a pu arriver depuis la lecture : l’état et la dette de sortie
+        // se décident ensemble, sur la ligne telle qu’elle est maintenant.
+        finish_without_confirmed_bot(ctx.connection, &meeting.id, state)?;
+    } else {
+        set_state(ctx.connection, &meeting.id, state, None)?;
+    }
+    Ok(())
+}
+/// Pour une réunion lue sans identifiant de bot : si Recall a répondu entre-temps, la sortie reste due.
+fn finish_without_confirmed_bot(conn: &Connection, id: &str, state: &str) -> Result<(), ApiError> {
+    conn.execute(
+        "UPDATE wrapper_recall_meetings SET state=?2,message=NULL,updated_at=?3,failures=0,needs_leave=(bot_id IS NOT NULL) WHERE id=?1 AND state IN ('joining','in_call')",
+        params![id, state, crate::now()],
+    )?;
     Ok(())
 }
 fn leave(ctx: &Context<'_>, id: Option<&str>) -> Result<Value, ApiError> {
@@ -979,6 +993,34 @@ mod tests {
             .windows(secret.len())
             .any(|w| w == secret.as_bytes()));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_bot_id_arriving_during_cancellation_keeps_its_removal_owed() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for (id, bot) in [("without", None), ("with", Some("bot-1"))] {
+            conn.execute(
+                "INSERT INTO wrapper_recall_meetings(id,link,bot_name,bot_id,state,created_at,updated_at) VALUES (?1,'https://zoom.us/j/1','Ezerbot',?2,'joining',1,1)",
+                params![id, bot],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE wrapper_recall_meetings SET state='done' WHERE state='joining' AND id<>?1",
+                [id],
+            )
+            .unwrap();
+            finish_without_confirmed_bot(&conn, id, "cancelled").unwrap();
+            let (state, owed): (String, bool) = conn
+                .query_row(
+                    "SELECT state,needs_leave FROM wrapper_recall_meetings WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, "cancelled");
+            assert_eq!(owed, bot.is_some(), "{id}");
+        }
     }
 
     #[test]

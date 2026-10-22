@@ -27,6 +27,33 @@ pub enum Schedule {
     },
     /// Never due by itself: an authenticated webhook call starts the routine.
     Webhook,
+    /// Starts as soon as one of its simple triggers starts. The members are a
+    /// flat list: a group inside a group is refused when the routine is saved,
+    /// but the type stays open to the simple kinds added later.
+    Group {
+        members: Vec<Member>,
+    },
+}
+
+/// A simple trigger of a group. The id is stable across edits, so that each
+/// member keeps its own schedule version and its own webhook token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    #[serde(default)]
+    pub id: String,
+    pub trigger: Schedule,
+}
+
+impl Schedule {
+    /// A webhook call can start the routine without any clock slot: either it is
+    /// a webhook, or a group holding one.
+    pub fn has_webhook(&self) -> bool {
+        match self {
+            Schedule::Webhook => true,
+            Schedule::Group { members } => members.iter().any(|m| m.trigger == Schedule::Webhook),
+            _ => false,
+        }
+    }
 }
 
 fn invalid(message: impl std::fmt::Display) -> Error {
@@ -106,6 +133,13 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
         }
         Schedule::Webhook => {
             return Ok("Webhook : démarre à chaque appel authentifié".into());
+        }
+        Schedule::Group { members } => {
+            let parts = members
+                .iter()
+                .map(|member| describe_fr(&member.trigger, time_zone))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(format!("Groupe, dès que l’un part : {}", parts.join(" · ")));
         }
         Schedule::Every {
             interval_ms,
@@ -298,6 +332,15 @@ pub fn next_after(schedule: &Schedule, time_zone: &str, reference_ms: i64) -> Re
     match schedule {
         Schedule::Once { at } => Ok((*at > reference_ms).then_some(*at)),
         Schedule::Webhook => Ok(None),
+        Schedule::Group { members } => {
+            let mut first: Option<i64> = None;
+            for member in members {
+                if let Some(next) = next_after(&member.trigger, time_zone, reference_ms)? {
+                    first = Some(first.map_or(next, |current| current.min(next)));
+                }
+            }
+            Ok(first)
+        }
         Schedule::Every {
             interval_ms,
             phase_ms,

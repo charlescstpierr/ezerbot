@@ -6,6 +6,7 @@ use crate::cron::{self, Schedule};
 use grokbot_engine::contracts::{Error, Result};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -63,6 +64,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1))
          );
          CREATE INDEX IF NOT EXISTS scheduler_routines_bot ON scheduler_routines(bot_id);
+         CREATE TABLE IF NOT EXISTS scheduler_members (
+            routine_id TEXT NOT NULL REFERENCES scheduler_routines(routine_id),
+            member_id TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version > 0),
+            trigger TEXT NOT NULL,
+            live INTEGER NOT NULL CHECK (live IN (0, 1)),
+            materialized_after INTEGER NOT NULL,
+            PRIMARY KEY (routine_id, member_id)
+         );
+         CREATE TABLE IF NOT EXISTS scheduler_member_versions (
+            routine_id TEXT NOT NULL,
+            member_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            trigger TEXT NOT NULL,
+            PRIMARY KEY (routine_id, member_id, version)
+         );
          INSERT INTO component_versions(component, version)
             VALUES ('scheduler.routine', 1) ON CONFLICT(component) DO NOTHING;",
     )?;
@@ -131,7 +148,118 @@ pub fn create(conn: &Connection, routine: &Routine) -> Result<Routine> {
             routine.modified_at,
         ],
     )?;
+    sync_members(conn, &routine, false, routine.modified_at)?;
     Ok(routine)
+}
+
+/// Only a cron without a zone of its own follows the routine's time zone: an
+/// interval, a one-shot or a webhook is unaffected when that zone changes.
+fn uses_routine_zone(trigger: &Schedule) -> bool {
+    matches!(trigger, Schedule::Cron { expression, time_zone: None }
+        if !["CRON_TZ=", "TZ="].iter().any(|prefix| expression.trim_start().starts_with(prefix)))
+}
+
+/// Keep one row per simple trigger of a group: its own schedule version and its
+/// own cursor, so editing one trigger never moves another's slots. A member
+/// that leaves the group keeps its row (not live), so its version only grows.
+/// The live members of a group whose trigger is the one already stored.
+fn unchanged_members(conn: &Connection, routine: &Routine) -> Result<HashSet<String>> {
+    let Schedule::Group { members } = &routine.trigger else {
+        return Ok(HashSet::new());
+    };
+    let mut kept = HashSet::new();
+    for member in members {
+        let same: bool = conn
+            .query_row(
+                "SELECT trigger=?3 FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
+                params![routine.routine_id, member.id, serde_json::to_string(&member.trigger)?],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if same {
+            kept.insert(member.id.clone());
+        }
+    }
+    Ok(kept)
+}
+
+/// The trigger of a group member as it was at `version`, for naming past occurrences.
+pub fn member_trigger(
+    conn: &Connection,
+    routine_id: &str,
+    member_id: &str,
+    version: u64,
+) -> Result<Option<Schedule>> {
+    Ok(conn
+        .query_row(
+            "SELECT trigger FROM scheduler_member_versions
+             WHERE routine_id=?1 AND member_id=?2 AND version=?3",
+            params![routine_id, member_id, version],
+            |row| json(row, 0),
+        )
+        .optional()?)
+}
+
+fn sync_members(
+    conn: &Connection,
+    routine: &Routine,
+    zone_changed: bool,
+    now_ms: i64,
+) -> Result<()> {
+    let members: &[cron::Member] = match &routine.trigger {
+        Schedule::Group { members } => members,
+        _ => &[],
+    };
+    for member in members {
+        let text = serde_json::to_string(&member.trigger)?;
+        let known: Option<(String, bool)> = conn
+            .query_row(
+                "SELECT trigger, live FROM scheduler_members WHERE routine_id=?1 AND member_id=?2",
+                params![routine.routine_id, member.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match known {
+            None => {
+                conn.execute(
+                    "INSERT INTO scheduler_members VALUES (?1, ?2, 1, ?3, 1, ?4)",
+                    params![routine.routine_id, member.id, text, now_ms],
+                )?;
+            }
+            Some((old, true))
+                if old == text && !(zone_changed && uses_routine_zone(&member.trigger)) => {}
+            Some(_) => {
+                conn.execute(
+                    "UPDATE scheduler_members SET version=version+1, trigger=?3, live=1,
+                     materialized_after=MAX(materialized_after, ?4)
+                     WHERE routine_id=?1 AND member_id=?2",
+                    params![routine.routine_id, member.id, text, now_ms],
+                )?;
+            }
+        }
+        // History keeps naming the trigger as it was when an occurrence was made.
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduler_member_versions
+             SELECT routine_id, member_id, version, trigger FROM scheduler_members
+             WHERE routine_id=?1 AND member_id=?2",
+            params![routine.routine_id, member.id],
+        )?;
+    }
+    let live = conn
+        .prepare("SELECT member_id FROM scheduler_members WHERE routine_id=?1 AND live=1")?
+        .query_map([&routine.routine_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in live
+        .iter()
+        .filter(|id| !members.iter().any(|m| &m.id == *id))
+    {
+        conn.execute(
+            "UPDATE scheduler_members SET live=0 WHERE routine_id=?1 AND member_id=?2",
+            params![routine.routine_id, id],
+        )?;
+    }
+    Ok(())
 }
 
 /// A schedule edit starts strictly after the edit and the last served slot.
@@ -144,7 +272,7 @@ pub fn create(conn: &Connection, routine: &Routine) -> Result<Routine> {
 pub fn update(conn: &Connection, routine: &Routine, now_ms: i64) -> Result<Routine> {
     let old = require(conn, &routine.routine_id)?;
     let now_ms = now_ms.max(old.modified_at);
-    validate(routine, now_ms)?;
+    validate_keeping(routine, now_ms, &unchanged_members(conn, routine)?)?;
     if routine.bot_id != old.bot_id || routine.conversation_id != old.conversation_id {
         return Err(Error::InvalidInput(
             "routine owner/conversation is immutable".into(),
@@ -192,6 +320,7 @@ pub fn update(conn: &Connection, routine: &Routine, now_ms: i64) -> Result<Routi
     )? != 1 {
         return Err(Error::InvalidInput("stale routine edit".into()));
     }
+    sync_members(conn, routine, routine.time_zone != old.time_zone, now_ms)?;
     Ok(updated)
 }
 
@@ -218,6 +347,13 @@ pub fn list(conn: &Connection, bot_id: &str) -> Result<Vec<Routine>> {
 /// Unphased intervals restart at resume time (CR10); catch-up is only for closure,
 /// not pause. Idempotent enable does not reset an already active schedule.
 pub fn set_enabled(conn: &Connection, routine_id: &str, enabled: bool, now_ms: i64) -> Result<()> {
+    let was_enabled: Option<bool> = conn
+        .query_row(
+            "SELECT enabled FROM scheduler_routines WHERE routine_id=?1 AND deleted=0",
+            [routine_id],
+            |row| row.get(0),
+        )
+        .optional()?;
     if conn.execute(
         "UPDATE scheduler_routines SET
          active_since=CASE WHEN ?2=1 AND enabled=0
@@ -230,6 +366,15 @@ pub fn set_enabled(conn: &Connection, routine_id: &str, enabled: bool, now_ms: i
     )? == 0
     {
         return Err(Error::InvalidInput("unknown routine".into()));
+    }
+    // Resuming restarts every trigger of a group after the pause, like a lone schedule.
+    if enabled && was_enabled == Some(false) {
+        conn.execute(
+            "UPDATE scheduler_members SET materialized_after=MAX(materialized_after, ?2,
+                COALESCE((SELECT last_served_at FROM scheduler_routines WHERE routine_id=?1), ?2))
+             WHERE routine_id=?1 AND live=1",
+            params![routine_id, now_ms],
+        )?;
     }
     Ok(())
 }
@@ -249,6 +394,13 @@ pub(crate) fn require(conn: &Connection, id: &str) -> Result<Routine> {
 }
 
 pub(crate) fn validate(routine: &Routine, reference_ms: i64) -> Result<()> {
+    validate_keeping(routine, reference_ms, &HashSet::new())
+}
+
+/// [`validate`], except that the group members named in `kept` are unchanged
+/// since they were stored: a one-shot among them may have fired already, and that
+/// must not stop an edit of the rest of the routine.
+fn validate_keeping(routine: &Routine, reference_ms: i64, kept: &HashSet<String>) -> Result<()> {
     if [
         &routine.routine_id,
         &routine.bot_id,
@@ -270,19 +422,60 @@ pub(crate) fn validate(routine: &Routine, reference_ms: i64) -> Result<()> {
     }
     jiff::tz::TimeZone::get(&routine.time_zone)
         .map_err(|error| Error::InvalidInput(error.to_string()))?;
-    // Execution cadence is a local cost/safety policy, not a change to CR10's
-    // parser grammar. One model run per minute is the fastest supported cadence.
-    if matches!(routine.trigger, Schedule::Every { interval_ms, .. } if interval_ms < 60_000) {
-        return Err(Error::InvalidInput(
-            "routine interval must be at least one minute".into(),
-        ));
+    validate_group(&routine.trigger, &routine.time_zone, reference_ms, kept)
+}
+
+/// A group is a flat list of at least two simple triggers, each valid on its own.
+/// Execution cadence is a local cost/safety policy, not a change to CR10's
+/// parser grammar. One model run per minute is the fastest supported cadence.
+pub(crate) fn validate_trigger(trigger: &Schedule, zone: &str, reference_ms: i64) -> Result<()> {
+    validate_group(trigger, zone, reference_ms, &HashSet::new())
+}
+
+fn validate_group(
+    trigger: &Schedule,
+    zone: &str,
+    reference_ms: i64,
+    kept: &HashSet<String>,
+) -> Result<()> {
+    match trigger {
+        Schedule::Webhook => Ok(()),
+        Schedule::Group { members } => {
+            if members.len() < 2 {
+                return Err(Error::InvalidInput(
+                    "a group needs at least two triggers".into(),
+                ));
+            }
+            let mut ids = HashSet::new();
+            for member in members {
+                if member.id.trim().is_empty() || !ids.insert(member.id.as_str()) {
+                    return Err(Error::InvalidInput(
+                        "group triggers need distinct IDs".into(),
+                    ));
+                }
+                if matches!(member.trigger, Schedule::Group { .. }) {
+                    return Err(Error::InvalidInput("a group cannot contain a group".into()));
+                }
+                let spent =
+                    matches!(member.trigger, Schedule::Once { .. }) && kept.contains(&member.id);
+                if !spent {
+                    validate_trigger(&member.trigger, zone, reference_ms)?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            if matches!(trigger, Schedule::Every { interval_ms, .. } if *interval_ms < 60_000) {
+                return Err(Error::InvalidInput(
+                    "routine interval must be at least one minute".into(),
+                ));
+            }
+            cron::next_after(trigger, zone, reference_ms)?.ok_or_else(|| {
+                Error::InvalidInput("schedule never fires after its reference".into())
+            })?;
+            Ok(())
+        }
     }
-    if routine.trigger == Schedule::Webhook {
-        return Ok(());
-    }
-    cron::next_after(&routine.trigger, &routine.time_zone, reference_ms)?
-        .ok_or_else(|| Error::InvalidInput("schedule never fires after its reference".into()))?;
-    Ok(())
 }
 
 pub(crate) fn json<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T> {

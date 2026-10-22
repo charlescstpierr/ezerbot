@@ -22,6 +22,11 @@
 //!   ([`begin_absence`]). The limited rule applies: the newest slot if it falls in
 //!   the last 60 minutes, the others are missed.
 //!
+//! A group (docs/specs/routines.md, « Groupe ») makes each simple trigger its own
+//! source of slots: the identity of a slot also names the member, whose version
+//! and cursor live in `scheduler_members`. Editing one member leaves the pending
+//! slots of another untouched.
+//!
 //! Time is always passed in, never read, so the "was meant to run" fact and the
 //! clock are injectable.
 use crate::{cron, routine};
@@ -58,6 +63,9 @@ pub struct Occurrence {
     pub scheduled_at_utc: i64,
     pub manual_nonce: Option<String>,
     pub status: OccurrenceStatus,
+    /// The simple trigger of a group that started this occurrence; empty outside a group.
+    #[serde(default)]
+    pub member_id: String,
 }
 
 /// At most this many individual missed slots plus one newest slot are inserted
@@ -75,6 +83,8 @@ const HEARTBEAT_EVERY_MS: i64 = 5_000;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissedRange {
     pub routine_id: String,
+    #[serde(default)]
+    pub member_id: String,
     pub schedule_version: u64,
     pub from_inclusive: i64,
     pub until_exclusive: i64,
@@ -84,7 +94,7 @@ pub struct MissedRange {
 }
 
 const COLUMNS: &str = "occurrence_id, routine_id, schedule_version, scheduled_at_utc,
-    manual_nonce, status, run_id, reason";
+    manual_nonce, status, run_id, reason, member_id";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -101,12 +111,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             run_id TEXT UNIQUE,
             reason TEXT,
             catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
+            member_id TEXT NOT NULL DEFAULT '',
             CHECK (status NOT IN ('running', 'done') OR run_id IS NOT NULL),
             CHECK (status != 'failed' OR reason IS NOT NULL)
          );
-         CREATE UNIQUE INDEX IF NOT EXISTS scheduler_scheduled_slot
-            ON scheduler_occurrences(routine_id, schedule_version, scheduled_at_utc)
-            WHERE manual_nonce IS NULL;
          CREATE UNIQUE INDEX IF NOT EXISTS scheduler_manual_nonce
             ON scheduler_occurrences(routine_id, manual_nonce) WHERE manual_nonce IS NOT NULL;
          CREATE INDEX IF NOT EXISTS scheduler_pending ON scheduler_occurrences(status);
@@ -114,12 +122,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             ON scheduler_occurrences(routine_id, scheduled_at_utc DESC, occurrence_id DESC);
          CREATE TABLE IF NOT EXISTS scheduler_missed_ranges (
             routine_id TEXT NOT NULL REFERENCES scheduler_routines(routine_id),
+            member_id TEXT NOT NULL DEFAULT '',
             schedule_version INTEGER NOT NULL,
             from_inclusive INTEGER NOT NULL,
             until_exclusive INTEGER NOT NULL CHECK (until_exclusive > from_inclusive),
             trigger TEXT NOT NULL,
             time_zone TEXT NOT NULL,
-            PRIMARY KEY(routine_id, schedule_version, from_inclusive)
+            PRIMARY KEY(routine_id, member_id, schedule_version, from_inclusive)
          );
          CREATE INDEX IF NOT EXISTS scheduler_range_history
             ON scheduler_missed_ranges(routine_id, from_inclusive DESC, schedule_version DESC);
@@ -146,7 +155,89 @@ pub fn migrate(conn: &Connection) -> Result<()> {
              ADD COLUMN catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1));",
         )?;
     }
+    // Upgrade databases made before groups existed: every old slot belongs to
+    // the routine itself (empty member), and its identity gains the member.
+    let columns = |table: &str| -> Result<Vec<String>> {
+        Ok(conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+    if !columns("scheduler_occurrences")?
+        .iter()
+        .any(|name| name == "member_id")
+    {
+        conn.execute_batch(
+            "ALTER TABLE scheduler_occurrences ADD COLUMN member_id TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if !columns("scheduler_missed_ranges")?
+        .iter()
+        .any(|name| name == "member_id")
+    {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS scheduler_range_history;
+             ALTER TABLE scheduler_missed_ranges RENAME TO scheduler_missed_ranges_old;
+             CREATE TABLE scheduler_missed_ranges (
+                routine_id TEXT NOT NULL REFERENCES scheduler_routines(routine_id),
+                member_id TEXT NOT NULL DEFAULT '',
+                schedule_version INTEGER NOT NULL,
+                from_inclusive INTEGER NOT NULL,
+                until_exclusive INTEGER NOT NULL CHECK (until_exclusive > from_inclusive),
+                trigger TEXT NOT NULL,
+                time_zone TEXT NOT NULL,
+                PRIMARY KEY(routine_id, member_id, schedule_version, from_inclusive)
+             );
+             INSERT INTO scheduler_missed_ranges
+                (routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone)
+                SELECT routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone
+                FROM scheduler_missed_ranges_old;
+             DROP TABLE scheduler_missed_ranges_old;
+             CREATE INDEX scheduler_range_history
+                ON scheduler_missed_ranges(routine_id, from_inclusive DESC, schedule_version DESC);",
+        )?;
+    }
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS scheduler_scheduled_slot;
+         CREATE UNIQUE INDEX IF NOT EXISTS scheduler_scheduled_member_slot
+            ON scheduler_occurrences(routine_id, member_id, schedule_version, scheduled_at_utc)
+            WHERE manual_nonce IS NULL;",
+    )?;
     routine::check_schema(conn, "scheduler.occurrences")
+}
+
+/// SQL for the version an occurrence has to match to still be current: the
+/// routine's for a lone trigger, the member's own inside a group (0, never
+/// current, once the member has left). `o` and `r` are the aliases of the
+/// occurrence and of its routine.
+pub fn current_version_sql(o: &str, r: &str) -> String {
+    format!(
+        "(CASE WHEN {o}.member_id='' THEN {r}.schedule_version ELSE COALESCE((SELECT m.version
+         FROM scheduler_members m WHERE m.routine_id={o}.routine_id AND m.member_id={o}.member_id
+         AND m.live=1), 0) END)"
+    )
+}
+
+/// Whether the trigger that made `occurrence` is still the one it was made by.
+pub fn is_current(conn: &Connection, occurrence: &Occurrence) -> Result<bool> {
+    let current: Option<u64> = if occurrence.member_id.is_empty() {
+        conn.query_row(
+            "SELECT schedule_version FROM scheduler_routines WHERE routine_id=?1 AND deleted=0",
+            [&occurrence.routine_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT m.version FROM scheduler_members m JOIN scheduler_routines r
+             ON r.routine_id=m.routine_id AND r.deleted=0
+             WHERE m.routine_id=?1 AND m.member_id=?2 AND m.live=1",
+            params![occurrence.routine_id, occurrence.member_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    };
+    Ok(current == Some(occurrence.schedule_version))
 }
 
 /// Materialize due slots. Ordinary and absence slots keep bounded individual
@@ -182,11 +273,11 @@ pub fn materialize(conn: &Connection, now_ms: i64, policy: &CatchUpPolicy) -> Re
     let earliest = now_ms.saturating_sub(i64::from(policy.late_minutes.max(1)) * 60_000);
     // The window never expires a queued catch-up slot: it was owed, not late.
     conn.execute(
-        "UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL
+        &format!("UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL
          AND ((catch_up=0 AND scheduled_at_utc < ?1) OR EXISTS (
             SELECT 1 FROM scheduler_routines r WHERE r.routine_id=scheduler_occurrences.routine_id
-            AND (scheduled_at_utc <= r.active_since OR scheduler_occurrences.schedule_version!=r.schedule_version)
-         ))", [earliest],
+            AND (scheduled_at_utc <= r.active_since OR scheduler_occurrences.schedule_version!={})
+         ))", current_version_sql("scheduler_occurrences", "r")), [earliest],
     )?;
     let presence = Presence::read(conn)?;
     for id in ids {
@@ -209,6 +300,7 @@ pub fn materialize(conn: &Connection, now_ms: i64, policy: &CatchUpPolicy) -> Re
     conn.execute(
         "UPDATE scheduler_occurrences SET status='missed' WHERE status='pending' AND manual_nonce IS NULL AND catch_up=0
          AND EXISTS (SELECT 1 FROM scheduler_occurrences newer WHERE newer.routine_id=scheduler_occurrences.routine_id
+            AND newer.member_id=scheduler_occurrences.member_id
             AND newer.status='pending' AND newer.manual_nonce IS NULL AND newer.catch_up=0
             AND newer.scheduled_at_utc > scheduler_occurrences.scheduled_at_utc)", [],
     )?;
@@ -290,6 +382,50 @@ pub fn heartbeat(conn: &Connection, now_ms: i64) -> Result<()> {
     record_tick(conn, now_ms)
 }
 
+/// One stream of slots: a lone trigger, or one simple trigger of a group. Each
+/// has its own schedule version and its own cursor.
+struct Source {
+    member_id: String,
+    version: u64,
+    trigger: cron::Schedule,
+    cursor: i64,
+}
+
+fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>> {
+    match &routine.trigger {
+        cron::Schedule::Webhook => Ok(vec![]),
+        cron::Schedule::Group { .. } => {
+            let mut query = conn.prepare(
+                "SELECT member_id, version, trigger, materialized_after FROM scheduler_members
+                 WHERE routine_id=?1 AND live=1 ORDER BY rowid",
+            )?;
+            let rows = query.query_map([&routine.routine_id], |row| {
+                Ok(Source {
+                    member_id: row.get(0)?,
+                    version: row.get(1)?,
+                    trigger: routine::json(row, 2)?,
+                    cursor: row.get(3)?,
+                })
+            })?;
+            Ok(rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|source| source.trigger != cron::Schedule::Webhook)
+                .collect())
+        }
+        trigger => Ok(vec![Source {
+            member_id: String::new(),
+            version: routine.schedule_version,
+            trigger: trigger.clone(),
+            cursor: conn.query_row(
+                "SELECT materialized_after FROM scheduler_routines WHERE routine_id=?1",
+                [&routine.routine_id],
+                |row| row.get(0),
+            )?,
+        }]),
+    }
+}
+
 fn materialize_one(
     conn: &Connection,
     id: &str,
@@ -298,25 +434,37 @@ fn materialize_one(
     presence: &Presence,
 ) -> Result<()> {
     let routine = routine::require(conn, id)?;
-    let cursor: i64 = conn.query_row(
-        "SELECT materialized_after FROM scheduler_routines WHERE routine_id=?1",
-        [id],
-        |row| row.get(0),
-    )?;
+    for source in sources(conn, &routine)? {
+        materialize_source(conn, &routine, &source, now_ms, earliest, presence)?;
+    }
+    Ok(())
+}
+
+fn materialize_source(
+    conn: &Connection,
+    routine: &routine::Routine,
+    source: &Source,
+    now_ms: i64,
+    earliest: i64,
+    presence: &Presence,
+) -> Result<()> {
+    let cursor = source.cursor;
     // A consumed one-shot is normal exhaustion, not a broken routine.
-    if matches!(routine.trigger, cron::Schedule::Once { at } if at <= cursor)
-        || routine.trigger == cron::Schedule::Webhook
-    {
+    if matches!(source.trigger, cron::Schedule::Once { at } if at <= cursor) {
         return Ok(());
     }
-    routine::validate(&routine, cursor)?;
-    let Some(first) = cron::next_after(&routine.trigger, &routine.time_zone, cursor)? else {
+    if source.member_id.is_empty() {
+        routine::validate(routine, cursor)?;
+    } else {
+        routine::validate_trigger(&source.trigger, &routine.time_zone, cursor)?;
+    }
+    let Some(first) = cron::next_after(&source.trigger, &routine.time_zone, cursor)? else {
         return Ok(());
     };
     if first > now_ms {
         return Ok(());
     }
-    let (trigger, zone) = (&routine.trigger, routine.time_zone.as_str());
+    let (trigger, zone) = (&source.trigger, routine.time_zone.as_str());
     // Time splits into ordinary, gap and absence, in that order. A slot is in
     // the gap if it is after the last tick and the host stayed silent too long.
     let absent_from = presence.absent_since.unwrap_or(i64::MAX);
@@ -330,22 +478,42 @@ fn materialize_one(
     let (mut last, mut next) = (first, Some(first));
     if first <= ordinary_until {
         let latest = latest_due(trigger, zone, first, ordinary_until)?;
-        settle_limited(conn, &routine, first, latest, earliest)?;
+        settle_limited(conn, routine, source, first, latest, earliest)?;
         (last, next) = (latest, cron::next_after(trigger, zone, latest)?);
     }
     while let Some(slot) = next.filter(|slot| *slot <= gap_until) {
-        insert_slot(conn, &routine, slot, "pending", true)?;
+        insert_slot(conn, routine, source, slot, "pending", true)?;
         (last, next) = (slot, cron::next_after(trigger, zone, slot)?);
     }
     if let Some(slot) = next.filter(|slot| *slot <= now_ms) {
         last = latest_due(trigger, zone, slot, now_ms)?;
-        settle_limited(conn, &routine, slot, last, earliest)?;
+        settle_limited(conn, routine, source, slot, last, earliest)?;
     }
-    conn.execute(
-        "UPDATE scheduler_routines SET materialized_after=?2 WHERE routine_id=?1 AND schedule_version=?3",
-        params![id, last, routine.schedule_version],
-    )?;
+    if source.member_id.is_empty() {
+        conn.execute(
+            "UPDATE scheduler_routines SET materialized_after=?2 WHERE routine_id=?1 AND schedule_version=?3",
+            params![routine.routine_id, last, source.version],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE scheduler_members SET materialized_after=?3 WHERE routine_id=?1 AND member_id=?2 AND version=?4",
+            params![routine.routine_id, source.member_id, last, source.version],
+        )?;
+    }
     Ok(())
+}
+
+/// The earliest slot that any trigger of `routine` has yet to materialize, from
+/// each trigger's own cursor. A host that only wants to know whether to wake up
+/// asks this instead of running a tick.
+pub fn next_slot(conn: &Connection, routine: &routine::Routine) -> Result<Option<i64>> {
+    let mut first: Option<i64> = None;
+    for source in sources(conn, routine)? {
+        if let Some(next) = cron::next_after(&source.trigger, &routine.time_zone, source.cursor)? {
+            first = Some(first.map_or(next, |current| current.min(next)));
+        }
+    }
+    Ok(first)
 }
 
 /// The limited rule on `first..=latest`: only `latest` can run, and only inside
@@ -354,6 +522,7 @@ fn materialize_one(
 fn settle_limited(
     conn: &Connection,
     routine: &routine::Routine,
+    source: &Source,
     first: i64,
     latest: i64,
     earliest: i64,
@@ -363,21 +532,22 @@ fn settle_limited(
         if slot == latest {
             break;
         }
-        insert_slot(conn, routine, slot, "missed", false)?;
-        slot = cron::next_after(&routine.trigger, &routine.time_zone, slot)?
+        insert_slot(conn, routine, source, slot, "missed", false)?;
+        slot = cron::next_after(&source.trigger, &routine.time_zone, slot)?
             .ok_or_else(|| Error::InvalidInput("schedule exhausted before latest slot".into()))?;
     }
     if slot < latest {
         conn.execute(
             "INSERT INTO scheduler_missed_ranges
-             (routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
+             (routine_id, member_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT DO NOTHING",
             params![
                 routine.routine_id,
-                routine.schedule_version,
+                source.member_id,
+                source.version,
                 slot,
                 latest,
-                serde_json::to_string(&routine.trigger)?,
+                serde_json::to_string(&source.trigger)?,
                 routine.time_zone
             ],
         )?;
@@ -385,6 +555,7 @@ fn settle_limited(
     insert_slot(
         conn,
         routine,
+        source,
         latest,
         if latest >= earliest {
             "pending"
@@ -398,18 +569,20 @@ fn settle_limited(
 fn insert_slot(
     conn: &Connection,
     routine: &routine::Routine,
+    source: &Source,
     slot: i64,
     status: &str,
     catch_up: bool,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO scheduler_occurrences
-         (occurrence_id, routine_id, schedule_version, scheduled_at_utc, status, catch_up)
-         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(routine_id, schedule_version, scheduled_at_utc) WHERE manual_nonce IS NULL DO NOTHING",
+         (occurrence_id, routine_id, member_id, schedule_version, scheduled_at_utc, status, catch_up)
+         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(routine_id, member_id, schedule_version, scheduled_at_utc) WHERE manual_nonce IS NULL DO NOTHING",
         params![
             routine.routine_id,
-            routine.schedule_version,
+            source.member_id,
+            source.version,
             slot,
             status,
             catch_up
@@ -423,7 +596,9 @@ fn insert_slot(
 // closure length or late-window size; no minute-by-minute scan of the backlog.
 fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Result<i64> {
     match schedule {
-        cron::Schedule::Once { .. } | cron::Schedule::Webhook => Ok(first),
+        cron::Schedule::Once { .. } | cron::Schedule::Webhook | cron::Schedule::Group { .. } => {
+            Ok(first)
+        }
         cron::Schedule::Every { interval_ms, .. } => {
             let first = i128::from(first);
             let interval = i128::from(*interval_ms);
@@ -462,8 +637,8 @@ fn quarantine(conn: &Connection, id: &str, now_ms: i64, reason: &str) -> Result<
 /// Interpret [from_inclusive, until_exclusive) using the captured schedule.
 pub fn missed_ranges(conn: &Connection, routine_id: &str) -> Result<Vec<MissedRange>> {
     let mut query = conn.prepare(
-        "SELECT routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone
-         FROM scheduler_missed_ranges WHERE routine_id=?1 ORDER BY from_inclusive",
+        "SELECT routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone, member_id
+         FROM scheduler_missed_ranges WHERE routine_id=?1 ORDER BY from_inclusive, member_id",
     )?;
     let rows = query.query_map([routine_id], |row| {
         Ok(MissedRange {
@@ -473,6 +648,7 @@ pub fn missed_ranges(conn: &Connection, routine_id: &str) -> Result<Vec<MissedRa
             until_exclusive: row.get(3)?,
             trigger: routine::json(row, 4)?,
             time_zone: row.get(5)?,
+            member_id: row.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -487,16 +663,39 @@ pub fn run_now(
     nonce: &str,
     now_ms: i64,
 ) -> Result<Occurrence> {
+    run_member(conn, routine_id, "", nonce, now_ms)
+}
+
+/// [`run_now`] for a call that belongs to one simple trigger of a group (a
+/// webhook), so that history names it and its own edits cut it off.
+pub fn run_member(
+    conn: &Connection,
+    routine_id: &str,
+    member_id: &str,
+    nonce: &str,
+    now_ms: i64,
+) -> Result<Occurrence> {
     if nonce.trim().is_empty() || nonce.starts_with("scheduler-error:") {
         return Err(Error::InvalidInput("manual run requires a nonce".into()));
     }
     let routine = routine::require(conn, routine_id)?;
+    let version = if member_id.is_empty() {
+        routine.schedule_version
+    } else {
+        conn.query_row(
+            "SELECT version FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
+            params![routine_id, member_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| Error::InvalidInput("unknown trigger".into()))?
+    };
     conn.execute(
         "INSERT INTO scheduler_occurrences
-         (occurrence_id, routine_id, schedule_version, scheduled_at_utc, manual_nonce, status)
-         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, 'pending')
+         (occurrence_id, routine_id, member_id, schedule_version, scheduled_at_utc, manual_nonce, status)
+         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, 'pending')
          ON CONFLICT(routine_id, manual_nonce) WHERE manual_nonce IS NOT NULL DO NOTHING",
-        params![routine_id, routine.schedule_version, now_ms, nonce],
+        params![routine_id, member_id, version, now_ms, nonce],
     )?;
     Ok(conn.query_row(
         &format!(
@@ -582,7 +781,7 @@ pub fn history_page(
     let mut rows = stmt
         .query_map(
             params![id, cursor.snapshot, cursor.after, HISTORY_PAGE_SIZE + 1],
-            |r| Ok((from_row(r)?, r.get::<_, i64>(8)?)),
+            |r| Ok((from_row(r)?, r.get::<_, i64>(9)?)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let more = rows.len() > HISTORY_PAGE_SIZE;
@@ -608,10 +807,10 @@ pub fn missed_ranges_page(
     cursor: Option<HistoryCursor>,
 ) -> Result<HistoryPage<MissedRange>> {
     let cursor = page_cursor(conn, "scheduler_missed_ranges", id, cursor)?;
-    let mut stmt = conn.prepare("SELECT routine_id,schedule_version,from_inclusive,until_exclusive,trigger,time_zone,rowid
+    let mut stmt = conn.prepare("SELECT routine_id,schedule_version,from_inclusive,until_exclusive,trigger,time_zone,rowid,member_id
         FROM scheduler_missed_ranges WHERE routine_id=?1 AND rowid<=?2 AND (?3=0 OR
-        (from_inclusive,schedule_version)<(SELECT from_inclusive,schedule_version FROM scheduler_missed_ranges WHERE rowid=?3))
-        ORDER BY from_inclusive DESC,schedule_version DESC LIMIT ?4")?;
+        (from_inclusive,schedule_version,member_id)<(SELECT from_inclusive,schedule_version,member_id FROM scheduler_missed_ranges WHERE rowid=?3))
+        ORDER BY from_inclusive DESC,schedule_version DESC,member_id DESC LIMIT ?4")?;
     let mut rows = stmt
         .query_map(
             params![id, cursor.snapshot, cursor.after, HISTORY_PAGE_SIZE + 1],
@@ -624,6 +823,7 @@ pub fn missed_ranges_page(
                         until_exclusive: r.get(3)?,
                         trigger: routine::json(r, 4)?,
                         time_zone: r.get(5)?,
+                        member_id: r.get(7)?,
                     },
                     r.get::<_, i64>(6)?,
                 ))
@@ -702,10 +902,13 @@ pub struct Queue {
 /// not waiting any more, even before the host has retired them.
 pub fn queue(conn: &Connection, routine_id: &str) -> Result<Queue> {
     Ok(conn.query_row(
-        "SELECT COUNT(*), MIN(o.scheduled_at_utc) FROM scheduler_occurrences o
+        &format!(
+            "SELECT COUNT(*), MIN(o.scheduled_at_utc) FROM scheduler_occurrences o
          JOIN scheduler_routines r ON r.routine_id=o.routine_id
          WHERE o.routine_id=?1 AND o.status='pending' AND o.manual_nonce IS NULL
-         AND r.enabled=1 AND r.deleted=0 AND o.schedule_version=r.schedule_version",
+         AND r.enabled=1 AND r.deleted=0 AND o.schedule_version={}",
+            current_version_sql("o", "r")
+        ),
         [routine_id],
         |row| {
             Ok(Queue {
@@ -721,10 +924,13 @@ pub fn queue(conn: &Connection, routine_id: &str) -> Result<Queue> {
 /// keep their existing treatment (the host fails them as "paused or edited").
 pub fn retire_catch_up(conn: &Connection, routine_id: &str) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE scheduler_occurrences SET status='missed'
+        &format!(
+            "UPDATE scheduler_occurrences SET status='missed'
          WHERE routine_id=?1 AND status='pending' AND catch_up=1 AND manual_nonce IS NULL
          AND NOT EXISTS (SELECT 1 FROM scheduler_routines r WHERE r.routine_id=?1 AND r.deleted=0
-            AND r.enabled=1 AND r.schedule_version=scheduler_occurrences.schedule_version)",
+            AND r.enabled=1 AND {}=scheduler_occurrences.schedule_version)",
+            current_version_sql("scheduler_occurrences", "r")
+        ),
         [routine_id],
     )?)
 }
@@ -827,6 +1033,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Occurrence> {
             },
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
+        member_id: row.get(8)?,
     })
 }
 
@@ -1555,5 +1762,261 @@ mod occurrences_tests {
         migrate(&conn).unwrap();
         migrate(&conn).unwrap();
         assert_eq!(pending(&conn).unwrap().len(), 0);
+    }
+
+    fn group_of(members: Vec<(&str, cron::Schedule)>) -> cron::Schedule {
+        cron::Schedule::Group {
+            members: members
+                .into_iter()
+                .map(|(id, trigger)| cron::Member {
+                    id: id.into(),
+                    trigger,
+                })
+                .collect(),
+        }
+    }
+    fn every(minutes: u64) -> cron::Schedule {
+        cron::Schedule::Every {
+            interval_ms: minutes * 60_000,
+            phase_ms: None,
+        }
+    }
+    fn grouped(members: Vec<(&str, cron::Schedule)>) -> (Connection, Routine) {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate(&conn).unwrap();
+        let mut input = fixture();
+        input.trigger = group_of(members);
+        let routine = routine::create(&conn, &input).unwrap();
+        (conn, routine)
+    }
+
+    #[test]
+    fn a_group_needs_two_flat_simple_triggers_with_distinct_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate(&conn).unwrap();
+        let refused = |trigger: cron::Schedule| {
+            let mut input = fixture();
+            input.trigger = trigger;
+            routine::create(&conn, &input).is_err()
+        };
+        assert!(refused(group_of(vec![("a", every(1))])));
+        assert!(refused(group_of(vec![])));
+        assert!(refused(group_of(vec![("a", every(1)), ("a", every(2))])));
+        assert!(refused(group_of(vec![("a", every(1)), ("", every(2))])));
+        let nested = group_of(vec![("c", every(1)), ("d", cron::Schedule::Webhook)]);
+        assert!(refused(group_of(vec![("a", every(1)), ("b", nested)])));
+        assert!(!refused(group_of(vec![
+            ("a", every(1)),
+            ("b", cron::Schedule::Webhook)
+        ])));
+        assert_eq!(routine::list(&conn, "bot-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn two_triggers_due_at_the_same_instant_give_two_attributed_occurrences() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(1))]);
+        let due = tick(&conn, 60_000);
+        assert_eq!(due.len(), 2);
+        let mut members: Vec<_> = due.iter().map(|o| o.member_id.as_str()).collect();
+        members.sort();
+        assert_eq!(members, ["a", "b"]);
+        // A second tick, or a second host, finds both identities claimed.
+        assert_eq!(tick(&conn, 60_000).len(), 2);
+        assert_eq!(list(&conn, &routine.routine_id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn editing_one_trigger_leaves_the_pending_slots_of_the_others() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(2))]);
+        let due = tick(&conn, 120_000);
+        assert_eq!(due.len(), 2);
+        let mut edited = routine.clone();
+        edited.trigger = group_of(vec![("a", every(3)), ("b", every(2))]);
+        let edited = routine::update(&conn, &edited, 120_000).unwrap();
+        assert_eq!(edited.schedule_version, 2);
+        let version = |id: &str| -> u64 {
+            conn.query_row(
+                "SELECT version FROM scheduler_members WHERE routine_id=?1 AND member_id=?2",
+                params![routine.routine_id, id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((version("a"), version("b")), (2, 1));
+        let stale = |member: &str| {
+            let o = due.iter().find(|o| o.member_id == member).unwrap();
+            !is_current(&conn, o).unwrap()
+        };
+        assert!(stale("a"));
+        assert!(!stale("b"));
+        assert_eq!(queue(&conn, &routine.routine_id).unwrap().waiting, 1);
+        let pending: Vec<_> = tick(&conn, 120_000)
+            .into_iter()
+            .map(|o| o.member_id)
+            .collect();
+        assert_eq!(pending, ["b"]);
+    }
+
+    #[test]
+    fn a_member_that_leaves_the_group_never_starts_again() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(1))]);
+        let due = tick(&conn, 60_000);
+        let mut edited = routine.clone();
+        edited.trigger = group_of(vec![("a", every(1)), ("c", every(1))]);
+        routine::update(&conn, &edited, 60_000).unwrap();
+        let b = due.iter().find(|o| o.member_id == "b").unwrap();
+        assert!(!is_current(&conn, b).unwrap());
+        let next: Vec<_> = tick(&conn, 120_000)
+            .into_iter()
+            .filter(|o| o.status == OccurrenceStatus::Pending)
+            .map(|o| o.member_id)
+            .collect();
+        assert!(next.iter().all(|member| member == "a" || member == "c"));
+        assert!(next.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn a_group_catches_up_each_trigger_from_its_own_cursor() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(2))]);
+        // The Mac slept for ten minutes with the planner meant to run.
+        record_tick(&conn, 0).unwrap();
+        let queued = tick(&conn, 600_000);
+        let slots = |member: &str| -> Vec<i64> {
+            queued
+                .iter()
+                .filter(|o| o.member_id == member && o.status == OccurrenceStatus::Pending)
+                .map(|o| o.scheduled_at_utc)
+                .collect()
+        };
+        assert_eq!(slots("a").len(), 10);
+        assert_eq!(slots("b").len(), 5);
+        // Pausing stops what has not started, for every trigger.
+        routine::set_enabled(&conn, &routine.routine_id, false, 600_000).unwrap();
+        assert_eq!(retire_catch_up(&conn, &routine.routine_id).unwrap(), 15);
+    }
+
+    #[test]
+    fn a_database_from_before_groups_keeps_its_slots_and_missed_ranges() {
+        let (conn, routine) = setup();
+        tick(&conn, 7_230_000);
+        let before = list(&conn, &routine.routine_id).unwrap();
+        let ranges = missed_ranges(&conn, &routine.routine_id).unwrap();
+        assert_eq!(ranges.len(), 1);
+        conn.execute_batch(
+            "DROP INDEX scheduler_scheduled_member_slot;
+             ALTER TABLE scheduler_occurrences DROP COLUMN member_id;
+             CREATE UNIQUE INDEX scheduler_scheduled_slot
+                ON scheduler_occurrences(routine_id, schedule_version, scheduled_at_utc)
+                WHERE manual_nonce IS NULL;",
+        )
+        .unwrap();
+        // The pre-group primary key cannot be changed in place: recreate the old table.
+        conn.execute_batch(
+            "DROP INDEX scheduler_range_history;
+             ALTER TABLE scheduler_missed_ranges RENAME TO keep;
+             CREATE TABLE scheduler_missed_ranges (
+                routine_id TEXT NOT NULL, schedule_version INTEGER NOT NULL,
+                from_inclusive INTEGER NOT NULL, until_exclusive INTEGER NOT NULL,
+                trigger TEXT NOT NULL, time_zone TEXT NOT NULL,
+                PRIMARY KEY(routine_id, schedule_version, from_inclusive));
+             INSERT INTO scheduler_missed_ranges
+                SELECT routine_id, schedule_version, from_inclusive, until_exclusive, trigger, time_zone FROM keep;
+             DROP TABLE keep;",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(list(&conn, &routine.routine_id).unwrap(), before);
+        assert_eq!(missed_ranges(&conn, &routine.routine_id).unwrap(), ranges);
+        // The new identity still claims a slot once.
+        assert_eq!(tick(&conn, 7_230_000).len(), 1);
+        assert_eq!(
+            list(&conn, &routine.routine_id).unwrap().len(),
+            before.len()
+        );
+    }
+
+    #[test]
+    fn a_fired_one_shot_of_a_group_does_not_block_editing_the_rest() {
+        let once = cron::Schedule::Once { at: 100_000 };
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", once.clone())]);
+        // The one-shot is past by the time the routine is renamed.
+        let mut edited = routine.clone();
+        edited.name = "Renamed".into();
+        let edited = routine::update(&conn, &edited, 500_000).unwrap();
+        assert_eq!(edited.name, "Renamed");
+        // Changing another member is fine too, and leaves the spent one alone.
+        let mut slower = edited.clone();
+        slower.trigger = group_of(vec![("a", every(2)), ("b", once)]);
+        routine::update(&conn, &slower, 500_001).unwrap();
+        // A new or rescheduled one-shot in the past is still refused.
+        let mut past = slower.clone();
+        past.trigger = group_of(vec![
+            ("a", every(2)),
+            ("b", cron::Schedule::Once { at: 200_000 }),
+        ]);
+        past.schedule_version = 3;
+        assert!(routine::update(&conn, &past, 500_002).is_err());
+    }
+
+    #[test]
+    fn a_member_remembers_its_trigger_at_each_version() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(5))]);
+        let mut edited = routine.clone();
+        edited.trigger = group_of(vec![("a", every(2)), ("b", every(5))]);
+        routine::update(&conn, &edited, 1_000).unwrap();
+        let at = |member: &str, version: u64| {
+            routine::member_trigger(&conn, &routine.routine_id, member, version).unwrap()
+        };
+        assert_eq!(at("a", 1), Some(every(1)));
+        assert_eq!(at("a", 2), Some(every(2)));
+        assert_eq!(at("b", 1), Some(every(5)));
+        assert_eq!(at("b", 2), None);
+    }
+
+    #[test]
+    fn a_timezone_edit_only_restarts_the_triggers_that_follow_the_zone() {
+        let daily = cron::parse("0 9 * * *").unwrap();
+        let pinned = cron::parse("CRON_TZ=UTC 0 9 * * *").unwrap();
+        let (conn, routine) = grouped(vec![
+            ("every", every(1)),
+            ("cron", daily),
+            ("pinned", pinned),
+            ("hook", cron::Schedule::Webhook),
+        ]);
+        let mut edited = routine.clone();
+        edited.time_zone = "America/Montreal".into();
+        routine::update(&conn, &edited, 1_000).unwrap();
+        let version = |id: &str| -> u64 {
+            conn.query_row(
+                "SELECT version FROM scheduler_members WHERE routine_id=?1 AND member_id=?2",
+                params![routine.routine_id, id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            [
+                version("every"),
+                version("cron"),
+                version("pinned"),
+                version("hook")
+            ],
+            [1, 2, 1, 1]
+        );
+    }
+
+    #[test]
+    fn two_members_with_the_same_schedule_keep_their_own_missed_ranges() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("b", every(1))]);
+        tick(&conn, 7_230_000);
+        let ranges = missed_ranges(&conn, &routine.routine_id).unwrap();
+        let mut members: Vec<_> = ranges.iter().map(|r| r.member_id.as_str()).collect();
+        members.sort();
+        assert_eq!(members, ["a", "b"]);
+        assert_eq!(ranges[0].from_inclusive, ranges[1].from_inclusive);
+        assert_eq!(ranges[0].schedule_version, ranges[1].schedule_version);
+        let page = missed_ranges_page(&conn, &routine.routine_id, None).unwrap();
+        assert_eq!(page.items.len(), 2);
     }
 }

@@ -2657,3 +2657,36 @@ fn history_keeps_naming_a_trigger_as_it_was_when_the_run_started() {
     assert!(description.contains("Chaque minute"), "{description}");
     assert!(!description.contains("2 minutes"), "{description}");
 }
+
+#[test]
+fn webhook_cards_follow_the_order_of_the_group_like_history_does() {
+    let mut f = Fixture::new(false);
+    let (r, created) = group_routine(&mut f, vec![every_minute(), hook_member()]);
+    let second = created["webhooks"][0]["trigger_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    let now = stored["routines"][0].clone();
+    // The schedule at the head of the group becomes a webhook: its token is created after the other's.
+    let mut members = now["trigger"]["members"].clone();
+    members[0]["trigger"] = json!({"kind":"webhook"});
+    let edited = f.post(
+        "/api/routines/update",
+        json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":now["modified_at"],"schedule_version":now["schedule_version"],"trigger":{"kind":"group","members":members}}),
+    );
+    let first = edited["routine"]["trigger"]["members"][0]["id"]
+        .as_str()
+        .unwrap();
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let listed: Vec<&str> = state["routine_webhooks"]["items"][&r.routine_id]["webhooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["trigger_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [first, second.as_str()]);
+}

@@ -581,3 +581,11 @@ test('reviewing a group before its activation offers no way to change its trigge
   assert.ok(!labels.includes('Retirer ce déclencheur'));
   assert.ok(!labels.includes('Ajouter un déclencheur'));
 });
+
+test('missed ranges of two group members with the same version and start are both listed', async () => {
+  const range = (member) => ({ routine_id: routine.routine_id, member_id: member, schedule_version: 1, from_inclusive: 1000, until_exclusive: 5000, time_zone: 'UTC', trigger: everyMinute });
+  const h = harness(async () => page([], { missed_ranges: [range('trigger-a'), range('trigger-b')] }));
+  await h.t.showHistory(routine);
+  assert.match(h.t.content.textContent, /Plages d’occurrences manquées \(2\)/);
+  assert.equal(h.t.content.querySelectorAll('.routines-warning').length, 2);
+});

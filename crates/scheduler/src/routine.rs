@@ -152,6 +152,13 @@ pub fn create(conn: &Connection, routine: &Routine) -> Result<Routine> {
     Ok(routine)
 }
 
+/// Only a cron without a zone of its own follows the routine's time zone: an
+/// interval, a one-shot or a webhook is unaffected when that zone changes.
+fn uses_routine_zone(trigger: &Schedule) -> bool {
+    matches!(trigger, Schedule::Cron { expression, time_zone: None }
+        if !["CRON_TZ=", "TZ="].iter().any(|prefix| expression.trim_start().starts_with(prefix)))
+}
+
 /// Keep one row per simple trigger of a group: its own schedule version and its
 /// own cursor, so editing one trigger never moves another's slots. A member
 /// that leaves the group keeps its row (not live), so its version only grows.
@@ -221,7 +228,7 @@ fn sync_members(
                 )?;
             }
             Some((old, true))
-                if old == text && !(zone_changed && member.trigger != Schedule::Webhook) => {}
+                if old == text && !(zone_changed && uses_routine_zone(&member.trigger)) => {}
             Some(_) => {
                 conn.execute(
                     "UPDATE scheduler_members SET version=version+1, trigger=?3, live=1,

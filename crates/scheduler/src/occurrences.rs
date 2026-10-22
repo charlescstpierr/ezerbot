@@ -1973,4 +1973,36 @@ mod occurrences_tests {
         assert_eq!(at("b", 1), Some(every(5)));
         assert_eq!(at("b", 2), None);
     }
+
+    #[test]
+    fn a_timezone_edit_only_restarts_the_triggers_that_follow_the_zone() {
+        let daily = cron::parse("0 9 * * *").unwrap();
+        let pinned = cron::parse("CRON_TZ=UTC 0 9 * * *").unwrap();
+        let (conn, routine) = grouped(vec![
+            ("every", every(1)),
+            ("cron", daily),
+            ("pinned", pinned),
+            ("hook", cron::Schedule::Webhook),
+        ]);
+        let mut edited = routine.clone();
+        edited.time_zone = "America/Montreal".into();
+        routine::update(&conn, &edited, 1_000).unwrap();
+        let version = |id: &str| -> u64 {
+            conn.query_row(
+                "SELECT version FROM scheduler_members WHERE routine_id=?1 AND member_id=?2",
+                params![routine.routine_id, id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            [
+                version("every"),
+                version("cron"),
+                version("pinned"),
+                version("hook")
+            ],
+            [1, 2, 1, 1]
+        );
+    }
 }

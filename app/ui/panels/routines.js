@@ -134,6 +134,8 @@
     } catch { return "Horaire illisible — consultez ou corrigez cette routine."; }
   }
 
+  // A group's triggers each have their own ranges, which can share a version and a start.
+  const rangeKey = (range) => `${range.member_id ? `${range.member_id}.` : ""}${range.schedule_version}.${range.from_inclusive}`;
   let dialog, botSelect, content, status, toolbar, view = "list", current = null;
   let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
@@ -616,7 +618,7 @@
   }
   function mergePage(h, remember = true) {
     for (const o of h.occurrences) historyView.occurrences.set(o.occurrence_id, o);
-    for (const range of h.missed_ranges) historyView.ranges.set(`${range.schedule_version}.${range.from_inclusive}`, range);
+    for (const range of h.missed_ranges) historyView.ranges.set(`${rangeKey(range)}`, range);
     if (remember) historyView.pages.set(`${h.cursor}/${h.ranges_cursor}`, [h.cursor, h.ranges_cursor]);
   }
   function emptyHistory() {
@@ -651,12 +653,12 @@
     try {
       const h = await readHistory(r, cursor, rangesCursor); settleLaunch(r);
       if (active(token)) {
-        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${range.schedule_version}.${range.from_inclusive}`));
+        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${rangeKey(range)}`));
         mergePage(h);
         if (!more || more === "occurrences") historyView.next = h.next_cursor;
         if (!more || more === "ranges") historyView.nextRanges = h.next_ranges_cursor;
         historyView.failures[more || "initial"] = null;
-        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${newItems[0].schedule_version}.${newItems[0].from_inclusive}`;
+        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${rangeKey(newItems[0])}`;
         if (!more) message("");
       }
     } catch (error) {
@@ -712,7 +714,7 @@
   function renderHistory(r) {
     renderNotices();
     const occurrences = [...historyView.occurrences.values()].sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || (a.occurrence_id < b.occurrence_id ? 1 : -1));
-    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version);
+    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version || (a.member_id || "") .localeCompare(b.member_id || ""));
     const next = JSON.stringify([r.routine_id, occurrences, visibleRanges, historyView.next, historyView.nextRanges, historyView.failures]);
     if (historySignature === next) return;
     historySignature = next;
@@ -727,7 +729,7 @@
     if (!visibleRanges.length) ranges.append(node("p", "routines-note", "Aucune plage manquée."));
     for (const range of visibleRanges) {
       const row = node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`);
-      row.tabIndex = -1; row.dataset.historyFocus = `range-${range.schedule_version}.${range.from_inclusive}`; ranges.append(row);
+      row.tabIndex = -1; row.dataset.historyFocus = `range-${rangeKey(range)}`; ranges.append(row);
     }
     pageControls(ranges, r, "ranges");
     content.append(ranges, node("h4", "", `${occurrences.length} ${occurrences.length > 1 ? "occurrences chargées" : "occurrence chargée"}${historyView.next ? " · d’autres plus anciennes disponibles" : ""} · plus récentes en premier`));

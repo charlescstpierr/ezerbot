@@ -354,24 +354,62 @@ fn pending_calls(events: &[RunEvent]) -> Result<Vec<ToolCall>> {
 
 fn settle_pending(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
     for call in pending_calls(&store::events(conn, run_id, 0)?)? {
-        let admitted: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2) OR EXISTS(SELECT 1 FROM engine_external_tools WHERE run_id=?1 AND call_id=?2)",
+        // A journal row may already hold the definitive outcome (not started, or
+        // finished and stored). Only a row with a NULL outcome is still uncertain.
+        let stored: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT outcome, authorized_by FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
+                rusqlite::params![run_id, call.call_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let mcp_admitted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",
             rusqlite::params![run_id, call.call_id],
             |r| r.get(0),
         )?;
-        let reason = if admitted {
-            "Appel externe interrompu ; son effet peut déjà avoir eu lieu.".to_owned()
+        let outcome = if let Some((Some(value), _)) = &stored {
+            serde_json::from_str::<ToolOutcome>(value)?
+        } else if stored.is_some() || mcp_admitted {
+            ToolOutcome::Failed {
+                reason: "Appel externe interrompu ; son effet peut déjà avoir eu lieu.".into(),
+            }
         } else {
-            format!("not executed: {reason}")
+            ToolOutcome::Failed {
+                reason: format!("not executed: {reason}"),
+            }
         };
-        store::append_event(
-            conn,
-            run_id,
-            RunEventKind::ToolResult,
-            &json!({"call_id": call.call_id, "outcome": ToolOutcome::Failed { reason }}),
-        )?;
+        let mut payload = json!({"call_id": call.call_id, "outcome": outcome});
+        if let Some((_, Some(by))) = &stored {
+            payload["authorized_by"] = serde_json::from_str(by)?;
+        }
+        store::append_event(conn, run_id, RunEventKind::ToolResult, &payload)?;
     }
     Ok(())
+}
+
+/// Record results for calls an interrupted run will not resume. Status stays
+/// interrupted and no model request is made.
+pub fn settle_interrupted_without_resume(
+    conn: &Connection,
+    services: &mut dyn RunServices,
+    run_id: &str,
+) -> Result<()> {
+    with_run_events(conn, services, run_id, |conn, _| {
+        let run = store::required(conn, run_id)?;
+        if run.status != RunStatus::Interrupted {
+            return Ok(());
+        }
+        settle_pending(conn, run_id, "interrupted")
+    })
+}
+
+/// Settle outstanding calls inside the caller's transaction. A stored journal
+/// outcome wins; an admission without one stays uncertain; anything else did
+/// not start.
+pub fn append_unsettled_results(conn: &Connection, run_id: &str, reason: &str) -> Result<()> {
+    store::require_transaction(conn)?;
+    settle_pending(conn, run_id, reason)
 }
 
 /// Stop/regenerate entry point. Settle every outstanding call and deliver the
@@ -1748,6 +1786,34 @@ mod tests {
                 && e.payload["outcome"]["reason"]
                     .as_str()
                     .is_some_and(|r| r.contains("effet peut"))));
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_reports_a_journaled_outcome_already_stored() -> Result<()> {
+        let (conn, call) = external_fixture()?;
+        let reason = "Action non exécutée : arrêt ou limite de temps avant le démarrage.";
+        conn.execute(
+            "INSERT INTO engine_external_tools(run_id,call_id,outcome) VALUES ('run',?1,?2)",
+            rusqlite::params![
+                call.call_id,
+                serde_json::to_string(&ToolOutcome::Failed {
+                    reason: reason.into(),
+                })?
+            ],
+        )?;
+        cancel(&conn, &mut Services::default(), "run", TurnEnd::Stopped)?;
+        let events = store::events(&conn, "run", 0)?;
+        let result = events
+            .iter()
+            .find(|e| e.kind == RunEventKind::ToolResult)
+            .expect("tool result");
+        assert_eq!(result.payload["outcome"]["reason"], reason);
+        assert!(!result.payload["outcome"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("effet peut"));
+        assert!(serde_json::to_string(&replay_items(&events)?)?.contains(reason));
         Ok(())
     }
 

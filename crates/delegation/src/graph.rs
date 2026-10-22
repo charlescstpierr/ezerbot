@@ -914,6 +914,7 @@ pub(crate) mod tests {
             ],
             fact_ids: vec!["fact".into(), "fact".into()],
             skill_ids: vec!["skill".into(), "skill".into()],
+            selected_images: vec![],
         };
         create(&conn, &edge).unwrap();
         let blocks = resolve_for(&conn, &Resolver, "a", 10_000).unwrap();
@@ -991,6 +992,7 @@ pub(crate) mod tests {
             entry_ids: vec!["entry".into()],
             fact_ids: vec!["fact".into()],
             skill_ids: vec!["skill".into()],
+            selected_images: vec![],
         };
         let blocks = resolve_selected_context(&Resolver, &edge, 10_000).unwrap();
         assert_eq!(blocks.len(), 4);

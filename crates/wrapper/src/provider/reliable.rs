@@ -289,7 +289,7 @@ impl Session {
                 }
                 return Err(Error::InvalidInput("run cancelled".into()));
             }
-            let timeout = if started.elapsed() >= limits.total {
+            let timeout = if Instant::now() >= deadline {
                 Some((
                     "turn_timeout",
                     "La réponse a dépassé le délai maximal. Réessayez.",
@@ -337,6 +337,10 @@ impl Session {
                     }
                     metadata(Some(&notice), None)?;
                 }
+                // The worker's read fails at the same instant as the deadline; that
+                // transport error is the timeout, not an interrupted connection.
+                Ok(Wire::Failure(_) | Wire::Event(ModelEvent::Failed { .. }))
+                    if Instant::now() >= deadline => {}
                 Ok(Wire::Failure(failure)) => metadata(None, Some(&failure))?,
                 Ok(Wire::Event(event)) => {
                     let terminal = match &event {

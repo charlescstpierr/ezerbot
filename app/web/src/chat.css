@@ -19,7 +19,7 @@
 .gb-memo-speed input[aria-invalid="true"] { border-color: var(--danger-text); }
 .gb-voice-memo p.gb-memo-refusal { margin: 0; color: var(--danger-text); font-size: 12px; }
 .gb-voice-memo p.gb-memo-notice { margin: 0; color: var(--muted); font-size: 12px; }
-.gb-voice-memo p.gb-memo-words { margin: 4px 0 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+.gb-voice-memo p.gb-memo-words { margin: 4px 0 0; color: var(--text); font-size: 13px; line-height: 1.6; text-align: left; }
 .gb-memo-word { display: inline; padding: 0 2px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .gb-memo-word:hover { background: var(--accent-soft); }
 .gb-memo-word:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 1px; }

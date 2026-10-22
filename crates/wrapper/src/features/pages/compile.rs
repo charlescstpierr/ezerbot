@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 /// refused instead of walked.
 pub(super) const MAX_DEPTH: usize = 64;
 const TOO_DEEP: &str = "imbrication trop profonde";
+/// Valeurs JSON recopiées dans le document par toutes les listes `.map()` de la Page.
+const MAX_COPIED_VALUES: usize = 100_000;
 /// serde_json rejects the 128th container. A page at the cap stays under this
 /// ceiling; anything taller is refused before `from_str`.
 pub(super) const MAX_STORED_CONTAINERS: usize = 256;
@@ -72,6 +74,7 @@ struct Parser {
     states: Vec<(String, Value)>,
     setters: HashMap<String, String>,
     arrays: BTreeMap<String, Value>,
+    copied_values: usize,
     row: Option<String>,
 }
 
@@ -100,6 +103,7 @@ impl Parser {
             states: Vec::new(),
             setters: HashMap::new(),
             arrays: BTreeMap::new(),
+            copied_values: 0,
             row: None,
         }
     }
@@ -483,7 +487,12 @@ impl Parser {
         }
         let text: String = self.chars[start..self.index].iter().collect();
         if text.trim().is_empty() {
-            Ok(None)
+            // Comme JSX : l’indentation (avec saut de ligne) disparaît, un espace sur la même ligne reste.
+            if text.contains(['\n', '\r']) {
+                Ok(None)
+            } else {
+                Ok(Some(Node::Text(text)))
+            }
         } else {
             Ok(Some(Node::Text(self.decode_references(&text, start)?)))
         }
@@ -567,6 +576,11 @@ impl Parser {
             let Some(items) = self.arrays.get(&name).cloned() else {
                 return self.fail(format!("liste « {name} » inconnue"));
             };
+            // Chaque .map() embarque sa propre copie de la liste : le total est plafonné.
+            self.copied_values = self.copied_values.saturating_add(count_values(&items));
+            if self.copied_values > MAX_COPIED_VALUES {
+                return self.fail("les listes utilisées par .map() dépassent le budget de données");
+            }
             let previous = self.row.replace(item);
             self.skip();
             if depth >= MAX_DEPTH {
@@ -660,6 +674,13 @@ impl Parser {
                     line: attr_line,
                     character: attr_character,
                     message: format!("attribut « {attr} » non pris en charge"),
+                });
+            }
+            if tag != "button" {
+                return Err(Diagnostic {
+                    line: attr_line,
+                    character: attr_character,
+                    message: format!("onClick n’est accepté que sur un bouton, pas sur « {tag} »"),
                 });
             }
             if click.is_some() {
@@ -860,6 +881,13 @@ fn render_budget_exceeded() -> Diagnostic {
         line: 1,
         character: 1,
         message: "la Page dépasse le budget de rendu".into(),
+    }
+}
+
+fn count_values(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(count_values).sum::<usize>(),
+        _ => 1,
     }
 }
 
@@ -1263,6 +1291,50 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn same_line_spaces_between_inline_elements_are_kept() {
+        let page = |body: &str| {
+            compile(&format!(
+                "export default function Page() {{\n  const [prenom, setPrenom] = useState(\"Ada\");\n  const [nom, setNom] = useState(\"Lovelace\");\n  return ({body});\n}}\n"
+            ))
+            .expect("une Page valide")
+            .preview
+        };
+        assert_eq!(
+            page("<p><strong>Plan</strong> <em>Premium</em></p>"),
+            "Plan Premium"
+        );
+        assert_eq!(page("<p>{prenom} {nom}</p>"), "Ada Lovelace");
+        assert_eq!(
+            page("<div>\n  <p>{prenom}</p>\n  <p>{nom}</p>\n</div>"),
+            "AdaLovelace"
+        );
+    }
+
+    #[test]
+    fn on_click_is_refused_outside_a_button() {
+        let source = "export default function Page() {\n  const [choix, setChoix] = useState(\"A\");\n  return (<div onClick={() => setChoix(\"B\")}>B</div>);\n}\n";
+        let error = compile(source).expect_err("un div cliquable");
+        assert!(error.message.contains("onClick"), "{}", error.message);
+        assert_eq!(error.line, 3);
+    }
+
+    #[test]
+    fn repeated_maps_over_a_large_array_are_bounded() {
+        let cells = vec!["1"; 25_000].join(",");
+        let spans = "{rows.map((r) => (<span>{r[0]}</span>))}".repeat(900);
+        let source = format!(
+            "export default function Page() {{\n  const rows = [[{cells}]];\n  return (<p>{spans}</p>);\n}}\n"
+        );
+        assert!(source.len() < 100_000, "{}", source.len());
+        let error = compile(&source).expect_err("des copies sans limite");
+        assert!(
+            error.message.contains("budget de données"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

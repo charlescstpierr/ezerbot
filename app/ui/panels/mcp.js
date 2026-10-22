@@ -6,8 +6,21 @@
   const button = (text, fn, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.addEventListener("click", fn); return b; };
   const label = (text, input) => { const n = node("label"); n.append(node("span", text), input); return n; };
   const input = (name, placeholder, type = "text") => { const n = node("input"); n.type = type; n.name = name; n.placeholder = placeholder; n.autocomplete = "off"; n.spellcheck = false; return n; };
-  let section, list, catalogue, catalogueHeader, feedback, key;
+  let section, list, catalogue, catalogueHeader, catalogueSearch, catalogueEmpty, feedback, key;
   const catalogueCards = new Map();
+  const normalize = text => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
+  // Les cartes filtrées restent dans la page, masquées : un brouillon de client OAuth ou le focus ne se perdent pas.
+  function filterCatalogue() {
+    if (!catalogueSearch) return;
+    const query = normalize(catalogueSearch.value.trim());
+    let shown = 0;
+    for (const entry of catalogueCards.values()) {
+      entry.node.hidden = !entry.text.includes(query);
+      if (!entry.node.hidden) shown++;
+    }
+    catalogueEmpty.hidden = !catalogueCards.size || shown > 0;
+    catalogueEmpty.textContent = catalogueEmpty.hidden ? "" : `Aucun service ne correspond à « ${catalogueSearch.value.trim()} ».`;
+  }
   function rememberCard(card) {
     const details = [...card.querySelectorAll("details")];
     const inputs = [...card.querySelectorAll("input")];
@@ -105,6 +118,11 @@
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
       catalogueHeader.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
+      catalogueSearch = node("input", null, "text-input"); catalogueSearch.type = "search"; catalogueSearch.name = "catalogue-search"; catalogueSearch.placeholder = "Rechercher un service…";
+      catalogueSearch.autocomplete = "off"; catalogueSearch.spellcheck = false; catalogueSearch.setAttribute("aria-label", "Rechercher dans le catalogue");
+      catalogueSearch.addEventListener("input", filterCatalogue);
+      catalogueEmpty = node("p", null, "mcp-note"); catalogueEmpty.hidden = true; catalogueEmpty.setAttribute("role", "status");
+      catalogueHeader.append(catalogueSearch, catalogueEmpty);
       catalogue.append(catalogueHeader);
     }
     const ids = new Set(items.map(item => item.id));
@@ -115,11 +133,12 @@
       // Do not even detach an unchanged card: detaching an active password field
       // loses browser focus/selection despite keeping the node and its value.
       if (previous?.key === cardKey) continue;
+      const text = normalize(`${item.name} ${item.description}`);
       const view = previous && rememberCard(previous.node);
       if (item.kind === "recall") {
         const recall = recallCard(item);
         if (previous) previous.node.replaceWith(recall); else catalogue.append(recall);
-        catalogueCards.set(item.id,{key:cardKey,node:recall});
+        catalogueCards.set(item.id,{key:cardKey,node:recall,text});
         restoreCard(recall,view);
         continue;
       }
@@ -227,9 +246,10 @@
       }
       card.append(actions);
       if (previous) previous.node.replaceWith(card); else catalogue.append(card);
-      catalogueCards.set(item.id,{key:cardKey,node:card});
+      catalogueCards.set(item.id,{key:cardKey,node:card,text});
       restoreCard(card,view);
     }
+    filterCatalogue();
   }
   async function act(path, body, b) {
     b.disabled = true;
@@ -304,7 +324,7 @@
     settingsSection(container) {
       section = container; section.className = "setting-section mcp-section";
       section.append(node("h3", "Connecteurs"),node("p", "Choisissez un service du catalogue ou ajoutez votre propre serveur MCP. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
-      catalogueCards.clear(); catalogueHeader = undefined;
+      catalogueCards.clear(); catalogueHeader = catalogueSearch = catalogueEmpty = undefined;
       catalogue = node("div", null, "mcp-catalogue mcp-list"); section.append(catalogue);
       section.append(node("h4", "Serveurs personnalisés"));
       list = node("div", null, "mcp-list"); section.append(list);

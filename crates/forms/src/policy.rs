@@ -325,7 +325,7 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
         scan.unproven = true;
         scan_loosely(&tokens, index + 1, scan);
     }
-    if is_code_interpreter(base) && has_code_flag(base, &tokens[index + 1..]) {
+    if is_code_interpreter(base) && may_carry_code(base, &tokens[index + 1..]) {
         scan.unproven = true;
         if let Some(script) = shell_script(&tokens, index) {
             scan_shell_at(&script, scan, depth + 1);
@@ -631,7 +631,23 @@ fn is_code_interpreter(base: &str) -> bool {
     is_shell(base)
         || matches!(
             base,
-            "perl" | "ruby" | "node" | "nodejs" | "php" | "lua" | "deno" | "bun"
+            "perl"
+                | "ruby"
+                | "node"
+                | "nodejs"
+                | "php"
+                | "lua"
+                | "deno"
+                | "bun"
+                | "awk"
+                | "gawk"
+                | "mawk"
+                | "nawk"
+                | "osascript"
+                | "tclsh"
+                | "expect"
+                | "pwsh"
+                | "powershell"
         )
         || base.starts_with("python")
         || base.starts_with("node")
@@ -644,18 +660,15 @@ fn is_mailer(base: &str) -> bool {
     )
 }
 
-fn has_code_flag(base: &str, tokens: &[String]) -> bool {
-    tokens.iter().any(|token| {
-        token == "-c"
-            || token == "--command"
-            || (matches!(base, "perl" | "ruby" | "node" | "nodejs" | "deno" | "bun")
-                && token == "-e")
-            || (base == "php" && (token == "-r" || token == "-R"))
-            || (is_shell(base)
-                && token.starts_with('-')
-                && !token.starts_with("--")
-                && token.chars().skip(1).any(|ch| ch == 'c'))
-    })
+/// An interpreter given any option may take its program from that option, in
+/// any attached or combined spelling (`-e'code'`, `-ne code`, `-lc code`).
+/// Without a grammar per interpreter, any option makes the call unproven. The
+/// awk family and scripting hosts take their program as the first operand.
+fn may_carry_code(base: &str, tokens: &[String]) -> bool {
+    matches!(
+        base,
+        "awk" | "gawk" | "mawk" | "nawk" | "osascript" | "tclsh" | "expect" | "pwsh" | "powershell"
+    ) || tokens.iter().any(|token| token.starts_with('-'))
 }
 
 fn shell_script(tokens: &[String], index: usize) -> Option<String> {
@@ -917,6 +930,37 @@ mod tests {
             assert!(policy.protection.is_none(), "{command}");
         }
         assert!(describe("run_shell", &json!({"command": "git status"}), None).remember);
+    }
+
+    #[test]
+    fn interpreter_options_in_any_spelling_are_never_remembered() {
+        for command in [
+            "perl -e'unlink \"note\"'",
+            "perl -ne 'print' file",
+            "perl -lne 'print' file",
+            "ruby -e'File.delete(1)'",
+            "node -p 'process.exit()'",
+            "node --eval 'x'",
+            "python3 -Bc 'print(1)'",
+            "python3 -m http.server",
+            "php -r'echo 1;'",
+            "awk 'BEGIN{system(\"rm note\")}'",
+            "osascript script.scpt",
+            "bash -xc 'printf ok'",
+            "sh -ec 'printf ok'",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(!policy.remember, "{command}");
+        }
+        for command in [
+            "perl script.pl",
+            "python3 script.py",
+            "node app.js",
+            "bash run.sh",
+        ] {
+            let policy = describe("run_shell", &json!({"command": command}), None);
+            assert!(policy.remember, "{command}");
+        }
     }
 
     #[test]

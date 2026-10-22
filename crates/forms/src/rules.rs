@@ -779,6 +779,7 @@ mod tests {
             "r\\m note",
             "eval 'rm note'",
             "git rm -f note",
+            "perl -e'unlink \"note\"'",
             "exec rm note",
             "xargs rm",
             "timeout 5 rm note",

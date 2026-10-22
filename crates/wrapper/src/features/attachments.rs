@@ -1109,13 +1109,10 @@ pub(super) fn thread_owns_image(
     )?)
 }
 
-/// Entry files and explicitly selected images share the child file cap.
-/// An id that is not linked to this thread after the latest reset is refused.
 pub(super) fn accept_delegation_files(
     ctx: &Context<'_>,
-    conversation: &str,
     sources: &[(String, String)],
-    image_ids: &[String],
+    grants: &super::delegation::ImageGrants,
 ) -> Result<(), ApiError> {
     let mut ids = std::collections::HashSet::new();
     let mut docs = Vec::new();
@@ -1129,11 +1126,8 @@ pub(super) fn accept_delegation_files(
             }
         }
     }
-    for id in image_ids {
-        if !thread_owns_image(ctx.connection, conversation, id)? {
-            return Err(ApiError::new(400, "Cette image n'est pas jointe à ce fil."));
-        }
-        ids.insert(id.clone());
+    for grant in grants.live() {
+        ids.insert(grant.id().to_owned());
     }
     if ids.len() > MAX_MESSAGE_FILES {
         return Err(ApiError::new(
@@ -1145,24 +1139,22 @@ pub(super) fn accept_delegation_files(
 }
 
 /// Live descriptor for the child: path and MIME, never the file name or bytes.
-/// Ids that no longer belong to the origin thread are reported as revoked.
 pub(super) fn selected_images_context(
     ctx: &Context<'_>,
-    conversation: &str,
-    ids: &[String],
+    grants: &super::delegation::ImageGrants,
 ) -> Result<(Option<String>, Vec<String>), ApiError> {
     let mut images = Vec::new();
-    let mut missing = Vec::new();
+    let missing: Vec<String> = grants
+        .revoked()
+        .iter()
+        .map(|id| format!("image/{id}"))
+        .collect();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
-        if !seen.insert(id.clone()) {
+    for grant in grants.live() {
+        if !seen.insert(grant.id().to_owned()) {
             continue;
         }
-        if !thread_owns_image(ctx.connection, conversation, id)? {
-            missing.push(format!("image/{id}"));
-            continue;
-        }
-        let attachment = staging::get(ctx.connection, id)?
+        let attachment = staging::get(ctx.connection, grant.id())?
             .ok_or_else(|| ApiError::new(404, "Image introuvable."))?;
         let path = staging::content_path(ctx.db_path, &attachment)
             .map_err(|_| ApiError::new(500, "Chemin d'image illisible."))?;
@@ -1185,19 +1177,15 @@ pub(super) fn selected_images_context(
 
 pub(super) fn selected_image_dtos(
     ctx: &Context<'_>,
-    conversation: &str,
-    ids: &[String],
+    grants: &[super::delegation::ImageGrant],
 ) -> Vec<Value> {
     let mut dtos = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
-        if !seen.insert(id.clone()) {
+    for grant in grants {
+        if !seen.insert(grant.id().to_owned()) {
             continue;
         }
-        if thread_owns_image(ctx.connection, conversation, id).ok() != Some(true) {
-            continue;
-        }
-        if let Ok(Some(attachment)) = staging::get(ctx.connection, id) {
+        if let Ok(Some(attachment)) = staging::get(ctx.connection, grant.id()) {
             dtos.push(dto(&attachment));
         }
     }
@@ -1207,6 +1195,7 @@ pub(super) fn selected_image_dtos(
 pub(super) fn validate_selected_material(
     ctx: &Context<'_>,
     sources: &[(String, String)],
+    grants: &[super::delegation::ImageGrant],
 ) -> Result<(), ApiError> {
     let mut ids = std::collections::HashSet::new();
     let mut docs = Vec::new();
@@ -1220,6 +1209,9 @@ pub(super) fn validate_selected_material(
             }
         }
     }
+    for grant in grants {
+        ids.insert(grant.id().to_owned());
+    }
     if ids.len() > MAX_MESSAGE_FILES {
         return Err(ApiError::new(
             400,
@@ -1232,11 +1224,12 @@ pub(super) fn validate_selected_material(
 pub(super) fn selected_material(
     ctx: &Context<'_>,
     sources: &[(String, String)],
+    grants: &[super::delegation::ImageGrant],
     model: &str,
     sending: bool,
     urls: &mut HashMap<String, String>,
 ) -> Result<(Vec<ImageInput>, String), ApiError> {
-    validate_selected_material(ctx, sources)?;
+    validate_selected_material(ctx, sources, grants)?;
     let mut images = Vec::new();
     let mut docs = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1250,6 +1243,11 @@ pub(super) fn selected_material(
             if seen.insert(doc.id.clone()) {
                 docs.push(doc);
             }
+        }
+    }
+    for image in images_for_selected(ctx, grants, model, sending, urls)? {
+        if seen.insert(image.attachment_id.clone()) {
+            images.push(image);
         }
     }
     let text = if docs.is_empty() {
@@ -1413,11 +1411,9 @@ pub(super) fn images_for_message_cached(
         .collect()
 }
 
-/// Bytes for images selected by id, still limited to the origin thread.
-pub(super) fn images_for_selected(
+fn images_for_selected(
     ctx: &Context<'_>,
-    conversation: &str,
-    ids: &[String],
+    grants: &[super::delegation::ImageGrant],
     model: &str,
     sending_turn: bool,
     urls: &mut HashMap<String, String>,
@@ -1425,16 +1421,16 @@ pub(super) fn images_for_selected(
     let no_vision = recorded_no_vision(ctx, model)?;
     let mut images = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
-        if !seen.insert(id.clone()) || !thread_owns_image(ctx.connection, conversation, id)? {
+    for grant in grants {
+        if !seen.insert(grant.id().to_owned()) {
             continue;
         }
-        let Some(attachment) = staging::get(ctx.connection, id)? else {
+        let Some(attachment) = staging::get(ctx.connection, grant.id())? else {
             continue;
         };
         images.push(transport_image(
             ctx,
-            conversation,
+            grant.origin(),
             &attachment,
             model,
             sending_turn,

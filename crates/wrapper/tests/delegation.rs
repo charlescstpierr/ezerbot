@@ -2136,7 +2136,9 @@ fn selected_image_follows_when_the_task_input_is_forwarded() {
                 .as_str()
                 .unwrap_or("")
                 .contains("executing a delegated Task")
-                && body.to_string().contains("Décris la photo un niveau plus bas")
+                && body
+                    .to_string()
+                    .contains("Décris la photo un niveau plus bas")
         })
     });
     let seen = f.server.seen.lock().unwrap();
@@ -2149,7 +2151,9 @@ fn selected_image_follows_when_the_task_input_is_forwarded() {
                 .as_str()
                 .unwrap_or("")
                 .contains("executing a delegated Task")
-                && body.to_string().contains("Décris la photo un niveau plus bas")
+                && body
+                    .to_string()
+                    .contains("Décris la photo un niveau plus bas")
         })
         .expect("requête du petit-enfant")
         .clone();

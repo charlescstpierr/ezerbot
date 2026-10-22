@@ -272,3 +272,25 @@ test('a background « refreshing » flag the panel does not display leaves an un
   h.panels.panel.onState(state({ status: 'unavailable', message: 'Indisponible.', refreshing: false }));
   assert.equal(h.section.querySelector('.usage-empty'), notice);
 });
+
+test('a workspace render that re-sends the cached quota does not undo a newer polled reading', async () => {
+  const h = harness(async () => ({ codex: quota(90), local: local() }));
+  const cached = state(quota(20));
+  h.panels.panel.onState(cached);
+  assert.equal(h.warning.hidden, true);
+  h.advance(60000); await flush();
+  assert.equal(h.warning.hidden, false);
+  h.panels.panel.onState(cached);
+  assert.equal(h.warning.hidden, false);
+  assert.match(h.section.textContent, /10 % restants/);
+  h.panels.panel.onState(state(quota(30)));
+  assert.equal(h.warning.hidden, true);
+  assert.match(h.section.textContent, /70 % restants/);
+});
+
+test('the cached quota is applied again after an account change even when it is unchanged', () => {
+  const h = harness();
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: true, email: 'a@example.com' }, usage: { codex: { status: 'signin' } } });
+  h.panels.panel.onState({ provider: { backend: 'codex', connected: true, email: 'b@example.com' }, usage: { codex: { status: 'signin' } } });
+  assert.match(h.section.textContent, /Connectez votre compte/);
+});

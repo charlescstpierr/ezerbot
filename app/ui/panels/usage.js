@@ -22,7 +22,7 @@
   const missingBot = "Bot supprimé";
   let dialog, section, quotaArea, localArea, notice, refresh, warning, warningText;
   let generalTab, usageTab, quotaState, localData, view = "bot", loading = false, queued = false, queuedForce = false, request = 0;
-  let providerKey, quotaPoll, quotaShown, localShown;
+  let providerKey, quotaPoll, quotaShown, localShown, stateQuota;
   const isUsageOpen = () => dialog?.open && dialog.classList.contains("usage-focus");
 
   function chooseUsage(active) {
@@ -181,13 +181,17 @@
     id: "usage",
     onState(state) {
       const key = `${state.provider?.backend}:${state.provider?.connected}:${state.provider?.email || ""}`;
-      if (providerKey !== undefined && key !== providerKey) {
+      const changed = providerKey !== undefined && key !== providerKey;
+      if (changed) {
         // Invalidate an in-flight response on sign-out or backend switch.
         request++; localData = null; localShown = undefined; localArea?.replaceChildren();
         if (isUsageOpen()) void load(false);
       }
       providerKey = key;
-      if (state.usage?.codex) renderQuota(state.usage.codex);
+      // A workspace render re-sends the cached reading: it must not undo a newer one read by a poll.
+      const reading = JSON.stringify(state.usage?.codex);
+      if (state.usage?.codex && (reading !== stateQuota || changed)) renderQuota(state.usage.codex);
+      stateQuota = reading;
     },
     onSettingsLink(id) {
       chooseUsage(id === "usage");

@@ -206,9 +206,18 @@ fn payload(
     }
 }
 
+#[cfg(debug_assertions)]
+mod fake_signin;
+
 /// Les builds de développement peuvent viser un faux serveur OpenAI pour essayer l'interface
 /// sans compte. Un build de production ne lit jamais cette variable.
+/// `EZERBOT_FAKE_SIGNIN=1` n’existe que dans un binaire de debug : il démarre son propre
+/// faux OpenAI sur 127.0.0.1 et ouvre une session locale, sans OAuth.
 fn provider(db: &std::path::Path) -> Provider {
+    #[cfg(debug_assertions)]
+    if let Some(provider) = fake_signin::connect(db) {
+        return provider;
+    }
     #[cfg(debug_assertions)]
     if let Ok(base) = std::env::var("GROKBOT_FAKE_OPENAI") {
         let base = fake_openai_base(&base)

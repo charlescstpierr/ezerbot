@@ -10,6 +10,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use url::Url;
 
@@ -99,7 +100,7 @@ pub(crate) fn image_size(aspect: &str) -> &'static str {
     }
 }
 
-pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolOutcome {
     let description = call.arguments["description"]
         .as_str()
         .unwrap_or("")
@@ -139,7 +140,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
         "image",
     );
     match result {
-        Ok(bytes) => store(ctx, call, &bytes, aspect),
+        Ok(bytes) => store(ctx, call, &bytes, aspect, cancel),
         Err(reason) => failed(reason),
     }
 }
@@ -335,7 +336,13 @@ fn phrase(status: u16, code: &str) -> &'static str {
     FAILED
 }
 
-fn store(ctx: &Context<'_>, call: &ToolCall, bytes: &[u8], aspect: &str) -> ToolOutcome {
+fn store(
+    ctx: &Context<'_>,
+    call: &ToolCall,
+    bytes: &[u8],
+    aspect: &str,
+    cancel: &AtomicBool,
+) -> ToolOutcome {
     let Some(conversation) = ctx.conversation_id else {
         return failed(FAILED);
     };
@@ -345,6 +352,14 @@ fn store(ctx: &Context<'_>, call: &ToolCall, bytes: &[u8], aspect: &str) -> Tool
     let Ok(tx) = super::write_transaction(ctx.connection) else {
         return failed(FAILED);
     };
+    // Serialize with run cancellation before creating any attachment or file.
+    let running = ctx
+        .run_id
+        .and_then(|id| grokbot_engine::store::required(&tx, id).ok())
+        .is_some_and(|run| run.status == grokbot_engine::model::RunStatus::Running);
+    if cancel.load(Ordering::SeqCst) || !running {
+        return failed(FAILED);
+    }
     let staged = match staging::stage(
         &tx,
         ctx.db_path,
@@ -554,7 +569,7 @@ mod tests {
         reset_posts();
         let present = Outside::open(true);
         let before = std::fs::read(present.db.with_extension("secrets.json")).unwrap();
-        execute(&present.ctx(), &draw());
+        execute(&present.ctx(), &draw(), &AtomicBool::new(false));
         assert_eq!(post_count(), 1, "le jeton de session n’a pas été utilisé");
         assert_eq!(post_key(), codex_token());
         assert_ne!(post_key(), VAULT_KEY);
@@ -570,7 +585,7 @@ mod tests {
         reset_posts();
         let absent = Outside::open(false);
         let before = std::fs::read(absent.db.with_extension("secrets.json")).unwrap();
-        let outcome = execute(&absent.ctx(), &draw());
+        let outcome = execute(&absent.ctx(), &draw(), &AtomicBool::new(false));
         assert_eq!(post_count(), 0, "un appel part sans session");
         match outcome {
             ToolOutcome::Failed { reason } => assert_eq!(reason, CONNECT),

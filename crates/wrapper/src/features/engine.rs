@@ -1635,7 +1635,7 @@ impl RunServices for Services<'_> {
         } else if super::generated::is_external(&call.name) {
             super::generated::execute(&ctx, call, self.cancel.clone())
         } else if super::images::is_external(&call.name) {
-            super::images::execute(&ctx, call)
+            super::images::execute(&ctx, call, &self.cancel)
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };

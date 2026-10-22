@@ -38,7 +38,8 @@ test("finished image card replaces the indicator", () => {
     },
   }));
   assert.match(markup, /src="\/api\/attachments\/attachment_abc"/);
-  assert.match(markup, /alt="Image générée"/);
+  assert.match(markup, /class="gb-image-grid"/);
+  assert.match(markup, /<button[^>]+aria-label="Agrandir :/);
   assert.doesNotMatch(markup, /Génération/);
   assert.doesNotMatch(markup, /approbation/);
 });

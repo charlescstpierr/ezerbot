@@ -1,3 +1,5 @@
+import { MessageAttachments } from "./image-gallery.jsx";
+
 export const IMAGE_INDICATOR = "Génération d’une image…";
 export const IMAGE_CONNECT = "Connectez votre compte ChatGPT";
 
@@ -18,7 +20,7 @@ export function GeneratedImage({ message, onAction }) {
   if (outcome?.status === "done") {
     const image = imageAttachment(message);
     return <article className="gb-message gb-engine-card gb-generated-image-card" data-message-id={message.id} data-card-kind="tool" data-image-state="done">
-      {image ? <img className="gb-generated-image" src={image.url} alt="Image générée" /> : <p className="gb-image-status">L’image reçue n’est pas utilisable.</p>}
+      {image ? <MessageAttachments message={message} /> : <p className="gb-image-status">L’image reçue n’est pas utilisable.</p>}
     </article>;
   }
   if (failed) {

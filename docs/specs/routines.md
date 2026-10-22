@@ -38,9 +38,11 @@ Grill du 21 octobre 2026.
 
 L’identité d’un créneau horaire est la routine, la version de son horaire et l’instant prévu dans son fuseau. Cette identité part au plus une fois. Un second réveil, un second tick ou un futur exécuteur distant qui trouverait l’identité déjà réclamée ne relance pas le run.
 
-Le rattrapage complet s’applique quand le planificateur était censé tourner : l’application était ouverte, ou l’agent en arrière-plan était activé. Tout trou depuis le dernier tick réussi est alors une période où le Mac était éteint, en veille, ou l’agent n’a pas pu tourner. Chaque créneau dû dans ce trou devient une occurrence en attente.
+L’éligibilité se juge sur l’intervalle manqué, pas sur l’état au tick de reprise : à la réouverture de l’application, « application ouverte » est vrai, ce qui ne dit rien de ce qui précédait. Le planificateur était censé tourner pendant un intervalle quand, tout du long, l’application était ouverte ou l’agent en arrière-plan était activé. Quitter l’application alors que l’agent est désactivé, ou désactiver l’agent alors que l’application est fermée, est une absence voulue : elle commence à cet instant et finit au premier tick suivant. Ouvrir l’application ou activer l’agent ferme l’absence voulue.
 
-Le rattrapage limité reste quand l’application était fermée et l’agent désactivé. L’utilisateur n’avait pas demandé d’exécution en son absence. Au prochain ouvert : un seul créneau, le plus récent s’il tombe dans les 60 dernières minutes ; les autres sont manqués. Un créneau plus vieux que 60 minutes, dans ce cas seulement, est manqué même s’il est le plus récent.
+Le rattrapage complet s’applique aux créneaux dus dans un intervalle où le planificateur était censé tourner. Tout trou depuis le dernier tick réussi, hors absence voulue, est alors une période où le Mac était éteint, en veille, ou l’agent n’a pas pu tourner. Chaque créneau dû dans ce trou devient une occurrence en attente.
+
+Le rattrapage limité s’applique aux créneaux dus pendant une absence voulue : l’application était fermée et l’agent désactivé, et l’utilisateur n’avait pas demandé d’exécution en son absence. Au prochain ouvert : un seul créneau, le plus récent s’il tombe dans les 60 dernières minutes ; les autres sont manqués. Un créneau plus vieux que 60 minutes, dans ce cas seulement, est manqué même s’il est le plus récent.
 
 Les occurrences rattrapées partent dans l’ordre chronologique de leur instant prévu, une à la fois pour une même routine. L’historique montre l’heure prévue d’origine, l’état Terminée ou Échec, et la mention Planifié. L’état Manquée est réservé à un créneau qui ne part pas.
 
@@ -64,9 +66,9 @@ L’écoute est en boucle locale, sur un port distinct du HTTPS 443 utilisé par
 
 Tant que Funnel n’est pas publié, le panneau n’affiche pas d’URL publique. Il affiche la raison : Tailscale arrêté, Funnel refusé par le tailnet, ou publication pas encore confirmée. Un `POST` vers l’écoute locale reste possible pour les tests ; il exige le même Bearer.
 
-Réponses de l’appelant : 200 quand l’occurrence est acceptée et la routine part ; 401 si le jeton manque ou est faux, sans run ; 404 si la routine est inconnue ou n’a pas de webhook ; 409 si la routine est en pause ou si la clé d’idempotence a déjà été acceptée ; 413 si le corps dépasse la borne du prompt de routine. Un 200 signifie l’acceptation, pas la fin du travail du bot.
+Réponses de l’appelant : 200 quand l’occurrence est acceptée et la routine part ; 401 si le jeton manque ou est faux, sans run ; 404 si la routine est inconnue ou n’a pas de webhook ; 409 si la routine est en pause ou si la clé d’idempotence a déjà été acceptée pour ce déclencheur ; 413 si le corps dépasse la borne du prompt de routine. Un 200 signifie l’acceptation, pas la fin du travail du bot.
 
-Sans en-tête `Idempotency-Key`, chaque `POST` authentifié démarre un run. Avec la même clé sur la même routine, un seul run. Le corps JSON, dans la borne du prompt, est le contexte du run dans le fil. L’historique affiche Webhook et l’état du run, avec l’heure de réception.
+Sans en-tête `Idempotency-Key`, chaque `POST` authentifié démarre un run. L’idempotence se juge sur la routine, le déclencheur et la clé : avec la même clé sur le même déclencheur, un seul run. La même clé envoyée à un autre déclencheur webhook de la même routine (dans un groupe) est une occurrence distincte et ne consomme pas la clé du premier. Le corps JSON, dans la borne du prompt, est le contexte du run dans le fil. L’historique affiche Webhook et l’état du run, avec l’heure de réception.
 
 L’écoute vit avec l’application ouverte. L’agent à la minute ne devient pas un serveur HTTP résident. Application fermée, l’URL ne répond pas. Un appel perdu pendant l’extinction n’est pas inventé au réveil. L’architecture laisse un futur ingress (cloud ou listener résident) déposer le même événement authentifié devant la même identité d’occurrence : routine, déclencheur, clé d’idempotence ou, à défaut de clé, un appel distinct.
 
@@ -145,7 +147,7 @@ Une seule frontière : la routine telle que le panneau, l’historique, le fil e
 
 - Étendre le déclencheur à côté de l’horaire existant. Les routines cron, `@every` et date unique déjà enregistrées continuent de partir. Le premier nouveau genre est le webhook. Le groupe, GitHub, le courriel et le calendrier s’ajoutent comme genres simples supplémentaires, le groupe ne contenant que des genres simples.
 - Le planificateur horaire reste le propriétaire des créneaux, de la version d’horaire et de la coupure pause / édition / suppression. Le rattrapage est une politique sur le trou depuis le dernier tick, pas une seconde file parallèle.
-- Le fait « censé tourner » est celui du tick : application ouverte, ou agent activé. Il est injectable. La détection ne repose pas sur un journal de veille fragile : un trou alors que le planificateur était censé tourner est le signal d’extinction, de veille ou de panne.
+- Le fait « censé tourner » décrit l’intervalle manqué, pas le tick de reprise : application ouverte, ou agent activé, sans absence voulue (application quittée avec l’agent désactivé, ou agent désactivé application fermée) entre le dernier tick réussi et la reprise. L’instant de début et de fin d’une absence voulue est enregistré et injectable. La détection ne repose pas sur un journal de veille fragile : un trou hors absence voulue est le signal d’extinction, de veille ou de panne.
 - L’ingress webhook est un adaptateur devant l’identité d’occurrence. Funnel est l’adaptateur retenu. Un ingress ultérieur dépose le même `POST` authentifié.
 - Funnel et Serve sont deux publications Tailscale distinctes. Le port du webhook n’est pas le port de la PWA. Aucune commande Funnel ne vise le HTTPS 443 de la PWA.
 - Les déclencheurs GitHub, courriel et calendrier n’apparaissent comme enregistrables que si le connecteur correspondant est connecté. Leur contrat d’entrée est l’événement normalisé du connecteur, pas l’API du fournisseur.
@@ -168,7 +170,7 @@ Le juge regarde le Mac : panneau Routines, historique, fil de la routine, Param�
 2. **Pause.** La même extinction avec la routine en pause. L’historique ne gagne aucun run pour ces créneaux. La phrase du panneau dit qu’une pause ne se rattrape pas.
 3. **Mac allumé, rien en tâche de fond.** Agent désactivé, application quittée, Mac resté allumé, deux créneaux dont un a plus de 60 minutes. Au réouvert, un seul rattrapage dans les 60 dernières minutes est Terminée ou En attente ; l’autre est Manquée. La phrase du panneau décrit cette limite.
 4. **File visible.** Une extinction qui laisse plusieurs créneaux dûs. Le panneau montre un nombre d’occurrences en attente tant que la file n’est pas vide. Pause : les occurrences pas encore parties passent à Manquée ; le compteur retombe.
-5. **Webhook publié.** Créer un déclencheur webhook, confirmer la carte d’approbation. Le panneau montre une URL `https` de Funnel et le rappel Bearer. L’écran iPhone, s’il est affiché, montre toujours son adresse privée, distincte. Depuis une autre machine, un `POST` avec le jeton fait apparaître un run Webhook dans l’historique et le JSON dans le fil. Un `POST` sans jeton laisse l’historique identique. Le même `Idempotency-Key` une seconde fois laisse un seul run.
+5. **Webhook publié.** Créer un déclencheur webhook, confirmer la carte d’approbation. Le panneau montre une URL `https` de Funnel et le rappel Bearer. L’écran iPhone, s’il est affiché, montre toujours son adresse privée, distincte. Depuis une autre machine, un `POST` avec le jeton fait apparaître un run Webhook dans l’historique et le JSON dans le fil. Un `POST` sans jeton laisse l’historique identique. Le même `Idempotency-Key` une seconde fois sur la même URL laisse un seul run ; sur l’URL d’un autre déclencheur webhook du groupe, il crée un run distinct.
 6. **Funnel indisponible.** Tailscale arrêté, ou Funnel non confirmé. Le panneau donne la raison et n’affiche pas d’URL publique.
 7. **Groupe.** Une routine avec un horaire et un webhook. L’échéance seule fait un run attribué à l’horaire. Un `POST` seul fait un run attribué au webhook. L’éditeur refuse un groupe d’un seul déclencheur.
 8. **GitHub.** Connecteur GitHub connecté, dépôt choisi, événements cochés parmi les cinq. L’action correspondante sur le dépôt fait un run GitHub dans l’historique et le fil. La même livraison une seconde fois ne fait pas un second run. Sans connecteur, l’éditeur explique que GitHub n’est pas connecté et n’enregistre pas le déclencheur.
@@ -218,7 +220,7 @@ Tranches verticales. Les issues portent le détail, les critères du juge et les
 flowchart TD
   tick[Tick]
   cut{Pause, édition ou suppression ?}
-  expect{App ouverte ou agent activé ?}
+  expect{Créneau dû hors absence voulue ?}
   gap{Trou depuis le dernier tick ?}
   all[Tous les créneaux dus, dans l'ordre]
   sixty[Un seul créneau dans les 60 minutes]

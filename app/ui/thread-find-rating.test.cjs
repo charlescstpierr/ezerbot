@@ -158,7 +158,7 @@ function register(byId, node, id) {
   return node;
 }
 
-async function boot({ storageThrows = false } = {}) {
+async function boot({ storageThrows = false, bridgeRejects = false } = {}) {
   const findMod = await import("../web/src/thread-find.js").catch(() => null);
   const ratingMod = await import("../web/src/thread-rating.js").catch(() => null);
   const teach = await import("../web/src/teach.js");
@@ -305,6 +305,7 @@ async function boot({ storageThrows = false } = {}) {
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     addEventListener() {},
   };
+  if (bridgeRejects) window.webkit = { messageHandlers: { ezerbotRatings: { postMessage: async () => { throw new Error("pont indisponible"); } } } };
   const localStorage = {
     getItem: (key) => storage.has(key) ? storage.get(key) : null,
     setItem: (key, value) => storage.set(key, String(value)),
@@ -443,4 +444,16 @@ test("un stockage qui jette laisse démarrer le shell et désactive la notation"
   assert.ok(app.document.getElementById("new-chat").listeners.click?.length >= 1);
   assert.equal(app.document.getElementById("conversation-title").textContent, "Nouvelle conversation");
   assert.doesNotThrow(() => app.document.getElementById("export-ratings-button").click());
+});
+
+test("un pont de notation qui échoue annonce l’échec au lieu d’accepter le vote", async () => {
+  const app = await boot({ bridgeRejects: true });
+  await app.threadProps.onRateGood(app.assistant);
+  assert.equal(app.document.getElementById("toast").textContent, "Impossible d’enregistrer la notation.");
+  app.threadProps.onRateBad(app.assistant);
+  app.document.getElementById("rating-form").dispatch("submit");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.document.getElementById("rating-dialog").open, true);
+  assert.equal(app.document.getElementById("toast").textContent, "Impossible d’enregistrer la notation.");
+  assert.deepEqual(app.notations(), []);
 });

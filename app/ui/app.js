@@ -62,7 +62,8 @@
     catch { return null; }
   }
   // Le démarrage n’attend pas le Mac : la table native remplace la table vide dès qu’elle est lue.
-  let ratings = { list() { return []; }, recordGood() {}, recordBad() {}, exportDocument() { return { notations: [] }; } };
+  const unavailable = () => { throw new Error("Notation indisponible."); };
+  let ratings = { list() { return []; }, recordGood: unavailable, recordBad: unavailable, exportDocument() { return { notations: [] }; } };
   const ratingsReady = openRatings().then((table) => { if (table) ratings = table; }, () => {});
   let pendingRating = null;
   let findState = { open: false, query: "", index: 0, matches: [], conversationId: null };

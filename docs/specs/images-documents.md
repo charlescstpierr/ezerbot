@@ -1,160 +1,382 @@
-# Images et documents
+# Images, documents et bibliothèque
 
-Statut : décisions du grill du 21 octobre 2026, plus le verdict d’accès vérifié le même jour. La vidéo, génération comme lecture, est hors périmètre. Le lot garde les images, les documents et la bibliothèque par bot. Aucune implémentation n’est commencée. Les tranches sont des issues enfants de la carte [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31).
+Statut : décisions du 21 octobre 2026, copie du comportement visible de Grok Bot 0.72.1 recalé sur le Mac de Charles. Aucune implémentation de ce lot n’est commencée. La première tranche qui doit marcher de bout en bout, avec le vrai compte, est la génération d’une image. Les tranches sont à créer comme issues enfants d’une carte `wayfinder:map` « Images, documents et bibliothèque ». Cette page ne crée pas les issues. L’annexe en donne le corps.
+
+Vocabulaire déjà en usage : bot, fil, bulle, pièce jointe, document généré, délégation, sous-tâche, fil `task:`, coffre, trousseau. Une Page est le petit artefact de ce lot. La bibliothèque est l’ensemble de fichiers de contexte d’un bot, distinct des pièces jointes d’un fil.
 
 ## Contexte
 
-Charles utilise Ezerbot, l’app Mac, pour faire produire à un bot des images et des documents, puis les revoir dans la conversation. Le tableau de parité laisse ces écarts ouverts : la génération d’images est absente (IMG-2) ; il n’y a pas de galerie (IMG-3, pour sa part images) ; le PDF généré est en Courier et refuse les emoji (DOC-2) ; aucun bot n’a de bibliothèque de fichiers (DOC-3).
+Charles utilise Ezerbot sur son Mac. Joindre une image au fil est déjà là : au plus dix pièces, 20 Mo pour une image, et le bot les voit. Il n’existe pas d’outil pour en produire une. Grok Bot, lui, appelle `GenerateImageArgs` (`description`, `reference_image_paths`, `aspect_ratio`). L’écran dit « Generating a photo ». Aucune carte d’approbation n’est branchée côté client. Les erreurs prévues sont un modèle restreint et un refus de sécurité. La vidéo est derrière un drapeau désactivé. La galerie est une grille dans le message, puis une visionneuse. Il n’y a pas de page galerie, ni de retouche, ni de masque.
 
-Aujourd’hui, le bot peut déjà créer un fichier local (PDF, DOCX, PPTX, Markdown, CSV, XLSX, SVG) et l’afficher comme une carte dans la conversation. Le PDF est une police standard Courier encodée en WinAnsi : le français passe, un emoji fait échouer la génération. Le DOCX met en forme les titres et les puces en Arial, sans tableau et sans les couleurs de l’app. L’aperçu dans la conversation est une vignette ; l’agrandissement actuel est une fenêtre bornée, et l’ouverture se fait hors de l’app. Les images que Charles joint sont montrées ; aucune image n’est produite par le bot. Une pièce audio peut déjà se lire dans la conversation.
+Demander à un sous-agent de décrire une photo jointe ne lui transmet pas l’image. Le schéma de Grok Bot prévoit `selected_images` dans le contexte choisi de l’enfant. Ezerbot s’arrête au nom.
 
-Le fournisseur a deux sessions distinctes, toutes deux au nom du compte que Charles a connecté dans Ezerbot :
+Les documents générés existent : pdf, docx, pptx, md, csv, xlsx, svg. Le PDF est une police Courier, encodage WinAnsi. Les accents français passent. Un emoji est refusé par une phrase qui nomme Courier. Il n’y a pas de tableau dans ce PDF. Grok Bot ajoute les Pages : un fichier React vivant à côté du fil, compilé, renommable. Chez Grok ce fichier peut être partagé. Ezerbot n’a pas de serveur pour cela.
 
-- **Codex.** Jeton OAuth du flux Codex, portée `openid profile email offline_access`, envoyé en `Authorization: Bearer` avec l’en-tête `chatgpt-account-id` vers `https://chatgpt.com/backend-api/codex`. C’est la session utilisée quand Codex est sélectionné.
-- **Partage d’abonnement** (« Sign in with ChatGPT »). Jeton destiné à `https://api.openai.com/v1`, avec la portée de plan `chatgpt.tokens.use.direct`. OpenAI documente cette voie comme des requêtes Responses éligibles au plan ChatGPT.
+Aucun bot n’a de bibliothèque. Un fichier ne compte que s’il est joint au fil. Le scénario de parité DOC-3 dépose le PDF dans les fichiers du bot et attend une citation dans un nouveau fil.
 
-Le bot décide déjà seul d’appeler un outil local, comme pour créer un document. Il n’existe pas de bouton « générer une image ».
+## Énoncé du problème
 
-## Verdict d’accès
+Charles ne peut pas demander un dessin et le voir apparaître. Plusieurs images d’un message ne s’ouvrent pas en visionneuse. Un sous-agent à qui l’on confie une photo n’en reçoit que le nom.
 
-### Images : le jeton Codex suffit, par la route Images du client officiel
+Un PDF avec un emoji ou un tableau échoue ou reste en Courier. Une analyse qui devrait être un tableau interactif redevient du Markdown dans le fil. Un document utile pour tous les fils d’un bot doit être joint à chaque fois, et un autre bot peut le recevoir par erreur s’il est dans le mauvais fil.
 
-Le jeton Codex qu’Ezerbot garde peut demander une image. La voie qui marche est celle du client Codex officiel, pas l’outil hébergé `image_generation` posé sur `POST /backend-api/codex/responses`.
+## Solution
 
-Preuves, lues le 21 octobre 2026 :
+Le bot appelle lui-même `generate_image` quand la demande le justifie, avec la clé OpenAI de Charles, modèle gpt-image. L’image arrive dans le fil. Les images d’un message forment une grille, et un clic ouvre la visionneuse. Une photo jointe transmise à un enfant part avec ses octets.
 
-- Le client officiel (`openai/codex`, client Images typé, outil de génération) envoie `POST {base}/images/generations` et `POST {base}/images/edits` avec le jeton ChatGPT et l’identifiant de compte. Le corps de génération porte `prompt`, `model`, `background`, `quality`, `size`. Le modèle envoyé par cet outil est `gpt-image-2`. La réponse contient `data[].b64_json`.
-- Une sonde publiée le 10 septembre 2026, avec un vrai jeton OAuth ChatGPT/Codex, a obtenu HTTP 200 et un PNG décodable sur `https://chatgpt.com/backend-api/codex/images/generations`, pour `gpt-image-2.5-flare` comme pour un nom de modèle volontairement invalide. Cette sonde ne prouve pas quel poids a réellement dessiné, ni que tous les comptes se comportent pareil. Elle prouve que la route répond une image à ce type de jeton.
-- Une demande sans authentification sur la même route reçoit HTTP 403. La route existe et exige le jeton.
-- L’outil Responses `image_generation` est documenté pour `https://api.openai.com/v1/responses` avec une clé d’API (`Authorization: Bearer $OPENAI_API_KEY`). Les modèles d’image cités par le guide sont `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-1-mini`. Forcer `tool_choice` à `{ "type": "image_generation" }` est le contrat de cette API publique.
-- Sur le backend Codex, ce `tool_choice` est rejeté (HTTP 400, l’outil n’est pas trouvé dans `tools`). Sans `tool_choice`, des comptes ont reçu du texte seul, sans événement `image_generation_call`. Le champ `experimental_supported_tools` a été observé vide. D’autres récits signalent un succès. Ce contrat est trop instable pour s’y fier. Le préparateur de corps Codex d’Ezerbot force en plus `tool_choice` à `auto`, ce qui ne déclenche pas l’outil hébergé.
-- Le partage d’abonnement exclut explicitement la génération d’images. La page « Preview limitations » de Sign in with ChatGPT liste, parmi les outils non pris en charge : génération d’images, recherche de fichiers, interpréteur de code, usage d’ordinateur natif, MCP hébergé. Un jeton de partage présenté à `api.openai.com` ne produit donc pas une image, même si on ajoute `image_generation` au corps Responses.
+Une analyse autonome devient une Page : fichier `.page.tsx` compilé sur le Mac, affiché à côté du fil. Le PDF embarque une police qui couvre les accents et l’emoji, et il sait faire un tableau. Le même contenu tient en docx et en pptx. Chaque bot a une bibliothèque : les fichiers déposés sont cherchés et cités dans ses nouveaux fils, et dans les siens seulement.
 
-**Ce que Charles fournit pour les images.** Rien, tant que la session sélectionnée est Codex et que la route Images accepte le compte. Si cette route refuse le compte (plan, droit ou rejet du client), la voie de repli est une clé d’API OpenAI collée une fois dans le trousseau du Mac, le même coffre que les secrets déjà gardés par l’app. Charles la crée dans les clés d’API de `platform.openai.com`. Elle est facturée sur le compte API, à part de l’abonnement ChatGPT. Il ne la fournit pas à l’avance.
+La vidéo, la retouche et le partage public d’une Page restent dehors. Les décisions déjà prises pour le Mac éteint ne bougent pas : pas d’ordinateur cloud dans ce lot.
 
 ## Décisions
 
-1. **Le bot génère l’image sans bouton.** Quand Charles décrit une image à créer ou à modifier, le modèle appelle un outil local, comme il appelle déjà la création de document. L’outil parle à la route Images Codex (`images/generations` pour créer, `images/edits` pour modifier) avec le jeton et l’identifiant de compte de la session Codex, modèle demandé `gpt-image-2`. Le PNG revient dans la bulle du bot. Il n’y a pas de bouton dédié dans le composeur.
-2. **Le partage d’abonnement ne génère pas d’images.** Si la session sélectionnée est le partage, ou si la route Images Codex refuse le compte, l’app utilise la clé d’API du trousseau contre l’API Images publique. Sans cette clé, la bulle explique en français quoi connecter (Codex, ou une clé dans le trousseau) et n’affiche pas une image inventée ni un simple texte à la place.
-3. **Charles regarde, agrandit, télécharge et modifie en parlant.** Un clic agrandit l’image dans l’app. Le téléchargement écrit un PNG neuf sur le Mac après le même accord que l’enregistrement d’un document. Une phrase suivante (« mets le fond en rouge ») renvoie l’image précédente à `images/edits` et affiche la nouvelle image dans une nouvelle bulle. L’ancienne reste.
-4. **La galerie est par bot.** Les images générées dans les conversations d’un bot se retrouvent dans sa galerie. Un autre bot ne les voit pas.
-5. **Les documents générés deviennent des pages lisibles.** PDF et DOCX utilisent une vraie police proportionnelle, gardent les emoji visibles, traitent les titres comme des titres et les tableaux comme des tableaux, et portent les couleurs d’accent déjà choisies dans l’app. L’aperçu plein écran se fait dans Ezerbot. La page reste claire : l’accent colore le bandeau ou le titre, le texte reste encre foncée. Le thème sombre de l’app ne renverse pas la page.
-6. **L’accent suivi est celui de l’app.** L’accent par défaut est le chartreuse de l’interface, `rgb(230 255 61)`, encre `#0f1012`, accent profond `#5b6b00`. Si Charles choisit un autre accent (orange, ambre, menthe, cyan, magenta, vermillon, violet, blanc), les documents générés ensuite prennent cet accent. Un document déjà produit ne change pas.
-7. **La bibliothèque est une, avec deux rôles.** Elle appartient au bot. Les fichiers de contexte sont relus, de façon bornée, à chaque conversation de ce bot. Les fichiers générés (images et documents) y sont rangés et retrouvables ; ils ne sont pas recopiés en entier dans chaque prompt. La recherche, au besoin, couvre les deux rôles et reste locale, sur le modèle du rappel de mémoire : lexicale, sans embeddings, limitée au bot.
-8. **Les octets restent sur le Mac.** Images, documents et fichiers de bibliothèque vivent dans la base locale, comme les documents générés aujourd’hui. Le prompt et les images envoyés à OpenAI partent parce que c’est le générateur. Aucun galerie en ligne n’est ajoutée. Le téléchargement est le passage vers le disque, et il demande un accord.
+Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’est rouverte. La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences.
+
+1. **La génération n’a pas de carte d’approbation.** Le bot appelle `generate_image` quand la phrase le justifie. L’indicateur est « Génération d’une image… ». L’image remplace l’indicateur. Un refus `content_safety_blocked` ou un modèle restreint devient une phrase française, une fois, sans nouvel appel. Sans clé OpenAI, la carte « Connecte ton compte OpenAI » s’affiche et le fournisseur n’est pas appelé. La clé reste au trousseau. Elle ne va pas dans le fil, les journaux, ni le contexte du modèle.
+2. **Les références et le cadre sont ceux de Grok Bot.** `reference_image_paths` désigne des images déjà jointes au fil. `aspect_ratio` vaut 1:1, 16:9, 9:16, 4:3 ou 3:4. Un autre cadre est refusé en français, sans appel. Pas de masque, pas de retouche, pas de variation.
+3. **La galerie est dans le fil.** Plusieurs images d’un message sont une grille. Un clic ouvre la visionneuse plein écran : flèches, légende, « Enregistrer l’image… », « Copier l’image ». Le clavier circule. Il n’y a pas de page galerie.
+4. **L’enfant reçoit l’image.** Quand `delegate` porte sur une image jointe, `selected_images` contient les octets ou le chemin et le type MIME. Le nom seul ne suffit pas. L’enfant décrit cette image. Un fil qui ne l’a pas ne l’envoie pas.
+5. **Une Page est locale.** Quand le résultat est une analyse autonome (graphique, tableau interactif, outil réutilisable), le bot écrit un `.page.tsx`. Ezerbot le compile sur le Mac et l’affiche dans un cadre à côté du fil. Une erreur de compilation revient au bot avec la ligne et le caractère. Le bot corrige seul. Charles peut renommer, ouvrir en pleine page, et retrouver la Page dans la liste « Pages » du bot. Elle survit au redémarrage. Pas de lien public, pas de partage d’équipe.
+6. **Le PDF ne perd plus les glyphes de ce lot.** Courier est remplacé par une police embarquée. Les accents et l’emoji 🎉 s’affichent. L’emoji peut être un glyphe ou une image de repli. Un tableau demandé est un tableau. Le docx et le pptx montrent les mêmes accents, le même emoji et le même tableau. Un caractère hors de cette police fait encore échouer le fichier en français, plutôt que d’imprimer une case vide.
+7. **La bibliothèque appartient au bot.** Le panneau est dans les réglages du bot. On y dépose par glisser-déposer les formats déjà lus dans un fil : pdf, docx, xlsx, csv, pptx, md, txt. Le plafond annoncé est celui de 20 Mo déjà en vigueur pour un document. Au-delà, refus en français, rien n’est retenu. Un nouveau fil de ce bot peut chercher ces fichiers et les citer. Un autre bot ne les reçoit pas. Retirer un fichier le sort du rappel. Le remplacer met à jour ce qui sera cité.
 
 ## Récits
 
-1. En tant que Charles, je veux décrire une image dans la conversation, afin d’obtenir cette image dans la bulle sans chercher un bouton.
-2. En tant que Charles, je veux que le bot choisisse seul de générer, afin de parler normalement (« dessine un cercle bleu sur fond blanc »).
-3. En tant que Charles, je veux qu’une question ordinaire ne produise pas d’image, afin que le fil ne se remplisse pas d’illustrations non demandées.
-4. En tant que Charles, je veux voir l’image dans la bulle du bot qui l’a produite, afin de la distinguer d’un fichier que j’aurais joint moi-même.
-5. En tant que Charles, je veux un message français clair si la génération échoue, afin de savoir si je dois me reconnecter, attendre le quota, ou ajouter une clé.
-6. En tant que Charles, je veux que l’échec ne montre pas une image cassée ni le corps brut du fournisseur, afin de ne pas prendre un diagnostic technique pour une image.
-7. En tant que Charles, je veux cliquer l’image pour l’agrandir dans l’app, afin de juger le dessin sans quitter Ezerbot.
-8. En tant que Charles, je veux fermer l’agrandissement et retrouver la conversation au même endroit, afin de continuer à parler.
-9. En tant que Charles, je veux télécharger l’image en PNG, afin de la réutiliser hors de l’app.
-10. En tant que Charles, je veux confirmer avant l’écriture sur le disque, afin qu’aucun fichier n’apparaisse sans mon accord.
-11. En tant que Charles, je veux que le PNG téléchargé soit celui que je vois, afin de ne pas récupérer une autre image.
-12. En tant que Charles, je veux modifier l’image en décrivant le changement, afin de ne pas recommencer le prompt depuis zéro.
-13. En tant que Charles, je veux que l’image modifiée apparaisse à la suite, et que l’originale reste visible, afin de comparer.
-14. En tant que Charles, je veux une galerie pour le bot courant, afin de retrouver les images de ses conversations.
-15. En tant que Charles, je veux que la galerie d’un autre bot soit distincte, afin de ne pas mélanger les univers des bots.
-16. En tant que Charles, je veux ouvrir une image de la galerie en grand, afin de la revoir sans chercher le message d’origine.
-17. En tant que Charles, je veux demander un PDF avec un titre, un tableau et un emoji, afin de lire une page propre dans l’app.
-18. En tant que Charles, je veux une police proportionnelle dans ce PDF, afin de ne plus voir de Courier.
-19. En tant que Charles, je veux voir l’emoji comme un glyphe, afin que « 😀 » ne fasse pas échouer le fichier ni disparaisse.
-20. En tant que Charles, je veux un titre visuellement distinct du corps, afin de parcourir la page.
-21. En tant que Charles, je veux un tableau aligné, avec une ligne d’en-tête reconnaissable, afin de lire des chiffres en colonnes.
-22. En tant que Charles, je veux que le bandeau ou le titre porte l’accent choisi dans l’app, afin que le document ressemble à Ezerbot.
-23. En tant que Charles, je veux une page claire même si l’app est en thème sombre, afin de pouvoir imprimer ou relire sans inverser les couleurs.
-24. En tant que Charles, je veux ouvrir ce PDF en plein écran dans l’app, afin de le lire sans passer par Aperçu.
-25. En tant que Charles, je veux le même traitement pour un DOCX (police, emoji, titre, tableau, accent, plein écran), afin qu’un document Word ne soit pas le parent pauvre du PDF.
-26. En tant que Charles, je veux déposer un fichier de contexte sur un bot, afin que ce bot le connaisse dans chaque nouvelle conversation.
-27. En tant que Charles, je veux que ce fichier n’apparaisse pas chez un autre bot, afin de garder les contextes séparés.
-28. En tant que Charles, je veux que seule une part bornée du fichier entre dans le prompt, afin qu’une grosse bibliothèque ne fasse pas échouer la conversation.
-29. En tant que Charles, je veux que le bot cherche dans la bibliothèque quand il a besoin d’un passage précis, afin de ne pas tout charger d’avance.
-30. En tant que Charles, je veux que la recherche reste sur ce Mac et sur ce bot, afin qu’un fait d’un autre bot ne ressorte pas.
-31. En tant que Charles, je veux que l’image ou le document que le bot vient de créer se range tout seul dans la bibliothèque, afin de le retrouver plus tard.
-32. En tant que Charles, je veux que les fichiers générés ne soient pas relus en entier à chaque tour, afin que le contexte reste celui des fichiers que j’ai désignés comme contexte.
+1. En tant que Charles, je veux écrire « Dessine un phare au crépuscule » et voir le bot générer l’image sans que je nomme un outil, afin d’obtenir le dessin.
+2. En tant que Charles, je veux lire « Génération d’une image… » pendant l’appel, afin de savoir que le dessin est en cours.
+3. En tant que Charles, je veux que l’indicateur cède la place à l’image, ou à la phrase d’erreur, afin de ne pas rester devant un appel qui aurait fini.
+4. En tant que Charles, je veux, tant que la clé OpenAI manque, la carte « Connecte ton compte OpenAI » et aucun appel, afin de ne pas prendre une absence pour une image.
+5. En tant que Charles, je veux qu’un refus de sécurité s’affiche en français, une seule fois, afin de comprendre le blocage.
+6. En tant que Charles, je veux qu’un modèle restreint s’affiche en français, une seule fois, afin de le distinguer d’une panne réseau.
+7. En tant que Charles, je veux que la clé reste absente du fil, des journaux et du contexte du modèle, afin qu’un export ne la contienne pas.
+8. En tant que Charles, je veux qu’aucune carte d’approbation ne s’ouvre avant la génération, afin de garder le geste direct.
+9. En tant que Charles, je veux joindre une photo et demander le même style, afin que cette photo soit envoyée comme référence.
+10. En tant que Charles, je veux un cadre 1:1, 16:9, 9:16, 4:3 ou 3:4, afin de recevoir l’image dans ce rapport.
+11. En tant que Charles, je veux qu’un cadre inconnu soit refusé en français, sans appel au fournisseur, afin de ne pas payer une requête vouée à l’échec.
+12. En tant que Charles, je veux les images d’un message en grille, afin de les comparer sans ouvrir un autre écran.
+13. En tant que Charles, je veux qu’un clic ouvre la visionneuse, avec les flèches et la légende, afin de regarder une image en grand.
+14. En tant que Charles, je veux « Enregistrer l’image… », afin de récupérer le fichier.
+15. En tant que Charles, je veux « Copier l’image », afin de la coller dans une autre application.
+16. En tant que Charles, je veux passer à l’image suivante et à la précédente au clavier, afin de parcourir la grille sans la souris.
+17. En tant que Charles, je veux que la grille reste dans le fil, afin de ne pas chercher une page galerie qui n’existe pas.
+18. En tant que Charles, je veux déléguer la description d’une photo jointe, afin que la réponse du fil `task:` décrive cette photo.
+19. En tant que Charles, je veux que l’enfant reçoive l’image elle-même, afin qu’un nom de fichier ne tienne pas lieu de contenu.
+20. En tant que Charles, je veux qu’une délégation dans un fil sans cette image ne l’emporte pas, afin de ne pas mélanger les conversations.
+21. En tant que Charles, je veux « compare mes 3 forfaits dans un tableau interactif » et voir une Page à côté du fil, afin d’obtenir un tableau vivant plutôt qu’un tableau Markdown.
+22. En tant que Charles, je veux qu’une erreur de compilation soit corrigée par le bot, avec la ligne et le caractère, afin de ne pas ouvrir le fichier moi-même.
+23. En tant que Charles, je veux renommer la Page, afin de la retrouver sous un titre clair.
+24. En tant que Charles, je veux « Ouvrir en pleine page », afin de travailler sans le fil à côté.
+25. En tant que Charles, je veux la liste « Pages » du bot, afin de rouvrir une Page plus tard.
+26. En tant que Charles, je veux que la Page soit encore là après un redémarrage, afin de ne pas la perdre en quittant.
+27. En tant que Charles, je veux un PDF avec é, ç, 🎉 et un tableau, sans glyphe manquant, afin de l’envoyer tel quel.
+28. En tant que Charles, je veux le même emoji et le même tableau dans le docx et le pptx, afin que les trois formats disent la même chose.
+29. En tant que Charles, je veux qu’un PDF dont le texte tient dans les accents français continue de s’ouvrir, afin de ne pas casser les fichiers déjà demandés.
+30. En tant que Charles, je veux déposer un fichier dans la bibliothèque d’un bot par glisser-déposer, afin qu’il serve dans tous les nouveaux fils de ce bot.
+31. En tant que Charles, je veux qu’une question dans un nouveau fil cite le fichier, afin de voir d’où vient la réponse.
+32. En tant que Charles, je veux qu’un autre bot ignore cette bibliothèque, afin de séparer les contextes.
+33. En tant que Charles, je veux retirer un fichier et entendre le bot dire qu’il ne l’a plus, afin que le retrait soit réel.
+34. En tant que Charles, je veux remplacer un fichier et voir la nouvelle version citée, afin de corriger un tarif sans laisser l’ancien.
+35. En tant que Charles, je veux lire la taille maximale sur le panneau, et un refus en français au-delà, afin de savoir pourquoi le dépôt n’a pas eu lieu.
+36. En tant que Charles, je veux continuer à joindre une image au fil et à la faire lire, afin de garder le geste déjà livré.
+37. En tant que Charles, je veux qu’une Page ne propose pas de lien public, afin qu’elle reste sur ce Mac.
 
 ## Décisions d’implémentation
 
-- L’outil d’image est un outil du bot, au même titre que la création de document. Son nom et son schéma vivent avec les autres outils. La description dit de l’appeler quand l’utilisateur décrit une image à créer ou à modifier, et de ne pas l’appeler pour une question ordinaire. Le modèle reste libre de cet appel : l’app ne scanne pas le texte pour forcer une image.
-- Création : `POST` sur la route Images de la base Codex déjà configurée, chemin `images/generations`, en-têtes déjà utilisés pour Codex (`Authorization`, `chatgpt-account-id`). Corps minimal aligné sur le client officiel : `prompt`, `model` valant `gpt-image-2`, `n` valant 1, `background` `opaque`, `quality` `auto`, `size` `auto`. La réussite est un PNG décodable dans `b64_json`. Le nom de modèle renvoyé peut manquer : l’app ne prétend pas connaître le poids réel.
-- Modification : `POST images/edits` avec l’image précédente et le nouveau prompt. L’outil reçoit l’identifiant local de l’image à modifier. Sans image identifiable, l’outil échoue en français et n’en crée pas une de toutes pièces en silence.
-- Repli clé d’API : uniquement après un refus d’habilitation de la route Codex, ou quand la session sélectionnée est le partage. La clé se lit dans le trousseau, jamais dans le prompt, les journaux ou la mémoire. L’appel public suit le guide Images / Responses d’OpenAI, authentifié par `Authorization: Bearer` et cette clé. Une clé absente produit l’explication française, pas une deuxième tentative muette.
-- Le préparateur de corps Responses n’est pas le canal d’image. On n’y ajoute pas `image_generation`.
-- L’image est enregistrée comme les documents générés : octets et métadonnées locaux, liés au message et au bot. La bulle affiche ces octets. La galerie liste les images de ce bot.
-- L’agrandissement et le plein écran d’un document restent dans la fenêtre de l’app. Le téléchargement et l’enregistrement réutilisent l’accord déjà exigé avant d’écrire un fichier neuf. Aucun remplacement silencieux.
-- PDF et DOCX acceptent le même contenu structuré : titres Markdown (`#`, `##`, `###`) et tableau Markdown. L’emoji n’est plus une erreur. La police du PDF n’est plus Courier. Sur Mac, le dessin passe par l’API PDF du système, afin qu’Aperçu et l’aperçu in-app montrent le glyphe emoji sans embarquer une police Apple dans le dépôt. Le DOCX continue d’embarquer des caractères Unicode ; il gagne le tableau et l’accent.
-- Les couleurs du modèle sont l’accent courant de l’app au moment de la génération, plus l’encre foncée pour le corps. Elles sont copiées dans le fichier. Changer l’accent plus tard ne réécrit pas les fichiers.
-- La bibliothèque a deux rôles, `contexte` et `généré`. Seul `contexte` est injecté, borné, dans chaque conversation du bot, avec un décompte du reste et l’invitation à chercher, sur le modèle du rappel de mémoire. `généré` est rangé à la création (image ou document) et ressort par la recherche ou par la galerie. La recherche est lexicale, locale, insensible aux accents français, limitée au bot, avec un budget de résultat. Elle ne fait pas d’appel réseau.
-- Les plafonds déjà en place pour les pièces jointes et les documents générés s’appliquent. Ce lot n’en invente pas de plus larges.
-- Aucun secret de connexion n’entre dans le contexte, la mémoire, ni l’export de conversation.
+- L’outil s’appelle `generate_image`. Les arguments sont `description`, `aspect_ratio` optionnel, et, à partir de la tranche références, `reference_image_paths`. Le modèle envoyé au fournisseur est gpt-image. Le cadre omis vaut 1:1. La clé est celle du compte OpenAI de Charles, lue dans le trousseau déjà utilisé pour les secrets de compte. Ce lot n’ajoute pas un second coffre ni un formulaire « colle ta clé ».
+- Le fournisseur de production est l’API d’images OpenAI. Les tests visent un fournisseur de boucle. Tout autre hôte est refusé. La clé ne sort pas de cet hôte.
+- Une image générée est une pièce du message, au même titre qu’une image jointe. La grille et la visionneuse lisent les deux. Le plafond de dix images et de 20 Mo déjà en vigueur pour une pièce jointe reste celui d’un dépôt. Une image générée qui dépasserait ce plafond est une phrase française, pas un fichier tronqué.
+- `selected_images` est un champ du contexte de `delegate`. Chaque entrée a les octets, ou un chemin local plus le type MIME. Le résumé texte du parent peut accompagner l’image. Il ne la remplace pas.
+- Une Page est un fichier du bot, pas un message. Le compilateur est local. Le diagnostic (ligne, caractère, message) est le texte que le bot reçoit pour réécrire le fichier. Charles ne voit pas la clé, et il ne voit pas un cadre vide présenté comme une Page réussie. La liste « Pages » est celle de ce bot.
+- La génération pdf, docx et pptx reste `create_document`. La police embarquée du PDF remplace Courier. Le tableau est reconnu dans le contenu déjà accepté par cet outil. Les coupes de longueur déjà écrites pour une diapositive restent, sauf à manger un emoji ou une cellule : ceux-là doivent apparaître.
+- La bibliothèque est une liste de fichiers du bot. Le rappel dans un nouveau fil réutilise la recherche lexicale locale déjà utilisée pour la mémoire quand l’ensemble ne tient pas dans le prompt. Il n’y a pas d’index distant. La citation nomme le fichier. Retirer ou remplacer change cette liste avant le prochain fil.
 
 ## Décisions de test
 
-Un bon test observe le comportement visible : le message produit, l’image ou le fichier rendu, le contexte reçu par le tour suivant, le refus français. Il ne vérifie pas l’ordre interne des fonctions.
+Un bon test observe le comportement visible : l’indicateur, l’image dans le fil, la phrase française, l’absence de la clé dans le transcript et les journaux, le nombre d’appels au fournisseur, la grille, le fichier enregistré, le contenu reçu par l’enfant, le cadre de la Page, le texte extrait du PDF, la citation, et le refus de l’autre bot. Il ne vérifie pas l’ordre interne des fonctions.
 
-La couture unique est celle qui existe déjà pour les outils : un test du wrapper qui scripte le serveur HTTP du fournisseur, puis le test de présentation web qui rend la charge de ce message dans la bulle. La génération de document garde sa couture actuelle (générateur et test d’outil), et le juge visuel regarde l’aperçu produit. On n’ajoute pas de nouveau harnais.
+La couture image est un fournisseur de boucle, puis le rendu de la bulle. On n’ajoute pas de harnais. Le test compte un appel pour une demande, zéro appel sans clé, zéro appel pour un cadre inconnu, et un seul appel pour un refus de sécurité. La couture Page injecte un diagnostic de compilation et observe le fichier réécrit, puis la Page encore présente après redémarrage du moteur. La couture PDF extrait é, ç et les cellules du tableau, et constate l’emoji au rendu. La couture bibliothèque parle à deux bots.
 
-Chaque tranche commence par un test rouge sur cette couture, puis le code qui le rend vert. Le fournisseur scripté ne prouve pas le compte réel. Le juge visuel sur Mac, avec la session Codex de Charles, est le critère d’acceptation des pixels, du glyphe emoji et du geste (clic, lecture, plein écran).
-
-Le juge visuel travaille dans l’app Mac, fenêtre assez grande pour lire une page, thème clair puis thème sombre, accent par défaut puis un accent modifié. Il ne se contente pas d’une capture statique : il envoie le message, attend la bulle, clique, télécharge, change de bot, rouvre une conversation neuve.
+Chaque tranche commence par un test rouge sur sa couture, puis le code qui le rend vert. Le fournisseur scripté ne prouve pas le compte réel. Le juge visuel sur le Mac de Charles est le critère d’acceptation des parcours ci-dessous. Une capture immobile ne suffit pas.
 
 ## Critères d’acceptation
 
-Un juge visuel sur Mac coche ces parcours. Chacun échoue si le résultat est seulement décrit en texte, ou si l’image ou la page est illisible.
+Le juge coche ces parcours dans l’app, avec le compte OpenAI de Charles capable d’appeler gpt-image, et des fichiers à lui. La clé n’apparaît nulle part à l’écran.
 
-1. **Image dans la bulle.** Session Codex connectée, aucun bouton d’image ajouté au composeur. Phrase : « Dessine un cercle bleu centré sur un fond blanc, sans texte. » La bulle du bot montre une image. Un décodeur y voit un PNG. Une question suivante sans demande d’image (« Quelle heure est-il à Montréal ? ») ne fait pas apparaître d’image.
-2. **Refus lisible.** Avec une session de partage seule et aucune clé dans le trousseau, la même phrase d’image produit une explication française dans la bulle, sans image et sans JSON brut. Après avoir collé une clé d’API de test dans le trousseau, la même phrase produit une image.
-3. **Agrandir et télécharger.** Cliquer l’image l’ouvre en grand dans l’app. Fermer ramène au message. Télécharger demande un accord, écrit un PNG neuf, et ce PNG est la même image (mêmes dimensions, même aperçu).
-4. **Modifier en parlant.** Phrase : « Mets le fond en rouge et garde le cercle bleu. » Une nouvelle bulle montre la nouvelle image. L’image précédente est encore dans le fil. Les deux PNG diffèrent.
-5. **Galerie.** L’image apparaît dans la galerie de ce bot. Après changement de bot, la galerie ne la montre pas. Revenir au premier bot la montre encore, y compris après avoir rouvert l’app.
-6. **PDF.** Phrase demandant un PDF avec le titre « Bilan », un emoji 😀 dans le titre ou juste dessous, et un tableau à deux colonnes (Nom, Valeur) et deux lignes. L’aperçu dans la bulle, puis le plein écran dans l’app, montrent une police proportionnelle, le glyphe emoji, un titre plus grand que le corps, un tableau aligné dont l’en-tête se distingue, et un bandeau ou un titre de la couleur d’accent. Le texte reste foncé sur fond clair, y compris en thème sombre. Aucun message du type « non pris en charge par Courier ».
-7. **Accent.** Changer l’accent de l’app pour le violet, demander un nouveau PDF : le bandeau ou le titre est violet. Le PDF précédent reste à l’accent qu’il avait.
-8. **DOCX.** Le même contenu en DOCX, ouvert en plein écran dans l’app, montre titre, emoji, tableau et accent. Fermer le plein écran rend la conversation.
-9. **Contexte.** Déposer un fichier de contexte sur le bot A contenant un mot rare. Ouvrir une conversation neuve avec A et demander ce mot : la réponse s’en sert. La même demande au bot B ne le connaît pas.
-10. **Recherche.** Avec assez de fichiers de contexte pour dépasser le budget injecté, demander un fait présent seulement dans un fichier non injecté en entier. Le bot le retrouve. Un fait privé d’un autre bot ne ressort pas.
-11. **Rangement.** L’image du parcours 1 et le PDF du parcours 6 figurent dans la bibliothèque du bot, rôle généré. Une conversation neuve ne réinjecte pas leur contenu intégral ; elle peut les retrouver par une question de recherche.
+1. **Génération.** Phrase : « Dessine un phare au crépuscule. » L’indicateur « Génération d’une image… » apparaît, puis une image dans le fil. Aucune carte d’approbation. Déconnecter le compte, ou partir d’un profil sans clé : la carte « Connecte ton compte OpenAI » s’affiche et aucune image n’est ajoutée. Un refus de sécurité scripté, rejoué sur le fournisseur de boucle devant le juge si le compte réel ne le produit pas, affiche une phrase française et ne relance pas l’appel.
+2. **Référence et cadre.** Joindre une photo. Phrase : « Le même style, en 16:9. » L’image résultante est en 16:9 et le juge reconnaît le style de la photo. Demander un cadre « 2:1 » affiche un refus français et n’ajoute pas d’image.
+3. **Grille.** Un message qui contient trois images les montre en grille. Le clic ouvre la visionneuse, la légende est lisible, les flèches et les touches changent d’image. « Enregistrer l’image… » produit un fichier ouvrable. « Copier l’image » dépose une image dans le presse-papiers, collable dans un autre document. Aucun écran « Galerie » n’est ajouté au menu.
+4. **Enfant.** Joindre une capture connue. Phrase : « Délègue la description de cette photo. » Le fil `task:` décrit cette capture. Une délégation dans un autre fil, sans la photo, ne décrit pas cette capture.
+5. **Page.** Phrase : « Compare mes 3 forfaits dans un tableau interactif. » Une Page s’affiche à côté du fil. Le fil ne se contente pas d’un tableau Markdown à la place de cette Page. Renommer, puis « Ouvrir en pleine page », puis quitter et rouvrir : la Page est dans « Pages » et se rouvre. Une compilation cassée, injectée une fois, est corrigée sans que Charles édite le fichier. Aucun bouton de partage public.
+6. **PDF.** Phrase : « Fais un PDF avec é, ç, 🎉 et un tableau, puis le même contenu en DOCX et en PPTX. » Les trois fichiers s’ouvrent. Le PDF montre les accents, l’emoji et le tableau. Le docx et le pptx aussi. Aucune case de glyphe manquant.
+7. **Bibliothèque.** Déposer `tarifs.pdf` dans la bibliothèque du bot A. Nouveau fil : « Quel est le tarif X ? » La réponse cite `tarifs.pdf` et le tarif juste. Le bot B, nouveau fil, même question, dit qu’il n’a pas ce document.
+8. **Retrait.** Retirer `tarifs.pdf`. Nouveau fil du bot A : le bot dit qu’il ne l’a plus. Déposer une version corrigée sous le même usage : la citation suit la nouvelle version. Déposer un fichier au-delà de la taille affichée : phrase française, le panneau ne gagne pas ce fichier.
 
 ## Hors-périmètre
 
-- Réécrire PPTX, XLSX, CSV, Markdown et SVG. Ils continuent de se générer comme aujourd’hui et ne doivent pas régresser. Ils ne reçoivent pas le modèle couleur dans ce lot.
-- La vidéo, en entier. Charles la laisse de côté pour l’instant : ni génération, ni lecture d’une vidéo jointe, ni lecteur dans la bulle. Les issues ouvertes pour cela sont fermées. La galerie d’images, elle, reste dans le lot.
-- Un bouton « générer une image », un éditeur de dessin, des calques, ou un choix manuel de taille et de qualité. `quality` et `size` restent `auto`.
-- Prétendre que le poids `gpt-image-2` a bien été celui qui a dessiné, lorsque la route ne le confirme pas.
-- Embarquer une police Apple dans le dépôt ou dans un fichier redistribué.
-- Une galerie synchronisée en ligne, un partage d’images entre Mac, un compte d’équipe multi-comptes.
-- Relire en entier, à chaque tour, les fichiers générés ou une bibliothèque qui dépasse le budget déjà pratiqué pour la mémoire.
-- La recherche sémantique, les embeddings, et une garantie que le modèle citera le bon passage.
-- Modifier une image jointe par Charles qui n’a pas été générée dans le fil, dans ce premier parcours. La modification vise l’image que le bot vient de produire.
-- La génération d’avatars de bot comme produit séparé. Une image demandée dans la conversation suit le parcours général.
+- Générer une vidéo, joindre une vidéo, et le drapeau vidéo de Grok Bot.
+- Retouche, masque, inpainting, variation.
+- Une page galerie hors du fil.
+- Partager une Page, la publier, ou la compiler sur un serveur.
+- Un second coffre de clés, et un champ pour coller une clé API dans le fil.
+- Changer la limite de dix pièces et de 20 Mo d’une pièce jointe.
+- Réécrire la lecture des images jointes déjà livrée.
+- L’ordinateur cloud, le Mac éteint qui générerait quand même, l’iPhone comme lieu de génération.
+- Faire de la bibliothèque une mémoire d’équipe ou un index distant.
+- Notion, les connecteurs, les routines. Le mémo vocal est le fichier `docs/specs/memo-vocal.md`, enfant de la carte [#63](https://github.com/charlescstpierr/ezerbot/issues/63), pas de cette carte.
 
 ## Risques
 
-- **La route Images peut refuser le client Ezerbot.** L’origine envoyée aujourd’hui est celle du flux pi, pas celle du client Codex officiel. Une sonde tierce a réussi avec une autre origine, ce qui rend le succès plausible, pas garanti pour ce compte. Mitigation : le repli par clé d’API dans le trousseau, et un message français si les deux voies manquent. Le juge visuel du parcours 1 est le moment de vérité sur le compte de Charles.
-- **Le modèle peut ne pas appeler l’outil.** Les tests scriptent l’appel. Seul le juge, avec le vrai compte, vérifie qu’une description d’image déclenche bien une image. Si le modèle décrit l’image en texte, on resserre la description de l’outil ; on n’ajoute pas un détecteur de mots-clés.
-- **Le nom de modèle peut être ignoré.** La sonde de septembre 2026 a reçu un PNG même pour un nom invalide, sans champ de modèle effectif. L’acceptation est le PNG dans la bulle, pas une affirmation sur `gpt-image-2.5-sunburst` ou un autre poids.
-- **Quota et droits.** Une image consomme le quota d’images du compte ChatGPT/Codex, ou le crédit de la clé d’API. Un refus de quota réutilise le type d’échec déjà montré pour le chat (`limit` ouvre les réglages d’utilisation), sans inventer un pourcentage local.
-- **Emoji et PDF hors de ce Mac.** L’API PDF du système montre l’emoji dans Aperçu et dans l’app. Un lecteur Linux du fichier peut ne pas dessiner l’emoji couleur. Les tests hors Mac vérifient que la génération accepte l’emoji et que la police n’est plus Courier ; le glyphe est jugé sur Mac.
-- **Couleur d’accent peu lisible.** L’accent « blanc » ou un accent clair sur page claire disparaîtrait. Le bandeau utilise l’accent profond quand l’accent clair ne contraste pas avec le fond de page. Le juge le vérifie avec l’accent par défaut et avec le violet.
-- **Taille des images dans la base.** Les PNG s’accumulent par bot. Les plafonds existants s’appliquent ; un dépassement échoue en français avant d’écrire. Ce lot ne migre pas l’historique.
-- **Clé d’API.** Elle est un secret de facturation. Elle reste dans le trousseau, absente des prompts, des journaux, de la mémoire et des exports. Les tests utilisent un coffre jetable, comme les tests de trousseau déjà présents.
+- **La clé est un secret de compte.** Elle suit la règle déjà prise pour les jetons : trousseau, pas de repli fichier pour un secret de compte quand le trousseau est actif. Le juge du parcours 1 vérifie qu’elle n’est pas à l’écran. Les tests vérifient qu’elle n’est pas dans le transcript.
+- **Un refus de sécurité mal classé relancerait l’appel.** Le test compte un seul appel, puis la phrase. Pas de boucle.
+- **gpt-image peut refuser le compte connecté.** La phrase « modèle restreint » est le comportement visible. Le juge du parcours 1 a besoin d’un compte qui produit une vraie image. Les tests, eux, tournent sur la boucle.
+- **Une Page exécute du code local écrit par le bot.** Elle n’est pas partagée. Une compilation en échec ne doit pas être affichée comme une Page vide réussie : le diagnostic reste visible tant que le bot n’a pas réécrit un fichier qui compile.
+- **Le PDF change de police.** Les accents qui passaient par WinAnsi doivent encore passer. Le parcours 6 et le test d’extraction sont là pour cela. Un glyphe hors police échoue encore en français.
+- **La bibliothèque peut être volumineuse.** Le plafond de 20 Mo par fichier et la recherche lexicale locale évitent d’envoyer tous les fichiers à chaque tour. Un fichier retiré doit disparaître du rappel au fil suivant : le parcours 8 le coche.
+- **L’enfant et la vie privée.** `selected_images` ne prend que les images du fil d’origine. Le test du parcours 4 couvre l’autre fil.
+
+## Preuves
+
+Source : Grok Bot 0.72.1, extraction asar en lecture seule. `grokbot-rea.md` §d et `tickets-parite.md` R1, R3, R4. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
+
+- **Génération sans carte.** [P] `GenerateImageRequestResponse` (`approved`, `rejected`) n’est qu’un proto hérité inutilisé dans `electron-main/proto.cjs`. Le renderer n’a que « Generating a photo » dans `renderer/assets/index.eager-app-*.js` (R1). [P] outil `GenerateImageArgs` (`description`, `file_path` optionnel, `reference_image_paths`, `aspect_ratio`) dans `electron-main/proto.cjs`. [P] RPC `RunGenerateImage`, requête `RunGenerateImageRequest` (`description`, `reference_images`, `model_id`, `max_mode`, `aspect_ratio`). [P] erreurs `RunGenerateImageError` : `model_restricted`, `content_safety_blocked` (rea §d). L’indicateur « Génération d’une image… », la carte « Connecte ton compte OpenAI », la clé au trousseau et l’absence de nouvel appel sont le choix Ezerbot de T1, pas des chaînes extraites.
+- **Modèle.** [P] aucune occurrence de `imagine`, `grok-2-image`, `flux`, `gpt-image` ni `images/generations` (rea §d). [P] l’avatar part de `modelId` `SAND_DEFAULT_MODEL_ID`, où `Pp="grok-4.5"` dans `electron-main/main-core.cjs`, avec `aspectRatio:"1:1"`. [I] le modèle d’image de Grok est probablement Grok Imagine. gpt-image et la clé OpenAI de Charles sont le choix Ezerbot.
+- **Références et cadre.** [P] `reference_image_paths` et `reference_images` (rea §d). [P] la seule valeur de cadre citée est `aspectRatio:"1:1"`, pour l’avatar. [I] la liste fermée 1:1, 16:9, 9:16, 4:3, 3:4 est celle de T2. L’extrait ne cite pas ces quatre autres rapports.
+- **Galerie.** [P] `gallery`, `galleryIndex`, `captions` dans `renderer/assets/index.eager-app-BBYQQe1M.js`, plus « Enregistrer l'image… » et « Copier l'image » (rea §d). [I] « aucune page de galerie dédiée n’a été trouvée » est une absence dans l’extrait, pas une preuve exhaustive. Les flèches et le clavier ne sont pas des symboles cités. [P] pas de retouche : pas de `inpaint`, `edit_image` ni `variation` hors CSS. `chunk-agent-avatar-editor-*.js` et l’IPC `generateAgentAvatarImage` concernent l’avatar du bot, pas la galerie du fil.
+- **Vidéo.** [P] drapeau `grok_bot_generate_video`, défaut `!1` (rea §d). Hors périmètre. L’extrait d’images ne nomme pas d’autre fichier pour ce drapeau.
+- **Image à l’enfant.** [P] le schéma prévoit `SubagentArgs.selected_context.selected_images` dans `local-exec-daemon/main.cjs` (R3). [I] que le serveur transmette vraiment les octets n’est pas tranchable dans le client : l’orchestrateur est serveur. T4 copie le schéma, octets ou chemin plus type MIME, pas seulement le nom.
+- **Page.** [P] `WriteCanvasArgs` et `GetCanvasPayloadResponse` dans `electron-main/proto.cjs`. Skill « Cursor Canvas » dans `electron-main/main-app.cjs` (R4). L’extrait dit une app React vivante, compilée, renommable, partageable. [I] le fichier local `.page.tsx`, le diagnostic ligne et caractère rendu au bot, « Ouvrir en pleine page » et la liste « Pages » sont la précision de T24. Ces libellés ne sont pas des chaînes extraites. Pas de lien public : choix Ezerbot, Ezerbot n’a pas de serveur.
+- **PDF et bibliothèque.** Aucun symbole de police PDF, d’emoji, de tableau ni de bibliothèque par bot dans `grokbot-rea.md` ni dans R1, R3, R4. [I] T5 et T6 reprennent les écarts DOC-2 et DOC-3 du tableau de parité. Courier et WinAnsi sont le code Ezerbot actuel, pas une chaîne Grok. Le plafond de 20 Mo est celui déjà en vigueur pour une pièce jointe.
 
 ## Tranches
 
-Carte : [Images et documents](https://github.com/charlescstpierr/ezerbot/issues/31). Chaque tranche traverse l’outil, la persistance, la bulle et le test. Le détail et les critères vivent dans l’issue. Les blocages sont aussi des dépendances natives sur le suivi.
+Chaque tranche traverse le parcours visible et le test. Le détail est dans l’annexe. Les blocages seront aussi des dépendances natives quand les issues existeront. Labels des tranches : `wayfinder:task`, `enhancement`, `ready-for-agent`. La première à prendre est T1.
 
-1. [Générer une image et l’afficher dans la bulle](https://github.com/charlescstpierr/ezerbot/issues/33). Aucun bloquant. Première tranche à prendre.
-2. [Agrandir et télécharger l’image de la bulle](https://github.com/charlescstpierr/ezerbot/issues/38). Bloquée par 33.
-3. [Modifier une image en conversant](https://github.com/charlescstpierr/ezerbot/issues/39). Bloquée par 33.
-4. [Galerie des images du bot](https://github.com/charlescstpierr/ezerbot/issues/40). Bloquée par 33.
-5. [PDF lisible en plein écran, aux couleurs de Charles](https://github.com/charlescstpierr/ezerbot/issues/34). Aucun bloquant.
-6. [DOCX au même modèle que le PDF](https://github.com/charlescstpierr/ezerbot/issues/41). Bloquée par 34.
-7. [Fichiers de contexte lus à chaque conversation](https://github.com/charlescstpierr/ezerbot/issues/35). Aucun bloquant.
-8. [Recherche dans la bibliothèque du bot](https://github.com/charlescstpierr/ezerbot/issues/42). Bloquée par 35.
-9. [Ranger images et documents générés dans la bibliothèque](https://github.com/charlescstpierr/ezerbot/issues/43). Bloquée par 40 et 35.
+Carte à créer : « Images, documents et bibliothèque ».
 
-La vidéo est hors périmètre. [Lecture d’une vidéo jointe hors périmètre](https://github.com/charlescstpierr/ezerbot/issues/36) et [Génération vidéo hors périmètre](https://github.com/charlescstpierr/ezerbot/issues/37) sont fermées. Aucune tranche vidéo ne reste ouverte.
+1. T1. Le bot génère une image. Aucun bloquant.
+2. T2. Images de référence et format. Bloquée par T1.
+3. T3. Galerie et visionneuse. Aucun bloquant : les images jointes suffisent. L’image générée entre dans la même grille une fois T1 livrée.
+4. T4. Transmettre une image jointe à un sous-agent. Aucun bloquant.
+5. T24. Créer une Page. Aucun bloquant.
+6. T5. PDF Unicode, emoji et tableau. Aucun bloquant.
+7. T6. Bibliothèque : ajouter. Aucun bloquant.
+8. T7. Bibliothèque : retirer et remplacer. Bloquée par T6.
+
+## Annexe — tickets prêts à créer
+
+Ces corps sont prêts à coller dans le suivi. Cette PR ne crée aucune issue. Le parent de chacun est la carte « Images, documents et bibliothèque » une fois créée. Spec : `docs/specs/images-documents.md`.
+
+### T1 — Le bot génère une image
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 1 et parcours juge 1.
+
+## What to build
+
+Le bot appelle `generate_image` quand Charles demande un dessin. L’argument est la description. Le cadre omis vaut 1:1. Le modèle est gpt-image. La clé OpenAI de Charles est lue dans le trousseau. Elle n’est pas écrite dans le fil, les journaux, ni le contexte.
+
+Pendant l’appel, le fil affiche « Génération d’une image… ». L’image le remplace. Un refus `content_safety_blocked` ou un modèle restreint affiche une phrase française et n’appelle pas le fournisseur une seconde fois. Sans clé, la carte « Connecte ton compte OpenAI » s’affiche et le compte d’appels reste à zéro. Aucune carte d’approbation.
+
+Démo : « Dessine un phare au crépuscule », puis l’image.
+
+TDD : d’abord un test rouge du wrapper contre le fournisseur de boucle (un appel, image dans le fil, refus de sécurité affiché, zéro appel sans clé, clé absente du transcript).
+
+## Acceptance criteria
+
+- [ ] TDD : le test du comportement visible est rouge avant le changement et vert après.
+- [ ] « Dessine un phare au crépuscule » produit un appel et une image dans le fil, avec l’indicateur pendant l’appel.
+- [ ] Aucune carte d’approbation n’est proposée.
+- [ ] Sans clé, la carte « Connecte ton compte OpenAI » s’affiche et le fournisseur n’est pas appelé.
+- [ ] Un refus de sécurité et un modèle restreint sont des phrases françaises, avec un seul appel chacun.
+- [ ] La clé est absente du transcript, des journaux et de l’export.
+- [ ] Joindre une image et la faire décrire fonctionne encore.
+- [ ] Juge visuel sur le Mac, vrai compte : parcours 1 de la spec.
+
+## Blocked by
+
+- None (can start immediately)
+
+### T2 — Images de référence et format
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 2 et parcours juge 2.
+
+## What to build
+
+`generate_image` accepte `reference_image_paths` (images jointes au fil) et `aspect_ratio` parmi 1:1, 16:9, 9:16, 4:3, 3:4. La référence part avec la demande. Un cadre hors de cette liste est refusé en français, sans appel. Pas de masque ni de retouche.
+
+Démo : une photo jointe, « le même style, en 16:9 », une image 16:9 à côté.
+
+TDD : d’abord un test rouge (la référence est dans l’appel, le cadre 16:9 est celui de l’image rendue, un cadre « 2:1 » fait zéro appel).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] Une image jointe citée comme style est envoyée dans `reference_image_paths`.
+- [ ] 16:9, 1:1, 9:16, 4:3 et 3:4 sont acceptés.
+- [ ] Un cadre inconnu est une phrase française et zéro appel.
+- [ ] Juge visuel : parcours 2 de la spec. La photo et le résultat sont lisibles ensemble, et le rapport 16:9 se voit.
+
+## Blocked by
+
+- T1 — Le bot génère une image
+
+### T3 — Galerie et visionneuse dans le fil
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 3 et parcours juge 3.
+
+## What to build
+
+Plusieurs images d’un message s’affichent en grille. Un clic ouvre la visionneuse plein écran : flèches, légende, « Enregistrer l’image… », « Copier l’image ». Les touches image suivante et précédente circulent. Enregistrer écrit le fichier. Copier met l’image dans le presse-papiers. Il n’y a pas de page galerie. Les images jointes suffisent pour livrer cette tranche. Une image produite par T1 utilise la même grille.
+
+Démo : trois images, grille, visionneuse, fichier enregistré, collage.
+
+TDD : d’abord un test rouge du rendu (grille de trois, libellés, enregistrement, presse-papiers).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] Trois images d’un message forment une grille.
+- [ ] La visionneuse montre la légende et change d’image à la flèche et au clavier.
+- [ ] « Enregistrer l’image… » produit le fichier. « Copier l’image » alimente le presse-papiers.
+- [ ] Le menu de l’app ne gagne pas d’entrée Galerie.
+- [ ] Juge visuel : parcours 3 de la spec.
+
+## Blocked by
+
+- None (can start immediately). Le juge d’une image générée dans la grille attend T1. Les images jointes débloquent le reste.
+
+### T4 — Transmettre une image jointe à un sous-agent
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 4 et parcours juge 4.
+
+## What to build
+
+Quand `delegate` vise une image jointe au fil, l’enfant reçoit `selected_images` : les octets, ou le chemin local et le type MIME. Le nom du fichier ne suffit pas. L’enfant décrit cette image dans le fil `task:`. Une délégation ouverte dans un fil qui n’a pas l’image ne la contient pas.
+
+Démo : « Délègue la description de cette photo », description juste.
+
+TDD : d’abord un test rouge qui observe la requête de l’enfant et constate l’image, puis l’absence d’image dans un autre fil.
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après. L’enfant reçoit l’image, pas seulement son nom.
+- [ ] Le fil `task:` décrit l’image jointe.
+- [ ] Un autre fil, sans cette image, ne la place pas dans `selected_images`.
+- [ ] Juge visuel : parcours 4 de la spec.
+
+## Blocked by
+
+- None (can start immediately)
+
+### T24 — Créer une Page
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 5 et parcours juge 5.
+
+## What to build
+
+Quand le bot produit une analyse autonome, il écrit un fichier `.page.tsx`. Ezerbot le compile sur le Mac et l’affiche dans un cadre à côté du fil. Une erreur de compilation est renvoyée au bot avec la ligne et le caractère. Le bot réécrit le fichier sans que Charles l’édite. Charles peut renommer la Page, choisir « Ouvrir en pleine page », et la retrouver dans la liste « Pages » du bot. La Page survit au redémarrage. Aucun lien de partage.
+
+Démo : « Compare mes 3 forfaits dans un tableau interactif », la Page à côté du fil.
+
+TDD : d’abord un test rouge (la Page s’affiche, une erreur injectée est corrigée, le fichier est encore là après redémarrage, pas de URL publique).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] La demande de tableau interactif affiche une Page, et le fil ne s’arrête pas à un tableau Markdown à sa place.
+- [ ] Une erreur de compilation injectée est corrigée sans édition manuelle.
+- [ ] Renommer et « Ouvrir en pleine page » sont disponibles. La liste « Pages » retrouve la Page après redémarrage.
+- [ ] Aucun contrôle de partage public n’est proposé.
+- [ ] Juge visuel : parcours 5 de la spec. Capture du fil avec la Page, puis la pleine page.
+
+## Blocked by
+
+- None (can start immediately)
+
+### T5 — PDF Unicode, emoji et tableau
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 6 et parcours juge 6.
+
+## What to build
+
+`create_document` en PDF n’utilise plus Courier comme seule police. Une police embarquée couvre les accents français et l’emoji. L’emoji peut être dessiné en image si la police n’a pas le glyphe. Un tableau demandé est un tableau. Le même contenu en docx et en pptx montre les accents, l’emoji et le tableau. Un caractère encore hors couverture fait échouer la génération en français, sans case vide.
+
+Démo : « Fais un PDF avec é, ç, 🎉 et un tableau », puis les trois formats ouverts.
+
+TDD : d’abord un test rouge d’extraction (é, ç, cellules) et de rendu (emoji présent, aucun glyphe manquant).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] Le PDF contient é, ç, le tableau, et l’emoji visible.
+- [ ] Le docx et le pptx montrent les mêmes éléments.
+- [ ] Un PDF limité aux accents français déjà acceptés s’ouvre encore.
+- [ ] Un caractère hors couverture échoue en français, sans fichier à glyphe manquant.
+- [ ] Juge visuel : parcours 6 de la spec, fichiers ouverts dans Aperçu ou l’application habituelle.
+
+## Blocked by
+
+- None (can start immediately)
+
+### T6 — Bibliothèque : ajouter des fichiers de contexte
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 7 et parcours juge 7.
+
+## What to build
+
+Les réglages du bot gagnent un panneau Bibliothèque. Charles y dépose par glisser-déposer un pdf, un docx, un xlsx, un csv, un pptx, un md ou un txt. Le plafond annoncé est 20 Mo. Le fichier est retenu pour ce bot. Un nouveau fil de ce bot peut s’en servir, et la réponse cite le fichier. Un autre bot ne le reçoit pas.
+
+Démo : `tarifs.pdf` sur le bot A, question sur le tarif, citation. Le bot B ne sait pas.
+
+TDD : d’abord un test rouge à deux bots (citation chez A, absence chez B).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] Le panneau accepte le dépôt des formats listés et affiche le fichier.
+- [ ] Un nouveau fil du bot A cite le fichier et répond juste.
+- [ ] Le bot B ne cite pas ce fichier et ne prétend pas l’avoir.
+- [ ] Juge visuel : parcours 7 de la spec.
+
+## Blocked by
+
+- None (can start immediately)
+
+### T7 — Bibliothèque : retirer et remplacer
+
+## Parent
+
+Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-documents.md`, décision 7 et parcours juge 8.
+
+## What to build
+
+Retirer un fichier de la bibliothèque le sort du rappel : le bot dit ensuite qu’il ne l’a plus. Remplacer le fichier met à jour ce qui est cité. La taille maximale est annoncée sur le panneau. Un fichier plus gros est refusé en français et n’est pas retenu.
+
+Démo : avant et après le retrait, puis un remplacement.
+
+TDD : d’abord un test rouge (après retrait, la réponse dit que l’information n’est plus là ; après remplacement, la nouvelle valeur est citée ; le fichier trop gros est absent de la liste).
+
+## Acceptance criteria
+
+- [ ] TDD : le test est rouge avant et vert après.
+- [ ] Après retrait, un nouveau fil dit que le bot n’a plus l’information.
+- [ ] Après remplacement, la citation suit la nouvelle version.
+- [ ] Au-delà de la taille annoncée, refus français, fichier absent du panneau.
+- [ ] Juge visuel : parcours 8 de la spec, avant et après.
+
+## Blocked by
+
+- T6 — Bibliothèque : ajouter des fichiers de contexte

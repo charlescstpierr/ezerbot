@@ -59,18 +59,79 @@ test("a group sign-in card never promises a retry, even after account changes", 
   for (const providerConnected of [false, true]) {
     const card = signInCardState({ message, providerConnected, isGroup: true });
     assert.equal(card.showRetry, false);
-    assert.equal(card.copy, providerConnected ? "Envoyez un nouveau message pour obtenir une réponse." : "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message.");
+    assert.equal(card.copy, providerConnected ? "Envoyez un nouveau message pour obtenir une réponse." : "Connectez votre compte ChatGPT, puis envoyez un nouveau message.");
     assert.equal(card.showSignIn, !providerConnected);
   }
+});
+
+function cssDeclarations(block) {
+  return Object.fromEntries([...block.matchAll(/(-{0,2}[-\w]+)\s*:\s*([^;]+);/g)].map(([, name, value]) => [name, value.trim()]));
+}
+
+function painted(vars, ...blocks) {
+  const style = Object.assign({}, ...blocks);
+  const resolve = (value) => value?.replace(/var\((--[-\w]+)\)/g, (_, name) => vars[name]);
+  const border = resolve(style.border);
+  return {
+    background: resolve(style.background),
+    color: resolve(style.color),
+    borderColor: resolve(style["border-color"]) || border?.match(/solid\s+(\S+)/)?.[1],
+  };
+}
+
+test("a connected account card paints a neutral surface instead of the warning amber", () => {
+  const styles = readFileSync(new URL("../../ui/styles.css", import.meta.url), "utf8");
+  const chat = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
+  const vars = cssDeclarations(styles.match(/:root\s*\{([^}]+)\}/)[1]);
+  const pending = cssDeclarations(chat.match(/\.gb-pending\s*\{([^}]+)\}/)[1]);
+  const connected = cssDeclarations(chat.match(/\.gb-pending\.gb-connected\s*\{([^}]+)\}/)?.[1] || "");
+  const retry = cssDeclarations(chat.match(/\.gb-retry\s*\{([^}]+)\}/)[1]);
+  const connectedRetry = cssDeclarations(chat.match(/\.gb-pending\.gb-connected \.gb-retry\s*\{([^}]+)\}/)?.[1] || "");
+  const card = painted(vars, pending, connected);
+  const button = painted(vars, retry, connectedRetry);
+  assert.equal(card.background, vars["--soft"]);
+  assert.equal(card.color, vars["--text"]);
+  assert.equal(card.borderColor, vars["--line"]);
+  assert.notEqual(card.background, vars["--warning-bg"]);
+  assert.notEqual(card.color, vars["--warning-text"]);
+  assert.equal(button.color, vars["--text"]);
+  assert.notEqual(button.color, vars["--warning-text"]);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /view\.alert \? " gb-problem" : " gb-connected"/);
+});
+
+test("a connected account card is a status, not a red alert", () => {
+  const connected = signInCardState({ message: { error_kind: "signin" }, providerConnected: true });
+  assert.equal(connected.title, "Compte ChatGPT connecté");
+  assert.equal(connected.alert, false);
+  const offline = signInCardState({ message: { error_kind: "signin" }, providerConnected: true, engineConnected: false });
+  assert.equal(offline.alert, false);
+  assert.equal(signInCardState({ message: { error_kind: "signin" } }).alert, true);
+  assert.equal(signInCardState({ message: { error_kind: "signin_expired" } }).alert, true);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /className=\{`gb-pending\$\{view\.alert \? " gb-problem" : " gb-connected"\}`\}/);
+  assert.match(source, /\{view\.alert \? <TriangleAlert \/> : <Check \/>\}/);
+});
+
+test("a sign-in card treats the local engine as down until the shell reports it", () => {
+  const card = signInCardState({ message: { error_kind: "signin" }, providerConnected: true });
+  assert.equal(card.retryDisabled, true);
+  assert.equal(card.signInDisabled, true);
+  assert.equal(card.retryTitle, "Moteur local indisponible");
+  const ready = signInCardState({ message: { error_kind: "signin" }, providerConnected: true, engineConnected: true });
+  assert.equal(ready.retryDisabled, false);
+  assert.equal(ready.signInDisabled, false);
 });
 
 test("direct retries are enabled only after both account and local engine are available", () => {
   const message = { error_kind: "signin" };
   const missing = signInCardState({ message });
   assert.equal(missing.title, "Connectez votre compte ChatGPT");
+  assert.equal(missing.signInLabel, "Se connecter");
+  assert.doesNotMatch(`${missing.copy} ${missing.signInLabel}`, /via Codex|clé API/);
   assert.equal(missing.showRetry, true);
   assert.equal(missing.retryDisabled, true);
-  const ready = signInCardState({ message, providerConnected: true });
+  const ready = signInCardState({ message, providerConnected: true, engineConnected: true });
   assert.equal(ready.retryDisabled, false);
   assert.equal(ready.title, "Compte ChatGPT connecté");
   assert.equal(ready.showSignIn, false);
@@ -84,8 +145,78 @@ test("direct retries are enabled only after both account and local engine are av
 test("an expired session has an explicit persistent reconnect presentation", () => {
   const card = signInCardState({ message: { error_kind: "signin_expired" } });
   assert.equal(card.title, "Votre session ChatGPT a expiré");
-  assert.equal(card.signInLabel, "Se reconnecter via Codex");
+  assert.equal(card.signInLabel, "Se reconnecter");
   assert.equal(replyProblemState({ error_kind: "signin_expired" }).signin, true);
+});
+
+test("an expired session body states the expiry instead of the generic sign-in copy", () => {
+  const expired = signInCardState({ message: { error_kind: "signin_expired" } });
+  const generic = signInCardState({ message: { error_kind: "signin" } });
+  assert.match(expired.copy, /^Votre session ChatGPT a expiré\. /);
+  assert.notEqual(expired.copy, generic.copy);
+  assert.match(expired.copy, /Reconnectez votre compte ChatGPT, puis réessayez\./);
+  const group = signInCardState({ message: { error_kind: "signin_expired" }, isGroup: true });
+  assert.match(group.copy, /^Votre session ChatGPT a expiré\. /);
+  assert.match(group.copy, /envoyez un nouveau message/);
+  assert.equal(group.showRetry, false);
+  const task = signInCardState({ message: { error_kind: "signin_expired" }, isTask: true });
+  assert.match(task.copy, /^Votre session ChatGPT a expiré\. /);
+  assert.match(task.copy, /conversation principale/);
+  const reconnected = signInCardState({ message: { error_kind: "signin_expired" }, providerConnected: true });
+  assert.equal(reconnected.title, "Compte ChatGPT connecté");
+  assert.match(reconnected.copy, /Réessayez pour obtenir la réponse/);
+});
+
+test("a group failure does not tell the reader to retry when no retry button is offered", () => {
+  const message = { error_kind: "other", error: "La réponse a dépassé le délai maximal. Réessayez.", payload: { turn_id: "t" } };
+  const view = replyProblemState(message, { isGroup: true });
+  assert.equal(view.retry, false);
+  assert.equal(view.error, "La réponse a dépassé le délai maximal. Envoyez un nouveau message.");
+  assert.equal(view.advice, null);
+  const direct = replyProblemState({ error_kind: "other", error: message.error });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, message.error);
+  const task = replyProblemState({ error_kind: "other", error: message.error }, { isTask: true });
+  assert.equal(task.retry, false);
+  assert.match(task.error, /Poursuivez dans la conversation principale\.$/);
+  assert.equal(task.advice, null);
+  const local = replyProblemState({ error_kind: "local_connection", error: "La connexion au moteur local est interrompue. La réponse peut avoir continué : réessayez pour retrouver son état, sans renvoyer votre question." }, { isGroup: true });
+  assert.equal(local.retry, true);
+  assert.match(local.error, /réessayez pour retrouver son état/);
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  assert.match(source, /<p>\{error\}<\/p>/);
+  assert.ok(!source.includes("<p>{message.error}</p>"));
+});
+
+test("group copy rewrites every retry instruction, including a delay or a shorter request", () => {
+  const cases = [
+    ["Les connexions précédentes se ferment encore. Réessayez dans une minute.", "Les connexions précédentes se ferment encore. Envoyez un nouveau message dans une minute."],
+    ["La réponse d’OpenAI dépasse la taille autorisée. Réessayez avec une demande plus courte.", "La réponse d’OpenAI dépasse la taille autorisée. Envoyez un nouveau message avec une demande plus courte."],
+  ];
+  for (const [error, expected] of cases) {
+    const view = replyProblemState({ error_kind: "other", error }, { isGroup: true });
+    assert.equal(view.retry, false);
+    assert.equal(view.error, expected);
+    assert.doesNotMatch(view.error, /Réessayez/);
+    assert.equal(view.advice, null);
+  }
+  const direct = replyProblemState({ error_kind: "other", error: cases[0][0] });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, cases[0][0]);
+});
+
+test("pings without an event are not described as a session renewal", () => {
+  const raw = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
+  const direct = replyProblemState({ error_kind: "other", error: raw });
+  assert.equal(direct.retry, true);
+  assert.equal(direct.error, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
+  assert.doesNotMatch(direct.error, /renouvellement de session/);
+  const group = replyProblemState({ error_kind: "other", error: raw }, { isGroup: true });
+  assert.equal(group.retry, false);
+  assert.equal(group.error, "OpenAI n’a envoyé aucun événement à temps. Envoyez un nouveau message.");
+  assert.doesNotMatch(group.error, /Réessayez|renouvellement/);
+  const stalled = replyProblemState({ error_kind: "other", error: "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez." });
+  assert.equal(stalled.error, "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.");
 });
 
 test("deduplicating group advice does not accidentally enable forbidden regeneration", () => {
@@ -108,6 +239,13 @@ test("a pending tool has a single visible progress state, never after failure or
   assert.equal(visibleNotice({ state: "streaming", notice }), notice);
   assert.equal(visibleNotice({ state: "stopped", notice: "Autre information" }), "Autre information");
   assert.equal(preparingTool({ state: "streaming" }), false);
+});
+
+test("the thread stays disconnected until the shell reports both connections", () => {
+  const source = readFileSync(new URL("./Thread.jsx", import.meta.url), "utf8");
+  const signature = source.match(/export function Thread\((\{[^}]*\})/)[1];
+  assert.match(signature, /providerConnected = false/);
+  assert.match(signature, /engineConnected = false/);
 });
 
 test("a disabled secondary button is dimmed and does not look actionable", () => {

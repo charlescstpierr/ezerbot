@@ -16,32 +16,74 @@ export function composerConnectionState({ offline = false, live = false, busy = 
     label: offline ? "Envoyer le message — moteur local indisponible" : active ? title : busy ? "Envoi en cours" : title };
 }
 
-export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = true }) {
+function signInCopy({ providerConnected, expired, group, isTask }) {
+  if (providerConnected) return group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse.";
+  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis envoyez un nouveau message."
+    : isTask ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
+      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez votre compte ChatGPT, puis réessayez.";
+  return group ? "Connectez votre compte ChatGPT, puis envoyez un nouveau message."
+    : isTask ? "Connectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
+      : "Votre question est conservée. Connectez votre compte ChatGPT, puis réessayez.";
+}
+
+export function signInCardState({ message, isGroup = false, isTask = false, providerConnected = false, engineConnected = false }) {
   const expired = message.error_kind === "signin_expired";
   const group = isGroup || Boolean(message.payload?.turn_id);
   return {
     title: providerConnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : "Connectez votre compte ChatGPT",
-    copy: providerConnected ? group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse." : group ? "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message."
-      : isTask ? "Connectez votre compte ChatGPT via Codex, puis poursuivez dans la conversation principale."
-        : "Votre question est conservée. Connectez-vous via Codex, puis réessayez.",
-    signInLabel: expired ? "Se reconnecter via Codex" : "Se connecter via Codex",
+    copy: signInCopy({ providerConnected, expired, group, isTask }),
+    signInLabel: expired ? "Se reconnecter" : "Se connecter",
     showRetry: !group && !isTask,
     retryDisabled: !providerConnected || !engineConnected,
-    retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez-vous via Codex avant de réessayer." : "Réessayer cette réponse",
+    retryTitle: !engineConnected ? "Moteur local indisponible" : !providerConnected ? "Connectez votre compte ChatGPT avant de réessayer." : "Réessayer cette réponse",
     signInDisabled: !engineConnected,
     showSignIn: !providerConnected,
+    alert: !providerConnected,
   };
+}
+
+export function presentedFailureText(error, { retry = true, replacement = "Envoyez un nouveau message." } = {}) {
+  let text = error || "";
+  // Keepalive pings are not a session renewal. Say that no event arrived.
+  text = text.replaceAll(
+    "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.",
+    "OpenAI n’a envoyé aucun événement à temps. Réessayez.",
+  );
+  if (!retry) {
+    const phrase = replacement.replace(/\.\s*$/, "");
+    text = text.replace(/Réessayez\.(?=\s*$)/, `${phrase}.`);
+    text = text.replace(/Réessayez(?=\s)/, phrase);
+  }
+  return text;
 }
 
 export function replyProblemState(message, { isGroup = false, isTask = false, engineConnected = true } = {}) {
   const signin = ["signin", "signin_expired"].includes(message.error_kind);
   const local = message.error_kind === "local_connection";
   const group = (isGroup || Boolean(message.payload?.turn_id)) && !signin && !local;
-  const advice = local || signin || message.error?.toLocaleLowerCase("fr").includes("envoyez un nouveau message") ? null
+  const retry = local || (!group && !isTask && message.error_kind !== "context_budget");
+  const error = presentedFailureText(message.error, { retry, replacement: isTask ? "Poursuivez dans la conversation principale." : "Envoyez un nouveau message." });
+  const shown = `${message.error || ""} ${error}`.toLocaleLowerCase("fr");
+  const advice = local || signin || shown.includes("envoyez un nouveau message") || shown.includes("poursuivez dans la conversation principale") ? null
     : group ? "Envoyez un nouveau message pour demander une nouvelle réponse."
       : isTask ? "Poursuivez dans la conversation principale." : null;
-  return { signin, advice, retry: local || (!group && !isTask && message.error_kind !== "context_budget"), retryDisabled: !engineConnected,
+  return { signin, advice, error, retry, retryDisabled: !engineConnected,
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
+}
+
+export function floatingFailureState(reply, { providerConnected = false } = {}) {
+  if (reply?.state !== "failed") return null;
+  const expired = reply.error_kind === "signin_expired";
+  const signin = expired || reply.error_kind === "signin";
+  const reconnected = signin && providerConnected;
+  const alert = !signin;
+  return {
+    title: reconnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
+    alert,
+    detailClass: alert ? "floating-error" : "",
+    detail: reconnected ? "Votre question est conservée. Ouvrez le fil pour reprendre la réponse."
+      : presentedFailureText(reply.error, { retry: false, replacement: "Ouvrez le fil." }) || (signin ? "Ouvrez le fil pour vous connecter." : "Ouvrez le fil pour reprendre la réponse."),
+  };
 }
 
 export function visibleNotice(message) {

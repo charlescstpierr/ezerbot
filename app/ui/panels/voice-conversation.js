@@ -220,7 +220,7 @@
         button = el("button","voice-session-toggle"); button.type = "button"; button.onclick = start;
         button.setAttribute("aria-label","Mode voix");
         const icon = el("span","voice-session-icon"); icon.setAttribute("aria-hidden","true");
-        icon.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M4 10v4m4-7v10m4-14v18m4-14v10m4-7v4"/></svg>';
+        icon.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
         button.append(icon,el("span","voice-session-label","Mode voix"));
         const controls = document.querySelector?.(".voice-controls");
         if (controls) controls.prepend(button);

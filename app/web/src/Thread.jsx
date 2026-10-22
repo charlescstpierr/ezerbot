@@ -4,7 +4,8 @@ import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
-import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
+import { MessageAttachments } from "./image-gallery.jsx";
+import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
@@ -123,32 +124,6 @@ function PendingCard({ message, busy, onRetry }) {
   );
 }
 
-function MessageAttachments({ message, align = "end" }) {
-  return message.attachments?.length > 0 && (
-        <div className={`flex flex-wrap items-start ${align === "start" ? "justify-start" : "justify-end"} gap-2`} aria-label="Pièces jointes">
-          {message.attachments.map((attachment, index) => {
-            const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
-            if (!id) return null;
-            if (attachment.kind === "voice") return <div key={`${id}-${index}`} className="gb-voice-memo">
-              <strong>Mémo vocal · {Math.ceil((attachment.duration_ms || 0) / 1000)} s</strong>
-              <audio controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" />
-              {attachment.transcript?.trim() && !message.body?.includes(attachment.transcript.trim()) && <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>}
-            </div>;
-            if (attachment.kind === "document") return <div key={`${id}-${index}`} className="gb-document-chip">
-              <svg width="22" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{documentIconPaths.map((d) => <path key={d} d={d} />)}</svg>
-              <div><strong title={attachment.name}>{attachment.name}</strong>
-                <span>{formatAttachmentSize(attachment.byte_length)} · {attachment.page_label}</span>
-                {attachment.note && <span className="gb-document-note">{attachment.note}</span>}
-              </div>
-            </div>;
-            const description = attachment.caption || attachment.name || "Image jointe";
-            const url = `/api/attachments/${encodeURIComponent(id)}`;
-            return <img key={`${id}-${index}`} className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" />;
-          })}
-        </div>
-  );
-}
-
 function DelegationInstruction({ message, createMascot, botName }) {
   return (
     <article className="gb-message gb-assistant gb-delegation-instruction" data-message-id={message.id} aria-label={`Consigne de ${botName}`}>
@@ -241,6 +216,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const copyText = "copyText" in message ? message.copyText : message.body;
+  const prose = proseWithoutGallery(message.body, galleryImages(message, { markdown: true }));
   useEffect(() => {
     const root = content.current;
     if (!root) return;
@@ -263,20 +239,21 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
     document.fonts?.ready.then(measure);
     measure();
     return () => { active = false; resize.disconnect(); mutations.disconnect(); };
-  }, [message.body, appearance.key]);
-  if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
+  }, [prose, appearance.key]);
+  if (!prose?.trim() && !message.attachments?.length && !galleryImages(message, { markdown: true }).length && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming && !queued}>
       {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
       <div className="gb-content" ref={content}>
         {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>}
-        {message.body
+        {prose?.trim()
           ? (
             <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
-              {message.body}
+              {prose}
             </Streamdown>
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
+        <MessageAttachments message={message} align="start" markdown />
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (

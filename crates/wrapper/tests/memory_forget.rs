@@ -713,6 +713,14 @@ impl PausedStream {
                     .as_reader()
                     .read_to_string(&mut request_body)
                     .unwrap();
+                let probe = serde_json::from_str::<Value>(&request_body)
+                    .ok()
+                    .and_then(|body| {
+                        body["instructions"]
+                            .as_str()
+                            .map(|text| text.starts_with("Test de connexion."))
+                    })
+                    .unwrap_or(false);
                 if request.url() == "/v1/models" {
                     let _ = request.respond(
                         tiny_http::Response::from_string(
@@ -723,6 +731,11 @@ impl PausedStream {
                                 .unwrap(),
                         ),
                     );
+                } else if probe {
+                    let payload = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+                    let _ = request.respond(tiny_http::Response::from_string(payload).with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                    ));
                 } else {
                     // Enough bytes to flush before the gate, proving a model
                     // response is already in flight at the instant of forget.

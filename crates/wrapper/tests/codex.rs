@@ -131,7 +131,7 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
     assert_eq!(query["scope"], "openid profile email offline_access");
     assert_eq!(query["redirect_uri"], "http://localhost:1455/auth/callback");
     assert_eq!(query["code_challenge_method"], "S256");
-    assert_eq!(query["originator"], "pi");
+    assert_eq!(query["originator"], "ezerbot");
     assert_eq!(query["id_token_add_organizations"], "true");
     assert_eq!(query["codex_cli_simplified_flow"], "true");
     assert!(!query.contains_key("resource") && !query.contains_key("ext_agent_host_id"));
@@ -196,12 +196,13 @@ fn oauth_matches_pi_pkce_refresh_storage_selection_and_local_signout() {
             0o600
         );
     }
-    f.provider.select_backend("sharing").unwrap();
+    assert!(f.provider.select_backend("sharing").is_err());
     let restored = Fixture::provider(&f.db, &f.server);
-    assert_eq!(restored.status()["backend"], "sharing");
-    assert_eq!(restored.status()["connections"]["codex"], true);
+    assert_eq!(restored.status()["backend"], "codex");
+    assert!(restored.status().get("connections").is_none());
     restored.select_backend("codex").unwrap();
-    assert_eq!(restored.status()["connected"], true);
+    assert_eq!(restored.status()["signed_in"], true);
+    wait("service Codex", || restored.status()["connected"] == true);
     assert!(restored.signout().unwrap());
     assert!(!f.server.seen.lock().unwrap().revoked); // no undocumented revoke endpoint
     let restarted = Fixture::provider(&f.db, &f.server);
@@ -234,8 +235,8 @@ fn usage_reads_wham_with_ezerbot_oauth_refresh_and_no_model_call() {
     assert!(seen.bodies.is_empty());
     drop(seen);
     assert!(!quota.to_string().contains("refresh-") && !quota.to_string().contains("account-test"));
-    f.provider.select_backend("sharing").unwrap();
-    assert_eq!(f.provider.codex_usage(false)["status"], "unsupported");
+    assert!(f.provider.select_backend("sharing").is_err());
+    assert_eq!(f.provider.codex_usage(false)["status"], "ready");
     f.provider.select_backend("codex").unwrap();
     f.provider.signout().unwrap();
     assert_eq!(f.provider.codex_usage(false)["status"], "signin");
@@ -326,7 +327,7 @@ fn headers_stream_tools_images_and_cache_use_only_codex_backend() {
     let seen = f.server.seen.lock().unwrap();
     let headers = &seen.headers[0];
     assert_eq!(headers["chatgpt-account-id"], "account-test");
-    assert_eq!(headers["originator"], "pi");
+    assert_eq!(headers["originator"], "ezerbot");
     assert_eq!(headers["openai-beta"], "responses=experimental");
     assert_eq!(headers["session-id"], "ezerbot-test");
     assert_eq!(headers["x-client-request-id"], "ezerbot-test");
@@ -340,7 +341,7 @@ fn headers_stream_tools_images_and_cache_use_only_codex_backend() {
         json!({"effort":"high", "summary":"auto"})
     );
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-    assert_eq!(body["text"]["verbosity"], "low");
+    assert!(body.get("text").is_none());
     assert_eq!(body["parallel_tool_calls"], true);
     assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
     assert_eq!(body["tools"][0]["name"], "remember");
@@ -577,7 +578,7 @@ fn first_simple_question_uses_supported_default_and_persists_answer_text() {
 }
 
 #[test]
-fn retired_codex_preferences_migrate_durably_only_while_codex_is_selected() {
+fn retired_preferences_migrate_durably_and_cannot_select_another_subscription() {
     let _serial = OAUTH.lock().unwrap();
     let f = Fixture::new();
     f.login();
@@ -615,37 +616,12 @@ fn retired_codex_preferences_migrate_durably_only_while_codex_is_selected() {
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
         "gpt-6-sol"
     );
-    post(
-        &mut app,
-        "/api/provider/select",
-        json!({"backend":"sharing"}),
-    );
-    post(&mut app, "/api/preferences", json!({"model":"gpt-5.5"}));
-    app.api("GET", "/api/state", b"").unwrap();
-    let saved: String = conn
-        .query_row("SELECT model FROM wrapper_preferences", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(saved, "gpt-5.5", "sharing preferences must not be migrated");
-    post(&mut app, "/api/provider/select", json!({"backend":"codex"}));
+    assert!(app
+        .api("POST", "/api/provider/select", br#"{"backend":"sharing"}"#)
+        .is_err());
     assert_eq!(
         app.api("GET", "/api/state", b"").unwrap()["preferences"]["model"],
-        "gpt-6.1-sol"
-    );
-    post(
-        &mut app,
-        "/api/provider/select",
-        json!({"backend":"sharing"}),
-    );
-    let saved: String = conn
-        .query_row("SELECT model FROM wrapper_preferences", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        saved, "gpt-6.1-sol",
-        "the existing single preference is shared across connections"
+        "gpt-6-sol"
     );
 }
 
@@ -714,14 +690,17 @@ fn plan_without_codex_is_not_a_temporary_quota_limit() {
 }
 
 #[test]
-fn existing_sharing_session_is_preserved_and_new_install_prefers_codex() {
+fn old_sharing_selection_is_ignored_without_touching_legacy_credentials() {
     let f = Fixture::new();
     assert_eq!(f.provider.status()["backend"], "codex");
     std::fs::write(f.db.with_extension("chatgpt-auth.json"), json!({"host_id":"fake", "client_id":"fake", "access_token":"fake", "refresh_token":"fake", "expires_at":4102444800u64, "scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+    std::fs::write(f.db.with_extension("provider.json"), "\"sharing\"").unwrap();
     let upgraded = Fixture::provider(&f.db, &f.server);
-    assert_eq!(upgraded.status()["backend"], "sharing");
+    assert_eq!(upgraded.status()["backend"], "codex");
+    assert_eq!(upgraded.status()["signed_in"], false);
+    assert!(upgraded.select_backend("sharing").is_err());
     upgraded.select_backend("codex").unwrap();
-    assert_eq!(upgraded.status()["connections"]["sharing"], true);
+    assert!(upgraded.status().get("connections").is_none());
     assert!(upgraded.select_backend("inconnu").is_err());
     // Neither migration nor switching modifies the separate sharing token file.
     let saved: Value =
@@ -990,4 +969,359 @@ fn delegation_and_manual_routine_keep_the_codex_transport() {
         .headers
         .iter()
         .all(|headers| headers["chatgpt-account-id"] == "account-test"));
+}
+
+#[test]
+fn connected_requires_a_real_openai_call_and_a_failed_probe_still_sends() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().probe_gate = Some(gate.clone());
+    f.login();
+    let first = f.provider.status();
+    assert_eq!(first["signed_in"], true);
+    assert_eq!(first["connected"], false);
+    assert_eq!(first["connection_test"]["state"], "running");
+    assert!(first.get("connections").is_none());
+    gate.store(true, Ordering::SeqCst);
+    wait("appel OpenAI confirmé", || {
+        f.provider.status()["connected"] == true
+    });
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(
+            seen.bodies.is_empty(),
+            "la sonde ne doit pas compter comme un tour de chat"
+        );
+        let probe = &seen.probe_bodies[0];
+        assert!(probe["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("Test de connexion."));
+        assert!(probe["input"].to_string().contains("Réponds seulement OK."));
+        assert_ne!(probe["model"], "gpt-5.5");
+        assert!(probe.get("tool_choice").is_none(), "{probe}");
+        assert!(probe.get("parallel_tool_calls").is_none(), "{probe}");
+    }
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let conversation = post(
+        &mut app,
+        "/api/conversations",
+        json!({"title":"Vérification"}),
+    )["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"391"}),
+        json!({"type":"response.completed"}),
+    ]));
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"q1","body":"Combien font 17 × 23 ?"}),
+    );
+    wait("réponse du modèle", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == "reply-q1" && message["body"] == "391")
+    });
+    let question = f.server.seen.lock().unwrap().bodies[0].clone();
+    assert!(question["input"]
+        .to_string()
+        .contains("Combien font 17 × 23 ?"));
+    assert!(!question["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("Test de connexion."));
+    drop(app);
+    drop(f);
+
+    let denied = Fixture::new();
+    denied.server.seen.lock().unwrap().fail_probe = true;
+    denied.login();
+    wait("sonde refusée", || {
+        denied.provider.status()["connection_test"]["state"] == "failed"
+    });
+    assert_eq!(denied.provider.status()["signed_in"], true);
+    assert_eq!(denied.provider.status()["connected"], false);
+    let mut app = App::open_with(&denied.db, denied.provider.clone()).unwrap();
+    let conversation = post(&mut app, "/api/conversations", json!({"title":"Refus"}))
+        ["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    denied.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"bonjour quand même"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"q2","body":"Dis bonjour"}),
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("réponse malgré la sonde refusée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == "reply-q2" && message["body"] == "bonjour quand même")
+    });
+    let sent = app.api("GET", "/api/state", b"").unwrap();
+    let reply = sent["conversations"][0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == "reply-q2")
+        .unwrap();
+    assert_eq!(reply["state"], "echoed");
+    assert!(reply["error"].is_null());
+    assert!(denied.server.seen.lock().unwrap().bodies[0]["input"]
+        .to_string()
+        .contains("Dis bonjour"));
+    assert_eq!(denied.provider.status()["connected"], false);
+}
+
+#[test]
+fn a_pending_probe_lets_the_message_leave_without_freezing_the_interface() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().probe_gate = Some(gate.clone());
+    f.login();
+    wait("sonde encore en cours", || {
+        f.provider.status()["connection_test"]["state"] == "running"
+    });
+    assert_eq!(f.provider.status()["connected"], false);
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let conversation = post(&mut app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"parti tout de suite"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"now","body":"Question immédiate"}),
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "l'envoi a attendu la sonde"
+    );
+    let start = std::time::Instant::now();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "l'état a gelé pendant la vérification"
+    );
+    assert_eq!(state["provider"]["connection_test"]["state"], "running");
+    assert_eq!(state["provider"]["connected"], false);
+    wait("réponse pendant que la sonde est bloquée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["id"] == "reply-now"
+                    && message["body"] == "parti tout de suite"
+                    && message["state"] == "echoed"
+            })
+    });
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(seen.bodies[0]["input"]
+            .to_string()
+            .contains("Question immédiate"));
+        assert!(!seen.bodies[0]["instructions"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Test de connexion."));
+    }
+    assert_eq!(f.provider.status()["connection_test"]["state"], "running");
+    assert_eq!(f.provider.status()["connected"], false);
+    assert!(
+        !gate.load(Ordering::SeqCst),
+        "la réponse ne doit pas dépendre de la fin de la sonde"
+    );
+    gate.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn sending_during_verification_never_holds_the_app_mutex_and_stop_fences_the_reply() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    let gate = Arc::new(AtomicBool::new(false));
+    f.server.seen.lock().unwrap().probe_gate = Some(gate.clone());
+    f.login();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let c = post(&mut app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"pending","body":"Question conservée"}),
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    let start = std::time::Instant::now();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    assert_eq!(state["provider"]["connection_test"]["state"], "running");
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/stop",
+        json!({"conversation_id":c,"message_id":"pending"}),
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    assert!(
+        !gate.load(Ordering::SeqCst),
+        "Arrêter a attendu la fin de la sonde"
+    );
+    gate.store(true, Ordering::SeqCst);
+    wait("arrêt pendant vérification", || {
+        app.api("GET", "/api/state", b"").unwrap()["provider"]["titling"] == false
+    });
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    if let Some(body) = bodies.first() {
+        assert!(body["input"].to_string().contains("Question conservée"));
+    }
+}
+
+#[test]
+fn live_catalog_uses_account_residency_and_only_advertises_account_efforts() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.server.seen.lock().unwrap().codex_catalog = Some(json!({"models":[
+        {"slug":"gpt-6-sol","display_name":"GPT-6 Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]},
+        {"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"}]},
+        {"slug":"hidden","visibility":"hide"}
+    ]}));
+    f.login();
+    let models = f.provider.models();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].slug, "gpt-6.1-sol");
+    assert_eq!(models[0].default_effort.as_deref(), Some("high"));
+    assert_eq!(models[0].efforts.len(), 1);
+    assert_eq!(models[0].efforts[0].effort, "high");
+    let seen = f.server.seen.lock().unwrap();
+    let headers = &seen.codex_model_headers[0];
+    assert_eq!(headers["chatgpt-account-id"], "account-test");
+    assert_eq!(headers["x-openai-internal-codex-residency"], "eu");
+    assert_eq!(headers["originator"], "ezerbot");
+}
+
+#[test]
+fn refresh_test_rotates_the_same_ezerbot_grant_off_the_http_thread() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.login();
+    wait("connexion", || f.provider.status()["connected"] == true);
+    let before = f.server.seen.lock().unwrap().forms.len();
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let start = std::time::Instant::now();
+    post(&mut app, "/api/provider/test", json!({"refresh":true}));
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("rotation et nouvelle sonde", || {
+        f.provider.status()["connected"] == true
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(seen.forms.len(), before + 1);
+    assert_eq!(seen.forms.last().unwrap()["grant_type"], "refresh_token");
+    assert_eq!(seen.forms.last().unwrap()["client_id"], CLIENT);
+    let log = std::fs::read_to_string(f.db.parent().unwrap().join("logs/engine.log")).unwrap();
+    assert!(log.contains("status=200 code=token_refresh_saved"));
+    assert!(!log.contains("refresh-"));
+}
+
+#[test]
+fn an_incomplete_or_empty_probe_cannot_claim_chatgpt_is_connected() {
+    let _serial = OAUTH.lock().unwrap();
+    for event in [
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
+        json!({"type":"response.completed"}),
+    ] {
+        let f = Fixture::new();
+        f.server.seen.lock().unwrap().probe_reply = Some(ScriptedResponse::events(&[event]));
+        f.login();
+        wait("sonde sans réponse complète", || {
+            f.provider.status()["connection_test"]["state"] == "failed"
+        });
+        assert_eq!(f.provider.status()["connected"], false);
+    }
+}
+
+#[test]
+fn retry_relaunches_the_probe_then_returns_the_complete_default_model_reply() {
+    let _serial = OAUTH.lock().unwrap();
+    let f = Fixture::new();
+    f.server.seen.lock().unwrap().fail_probe = true;
+    f.login();
+    wait("sonde refusée", || {
+        f.provider.status()["connection_test"]["state"] == "failed"
+    });
+    let mut app = App::open_with(&f.db, f.provider.clone()).unwrap();
+    let c = post(&mut app, "/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    post(
+        &mut app,
+        "/api/preferences",
+        json!({"model":"gpt-6.1-sol","effort":"high"}),
+    );
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":"premier envoi"}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id":c,"message_id":"retry","body":"Une réponse complète"}),
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("premier envoi malgré la sonde refusée", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["body"] == "premier envoi" && m["state"] == "echoed")
+    });
+    let before = f.server.seen.lock().unwrap().probe_bodies.len();
+    f.server.seen.lock().unwrap().fail_probe = false;
+    let complete = "Voici la réponse complète.\n\n1. Première explication détaillée.\n2. Deuxième explication détaillée.\n3. Conclusion demandée.";
+    f.reply(ScriptedResponse::events(&[
+        json!({"type":"response.output_text.delta","delta":complete}),
+        json!({"type":"response.completed"}),
+    ]));
+    let start = std::time::Instant::now();
+    post(
+        &mut app,
+        "/api/regenerate",
+        json!({"conversation_id":c,"message_id":"retry"}),
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    wait("réponse après relance", || {
+        app.api("GET", "/api/state", b"").unwrap()["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["body"] == complete && m["state"] == "echoed")
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert!(seen.probe_bodies.len() > before);
+    assert_eq!(seen.bodies[0]["model"], "gpt-6.1-sol");
+    assert_eq!(seen.bodies[0]["reasoning"]["effort"], "high");
+    assert!(seen.bodies[0].get("text").is_none());
 }

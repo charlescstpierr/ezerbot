@@ -1,11 +1,12 @@
-//! Sessions indépendantes : quota Codex (protocole pi openai-codex) et partage
-//! d’abonnement « Sign in with ChatGPT ». Aucun identifiant d’un autre logiciel n’est lu.
+//! Compte ChatGPT par OAuth Codex, avec une session propre à Ezerbot.
+//! Aucun identifiant d’un autre logiciel n’est lu. L'ancien protocole /v1
+//! n'est accessible que par injection explicite de serveurs de test locaux.
 mod codex;
 mod connection;
 mod reliable;
 pub use connection::Provider;
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -34,23 +35,22 @@ const CALLBACK_PORTS: std::ops::RangeInclusive<u16> = 1455..=1465;
 const CALLBACK_PATH: &str = "/auth/callback";
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(300);
 const REFRESH_MARGIN: u64 = 300;
-const REFRESH_LOCK_STALE: Duration = Duration::from_secs(25);
-/// Attente courte : un verrou vivant n’est pas volé. L’appelant réessaie.
+/// Attente courte : un flock tenu par un processus vivant n’est jamais volé.
 const REFRESH_LOCK_WAIT: Duration = Duration::from_millis(400);
 /// Dernier recours absolu si le dossier personnel est inconnu. Jamais le répertoire courant.
 const FALLBACK_HOME: &str = "/var/empty";
 
 thread_local! {
-    static HOLDING_AUTH_LOCK: Cell<bool> = const { Cell::new(false) };
+    static HELD_LOCKS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
 }
 
-fn auth_lock_held() -> bool {
-    HOLDING_AUTH_LOCK.with(Cell::get)
+fn holds_lock(path: &Path) -> bool {
+    HELD_LOCKS.with(|held| held.borrow().iter().any(|item| item == path))
 }
 
 /// Même dossier que l’application Cocoa : `Application Support/Grokbot`.
-/// `Grokbot Local` n’est plus une destination. Une session déjà là n’est lue
-/// qu’une fois, par déplacement, pour ne jamais dupliquer un `refresh_token`.
+/// `Grokbot Local` n’est plus une destination. Une session déjà là est fusionnée
+/// une fois sous verrou, puis le fichier d’origine reste sans `refresh_token`.
 ///
 /// Les jetons restent dans le JSON propriétaire voisin de la base
 /// (`workspace.codex-auth.json` ou `workspace.chatgpt-auth.json`, mode 0600).
@@ -140,14 +140,17 @@ impl Failure {
 
     fn signin() -> Self {
         Self {
-            message: "La connexion à ChatGPT n’est plus valide. Reconnectez-vous via Codex.".into(),
+            message:
+                "La connexion à ChatGPT n’est plus valide. Reconnectez-vous à votre compte ChatGPT."
+                    .into(),
             kind: "signin",
         }
     }
 
     fn expired() -> Self {
         Self {
-            message: "Votre session ChatGPT a expiré. Reconnectez-vous via Codex.".into(),
+            message: "Votre session ChatGPT a expiré. Reconnectez-vous à votre compte ChatGPT."
+                .into(),
             kind: "signin_expired",
         }
     }
@@ -292,6 +295,10 @@ struct Inner {
     credentials: Mutex<()>,
     signin: Mutex<SignIn>,
     runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Lectures encore ouvertes, pour les compter dès l'annulation.
+    live_reads: Mutex<HashMap<String, Arc<Mutex<reliable::Settled>>>>,
+    #[cfg(test)]
+    paused_turns: Mutex<std::collections::HashSet<String>>,
     interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
@@ -542,51 +549,37 @@ fn preserved_scope(codex: bool, stored: &str, granted: String) -> String {
     }
 }
 
-/// Verrou fichier entre processus. `create_new` évite `flock` (pas de dépendance, pas d’unsafe).
+/// Verrou `flock` tenu par le processus. Le noyau le lâche à la mort du
+/// processus. Un second descripteur n’est jamais ouvert pour le même fichier :
+/// le fermer libérerait le verrou du processus sur macOS.
 struct AuthLock {
     path: PathBuf,
-    token: String,
+    _file: nix::fcntl::Flock<fs::File>,
 }
 
 impl AuthLock {
-    /// `None` : le verrou est tenu par un autre processus encore vivant.
-    /// Aucun renouvellement ne part. Un verrou plus vieux que 25 s est retiré.
+    /// `None` si ce fil tient déjà ce fichier, ou si un autre processus vivant
+    /// le tient encore après une courte attente. Jamais de vol.
     fn acquire(auth_file: &Path) -> Option<Self> {
-        if auth_lock_held() {
+        let path = auth_file.with_extension("lock");
+        if holds_lock(&path) {
             return None;
         }
-        if let Some(parent) = auth_file
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            if fs::create_dir_all(parent).is_err() {
-                return None;
-            }
-        }
-        let path = auth_file.with_extension("lock");
-        let token = random_token(16);
         let started = Instant::now();
         loop {
-            match create_lock(&path, &token) {
-                Ok(()) => {
-                    HOLDING_AUTH_LOCK.with(|flag| flag.set(true));
-                    return Some(Self { path, token });
+            let file = open_lock(&path)?;
+            match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+                Ok(file) => {
+                    HELD_LOCKS.with(|held| held.borrow_mut().push(path.clone()));
+                    return Some(Self { path, _file: file });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-                    let stale = age
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                        .is_some_and(|age| age > REFRESH_LOCK_STALE);
-                    if stale {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
+                Err((file, _)) => {
+                    drop(file);
                     if started.elapsed() > REFRESH_LOCK_WAIT {
                         return None;
                     }
                     thread::sleep(Duration::from_millis(15));
                 }
-                Err(_) => return None,
             }
         }
     }
@@ -594,25 +587,120 @@ impl AuthLock {
 
 impl Drop for AuthLock {
     fn drop(&mut self) {
-        if fs::read_to_string(&self.path).ok().as_deref() == Some(self.token.as_str()) {
-            let _ = fs::remove_file(&self.path);
-        }
-        HOLDING_AUTH_LOCK.with(|flag| flag.set(false));
+        HELD_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(index) = held.iter().rposition(|item| item == &self.path) {
+                held.remove(index);
+            }
+        });
     }
 }
 
-fn create_lock(path: &Path, token: &str) -> std::io::Result<()> {
+fn open_lock(path: &Path) -> Option<fs::File> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).ok()?;
+    }
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    file.write_all(token.as_bytes())?;
-    file.sync_all()?;
+    let file = options.open(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
+    Some(file)
+}
+
+fn legacy_auth_path(primary: &Path) -> Option<PathBuf> {
+    let parent = primary.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some("Grokbot") {
+        return None;
+    }
+    let name = primary.file_name()?;
+    Some(parent.parent()?.join("Grokbot Local").join(name))
+}
+
+fn read_credentials(path: &Path) -> Option<Credentials> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+fn legacy_has_refresh(path: &Path) -> bool {
+    read_credentials(path)
+        .and_then(|credentials| credentials.refresh_token)
+        .is_some_and(|token| !token.is_empty())
+}
+
+fn temporary_is_newer(primary: &Path, temporary: &Path) -> bool {
+    if !temporary.is_file() {
+        return false;
+    }
+    let Some(credentials) = read_credentials(temporary) else {
+        return false;
+    };
+    if credentials
+        .refresh_token
+        .as_deref()
+        .is_none_or(|token| token.is_empty())
+    {
+        return false;
+    }
+    let Ok(temporary_time) = fs::metadata(temporary).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    match fs::metadata(primary).and_then(|meta| meta.modified()) {
+        Ok(primary_time) => temporary_time > primary_time,
+        Err(_) => true,
+    }
+}
+
+fn promote_temporary(temporary: &Path, primary: &Path) -> std::io::Result<()> {
+    if let Some(parent) = primary.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(temporary, primary)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(primary, fs::Permissions::from_mode(0o600));
+    }
     Ok(())
+}
+
+fn tombstone(path: &Path, source: &Credentials) {
+    let mut cleared = source.clone();
+    cleared.clear_tokens();
+    let _ = write_credentials(path, &cleared);
+}
+
+fn write_credentials(path: &Path, credentials: &Credentials) -> std::io::Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(&serde_json::to_vec_pretty(credentials).expect("identifiants sérialisables"))?;
+    file.sync_all()?;
+    fs::rename(temporary, path)
 }
 
 fn page(title: &str, detail: &str) -> String {
@@ -660,6 +748,9 @@ impl Session {
                     cancel: None,
                 }),
                 runs: Mutex::new(HashMap::new()),
+                live_reads: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                paused_turns: Mutex::new(std::collections::HashSet::new()),
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
@@ -710,9 +801,8 @@ impl Session {
     }
 
     fn read(&self) -> Option<Credentials> {
-        if !self.inner.file.is_file() {
-            self.import_legacy_session();
-        }
+        self.adopt_pending_write();
+        self.import_legacy_session();
         self.read_raw()
     }
 
@@ -720,10 +810,39 @@ impl Session {
         serde_json::from_slice(&fs::read(&self.inner.file).ok()?).ok()
     }
 
-    /// Déplace une fois `Grokbot Local/<fichier>` vers `Grokbot/<fichier>`.
-    /// Jamais l’inverse, jamais une copie : un seul `refresh_token` reste sur le disque.
+    /// Un processus tué après `sync` et avant `rename` laisse un `*.json.tmp`
+    /// plus récent. On le reprend au prochain démarrage s’il contient un jeton.
+    fn adopt_pending_write(&self) {
+        let temporary = self.inner.file.with_extension("json.tmp");
+        if !temporary_is_newer(&self.inner.file, &temporary) {
+            return;
+        }
+        let promote = || {
+            if temporary_is_newer(&self.inner.file, &temporary) {
+                let _ = promote_temporary(&temporary, &self.inner.file);
+            }
+        };
+        if holds_lock(&self.inner.file.with_extension("lock")) {
+            promote();
+            return;
+        }
+        let Some(_lock) = AuthLock::acquire(&self.inner.file) else {
+            return;
+        };
+        promote();
+    }
+
+    /// Fusionne `Grokbot Local/<fichier>` vers `Grokbot/<fichier>`. Jamais
+    /// l’inverse. Les deux chemins sont verrouillés. L’ancien fichier reste,
+    /// sans `refresh_token`.
     fn import_legacy_session(&self) {
-        if auth_lock_held() {
+        let Some(legacy) = legacy_auth_path(&self.inner.file) else {
+            return;
+        };
+        if !legacy_has_refresh(&legacy) {
+            return;
+        }
+        if holds_lock(&self.inner.file.with_extension("lock")) {
             self.migrate_assuming_locked();
             return;
         }
@@ -734,87 +853,55 @@ impl Session {
     }
 
     fn migrate_assuming_locked(&self) {
-        let primary = &self.inner.file;
-        if primary.is_file() {
-            return;
-        }
-        let Some(parent) = primary.parent() else {
+        let Some(legacy) = legacy_auth_path(&self.inner.file) else {
             return;
         };
-        if parent.file_name().and_then(|name| name.to_str()) != Some("Grokbot") {
+        if !legacy.is_file() {
             return;
         }
-        let Some(name) = primary.file_name() else {
+        let Some(_source) = AuthLock::acquire(&legacy) else {
             return;
         };
-        let Some(legacy) = parent
-            .parent()
-            .map(|grand| grand.join("Grokbot Local").join(name))
-        else {
+        let Some(source) = read_credentials(&legacy) else {
             return;
         };
-        if !legacy.is_file() || primary.is_file() {
-            return;
-        }
-        let Some(credentials): Option<Credentials> = fs::read(&legacy)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        else {
-            return;
-        };
-        if !credentials.usable(self.inner.codex) {
-            return;
-        }
-        if let Some(directory) = primary.parent() {
-            if fs::create_dir_all(directory).is_err() {
-                return;
-            }
-        }
-        if primary.is_file() {
-            return;
-        }
-        if fs::rename(&legacy, primary).is_err() {
-            return;
-        }
-        #[cfg(unix)]
+        if source
+            .refresh_token
+            .as_deref()
+            .is_none_or(|token| token.is_empty())
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(primary, fs::Permissions::from_mode(0o600));
+            return;
         }
+        if self
+            .read_raw()
+            .and_then(|credentials| credentials.refresh_token)
+            .is_some_and(|token| !token.is_empty())
+        {
+            tombstone(&legacy, &source);
+            return;
+        }
+        let mut destination = self.read_raw().unwrap_or_default();
+        let host = if destination.host_id.is_empty() {
+            source.host_id.clone()
+        } else {
+            destination.host_id.clone()
+        };
+        destination = source.clone();
+        destination.host_id = host;
+        if self.write(&destination).is_err() {
+            return;
+        }
+        tombstone(&legacy, &source);
     }
 
     /// Écriture atomique, lisible par le seul propriétaire.
     fn write(&self, credentials: &Credentials) -> std::io::Result<()> {
-        let temporary = self.inner.file.with_extension("json.tmp");
-        if let Some(parent) = self.inner.file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(
-            &serde_json::to_vec_pretty(credentials).expect("identifiants sérialisables"),
-        )?;
-        file.sync_all()?;
-        fs::rename(temporary, &self.inner.file)
+        write_credentials(&self.inner.file, credentials)
     }
 
     /// L'identifiant d'hôte doit exister et rester stable avant la première connexion.
     fn load_or_create(&self) -> std::io::Result<Credentials> {
         let _lock = self.lock_auth()?;
-        if let Some(credentials) = self.read_raw() {
-            return Ok(credentials);
-        }
         self.migrate_assuming_locked();
         if let Some(credentials) = self.read_raw() {
             return Ok(credentials);
@@ -830,7 +917,7 @@ impl Session {
     /// Verrou déjà pris par l’appelant : `Ok(None)`. Sinon le garde doit vivre
     /// jusqu’à la fin de l’écriture. Échec = ne rien écrire et ne rien renouveler.
     fn lock_auth(&self) -> std::io::Result<Option<AuthLock>> {
-        if auth_lock_held() {
+        if holds_lock(&self.inner.file.with_extension("lock")) {
             return Ok(None);
         }
         AuthLock::acquire(&self.inner.file)
@@ -1323,25 +1410,38 @@ impl Session {
         if credentials.refresh_token.as_deref() != Some(refresh.as_str()) {
             return self.use_disk_session(&credentials, retried);
         }
-        if self.inner.codex {
-            codex::update_profile(&mut credentials, &tokens)?;
-        }
         credentials.access_token = Some(tokens.access_token.clone());
         credentials.expires_at = seconds() + tokens.expires_in;
-        if let Some(refresh) = tokens.refresh_token {
+        if let Some(refresh) = tokens.refresh_token.clone() {
             credentials.refresh_token = Some(refresh);
         }
-        if let Some(scope) = tokens.scope {
+        if let Some(scope) = tokens.scope.clone() {
             credentials.scopes = preserved_scope(self.inner.codex, &credentials.scopes, scope);
         }
-        if let Some(id_token) = tokens.id_token {
+        if let Some(id_token) = tokens.id_token.clone() {
             credentials.id_token = Some(id_token);
         }
         credentials.saved_at = seconds();
+        // Le nouveau refresh_token est durable avant update_profile : un échec
+        // ou un kill ensuite ne doit pas laisser l’ancien jeton, déjà invalidé.
         if self.write(&credentials).is_err() {
             return Err(Failure::other(
                 "Impossible d’enregistrer les identifiants sur ce Mac. La connexion reste enregistrée.",
             ));
+        }
+        crate::upstream::turn(
+            self.inner.file.parent().unwrap_or(Path::new(".")),
+            "oauth",
+            200,
+            "token_refresh_saved",
+        );
+        if self.inner.codex {
+            codex::update_profile(&mut credentials, &tokens)?;
+            if self.write(&credentials).is_err() {
+                return Err(Failure::other(
+                    "Impossible d’enregistrer les identifiants sur ce Mac. La connexion reste enregistrée.",
+                ));
+            }
         }
         Ok(tokens.access_token)
     }
@@ -1454,9 +1554,13 @@ impl Session {
             catalog.loading = true;
         }
         let provider = self.clone();
+        let generation = self.inner.probe_generation.load(Ordering::SeqCst);
         thread::spawn(move || {
             let models = provider.fetch_models();
             let mut catalog = lock(&provider.inner.catalog);
+            if provider.inner.probe_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             catalog.loading = false;
             if let Ok(models) = models {
                 catalog.models = models;
@@ -1467,7 +1571,7 @@ impl Session {
 
     fn fetch_models(&self) -> Result<Vec<Model>, Failure> {
         if self.inner.codex {
-            return Ok(codex::models());
+            return self.fetch_codex_models();
         }
         let token = self.bearer(false)?;
         let body: Value = agent()

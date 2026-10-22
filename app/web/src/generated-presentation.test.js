@@ -30,6 +30,10 @@ test("document action status distinguishes running, refusal, expiry and success"
   assert.equal(documentToolView({ call: action, run_status: "running" }, { status: "ended" }).label, "En cours…");
   assert.equal(documentToolView({ call: action, run_status: "interrupted" }).label, "Arrêtée");
   assert.notEqual(documentToolView({ call: action, run_status: "interrupted" }).state, "running");
+  assert.equal(documentToolView({ call: action, run_status: "interrupted" }).note, "Aucun résultat n’a été enregistré avant l’arrêt.");
+  assert.equal(documentToolView({ call: action }, { status: "running" }).note, "L’action est en cours sur votre Mac.");
+  assert.equal(documentToolView({ call }, { status: "running" }).note, "Création du document en cours.");
+  assert.equal(documentToolView({ call: action, run_status: "running" }, { status: "ended" }).note, "L’action est en cours sur votre Mac.");
 });
 test("document approvals describe Finder without opening and warn about broad authority", () => {
   assert.match(documentApprovalEffect("reveal"), /sans l’ouvrir/);

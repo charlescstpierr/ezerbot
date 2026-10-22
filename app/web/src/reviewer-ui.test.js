@@ -404,6 +404,17 @@ test("interrupted tool cards are stopped, not left running or waiting", () => {
   } finally { delete globalThis.window; }
 });
 
+test("an interrupted document card does not promise a later result", () => {
+  const html = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "doc", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "document_action", arguments: { action: "save", path: "/tmp/note.txt" } },
+  } } }));
+  assert.match(html, /Arrêtée/);
+  assert.match(html, /Aucun résultat n’a été enregistré avant l’arrêt/);
+  assert.doesNotMatch(html, /Le résultat sera affiché ici/);
+  assert.doesNotMatch(html, /En cours/);
+  assert.doesNotMatch(html, /Annuler l’exécution/);
+});
+
 test("generic approval retains its code identifier instead of a local-action label", () => {
   const html = card("pending", "ask", {}, false, "test_generic_tool");
   assert.match(html, /Outil : <code>test_generic_tool<\/code>/);

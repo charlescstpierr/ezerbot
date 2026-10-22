@@ -708,7 +708,12 @@ fn join(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
             )?;
             if stored == 0 {
                 // Quitter a devancé la réponse de Recall : ce bot ne doit pas rester.
-                let _ = leave_bot(&key, Some(&region), &bot);
+                // L’identité est conservée avec une obligation de sortie tant que Recall ne l’a pas confirmée.
+                let left = leave_bot(&key, Some(&region), &bot).is_ok();
+                ctx.connection.execute(
+                    "UPDATE wrapper_recall_meetings SET bot_id=?2,region=?3,needs_leave=?4 WHERE id=?1",
+                    params![id, bot, region, !left],
+                )?;
             }
             Ok(
                 json!({"meeting_id":id,"message":"Le bot rejoint la réunion. L’état passe à En cours quand il est dans l’appel."}),
@@ -720,6 +725,38 @@ fn join(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
             Err(ApiError::new(502, message))
         }
     }
+}
+/// Sans clé, plus aucune sortie en attente ne pourrait partir : elles passent avant le retrait.
+fn drain_pending_leaves(ctx: &Context<'_>) -> Result<(), ApiError> {
+    let pending: Vec<Meeting> = {
+        let mut q = ctx.connection.prepare(&format!(
+            "{SELECT} WHERE bot_id IS NOT NULL AND needs_leave=1"
+        ))?;
+        let rows = q
+            .query_map([], Meeting::read)?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let key = key(ctx)?;
+    for meeting in pending {
+        let bot = meeting.bot_id.as_deref().unwrap_or_default();
+        let region = meeting.region.as_deref();
+        let confirmed = leave_bot(&key, region, bot).is_ok()
+            || bot_code(&key, region, bot)
+                .map(|code| !matches!(map_status(&code).0, "joining" | "in_call"))
+                .unwrap_or(false);
+        if !confirmed {
+            return Err(ApiError::new(502, LEAVE_UNCONFIRMED));
+        }
+        ctx.connection.execute(
+            "UPDATE wrapper_recall_meetings SET needs_leave=0 WHERE id=?1",
+            [&meeting.id],
+        )?;
+    }
+    Ok(())
 }
 fn remove(ctx: &Context<'_>) -> Result<Value, ApiError> {
     validate(
@@ -734,6 +771,7 @@ fn remove(ctx: &Context<'_>) -> Result<Value, ApiError> {
     if let Some(meeting) = active(ctx.connection)? {
         leave_meeting(ctx, &meeting, "cancelled")?;
     }
+    drain_pending_leaves(ctx)?;
     super::forms::vault(ctx)?.remove(SECRET).map_err(|_| {
         ApiError::new(503, "Suppression non confirmée : rétablissez l’accès au trousseau macOS puis réessayez. La clé est conservée.")
     })?;

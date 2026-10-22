@@ -667,3 +667,65 @@ fn the_consent_card_shows_the_result_of_its_own_call_not_the_latest_of_the_run()
         .unwrap()
         .contains("Le bot rejoint la réunion"));
 }
+
+#[test]
+fn a_failed_compensating_removal_keeps_the_bot_identity_until_recall_confirms() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.recall.seen.lock().unwrap().create_delay = Duration::from_millis(1500);
+    let run = f.join(MEET);
+    let request = f.request(&run);
+    f.post("/api/approvals/resolve",json!({"entry_id":request.entry_id,"conversation_id":request.route.target_conversation_id,"submission_id":"accept","decision":"allow_once"}));
+    f.app.tick(0);
+    wait("meeting row", || {
+        f.db().query_row("SELECT count(*) FROM wrapper_recall_meetings WHERE state='joining' AND bot_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
+    });
+    // Quitter devance la réponse de Recall ; la sortie compensatoire échoue ensuite.
+    f.recall.seen.lock().unwrap().leave_status = 500;
+    f.post("/api/recall/leave", json!({}));
+    assert_eq!(f.item()["meeting"]["label"], "Annulée");
+    wait("bot created", || {
+        f.db().query_row("SELECT count(*) FROM wrapper_recall_meetings WHERE bot_id='bot-1' AND needs_leave=1",[],|r|r.get::<_,i64>(0)).unwrap() == 1
+    });
+    f.recall.seen.lock().unwrap().leave_status = 200;
+    f.sync();
+    assert_eq!(
+        f.db()
+            .query_row(
+                "SELECT count(*) FROM wrapper_recall_meetings WHERE needs_leave=0",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(f.recall.leaves(), 2);
+}
+
+#[test]
+fn disconnecting_first_drains_a_pending_removal_before_the_key_goes() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.joined();
+    f.recall.code("nouvel_etat_inconnu");
+    f.sync();
+    assert_eq!(f.item()["meeting"]["label"], "Échec");
+    assert_eq!(f.recall.leaves(), 0);
+    let run = f.post("/api/recall/disconnect", json!({}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    // Le suivi de fond peut aussi avoir demandé la sortie : au moins une, jamais zéro.
+    assert!(f.recall.leaves() >= 1);
+    assert_eq!(f.item()["status"], "disconnected");
+    let pending: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM wrapper_recall_meetings WHERE needs_leave=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+}

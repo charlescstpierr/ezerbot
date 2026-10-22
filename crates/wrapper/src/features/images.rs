@@ -1,6 +1,6 @@
 //! Image generation for a drawing request. The call uses the current ChatGPT
-//! session bearer and never an account-vault secret. T1 does not validate the
-//! closed aspect-ratio list or accept reference images.
+//! session on the Codex responses route and never an account-vault secret.
+//! T1 does not validate the closed aspect-ratio list or accept reference images.
 
 use super::Context;
 use crate::provider::error_parts;
@@ -24,7 +24,10 @@ const UNUSABLE: &str = "L’image reçue n’est pas utilisable.";
 const TOO_BIG: &str = "L’image générée dépasse 20 Mo et n’a pas été conservée.";
 const UNAVAILABLE: &str = "Le service d’images est indisponible.";
 const MODEL: &str = "gpt-image-1.5";
-const IMAGE_HOST: &str = "https://api.openai.com/v1/images/generations";
+const IMAGE_HOST: &str = "https://chatgpt.com/backend-api/codex/responses";
+const ORIGINATOR: &str = "ezerbot";
+/// GPT Image can take about two minutes. The read and the whole call share this budget.
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Base64 of a 20 MiB image, plus a small JSON envelope.
 const MAX_RESPONSE_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 1024 * 1024;
 
@@ -53,8 +56,8 @@ pub fn is_external(name: &str) -> bool {
     name == TOOL
 }
 
-/// Only the loopback test host or the production image host. ChatGPT’s chat
-/// host is mapped onto api.openai.com and is not itself an image host.
+/// Loopback tests and the production Codex host. The Platform images API is
+/// refused: a ChatGPT session bearer has no `api.model.images.request` scope.
 pub(crate) fn image_endpoint(api: &str) -> Result<String, ()> {
     let url = Url::parse(api).map_err(|_| ())?;
     if !url.username().is_empty()
@@ -71,9 +74,14 @@ pub(crate) fn image_endpoint(api: &str) -> Result<String, ()> {
             if !matches!(url.path(), "/v1" | "/v1/") {
                 return Err(());
             }
-            Ok(format!("http://127.0.0.1:{port}/v1/images/generations"))
+            Ok(format!(
+                "http://127.0.0.1:{port}/backend-api/codex/responses"
+            ))
         }
-        ("https", "api.openai.com" | "chatgpt.com") if url.port().is_none() => {
+        ("https", "chatgpt.com")
+            if url.port().is_none()
+                && matches!(url.path(), "/backend-api/codex" | "/backend-api/codex/") =>
+        {
             Ok(IMAGE_HOST.into())
         }
         _ => Err(()),
@@ -107,14 +115,21 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     let Ok(endpoint) = image_endpoint(&ctx.provider.image_api_base()) else {
         return failed(UNAVAILABLE);
     };
-    let key = match ctx.provider.session_bearer() {
-        Ok(token) => token,
+    let (token, account) = match ctx.provider.image_auth() {
+        Ok(auth) => auth,
         Err(failure) if failure.kind == "signin" || failure.kind == "signin_expired" => {
             return failed(CONNECT);
         }
         Err(_) => return failed(UNAVAILABLE),
     };
-    let (status, result) = post(&endpoint, &key, &description, size);
+    let (status, result) = post(
+        &endpoint,
+        &token,
+        &account,
+        ctx.provider.image_responses_model(),
+        &description,
+        size,
+    );
     let run_id = ctx.run_id.unwrap_or(TOOL);
     crate::upstream::turn(
         ctx.db_path.parent().unwrap_or(Path::new(".")),
@@ -160,32 +175,43 @@ pub fn present(
 
 fn post(
     endpoint: &str,
-    key: &str,
+    token: &str,
+    account: &str,
+    model: &str,
     description: &str,
     size: &str,
 ) -> (u16, Result<Vec<u8>, &'static str>) {
     #[cfg(test)]
     {
-        tests::note_post(key);
+        tests::note_post(token);
         if tests::block_post() {
             return (0, Err(FAILED));
         }
     }
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(60))
+        .timeout_read(GENERATION_TIMEOUT)
         .timeout_write(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60))
+        .timeout(GENERATION_TIMEOUT)
         .redirects(0)
         .build();
     let response = agent
         .post(endpoint)
-        .set("Authorization", &format!("Bearer {key}"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("chatgpt-account-id", account)
+        .set("originator", ORIGINATOR)
+        .set("User-Agent", "ezerbot/0.1.0")
+        .set("Accept", "application/json, text/event-stream")
         .send_json(json!({
-            "model": MODEL,
-            "prompt": description,
-            "size": size,
-            "n": 1,
+            "model": model,
+            "input": description,
+            "store": false,
+            "tools": [{
+                "type": "image_generation",
+                "model": MODEL,
+                "size": size
+            }],
+            "tool_choice": {"type": "image_generation"}
         }));
     let response = match response {
         Ok(response) => response,
@@ -209,12 +235,14 @@ fn post(
 fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
     let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     if !(200..300).contains(&status) || value.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(phrase(status, &error_parts(&value).0));
+        let code = if value.is_null() {
+            sse_error_code(body)
+        } else {
+            error_parts(&value).0
+        };
+        return Err(phrase(status, &code));
     }
-    let Some(encoded) = value["data"]
-        .get(0)
-        .and_then(|item| item["b64_json"].as_str())
-    else {
+    let Some(encoded) = encoded_image(&value).or_else(|| sse_image(body)) else {
         return Err(UNUSABLE);
     };
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded.trim())
@@ -227,6 +255,76 @@ fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     staging::sniff(&bytes).map_err(|_| UNUSABLE)?;
     Ok(bytes)
+}
+
+fn encoded_image(value: &Value) -> Option<String> {
+    image_result(value)
+        .or_else(|| image_result(&value["item"]))
+        .or_else(|| image_result(&value["response"]))
+        .or_else(|| output_result(value))
+        .or_else(|| output_result(&value["response"]))
+        .map(str::to_owned)
+}
+
+fn output_result(value: &Value) -> Option<&str> {
+    value["output"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find_map(image_result)
+}
+
+fn image_result(value: &Value) -> Option<&str> {
+    (value["type"] == "image_generation_call")
+        .then(|| value["result"].as_str())
+        .flatten()
+        .filter(|result| !result.trim().is_empty())
+}
+
+fn sse_image(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(encoded) = encoded_image(&value) {
+            found = Some(encoded);
+        }
+    }
+    found
+}
+
+fn sse_error_code(body: &[u8]) -> String {
+    let Some(text) = std::str::from_utf8(body).ok() else {
+        return String::new();
+    };
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+            continue;
+        };
+        let code = error_parts(&value).0;
+        if !code.is_empty() {
+            return code;
+        }
+        if value["type"] == "response.failed" || value["type"] == "error" {
+            let nested = error_parts(&value["response"]);
+            if !nested.0.is_empty() {
+                return nested.0;
+            }
+        }
+    }
+    String::new()
 }
 
 fn phrase(status: u16, code: &str) -> &'static str {
@@ -344,7 +442,17 @@ mod tests {
 
     const VAULT_KEY: &str = "vault-bot-secret-9f3c1a7e";
     const CHAT_TOKEN: &str = "chatgpt-auth-bearer-not-image";
-    const CODEX_TOKEN: &str = "codex-auth-bearer-not-image";
+
+    fn codex_token() -> String {
+        use base64::Engine;
+        format!(
+            "e30.{}.e30",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                json!({"https://api.openai.com/auth":{"chatgpt_account_id":"ezerbot-only"}})
+                    .to_string()
+            )
+        )
+    }
 
     struct Outside {
         root: PathBuf,
@@ -377,7 +485,7 @@ mod tests {
                         "host_id": "test-host",
                         "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
                         "account_id": "ezerbot-only",
-                        "access_token": CODEX_TOKEN,
+                        "access_token": codex_token(),
                         "refresh_token": "codex-refresh-token",
                         "expires_at": expires
                     })
@@ -450,7 +558,7 @@ mod tests {
         let before = std::fs::read(present.db.with_extension("secrets.json")).unwrap();
         execute(&present.ctx(), &draw());
         assert_eq!(post_count(), 1, "le jeton de session n’a pas été utilisé");
-        assert_eq!(post_key(), CODEX_TOKEN);
+        assert_eq!(post_key(), codex_token());
         assert_ne!(post_key(), VAULT_KEY);
         assert_ne!(post_key(), CHAT_TOKEN);
         assert_eq!(
@@ -459,7 +567,7 @@ mod tests {
         );
         let stored = secrets_text(&present.db);
         assert!(!stored.contains(CHAT_TOKEN));
-        assert!(!stored.contains(CODEX_TOKEN));
+        assert!(!stored.contains(&codex_token()));
 
         reset_posts();
         let absent = Outside::open(false);
@@ -477,18 +585,14 @@ mod tests {
         let stored = secrets_text(&absent.db);
         assert!(stored.contains(VAULT_KEY));
         assert!(!stored.contains(CHAT_TOKEN));
-        assert!(!stored.contains(CODEX_TOKEN));
+        assert!(!stored.contains(&codex_token()));
     }
 
     #[test]
     fn endpoint_accepts_only_loopback_and_the_production_image_host() {
         assert_eq!(
             image_endpoint("http://127.0.0.1:1455/v1").unwrap(),
-            "http://127.0.0.1:1455/v1/images/generations"
-        );
-        assert_eq!(
-            image_endpoint("https://api.openai.com/v1").unwrap(),
-            IMAGE_HOST
+            "http://127.0.0.1:1455/backend-api/codex/responses"
         );
         assert_eq!(
             image_endpoint("https://chatgpt.com/backend-api/codex").unwrap(),
@@ -497,8 +601,10 @@ mod tests {
         for rejected in [
             "http://user:secret@127.0.0.1:1455/v1",
             "https://127.0.0.1:1455/v1",
-            "http://api.openai.com/v1",
-            "https://api.openai.com:8443/v1",
+            "http://chatgpt.com/backend-api/codex",
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/images/generations",
+            "https://chatgpt.com/backend-api/codex/responses",
             "https://evil.example/v1",
             "http://127.0.0.1:1455/v1?x=1",
             "http://127.0.0.1/v1",
@@ -529,9 +635,21 @@ mod tests {
         let down = br#"{"error":{"code":"server_error","message":"down"}}"#;
         assert_eq!(interpret(503, down).unwrap_err(), FAILED);
         assert_eq!(interpret(0, b"").unwrap_err(), FAILED);
-        let remote = br#"{"data":[{"url":"https://evil.example/secret.png"}]}"#;
+        let remote = br#"{"output":[{"type":"image_generation_call","result":""}]}"#;
         assert_eq!(interpret(200, remote).unwrap_err(), UNUSABLE);
-        let garbage = br#"{"data":[{"b64_json":"bm90IGFuIGltYWdl"}]}"#;
+        let url_only = br#"{"data":[{"url":"https://evil.example/secret.png"}]}"#;
+        assert_eq!(interpret(200, url_only).unwrap_err(), UNUSABLE);
+        let garbage =
+            br#"{"output":[{"type":"image_generation_call","result":"bm90IGFuIGltYWdl"}]}"#;
         assert_eq!(interpret(200, garbage).unwrap_err(), UNUSABLE);
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+        let json = format!(
+            r#"{{"output":[{{"type":"image_generation_call","status":"completed","result":"{png}"}}]}}"#
+        );
+        assert!(interpret(200, json.as_bytes()).is_ok());
+        let sse = format!(
+            "event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"image_generation_call\",\"result\":\"{png}\"}}}}\n\n"
+        );
+        assert!(interpret(200, sse.as_bytes()).is_ok());
     }
 }

@@ -366,10 +366,15 @@ impl Provider {
         self.session().inner.endpoints.api.clone()
     }
 
-    /// Bearer of the current ChatGPT session. Image generation uses this token
-    /// and never copies it into the account vault.
-    pub(crate) fn session_bearer(&self) -> Result<String, Failure> {
-        self.session().bearer(false)
+    /// Bearer and ChatGPT account id for image generation. The token is never
+    /// copied into the account vault.
+    pub(crate) fn image_auth(&self) -> Result<(String, String), Failure> {
+        self.session().image_auth()
+    }
+
+    /// Mainline model of a Codex responses call. The image tool names its own model.
+    pub(crate) fn image_responses_model(&self) -> &'static str {
+        codex::DEFAULT_MODEL
     }
 }
 

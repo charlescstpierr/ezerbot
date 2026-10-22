@@ -7,7 +7,7 @@ use super::*;
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const SCOPE: &str = "openid profile email offline_access";
 const AUTH_CLAIM: &str = "https://api.openai.com/auth";
-pub(super) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
 
 pub(super) fn authorization_query(attempt: &Attempt) -> Vec<(&'static str, String)> {
     vec![
@@ -202,6 +202,24 @@ impl Session {
                 "application/json"
             },
         ))
+    }
+
+    /// Bearer and ChatGPT account id for an image call. The account id is the
+    /// same claim the chat request puts in `chatgpt-account-id`.
+    pub(crate) fn image_auth(&self) -> Result<(String, String), Failure> {
+        let token = self.bearer(false)?;
+        let access = claims(&token).ok_or_else(Failure::signin)?;
+        let account = access[AUTH_CLAIM]["chatgpt_account_id"]
+            .as_str()
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 256
+                    && id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+            })
+            .ok_or_else(Failure::signin)?;
+        Ok((token, account.to_owned()))
     }
 }
 

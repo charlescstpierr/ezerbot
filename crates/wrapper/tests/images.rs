@@ -18,6 +18,7 @@ use std::{
 use support::{wait, FakeOpenAi, ScriptedResponse, Seen, CLIENT};
 
 const SECRET: &str = "ezerbot-bot-secret-9f3c1a7e-loop";
+const ACCOUNT: &str = "account-ezerbot-image";
 const INDICATOR: &str = "Génération d’une image…";
 const RESTRICTED: &str = "Ce modèle d’image est restreint pour ce compte.";
 const PNG_B64: &str =
@@ -30,6 +31,7 @@ struct Fixture {
     path: PathBuf,
     root: PathBuf,
     chat: String,
+    token: String,
 }
 
 fn now() -> u64 {
@@ -50,12 +52,14 @@ impl Fixture {
         std::fs::create_dir_all(root.join("data")).unwrap();
         let root = root.canonicalize().unwrap();
         let path = root.join("data/workspace.sqlite");
+        let token = session_token(ACCOUNT);
         std::fs::write(
             path.with_extension("chatgpt-auth.json"),
             json!({
                 "host_id": "test-host",
                 "client_id": CLIENT,
-                "access_token": "fake-access",
+                "account_id": ACCOUNT,
+                "access_token": token,
                 "refresh_token": "fake-refresh",
                 "expires_at": now() / 1000 + 3600,
                 "scopes": "chatgpt.tokens.use.direct"
@@ -93,6 +97,7 @@ impl Fixture {
             path,
             root,
             chat,
+            token,
         }
     }
 
@@ -170,6 +175,50 @@ impl Fixture {
             .find(|message| message["payload"]["call"]["name"] == "generate_image")
             .unwrap_or(Value::Null)
     }
+}
+
+fn session_token(account: &str) -> String {
+    format!(
+        "e30.{}.e30",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id":account}}).to_string()
+        )
+    )
+}
+
+fn assert_image_contract(fixture: &Fixture, prompt: &str, size: &str) {
+    let seen = fixture.server.seen.lock().unwrap();
+    assert_eq!(seen.image_calls.len(), 1);
+    assert_eq!(seen.image_urls[0], "/backend-api/codex/responses");
+    let call = &seen.image_calls[0];
+    assert_eq!(call["model"], "gpt-6.1-sol");
+    assert_eq!(call["input"], prompt);
+    assert!(call.get("aspect_ratio").is_none());
+    assert!(call.get("prompt").is_none());
+    assert!(call.get("n").is_none());
+    let tools = call["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["type"], "image_generation");
+    assert_eq!(tools[0]["model"], "gpt-image-1.5");
+    assert_eq!(tools[0]["size"], size);
+    assert!(tools[0].get("aspect_ratio").is_none());
+    assert_eq!(call["tool_choice"]["type"], "image_generation");
+    let headers = &seen.image_headers[0];
+    let authorization = format!("Bearer {}", fixture.token);
+    assert_eq!(
+        headers.get("authorization").map(String::as_str),
+        Some(authorization.as_str())
+    );
+    assert_eq!(
+        headers.get("chatgpt-account-id").map(String::as_str),
+        Some(ACCOUNT)
+    );
+    assert_eq!(
+        headers.get("originator").map(String::as_str),
+        Some("ezerbot")
+    );
+    assert!(!call.to_string().contains("api.openai.com"));
+    assert!(!call.to_string().contains("images/generations"));
 }
 
 fn png() -> Vec<u8> {
@@ -251,7 +300,10 @@ fn walkdir_files(root: &Path) -> Vec<PathBuf> {
 fn drawing_replaces_the_indicator_with_one_image() {
     let mut fixture = Fixture::open();
     let gate = fixture.hold_image();
-    fixture.script_image(200, json!({"data":[{"b64_json":PNG_B64}]}));
+    fixture.script_image(
+        200,
+        json!({"output":[{"type":"image_generation_call","status":"completed","result":PNG_B64}]}),
+    );
     fixture.ask(
         "phare",
         json!({"description":"un phare au crépuscule"}),
@@ -292,17 +344,8 @@ fn drawing_replaces_the_indicator_with_one_image() {
         }
         ApiResponse::Json(_) => panic!("image non binaire"),
     }
-    let call = fixture.server.seen.lock().unwrap().image_calls[0].clone();
-    assert_eq!(call["model"], "gpt-image-1.5");
-    assert_eq!(call["prompt"], "un phare au crépuscule");
-    assert_eq!(call["size"], "1024x1024");
-    assert!(call.get("aspect_ratio").is_none());
-    assert_eq!(call["n"], 1);
-    let authorization = fixture.server.seen.lock().unwrap().image_authorization[0].clone();
-    assert!(
-        authorization == "Bearer fake-access",
-        "en-tête d’autorisation inattendu"
-    );
+    assert_eq!(fixture.image_calls(), 1);
+    assert_image_contract(&fixture, "un phare au crépuscule", "1024x1024");
     fixture.until("réponse non terminée", |fixture| {
         fixture.provider.status()["titling"] == false
             && fixture
@@ -378,16 +421,7 @@ fn wide_frame_is_sent_as_a_supported_size() {
     fixture.until("appel image large absent", |fixture| {
         fixture.image_calls() == 1
     });
-    let call = fixture.server.seen.lock().unwrap().image_calls[0].clone();
-    assert_eq!(call["model"], "gpt-image-1.5");
-    assert_eq!(call["size"], "1536x1024");
-    assert_eq!(call["prompt"], "un phare large");
-    assert!(call.get("aspect_ratio").is_none());
-    assert_eq!(call["n"], 1);
-    assert_eq!(
-        fixture.server.seen.lock().unwrap().image_authorization[0],
-        "Bearer fake-access"
-    );
+    assert_image_contract(&fixture, "un phare large", "1536x1024");
     fixture.until("réponse large non terminée", |fixture| {
         fixture.provider.status()["titling"] == false
             && fixture

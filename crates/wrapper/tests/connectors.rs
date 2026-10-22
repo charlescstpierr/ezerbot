@@ -4136,6 +4136,22 @@ fn gmail_email_refuses_a_bad_draft_without_a_card_and_without_calling_google() {
 }
 
 #[test]
+fn gmail_email_accepts_an_apostrophe_in_a_bare_address() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (_, card) = f.github_prepare(
+        "mail-apos",
+        GMAIL_SEND_TOOL,
+        json!({"to":["o'connor@example.test"],"subject":"Essai"}),
+    );
+    assert_eq!(
+        card["arguments"]["brouillon"]["a"],
+        json!(["o'connor@example.test"])
+    );
+    assert_eq!(f.email_sends(), 0);
+}
+
+#[test]
 fn gmail_email_refused_limited_and_unconfirmed_sends_are_visible_and_never_a_sent_mail() {
     let mut f = Fixture::new();
     f.gmail_connect();

@@ -109,7 +109,7 @@ fn address(text: &str, login: &str) -> Result<String, ApiError> {
     let valid = text.len() <= 254
         && text.is_ascii()
         && !text.bytes().any(|b| {
-            b.is_ascii_control() || b.is_ascii_whitespace() || b"<>,;:\"'()[]\\".contains(&b)
+            b.is_ascii_control() || b.is_ascii_whitespace() || b"<>,;:\"()[]\\".contains(&b)
         })
         && text.split_once('@').is_some_and(|(local, domain)| {
             !local.is_empty()
@@ -131,10 +131,11 @@ fn address(text: &str, login: &str) -> Result<String, ApiError> {
         )))
     }
 }
-fn recipients(entries: &[String], login: &str) -> Result<Vec<String>, ApiError> {
+fn recipients(ctx: &Context<'_>, entries: &[String], login: &str) -> Result<Vec<String>, ApiError> {
     let mut found: Vec<String> = Vec::new();
     for entry in entries {
         let one = address(entry, login)?;
+        unmasked(ctx, &one, "Une adresse")?;
         if !found.iter().any(|seen| seen.eq_ignore_ascii_case(&one)) {
             found.push(one);
         }
@@ -158,8 +159,8 @@ fn parse(ctx: &Context<'_>, arguments: &Value) -> Result<Draft, ApiError> {
     check_subject(ctx, &args.subject)?;
     check_body(ctx, &args.body)?;
     let account = usable(ctx)?;
-    let to = recipients(&args.to, &account.email)?;
-    let cc: Vec<String> = recipients(&args.cc, &account.email)?
+    let to = recipients(ctx, &args.to, &account.email)?;
+    let cc: Vec<String> = recipients(ctx, &args.cc, &account.email)?
         .into_iter()
         .filter(|one| !to.iter().any(|seen| seen.eq_ignore_ascii_case(one)))
         .collect();

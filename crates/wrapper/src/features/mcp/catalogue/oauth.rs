@@ -45,7 +45,13 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-fn token_fields(env: &HashMap<String, String>) -> Vec<(String, String)> {
+fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
+    // Gmail sends the public client of the build and nothing else: no secret exists.
+    if m.id == "gmail" {
+        return gmail::client_id()
+            .map(|id| vec![("client_id".into(), id)])
+            .unwrap_or_default();
+    }
     ["CLIENT_ID", "CLIENT_SECRET"]
         .into_iter()
         .filter_map(|k| env.get(k).map(|v| (k.to_lowercase(), v.clone())))
@@ -110,7 +116,12 @@ fn accept_token(
                 .min(i64::MAX as u64) as i64
         })
         .unwrap_or(0);
-    if m.endpoint.is_empty() {
+    if m.id == "gmail" {
+        // A renewal keeps the account it already named; a sign-in learns it from Google.
+        if !env.contains_key("EMAIL") {
+            env.insert("EMAIL".into(), gmail::profile_email(m, access)?);
+        }
+    } else if m.endpoint.is_empty() {
         let user = read_json(
             agent()
                 .get(&endpoint(m, "userinfo"))
@@ -124,11 +135,23 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    save(ctx, &server.id, env)?;
+    save(ctx, &server.id, env).map_err(|error| {
+        if m.id == "gmail" {
+            gmail::refused_write(ctx)
+        } else {
+            error
+        }
+    })?;
     ctx.connection.execute(
         "UPDATE wrapper_connector_catalogue SET expires_at=?2 WHERE server_id=?1",
         params![server.id, expires],
     )?;
+    if m.id == "gmail" {
+        ctx.connection.execute(
+            "UPDATE wrapper_connector_catalogue SET account_id=lower(account_email) WHERE server_id=?1",
+            [&server.id],
+        )?;
+    }
     Ok(())
 }
 pub(super) fn refresh(
@@ -140,7 +163,7 @@ pub(super) fn refresh(
     if m.id == "github" {
         return super::github::refresh(ctx, server, m, env);
     }
-    let mut fields = token_fields(env);
+    let mut fields = token_fields(m, env);
     fields.push(("grant_type".into(), "refresh_token".into()));
     fields.push((
         "refresh_token".into(),
@@ -176,18 +199,23 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && !env.contains_key("CLIENT_ID") {
+    if fake_base().is_some() && m.id != "gmail" && !env.contains_key("CLIENT_ID") {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
+    let client = if m.id == "gmail" {
+        gmail::client_id().ok_or_else(gmail::not_configured)?
+    } else {
+        env.get("CLIENT_ID").ok_or_else(fail)?.clone()
+    };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
     {
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", env.get("CLIENT_ID").ok_or_else(fail)?)
+            .append_pair("client_id", &client)
             .append_pair("redirect_uri", &redirect)
             .append_pair("state", &state)
             .append_pair(
@@ -197,9 +225,14 @@ pub(super) fn begin(
             .append_pair("code_challenge_method", "S256")
             .append_pair("scope", m.scopes);
         if m.endpoint.is_empty() {
-            query
-                .append_pair("access_type", "offline")
-                .append_pair("prompt", "consent");
+            query.append_pair("access_type", "offline").append_pair(
+                "prompt",
+                if m.id == "gmail" {
+                    "select_account consent"
+                } else {
+                    "consent"
+                },
+            );
         }
         if m.id == "notion" {
             query.append_pair("resource", m.endpoint);
@@ -292,7 +325,7 @@ pub(super) fn begin(
                         return Err(invalid("Vous avez refusé l’autorisation du service. Aucun nouveau jeton n’a été enregistré."));
                     }
                     let code = value("code").filter(|s| !s.is_empty()).ok_or_else(fail)?;
-                    let mut fields = token_fields(&env);
+                    let mut fields = token_fields(m, &env);
                     fields.extend([
                         ("grant_type".into(), "authorization_code".into()),
                         ("code".into(), code.into()),
@@ -317,7 +350,14 @@ pub(super) fn begin(
                         [format!("mcp_{}_*", server.id)],
                     )?;
                     tx.commit()?;
-                    attach(&ctx, &server, m, &env)?;
+                    let attached = attach(&ctx, &server, m, &env);
+                    if attached.is_err() && m.id == "gmail" {
+                        // A connection that did not come up keeps no token.
+                        if let Ok(vault) = crate::features::forms::vault(&ctx) {
+                            let _ = vault.remove(&secret_name(&server.id));
+                        }
+                    }
+                    attached?;
                     Ok(())
                 })();
                 match completion {
@@ -411,7 +451,7 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
         return super::github::revoke(m, env);
     }
     let Some(token) = token else { return true };
-    let mut fields = token_fields(env);
+    let mut fields = token_fields(m, env);
     fields.push(("token".into(), token.clone()));
     if m.id == "notion" {
         fields.push((

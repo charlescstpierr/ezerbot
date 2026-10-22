@@ -341,7 +341,6 @@ struct Attempt {
 struct Inner {
     codex: bool,
     deadlines: Mutex<reliable::Deadlines>,
-    transports: AtomicUsize,
     closing: AtomicUsize,
     simulation: AtomicBool,
     probe: Mutex<Value>,
@@ -824,7 +823,6 @@ impl Session {
             inner: Arc::new(Inner {
                 codex,
                 deadlines: Mutex::new(reliable::Deadlines::default()),
-                transports: AtomicUsize::new(0),
                 closing: AtomicUsize::new(0),
                 simulation: AtomicBool::new(
                     cfg!(debug_assertions)

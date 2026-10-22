@@ -67,7 +67,6 @@ struct Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.inner.transports.fetch_sub(1, Ordering::SeqCst);
         let mut settled = lock(&self.settled);
         settled.worker_done = true;
         if settled.counted {
@@ -132,7 +131,6 @@ impl Session {
                 reason: failure.message,
             });
         }
-        let _ = self.inner.transports.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::sync_channel(32);
         let abandoned = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Mutex::new(Settled {

@@ -1351,11 +1351,30 @@ fn git_deletions_still_ask_when_a_permanent_shell_rule_exists() {
         assert!(status.success(), "git {args:?}");
     };
     git(&["init", "-q"]);
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+    ]);
     git(&["branch", "vieille"]);
     std::fs::write(f.root().join("note"), "garde").unwrap();
     git(&["add", "note"]);
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
     f.send("allow-shell", "run_shell", f.shell("git status --short"));
     let allowed = f.request("allow-shell");
     f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));

@@ -25,6 +25,6 @@ export function ScreenCard({ message }) {
     {reason && <p role="status">{reason}</p>}
     {!outcome && !state.error && message.payload.approval_status === "resolved" && <p>Geste autorisé par vous, en cours d’exécution.</p>}
     {reason && /permission|Accessibilité|Enregistrement|Surveillance/i.test(reason) && <div className="screen-actions"><button className="gb-retry" onClick={() => window.EzerbotScreen?.pane("accessibility")}>Ouvrir Accessibilité</button><button className="gb-retry" onClick={() => window.EzerbotScreen?.pane("recording")}>Ouvrir Enregistrement de l’écran</button><button className="gb-retry" onClick={() => window.EzerbotScreen?.pane("input")}>Ouvrir Surveillance de l’entrée</button></div>}
-    {screenDecisionLabel(message.payload.approval_status) && <footer className="screen-decision">{screenDecisionLabel(message.payload.approval_status)}</footer>}
+    {screenDecisionLabel(message.payload.approval_status) && <footer className="screen-decision"><span className={message.payload.approval_status === "resolved" ? "gb-status-ok" : undefined}>{screenDecisionLabel(message.payload.approval_status)}</span></footer>}
   </article>;
 }

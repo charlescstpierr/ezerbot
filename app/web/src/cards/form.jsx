@@ -43,6 +43,8 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
   const delivered = wake?.status === "delivered" && typeof wake.run_id === "string" && Number.isInteger(wake.first_event_seq);
   const available = request.entry_id && request.route && request.kind?.kind === message.kind && labels[status];
   const recorded = message.kind === "approval" ? "Autorisée" : message.kind === "secret" ? "Secret enregistré" : "Réponse enregistrée";
+  const authorization = message.kind === "approval" && status === "resolved" && !request.background_task
+    ? (request.decision?.always_allow ? "Toujours autorisé" : "Autorisé une fois") : null;
   const statusLabel = status === "resolved" ? recorded : status === "pending" && receipt ? "Résolution reçue · Vérification de l’état…" : labels[status];
   const requesterId = request.route?.requesting_bot_id;
   const requesterName = window.GrokbotPanels?.state?.bots?.find((bot) => bot.id === requesterId)?.name || requesterId;
@@ -53,7 +55,7 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
     <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong>{badge}</header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {statusText || statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {authorization ? <span className="gb-status-ok" role="status">{authorization}</span> : statusText || statusLabel}</p>
         {children}
         {showDelivery && <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}

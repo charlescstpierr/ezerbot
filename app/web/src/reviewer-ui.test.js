@@ -271,6 +271,7 @@ const vite = await createServer({
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
 const { Card: ToolCard, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { ScreenCard } = await vite.ssrLoadModule("/src/screen.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
 
 test("connector lifecycle cards show the provider-specific action and its result, not a bare resume receipt", () => {
@@ -548,4 +549,32 @@ test("human fallback is attributed to the reviewer; pending review has decorativ
   assert.ok(progress.includes("Relecteur : "));
   assert.ok(progress.includes("Autoriser une fois"));
   assert.ok(!progress.includes("disabled="));
+});
+
+test("resolved permission cards show the green decision for every action type", () => {
+  globalThis.window = { GrokbotForms: { view() {} } };
+  try {
+    for (const tool of ["test_generic_tool", "run_shell", "mcp_start_test", "routines_background_configure", "propose_skill"]) {
+      for (const [decision, label] of [["allow_once", "Autorisé une fois"], [{ always_allow: { scope: "global" } }, "Toujours autorisé"]]) {
+        const html = renderToStaticMarkup(React.createElement(Card, { message: {
+          id: "allowed", kind: "approval", payload: {
+            entry_id: "allowed", route: { requesting_bot_id: "bot" },
+            status: { status: "resolved" }, kind: { kind: "approval", tool }, decision,
+          },
+        } }));
+        assert.match(html, new RegExp(`class="gb-status-ok"[^>]*>${label}<`), tool);
+      }
+    }
+  } finally { delete globalThis.window; }
+});
+
+test("automatic permission grants show a green one-time authorization", () => {
+  assert.match(card("resolved", "allow"), /class="gb-status-ok"[^>]*>Autorisé une fois</);
+});
+
+test("screen grants show their one-time authorization in green inside the muted footer", () => {
+  const html = renderToStaticMarkup(React.createElement(ScreenCard, { message: {
+    id: "screen-allowed", payload: { approval_status: "resolved", run_status: "running", call: { name: "computer_click", arguments: { x: 1, y: 2 } } },
+  } }));
+  assert.match(html, /<footer class="screen-decision"><span class="gb-status-ok"[^>]*>Autorisé une fois<\/span><\/footer>/);
 });

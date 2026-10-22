@@ -62,6 +62,7 @@ export function Card({ message, busy, onAction }) {
   if (screen && !pending) return null;
   if (automatic) return (
     <article className={`gb-message rounded-xl border border-border bg-card px-4 py-3 text-foreground${input.status === "denied" ? " gb-approval-denied" : ""}`} data-message-id={message.id} data-card-kind="approval">
+      {input.status === "resolved" && <p className="gb-status-ok" role="status">Autorisé une fois</p>}
       <p className="text-sm" role="status"><strong className={input.status === "denied" ? "gb-status-alert" : undefined}>{input.status === "resolved" ? "Approuvé automatiquement : " : "Refusé automatiquement : "}</strong>{review.answer.reason}</p>
       <p className="mt-1 text-xs text-muted-foreground">{request.connector ? <>Connecteur : <strong>{request.connector.server}</strong><br />Outil : <code>{request.connector.tool}</code></> : <>Outil : <code>{action.tool}</code></>}</p>
       {preview == null ? <p className="mt-2 text-xs text-muted-foreground">Aperçu de l’action indisponible.</p> : <div className="mt-2 space-y-2 text-xs text-muted-foreground">

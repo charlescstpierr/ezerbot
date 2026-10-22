@@ -180,8 +180,16 @@
   panels.register({
     id: "local", settingsSection(container) { settings = container; render(panels.state); },
     onState(state, context) { render(state); latestContext = context; if (resizeAnchor && attention(context)?.token !== resizeAnchor) { dropAnchor(); } focusAttention(context); },
+    wantsPolling(context) {
+      return (context?.conversation?.messages || []).some((message) => message.payload?.outcome?.output?.background === true && message.payload?.outcome?.output?.status === "en cours");
+    },
     async onCardAction(message, action, detail, context) {
-      if (action !== "local.stop" || message.kind !== "tool") return false;
+      if (message.kind !== "tool") return false;
+      if (action === "local.task.stop") {
+        await panels.api("/api/local/tasks/stop", { run_id: message.payload.run_id, call_id: message.payload.call?.call_id });
+        await panels.refresh(); return true;
+      }
+      if (action !== "local.stop") return false;
       await panels.api("/api/stop", { conversation_id: context.conversation.id, message_id: message.payload.run_id });
       await panels.refresh(); return true;
     },

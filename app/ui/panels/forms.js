@@ -367,6 +367,8 @@
         path = "/api/forms/submit"; body.value = detail?.value;
       } else if (action === "forms.decide" && message.kind === "approval") {
         path = "/api/approvals/resolve"; body.decision = detail?.decision;
+        // A draft card sends the text its owner corrected; the server binds it to the card.
+        if (typeof detail?.text === "string") body.text = detail.text;
         // Do not echo the displayed arguments: they may be redacted. The server
         // binds entry_id to the original action digest (wrapper review r2 §2).
       } else return false;
@@ -395,6 +397,7 @@
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
         delete body.value;
+        delete body.text;
         changed();
       }
       // Reconcile lost responses and decisions made in another window. A refresh

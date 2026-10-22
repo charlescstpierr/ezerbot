@@ -499,6 +499,8 @@ pub fn request_tool_approval(
             super::generated::approval_display(ctx, call)?
         } else if call.name == "propose_skill" {
             super::skills::proposal_display(ctx, call)?
+        } else if super::mcp::is_github_comment(&call.name) {
+            super::mcp::github_comment_display(ctx, &id, call)?
         } else {
             call.arguments.clone()
         };
@@ -831,6 +833,8 @@ struct Decision {
     decision: ApprovalDecision,
     tool: Option<String>,
     arguments: Option<Value>,
+    /// Corrected text of a draft card, bound to the card by the host.
+    text: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1168,6 +1172,20 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
                     ))
                 }
             }
+            if let Some(text) = &input.text {
+                if !super::mcp::is_github_comment(tool)
+                    || !matches!(input.decision, ApprovalDecision::AllowOnce)
+                {
+                    return Err(ApiError::new(
+                        400,
+                        "Seul le texte d’un brouillon peut être corrigé, au moment de l’envoyer.",
+                    ));
+                }
+                // A replayed click keeps the text of the first one.
+                if request.status == RequestStatus::Pending {
+                    super::mcp::edit_github_comment(&ctx, &request.id, text)?;
+                }
+            }
             let mut decision = input.decision;
             let mut rule_tool = None;
             if policy.scope == "action" {
@@ -1390,32 +1408,35 @@ fn request_value(
             .unwrap_or(Value::Null);
     }
     if let InputKind::Approval { tool, .. } = &request.kind {
+        let publication = super::mcp::is_github_comment(tool);
+        let consent = super::recall::is_consent(tool);
         if tool == super::routines_background::ACTION
             || super::mcp::is_lifecycle(tool)
-            || super::recall::is_consent(tool)
+            || publication
+            || consent
         {
-            // Une invitation dans le fil partage son tour avec d’autres outils : seul le
-            // résultat de l’appel approuvé compte, pas le dernier résultat du tour.
-            let call_id = if super::recall::is_consent(tool) {
+            // A draft or a consent card shows the result of its own call, never the run's
+            // latest one (an invitation shares its turn with other tools).
+            let call_id = if consent {
                 approved_call_id(ctx, request)?
+            } else if publication {
+                super::mcp::github_comment_call(ctx, &request.id)
             } else {
                 None
             };
-            let result: Option<String> = if super::recall::is_consent(tool) {
-                match call_id {
-                    Some(call_id) => ctx.connection.query_row(
-                        "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND json_extract(payload,'$.call_id')=?2 ORDER BY seq DESC LIMIT 1",
-                        params![&request.run_id, call_id], |r| r.get(0),
-                    ).optional()?,
-                    None => None,
-                }
+            let result: Option<String> = if consent && call_id.is_none() {
+                None
             } else {
                 ctx.connection.query_row(
-                    "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' ORDER BY seq DESC LIMIT 1",
-                    [&request.run_id], |r| r.get(0),
+                    "SELECT json_extract(payload,'$.outcome') FROM engine_run_events WHERE run_id=?1 AND kind='tool_result' AND (?2 IS NULL OR json_extract(payload,'$.call_id')=?2) ORDER BY seq DESC LIMIT 1",
+                    params![&request.run_id, call_id], |r| r.get(0),
                 ).optional()?
             };
-            value["configuration_result"] = result
+            value[if publication {
+                "publication_result"
+            } else {
+                "configuration_result"
+            }] = result
                 .map(|s| serde_json::from_str::<Value>(&s))
                 .transpose()
                 .map_err(|_| ApiError::new(500, "Résultat de configuration illisible."))?

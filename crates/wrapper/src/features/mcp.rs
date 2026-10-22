@@ -111,10 +111,40 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 
 /// The GitHub read tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_github_tool(name: &str) -> bool {
-    catalogue::github::is_tool(name)
+    catalogue::github::is_tool(name) || is_github_comment(name)
 }
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
-    catalogue::github::call(ctx, &call.name, &call.arguments)
+    if is_github_comment(&call.name) {
+        catalogue::github::comment::call(ctx, call)
+    } else {
+        catalogue::github::call(ctx, &call.name, &call.arguments)
+    }
+}
+/// The one publishing tool of the connection: it opens a draft card and sends nothing
+/// until that card is validated.
+pub(crate) fn is_github_comment(name: &str) -> bool {
+    name == catalogue::github::COMMENT_TOOL
+}
+pub(crate) fn validate_github_comment(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
+    catalogue::github::comment::validate(ctx, &call.arguments)
+}
+/// Content of the draft card, stored with the approval request.
+pub(crate) fn github_comment_display(
+    ctx: &Context<'_>,
+    request_id: &str,
+    call: &ToolCall,
+) -> Result<Value, ApiError> {
+    catalogue::github::comment::prepare(ctx, request_id, call)
+}
+pub(crate) fn github_comment_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    catalogue::github::comment::call_id(ctx, request_id)
+}
+pub(crate) fn edit_github_comment(
+    ctx: &Context<'_>,
+    request_id: &str,
+    text: &str,
+) -> Result<(), ApiError> {
+    catalogue::github::comment::edit(ctx, request_id, text)
 }
 pub(crate) fn is_lifecycle(name: &str) -> bool {
     name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")

@@ -1695,6 +1695,15 @@ impl RunServices for Services<'_> {
         }
         Ok(decision)
     }
+    fn approval_denied(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+        reason: String,
+    ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+        super::delegation::approval_denied(&self.ctx(conn, run), call, run, reason)
+    }
     fn request_approval(
         &mut self,
         conn: &Connection,

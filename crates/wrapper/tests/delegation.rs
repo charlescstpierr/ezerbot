@@ -810,6 +810,89 @@ fn checked_context_is_reused_once_and_cache_is_scoped_to_assembly() {
 }
 
 #[test]
+fn denied_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(false);
+}
+
+#[test]
+fn expired_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(true);
+}
+
+fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        call("approved", "delegate", args("child")),
+        call("denied", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "mixed", "Run two independent tasks");
+    wait("first approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.provider.status()["titling"] == false
+    });
+    assert!(f.allow_pending_background());
+    f.tick_suspended();
+    wait("second approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.children(&f.run(&c, "mixed")).len() == 1
+            && f.provider.status()["titling"] == false
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| {
+            message["kind"] == "approval" && message["payload"]["status"]["status"] == "pending"
+        })
+        .expect("pending sibling approval");
+    let request = &card["payload"];
+    if expired {
+        let db = f.db();
+        let parent = f.run(&c, "mixed");
+        let ctx = Context {
+            now_ms: request["kind"]["expires_at"].as_u64().unwrap() + 1,
+            ..f.context(&db, &parent)
+        };
+        features::forms::tick(&ctx);
+    } else {
+        f.post(
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": request["entry_id"],
+                "submission_id": "deny-sibling",
+                "conversation_id": c,
+                "decision": "deny"
+            }),
+        );
+    }
+    f.events(vec![completed()]);
+    f.tick_suspended();
+    wait("approval settled", || {
+        f.provider.status()["titling"] == false
+    });
+    let parent = f.run(&c, "mixed");
+    assert_eq!(parent.status, RunStatus::AwaitingChildren);
+    let children = f.children(&parent);
+    assert_eq!(children.len(), 1, "the denied task must never launch");
+    assert!(matches!(
+        children[0].status,
+        DelegationStatus::Queued | DelegationStatus::Running
+    ));
+    // The unused parent response must still be queued while children run.
+    f.server.seen.lock().unwrap().responses.pop_front().unwrap();
+    f.child_done(&children[0]);
+    f.resume(&c, "mixed");
+    let seen = f.server.seen.lock().unwrap();
+    let resumed = seen.bodies.last().unwrap().to_string();
+    assert!(resumed.contains("Verified child summary"));
+    assert!(resumed.contains(if expired { "écoulé" } else { "refusée" }));
+}
+
+#[test]
 fn parallel_delegates_in_one_response_run_concurrently() {
     let mut f = Fixture::new(true);
     let c = f.conversation();
@@ -2214,6 +2297,7 @@ fn selected_image_follows_when_the_task_input_is_forwarded() {
         completed(),
     ]);
     wait("grandchild request", || {
+        f.allow_pending_background();
         f.tick();
         f.server.seen.lock().unwrap().bodies.iter().any(|body| {
             body["instructions"]

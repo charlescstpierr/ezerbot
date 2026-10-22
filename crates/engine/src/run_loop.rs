@@ -64,6 +64,17 @@ pub trait RunServices {
         run: &Run,
         call: &ToolCall,
     ) -> Result<ApprovalCheck>;
+    /// Settle a denied/expired call without executing its effects. Adapters may
+    /// wait for work already admitted by sibling calls in the same response.
+    fn approval_denied(
+        &mut self,
+        _conn: &Connection,
+        _run: &Run,
+        _call: &ToolCall,
+        reason: String,
+    ) -> Result<ToolOutcome> {
+        Ok(ToolOutcome::Failed { reason })
+    }
     /// Called only for ApprovalCheck::Ask. Idempotent by (run_id, call_id, canonical
     /// tool/argument digest): reuse the same SuspendCause::HumanInput { id } after
     /// retries/crashes instead of creating another request. Derive its id (or
@@ -1004,7 +1015,7 @@ fn execute(
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Some(RunProgress::Suspended(cause)));
                 }
-                ApprovalCheck::Denied { reason } => Some(ToolOutcome::Failed { reason }),
+                ApprovalCheck::Denied { reason } => Some(reason),
                 ApprovalCheck::Authorized { by } => {
                     authorized_by = Some(by);
                     None
@@ -1024,8 +1035,8 @@ fn execute(
                     "invalid arguments".into()
                 },
             }
-        } else if let Some(denied) = approval {
-            denied
+        } else if let Some(reason) = approval {
+            services.approval_denied(conn, &run, call, reason)?
         } else if spec.is_none() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {

@@ -293,6 +293,7 @@ fn classify_segment(segment: &str, scan: &mut ShellScan, depth: u8) {
         }
     }
     let Some(index) = command_index(&tokens) else {
+        scan.unproven = true;
         return;
     };
     if destructive_at(&tokens, index) {
@@ -543,8 +544,11 @@ fn command_index(tokens: &[String]) -> Option<usize> {
             "sudo" | "command" | "env" | "nohup" | "nice" | "time"
         ) {
             cursor += 1;
-            while cursor < tokens.len() && tokens[cursor].starts_with('-') {
-                cursor += 1;
+            // Wrapper flags may consume operands or even supply shell code
+            // (env -S). Without parsing that wrapper's grammar, no executable
+            // can be identified reliably enough for a standing allow rule.
+            if tokens.get(cursor).is_some_and(|arg| arg.starts_with('-')) {
+                return None;
             }
             continue;
         }

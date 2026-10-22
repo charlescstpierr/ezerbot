@@ -762,6 +762,13 @@ mod tests {
             .unwrap()
             .is_none());
         for command in [
+            "env -u FOO rm note",
+            "env --unset FOO rm note",
+            "env --unset=FOO rm note",
+            "sudo -u root rm note",
+            "nice -n 5 rm note",
+            "env -u FOO sendmail bob",
+            "env --unknown FOO rm note",
             "printf ok; rm note",
             "cd /tmp && printf ok",
             "find . -exec ls {} +",

@@ -33,6 +33,11 @@ pub enum InputKind {
     Form {
         fields: Vec<Field>,
     },
+    SiteForm {
+        origin: String,
+        fields: Vec<Field>,
+        expires_at: i64,
+    },
     Approval {
         tool: String,
         args_digest: String,
@@ -107,7 +112,7 @@ pub(crate) fn valid_digest(digest: &str) -> bool {
 
 fn validate_kind(kind: &InputKind) -> Result<()> {
     match kind {
-        InputKind::Form { fields } => {
+        InputKind::Form { fields } | InputKind::SiteForm { fields, .. } => {
             let mut names = HashSet::new();
             for field in fields {
                 if !nonempty(&field.name) || !names.insert(&field.name) {
@@ -283,7 +288,7 @@ pub(crate) fn replay(
     }
 }
 
-fn validate_values(fields: &[Field], values: &Value) -> Result<()> {
+pub fn validate_values(fields: &[Field], values: &Value) -> Result<()> {
     let values = values
         .as_object()
         .ok_or_else(|| invalid("form values must be an object"))?;
@@ -357,6 +362,41 @@ pub fn submit_secret_ref(
         submission_id,
         &serde_json::to_value(secret)?,
         "resolved",
+    )
+}
+
+/// Site submissions persist only a closed status vocabulary, never field values.
+pub fn resolve_site(
+    conn: &Connection,
+    request: &HumanInputRequest,
+    submission: &str,
+    now: i64,
+    origin: &str,
+    refused: bool,
+) -> Result<ResumeReceipt> {
+    let InputKind::SiteForm {
+        origin: target,
+        expires_at,
+        ..
+    } = &request.kind
+    else {
+        return Err(invalid("site form required"));
+    };
+    let (value, status) = if now >= *expires_at {
+        ("demande périmée", "expired")
+    } else if refused {
+        ("refusé", "denied")
+    } else if origin != target {
+        ("cible changée", "resolved")
+    } else {
+        ("rempli", "resolved")
+    };
+    resolve(
+        conn,
+        request,
+        submission,
+        &Value::String(value.into()),
+        status,
     )
 }
 
@@ -437,7 +477,7 @@ pub fn attach_wake(conn: &Connection, resolution_id: &str, wake: &Wake) -> Resul
         .ok_or_else(|| invalid("unknown human-input resolution"))?;
     let request = for_entry(conn, &entry_id)?;
     let cause = match request.kind {
-        InputKind::Form { .. } => WakeCause::Form,
+        InputKind::Form { .. } | InputKind::SiteForm { .. } => WakeCause::Form,
         InputKind::Approval { .. } => WakeCause::Approval,
         InputKind::Secret { .. } => WakeCause::Secret,
     };

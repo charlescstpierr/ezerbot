@@ -360,7 +360,12 @@
         conversation_id: context.conversation.id,
       };
       let path;
-      if (action === "forms.cancel") path = "/api/forms/cancel";
+      if (action === "forms.site" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.values = detail?.values;
+        body.origin = request.kind.origin; body.refused = detail?.refused === true;
+      } else if (action === "forms.cancel" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.refused = true;
+      } else if (action === "forms.cancel") path = "/api/forms/cancel";
       else if (action === "forms.submit" && message.kind === "form") {
         path = "/api/forms/submit"; body.values = detail?.values;
       } else if (action === "forms.secret" && message.kind === "secret") {
@@ -396,6 +401,7 @@
             : uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
+        if (request.kind?.kind === "site_form") delete body.values;
         delete body.value;
         delete body.text;
         changed();

@@ -41,7 +41,7 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
   const labels = { pending: "En attente de vous", resolved: "Réponse enregistrée", denied: "Refusée", expired: "Expirée", cancelled: "Annulée" };
   const wake = receipt?.wake;
   const delivered = wake?.status === "delivered" && typeof wake.run_id === "string" && Number.isInteger(wake.first_event_seq);
-  const available = request.entry_id && request.route && request.kind?.kind === message.kind && labels[status];
+  const available = request.entry_id && request.route && (request.kind?.kind === message.kind || message.kind === "form" && request.kind?.kind === "site_form") && labels[status];
   const recorded = message.kind === "approval" ? "Autorisée" : message.kind === "secret" ? "Secret enregistré" : "Réponse enregistrée";
   const authorization = message.kind === "approval" && status === "resolved" && !request.background_task
     ? (request.decision?.always_allow ? "Toujours autorisé" : "Autorisé une fois") : null;
@@ -74,6 +74,7 @@ export function Card({ message, busy, onAction }) {
   const input = useHumanInput(message, onAction);
   const { request, pending, act } = input;
   const fields = request.kind?.fields || [];
+  const site = request.kind?.kind === "site_form";
   const disabled = busy || input.busy || !pending;
   async function submit(event) {
     event.preventDefault();
@@ -87,10 +88,12 @@ export function Card({ message, busy, onAction }) {
       if (value === "" && !field.required) return [];
       return [[field.name, field.field_type.kind === "number" ? Number(value) : value]];
     }));
-    await act("forms.submit", { values });
+    if (site) form.reset();
+    await act(site ? "forms.site" : "forms.submit", { values });
   }
   return (
-    <HumanInputCard message={message} title="Informations demandées" input={input}>
+    <HumanInputCard message={message} title={site ? `Site confirmé : ${request.kind.origin}` : "Informations demandées"} input={input}>
+      {site && <p className="mb-3 text-sm">Jamais montré à votre bot. Rempli directement sur {request.kind.origin}.</p>}
       {pending && <form className="space-y-3" onSubmit={submit}>
         <fieldset className="space-y-3" disabled={disabled}>
           {fields.map((field, index) => <label className="block space-y-1 text-sm" key={field.name}>
@@ -100,9 +103,9 @@ export function Card({ message, busy, onAction }) {
               : field.field_type.kind === "boolean"
                 // Required boolean means a value is required, not that it must be true.
                 ? <input type="checkbox" name={`field-${index}`} />
-                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} pattern={field.required && field.field_type.kind === "text" ? ".*\\S.*" : undefined} />}
+                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : site ? "password" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} pattern={field.required && field.field_type.kind === "text" ? ".*\\S.*" : undefined} />}
           </label>)}
-          <div className="flex flex-wrap gap-2"><button className="gb-retry gb-retry-primary" type="submit">Envoyer les réponses</button><button className="gb-retry" type="button" onClick={() => act("forms.cancel")}>Annuler</button></div>
+          <div className="flex flex-wrap gap-2"><button className="gb-retry gb-retry-primary" type="submit">Envoyer les réponses</button><button className="gb-retry" type="button" onClick={(event) => { if (site) event.currentTarget.form.reset(); act("forms.cancel"); }}>{site ? "Refuser" : "Annuler"}</button></div>
         </fieldset>
       </form>}
     </HumanInputCard>

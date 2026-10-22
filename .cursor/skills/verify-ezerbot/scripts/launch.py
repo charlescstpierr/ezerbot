@@ -173,6 +173,7 @@ def main() -> None:
             "TMPDIR": str(home / "tmp"),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
+            "EZERBOT_FAKE_SIGNIN": "1",
         }
         print(
             f"run: {binary} --port 0 --db {db}",

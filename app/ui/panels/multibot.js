@@ -17,10 +17,29 @@
     ["blanc", "Sans couleur", "#F5F5F5"],
   ];
   const dismissedMemory = new Set();
+  const MEMBER_KINDS = ["chat", "group"];
+  const INTENTS = Object.freeze({
+    create: Object.freeze({
+      label: "Créer un groupe",
+      title: "Créer un groupe",
+      visible: (conversation) => !conversation || MEMBER_KINDS.includes(conversation.kind),
+    }),
+    members: Object.freeze({
+      label: "Membres",
+      title: "Membres du fil",
+      visible: (conversation) => Boolean(conversation) && MEMBER_KINDS.includes(conversation.kind),
+    }),
+  });
   let context;
-  const button = node("button", "tool-pill", "Créer un groupe");
-  button.type = "button";
-  document.querySelector(".topbar-actions").prepend(button);
+  let session = null;
+  function makePill(intent, row) {
+    const el = node("button", "tool-pill", row.label);
+    el.type = "button";
+    el.dataset.topbarIntent = intent;
+    return el;
+  }
+  const pills = new Map(Object.entries(INTENTS).map(([intent, row]) => [intent, makePill(intent, row)]));
+  document.querySelector(".topbar-actions").prepend(...pills.values());
   const bar = node("div", "group-bar");
   document.querySelector(".topbar").after(bar);
   const banner = node("aside", "group-cost-banner");
@@ -31,7 +50,6 @@
   document.getElementById("panels").append(dialog);
   let selected = new Set();
   let mutating = false;
-  let creating = false;
   let focusKey = null;
   let profile = { name: "", description: "", color: "citron", mark: "" };
   function dismissed() {
@@ -96,14 +114,34 @@
     };
     return b;
   }
+  function dialogView(current) {
+    if (current.intent === "create") return { title: INTENTS.create.title, target: null, profile: "create", members: "choose" };
+    const target = context.conversation?.id === current.conversationId ? context.conversation : null;
+    return { title: INTENTS.members.title, target, profile: target?.kind === "group" ? "edit" : null, members: "manage" };
+  }
+  function sessionStillValid(current) {
+    if (current.intent === "create") return true;
+    return context.conversation?.id === current.conversationId && INTENTS.members.visible(context.conversation);
+  }
+  function dialogBots(bots, view) {
+    return bots.filter((b) => !b.deleted || view.target?.member_ids?.includes(b.id));
+  }
+  function openDialog(next) {
+    session = next;
+    focusKey = null;
+    selected = new Set();
+    const view = dialogView(next);
+    profile = view.target ? profileFrom(view.target) : blankProfile();
+    renderDialog();
+    dialog.showModal();
+  }
   async function command(path, bot) {
-    const conversation = context.conversation;
-    await host.api(path, { conversation_id: conversation.id, bot_id: bot, command_id: crypto.randomUUID() });
+    await host.api(path, { conversation_id: session.conversationId, bot_id: bot, command_id: crypto.randomUUID() });
     await host.refresh();
   }
-  function profileSection() {
+  function profileSection(mode) {
     const section = node("section", "setting-section group-profile");
-    section.append(node("h3", "", creating ? "Le groupe" : "Nom du groupe"));
+    section.append(node("h3", "", mode === "create" ? "Le groupe" : "Nom du groupe"));
     const nameLabel = node("label", "form-label", "Nom");
     const name = node("input", "text-input");
     name.type = "text";
@@ -173,26 +211,27 @@
       if (isTextField(active)) selection = { start: active.selectionStart ?? 0, end: active.selectionEnd ?? active.selectionStart ?? 0 };
     }
     const scrollTop = dialog.scrollTop;
-    const conversation = context.conversation;
-    const bots = context.state.bots.filter((b) => !b.deleted || conversation?.member_ids?.includes(b.id));
-    const editing = creating || conversation?.kind === "group";
+    const view = dialogView(session);
+    const conversation = view.target;
+    const choosing = view.members === "choose";
+    const bots = dialogBots(context.state.bots, view);
     dialog.replaceChildren();
     const header = node("div", "dialog-header");
-    header.append(node("h2", "", creating ? "Créer un groupe" : "Membres du fil"), action("Fermer", () => dialog.close()));
+    header.append(node("h2", "", view.title), action("Fermer", () => dialog.close()));
     dialog.append(header);
-    if (editing) dialog.append(profileSection());
+    if (view.profile) dialog.append(profileSection(view.profile));
     const section = node("section", "setting-section");
-    section.append(node("h3", "", creating ? "Deux à six bots" : "Vos bots · six au maximum"), node("p", "", creating ? "Choisissez de deux à six bots. Ils partageront ce nouveau fil. Les conversations privées restent privées." : "Ajouter un bot lui donne accès à l’historique visible de ce fil, pas aux conversations privées des autres bots."));
+    section.append(node("h3", "", choosing ? "Deux à six bots" : "Vos bots · six au maximum"), node("p", "", choosing ? "Choisissez de deux à six bots. Ils partageront ce nouveau fil. Les conversations privées restent privées." : "Ajouter un bot lui donne accès à l’historique visible de ce fil, pas aux conversations privées des autres bots."));
     const ids = conversation?.member_ids || [];
     for (const bot of bots) {
-      const row = node(creating ? "label" : "div", "group-member");
+      const row = node(choosing ? "label" : "div", "group-member");
       row.title = `Bot : ${bot.id}`;
       const avatar = node("span", "group-member-avatar"); avatar.setAttribute("aria-hidden", "true");
       avatar.append(host.createBotMascot(bot)());
       const copy = node("div", "group-member-copy");
       copy.append(node("strong", "", bot.name), node("small", "", host.botSummary(bot)));
       row.append(avatar, copy);
-      if (creating) {
+      if (choosing) {
         const check = document.createElement("input"); check.className = "group-select"; check.type = "checkbox"; check.checked = selected.has(bot.id);
         check.dataset.botChoice = bot.id;
         check.setAttribute("aria-label", `Choisir ${bot.name} (${bot.id})`);
@@ -223,8 +262,8 @@
     rules.append(node("h3", "", "Prise de parole"), node("p", "", "Sans mention, le coordinateur répond. @ ouvre la liste des membres ; @everyone les adresse tous. Une chaîne s’arrête après 12 tours ou 3 tours par bot. Les demandes entre bots restent dans ce fil."));
     dialog.append(rules);
     const footer = node("div", "dialog-footer");
-    footer.append(action(creating ? "Annuler" : "Terminé", () => dialog.close()));
-    if (creating) {
+    footer.append(action(choosing ? "Annuler" : "Terminé", () => dialog.close()));
+    if (choosing) {
       const create = action("Créer le groupe", async () => {
         const response = await host.api("/api/conversations", { bot_ids: [...selected], ...payloadFields() });
         await host.refresh(); host.openConversation(response.conversation.id); dialog.close();
@@ -243,7 +282,7 @@
       footer.append(save);
     }
     dialog.append(footer);
-    if (creating && !canCreate()) {
+    if (choosing && !canCreate()) {
       const help = node("p", "group-help", selected.size < 2 ? "Choisissez au moins deux bots." : "Indiquez un nom et une description.");
       help.setAttribute("role", "status");
       dialog.append(help);
@@ -290,27 +329,21 @@
     banner.replaceChildren(text, close);
   }
   dialog.addEventListener("close", () => {
+    session = null;
     focusKey = null;
     selected = new Set();
-    if (creating) profile = blankProfile();
+    profile = blankProfile();
   });
-  button.onclick = () => {
-    focusKey = null;
-    creating = !context.conversation;
-    selected = new Set();
-    profile = creating ? blankProfile() : profileFrom(context.conversation);
-    renderDialog();
-    dialog.showModal();
-  };
+  pills.get("create").onclick = () => openDialog({ intent: "create" });
+  pills.get("members").onclick = () => openDialog({ intent: "members", conversationId: context.conversation.id });
   host.register({
     id: "multibot",
     onState(_state, current) {
       context = current;
-      const conversation = current.conversation;
-      const supported = !conversation || ["chat", "group"].includes(conversation.kind);
-      button.hidden = !supported; button.textContent = conversation ? "Membres" : "Créer un groupe";
+      for (const [intent, el] of pills) el.hidden = !INTENTS[intent].visible(current.conversation);
       renderBars();
-      if (dialog.open && !mutating) renderDialog();
+      if (session && !sessionStillValid(session)) dialog.close();
+      else if (dialog.open && !mutating) renderDialog();
     },
   });
 })();

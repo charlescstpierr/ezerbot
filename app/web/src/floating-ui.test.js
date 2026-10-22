@@ -152,7 +152,7 @@ test("a floating detail stays neutral when the notice is not an alert", () => {
 
 test("a floating ping points at Ouvrir le fil instead of a missing retry button", () => {
   const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
-  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
+  assert.equal(ping.detail, "Connexion lente… on attend la réponse.");
   assert.doesNotMatch(ping.detail, /Réessayez/);
   const delayed = floatingFailureState({ state: "failed", error_kind: "other", error: "Les connexions précédentes se ferment encore. Réessayez dans une minute." });
   assert.equal(delayed.detail, "Les connexions précédentes se ferment encore. Ouvrez le fil dans une minute.");
@@ -173,12 +173,31 @@ test("a floating panel without a session is not titled as a failed answer", () =
   assert.equal(failed.detail, "Panne");
   const ping = floatingFailureState({ state: "failed", error_kind: "other", error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." });
   assert.equal(ping.alert, true);
-  assert.equal(ping.detail, "OpenAI n’a envoyé aucun événement à temps. Ouvrez le fil.");
+  assert.equal(ping.detail, "Connexion lente… on attend la réponse.");
+  const stalled = floatingFailureState({ state: "failed", error_kind: "other", error: "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez." });
+  assert.equal(stalled.detail, "La réponse n’arrive pas. Ouvrez le fil.");
   assert.equal(floatingFailureState({ state: "echoed", error_kind: "signin" }), null);
   const source = readFileSync(new URL("./floating.jsx", import.meta.url), "utf8");
   assert.match(source, /floatingFailureState\(reply, \{ providerConnected: state\?\.provider\?\.connected === true \}\)/);
   assert.match(source, /failure\.alert \? " floating-failure" : ""/);
   assert.match(source, /<strong>\{failure\.title\}<\/strong>/);
+});
+
+test("a floating panel without a session carries a neutral title instead of the red failed-answer one", () => {
+  const failure = { state: "failed", error_kind: "other", error: "Panne" };
+  const view = floatingFailureState(failure, { providerConnected: false });
+  assert.equal(view.title, "Non connecté");
+  assert.equal(view.alert, false);
+  assert.equal(view.detailClass, "");
+  assert.equal(view.detail, "Panne");
+  assert.doesNotMatch(view.title, /échoué/);
+  const connected = floatingFailureState(failure, { providerConnected: true });
+  assert.equal(connected.title, "La réponse a échoué.");
+  assert.equal(connected.alert, true);
+  const ping = floatingFailureState({ ...failure, error: "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez." }, { providerConnected: false });
+  assert.equal(ping.title, "Non connecté");
+  assert.equal(ping.detail, "Connexion lente… on attend la réponse.");
+  assert.equal(floatingFailureState({ state: "failed", error_kind: "signin" }, { providerConnected: false }).title, "Connexion ChatGPT requise");
 });
 
 test("compact layout keeps decisions outside the scroll region and disabled actions visibly muted", () => {

@@ -778,6 +778,7 @@ mod tests {
             "printf x\nwhoami",
             "r\\m note",
             "eval 'rm note'",
+            "git rm -f note",
             "exec rm note",
             "xargs rm",
             "timeout 5 rm note",

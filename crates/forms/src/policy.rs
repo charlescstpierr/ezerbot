@@ -515,19 +515,48 @@ fn destructive_at(tokens: &[String], index: usize) -> bool {
     if matches!(base, "rm" | "rmdir" | "unlink" | "shred" | "srm") {
         return true;
     }
-    if base == "git" && git_subcommand(tokens, index) == Some("clean") {
-        return true;
-    }
-    if base == "git"
-        && git_subcommand(tokens, index) == Some("reset")
-        && tokens[index + 1..].iter().any(|token| token == "--hard")
-    {
+    if base == "git" && git_is_destructive(tokens, index) {
         return true;
     }
     if base == "find" && tokens[index + 1..].iter().any(|token| token == "-delete") {
         return true;
     }
     false
+}
+
+/// Git operations that delete files, branches or stashed work, or overwrite
+/// the working tree.
+fn git_is_destructive(tokens: &[String], index: usize) -> bool {
+    let Some(sub) = git_subcommand(tokens, index) else {
+        return false;
+    };
+    let rest = || {
+        tokens[index + 1..]
+            .iter()
+            .skip_while(|token| token.as_str() != sub)
+            .skip(1)
+            .map(String::as_str)
+    };
+    match sub {
+        "clean" | "rm" | "restore" => true,
+        "reset" => rest().any(|token| token == "--hard"),
+        "checkout" | "switch" => {
+            rest().any(|token| matches!(token, "--" | "." | "-f" | "--force" | "--discard-changes"))
+        }
+        "branch" => rest().any(|token| {
+            token == "--delete"
+                || (token.starts_with('-')
+                    && !token.starts_with("--")
+                    && token.contains(['d', 'D']))
+        }),
+        "stash" => rest()
+            .next()
+            .is_some_and(|op| matches!(op, "drop" | "clear")),
+        "worktree" => rest()
+            .next()
+            .is_some_and(|op| matches!(op, "remove" | "prune")),
+        _ => false,
+    }
 }
 
 fn git_subcommand(tokens: &[String], index: usize) -> Option<&str> {
@@ -739,8 +768,19 @@ mod tests {
             "git clean -fd",
             "find . -delete",
             "git reset --hard",
+            "git rm -f note",
+            "git -C /tmp rm note",
+            "git restore note",
+            "git checkout -- note",
+            "git branch -D old",
+            "git stash drop",
+            "git worktree remove ../tree",
         ] {
             assert!(shell_is_destructive(command), "{command}");
+            assert!(
+                !describe("run_shell", &json!({"command": command}), None).remember,
+                "{command}"
+            );
         }
         for command in [
             "cd /tmp && rm note",
@@ -764,6 +804,10 @@ mod tests {
             "git status",
             "ls",
             "printf ok && echo rm",
+            "git branch",
+            "git checkout main",
+            "git stash list",
+            "git reset --soft HEAD~1",
         ] {
             assert!(!shell_is_destructive(command), "{command}");
         }

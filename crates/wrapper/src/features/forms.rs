@@ -1536,8 +1536,19 @@ fn policy_for_request(
     else {
         return Ok(grokbot_forms::policy::describe("", &Value::Null, None));
     };
-    let arguments = stored_call_arguments(ctx, &request.run_id, tool, args_digest)?
-        .unwrap_or(display_arguments(ctx, &request.id)?);
+    // These policies never read the arguments: settled cards must not reload
+    // their (possibly large) bodies on every state poll.
+    if super::screen::is_tool(tool)
+        || super::mcp::is_lifecycle(tool)
+        || tool == "propose_skill"
+        || super::local::is_read(tool)
+    {
+        return Ok(approval_policy(ctx, tool, &Value::Null));
+    }
+    let arguments = match stored_call_arguments(ctx, &request.run_id, tool, args_digest)? {
+        Some(arguments) => arguments,
+        None => display_arguments(ctx, &request.id)?,
+    };
     Ok(approval_policy(ctx, tool, &arguments))
 }
 // Presentation metadata only: the digest remains the sole binding of a subject

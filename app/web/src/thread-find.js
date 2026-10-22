@@ -85,7 +85,7 @@ function isChrome(element) {
   const tag = element.tagName;
   if (tag === "BUTTON") return element.getAttribute?.("data-streamdown") !== "link";
   if (tag === "HEADER" || tag === "FOOTER" || tag === "TIME") return true;
-  return String(element.className || "").split(/\s+/).some((name) => name === "gb-meta" || name === "gb-actions" || name === "gb-status");
+  return String(element.className || "").split(/\s+/).some((name) => name === "gb-meta" || name === "gb-actions" || name === "gb-status" || name === "katex-mathml");
 }
 
 function bodyElements(root) {

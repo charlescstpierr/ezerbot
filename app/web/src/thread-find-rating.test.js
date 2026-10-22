@@ -456,3 +456,23 @@ test("un vote que le Mac refuse n’entre ni dans l’export ni dans l’essai s
   assert.equal(first.message_id, "m1");
   assert.equal(second.vote, "mauvais");
 });
+
+test("une formule rendue ne compte que sa partie visible, pas le MathML caché ni l’annotation TeX", () => {
+  const document = createDocument();
+  const root = article({ id: "m-bot", name: "Ezerbot", body: "Soit ", document });
+  const bubble = root.querySelector("[data-find-body]");
+  const katex = document.createElement("span");
+  katex.className = "katex";
+  const hidden = document.createElement("span");
+  hidden.className = "katex-mathml";
+  hidden.append("x", "x");
+  const visible = document.createElement("span");
+  visible.className = "katex-html";
+  visible.append("x");
+  katex.append(hidden, visible);
+  bubble.append(katex);
+  const found = findInRendered(root, "x");
+  assert.equal(found.length, 1);
+  const mark = highlightOccurrence(root, "x", 0);
+  assert.equal(mark.parentNode, visible);
+});

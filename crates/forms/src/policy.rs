@@ -579,17 +579,35 @@ fn destructive_at(tokens: &[String], index: usize) -> bool {
 /// `git -c alias.x=rm x`, `--config-env`, or a `GIT_CONFIG*` assignment in
 /// front of the command can redefine what a subcommand runs.
 fn git_rewrites_commands(tokens: &[String], index: usize) -> bool {
-    tokens[..index]
+    if tokens[..index]
         .iter()
         .any(|token| token.starts_with("GIT_CONFIG") || token.starts_with("GIT_EXEC_PATH"))
-        || tokens[index + 1..]
-            .iter()
-            .take_while(|token| token.starts_with('-'))
-            .any(|token| {
-                token.starts_with("-c")
-                    || token.starts_with("--config-env")
-                    || token == "--exec-path"
-            })
+    {
+        return true;
+    }
+    // Walk the global options, skipping the values `-C` and friends take, so
+    // `git -C . -c alias.x=rm x` is seen like `git -c alias.x=rm x`.
+    let mut cursor = index + 1;
+    while let Some(token) = tokens.get(cursor) {
+        if !token.starts_with('-') || token == "--" {
+            return false;
+        }
+        if token.starts_with("-c")
+            || token.starts_with("--config-env")
+            || token.starts_with("--exec-path")
+        {
+            return true;
+        }
+        cursor += if matches!(
+            token.as_str(),
+            "-C" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            2
+        } else {
+            1
+        };
+    }
+    false
 }
 
 /// Git operations that delete files, branches or stashed work, or overwrite

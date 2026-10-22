@@ -2007,6 +2007,85 @@ fn attached_interpreter_code_still_asks_when_a_permanent_shell_rule_exists() {
 }
 
 #[test]
+fn git_inline_aliases_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "note",
+    ]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    f.send("plain", "run_shell", f.shell("git -C . status --short"));
+    f.finish("plain");
+    assert!(requests::list_for_run(&f.db(), &f.run("plain").run_id)
+        .unwrap()
+        .is_empty());
+    let cases = [
+        ("alias", "git -c alias.wipe=rm wipe -q note"),
+        ("glued", "git -calias.wipe=rm wipe -q note"),
+        ("dir", "git -C . -c alias.wipe=rm wipe -q note"),
+        (
+            "env",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.wipe GIT_CONFIG_VALUE_0=rm git wipe -q note",
+        ),
+    ];
+    for (id, command) in cases {
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert!(f.root().join("note").exists(), "{command}");
+        assert_eq!(approval_policy(&mut f, id)["remember"], false, "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"global"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    // The alias really deletes: only the human's one-time approval runs it.
+    f.send("once", "run_shell", f.shell("git -c alias.wipe=rm wipe -q note"));
+    let card = f.request("once");
+    f.decide(&card, json!("allow_once"));
+    f.finish("once");
+    assert!(!f.root().join("note").exists());
+}
+
+#[test]
 fn forge_cli_sends_still_ask_when_a_permanent_shell_rule_exists() {
     // Nonexistent repositories: even a regression could not post anywhere.
     let mut f = Fixture::new();

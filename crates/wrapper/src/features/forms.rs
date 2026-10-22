@@ -1411,6 +1411,7 @@ fn request_value(
         let publication = super::mcp::is_github_comment(tool);
         let consent = super::recall::is_consent(tool);
         if tool == super::routines_background::ACTION
+            || tool == super::routine_webhooks::ACTION
             || super::mcp::is_lifecycle(tool)
             || publication
             || consent
@@ -1529,6 +1530,7 @@ fn approval_policy(
     let mut policy = grokbot_forms::policy::describe(tool, arguments, remote.as_deref());
     if super::screen::is_tool(tool)
         || super::mcp::is_lifecycle(tool)
+        || tool == super::routine_webhooks::ACTION
         || super::recall::is_consent(tool)
         || tool == "propose_skill"
         || super::local::is_read(tool)

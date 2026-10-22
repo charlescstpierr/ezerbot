@@ -1361,4 +1361,59 @@ mod tests {
         drop(app);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn an_imported_webhook_routine_gets_its_trigger_and_token() {
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-templates-webhook-{}-{}.sqlite",
+            std::process::id(),
+            now()
+        ));
+        let mut app = App::open(&path).unwrap();
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-veille", "template_id": "veille"}),
+        )
+        .unwrap();
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-veille"}),
+        )
+        .unwrap();
+        let decoded = post(
+            &mut app,
+            "/api/templates/decode",
+            json!({"text": exported["link"]}),
+        )
+        .unwrap();
+        let mut document = decoded["document"].clone();
+        for routine in document["routines"].as_array_mut().unwrap() {
+            let routine = routine.as_object_mut().unwrap();
+            routine.remove("schedule_description");
+            routine.remove("schedule");
+            routine.insert("trigger".into(), json!({"kind": "webhook"}));
+        }
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-copie", "document": document}),
+        )
+        .unwrap();
+        let routines = app
+            .api("GET", "/api/routines?bot_id=bot-copie", b"")
+            .unwrap();
+        let id = routines["routines"][0]["routine_id"].as_str().unwrap();
+        assert_eq!(routines["routines"][0]["trigger"]["kind"], "webhook");
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        assert!(state["routine_webhooks"]["items"][id]["trigger_id"].is_string());
+        let token = post(
+            &mut app,
+            "/api/routines/webhook/token",
+            json!({"bot_id": "bot-copie", "routine_id": id}),
+        )
+        .unwrap();
+        assert!(token["token"].as_str().unwrap().starts_with("ezwh_"));
+    }
 }

@@ -8,6 +8,7 @@ Les Paramètres regroupent le compte, l’apparence et les sections ajoutées pa
 - `connecteurs-section` montre le titre Connecteurs et l’ajout d’un serveur, sans en enregistrer.
 - `connecteurs-vide` laisse la liste des serveurs personnels vide sur une base neuve.
 - `connecteurs-reunions` montre l’entrée Réunions du catalogue : un seul champ de clé (mot de passe) et le bouton Connecter, sans OAuth.
+- `connecteurs-recherche` filtre le catalogue : « git » ne laisse que GitHub, une recherche vide rend toutes les cartes, une chaîne absente affiche « Aucun service ne correspond à … ».
 - `connecteurs-github` montre la carte GitHub sans champ d’identifiant ni de secret ; sans `client_id` de build, elle dit que l’application GitHub d’Ezerbot n’est pas configurée.
 - `connecteurs-github-comptes` : une fois un compte connecté, la carte GitHub offre « Connecter un autre compte ». Chaque compte a sa ligne `[data-account]` (login, code à entrer pendant l’attente, Déconnecter, activation par bot). La preuve automatisée n’y va pas : elle exige deux comptes GitHub.
 
@@ -28,6 +29,7 @@ Preconditions:
 - **Aller aux connecteurs.** Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> eval '() => { const panel = document.querySelector("[data-panel=mcp]"); panel.scrollIntoView({block:"start"}); return panel.querySelector("h3").textContent; }'`. `result:` vaut `"Connecteurs"`.
 - **Formulaire d’ajout.** Le `summary` « Ajouter un serveur MCP » est dans `[data-panel="mcp"]`. Ne pas le soumettre.
 - **Entrée Réunions.** `[data-panel="mcp"] [data-connector="reunions"]` contient un seul `input` de type `password` et le bouton « Connecter ». Ne pas le soumettre : la clé et les liens de réunion ne passent que par un fournisseur de boucle (`GROKBOT_FAKE_RECALL`), jamais par cette sphère.
+- **Recherche.** Le champ `[data-panel="mcp"] [name="catalogue-search"]` filtre par nom et description, sans tenir compte de la casse ni des accents. Saisir `git` (événement `input`) : seul `[data-connector="github"]` n’est pas `hidden`. Vider : toutes les cartes reviennent. Saisir `zzzz-absent` : le `[role="status"]` de l’en-tête du catalogue dit qu’aucun service ne correspond.
 - **Liste vide.** `[data-panel="mcp"] .mcp-list` ne contient pas d’article de serveur personnalisé.
 - **Capture.** Pour chaque thème et chaque taille (`1140x780`, `820x560`), Run `bash .cursor/skills/verify-ezerbot/scripts/browser.sh --evidence <preuves> resize <largeur> <hauteur>` puis `screenshot <preuves>/spheres/parametres-connecteurs/<theme>-<largeur>x<hauteur>.png`.
 - **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere parametres-connecteurs`.

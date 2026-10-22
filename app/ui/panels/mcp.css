@@ -2,6 +2,7 @@
 .mcp-section h4 { margin: 24px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .mcp-catalogue-header { display: grid; gap: 4px; margin-top: 24px; }
 .mcp-catalogue-header > h4, .mcp-catalogue-header > p { margin: 0; }
+.mcp-catalogue-header > .text-input { margin: 8px 0 4px; }
 .mcp-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
 .mcp-copy-row code { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; user-select: all; -webkit-user-select: all; }
 .mcp-copy-row button { font-size: 11px; padding: 7px 9px; }

@@ -277,6 +277,9 @@ pub(crate) fn validate(routine: &Routine, reference_ms: i64) -> Result<()> {
             "routine interval must be at least one minute".into(),
         ));
     }
+    if routine.trigger == Schedule::Webhook {
+        return Ok(());
+    }
     cron::next_after(&routine.trigger, &routine.time_zone, reference_ms)?
         .ok_or_else(|| Error::InvalidInput("schedule never fires after its reference".into()))?;
     Ok(())
@@ -372,6 +375,20 @@ pub(crate) mod routine_tests {
         stored = update(&conn, &stored, 3).unwrap();
         assert_eq!(stored.schedule_version, 3);
         assert!(update(&conn, &stale, 4).is_err());
+        assert_eq!(get(&conn, &stored.routine_id).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn webhook_routine_needs_no_future_slot() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mut input = fixture();
+        input.trigger = Schedule::Webhook;
+        let mut stored = create(&conn, &input).unwrap();
+        assert_eq!(stored.trigger, Schedule::Webhook);
+        stored.name = "Renamed".into();
+        stored = update(&conn, &stored, 1).unwrap();
+        assert_eq!(stored.schedule_version, 1);
         assert_eq!(get(&conn, &stored.routine_id).unwrap(), Some(stored));
     }
 

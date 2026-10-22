@@ -21,7 +21,9 @@ export function Card({ message, busy, onAction }) {
   const screen = Boolean(screenTools[action.tool]);
   const lifecycle = request.connector && typeof action.tool === "string" && (action.tool.startsWith("mcp_start_") || action.tool.startsWith("mcp_remove_"));
   const background = action.tool === "routines_background_configure";
-  const configuration = background || lifecycle ? request.configuration_result : null;
+  const publication = action.tool === "routines_webhook_publish";
+  const hostAction = background || publication;
+  const configuration = hostAction || lifecycle ? request.configuration_result : null;
   const preview = request.arguments;
   const previewAvailable = preview != null && (!lifecycle || (typeof preview.commande === "string" && Array.isArray(preview.arguments) && Array.isArray(preview.variables_privées)));
   const argumentPreview = screen ? <ScreenArguments tool={action.tool} arguments={preview || {}} /> : <ActionArguments value={preview} />;
@@ -112,22 +114,22 @@ export function Card({ message, busy, onAction }) {
     ? Boolean(policy.remember) && !screen && !lifecycle
     : !screen && !lifecycle && !["read_file", "list_directory"].includes(action.tool);
   return (
-    <HumanInputCard message={message} title={title} input={input} showDelivery={!background && !lifecycle}>
-      <div className="space-y-3" data-follow-actions={background || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
+    <HumanInputCard message={message} title={title} input={input} showDelivery={!hostAction && !lifecycle}>
+      <div className="space-y-3" data-follow-actions={hostAction || screen || localToolNames[action.tool] || request.connector?.origin === "settings" ? "true" : undefined}>
         {pending && review && <p className="text-xs text-muted-foreground" role="status">
           {reviewing && <span className="gb-reviewer-progress" aria-hidden="true"><i /><i /><i /></span>}
           <strong>Relecteur : </strong>{review.pending
             ? (reviewing ? "Relecture des règles en cours… Vous pouvez aussi décider maintenant." : "La revue a été interrompue ou son délai est écoulé. À vous de décider.")
             : review.answer.reason}
         </p>}
-        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{screen ? <>Action : {screenTools[action.tool]}</> : background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
+        {request.connector ? <p className="text-sm">Connecteur : <strong>{request.connector.server}</strong><br />{lifecycle ? <>Action : <span>{request.connector.tool}</span></> : <>Outil : <code>{request.connector.tool}</code></>}</p> : <p className="text-sm">{screen ? <>Action : {screenTools[action.tool]}</> : background ? <>Action : {preview?.enabled ? "Installer l’agent de routines" : "Désinstaller l’agent de routines"}</> : publication ? <>Action : {preview?.enabled ? "Publier les webhooks sur Internet" : "Retirer la publication des webhooks"}</> : localToolNames[action.tool] ? <>Action : {localToolLabel(action.tool)}</> : <>Outil : <code>{action.tool}</code></>}</p>}
         {action.tool === "run_shell" && preview && <><p className="text-sm">Commande exacte sur votre Mac (sans sandbox) :</p><pre className="gb-local-command">{preview.command}</pre><p className="text-xs">Dossier : {preview.cwd} · {localLimits(preview)}</p></>}
         {screen && <><p className="text-sm">{screenWarnings[action.tool]}</p><p className="text-xs text-muted-foreground">Ezerbot se masque brièvement pour viser le bureau derrière sa fenêtre. Autoriser reprend explicitement le bot en pause pour ce geste.</p></>}
         <LocalApprovalPreview tool={action.tool} arguments={preview} />
         {action.tool === "document_action" && preview && <div className="gb-document-approval"><strong className="text-sm font-semibold">{preview.document}</strong><p className="text-sm">{preview.action}</p>{preview.destination && <p className="gb-file-path">{preview.destination}</p>}<p className="text-xs text-muted-foreground">{documentApprovalEffect(preview.action_id)}</p></div>}
         {!previewAvailable
           ? <p className="text-sm" role={pending ? "alert" : undefined}>Aperçu de l’action indisponible.{pending ? " Refusez la demande si vous ne pouvez pas la vérifier." : ""}</p>
-          : background ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à exécuter les routines dues quand l’app est fermée ? Un agent macOS sera installé pour votre session uniquement. Les résultats et les alertes suivront vos réglages habituels." : "Retirer l’agent macOS de cette session ? Les routines ne s’exécuteront plus quand Ezerbot est fermé. Vos routines, résultats et historiques seront conservés."}</p> : lifecycle ? <>
+          : background ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à exécuter les routines dues quand l’app est fermée ? Un agent macOS sera installé pour votre session uniquement. Les résultats et les alertes suivront vos réglages habituels." : "Retirer l’agent macOS de cette session ? Les routines ne s’exécuteront plus quand Ezerbot est fermé. Vos routines, résultats et historiques seront conservés."}</p> : publication ? <p className="text-sm">{preview.enabled ? "Autoriser Ezerbot à publier l’écoute des webhooks de routines sur Internet avec Tailscale Funnel ? Seul le chemin des webhooks devient public, sur son propre port HTTPS : chaque appel exige son jeton Bearer. L’adresse privée de l’iPhone et Tailscale Serve ne changent pas." : "Retirer la publication Funnel des webhooks ? Les appels depuis Internet n’arriveront plus. L’adresse privée de l’iPhone ne change pas."}</p> : lifecycle ? <>
             <dl className="grid gap-3 text-sm" aria-label="Configuration du connecteur">
               {!(preview.catalogue && action.tool.startsWith("mcp_remove_")) && <>
                 <div className="min-w-0"><dt className="text-xs text-muted-foreground">{preview.catalogue?.transport === "https" ? "Adresse du service" : "Commande"}</dt><dd className="mt-1 ml-0 whitespace-pre-wrap break-words">{preview.commande}</dd></div>
@@ -156,7 +158,7 @@ export function Card({ message, busy, onAction }) {
             <div className="flex flex-wrap gap-2"><button type="button" className="gb-retry" disabled={blocked} onClick={() => decide({ always_allow: { scope } })}>Toujours autoriser</button><button type="button" className="gb-retry" onClick={() => decide({ never: { scope } })}>Toujours refuser</button></div>
           </details>}
         </fieldset>}
-        {(background || lifecycle) && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
+        {(hostAction || lifecycle) && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
         {pending && expired && <p className="text-sm">Le délai de décision est écoulé. Actualisation de l’état…</p>}
       </div>
     </HumanInputCard>

@@ -117,6 +117,7 @@ export function Card({ message, onAction, busy }) {
   if (call.name === "generate_image") return <GeneratedImage message={message} onAction={onAction} />;
   if (["run_shell", "read_file", "list_directory", "write_file"].includes(call.name)) return <LocalCard message={message} run={run} onAction={onAction} busy={busy} />;
   const background = call.name === "routines_background_configure";
+  const publication = call.name === "routines_webhook_publish";
   let label = outcome?.status === "done" ? (outcome.output?.isError ? "Erreur de l’outil" : "Appel terminé") : outcome?.status === "failed" ? "Échec de l’appel" : "Résultat en attente";
   const decisionLabels = { denied: "Refusé", cancelled: "Annulé", expired: "Approbation expirée" };
   const refused = outcome?.status === "failed" && Object.hasOwn(decisionLabels, approval_status);
@@ -130,16 +131,16 @@ export function Card({ message, onAction, busy }) {
         : "Aucun résultat enregistré pour cet appel.";
   }
   return (
-    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : call.name === "routines_background_configure" ? "Routines en arrière-plan" : `Outil · ${call.name}`} label={label}>
-      {!background && <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>}
+    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : background ? "Routines en arrière-plan" : publication ? "Webhooks de routines" : `Outil · ${call.name}`} label={label}>
+      {!background && !publication && <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>}
       {authorized_by?.kind === "rule" && <p className="gb-engine-note">Autorisé automatiquement par la règle « Toujours » ({requesting_bot || "Bot demandeur"} · {connector ? `${connector.server} · ${connector.tool}` : call.name}).</p>}
-      {background ? <p>{call.arguments?.enabled ? "Installer l’agent de routines" : "Retirer l’agent de routines"}</p> : <><h4>Arguments</h4><Data value={call.arguments} /></>}
+      {background || publication ? <p>{background ? (call.arguments?.enabled ? "Installer l’agent de routines" : "Retirer l’agent de routines") : (call.arguments?.enabled ? "Publier les webhooks sur Internet" : "Retirer la publication des webhooks")}</p> : <><h4>Arguments</h4><Data value={call.arguments} /></>}
       {outcome?.status === "done" && <><h4>Résultat</h4>{connector && Array.isArray(outcome.output?.content)
         ? <>{outcome.output.content.some(part => part?.type === "text" && typeof part.text === "string")
           ? outcome.output.content.filter(part => part?.type === "text" && typeof part.text === "string").map((part, index) => <Data key={index} value={part.text} />)
           : <p className="gb-engine-note">Le résultat ne contient pas de texte. Consultez les données techniques ci-dessous.</p>}
           <details><summary>Données techniques du résultat</summary><Data value={outcome.output} /></details></>
-        : background ? <p>{outcome.output?.message}</p> : <Data value={outcome.output} />}</>}
+        : background || publication ? <p>{outcome.output?.message}</p> : <Data value={outcome.output} />}</>}
       {outcome?.status === "failed" && <><h4>{refused ? "Raison" : "Raison de l’échec"}</h4><Data value={outcome.reason} />{connector?.recoverable === true && !refused && <button type="button" className="gb-retry" onClick={() => openConnectors(connector)}>Ouvrir les connecteurs</button>}</>}
       {note && <p className="gb-engine-note">{note}</p>}
     </Disclosure>

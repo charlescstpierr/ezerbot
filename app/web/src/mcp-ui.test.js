@@ -308,6 +308,84 @@ test("only the device flow offers a cancel while other services keep their brows
   assert.equal(root.all().filter(n => n.tag === "a").length, 1);
 });
 
+const catalogueServices = [
+  {...service,description:"Rechercher et lire vos courriels, préparer et envoyer des messages."},
+  {...service,id:"calendar",name:"Google Calendar",description:"Consulter vos agendas et gérer vos événements."},
+  {...service,id:"drive",name:"Google Drive",description:"Rechercher, lire et organiser les fichiers de votre Drive."},
+  {...service,id:"slack",name:"Slack",description:"Rechercher des discussions, lire les fils et envoyer des messages."},
+  {...service,id:"notion",name:"Notion",description:"Rechercher et modifier les pages de votre espace Notion.",needs_client:false},
+  {...github,description:"Lister les issues de vos dépôts et préparer des commentaires depuis le chat, avec votre compte GitHub."},
+];
+const searchField = root => root.all().find(n => n.tag === "input" && n.type === "search");
+const type = (field, text) => { field.value = text; return field.events.input({}); };
+const shown = root => root.all().filter(n => n.tag === "article" && !n.hidden).map(n => n.getAttribute("data-connector"));
+const emptyState = root => root.all().find(n => n.attrs.role === "status" && n.className === "mcp-note" && /Aucun service/.test(n.textContent));
+
+test("searching « git » keeps only GitHub, which connects in one click without any client field", async () => {
+  const { root, calls } = await mount([], {}, catalogueServices);
+  assert.deepEqual(shown(root), ["gmail","calendar","drive","slack","notion","github"]);
+  type(searchField(root), "git");
+  assert.deepEqual(shown(root), ["github"]);
+  const card = catalogueCard(root,"github");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"github"}});
+  assert.equal(emptyState(root), undefined);
+});
+
+test("clearing the search shows the six services again", async () => {
+  const { root } = await mount([], {}, catalogueServices);
+  const field = searchField(root);
+  type(field, "git");
+  type(field, "");
+  assert.deepEqual(shown(root), ["gmail","calendar","drive","slack","notion","github"]);
+  type(field, "   ");
+  assert.equal(shown(root).length, 6, "blank spaces are not a query");
+});
+
+test("the search matches the description too, ignoring case and accents", async () => {
+  const { root } = await mount([], {}, catalogueServices);
+  const field = searchField(root);
+  type(field, "ÉVÉNEMENTS");
+  assert.deepEqual(shown(root), ["calendar"]);
+  type(field, "rechercher");
+  assert.deepEqual(shown(root), ["gmail","drive","slack","notion"]);
+});
+
+test("a search without result says so instead of leaving a blank panel", async () => {
+  const { root } = await mount([], {}, catalogueServices);
+  const field = searchField(root);
+  assert.equal(emptyState(root), undefined);
+  type(field, "zzzz-absent");
+  assert.deepEqual(shown(root), []);
+  assert.match(emptyState(root).textContent, /Aucun service ne correspond à « zzzz-absent »/);
+  type(field, "slack");
+  assert.equal(emptyState(root), undefined);
+});
+
+test("Gmail keeps its client fields when the search shows it", async () => {
+  const { root } = await mount([], {}, catalogueServices);
+  type(searchField(root), "gmail");
+  assert.deepEqual(shown(root), ["gmail"]);
+  const card = catalogueCard(root,"gmail");
+  assert.ok(card.all().find(n => n.name === "gmail-client"));
+  assert.equal(card.all().find(n => n.name === "gmail-secret").type, "password");
+});
+
+test("the search and a typed draft survive a catalogue refresh", async () => {
+  const { root, setState } = await mount([], {}, catalogueServices);
+  const field = searchField(root);
+  type(field, "slack");
+  root.all().find(n => n.name === "slack-client").value = "brouillon";
+  setState({bots:[{id:"grokbot",name:"Ezerbot"}],mcp:{servers:[],catalogue:catalogueServices.map(s => s.id === "slack" ? s : {...s,message:"Mise à jour"})}});
+  assert.equal(searchField(root), field);
+  assert.equal(field.value, "slack");
+  assert.deepEqual(shown(root), ["slack"]);
+  setState({bots:[{id:"grokbot",name:"Ezerbot"}],mcp:{servers:[],catalogue:catalogueServices.map(s => s.id === "gmail" ? {...s,status:"error",message:"Boum"} : s)}});
+  assert.deepEqual(shown(root), ["slack"], "a card re-rendered while hidden stays hidden");
+  assert.equal(root.all().find(n => n.name === "slack-client").value, "brouillon");
+});
+
 const twoAccounts = () => {
   const first = {id:"c1",enabled_bots:["grokbot"],tools:[{name:"list_issues",description:"Lister"}]};
   const second = {id:"c2",enabled_bots:[],tools:[{name:"list_issues",description:"Lister"}]};

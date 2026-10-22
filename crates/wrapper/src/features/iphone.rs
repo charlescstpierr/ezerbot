@@ -282,6 +282,7 @@ pub fn remote(
                 "screen",
                 "voice",
                 "routines_background",
+                "routine_webhooks",
                 "updates",
             ] {
                 value.as_object_mut().unwrap().remove(key);
@@ -498,7 +499,7 @@ pub fn routes(
         Ok(ApiResponse::Json(value))
     })())
 }
-fn tailscale(args: &[String]) -> Result<std::process::Output, ApiError> {
+pub(crate) fn tailscale(args: &[String]) -> Result<std::process::Output, ApiError> {
     // Debug NEVER invokes a real CLI, including status. No installation, login,
     // network mutation or real Serve invocation can occur during tests/QA.
     #[cfg(debug_assertions)]

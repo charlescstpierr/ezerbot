@@ -5,6 +5,10 @@
 .mcp-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
 .mcp-copy-row code { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; user-select: all; -webkit-user-select: all; }
 .mcp-copy-row button { font-size: 11px; padding: 7px 9px; }
+.mcp-device { display: grid; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); min-width: 0; }
+.mcp-device > p { margin: 0; }
+.mcp-device .mcp-copy-row code { font-size: 20px; font-weight: 600; letter-spacing: .12em; text-align: center; padding: 10px; background: var(--canvas); }
+.mcp-device > a { justify-self: start; font-size: 11px; line-height: 1.2; padding: 7px 9px; }
 .mcp-catalogue-card > p { line-height: 1.5; margin: 8px 0; }
 .mcp-catalogue-card a { text-decoration: none; }
 .mcp-catalogue-card .mcp-form { padding-bottom: 8px; }

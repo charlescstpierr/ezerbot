@@ -1,10 +1,7 @@
 //! Authorization-code + PKCE broker. Callback listener is loopback-only,
 //! single-use, state-bound, bounded in time and invalidated by disconnect/restart.
 use super::*;
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine,
-};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, time::Duration};
 use tiny_http::{Header, Response, Server as HttpServer, StatusCode};
 
@@ -140,6 +137,9 @@ pub(super) fn refresh(
     m: Manifest,
     env: &mut HashMap<String, String>,
 ) -> Result<(), ApiError> {
+    if m.id == "github" {
+        return super::github::refresh(ctx, server, m, env);
+    }
     let mut fields = token_fields(env);
     fields.push(("grant_type".into(), "refresh_token".into()));
     fields.push((
@@ -402,25 +402,16 @@ fn respond(request: tiny_http::Request, status: u16, service: &str, text: &str) 
     );
 }
 pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
-    let token = if matches!(m.id, "slack" | "github") {
+    let token = if m.id == "slack" {
         env.get("ACCESS_TOKEN")
     } else {
         env.get("REFRESH_TOKEN").or_else(|| env.get("ACCESS_TOKEN"))
     };
     let Some(token) = token else { return true };
-    if m.id == "github" && fake_base().is_none() {
-        let (Some(id), Some(secret)) = (env.get("CLIENT_ID"), env.get("CLIENT_SECRET")) else {
-            return false;
-        };
-        return agent()
-            .delete(&format!("{}/{id}/grant", endpoint(m, "revoke")))
-            .set(
-                "Authorization",
-                &format!("Basic {}", STANDARD.encode(format!("{id}:{secret}"))),
-            )
-            .set("User-Agent", "Ezerbot")
-            .send_json(json!({"access_token":token}))
-            .is_ok();
+    if m.id == "github" {
+        // Revoking a user token needs the app's secret, which Ezerbot does not hold:
+        // the disconnect says so instead of claiming a revocation.
+        return false;
     }
     let mut fields = token_fields(env);
     fields.push(("token".into(), token.clone()));

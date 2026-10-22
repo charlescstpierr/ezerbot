@@ -2442,6 +2442,97 @@ fn a_hard_link_to_a_protected_file_is_not_imported() {
     assert!(!saved.contains("secret par lien dur"));
 }
 
+#[test]
+fn a_granted_skill_folder_keeps_its_annexes_when_chosen_directly() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-root-bundle-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("modele.md"), "annexe interne").unwrap();
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(&mut app, "/api/local/folders/add", json!({"path": &folder}));
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let annex = report["report"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file_name"] == "dossier/modele.md")
+        .unwrap();
+    assert_eq!(annex["status"]["status"], "annex");
+    let saved = listing(&mut app, "grokbot");
+    assert_eq!(
+        saved.len(),
+        1,
+        "l'annexe ne devient pas une skill: {saved:?}"
+    );
+}
+
+#[test]
+fn a_granted_folder_does_not_read_unsupported_files_or_exceed_its_byte_budget() {
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let scratch = std::env::temp_dir().join(format!("grokbot-byte-budget-{stamp}"));
+    let folder = scratch.join("dossier");
+    let _guard = scopeguard(&scratch);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("SKILL.md"), "---\nname: Modèle\n---\nCorps").unwrap();
+    std::fs::write(folder.join("video.mp4"), vec![0u8; 1024]).unwrap();
+    // Twenty annex-sized files of about 1 MiB cannot all be retained.
+    for index in 0..20 {
+        std::fs::write(
+            folder.join(format!("annexe-{index:02}.md")),
+            "a".repeat(1_000_000),
+        )
+        .unwrap();
+    }
+    let db = Database::new();
+    let mut app = db.open();
+    let added = post(
+        &mut app,
+        "/api/local/folders/add",
+        json!({"path": &scratch}),
+    );
+    let stored = added["folders"][0].as_str().unwrap();
+    let report = post(
+        &mut app,
+        "/api/skills/import-folder",
+        json!({"bot_id":"grokbot", "path": stored}),
+    );
+    let items = report["report"].as_array().unwrap();
+    let video = items
+        .iter()
+        .find(|item| item["file_name"] == "dossier/video.mp4")
+        .unwrap();
+    assert_eq!(video["status"]["reason"], "unsupported");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["status"]["reason"] == "too-large"),
+        "l'excédent d'octets doit être signalé sans être lu: {items:?}"
+    );
+}
+
 fn scopeguard(path: &std::path::Path) -> impl Drop {
     struct Guard(std::path::PathBuf);
     impl Drop for Guard {

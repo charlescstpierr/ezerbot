@@ -468,10 +468,26 @@ fn handle(
                 let ctx = app.feature_context();
                 super::local::read_granted_tree(&ctx, &directory)?
             };
+            // A folder chosen directly holds its own `SKILL.md`. Keep its name in
+            // the paths so the primary and its annexes still share a directory,
+            // as they do when the parent folder is imported.
+            let root = read
+                .files
+                .iter()
+                .any(|(path, _)| path == "SKILL.md")
+                .then(|| directory.file_name().and_then(|name| name.to_str()))
+                .flatten()
+                .map(str::to_owned);
             let files = read
                 .files
                 .into_iter()
-                .map(|(path, bytes)| ImportFile { path, bytes })
+                .map(|(path, bytes)| ImportFile {
+                    path: match &root {
+                        Some(root) => format!("{root}/{path}"),
+                        None => path,
+                    },
+                    bytes,
+                })
                 .collect();
             finish_import(app, &input.bot_id, files, read.skipped)
         }

@@ -557,7 +557,14 @@ fn import_skill_folder(
             if siblings {
                 content.files = attached;
             }
-            let reusable = named_reuse(known, planned, &content, front_name.as_deref());
+            // A primary alone, with no `name:` to match, is the same skill again
+            // when its stored body and title are unchanged. Its annexes stay.
+            let reusable =
+                named_reuse(known, planned, &content, front_name.as_deref()).or_else(|| {
+                    (front_name.is_none() && !siblings)
+                        .then(|| unnamed_reuse(known, planned, &content))
+                        .flatten()
+                });
             if let Some(index) = reusable {
                 content.name.clone_from(&known[index].content.name);
                 if !siblings {
@@ -661,6 +668,18 @@ fn named_reuse(
                 == front
                 || (matches!(skill.content.origin, Origin::Model)
                     && skill.content.display_name == imported.display_name))
+    })
+}
+
+fn unnamed_reuse(
+    known: &[Skill],
+    planned: &HashSet<String>,
+    imported: &SkillContent,
+) -> Option<usize> {
+    known.iter().position(|skill| {
+        skill.content.body == imported.body
+            && skill.content.display_name == imported.display_name
+            && !planned.contains(&skill.content.name)
     })
 }
 
@@ -1827,6 +1846,32 @@ mod tests {
         assert!(
             format!("{:?}", again[0].status).starts_with("Duplicate"),
             "réimporter le même SKILL.md sans voisin ne doit pas effacer l'annexe"
+        );
+        let saved = library::list(&conn, "bot").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].version, 1);
+        assert_eq!(saved[0].content.files[0].content, annex);
+    }
+
+    #[test]
+    fn reimporting_an_unnamed_skill_md_alone_keeps_its_annex() {
+        let conn = database();
+        let body = "# Modèle\nCorps";
+        let annex = "Réponds exactement : Le modèle annexe est suivi.";
+        import_batch(
+            &conn,
+            "bot",
+            &[
+                file("dossier/SKILL.md", body),
+                file("dossier/modele.md", annex),
+            ],
+        )
+        .unwrap();
+        let again = import_batch(&conn, "bot", &[file("dossier/SKILL.md", body)]).unwrap();
+        assert!(
+            format!("{:?}", again[0].status).starts_with("Duplicate"),
+            "un SKILL.md sans name: réimporté seul doit retrouver sa skill, statut {:?}",
+            again[0].status
         );
         let saved = library::list(&conn, "bot").unwrap();
         assert_eq!(saved.len(), 1);

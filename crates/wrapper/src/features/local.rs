@@ -454,6 +454,22 @@ fn read_granted_tree_with(
     Ok(GrantedTree { files, skipped })
 }
 
+/// All the text a folder import keeps in memory. Files beyond it are reported,
+/// not read; it matches the request cap of an uploaded import.
+const TREE_BYTES: usize = grokbot_skills::import::IMPORT_REQUEST_BYTES;
+
+/// Same extensions as the skill importer. Anything else is refused unread.
+fn skill_text_name(name: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+    name.rfind('.').is_some_and(|dot| {
+        dot > 0
+            && matches!(
+                &name[dot + 1..],
+                "txt" | "md" | "markdown" | "csv" | "json" | "yaml" | "yml"
+            )
+    })
+}
+
 #[cfg(unix)]
 fn walk_granted(
     ctx: &Context<'_>,
@@ -494,6 +510,12 @@ fn walk_granted(
                 skipped.push((relative, "symlink".into()));
                 continue;
             }
+            FileType::RegularFile if !skill_text_name(name.to_bytes()) => {
+                // Never open what the importer would refuse: a video or an
+                // archive must not be read into memory first.
+                skipped.push((relative, "unsupported".into()));
+                continue;
+            }
             FileType::Directory | FileType::RegularFile => {}
             _ => continue,
         }
@@ -520,7 +542,15 @@ fn walk_granted(
         } else if metadata.is_dir() {
             walk_granted(ctx, &path, &relative_path, &file, files, skipped, intervene)?;
         } else if metadata.is_file() {
+            let retained: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
+            if retained.saturating_add(metadata.len().min(1048576) as usize) > TREE_BYTES {
+                skipped.push((relative, "too-large".into()));
+                continue;
+            }
             match read_opened_bytes(file, |_| Ok(())) {
+                Ok(bytes) if retained + bytes.len() > TREE_BYTES => {
+                    skipped.push((relative, "too-large".into()));
+                }
                 Ok(bytes) => files.push((relative, bytes)),
                 Err(error) if error.message == "Fichier trop volumineux (1 Mio maximum)." => {
                     skipped.push((relative, "too-large".into()));

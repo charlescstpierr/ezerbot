@@ -1336,3 +1336,117 @@ fn exact_shell_key_and_unproven_commands_stay_on_the_card() {
         f.finish(id);
     }
 }
+
+#[test]
+fn git_deletions_still_ask_when_a_permanent_shell_rule_exists() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(f.root())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"]);
+    git(&["branch", "vieille"]);
+    std::fs::write(f.root().join("note"), "garde").unwrap();
+    git(&["add", "note"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "note"]);
+    f.send("allow-shell", "run_shell", f.shell("git status --short"));
+    let allowed = f.request("allow-shell");
+    f.decide(&allowed, json!({"always_allow":{"scope":"global"}}));
+    f.finish("allow-shell");
+    for (id, command) in [
+        ("rm", "git rm -f note"),
+        ("c-rm", "git -C . rm note"),
+        ("restore", "git restore note"),
+        ("checkout", "git checkout -- note"),
+        ("checkout-tree", "git checkout HEAD note"),
+        ("branch", "git branch -D vieille"),
+        ("stash", "git stash drop"),
+        ("worktree", "git worktree remove ../ailleurs"),
+    ] {
+        std::fs::write(f.root().join("note"), "modifiée").unwrap();
+        f.send(id, "run_shell", f.shell(command));
+        wait("carte ou fin", || {
+            let status = f.run(id).status;
+            status == RunStatus::AwaitingApproval || status.is_terminal()
+        });
+        assert_eq!(f.run(id).status, RunStatus::AwaitingApproval, "{command}");
+        assert_eq!(
+            std::fs::read_to_string(f.root().join("note")).unwrap(),
+            "modifiée",
+            "{command}"
+        );
+        let policy = approval_policy(&mut f, id);
+        assert_eq!(policy["remember"], false, "{command}");
+        assert_eq!(policy["protection"], "destructive", "{command}");
+        assert_eq!(policy["label"], "Suppression à confirmer", "{command}");
+        let card = f.request(id);
+        let refused = f.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": card.entry_id,
+                "submission_id": format!("always-{id}"),
+                "conversation_id": card.route.target_conversation_id,
+                "decision": {"always_allow":{"scope":"pattern"}}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(refused.is_err(), "{command}");
+        f.decide(&card, json!("deny"));
+        f.finish(id);
+        assert!(f.root().join("note").exists(), "{command}");
+    }
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", "vieille"])
+        .current_dir(f.root())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).contains("vieille"));
+    // Non-destructive git commands follow the permanent rule without a card.
+    for (id, command) in [("list", "git stash list"), ("plain-branch", "git branch")] {
+        f.send(id, "run_shell", f.shell(command));
+        f.finish(id);
+        assert!(
+            requests::list_for_run(&f.db(), &f.run(id).run_id)
+                .unwrap()
+                .is_empty(),
+            "{command}"
+        );
+        assert_eq!(f.outcome(id)["status"], "done", "{command}");
+    }
+}
+
+#[test]
+fn settled_read_card_keeps_its_policy_and_shows_its_decision() {
+    let mut f = Fixture::new();
+    f.settings(true, true);
+    let file = f.root().join("lu.txt");
+    std::fs::write(&file, "Bonjour\n").unwrap();
+    f.send("read", "read_file", json!({"path":file}));
+    let card = f.request("read");
+    let pending = approval_policy(&mut f, "read");
+    assert_eq!(pending["remember"], false);
+    assert_eq!(pending["scope"], "none");
+    assert!(pending.get("protection").is_none());
+    f.decide(&card, json!("allow_once"));
+    f.finish("read");
+    assert_eq!(f.outcome("read")["output"]["content"], "Bonjour\n");
+    assert_eq!(approval_policy(&mut f, "read"), pending);
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let decision = state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["id"] == card.id)
+        .unwrap()["decision"]
+        .clone();
+    assert_eq!(decision, json!("allow_once"));
+}

@@ -542,6 +542,8 @@ fn git_is_destructive(tokens: &[String], index: usize) -> bool {
         "reset" => rest().any(|token| token == "--hard"),
         "checkout" | "switch" => {
             rest().any(|token| matches!(token, "--" | "." | "-f" | "--force" | "--discard-changes"))
+                // `git checkout <tree> <path>` overwrites the path like `git restore`.
+                || (sub == "checkout" && checkout_operands(rest()) > 1)
         }
         "branch" => rest().any(|token| {
             token == "--delete"
@@ -557,6 +559,24 @@ fn git_is_destructive(tokens: &[String], index: usize) -> bool {
             .is_some_and(|op| matches!(op, "remove" | "prune")),
         _ => false,
     }
+}
+
+/// Counts positional operands, skipping options and the branch name that
+/// `-b`, `-B` and `--orphan` take.
+fn checkout_operands<'a>(tokens: impl Iterator<Item = &'a str>) -> usize {
+    let mut count = 0;
+    let mut skip_value = false;
+    for token in tokens {
+        if std::mem::take(&mut skip_value) {
+            continue;
+        }
+        if matches!(token, "-b" | "-B" | "--orphan") {
+            skip_value = true;
+        } else if !token.starts_with('-') {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn git_subcommand(tokens: &[String], index: usize) -> Option<&str> {
@@ -772,6 +792,8 @@ mod tests {
             "git -C /tmp rm note",
             "git restore note",
             "git checkout -- note",
+            "git checkout HEAD note",
+            "git checkout main note",
             "git branch -D old",
             "git stash drop",
             "git worktree remove ../tree",
@@ -806,6 +828,8 @@ mod tests {
             "printf ok && echo rm",
             "git branch",
             "git checkout main",
+            "git checkout -b feature origin/feature",
+            "git switch main",
             "git stash list",
             "git reset --soft HEAD~1",
         ] {

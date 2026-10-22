@@ -2158,8 +2158,10 @@ fn a_webhook_whose_routine_a_bot_moved_to_a_schedule_answers_nothing() {
             .status,
         404
     );
-    assert!(f.app.api("GET", "/api/state", b"").unwrap()["routine_webhooks"]["items"]
-        .as_object()
-        .unwrap()
-        .is_empty());
+    assert!(
+        f.app.api("GET", "/api/state", b"").unwrap()["routine_webhooks"]["items"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
 }

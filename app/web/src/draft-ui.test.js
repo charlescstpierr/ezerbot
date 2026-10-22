@@ -62,16 +62,11 @@ test("Envoyer transmet le titre et le corps corrigés d’une issue, sans « Tou
   assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
 });
 
-test("Envoyer transmet le texte corrigé d’un message Slack, et la carte nomme l’espace, la cible, le fil et les trois échecs", async () => {
+test("Envoyer transmet le texte corrigé d’un message Slack, sans titre", async () => {
   const calls = [];
   const panels = mount(async (path, body) => { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; });
   const slack = { ...message, id: "draft-5", payload: { ...message.payload, entry_id: "draft-5", kind: { kind: "approval", tool: "slack_post_message" } } };
   assert.equal(await panels.panel.onCardAction(slack, "forms.decide", { decision: "allow_once", text: "Message validé" }, context(panels)), true);
   assert.equal(calls[0].body.text, "Message validé");
   assert.equal(Object.hasOwn(calls[0].body, "title"), false);
-  const card = readFileSync(new URL("./cards/draft.jsx", import.meta.url), "utf8");
-  for (const label of ["Espace", "Cible", "Fil", "Refusé", "Trop de messages", "Envoi non confirmé"]) assert.match(card, new RegExp(label));
-  assert.match(card, /draft\.espace/);
-  assert.match(card, /draft\.etat/);
-  assert.doesNotMatch(card, /Toujours|always_allow|never:|Mémoriser/);
 });

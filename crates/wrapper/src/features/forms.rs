@@ -833,9 +833,9 @@ struct Decision {
     decision: ApprovalDecision,
     tool: Option<String>,
     arguments: Option<Value>,
-    /// Corrected text (the body of an issue) of a draft card, bound to the card by the host.
+    /// Corrected text (the body of an issue or an email) of a draft card, bound to the card by the host.
     text: Option<String>,
-    /// Corrected title of an issue draft.
+    /// Corrected title of an issue draft, or subject of an email draft.
     title: Option<String>,
 }
 #[derive(Deserialize)]
@@ -1176,7 +1176,7 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             }
             if input.text.is_some() || input.title.is_some() {
                 if !super::mcp::is_draft(tool)
-                    || (input.title.is_some() && !super::mcp::is_github_issue(tool))
+                    || (input.title.is_some() && !super::mcp::has_draft_title(tool))
                     || !matches!(input.decision, ApprovalDecision::AllowOnce)
                 {
                     return Err(ApiError::new(
@@ -1430,7 +1430,7 @@ fn request_value(
             let call_id = if consent {
                 approved_call_id(ctx, request)?
             } else if publication {
-                super::mcp::draft_call(ctx, &request.id, tool)
+                super::mcp::draft_call(ctx, &request.id)
             } else {
                 None
             };

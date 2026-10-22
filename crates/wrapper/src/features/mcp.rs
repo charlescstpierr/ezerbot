@@ -123,7 +123,7 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
 
 /// The GitHub read tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_github_tool(name: &str) -> bool {
-    catalogue::github::is_tool(name) || is_github_draft(name)
+    catalogue::github::is_tool(name) || is_github_comment(name) || is_github_issue(name)
 }
 /// The Slack tools: a native adapter, run outside any SQLite writer.
 pub(crate) fn is_slack_tool(name: &str) -> bool {
@@ -157,16 +157,24 @@ pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome
         catalogue::github::call(ctx, &call.name, &call.arguments)
     }
 }
-/// The Gmail read tool: a native adapter, run outside any SQLite writer.
+/// The Gmail tools: a native adapter, run outside any SQLite writer. The read starts
+/// without a card; the send is a draft card.
 pub(crate) fn is_gmail_tool(name: &str) -> bool {
-    catalogue::gmail::is_tool(name)
+    catalogue::gmail::is_tool(name) || is_gmail_email(name)
+}
+pub(crate) fn is_gmail_email(name: &str) -> bool {
+    name == catalogue::gmail::EMAIL_TOOL
 }
 /// Why the Gmail tool a bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn gmail_unavailable(ctx: &Context<'_>) -> String {
     catalogue::gmail::unavailable(ctx)
 }
 pub(crate) fn run_gmail_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
-    catalogue::gmail::call(ctx, &call.name, &call.arguments)
+    if is_gmail_email(&call.name) {
+        catalogue::gmail::email_call(ctx, call)
+    } else {
+        catalogue::gmail::call(ctx, &call.name, &call.arguments)
+    }
 }
 pub use catalogue::gmail::MailEvent;
 /// The messages that arrived in the connected Gmail inbox since the last call, the oldest
@@ -175,10 +183,10 @@ pub use catalogue::gmail::MailEvent;
 pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
     catalogue::gmail::new_messages(ctx)
 }
-/// The publishing tools of the connection: each opens a draft card and sends nothing
+/// The publishing tools of the connections (GitHub, Gmail, Slack): each opens a draft card and sends nothing
 /// until that card is validated.
-pub(crate) fn is_github_draft(name: &str) -> bool {
-    is_github_comment(name) || is_github_issue(name)
+pub(crate) fn is_draft(name: &str) -> bool {
+    is_github_comment(name) || is_github_issue(name) || is_gmail_email(name) || is_slack_post(name)
 }
 pub(crate) fn is_github_comment(name: &str) -> bool {
     name == catalogue::github::COMMENT_TOOL
@@ -186,14 +194,15 @@ pub(crate) fn is_github_comment(name: &str) -> bool {
 pub(crate) fn is_github_issue(name: &str) -> bool {
     name == catalogue::github::ISSUE_TOOL
 }
-/// A publication of a closed list, GitHub or Slack: it opens a draft card, and no standing
-/// rule can cover it.
-pub(crate) fn is_draft(name: &str) -> bool {
-    is_github_draft(name) || is_slack_post(name)
+/// A draft whose card has a title the user may correct: an issue title, a subject.
+pub(crate) fn has_draft_title(name: &str) -> bool {
+    is_github_issue(name) || is_gmail_email(name)
 }
 pub(crate) fn validate_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     if is_slack_post(&call.name) {
         catalogue::slack::post::validate(ctx, call)
+    } else if is_gmail_email(&call.name) {
+        catalogue::gmail::email_validate(ctx, call)
     } else if is_github_issue(&call.name) {
         catalogue::github::issue::validate(ctx, call)
     } else {
@@ -208,20 +217,21 @@ pub(crate) fn draft_display(
 ) -> Result<Value, ApiError> {
     if is_slack_post(&call.name) {
         catalogue::slack::post::prepare(ctx, request_id, call)
+    } else if is_gmail_email(&call.name) {
+        catalogue::gmail::email_prepare(ctx, request_id, call)
     } else if is_github_issue(&call.name) {
         catalogue::github::issue::prepare(ctx, request_id, call)
     } else {
         catalogue::github::comment::prepare(ctx, request_id, call)
     }
 }
-pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str, tool: &str) -> Option<String> {
-    if is_slack_post(tool) {
-        catalogue::slack::post::call_id(ctx, request_id)
-    } else {
-        catalogue::github::comment::call_id(ctx, request_id)
-    }
+pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    catalogue::github::comment::call_id(ctx, request_id)
+        .or_else(|| catalogue::gmail::email_call_id(ctx, request_id))
+        .or_else(|| catalogue::slack::post::call_id(ctx, request_id))
 }
-/// What Charles corrected on a draft card: a comment or a message has a text, an issue a title and a body.
+/// What Charles corrected on a draft card: a comment or a Slack message has a text, an issue a title and a body,
+/// an email a subject and a body.
 pub(crate) fn edit_draft(
     ctx: &Context<'_>,
     request_id: &str,
@@ -231,6 +241,8 @@ pub(crate) fn edit_draft(
 ) -> Result<(), ApiError> {
     if is_slack_post(tool) {
         catalogue::slack::post::edit(ctx, request_id, text.unwrap_or_default())
+    } else if is_gmail_email(tool) {
+        catalogue::gmail::email_edit(ctx, request_id, title, text)
     } else if is_github_issue(tool) {
         catalogue::github::issue::edit(ctx, request_id, title, text)
     } else {

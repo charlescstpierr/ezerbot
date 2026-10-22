@@ -59,7 +59,7 @@ test("a group sign-in card never promises a retry, even after account changes", 
   for (const providerConnected of [false, true]) {
     const card = signInCardState({ message, providerConnected, isGroup: true });
     assert.equal(card.showRetry, false);
-    assert.equal(card.copy, providerConnected ? "Envoyez un nouveau message pour obtenir une réponse." : "Connectez votre compte ChatGPT via Codex, puis envoyez un nouveau message.");
+    assert.equal(card.copy, providerConnected ? "Envoyez un nouveau message pour obtenir une réponse." : "Connectez votre compte ChatGPT, puis envoyez un nouveau message.");
     assert.equal(card.showSignIn, !providerConnected);
   }
 });
@@ -127,6 +127,8 @@ test("direct retries are enabled only after both account and local engine are av
   const message = { error_kind: "signin" };
   const missing = signInCardState({ message });
   assert.equal(missing.title, "Connectez votre compte ChatGPT");
+  assert.equal(missing.signInLabel, "Se connecter");
+  assert.doesNotMatch(`${missing.copy} ${missing.signInLabel}`, /via Codex|clé API/);
   assert.equal(missing.showRetry, true);
   assert.equal(missing.retryDisabled, true);
   const ready = signInCardState({ message, providerConnected: true, engineConnected: true });
@@ -143,7 +145,7 @@ test("direct retries are enabled only after both account and local engine are av
 test("an expired session has an explicit persistent reconnect presentation", () => {
   const card = signInCardState({ message: { error_kind: "signin_expired" } });
   assert.equal(card.title, "Votre session ChatGPT a expiré");
-  assert.equal(card.signInLabel, "Se reconnecter via Codex");
+  assert.equal(card.signInLabel, "Se reconnecter");
   assert.equal(replyProblemState({ error_kind: "signin_expired" }).signin, true);
 });
 
@@ -152,7 +154,7 @@ test("an expired session body states the expiry instead of the generic sign-in c
   const generic = signInCardState({ message: { error_kind: "signin" } });
   assert.match(expired.copy, /^Votre session ChatGPT a expiré\. /);
   assert.notEqual(expired.copy, generic.copy);
-  assert.match(expired.copy, /Reconnectez-vous via Codex, puis réessayez\./);
+  assert.match(expired.copy, /Reconnectez votre compte ChatGPT, puis réessayez\./);
   const group = signInCardState({ message: { error_kind: "signin_expired" }, isGroup: true });
   assert.match(group.copy, /^Votre session ChatGPT a expiré\. /);
   assert.match(group.copy, /envoyez un nouveau message/);
@@ -207,14 +209,19 @@ test("pings without an event are not described as a session renewal", () => {
   const raw = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
   const direct = replyProblemState({ error_kind: "other", error: raw });
   assert.equal(direct.retry, true);
-  assert.equal(direct.error, "OpenAI n’a envoyé aucun événement à temps. Réessayez.");
+  assert.equal(direct.error, "Connexion lente… on attend la réponse.");
   assert.doesNotMatch(direct.error, /renouvellement de session/);
   const group = replyProblemState({ error_kind: "other", error: raw }, { isGroup: true });
   assert.equal(group.retry, false);
-  assert.equal(group.error, "OpenAI n’a envoyé aucun événement à temps. Envoyez un nouveau message.");
+  assert.equal(group.error, "Connexion lente… on attend la réponse.");
   assert.doesNotMatch(group.error, /Réessayez|renouvellement/);
-  const stalled = replyProblemState({ error_kind: "other", error: "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez." });
-  assert.equal(stalled.error, "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.");
+  const silent = "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.";
+  const stalled = replyProblemState({ error_kind: "other", error: silent });
+  assert.equal(stalled.retry, true);
+  assert.equal(stalled.error, "La réponse n’arrive pas. Réessayer ?");
+  const stalledGroup = replyProblemState({ error_kind: "other", error: silent }, { isGroup: true });
+  assert.equal(stalledGroup.retry, false);
+  assert.equal(stalledGroup.error, "La réponse n’arrive pas. Envoyez un nouveau message.");
 });
 
 test("deduplicating group advice does not accidentally enable forbidden regeneration", () => {

@@ -1,3 +1,5 @@
+import { runView } from "./run-status.js";
+
 export const screenTools = {
   computer_screenshot: "Capture de l’écran", computer_move: "Déplacer la souris", computer_click: "Cliquer",
   computer_scroll: "Faire défiler", computer_type: "Saisir du texte", computer_key: "Appuyer sur une touche",
@@ -20,12 +22,10 @@ export function screenActionState({ outcome, approval_status: approval, run_stat
     return { label: /permission|Accessibilité|Enregistrement|Surveillance/i.test(reason) ? "Permission manquante" : /arrêt|expir|repris|pause|annul/i.test(reason) ? "Arrêtée" : "Échec", reason, error: true };
   }
   if (outcome) return { label: "Terminée" };
-  if (["cancelled", "failed", "finished", "ended", "interrupted"].includes(run)) return { label: "Arrêtée", reason: "Action interrompue — aucun résultat enregistré.", error: true };
-  // A later call in the same batch may not have reached its approval yet.
-  // Absence of a result is never proof of a human decision or execution.
+  if (runView(run).stopped) return { label: "Arrêtée", reason: "Action interrompue — aucun résultat enregistré.", error: true };
   if (approval !== "resolved") return { hidden: true };
   return { label: "En cours…" };
 }
 export function screenDecisionLabel(approval) {
-  return { resolved: "Autorisée par vous", denied: "Refusée par vous", cancelled: "Approbation annulée", expired: "Approbation expirée" }[approval] || null;
+  return { resolved: "Autorisé une fois", denied: "Refusée par vous", cancelled: "Approbation annulée", expired: "Approbation expirée" }[approval] || null;
 }

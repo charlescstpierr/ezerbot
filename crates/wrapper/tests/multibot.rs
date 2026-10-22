@@ -408,6 +408,66 @@ fn interrupted_group_callback_is_not_silently_reissued_in_the_same_process() {
 }
 
 #[test]
+fn interrupted_group_tool_call_is_recorded_without_another_model_call() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    let conversation = f.group(&["a", "b"]);
+    let db = f.db();
+    with_tx(&db, |conn| -> grokbot_engine::contracts::Result<()> {
+        let run = model::Run {
+            run_id: "groupe-interrompu".into(),
+            bot_id: "a".into(),
+            conversation_id: conversation,
+            trigger: Trigger::UserMessage {
+                message_id: "message-groupe".into(),
+                attempt: 0,
+            },
+            kind: RunKind::Chat,
+            status: RunStatus::Queued,
+            task_status: None,
+            turn_end: None,
+            budgets: RunBudgets::default(),
+            started_at: 1,
+        };
+        model::start(conn, &run)?;
+        model::set_running_at(conn, &run.run_id, 2)?;
+        store::append_event(
+            conn,
+            &run.run_id,
+            RunEventKind::ToolCall,
+            &json!({"call_id":"appel","name":"remember","arguments":{}}),
+        )?;
+        let mut current = store::required(conn, &run.run_id)?;
+        current.status = RunStatus::Interrupted;
+        store::save(conn, &current)?;
+        store::append_event(
+            conn,
+            &run.run_id,
+            RunEventKind::Interrupted,
+            &json!({"reason":"process_restart"}),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+    let before = f.server.seen.lock().unwrap().bodies.len();
+    f.app.tick(0);
+    let db = f.db();
+    assert_eq!(
+        store::required(&db, "groupe-interrompu").unwrap().status,
+        RunStatus::Interrupted
+    );
+    let events = store::events(&db, "groupe-interrompu", 0).unwrap();
+    assert!(events.iter().any(|event| {
+        event.kind == RunEventKind::ToolResult && event.payload["call_id"] == "appel"
+    }));
+    let replay = grokbot_engine::run_loop::replay_items(&events).unwrap();
+    assert!(serde_json::to_string(&replay).unwrap().contains("appel"));
+    assert_eq!(f.server.seen.lock().unwrap().bodies.len(), before);
+}
+
+#[test]
 fn refusal_model_failure_stop_removal_and_uncertain_restart_are_terminal() {
     let mut f = Fixture::new(true);
     f.bot("a");
@@ -1481,4 +1541,76 @@ fn a_failed_initial_group_turn_does_not_prevent_the_first_completed_title() {
     });
     f.drain();
     wait("fin du titrage", || f.provider.status()["titling"] == false);
+}
+
+#[test]
+fn group_profile_is_saved_on_create_and_rename() {
+    let mut f = Fixture::new(false);
+    f.bot("a");
+    f.bot("b");
+    assert_eq!(
+        f.bad(
+            "/api/conversations",
+            json!({"bot_ids":["a"],"title":"Seul","description":"Pas un groupe"})
+        ),
+        400
+    );
+    assert_eq!(
+        f.bad(
+            "/api/conversations",
+            json!({"bot_ids":["a","b","c","d","e","f","g"],"title":"Trop","description":"Sept bots"})
+        ),
+        400
+    );
+    let created = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["a","b"],"title":"Atelier","description":"Croiser les lectures","avatar":{"color":"cyan","mark":"A"}}),
+    );
+    let id = created["conversation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["conversation"]["kind"], "group");
+    assert_eq!(created["conversation"]["title"], "Atelier");
+    assert_eq!(
+        created["conversation"]["description"],
+        "Croiser les lectures"
+    );
+    assert_eq!(created["conversation"]["avatar"]["color"], "cyan");
+    assert_eq!(created["conversation"]["avatar"]["mark"], "A");
+    assert_eq!(created["conversation"]["member_ids"], json!(["a", "b"]));
+    let renamed = f.post(
+        "/api/conversations/update",
+        json!({"id": id, "title": "Atelier bis", "description": "Nouvelle description", "avatar": {"color": "violet", "mark": "B"}}),
+    );
+    assert_eq!(renamed["conversation"]["title"], "Atelier bis");
+    assert_eq!(
+        renamed["conversation"]["description"],
+        "Nouvelle description"
+    );
+    assert_eq!(
+        renamed["conversation"]["avatar"],
+        json!({"color": "violet", "mark": "B"})
+    );
+    f.post(
+        "/api/conversations/update",
+        json!({"id": id, "favorite": true}),
+    );
+    f.restart();
+    let stored = f.conversation(&id);
+    assert_eq!(stored["title"], "Atelier bis");
+    assert_eq!(stored["description"], "Nouvelle description");
+    assert_eq!(stored["avatar"]["mark"], "B");
+    assert_eq!(stored["favorite"], true);
+    let direct = f.post(
+        "/api/conversations",
+        json!({"bot_ids":["a"],"title":"Direct"}),
+    );
+    let direct_id = direct["conversation"]["id"].as_str().unwrap();
+    assert_eq!(direct["conversation"]["description"], "");
+    assert!(direct["conversation"].get("avatar").is_none());
+    assert_eq!(
+        f.bad(
+            "/api/conversations/update",
+            json!({"id": direct_id, "description": "Interdit"})
+        ),
+        400
+    );
 }

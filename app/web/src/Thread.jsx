@@ -1,15 +1,19 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
-import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
+import { MessageMenu } from "./message-menu.jsx";
+import { messageActions, messageMenuOpenId } from "./message-actions.js";
+import { MessageAttachments } from "./image-gallery.jsx";
+import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
 import { useAppearance } from "./appearance.js";
 import { CopyIconButton } from "./ui.jsx";
 import { Card as FallbackCard } from "./cards/fallback.jsx";
 import { orderThread } from "./thread-order.js";
+import { clearFindMarks, findInRendered, highlightOccurrence, shouldRecenterFind } from "./thread-find.js";
 import { collapseMemoryReceipts } from "./memory-presentation.js";
 import { splitMentionText } from "./mentions.js";
 import { isTeachMessage, isDemonstrationMessage } from "./teach.js";
@@ -123,46 +127,20 @@ function PendingCard({ message, busy, onRetry }) {
   );
 }
 
-function MessageAttachments({ message, align = "end" }) {
-  return message.attachments?.length > 0 && (
-        <div className={`flex flex-wrap items-start ${align === "start" ? "justify-start" : "justify-end"} gap-2`} aria-label="Pièces jointes">
-          {message.attachments.map((attachment, index) => {
-            const id = typeof attachment === "string" ? attachment : attachment.id || attachment.attachment_id;
-            if (!id) return null;
-            if (attachment.kind === "voice") return <div key={`${id}-${index}`} className="gb-voice-memo">
-              <strong>Mémo vocal · {Math.ceil((attachment.duration_ms || 0) / 1000)} s</strong>
-              <audio controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" />
-              {attachment.transcript?.trim() && !message.body?.includes(attachment.transcript.trim()) && <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>}
-            </div>;
-            if (attachment.kind === "document") return <div key={`${id}-${index}`} className="gb-document-chip">
-              <svg width="22" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{documentIconPaths.map((d) => <path key={d} d={d} />)}</svg>
-              <div><strong title={attachment.name}>{attachment.name}</strong>
-                <span>{formatAttachmentSize(attachment.byte_length)} · {attachment.page_label}</span>
-                {attachment.note && <span className="gb-document-note">{attachment.note}</span>}
-              </div>
-            </div>;
-            const description = attachment.caption || attachment.name || "Image jointe";
-            const url = `/api/attachments/${encodeURIComponent(id)}`;
-            return <img key={`${id}-${index}`} className="rounded-lg object-cover" src={url} width="160" height="120" alt={description} loading="lazy" />;
-          })}
-        </div>
-  );
-}
-
 function DelegationInstruction({ message, createMascot, botName }) {
   return (
     <article className="gb-message gb-assistant gb-delegation-instruction" data-message-id={message.id} aria-label={`Consigne de ${botName}`}>
       <Mascot create={createMascot} />
       <div className="gb-content">
         <header className="gb-meta"><strong>Consigne de {botName}</strong><Timestamp value={message.created_at} /></header>
-        {message.body && <p className="gb-instruction-text">{message.body}</p>}
+        {message.body && <p className="gb-instruction-text" data-find-body>{message.body}</p>}
         <MessageAttachments message={message} align="start" />
       </div>
     </article>
   );
 }
 
-function UserMessage({ message, busy, onCopy, onRetry }) {
+function UserMessage({ message, busy, onCopy, onRetry, onReact, onResend, onDelete, menuOpen, onMenuOpenChange }) {
   const demonstration = isDemonstrationMessage(message);
   if (isTeachMessage(message) || demonstration) return (
     <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
@@ -172,21 +150,22 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
     </article>
   );
   const followUp = message.payload?.source === "follow_up";
+  const menu = messageActions(message, { busy });
   return (
     <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
       {followUp && <span className="gb-followup-label">Suivi</span>}
-      {message.body && <div className="gb-bubble">{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
+      {message.body && <div className="gb-bubble" data-find-body>{splitMentionText(message.body, message.payload?.mentions || message.mentions).map((part, index) => part.mention
         ? <span className="gb-mention" key={index} data-bot-mention={part.mention.id} title={part.mention.id === "@everyone" ? "Tous les membres à l’envoi" : `Bot : ${part.mention.id}`}>{part.text}</span>
         : part.text)}</div>}
       <MessageAttachments message={message} />
       <footer className="gb-actions">
         {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />{followUp ? "Enregistré" : "Envoyé"}</span>}
-        {["queued", "dispatching"].includes(message.state) && <span className="gb-status">Envoi en cours…</span>}
-        {message.state === "refused" && <span className="gb-status gb-status-alert"><TriangleAlert />Envoi refusé</span>}
+        {["queued", "dispatching"].includes(message.state) && !menu.status && <span className="gb-status">Envoi en cours…</span>}
+        <MessageMenu message={message} busy={busy} text={message.body || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={onCopy} onReact={onReact} onResend={onResend} onDelete={onDelete} />
         <CopyIconButton text={message.body} label="Copier votre message" onCopy={onCopy} />
       </footer>
-      {pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
+      {!menu.status && pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
     </article>
   );
 }
@@ -234,13 +213,14 @@ function TurnLabel({ message }) {
   return message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>;
 }
 
-function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName }) {
+function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad, menuOpen, onMenuOpenChange }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
   const toolPreparing = preparingTool(message);
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const copyText = "copyText" in message ? message.copyText : message.body;
+  const prose = proseWithoutGallery(message.body, galleryImages(message, { markdown: true }));
   useEffect(() => {
     const root = content.current;
     if (!root) return;
@@ -263,25 +243,31 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
     document.fonts?.ready.then(measure);
     measure();
     return () => { active = false; resize.disconnect(); mutations.disconnect(); };
-  }, [message.body, appearance.key]);
-  if (!message.body?.trim() && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
+  }, [prose, appearance.key]);
+  if (!prose?.trim() && !message.attachments?.length && !galleryImages(message, { markdown: true }).length && !message.notice && !["streaming", "failed", "stopped"].includes(message.state)) return null;
   return (
     <article className="gb-message gb-assistant" data-message-id={message.id} aria-busy={streaming && !queued}>
       {message.continuation ? <span className="gb-avatar" aria-hidden="true" /> : <Mascot create={createMascot} />}
       <div className="gb-content" ref={content}>
         {!message.continuation && <header className="gb-meta"><strong>{botName}</strong><Timestamp value={message.created_at} /><TurnLabel message={message} /></header>}
-        {message.body
+        {prose?.trim()
           ? (
-            <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
-              {message.body}
-            </Streamdown>
+            <div data-find-body>
+              <Streamdown key={appearance.key} className="gb-markdown" mode={streaming ? "streaming" : "static"} isAnimating={streaming} plugins={plugins} shikiTheme={code.getThemes()} translations={translations} portal={portal}>
+                {prose}
+              </Streamdown>
+            </div>
           )
           : queued && message.payload?.wait_reason === "signin" ? <SignInCard message={message} actions={actions} /> : queued ? <span className="gb-queued"><Clock />{message.payload?.wait_reason === "models" ? "En attente des modèles ChatGPT" : "En attente"}</span> : streaming && !toolPreparing && <Dots />}
+        <MessageAttachments message={message} align="start" markdown />
         {message.state === "failed" && <ReplyProblem message={message} actions={actions} />}
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
+            <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onResend={actions.onResend} onDelete={actions.onDelete} />
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
+            {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
+            {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
             {message.state === "stopped" && <><span className={group ? "gb-status gb-group-stopped" : "gb-status"}>{message.payload?.never_started ? <Clock /> : <Square className={group ? "gb-stop-solid" : undefined} />}{actions.isTask ? "Sous-tâche annulée" : message.payload?.never_started ? "Tour annulé avant de commencer" : "Réponse arrêtée"}</span>{!group && !actions.isTask && <button type="button" className="gb-text-button" onClick={() => actions.onRegenerate(message)}><RefreshCw />Relancer</button>}</>}
           </footer>
         )}
@@ -300,18 +286,53 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad }) {
+  const [openMenuId, setOpenMenuId] = useState(null);
+  const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
   const overlay = useRef(null);
+  const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
+  const actions = useMemo(() => ({ onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
-  useLayoutEffect(() => { onLayout?.(); }, [ordered, onLayout]);
+  const findAnchor = useRef(null);
+  useLayoutEffect(() => {
+    const root = threadRoot.current;
+    let attempts = 0;
+    let frame = 0;
+    // Les correspondances viennent du DOM que React vient de valider : le
+    // compteur, l’occurrence active et le surlignage partent du même texte.
+    const apply = () => {
+      clearFindMarks(root);
+      const matches = find?.query && root ? findInRendered(root, find.query) || [] : [];
+      onFindMatches?.(matches);
+      const active = matches[find?.index < matches.length ? find.index : 0];
+      if (!active) return { mark: null, recenter: false };
+      const { identity, recenter } = shouldRecenterFind(findAnchor.current, { query: find.query, ...active });
+      const escape = (value) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, ""));
+      const article = root.querySelector(`[data-message-id="${escape(active.messageId)}"]`);
+      const mark = article ? highlightOccurrence(article, find.query, active.indexInMessage) : null;
+      if (mark) findAnchor.current = identity;
+      return { mark, recenter };
+    };
+    const reveal = () => {
+      const { mark, recenter } = apply();
+      if (mark && recenter) mark.scrollIntoView?.({ block: "center", inline: "nearest" });
+      else if (!mark && find?.query && attempts < 8) {
+        attempts += 1;
+        frame = requestAnimationFrame(reveal);
+      }
+    };
+    if (!find?.query) findAnchor.current = "";
+    reveal();
+    onLayout?.();
+    return () => { cancelAnimationFrame(frame); clearFindMarks(root); };
+  }, [ordered, onLayout, find, onFindMatches]);
   return (
     <Tooltip.Provider delayDuration={350}>
-      <div className="gb-thread">
+      <div className="gb-thread" ref={threadRoot}>
         {ordered.map((message) => {
           const delegated = message.payload?.source === "delegation";
           const author = bots.find((bot) => bot.id === (delegated ? message.payload.from_bot : message.payload?.bot_id));
@@ -340,9 +361,11 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
           }
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id} data-notification-card={message.id} data-run-id={message.payload?.run_id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
+          const menuOpen = message.id != null && openMenuId === message.id;
+          const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
-            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} />;
+            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

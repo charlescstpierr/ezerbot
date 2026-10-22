@@ -167,9 +167,73 @@ impl Fixture {
             .as_millis() as u64;
         self.app.tick(ms);
     }
-    fn wait_parent(&self, c: &str, m: &str, status: RunStatus) {
+    fn wait_parent(&mut self, c: &str, m: &str, status: RunStatus) {
+        let mut delivered = false;
         wait("parent state", || {
+            // A background launch pauses on its own card. Existing engine tests
+            // that wait for the child (or for the parent to finish) allow it once.
+            if self.run(c, m).status == RunStatus::AwaitingApproval {
+                if self.allow_pending_background() || !delivered {
+                    self.tick_suspended();
+                    delivered = true;
+                }
+            } else {
+                delivered = false;
+            }
             self.run(c, m).status == status && self.provider.status()["titling"] == false
+        });
+    }
+    fn allow_pending_background(&mut self) -> bool {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        let mut pending = Vec::new();
+        for conversation in state["conversations"].as_array().into_iter().flatten() {
+            for message in conversation["messages"].as_array().into_iter().flatten() {
+                if message["kind"] == "approval"
+                    && message["payload"]["status"]["status"] == "pending"
+                    && message["payload"]["policy"]["scope"] == "action"
+                {
+                    pending.push((
+                        message["payload"]["entry_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                        message["payload"]["route"]["target_conversation_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        if pending.is_empty() {
+            return false;
+        }
+        for (entry, conversation) in pending {
+            self.post(
+                "/api/approvals/resolve",
+                json!({
+                    "entry_id": entry,
+                    "submission_id": format!("bg-{entry}"),
+                    "conversation_id": conversation,
+                    "decision": "allow_once"
+                }),
+            );
+        }
+        true
+    }
+    fn tick_suspended(&mut self) {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        self.app.tick_suspended(ms);
+    }
+    fn reopen(&mut self) {
+        assert_eq!(self.provider.status()["titling"], false);
+        self.provider = Provider::with_endpoints(&self.path, self.server.endpoints(), false);
+        self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
+        wait("reopened models", || {
+            self.provider.status()["models_ready"] == true
         });
     }
     fn begin(&mut self, c: &str, m: &str, args: Value) -> (Run, Delegation) {
@@ -181,12 +245,12 @@ impl Fixture {
         (run, edge)
     }
     fn child_done(&mut self, edge: &Delegation) {
+        self.child_result(edge, "Verified child summary");
+    }
+    fn child_result(&mut self, edge: &Delegation, summary: &str) {
         self.events(vec![
-            call(
-                "finish-child",
-                "complete_task",
-                json!({"summary":"Verified child summary"}),
-            ),
+            json!({"type":"response.output_text.delta","delta":summary}),
+            call("finish-child", "complete_task", json!({"summary":summary})),
             completed(),
         ]);
         self.tick();
@@ -199,6 +263,44 @@ impl Fixture {
         wait("child owner released", || {
             self.provider.status()["titling"] == false
         });
+    }
+    /// The parent resume is a spawned model call. Settle it before queueing
+    /// another scripted response, and drop an acknowledgement it no longer needs.
+    fn settle(&mut self, c: &str, m: &str) {
+        let run_id = self.run(c, m).run_id;
+        let terminal = |status: RunStatus| {
+            matches!(
+                status,
+                RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+            )
+        };
+        if terminal(store::get(&self.db(), &run_id).unwrap().unwrap().status)
+            && self.provider.status()["titling"] == false
+        {
+            return;
+        }
+        let before = self.server.seen.lock().unwrap().responses.len();
+        self.events(vec![
+            json!({"type":"response.output_text.delta","delta":"Parent acknowledged"}),
+            completed(),
+        ]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            self.tick();
+            let status = store::get(&self.db(), &run_id).unwrap().unwrap().status;
+            if terminal(status) && self.provider.status()["titling"] == false {
+                let mut seen = self.server.seen.lock().unwrap();
+                if seen.responses.len() > before {
+                    seen.responses.pop_back();
+                }
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent {status:?} not settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
     fn resume(&mut self, c: &str, m: &str) {
         self.events(vec![
@@ -223,6 +325,15 @@ fn call(id: &str, name: &str, args: Value) -> Value {
 fn args(bot: &str) -> Value {
     json!({"child_bot":bot,"objective":"Verify selected material","selected_context":{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}})
 }
+fn form_request(state: &Value) -> &Value {
+    state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["kind"]["kind"] == "form")
+        .expect("formulaire")
+}
+
 fn suspended(outcome: ToolOutcome) -> String {
     match outcome {
         ToolOutcome::Suspend {
@@ -388,7 +499,17 @@ fn tool_budget_cannot_skip_the_final_batch_wait() {
     }
     tx.commit().unwrap();
     f.tick();
+    let mut budget_delivered = false;
     wait("budget batch waits", || {
+        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval
+            && (f.allow_pending_background() || !budget_delivered)
+        {
+            f.tick_suspended();
+            budget_delivered = true;
+        }
+        if store::required(&f.db(), &root.run_id).unwrap().status != RunStatus::AwaitingApproval {
+            budget_delivered = false;
+        }
         store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
     });
     let edge = f.children(&root).remove(0);
@@ -689,6 +810,89 @@ fn checked_context_is_reused_once_and_cache_is_scoped_to_assembly() {
 }
 
 #[test]
+fn denied_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(false);
+}
+
+#[test]
+fn expired_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(true);
+}
+
+fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        call("approved", "delegate", args("child")),
+        call("denied", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "mixed", "Run two independent tasks");
+    wait("first approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.provider.status()["titling"] == false
+    });
+    assert!(f.allow_pending_background());
+    f.tick_suspended();
+    wait("second approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.children(&f.run(&c, "mixed")).len() == 1
+            && f.provider.status()["titling"] == false
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| {
+            message["kind"] == "approval" && message["payload"]["status"]["status"] == "pending"
+        })
+        .expect("pending sibling approval");
+    let request = &card["payload"];
+    if expired {
+        let db = f.db();
+        let parent = f.run(&c, "mixed");
+        let ctx = Context {
+            now_ms: request["kind"]["expires_at"].as_u64().unwrap() + 1,
+            ..f.context(&db, &parent)
+        };
+        features::forms::tick(&ctx);
+    } else {
+        f.post(
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": request["entry_id"],
+                "submission_id": "deny-sibling",
+                "conversation_id": c,
+                "decision": "deny"
+            }),
+        );
+    }
+    f.events(vec![completed()]);
+    f.tick_suspended();
+    wait("approval settled", || {
+        f.provider.status()["titling"] == false
+    });
+    let parent = f.run(&c, "mixed");
+    assert_eq!(parent.status, RunStatus::AwaitingChildren);
+    let children = f.children(&parent);
+    assert_eq!(children.len(), 1, "the denied task must never launch");
+    assert!(matches!(
+        children[0].status,
+        DelegationStatus::Queued | DelegationStatus::Running
+    ));
+    // The unused parent response must still be queued while children run.
+    f.server.seen.lock().unwrap().responses.pop_front().unwrap();
+    f.child_done(&children[0]);
+    f.resume(&c, "mixed");
+    let seen = f.server.seen.lock().unwrap();
+    let resumed = seen.bodies.last().unwrap().to_string();
+    assert!(resumed.contains("Verified child summary"));
+    assert!(resumed.contains(if expired { "écoulé" } else { "refusée" }));
+}
+
+#[test]
 fn parallel_delegates_in_one_response_run_concurrently() {
     let mut f = Fixture::new(true);
     let c = f.conversation();
@@ -709,13 +913,13 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     let state = f.app.api("GET", "/api/state", b"").unwrap();
     assert_eq!(state["delegation"]["active_by_conversation"][&c], 2);
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.kind == RunEventKind::Suspended)
-            .count(),
-        1
-    );
+    let children_wait = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::Suspended && e.payload["cause"]["kind"] == "children")
+        .expect("attente des sous-tâches");
+    assert!(events
+        .iter()
+        .any(|e| { e.kind == RunEventKind::Suspended && e.payload["approval"] == true }));
     assert_eq!(
         events
             .iter()
@@ -725,11 +929,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
         "done"
     );
     assert_eq!(
-        events
-            .iter()
-            .find(|e| e.kind == RunEventKind::Suspended)
-            .unwrap()
-            .payload["cause"]["ids"]
+        children_wait.payload["cause"]["ids"]
             .as_array()
             .unwrap()
             .len(),
@@ -765,7 +965,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     assert!(!model::ready_to_resume(&f.db(), &parent.run_id).unwrap());
     assert_eq!(f.run(&c, "parallel").status, RunStatus::AwaitingChildren);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "second-done",
@@ -786,12 +986,17 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     });
     f.resume(&c, "parallel");
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    let approvals = events
+        .iter()
+        .filter(|e| e.kind == RunEventKind::Suspended && e.payload["approval"] == true)
+        .count();
     assert_eq!(
         events
             .iter()
             .filter(|e| e.kind == RunEventKind::Resumed)
             .count(),
-        1
+        approvals + 1,
+        "une reprise pour chaque carte, puis une seule pour le lot de sous-tâches"
     );
     let seen = f.server.seen.lock().unwrap();
     let body = seen.bodies.last().unwrap().to_string();
@@ -993,7 +1198,7 @@ fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
         json!({"bot_id":"grokbot","fact_id":fact}),
     );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "done",
@@ -1664,7 +1869,7 @@ fn child_human_input_routes_to_principal_and_is_cancelled_with_parent() {
     });
     wait("released child", || f.provider.status()["titling"] == false);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let request = &state["forms"]["requests"][0];
+    let request = form_request(&state);
     assert_eq!(request["route"]["target_conversation_id"], c);
     assert_eq!(request["route"]["target_bot_id"], "grokbot");
     assert_eq!(request["route"]["requesting_bot_id"], "child");
@@ -1820,6 +2025,339 @@ fn delegation_call_retries_keep_binding_and_terminal_result() {
     );
     assert!(
         matches!(f.tool(&root,"check","check_delegations",json!({})),ToolOutcome::Done{output} if output["delegations"][0]["status"]["result"]=="stable result")
+    );
+}
+
+#[test]
+fn selected_image_reaches_the_child_request_and_not_another_thread() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    const DESCRIPTION: &str = "Carré PNG d’un pixel, fond clair.";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Décris cette photo");
+    targeted["selected_context"]["texts"] = json!(["photo.png"]);
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    // The send would otherwise start a caption call that consumes the scripted
+    // child reply. Prepare the same draft the message will carry.
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue la description de cette photo."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-photo", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "describe-photo",
+            "body": "Délègue la description de cette photo.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "describe-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "describe-photo")).remove(0);
+    f.child_result(&edge, DESCRIPTION);
+    let seen = f.server.seen.lock().unwrap();
+    let child = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris cette photo")
+        })
+        .expect("requête de l'enfant")
+        .clone();
+    drop(seen);
+    let child_json = child.to_string();
+    assert!(
+        child_json.contains(&format!("data:image/png;base64,{PNG}")),
+        "la requête de l'enfant ne contient pas les octets de l'image"
+    );
+    // Delegated blocks are JSON-fenced, so the descriptor's quotes are escaped once.
+    // Object keys are alphabetical: mime and path precede kind.
+    let instructions = child["instructions"]
+        .as_str()
+        .unwrap_or("")
+        .replace("\\\"", "\"");
+    let marker = "\"kind\":\"selected_images\"";
+    let at = instructions
+        .find(marker)
+        .expect("selected_images absent de la requête de l'enfant");
+    let start = instructions[..at]
+        .rfind('{')
+        .expect("objet selected_images introuvable");
+    let end = instructions[at..]
+        .find('}')
+        .expect("objet selected_images non fermé")
+        + at
+        + 1;
+    let selected = &instructions[start..end];
+    assert!(
+        selected.contains("\"mime_type\":\"image/png\""),
+        "selected_images n'a pas le type MIME"
+    );
+    let path_key = "\"path\":\"";
+    let path_at = selected
+        .find(path_key)
+        .expect("selected_images n'a pas le chemin local");
+    let path = &selected[path_at + path_key.len()..];
+    let path = &path[..path.find('"').unwrap()];
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        png,
+        "le chemin de selected_images ne pointe pas vers les octets"
+    );
+    assert!(
+        !selected
+            .split("\"mime_type\"")
+            .next()
+            .unwrap_or("")
+            .contains("photo.png"),
+        "le nom du fichier ne doit pas tenir lieu d'image"
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let thread = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == json!(edge.conversation_id))
+        .unwrap();
+    let messages = thread["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["body"].as_str().unwrap_or("").contains(DESCRIPTION)),
+        "le fil task: ne décrit pas l'image"
+    );
+    let brief = messages
+        .iter()
+        .find(|m| m["kind"] == "delegation_brief")
+        .expect("consigne du fil task:");
+    assert!(
+        brief["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == image && a["mime_type"] == "image/png"),
+        "le fil task: ne montre pas l'image jointe"
+    );
+    f.settle(&c, "describe-photo");
+
+    let mut name_only = args("child");
+    name_only["objective"] = json!("Décris photo.png");
+    name_only["selected_context"]["texts"] = json!(["photo.png"]);
+    let (_, name_edge) = f.begin(&c, "name-only", name_only);
+    f.child_result(&name_edge, "Je n'ai que le nom photo.png.");
+    let seen = f.server.seen.lock().unwrap();
+    let named = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris photo.png")
+        })
+        .expect("requête du fil qui n'a sélectionné que le nom")
+        .clone();
+    drop(seen);
+    assert!(
+        !named.to_string().contains(PNG)
+            && !named["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("selected_images"),
+        "le nom du fichier a suffi à transmettre l'image"
+    );
+    f.settle(&c, "name-only");
+
+    let other = f.conversation();
+    let mut elsewhere = args("child");
+    elsewhere["objective"] = json!("Décris ce fil vide");
+    let (_, other_edge) = f.begin(&other, "other-thread", elsewhere);
+    f.child_result(&other_edge, "Ce fil n'a pas de photo.");
+    let seen = f.server.seen.lock().unwrap();
+    let foreign = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body.to_string().contains("Décris ce fil vide")
+        })
+        .expect("requête de l'autre fil")
+        .clone();
+    drop(seen);
+    assert!(
+        !foreign.to_string().contains(PNG) && !foreign.to_string().contains(&image),
+        "un autre fil a placé l'image dans la requête de l'enfant"
+    );
+    f.settle(&other, "other-thread");
+
+    let outsider = f.root("other-thread-root");
+    let mut stolen = args("child");
+    stolen["selected_context"]["selected_images"] = json!([image]);
+    stolen["selected_context"]["texts"] = json!(["photo.png"]);
+    assert!(
+        matches!(
+            f.tool(&outsider, "steal", "delegate", stolen),
+            ToolOutcome::Failed { .. }
+        ),
+        "une image d'un autre fil a été acceptée dans selected_images"
+    );
+    assert!(f.children(&outsider).is_empty());
+}
+
+#[test]
+fn selected_image_follows_when_the_task_input_is_forwarded() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Décris cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Transmets cette photo."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-photo", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "forward-photo",
+            "body": "Transmets cette photo.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "forward-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "forward-photo")).remove(0);
+    let mut forwarded = args("grandchild");
+    forwarded["objective"] = json!("Décris la photo un niveau plus bas");
+    forwarded["selected_context"]["entry_ids"] = json!([edge.id]);
+    f.events(vec![
+        call("forward-task", "delegate", forwarded),
+        completed(),
+        call(
+            "finish-grandchild",
+            "complete_task",
+            json!({"summary":"Photo reçue"}),
+        ),
+        completed(),
+        call(
+            "finish-child",
+            "complete_task",
+            json!({"summary":"Transmise"}),
+        ),
+        completed(),
+    ]);
+    wait("grandchild request", || {
+        f.allow_pending_background();
+        f.tick();
+        f.server.seen.lock().unwrap().bodies.iter().any(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body
+                    .to_string()
+                    .contains("Décris la photo un niveau plus bas")
+        })
+    });
+    let seen = f.server.seen.lock().unwrap();
+    let grandchild = seen
+        .bodies
+        .iter()
+        .rev()
+        .find(|body| {
+            body["instructions"]
+                .as_str()
+                .unwrap_or("")
+                .contains("executing a delegated Task")
+                && body
+                    .to_string()
+                    .contains("Décris la photo un niveau plus bas")
+        })
+        .expect("requête du petit-enfant")
+        .clone();
+    drop(seen);
+    let grandchild_json = grandchild.to_string();
+    assert!(
+        grandchild_json.contains(&format!("data:image/png;base64,{PNG}")),
+        "la requête du petit-enfant ne contient pas les octets de l'image transmise avec l'entrée"
+    );
+    let instructions = grandchild["instructions"]
+        .as_str()
+        .unwrap_or("")
+        .replace("\\\"", "\"");
+    let marker = "\"kind\":\"selected_images\"";
+    let at = instructions
+        .find(marker)
+        .expect("selected_images absent de la requête du petit-enfant");
+    let start = instructions[..at]
+        .rfind('{')
+        .expect("objet selected_images introuvable");
+    let end = instructions[at..]
+        .find('}')
+        .expect("objet selected_images non fermé")
+        + at
+        + 1;
+    let selected = &instructions[start..end];
+    let path_key = "\"path\":\"";
+    let path_at = selected
+        .find(path_key)
+        .expect("selected_images n'a pas le chemin local");
+    let path = &selected[path_at + path_key.len()..];
+    let path = &path[..path.find('"').unwrap()];
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        png,
+        "le chemin transmis au petit-enfant ne pointe pas vers les octets"
     );
 }
 
@@ -2110,7 +2648,25 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
     ]);
     f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
     f.tick();
+    let mut group_delivered = false;
     wait("group delegates", || {
+        let waiting = f
+            .db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_runs WHERE status='awaiting_approval')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if waiting && (f.allow_pending_background() || !group_delivered) {
+            // Group turns resume from the multibot driver, which a full tick runs
+            // after the engine has already scanned queued children.
+            f.tick();
+            group_delivered = true;
+        }
+        if !waiting {
+            group_delivered = false;
+        }
         f.db()
             .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {
                 r.get::<_, i64>(0)
@@ -2568,4 +3124,87 @@ fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
     assert!(events.iter().any(|e| e.kind == RunEventKind::ToolResult
         && e.payload["call_id"] == "stale-completion"
         && e.payload["outcome"]["status"] == "failed"));
+}
+
+#[test]
+fn background_delegate_card_saves_the_action_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let mut first = args("child");
+    first["objective"] = json!(format!("Préparer {}", "le dossier ".repeat(30)));
+    f.events(vec![call("delegate-call", "delegate", first), completed()]);
+    f.send(&c, "bg-task", "Lance la tâche de fond");
+    wait("carte de tâche", || {
+        f.run(&c, "bg-task").status == RunStatus::AwaitingApproval
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["kind"] == "approval")
+        .expect("carte");
+    assert_eq!(card["payload"]["policy"]["scope"], "action");
+    assert_eq!(card["payload"]["policy"]["remember"], true);
+    assert_eq!(
+        card["payload"]["background_task"]["kind"],
+        "Exécuter une tâche sur l'ordinateur"
+    );
+    assert_eq!(card["payload"]["background_task"]["bot_name"], "Ezerbot");
+    assert!(card["payload"]["background_task"]["summary"]
+        .as_str()
+        .unwrap()
+        .ends_with("… (raccourci)"));
+    f.post(
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card["payload"]["entry_id"],
+            "submission_id": "always-bg",
+            "conversation_id": card["payload"]["route"]["target_conversation_id"],
+            "decision": {"always_allow": {"scope": "global"}}
+        }),
+    );
+    f.wait_parent(&c, "bg-task", RunStatus::AwaitingChildren);
+    let settled = f.app.api("GET", "/api/state", b"").unwrap();
+    let shown = settled["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["id"] == card["id"])
+        .unwrap();
+    assert!(shown["payload"]["decision"]["always_allow"].is_object());
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-next", "La même sorte de tâche");
+    f.wait_parent(&c, "bg-next", RunStatus::AwaitingChildren);
+    assert_ne!(f.run(&c, "bg-next").status, RunStatus::AwaitingApproval);
+    f.reopen();
+    f.events(vec![
+        call("delegate-call", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "bg-restart", "Après redémarrage");
+    f.wait_parent(&c, "bg-restart", RunStatus::AwaitingChildren);
+    f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id": "grokbot",
+            "target_bot_id": "grokbot",
+            "tool": "background_computer",
+            "args_digest": "",
+            "scope": "global"
+        }),
+    );
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-revoked", "La règle est retirée");
+    wait("carte revenue", || {
+        f.run(&c, "bg-revoked").status == RunStatus::AwaitingApproval
+    });
 }

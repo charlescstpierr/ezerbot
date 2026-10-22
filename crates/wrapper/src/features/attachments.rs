@@ -1083,9 +1083,119 @@ pub(super) fn selection_metadata(
     Ok(items)
 }
 
+pub(super) fn thread_owns_image(
+    conn: &Connection,
+    conversation: &str,
+    id: &str,
+) -> Result<bool, ApiError> {
+    if staging::get(conn, id)?.is_none() {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM attachments_message_links l
+            JOIN wrapper_messages m
+              ON m.account_id = ?1 AND m.conversation_id = l.conversation_id
+             AND m.message_id = l.message_id
+            WHERE l.conversation_id = ?2 AND l.attachment_id = ?3
+              AND m.ordinal > COALESCE((
+                SELECT MAX(ordinal) FROM wrapper_messages
+                WHERE account_id = ?1 AND conversation_id = ?2
+                  AND kind IN ('reset', 'engine_reset')
+              ), -1)
+        )",
+        params![ACCOUNT, conversation, id],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn accept_delegation_files(
+    ctx: &Context<'_>,
+    sources: &[(String, String)],
+    grants: &super::delegation::ImageGrants,
+) -> Result<(), ApiError> {
+    let mut ids = std::collections::HashSet::new();
+    let mut docs = Vec::new();
+    for (source_conversation, message) in sources {
+        for image in staging::for_message(ctx.connection, source_conversation, message)? {
+            ids.insert(image.id);
+        }
+        for doc in documents::for_message(ctx.connection, source_conversation, message)? {
+            if ids.insert(doc.id.clone()) {
+                docs.push(doc);
+            }
+        }
+    }
+    for grant in grants.live() {
+        ids.insert(grant.id().to_owned());
+    }
+    if ids.len() > MAX_MESSAGE_FILES {
+        return Err(ApiError::new(
+            400,
+            "Sélectionnez au plus 10 fichiers pour une sous-tâche.",
+        ));
+    }
+    validate_document_budget(ctx.connection, &docs)
+}
+
+/// Live descriptor for the child: path and MIME, never the file name or bytes.
+pub(super) fn selected_images_context(
+    ctx: &Context<'_>,
+    grants: &super::delegation::ImageGrants,
+) -> Result<(Option<String>, Vec<String>), ApiError> {
+    let mut images = Vec::new();
+    let missing: Vec<String> = grants
+        .revoked()
+        .iter()
+        .map(|id| format!("image/{id}"))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for grant in grants.live() {
+        if !seen.insert(grant.id().to_owned()) {
+            continue;
+        }
+        let attachment = staging::get(ctx.connection, grant.id())?
+            .ok_or_else(|| ApiError::new(404, "Image introuvable."))?;
+        let path = staging::content_path(ctx.db_path, &attachment)
+            .map_err(|_| ApiError::new(500, "Chemin d'image illisible."))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| ApiError::new(500, "Chemin d'image illisible."))?;
+        images.push(json!({
+            "id": attachment.id,
+            "path": path,
+            "mime_type": attachment.image_type.mime_type(),
+        }));
+    }
+    let note = if images.is_empty() {
+        None
+    } else {
+        Some(json!({"kind":"selected_images","images":images}).to_string())
+    };
+    Ok((note, missing))
+}
+
+pub(super) fn selected_image_dtos(
+    ctx: &Context<'_>,
+    grants: &[super::delegation::ImageGrant],
+) -> Vec<Value> {
+    let mut dtos = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for grant in grants {
+        if !seen.insert(grant.id().to_owned()) {
+            continue;
+        }
+        if let Ok(Some(attachment)) = staging::get(ctx.connection, grant.id()) {
+            dtos.push(dto(&attachment));
+        }
+    }
+    dtos
+}
+
 pub(super) fn validate_selected_material(
     ctx: &Context<'_>,
     sources: &[(String, String)],
+    grants: &[super::delegation::ImageGrant],
 ) -> Result<(), ApiError> {
     let mut ids = std::collections::HashSet::new();
     let mut docs = Vec::new();
@@ -1099,6 +1209,9 @@ pub(super) fn validate_selected_material(
             }
         }
     }
+    for grant in grants {
+        ids.insert(grant.id().to_owned());
+    }
     if ids.len() > MAX_MESSAGE_FILES {
         return Err(ApiError::new(
             400,
@@ -1111,11 +1224,12 @@ pub(super) fn validate_selected_material(
 pub(super) fn selected_material(
     ctx: &Context<'_>,
     sources: &[(String, String)],
+    grants: &[super::delegation::ImageGrant],
     model: &str,
     sending: bool,
     urls: &mut HashMap<String, String>,
 ) -> Result<(Vec<ImageInput>, String), ApiError> {
-    validate_selected_material(ctx, sources)?;
+    validate_selected_material(ctx, sources, grants)?;
     let mut images = Vec::new();
     let mut docs = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1129,6 +1243,11 @@ pub(super) fn selected_material(
             if seen.insert(doc.id.clone()) {
                 docs.push(doc);
             }
+        }
+    }
+    for image in images_for_selected(ctx, grants, model, sending, urls)? {
+        if seen.insert(image.attachment_id.clone()) {
+            images.push(image);
         }
     }
     let text = if docs.is_empty() {
@@ -1275,46 +1394,100 @@ pub(super) fn images_for_message_cached(
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
+    let no_vision = recorded_no_vision(ctx, model)?;
+    attachments
+        .iter()
+        .map(|attachment| {
+            transport_image(
+                ctx,
+                conversation,
+                attachment,
+                model,
+                sending_turn,
+                no_vision,
+                urls,
+            )
+        })
+        .collect()
+}
+
+fn images_for_selected(
+    ctx: &Context<'_>,
+    grants: &[super::delegation::ImageGrant],
+    model: &str,
+    sending_turn: bool,
+    urls: &mut HashMap<String, String>,
+) -> Result<Vec<ImageInput>, ApiError> {
+    let no_vision = recorded_no_vision(ctx, model)?;
+    let mut images = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for grant in grants {
+        if !seen.insert(grant.id().to_owned()) {
+            continue;
+        }
+        let Some(attachment) = staging::get(ctx.connection, grant.id())? else {
+            continue;
+        };
+        images.push(transport_image(
+            ctx,
+            grant.origin(),
+            &attachment,
+            model,
+            sending_turn,
+            no_vision,
+            urls,
+        )?);
+    }
+    Ok(images)
+}
+
+fn recorded_no_vision(ctx: &Context<'_>, model: &str) -> Result<bool, ApiError> {
     // One capability read per message, not per attachment. RC01's general
     // SKIPPED cooldown remains independent and never strips bytes from chat.
-    let no_vision: bool = ctx.connection.query_row(
+    let recorded: bool = ctx.connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM wrapper_attachment_model_no_vision
          WHERE model = ?1 AND until_ms > ?2)",
         params![model, ctx.now_ms],
         |row| row.get(0),
     )?;
-    let no_vision = no_vision || !ctx.provider.accepts_images(model);
-    attachments
-        .iter()
-        .map(|attachment| {
-            let bmp = attachment.image_type == staging::ImageType::Bmp;
-            let mut image = ImageInput {
-                attachment_id: attachment.id.clone(),
-                url: if sending_turn && !bmp && !no_vision {
-                    let url = match urls.get(&attachment.id) {
-                        Some(url) => url.clone(),
-                        None => {
-                            let url = data_url(ctx, attachment)?;
-                            urls.insert(attachment.id.clone(), url.clone());
-                            url
-                        }
-                    };
-                    Some(url)
-                } else {
-                    None
-                },
-                caption: if bmp {
-                    Some(BMP_CAPTION.into())
-                } else {
-                    caption_for(ctx.connection, conversation, &attachment.sha256, model)?
-                },
+    Ok(recorded || !ctx.provider.accepts_images(model))
+}
+
+fn transport_image(
+    ctx: &Context<'_>,
+    conversation: &str,
+    attachment: &staging::Attachment,
+    model: &str,
+    sending_turn: bool,
+    no_vision: bool,
+    urls: &mut HashMap<String, String>,
+) -> Result<ImageInput, ApiError> {
+    let bmp = attachment.image_type == staging::ImageType::Bmp;
+    let mut image = ImageInput {
+        attachment_id: attachment.id.clone(),
+        url: if sending_turn && !bmp && !no_vision {
+            let url = match urls.get(&attachment.id) {
+                Some(url) => url.clone(),
+                None => {
+                    let url = data_url(ctx, attachment)?;
+                    urls.insert(attachment.id.clone(), url.clone());
+                    url
+                }
             };
-            if no_vision && !bmp {
-                without_vision(std::slice::from_mut(&mut image));
-            }
-            Ok(image)
-        })
-        .collect()
+            Some(url)
+        } else {
+            None
+        },
+        caption: if bmp {
+            Some(BMP_CAPTION.into())
+        } else {
+            caption_for(ctx.connection, conversation, &attachment.sha256, model)?
+        },
+    };
+    if no_vision && !bmp {
+        without_vision(std::slice::from_mut(&mut image));
+    }
+    Ok(image)
 }
 
 /// Capability evidence is deliberately separate from the general caption cache.

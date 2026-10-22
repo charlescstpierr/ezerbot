@@ -88,7 +88,7 @@ def main() -> None:
     failed = None
     try:
         run_script("verify_lib.py", "self-check")
-        run_script("launch.py", "--evidence", str(evidence))
+        run_script("launch.py", "--evidence", str(evidence), "--sphere", args.sphere)
         run_script("doctor.py", "--evidence", str(evidence))
         try:
             run_script("drive.py", "--evidence", str(evidence), "--sphere", args.sphere)

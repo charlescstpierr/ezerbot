@@ -22,9 +22,14 @@
   }
   window.EzerbotFloatingMain = {
     async openConversation(id) {
-      await P.refresh();
-      if (!await P.focusConversation(id)) throw new Error("La conversation n’est plus disponible ou un envoi est en cours.");
-      return true;
+      try {
+        await P.refresh();
+        if (!await P.focusConversation(id)) return { opened: false, reason: "La conversation n’est plus disponible ou un envoi est en cours." };
+        return { opened: true };
+      } catch (error) {
+        const reason = error?.name === "Error" && typeof error.message === "string" ? error.message : "";
+        return { opened: false, reason };
+      }
     },
   };
   P.register({

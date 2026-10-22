@@ -239,6 +239,14 @@ impl Client {
                 continue;
             }
             if frame["id"] != id {
+                // A timed-out call can still deliver its frame. Skip only an
+                // older id; a newer one is a real protocol error.
+                if frame["id"].as_u64().is_some_and(|late| late < id) {
+                    if Instant::now() >= deadline {
+                        return Err("Délai de réponse MCP dépassé.".into());
+                    }
+                    continue;
+                }
                 return Err("Le serveur MCP a renvoyé un identifiant de réponse inattendu.".into());
             }
             if let Some(error) = frame.get("error") {
@@ -519,5 +527,30 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+    #[test]
+    fn late_response_after_timeout_does_not_poison_the_next_call() {
+        let mut client = fake("normal");
+        client
+            .initialize_with_timeout(Duration::from_secs(2))
+            .unwrap();
+        let late = client
+            .request_with_timeout(
+                "tools/call",
+                json!({"name":"echo","arguments":{"text":"slow-late"}}),
+                Duration::from_millis(30),
+            )
+            .unwrap_err();
+        assert!(late.to_string().contains("délai"), "{late}");
+        // The fixture answers 150 ms later. Wait until that frame is queued.
+        std::thread::sleep(Duration::from_millis(250));
+        let result = client
+            .request_with_timeout(
+                "tools/call",
+                json!({"name":"echo","arguments":{"text":"Bonjour"}}),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "Bonjour");
     }
 }

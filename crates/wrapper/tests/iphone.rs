@@ -424,3 +424,23 @@ fn remote_decisions_use_the_same_digest_bound_approval_gate() {
     ));
     tx.commit().unwrap();
 }
+
+#[test]
+fn paired_phone_can_stop_a_background_task() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    f.app.feature_context().connection.execute(
+        "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", [],
+    ).unwrap();
+    let body = json!({"run_id":"run","call_id":"call"});
+    assert_eq!(
+        f.remote("POST", "/api/local/tasks/stop", body.clone(), None)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let result = f
+        .remote("POST", "/api/local/tasks/stop", body, Some(&token))
+        .unwrap();
+    assert_eq!(result["status"], "arrêtée");
+}

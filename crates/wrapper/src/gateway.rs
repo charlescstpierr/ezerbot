@@ -134,6 +134,19 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     Ok(body)
 }
 
+fn output_text(item: &Value) -> String {
+    item["content"]
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part["type"] == "output_text")
+                .filter_map(|part| part["text"].as_str())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn token_usage(value: &Value) -> Option<TokenUsage> {
     // Bad/missing telemetry must not fail an otherwise valid reply or fabricate counts.
     let count = |v: &Value| v.as_u64().filter(|n| *n <= i64::MAX as u64);
@@ -158,10 +171,24 @@ struct PendingCall {
 }
 
 #[derive(Default)]
+struct TextItem {
+    commentary: bool,
+    saw_delta: bool,
+    fallback_used: bool,
+}
+
+#[derive(Default)]
 struct Events {
     calls: HashMap<String, PendingCall>,
     emitted_ids: HashSet<String>,
     emitted_reasoning_ids: HashSet<String>,
+    texts: HashMap<String, TextItem>,
+    /// Codex `phase: commentary` is a side channel. It is shown only when the
+    /// stream never produced a visible answer, and never mixed into that answer.
+    commentary: String,
+    visible: bool,
+    anonymous_delta: bool,
+    anonymous_fallback: bool,
 }
 
 const INTERRUPTED: &str = "La réponse a été interrompue avant la fin. Vous pouvez la relancer.";
@@ -195,10 +222,31 @@ impl Events {
         };
         let kind = event["type"].as_str().unwrap_or_default();
         match kind {
-            "response.output_text.delta" => {
-                if let Some(text) = event["delta"].as_str() {
-                    emit(ModelEvent::TextDelta { text: text.into() })?;
+            "response.output_item.added" | "response.output_item.done"
+                if event["item"]["type"] == "message" =>
+            {
+                self.note_message(&event["item"]);
+                if kind == "response.output_item.done" {
+                    let id = event["item"]["id"].as_str();
+                    let text = output_text(&event["item"]);
+                    self.absorb_text(id, &text, false, emit)?;
                 }
+            }
+            "response.output_text.delta" => {
+                self.absorb_text(
+                    event["item_id"].as_str(),
+                    event["delta"].as_str().unwrap_or(""),
+                    true,
+                    emit,
+                )?;
+            }
+            "response.output_text.done" => {
+                self.absorb_text(
+                    event["item_id"].as_str(),
+                    event["text"].as_str().unwrap_or(""),
+                    false,
+                    emit,
+                )?;
             }
             "response.output_item.done" if event["item"]["type"] == "reasoning" => {
                 let item = &event["item"];
@@ -270,11 +318,25 @@ impl Events {
                 }
             }
             "response.completed" => {
+                // Some backends send the final text only in the completed
+                // envelope. Reconcile by item id without repeating any delta.
+                if !self.anonymous_delta {
+                    if let Some(items) = event["response"]["output"].as_array() {
+                        for item in items.iter().filter(|item| item["type"] == "message") {
+                            self.note_message(item);
+                            self.absorb_text(item["id"].as_str(), &output_text(item), false, emit)?;
+                        }
+                    }
+                }
                 if self.calls.values().any(|call| !call.emitted) {
                     emit(failed(
                         "OpenAI a terminé la réponse avec un appel d’outil incomplet.",
                     ))?;
                 } else {
+                    if !self.visible && !self.commentary.is_empty() {
+                        let text = std::mem::take(&mut self.commentary);
+                        emit(ModelEvent::TextDelta { text })?;
+                    }
                     if let Some(usage) = token_usage(&event["response"]["usage"]) {
                         emit(ModelEvent::Usage { usage })?;
                     }
@@ -311,6 +373,63 @@ impl Events {
             _ => {} // Non-function items are not executable tool calls.
         }
         Ok(false)
+    }
+
+    fn note_message(&mut self, item: &Value) {
+        let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let entry = self.texts.entry(id.to_owned()).or_default();
+        if item["phase"].as_str() == Some("commentary") {
+            entry.commentary = true;
+        }
+    }
+
+    /// Visible text is the exact concatenation of non-commentary deltas.
+    /// A `done` payload is used once, and only when that item sent no delta.
+    fn absorb_text(
+        &mut self,
+        id: Option<&str>,
+        text: &str,
+        from_delta: bool,
+        emit: &mut dyn FnMut(ModelEvent) -> Result<()>,
+    ) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            if from_delta {
+                self.anonymous_delta = true;
+                self.visible = true;
+                return emit(ModelEvent::TextDelta { text: text.into() });
+            }
+            if self.anonymous_delta || self.anonymous_fallback || self.visible {
+                return Ok(());
+            }
+            self.anonymous_fallback = true;
+            self.visible = true;
+            return emit(ModelEvent::TextDelta { text: text.into() });
+        };
+        let commentary = {
+            let item = self.texts.entry(id.to_owned()).or_default();
+            if from_delta {
+                if item.fallback_used {
+                    return Ok(());
+                }
+                item.saw_delta = true;
+            } else if item.saw_delta || item.fallback_used {
+                return Ok(());
+            } else {
+                item.fallback_used = true;
+            }
+            item.commentary
+        };
+        if commentary {
+            self.commentary.push_str(text);
+            return Ok(());
+        }
+        self.visible = true;
+        emit(ModelEvent::TextDelta { text: text.into() })
     }
 
     fn emit_call(
@@ -409,8 +528,30 @@ impl ModelGateway for SimulatedGateway {
             .find(|entry| entry.role == Role::User)
             .map_or("", |entry| entry.text.as_str());
         emit(ModelEvent::TextDelta {
-            text: crate::demo_reply(prompt).into(),
+            text: simulated_text(request, prompt),
         })?;
         emit(ModelEvent::Completed)
+    }
+}
+
+fn simulated_text(request: &ModelRequest, prompt: &str) -> String {
+    if request.instructions.contains("skill_appliquee") {
+        if let Some(phrase) = exact_skill_phrase(&request.instructions) {
+            return phrase;
+        }
+    }
+    crate::demo_reply(prompt).to_owned()
+}
+
+fn exact_skill_phrase(instructions: &str) -> Option<String> {
+    let key = "Réponds exactement : ";
+    let start = instructions.rfind(key)? + key.len();
+    let rest = &instructions[start..];
+    let end = rest.find(['\\', '"', '\n', '\r']).unwrap_or(rest.len());
+    let phrase = rest[..end].trim();
+    if phrase.is_empty() {
+        None
+    } else {
+        Some(phrase.to_owned())
     }
 }

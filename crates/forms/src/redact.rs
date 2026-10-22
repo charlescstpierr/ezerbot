@@ -14,12 +14,59 @@ use std::collections::BTreeSet;
 
 // Shorter in UTF-8 bytes than *any* valid secret, so repeated masking converges
 // even if replacement boundaries accidentally form another known secret.
-const MASK: &str = "[...]";
+pub const MASK: &str = "[...]";
 
 pub fn redact(vault: &Vault, text: &str) -> Result<String> {
     let values = known_patterns(vault)?;
     Ok(mask(text, &values))
 }
+/// Redact a cumulative live snapshot and withhold enough trailing characters
+/// to cover a secret split across reads, including its JSON-escaped form.
+/// Publish the complete text with `redact` once the stream finishes.
+pub fn redact_live(vault: &Vault, text: &str) -> Result<String> {
+    let values = known_patterns(vault)?;
+    Ok(mask_live(text, &values))
+}
+
+fn mask_live(text: &str, values: &[String]) -> String {
+    let mut output = mask(text, values);
+    let tail = values
+        .iter()
+        .map(|value| value.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count = output.chars().count().saturating_sub(tail);
+    let end = output
+        .char_indices()
+        .nth(count)
+        .map_or(output.len(), |(index, _)| index);
+    output.truncate(end);
+    output
+}
+
+/// Retains every observed pattern for the lifetime of cumulative task output.
+#[derive(Default)]
+pub struct SnapshotRedactor {
+    known: BTreeSet<String>,
+}
+
+impl SnapshotRedactor {
+    pub fn redact(&mut self, vault: &Vault, value: &Value, live: bool) -> Result<Value> {
+        // Always refresh, failing closed even when older patterns are available.
+        self.known.extend(known_patterns(vault)?);
+        let patterns: Vec<_> = self.known.iter().cloned().collect();
+        let mut value = value.clone();
+        if live {
+            for field in ["stdout", "stderr"] {
+                if let Some(text) = value["output"][field].as_str() {
+                    value["output"][field] = Value::String(mask_live(text, &patterns));
+                }
+            }
+        }
+        mask_value(&value, &patterns)
+    }
+}
+
 pub fn redact_value(vault: &Vault, value: &Value) -> Result<Value> {
     // One fresh snapshot per output; never continue with an empty set on an
     // unavailable/corrupt vault, even if this particular output looks harmless.

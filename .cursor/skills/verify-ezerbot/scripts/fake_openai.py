@@ -8,7 +8,10 @@ so automatic memory can see a small model). Prints one JSON line, then serves.
 
 from __future__ import annotations
 
+import base64
 import json
+import struct
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -45,6 +48,24 @@ MODELS = {
     ]
 }
 
+def _png(width: int, height: int) -> bytes:
+    """A small gradient PNG, so the generated picture is visible in a screenshot."""
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            rows += bytes((40 + 180 * x // width, 90 + 100 * y // height, 200 - 120 * x // width))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
+
+
+IMAGE_B64 = base64.b64encode(_png(192, 192)).decode()
+
 USAGE = {
     "plan_type": "plus",
     "rate_limit": {
@@ -61,6 +82,15 @@ def response_body(raw: bytes) -> bytes:
     except json.JSONDecodeError:
         payload = {}
     instructions = str(payload.get("instructions") or "")
+    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+    if any(isinstance(tool, dict) and tool.get("type") == "image_generation" for tool in tools):
+        item = {"type": "image_generation_call", "status": "completed", "result": IMAGE_B64}
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": item},
+                {"type": "response.completed", "response": {"output": [item]}},
+            ]
+        )
     if instructions.startswith("Extraction de mémoire automatique."):
         return _sse(
             [
@@ -72,6 +102,29 @@ def response_body(raw: bytes) -> bytes:
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": "« Vérification visuelle. »"},
+                {"type": "response.completed"},
+            ]
+        )
+    items = payload.get("input") if isinstance(payload.get("input"), list) else []
+    if any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in items):
+        return _sse(
+            [
+                {"type": "response.output_text.delta", "delta": "Voici l’image."},
+                {"type": "response.completed"},
+            ]
+        )
+    if "dessine" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-image",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-image",
+            "name": "generate_image",
+            "arguments": json.dumps({"description": "un phare au crépuscule", "aspect_ratio": "1:1"}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
                 {"type": "response.completed"},
             ]
         )
@@ -110,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path == "/v1/models":
+        if path in ("/v1/models", "/backend-api/codex/models"):
             self._send(200, json.dumps(MODELS).encode(), "application/json")
         elif path == "/backend-api/wham/usage":
             self._send(200, json.dumps(USAGE).encode(), "application/json")

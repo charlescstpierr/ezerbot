@@ -1956,3 +1956,402 @@ fn only_the_default_bot_gets_the_proposal_tools_and_the_roster() {
         !super::features::engine::compose_instructions(&other, &[default]).contains("propose_bot")
     );
 }
+
+fn find_message<'a>(conversation: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    conversation["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == id)
+        .unwrap_or_else(|| panic!("message {id} absent"))
+}
+
+fn remote_sends(path: &std::path::Path, conversation: &str, message: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT send_count FROM wrapper_remote WHERE account_id = 'local-workspace' AND conversation_id = ?1 AND message_id = ?2",
+            [conversation, message],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+
+fn user_copies(conversation: &serde_json::Value, body: &str) -> usize {
+    conversation["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user" && message["body"] == body)
+        .count()
+}
+
+/// Réaction persistante, un envoi après Renvoyer, zéro après Supprimer,
+/// et aucune de ces deux actions sur un message déjà livré.
+#[test]
+fn reaction_persistante_renvoi_unique_et_suppression_sans_envoi() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+
+    let livre = post(
+        &mut app,
+        "/api/send",
+        json!({"conversation_id": id, "message_id": "livre", "body": "Déjà livré"}),
+    )
+    .unwrap();
+    assert_eq!(
+        find_message(&livre["conversation"], "livre")["state"],
+        "echoed"
+    );
+    assert_eq!(remote_sends(&db.0, &id, "livre"), 1);
+
+    let reacted = post(
+        &mut app,
+        "/api/messages/react",
+        json!({"conversation_id": id, "message_id": "livre", "emoji": "👍"}),
+    )
+    .unwrap();
+    assert_eq!(
+        find_message(&reacted["conversation"], "livre")["payload"]["reaction"],
+        "👍"
+    );
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        find_message(&state["conversations"][0], "livre")["payload"]["reaction"],
+        "👍"
+    );
+    let cleared = post(
+        &mut app,
+        "/api/messages/react",
+        json!({"conversation_id": id, "message_id": "livre", "emoji": "👍"}),
+    )
+    .unwrap();
+    assert!(find_message(&cleared["conversation"], "livre")["payload"]
+        .get("reaction")
+        .is_none());
+    post(
+        &mut app,
+        "/api/messages/react",
+        json!({"conversation_id": id, "message_id": "livre", "emoji": "❤️"}),
+    )
+    .unwrap();
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(
+        find_message(&state["conversations"][0], "livre")["payload"]["reaction"],
+        "❤️"
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/messages/resend",
+            json!({"conversation_id": id, "message_id": "livre"})
+        ),
+        Err(409)
+    );
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/messages/delete",
+            json!({"conversation_id": id, "message_id": "livre"})
+        ),
+        Err(409)
+    );
+    assert_eq!(remote_sends(&db.0, &id, "livre"), 1);
+
+    let tx = super::features::write_transaction(&app.connection).unwrap();
+    grokbot_attachments::staging::link_attachments(&tx, &id, "coupe", &["image-a".into()]).unwrap();
+    super::features::conversations::append_entry(&tx, &id, "submission", "coupe", 2).unwrap();
+    tx.commit().unwrap();
+    app.session
+        .prepare(
+            ConversationId::new(&id).unwrap(),
+            MessageId::new("coupe").unwrap(),
+            "Phrase coupée".into(),
+        )
+        .unwrap();
+    assert_eq!(remote_sends(&db.0, &id, "coupe"), 0);
+    let resent = post(
+        &mut app,
+        "/api/messages/resend",
+        json!({"conversation_id": id, "message_id": "coupe"}),
+    )
+    .unwrap();
+    let coupe = find_message(&resent["conversation"], "coupe");
+    assert_eq!(coupe["state"], "echoed");
+    assert_eq!(coupe["body"], "Phrase coupée");
+    assert_eq!(coupe["attachments"][0]["id"], "image-a");
+    assert_eq!(remote_sends(&db.0, &id, "coupe"), 1);
+    assert_eq!(user_copies(&resent["conversation"], "Phrase coupée"), 1);
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/messages/resend",
+            json!({"conversation_id": id, "message_id": "coupe"})
+        ),
+        Err(409)
+    );
+    assert_eq!(remote_sends(&db.0, &id, "coupe"), 1);
+
+    let cut = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": id,
+            "message_id": "coupure",
+            "body": "Coupure réseau",
+            "attachments": ["image-b"],
+            "simulate_loss": true
+        }),
+    )
+    .unwrap();
+    let coupure = find_message(&cut["conversation"], "coupure");
+    assert_eq!(coupure["state"], "unknown");
+    assert_eq!(coupure["attachments"][0]["id"], "image-b");
+    assert_eq!(remote_sends(&db.0, &id, "coupure"), 1);
+    let replayed = post(
+        &mut app,
+        "/api/messages/resend",
+        json!({"conversation_id": id, "message_id": "coupure"}),
+    )
+    .unwrap();
+    let coupure = find_message(&replayed["conversation"], "coupure");
+    assert_eq!(coupure["state"], "echoed");
+    assert_eq!(coupure["attachments"][0]["id"], "image-b");
+    assert_eq!(user_copies(&replayed["conversation"], "Coupure réseau"), 1);
+    assert_eq!(remote_sends(&db.0, &id, "coupure"), 1);
+    assert_eq!(
+        post(
+            &mut app,
+            "/api/messages/resend",
+            json!({"conversation_id": id, "message_id": "coupure"})
+        ),
+        Err(409)
+    );
+    assert_eq!(remote_sends(&db.0, &id, "coupure"), 1);
+
+    let forgotten = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": id,
+            "message_id": "oublie",
+            "body": "À oublier",
+            "simulate_loss": true
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        find_message(&forgotten["conversation"], "oublie")["state"],
+        "unknown"
+    );
+    assert_eq!(remote_sends(&db.0, &id, "oublie"), 1);
+    let deleted = post(
+        &mut app,
+        "/api/messages/delete",
+        json!({"conversation_id": id, "message_id": "oublie"}),
+    )
+    .unwrap();
+    assert!(deleted["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["id"] != "oublie"));
+    assert_eq!(remote_sends(&db.0, &id, "oublie"), 0);
+
+    app.session
+        .prepare(
+            ConversationId::new(&id).unwrap(),
+            MessageId::new("efface").unwrap(),
+            "À effacer".into(),
+        )
+        .unwrap();
+    assert_eq!(remote_sends(&db.0, &id, "efface"), 0);
+    let removed = post(
+        &mut app,
+        "/api/messages/delete",
+        json!({"conversation_id": id, "message_id": "efface"}),
+    )
+    .unwrap();
+    assert!(removed["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["id"] != "efface"));
+    assert_eq!(remote_sends(&db.0, &id, "efface"), 0);
+
+    drop(app);
+    let mut app = App::open(&db.0).unwrap();
+    let state = app.api("GET", "/api/state", b"").unwrap();
+    let messages = &state["conversations"][0];
+    assert_eq!(find_message(messages, "livre")["payload"]["reaction"], "❤️");
+    assert!(messages["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["id"] != "oublie" && message["id"] != "efface"));
+    assert_eq!(remote_sends(&db.0, &id, "oublie"), 0);
+    assert_eq!(remote_sends(&db.0, &id, "coupe"), 1);
+}
+
+/// Supprimer un envoi non livré retire ses liens de pièces jointes. Les objets
+/// et les liens d’un autre message restent, pour que le nettoyage des orphelins
+/// puisse voir un fichier qui n’a plus aucun message.
+#[test]
+fn suppression_retire_les_liens_de_pieces_du_message_non_envoye() {
+    let db = Database::new();
+    let mut app = App::open(&db.0).unwrap();
+    let id = conversation(&mut app);
+    seed_attachments(&app);
+    for document in ["document_shared", "document_only"] {
+        let record = serde_json::json!({
+            "id": document,
+            "name": "note.txt",
+            "format": "txt",
+            "byte_length": 4,
+            "page_count": 1,
+            "page_kind": "pages estimées",
+            "pages_read": 1,
+            "truncated": false,
+            "note": null,
+            "text": "note"
+        })
+        .to_string();
+        app.connection
+            .execute(
+                "INSERT INTO attachments_documents(id, record) VALUES (?1, ?2)",
+                rusqlite::params![document, record],
+            )
+            .unwrap();
+    }
+
+    let kept = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": id,
+            "message_id": "garde",
+            "body": "Conservé",
+            "attachments": ["image-a", "document_shared"]
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        find_message(&kept["conversation"], "garde")["state"],
+        "echoed"
+    );
+
+    let unsent = post(
+        &mut app,
+        "/api/send",
+        json!({
+            "conversation_id": id,
+            "message_id": "efface",
+            "body": "Pas encore parti",
+            "attachments": ["image-a", "image-b", "document_shared", "document_only"],
+            "simulate_loss": true
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        find_message(&unsent["conversation"], "efface")["state"],
+        "unknown"
+    );
+    assert_eq!(remote_sends(&db.0, &id, "efface"), 1);
+    assert_eq!(
+        link_rows(&app, "attachments_message_links", &id, "efface"),
+        2
+    );
+    assert_eq!(
+        link_rows(&app, "attachments_document_links", &id, "efface"),
+        2
+    );
+    assert_eq!(
+        link_rows(&app, "wrapper_attachment_order", &id, "efface"),
+        4
+    );
+
+    let deleted = post(
+        &mut app,
+        "/api/messages/delete",
+        json!({"conversation_id": id, "message_id": "efface"}),
+    )
+    .unwrap();
+    assert!(deleted["conversation"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["id"] != "efface"));
+    assert_eq!(remote_sends(&db.0, &id, "efface"), 0);
+    for table in [
+        "attachments_message_links",
+        "attachments_document_links",
+        "wrapper_attachment_order",
+    ] {
+        assert_eq!(link_rows(&app, table, &id, "efface"), 0, "{table}");
+    }
+    assert_eq!(
+        link_rows(&app, "attachments_message_links", &id, "garde"),
+        1
+    );
+    assert_eq!(
+        link_rows(&app, "attachments_document_links", &id, "garde"),
+        1
+    );
+    assert_eq!(link_rows(&app, "wrapper_attachment_order", &id, "garde"), 2);
+    for (table, attachment) in [
+        ("attachments_staged", "image-a"),
+        ("attachments_staged", "image-b"),
+        ("attachments_documents", "document_shared"),
+        ("attachments_documents", "document_only"),
+    ] {
+        let present: bool = app
+            .connection
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                [attachment],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(present, "{attachment}");
+    }
+    let roots = attachment_roots(&app);
+    assert!(roots.contains("image-a"));
+    assert!(roots.contains("document_shared"));
+    assert!(!roots.contains("image-b"));
+    assert!(!roots.contains("document_only"));
+    let kept = find_message(&deleted["conversation"], "garde");
+    assert_eq!(kept["attachments"][0]["id"], "image-a");
+}
+
+fn link_rows(app: &App, table: &str, conversation: &str, message: &str) -> i64 {
+    app.connection
+        .query_row(
+            &format!("SELECT count(*) FROM {table} WHERE conversation_id = ?1 AND message_id = ?2"),
+            rusqlite::params![conversation, message],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn attachment_roots(app: &App) -> std::collections::HashSet<String> {
+    let mut statement = app
+        .connection
+        .prepare(
+            "SELECT attachment_id FROM wrapper_storage_drafts
+             UNION SELECT attachment_id FROM attachments_message_links
+             UNION SELECT document_id FROM attachments_document_links
+             UNION SELECT attachment_id FROM wrapper_attachment_order",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}

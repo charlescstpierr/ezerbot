@@ -321,7 +321,9 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
         .unwrap()
         .responses
         .extend([unauthorized(), unauthorized()]);
-    assert_eq!(provider.responses(body.clone()).unwrap_err().kind, "signin");
+    let failure = provider.responses(body.clone()).unwrap_err();
+    assert_eq!(failure.kind, "other");
+    assert!(provider.connected());
     assert_eq!(seen.lock().unwrap().forms.len(), forms_before + 1);
     assert_eq!(seen.lock().unwrap().bodies.len(), bodies_before + 2);
 
@@ -350,10 +352,9 @@ fn chatgpt_sign_in_streams_a_real_reply_and_signs_out() {
     // Les jetons renouvelés survivent à un redémarrage.
     drop(app);
     let mut app = App::open_with(&db, provider.clone()).unwrap();
-    assert_eq!(
-        app.api("GET", "/api/state", b"").unwrap()["mode"],
-        "chatgpt"
-    );
+    wait("session rouverte", || {
+        app.api("GET", "/api/state", b"").unwrap()["mode"] == "chatgpt"
+    });
 
     // La déconnexion révoque la session et rend le mode simulé.
     assert_eq!(

@@ -506,25 +506,184 @@ fn secret_value_absent_from_state_export_and_events() {
     assert!(encoded.contains("API_TOKEN"));
     let vault = forms::vault(&f.app.feature_context()).unwrap();
     assert_eq!(vault.path(), f.directory.join("app.secrets.json"));
-    assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "API_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some(secret)
+    );
     let retry = f.post("/api/forms/submit",json!({"entry_id":request.entry_id,"submission_id":"secret-submit","conversation_id":f.conversation,"value":"other-token-value"}));
     assert_eq!(
         retry["receipt"]["resolution_id"],
         first["receipt"]["resolution_id"]
     );
-    assert_eq!(vault.get("API_TOKEN").unwrap().as_deref(), Some(secret));
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "API_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some(secret)
+    );
     assert!(f.app.api("GET", "/api/secrets", b"").unwrap()["secrets"][0]
         .get("value")
         .is_none());
     assert_eq!(
-        f.post("/api/secrets/delete", json!({"name":"api_token"})),
+        f.post(
+            "/api/secrets/delete",
+            json!({"name":"api_token","bot_id":"grokbot"})
+        ),
         json!({"secrets":[]})
     );
+    let stale = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"secret-again","conversation_id":f.conversation,"value":"autre phrase refusee ici"}),
+    )
+    .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.message, "Ce formulaire n’a pas été accepté.");
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .get_for_bot("grokbot", "API_TOKEN")
+        .unwrap()
+        .is_none());
     for name in ["app.sqlite", "app.sqlite-wal"] {
         assert!(!std::fs::read(f.directory.join(name))
             .unwrap()
             .windows(secret.len())
             .any(|bytes| bytes == secret.as_bytes()));
+    }
+    assert!(!bytes_contain(
+        &f.directory.join("app.secrets.json"),
+        "autre phrase refusee ici"
+    ));
+}
+
+#[test]
+fn conversation_secret_card_records_the_name_and_rejects_another_submission() {
+    const STALE: &str = "Ce formulaire n’a pas été accepté.";
+    const VALUE: &str = "phrase stripe du formulaire";
+    const OTHER: &str = "autre phrase du formulaire";
+    let mut f = Fixture::new();
+    let request = f.suspended_request(
+        "run",
+        "stripe",
+        "request_secret",
+        json!({"name":"stripe_key","purpose":"Clé API Stripe"}),
+    );
+    assert!(matches!(
+        &request.kind,
+        grokbot_forms::requests::InputKind::Secret { name, purpose }
+            if name == "STRIPE_KEY" && purpose == "Clé API Stripe"
+    ));
+    let pending = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = pending["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| message["kind"] == "secret")
+        .unwrap();
+    assert_eq!(card["body"], "");
+    assert_eq!(card["payload"]["kind"]["name"], "STRIPE_KEY");
+    assert_eq!(card["payload"]["kind"]["purpose"], "Clé API Stripe");
+    assert_eq!(card["payload"]["status"]["status"], "pending");
+    assert!(!card.to_string().contains(VALUE));
+
+    let first = f.post(
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-submit","conversation_id":f.conversation,"value":VALUE}),
+    );
+    assert_eq!(
+        requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
+            .unwrap(),
+        json!({"name":"STRIPE_KEY"})
+    );
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive("run", &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    let seen = gateway.requests.lock().unwrap();
+    let model = seen[0]
+        .input
+        .iter()
+        .flat_map(|item| &item.tool_items)
+        .map(|item| serde_json::to_value(item).unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(model.contains("STRIPE_KEY"));
+    assert!(!model.contains(VALUE));
+    drop(seen);
+
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let resolved = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| message["kind"] == "secret")
+        .unwrap();
+    assert_eq!(resolved["payload"]["status"]["status"], "resolved");
+    assert_eq!(resolved["payload"]["kind"]["name"], "STRIPE_KEY");
+    assert_eq!(resolved["body"], "");
+    let events = store::events(&f.conn, "run", 0).unwrap();
+    let encoded = json!({"state":state,"events":events}).to_string();
+    assert!(encoded.contains("STRIPE_KEY"));
+    assert!(encoded.contains("Clé API Stripe"));
+    assert!(!encoded.contains(VALUE));
+    let listed = post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"grokbot"})).unwrap();
+    assert_eq!(listed["secrets"][0]["name"], "STRIPE_KEY");
+    assert_eq!(listed["secrets"][0]["description"], "Clé API Stripe");
+    assert!(listed["secrets"][0].get("value").is_none());
+    assert!(!listed.to_string().contains(VALUE));
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
+
+    let replay = f.post(
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-submit","conversation_id":f.conversation,"value":OTHER}),
+    );
+    assert_eq!(
+        replay["receipt"]["resolution_id"],
+        first["receipt"]["resolution_id"]
+    );
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
+
+    let resolutions = f.count("forms_resolutions");
+    let stale = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":request.entry_id,"submission_id":"stripe-autre","conversation_id":f.conversation,"value":OTHER}),
+    )
+    .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.message, STALE);
+    assert_eq!(f.count("forms_resolutions"), resolutions);
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "STRIPE_KEY")
+            .unwrap()
+            .as_deref(),
+        Some(VALUE)
+    );
+    assert!(!bytes_contain(vault.path(), OTHER));
+    for name in ["app.sqlite", "app.sqlite-wal"] {
+        assert!(!bytes_contain(&f.directory.join(name), VALUE));
+        assert!(!bytes_contain(&f.directory.join(name), OTHER));
     }
 }
 
@@ -624,6 +783,27 @@ fn denied_expired_and_cancelled_approvals_resume_without_effect_or_new_request()
             "delivered"
         );
     }
+}
+
+#[test]
+fn state_reports_how_each_approval_was_decided() {
+    let mut f = Fixture::new();
+    let once = f.approval("once", json!({"path":"one"}));
+    let always = f.approval("always", json!({"path":"two"}));
+    let waiting = f.approval("waiting", json!({"path":"three"}));
+    f.decide(&once, "once", json!("allow_once"));
+    f.decide(
+        &always,
+        "always",
+        json!({"always_allow":{"scope":"global"}}),
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let requests = state["forms"]["requests"].as_array().unwrap();
+    let decision =
+        |id: &str| requests.iter().find(|request| request["id"] == id).unwrap()["decision"].clone();
+    assert_eq!(decision(&once.id), json!("allow_once"));
+    assert!(decision(&always.id)["always_allow"].is_object());
+    assert!(decision(&waiting.id).is_null());
 }
 
 #[test]
@@ -1120,4 +1300,215 @@ fn checked_event_reaction_propagates_failure_and_rolls_back_cancellation() {
         requests::get(&f.conn, &request.id).unwrap().unwrap().status,
         RequestStatus::Cancelled { .. }
     ));
+}
+
+fn post_result(app: &mut App, path: &str, body: Value) -> Result<Value, ApiError> {
+    app.api("POST", path, &serde_json::to_vec(&body).unwrap())
+}
+
+fn bytes_contain(path: &std::path::Path, needle: &str) -> bool {
+    std::fs::read(path)
+        .map(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        })
+        .unwrap_or(false)
+}
+
+/// T22 : liste sans valeur, trousseau, formulaire périmé, demande ancienne, bot B.
+#[test]
+fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms() {
+    const STALE: &str = "Ce formulaire n’a pas été accepté.";
+    const PANEL: &str = "panneau-secret-unique-8801";
+    const OLD: &str = "ancien-secret-unique-8802";
+    const REPLACED: &str = "remplace-secret-unique-8803";
+    const RESTARTED: &str = "redemarre-secret-unique-8804";
+    let mut f = Fixture::new();
+    f.post(
+        "/api/bots",
+        json!({"id":"bot-b","name":"Bot B","color":"cyan","description":"","instructions":""}),
+    );
+
+    let empty = post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"grokbot"})).unwrap();
+    assert_eq!(empty["secrets"], json!([]));
+
+    let added = post_result(
+        &mut f.app,
+        "/api/secrets/put",
+        json!({"bot_id":"grokbot","name":"cle_panneau","description":"Jeton du panneau","value":PANEL}),
+    )
+    .unwrap();
+    assert!(added["secrets"][0].get("value").is_none());
+    assert_eq!(added["secrets"][0]["name"], "CLE_PANNEAU");
+    assert_eq!(added["secrets"][0]["description"], "Jeton du panneau");
+    assert!(added["secrets"][0]["created_at"].as_i64().unwrap() > 0);
+    assert!(
+        added["secrets"][0]["updated_at"].as_i64().unwrap()
+            >= added["secrets"][0]["created_at"].as_i64().unwrap()
+    );
+    assert!(!added.to_string().contains(PANEL));
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "CLE_PANNEAU")
+            .unwrap()
+            .as_deref(),
+        Some(PANEL)
+    );
+    let file = std::fs::read_to_string(vault.path()).unwrap_or_default();
+    match vault.storage_status().backend {
+        "keychain" => assert!(
+            !file.contains(PANEL),
+            "un trousseau actif ne laisse pas la valeur dans le fichier"
+        ),
+        "file" | "file_fallback" => assert!(
+            file.contains(PANEL),
+            "la valeur est dans le coffre qui alimente le trousseau"
+        ),
+        other => panic!("coffre inattendu: {other}"),
+    }
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let export = serde_json::to_string(&state["conversations"]).unwrap();
+    let template = post_result(
+        &mut f.app,
+        "/api/templates/export",
+        json!({"bot_id":"grokbot"}),
+    )
+    .unwrap();
+    for haystack in [state.to_string(), export, template.to_string()] {
+        assert!(!haystack.contains(PANEL));
+    }
+    for name in ["app.sqlite", "app.sqlite-wal"] {
+        assert!(!bytes_contain(&f.directory.join(name), PANEL));
+    }
+    let other = post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"bot-b"})).unwrap();
+    assert_eq!(other["secrets"], json!([]));
+    assert!(!other.to_string().contains("CLE_PANNEAU"));
+    let removed = post_result(
+        &mut f.app,
+        "/api/secrets/delete",
+        json!({"bot_id":"grokbot","name":"cle_panneau"}),
+    )
+    .unwrap();
+    assert_eq!(removed["secrets"], json!([]));
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .get_for_bot("grokbot", "CLE_PANNEAU")
+        .unwrap()
+        .is_none());
+
+    let older = f.request(
+        "secret-old",
+        "request_secret",
+        json!({"name":"jeton_ancien","purpose":"Ancien jeton"}),
+    );
+    let now = f.app.feature_context().now_ms as i64;
+    let shifted = now - 31 * 60 * 1000;
+    f.conn
+        .execute(
+            "UPDATE forms_requests SET created_at=?1 WHERE id=?2",
+            params![shifted, older.id],
+        )
+        .unwrap();
+    let stored: i64 = f
+        .conn
+        .query_row(
+            "SELECT created_at FROM forms_requests WHERE id=?1",
+            [&older.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored <= now - 30 * 60 * 1000);
+    let accepted = f.post(
+        "/api/forms/submit",
+        json!({"entry_id":older.entry_id,"submission_id":"old-secret","conversation_id":older.route.target_conversation_id,"value":OLD}),
+    );
+    assert_eq!(accepted["accepted"], true);
+    let listed = post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"grokbot"})).unwrap();
+    assert!(listed["secrets"][0].get("value").is_none());
+    assert_eq!(listed["secrets"][0]["name"], "JETON_ANCIEN");
+    assert_eq!(listed["secrets"][0]["description"], "Ancien jeton");
+    assert_eq!(
+        forms::vault(&f.app.feature_context())
+            .unwrap()
+            .get_for_bot("grokbot", "JETON_ANCIEN")
+            .unwrap()
+            .as_deref(),
+        Some(OLD)
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(!state.to_string().contains(OLD));
+    assert!(!serde_json::to_string(&state["conversations"])
+        .unwrap()
+        .contains(OLD));
+    assert_eq!(
+        post_result(&mut f.app, "/api/secrets/list", json!({"bot_id":"bot-b"})).unwrap()["secrets"],
+        json!([])
+    );
+
+    let replaced = f.request(
+        "secret-replaced",
+        "request_secret",
+        json!({"name":"jeton_remplace","purpose":"Demande remplacée"}),
+    );
+    let current = f.request(
+        "secret-current",
+        "request_secret",
+        json!({"name":"jeton_courant","purpose":"Demande suivante"}),
+    );
+    let resolutions = f.count("forms_resolutions");
+    let stale = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":replaced.entry_id,"submission_id":"replaced-secret","conversation_id":replaced.route.target_conversation_id,"value":REPLACED}),
+    )
+    .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.message, STALE);
+    assert_eq!(f.count("forms_resolutions"), resolutions);
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .get_for_bot("grokbot", "JETON_REMPLACE")
+        .unwrap()
+        .is_none());
+    assert!(!f
+        .app
+        .api("GET", "/api/state", b"")
+        .unwrap()
+        .to_string()
+        .contains(REPLACED));
+
+    f.app = App::open(&f.directory.join("app.sqlite")).unwrap();
+    let restarted = post_result(
+        &mut f.app,
+        "/api/forms/submit",
+        json!({"entry_id":current.entry_id,"submission_id":"restarted-secret","conversation_id":current.route.target_conversation_id,"value":RESTARTED}),
+    )
+    .unwrap_err();
+    assert_eq!(restarted.status, 409);
+    assert_eq!(restarted.message, STALE);
+    assert_eq!(f.count("forms_resolutions"), resolutions);
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    assert!(vault
+        .get_for_bot("grokbot", "JETON_COURANT")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        vault
+            .get_for_bot("grokbot", "JETON_ANCIEN")
+            .unwrap()
+            .as_deref(),
+        Some(OLD)
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    assert!(!state.to_string().contains(RESTARTED));
+    assert!(!state.to_string().contains(REPLACED));
+    let bot_b = state["forms"]["bot_secrets"]["bot-b"].as_array().unwrap();
+    assert!(bot_b.is_empty());
+    assert!(state["forms"]["bot_secrets"]["grokbot"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|secret| secret.get("value").is_none()));
 }

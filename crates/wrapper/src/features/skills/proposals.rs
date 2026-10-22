@@ -123,19 +123,7 @@ fn validated(
         ));
     }
     for file in &input.files {
-        let valid_path = !file.path.is_empty()
-            && file.path.chars().count() <= 240
-            && !file.path.contains(['\\', ':'])
-            && !file.path.chars().any(char::is_control)
-            && file
-                .path
-                .split('/')
-                .all(|part| !part.is_empty() && part != "." && part != "..")
-            && file.path.rsplit_once('.').is_some_and(|(_, ext)| {
-                ["txt", "md", "markdown", "csv", "json", "yaml", "yml"]
-                    .contains(&ext.to_ascii_lowercase().as_str())
-            });
-        if !valid_path || !paths.insert(file.path.to_lowercase()) {
+        if !import::valid_companion_path(&file.path) || !paths.insert(file.path.to_lowercase()) {
             return Err(ApiError::new(400, "Nom de fichier annexe invalide ou répété. Utilisez un chemin relatif de fichier texte."));
         }
         if file

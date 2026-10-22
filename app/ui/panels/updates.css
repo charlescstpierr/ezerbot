@@ -1,0 +1,12 @@
+.update-corner { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; margin: 0 2px 8px; padding: 2px 7px 2px 5px; border-radius: 999px; color: var(--sidebar-muted); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.update-corner[hidden] { display: none; }
+.update-corner:hover:not(:disabled) { background: var(--soft); color: var(--sidebar-text); }
+.update-corner:disabled { cursor: default; }
+.update-corner-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.update-corner.is-running .update-corner-mark { background: transparent; border: 1.5px solid color-mix(in srgb, var(--sidebar-muted) 45%, transparent); border-top-color: var(--accent-ink); animation: update-spin .8s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+.updates-version { color: var(--text); font-variant-numeric: tabular-nums; }
+.updates-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.updates-status { margin: 0 0 10px; min-height: 1.2em; }
+.updates-status[data-tone="error"] { color: var(--danger-text); }
+.updates-log { margin: 0; max-height: 9.5rem; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--soft); color: var(--text); font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }

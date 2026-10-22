@@ -297,14 +297,24 @@
     task.standardOutput = output;
     task.standardError = self.logHandle;
     task.currentDirectoryURL = [NSURL fileURLWithPath:self.supportPath isDirectory:YES];
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+#ifdef EZERBOT_RELEASE
+    // Recherche discrète au lancement. Le bouton des Réglages reste disponible sans cette variable.
+    environment[@"EZERBOT_QUIET_UPDATE_CHECK"] = @"1";
+#endif
+    task.environment = environment;
     __weak GrokbotApplication *weakSelf = self;
     task.terminationHandler = ^(NSTask *finished) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GrokbotApplication *strongSelf = weakSelf;
-            if (strongSelf && strongSelf.backendTask == finished && !strongSelf.terminating) {
-                [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
-                              generation:generation];
+            if (!strongSelf || strongSelf.backendTask != finished || strongSelf.terminating) return;
+            // 86 : le moteur a installé une nouvelle application et demande le redémarrage.
+            if (finished.terminationReason == NSTaskTerminationReasonExit && finished.terminationStatus == 86) {
+                [strongSelf relaunchUpdatedApplication];
+                return;
             }
+            [strongSelf failStartup:@"Le moteur s’est arrêté. Les détails sont dans le journal local."
+                          generation:generation];
         });
     };
     self.backendTask = task;
@@ -381,6 +391,7 @@
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotVoiceSession"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotFloating"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotImages"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -469,6 +480,22 @@
     void (^reply)(NSDictionary *) = ^(NSDictionary *result) {
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
+    if ([message.name isEqual:@"ezerbotImages"]) {
+        if (![command isEqual:@"copy"]) { replyHandler(nil, @"Commande d’image inconnue."); return; }
+        NSString *mime = [body[@"mime"] isKindOfClass:NSString.class] ? [body[@"mime"] lowercaseString] : @"";
+        NSString *data = [body[@"data"] isKindOfClass:NSString.class] ? body[@"data"] : @"";
+        NSSet *types = [NSSet setWithArray:@[@"image/png", @"image/jpeg", @"image/gif", @"image/webp", @"image/bmp"]];
+        if (![types containsObject:mime] || data.length == 0 || data.length > 27962028) { replyHandler(nil, @"Image illisible."); return; }
+        NSData *bytes = [[NSData alloc] initWithBase64EncodedString:data options:NSDataBase64DecodingIgnoreUnknownCharacters];
+        if (!bytes || bytes.length == 0 || bytes.length > 20 * 1024 * 1024) { replyHandler(nil, @"Image illisible."); return; }
+        NSImage *image = [[NSImage alloc] initWithData:bytes];
+        if (!image.isValid) { replyHandler(nil, @"Image illisible."); return; }
+        NSPasteboard *board = NSPasteboard.generalPasteboard;
+        [board clearContents];
+        if (![board writeObjects:@[image]]) { replyHandler(nil, @"L’image n’a pas pu être copiée."); return; }
+        replyHandler(@{@"ok": @YES}, nil);
+        return;
+    }
     if ([message.name isEqual:@"ezerbotVoice"]) {
         if ([command isEqual:@"start"] && [EzerbotVoice captureStatusActive:self.voiceSession.status]) { reply(@{@"status":@"microphone_busy"}); return; }
         [self.voice command:body reply:^(NSDictionary *result) {
@@ -629,15 +656,24 @@
 - (void)download:(WKDownload *)download decideDestinationUsingResponse:(NSURLResponse *)response
  suggestedFilename:(NSString *)suggestedFilename completionHandler:(void (^)(NSURL *))completionHandler {
     (void)download;
-    (void)response;
-    NSSavePanel *panel = [NSSavePanel savePanel];
-    panel.title = @"Exporter l’espace Ezerbot";
-    panel.prompt = @"Exporter";
-    panel.allowedContentTypes = @[UTTypeJSON];
-    panel.canCreateDirectories = YES;
+    NSString *mime = response.MIMEType.lowercaseString ?: @"";
     NSString *filename = suggestedFilename.lastPathComponent;
-    panel.nameFieldStringValue = [filename.pathExtension.lowercaseString isEqualToString:@"json"]
-                                  ? filename : @"ezerbot-workspace.json";
+    BOOL image = [mime hasPrefix:@"image/"];
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.canCreateDirectories = YES;
+    if (image) {
+        panel.title = @"Enregistrer l’image";
+        panel.prompt = @"Enregistrer";
+        UTType *type = [UTType typeWithMIMEType:response.MIMEType];
+        if (type) panel.allowedContentTypes = @[type];
+        panel.nameFieldStringValue = filename.length ? filename : @"image";
+    } else {
+        panel.title = @"Exporter l’espace Ezerbot";
+        panel.prompt = @"Exporter";
+        panel.allowedContentTypes = @[UTTypeJSON];
+        panel.nameFieldStringValue = [filename.pathExtension.lowercaseString isEqualToString:@"json"]
+                                      ? filename : @"ezerbot-workspace.json";
+    }
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
         completionHandler(result == NSModalResponseOK ? panel.URL : nil);
     }];
@@ -670,6 +706,26 @@
     (void)sender;
     if (self.supportPath) [[NSWorkspace sharedWorkspace] openURL:
                           [NSURL fileURLWithPath:[self.supportPath stringByAppendingPathComponent:@"logs"] isDirectory:YES]];
+}
+
+- (void)relaunchUpdatedApplication {
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    NSTask *relaunch = [[NSTask alloc] init];
+    relaunch.executableURL = [NSURL fileURLWithPath:@"/bin/bash"];
+    // $0 est le nom, $1 le pid, $2 le bundle. on ignore SIGHUP pour survivre à la fermeture.
+    relaunch.arguments = @[
+        @"-c",
+        @"trap '' HUP; while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$2\"",
+        @"ezerbot-relaunch",
+        [NSString stringWithFormat:@"%d", getpid()],
+        bundle
+    ];
+    relaunch.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    relaunch.standardError = [NSFileHandle fileHandleWithNullDevice];
+    if ([relaunch launchAndReturnError:nil]) {
+        self.terminating = YES;
+        [NSApp terminate:nil];
+    }
 }
 
 - (void)stopBackend {

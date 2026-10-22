@@ -333,6 +333,9 @@ pub fn routes(
             path,
             "/api/send"
                 | "/api/reconcile"
+                | "/api/messages/react"
+                | "/api/messages/resend"
+                | "/api/messages/delete"
                 | "/api/provider/signin"
                 | "/api/provider/test"
                 | "/api/provider/select"
@@ -476,6 +479,9 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             app.touch(&input.conversation_id)?;
             app.conversation_response(&input.conversation_id)
         }
+        "/api/messages/react" => react(app, body),
+        "/api/messages/resend" => resend(app, body),
+        "/api/messages/delete" => delete_undelivered(app, body),
         "/api/provider/test" => {
             let input: ConnectionTest = parse(body)?;
             app.provider.test_connection_with_refresh(input.refresh);
@@ -1094,6 +1100,15 @@ fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
                 if status == RunStatus::Interrupted
                     && super::multibot::is_group(ctx.connection, &run.conversation_id)
                 {
+                    // The remote attempt is not reissued. Pending calls still need
+                    // a result, or the card stays open and replay drops the call.
+                    if let Ok(mut services) = Services::new(ctx) {
+                        let _ = run_loop::settle_interrupted_without_resume(
+                            ctx.connection,
+                            &mut services,
+                            &run.run_id,
+                        );
+                    }
                     continue;
                 }
                 if super::multibot::managed(ctx.connection, &run.run_id) {
@@ -1360,32 +1375,7 @@ fn fail_host(
         if run.status == RunStatus::Interrupted {
             model::resume(conn, id)?;
         }
-        let events = store::events(conn, id, 0)?;
-        let settled: HashSet<_> = events
-            .iter()
-            .filter(|e| e.kind == RunEventKind::ToolResult)
-            .filter_map(|e| e.payload["call_id"].as_str())
-            .collect();
-        for event in &events {
-            if event.kind == RunEventKind::ToolCall {
-                if let Some(call) = event.payload["call_id"].as_str() {
-                    if !settled.contains(call) {
-                        let admitted:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM engine_tool_admissions WHERE run_id=?1 AND call_id=?2)",params![id,call],|r|r.get(0))?;
-                        let reason = if admitted {
-                            "Résultat d’appel externe non confirmé ; son effet est incertain."
-                        } else {
-                            "local service unavailable"
-                        };
-                        store::append_event(
-                            conn,
-                            id,
-                            RunEventKind::ToolResult,
-                            &json!({"call_id":call,"outcome":{"status":"failed","reason":reason}}),
-                        )?;
-                    }
-                }
-            }
-        }
+        run_loop::append_unsettled_results(conn, id, "local service unavailable")?;
         run = store::required(conn, id)?;
         run.status = RunStatus::Failed;
         run.turn_end = None;
@@ -2041,15 +2031,19 @@ impl RunGatewayCall<'_> {
             if sending.entry_id == original.entry_id
                 && matches!(run.trigger, Trigger::Delegation { .. })
             {
-                let sources = super::delegation::material_sources(self.connection, &run)?;
+                let delivery = super::delegation::delivery_for_run(self.connection, &run)?
+                    .ok_or_else(|| Error::InvalidInput("missing delegation".into()))?;
+                let mut urls = self.image_urls.lock().unwrap_or_else(|e| e.into_inner());
                 let (images, documents) = super::attachments::selected_material(
                     &ctx,
-                    &sources,
+                    delivery.sources(),
+                    delivery.grants().live(),
                     &request.model,
                     sending_bytes,
-                    &mut self.image_urls.lock().unwrap_or_else(|e| e.into_inner()),
+                    &mut urls,
                 )
                 .map_err(engine_error)?;
+                drop(urls);
                 sending.images = images;
                 sending.text.push_str(&documents);
             } else {
@@ -2473,15 +2467,15 @@ impl<'a> RedactedDeltas<'a> {
         Ok(state)
     }
     fn refresh(&mut self) -> grokbot_engine::contracts::Result<()> {
-        for metadata in self.vault.list()? {
-            if let Some(value) = self.vault.get(&metadata.name)? {
-                self.tail = self.tail.max(value.chars().count());
-                if !self.known.contains(&value) {
-                    self.known.push(value);
-                }
-            }
-        }
-        self.known.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        self.known = self.vault.values_for_redaction()?;
+        self.tail = self
+            .known
+            .iter()
+            .map(|value| value.chars().count())
+            .max()
+            .unwrap_or(0);
+        self.known
+            .sort_by_key(|value| std::cmp::Reverse(value.len()));
         Ok(())
     }
     fn flush(
@@ -3160,6 +3154,217 @@ fn clean_title(raw: &str) -> Option<String> {
         Some(title)
     }
 }
+const REACTIONS: &[&str] = &["👍", "❤️", "😂", "🎉", "👀", "🙏"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reaction {
+    conversation_id: String,
+    message_id: String,
+    emoji: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageRef {
+    conversation_id: String,
+    message_id: String,
+}
+
+fn delivered(state: &SubmissionState) -> bool {
+    matches!(
+        state,
+        SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. }
+    )
+}
+
+fn message_ids(body: &[u8]) -> Result<(String, String), ApiError> {
+    let input: MessageRef = parse(body)?;
+    validate_conversation_id(&input.conversation_id)?;
+    validate_id(&input.message_id)?;
+    Ok((input.conversation_id, input.message_id))
+}
+
+fn require_visible_message(app: &App, conversation: &str, message: &str) -> Result<(), ApiError> {
+    let visible = app
+        .conversations()?
+        .into_iter()
+        .find(|item| item.id == conversation)
+        .ok_or_else(|| ApiError::new(404, "Conversation introuvable."))?
+        .messages
+        .into_iter()
+        .any(|item| item.id == message);
+    if visible {
+        Ok(())
+    } else {
+        Err(ApiError::new(404, "Message introuvable."))
+    }
+}
+
+fn submission_body(
+    app: &App,
+    conversation: &ConversationId,
+    message: &MessageId,
+) -> Result<String, ApiError> {
+    app.reader
+        .list_submissions()?
+        .into_iter()
+        .find(|item| &item.conversation_id == conversation && &item.message_id == message)
+        .map(|item| item.body)
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))
+}
+
+fn dispatch_queued(
+    app: &mut App,
+    conversation: &ConversationId,
+    message: &MessageId,
+) -> Result<(), ApiError> {
+    if !matches!(
+        app.session.state(conversation, message)?,
+        Some(SubmissionState::Queued)
+    ) {
+        return Ok(());
+    }
+    let mut carrier = LocalTransport {
+        connection: &app.connection,
+        lose_reply: false,
+        #[cfg(test)]
+        live: app.provider.connected(),
+        error: None,
+    };
+    app.session.send_with(conversation, message, &mut carrier)?;
+    carrier.error.map_or(Ok(()), Err)
+}
+
+fn react(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let input: Reaction = parse(body)?;
+    validate_conversation_id(&input.conversation_id)?;
+    validate_id(&input.message_id)?;
+    if !REACTIONS.contains(&input.emoji.as_str()) {
+        return Err(ApiError::new(400, "Choisissez une réaction proposée."));
+    }
+    app.require_conversation(&input.conversation_id)?;
+    require_visible_message(app, &input.conversation_id, &input.message_id)?;
+    let current: Option<String> = match app.connection.query_row(
+        "SELECT emoji FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, input.conversation_id, input.message_id],
+        |row| row.get(0),
+    ) {
+        Ok(emoji) => Some(emoji),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if current.as_deref() == Some(input.emoji.as_str()) {
+        app.connection.execute(
+            "DELETE FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+            params![ACCOUNT, input.conversation_id, input.message_id],
+        )?;
+    } else {
+        app.connection.execute(
+            "INSERT INTO wrapper_reactions (account_id, conversation_id, message_id, emoji) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET emoji = excluded.emoji",
+            params![ACCOUNT, input.conversation_id, input.message_id, input.emoji],
+        )?;
+    }
+    app.conversation_response(&input.conversation_id)
+}
+
+fn resend(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let (conversation_id, message_id) = message_ids(body)?;
+    app.require_conversation(&conversation_id)?;
+    let conversation = ConversationId::new(&conversation_id).expect("validated");
+    let message = MessageId::new(&message_id).expect("validated");
+    let state = app
+        .session
+        .state(&conversation, &message)?
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))?;
+    if delivered(&state) {
+        return Err(ApiError::new(409, "Ce message est déjà livré."));
+    }
+    match state {
+        SubmissionState::Refused { .. } => {
+            let text = submission_body(app, &conversation, &message)?;
+            app.session.discard_undelivered(&conversation, &message)?;
+            app.session
+                .prepare(conversation.clone(), message.clone(), text)?;
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::Prepared | SubmissionState::Queued => {
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::Dispatching { .. } | SubmissionState::OutcomeUnknown { .. } => {
+            let error = {
+                let mut carrier = LocalTransport {
+                    connection: &app.connection,
+                    lose_reply: false,
+                    #[cfg(test)]
+                    live: app.provider.connected(),
+                    error: None,
+                };
+                app.session
+                    .reconcile_with(&conversation, &message, &mut carrier)?;
+                carrier.error
+            };
+            if let Some(error) = error {
+                return Err(error);
+            }
+            dispatch_queued(app, &conversation, &message)?;
+        }
+        SubmissionState::AcceptedAwaitingEcho { .. } | SubmissionState::Echoed { .. } => {
+            return Err(ApiError::new(409, "Ce message est déjà livré."));
+        }
+    }
+    app.finish_echo(&conversation, &message)?;
+    app.start_message(&conversation_id, &message_id, 0)?;
+    app.touch(&conversation_id)?;
+    app.conversation_response(&conversation_id)
+}
+
+fn delete_undelivered(app: &mut App, body: &[u8]) -> Result<Value, ApiError> {
+    let (conversation_id, message_id) = message_ids(body)?;
+    app.require_conversation(&conversation_id)?;
+    let conversation = ConversationId::new(&conversation_id).expect("validated");
+    let message = MessageId::new(&message_id).expect("validated");
+    let state = app
+        .session
+        .state(&conversation, &message)?
+        .ok_or_else(|| ApiError::new(404, "Message introuvable."))?;
+    if delivered(&state) {
+        return Err(ApiError::new(409, "Un message livré ne se supprime pas."));
+    }
+    app.session.discard_undelivered(&conversation, &message)?;
+    // Les liens de pièces jointes comptent comme des racines de stockage. Les
+    // retirer avec le message non livré laisse l’objet en place s’il est encore
+    // référencé ailleurs, et le rend orphelin sinon.
+    let tx = super::write_transaction(&app.connection)?;
+    tx.execute(
+        "DELETE FROM wrapper_remote WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM wrapper_messages WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM wrapper_reactions WHERE account_id = ?1 AND conversation_id = ?2 AND message_id = ?3",
+        params![ACCOUNT, conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM attachments_message_links WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM attachments_document_links WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.execute(
+        "DELETE FROM wrapper_attachment_order WHERE conversation_id = ?1 AND message_id = ?2",
+        params![conversation_id, message_id],
+    )?;
+    tx.commit()?;
+    app.conversation_response(&conversation_id)
+}
+
 pub(crate) struct LocalTransport<'a> {
     pub(crate) connection: &'a Connection,
     pub(crate) lose_reply: bool,
@@ -3347,6 +3552,92 @@ mod projection_tests {
             let _ = self.app.connection.execute_batch("ROLLBACK");
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn host_failure_reports_the_journaled_outcome_instead_of_a_down_service() {
+        let dir = std::env::temp_dir().join(format!(
+            "grokbot-host-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = App::open(&dir.join("workspace.sqlite")).unwrap();
+        let reason = "Action non exécutée : arrêt ou limite de temps avant le démarrage.";
+        grokbot_engine::contracts::with_tx(&app.connection, |conn| -> grokbot_engine::contracts::Result<()> {
+            for (id, tool) in [("known", true), ("unknown-local", true), ("plain", false)] {
+                let run = Run {
+                    run_id: id.into(),
+                    bot_id: DEFAULT_BOT.id.into(),
+                    conversation_id: "host".into(),
+                    trigger: Trigger::UserMessage {
+                        message_id: id.into(),
+                        attempt: 0,
+                    },
+                    kind: RunKind::Chat,
+                    status: RunStatus::Queued,
+                    task_status: None,
+                    turn_end: None,
+                    budgets: RunBudgets::default(),
+                    started_at: 1,
+                };
+                model::start(conn, &run)?;
+                model::set_running_at(conn, id, 2)?;
+                store::append_event(
+                    conn,
+                    id,
+                    RunEventKind::ToolCall,
+                    &json!({"call_id":"call","name":"run_shell","arguments":{}}),
+                )?;
+                if tool && id == "known" {
+                    conn.execute(
+                        "INSERT INTO engine_external_tools(run_id,call_id,outcome) VALUES (?1,'call',?2)",
+                        rusqlite::params![id, serde_json::to_string(&ToolOutcome::Failed { reason: reason.into() })?],
+                    )?;
+                } else if tool {
+                    conn.execute(
+                        "INSERT INTO engine_external_tools(run_id,call_id) VALUES (?1,'call')",
+                        [id],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut services = Services {
+            path: &app.db_path,
+            provider: &app.provider,
+            connection: &app.connection,
+            cancel: Arc::new(AtomicBool::new(false)),
+            bot_id: None,
+            host_mcp: false,
+        };
+        for id in ["known", "unknown-local", "plain"] {
+            fail_host(&app.connection, &mut services, id).unwrap();
+        }
+        let reason_of = |id: &str| {
+            store::events(&app.connection, id, 0)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == RunEventKind::ToolResult)
+                .unwrap()
+                .payload["outcome"]["reason"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(reason_of("known"), reason);
+        assert!(reason_of("unknown-local").contains("effet peut"));
+        assert!(!reason_of("unknown-local").contains("local service unavailable"));
+        assert!(reason_of("plain").starts_with("not executed:"));
+        assert_eq!(
+            store::required(&app.connection, "known").unwrap().status,
+            RunStatus::Failed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -317,7 +317,7 @@ fn delegation_catalog(ctx: &Context<'_>, parent: &Run, args: &Value) -> Result<T
     let next = (rows.len() > 20).then_some(page.offset + 20);
     let mut entries = Vec::new();
     for (id, kind) in rows.into_iter().take(20) {
-        let (text, sources) = if kind == "delegation_input" {
+        let (text, sources, grants) = if kind == "delegation_input" {
             let edge =
                 graph::get(ctx.connection, &id)?.ok_or_else(|| invalid("missing task input"))?;
             let objective: String = ctx.connection.query_row(
@@ -325,7 +325,8 @@ fn delegation_catalog(ctx: &Context<'_>, parent: &Run, args: &Value) -> Result<T
                 [&id],
                 |r| r.get(0),
             )?;
-            (objective, selected_sources(ctx.connection, &edge)?)
+            let delivery = delivery_for(ctx.connection, &edge)?;
+            (objective, delivery.sources, delivery.grants)
         } else {
             let text = if kind == "submission" {
                 ctx.connection.query_row("SELECT body FROM wrapper_remote WHERE account_id=?1 AND conversation_id=?2 AND message_id=?3",params![ACCOUNT,parent.conversation_id,id],|r|r.get(0)).optional()?
@@ -339,7 +340,11 @@ fn delegation_catalog(ctx: &Context<'_>, parent: &Run, args: &Value) -> Result<T
                     .optional()?
             };
             let Some(text) = text else { continue };
-            (text, vec![(parent.conversation_id.clone(), id.clone())])
+            (
+                text,
+                vec![(parent.conversation_id.clone(), id.clone())],
+                ImageGrants::default(),
+            )
         };
         let mut files = Vec::new();
         for (conversation, message) in sources {
@@ -348,6 +353,11 @@ fn delegation_catalog(ctx: &Context<'_>, parent: &Run, args: &Value) -> Result<T
                 &conversation,
                 &message,
             )?);
+        }
+        for grant in grants.live() {
+            if !files.iter().any(|file| file["id"] == grant.id()) {
+                files.push(json!({"id": grant.id(), "kind": "image"}));
+            }
         }
         entries.push(json!({"entry_id":id,"excerpt":bounded(&text,160),"attachments":files}));
     }
@@ -654,14 +664,17 @@ fn delegate(ctx: &Context<'_>, call: &ToolCall, parent: &Run) -> Result<ToolOutc
             .retain(|id| seen.insert(id.clone()));
     }
     graph::resolve_selected_context(&Resolver(ctx.connection), &edge, CONTEXT_BUDGET)?;
-    let sources = selected_sources(ctx.connection, &edge)?;
-    super::attachments::accept_delegation_files(
-        ctx,
-        &parent.conversation_id,
-        &sources,
-        &edge.selected_context.selected_images,
-    )
-    .map_err(|_| invalid("selected attachments exceed the child input budget"))?;
+    let delivery = delivery_for(ctx.connection, &edge)?;
+    if delivery
+        .grants()
+        .rejects_named(&edge.selected_context.selected_images)
+    {
+        return Err(invalid(
+            "selected attachments exceed the child input budget",
+        ));
+    }
+    super::attachments::accept_delegation_files(ctx, delivery.sources(), delivery.grants())
+        .map_err(|_| invalid("selected attachments exceed the child input budget"))?;
     let decision = admission::admit(ctx.connection, &edge, &AdmissionLimits::default())?;
     let refusal = match decision {
         Admission::Refused { reason } => Some(reason),
@@ -834,58 +847,141 @@ fn reserve_run(ctx: &Context<'_>, edge: &Delegation) -> Result<()> {
     Ok(())
 }
 
-// The selection remains live: reset/deletion revokes access on every request.
-// Only explicitly selected, parent-readable entries may contribute files.
-pub(super) fn selected_sources(
+pub(super) struct ImageGrant {
+    origin: String,
+    id: String,
+}
+
+impl ImageGrant {
+    pub(super) fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub(super) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ImageGrants {
+    live: Vec<ImageGrant>,
+    revoked: Vec<String>,
+}
+
+impl ImageGrants {
+    pub(super) fn live(&self) -> &[ImageGrant] {
+        &self.live
+    }
+
+    pub(super) fn revoked(&self) -> &[String] {
+        &self.revoked
+    }
+
+    pub(super) fn rejects_named(&self, named: &[String]) -> bool {
+        named
+            .iter()
+            .any(|id| !self.live.iter().any(|grant| grant.id == *id))
+    }
+}
+
+pub(super) struct Delivery {
+    sources: Vec<(String, String)>,
+    grants: ImageGrants,
+}
+
+impl Delivery {
+    pub(super) fn sources(&self) -> &[(String, String)] {
+        &self.sources
+    }
+
+    pub(super) fn grants(&self) -> &ImageGrants {
+        &self.grants
+    }
+}
+
+fn image_owned(conn: &Connection, origin: &str, id: &str) -> Result<bool> {
+    super::attachments::thread_owns_image(conn, origin, id)
+        .map_err(|_| invalid("selected image is unreadable"))
+}
+
+fn claim_image(
     conn: &Connection,
-    edge: &Delegation,
-) -> Result<Vec<(String, String)>> {
+    origin: &str,
+    id: &str,
+    live: &mut Vec<ImageGrant>,
+    revoked: &mut Vec<String>,
+) -> Result<()> {
+    if live.iter().any(|grant| grant.id == id) {
+        return Ok(());
+    }
+    if image_owned(conn, origin, id)? {
+        revoked.retain(|item| item != id);
+        live.push(ImageGrant {
+            origin: origin.to_owned(),
+            id: id.to_owned(),
+        });
+    } else if !revoked.iter().any(|item| item == id) {
+        revoked.push(id.to_owned());
+    }
+    Ok(())
+}
+
+fn delivery_for(conn: &Connection, edge: &Delegation) -> Result<Delivery> {
     let parent = store::required(conn, &edge.parent_run_id)?;
-    let mut sources = Vec::new();
+    let mut sources: Vec<(String, String)> = Vec::new();
+    let mut live: Vec<ImageGrant> = Vec::new();
+    let mut revoked: Vec<String> = Vec::new();
     for id in &edge.selected_context.entry_ids {
-        if Resolver(conn).entry(edge, id)?.is_some() {
-            let inherited = graph::get(conn, id)?.filter(|d| {
-                d.conversation_id.as_deref() == Some(&parent.conversation_id)
-                    && d.depth < edge.depth
-            });
-            if let Some(inherited) = inherited {
-                for source in selected_sources(conn, &inherited)? {
-                    if !sources.contains(&source) {
-                        sources.push(source);
-                    }
-                }
-            } else {
-                let source = (parent.conversation_id.clone(), id.clone());
+        if Resolver(conn).entry(edge, id)?.is_none() {
+            continue;
+        }
+        let inherited = graph::get(conn, id)?.filter(|delegation| {
+            delegation.conversation_id.as_deref() == Some(&parent.conversation_id)
+                && delegation.depth < edge.depth
+        });
+        if let Some(inherited) = inherited {
+            let nested = delivery_for(conn, &inherited)?;
+            for source in nested.sources {
                 if !sources.contains(&source) {
                     sources.push(source);
                 }
             }
+            for grant in nested.grants.live {
+                let id = grant.id.clone();
+                if live.iter().any(|existing| existing.id == id) {
+                    continue;
+                }
+                revoked.retain(|item| item != &id);
+                live.push(grant);
+            }
+            for id in nested.grants.revoked {
+                if live.iter().any(|grant| grant.id == id) || revoked.contains(&id) {
+                    continue;
+                }
+                revoked.push(id);
+            }
+        } else {
+            let source = (parent.conversation_id.clone(), id.clone());
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
         }
     }
-    Ok(sources)
+    for id in &edge.selected_context.selected_images {
+        claim_image(conn, &parent.conversation_id, id, &mut live, &mut revoked)?;
+    }
+    Ok(Delivery {
+        sources,
+        grants: ImageGrants { live, revoked },
+    })
 }
 
-pub(super) fn delegation_image_selection(
-    conn: &Connection,
-    run: &Run,
-) -> Result<Option<(String, Vec<String>)>> {
+pub(super) fn delivery_for_run(conn: &Connection, run: &Run) -> Result<Option<Delivery>> {
     let Trigger::Delegation { delegation_id } = &run.trigger else {
         return Ok(None);
     };
     let edge = graph::get(conn, delegation_id)?.ok_or_else(|| invalid("missing delegation"))?;
-    let parent = store::required(conn, &edge.parent_run_id)?;
-    Ok(Some((
-        parent.conversation_id,
-        edge.selected_context.selected_images,
-    )))
-}
-
-pub(super) fn material_sources(conn: &Connection, run: &Run) -> Result<Vec<(String, String)>> {
-    if let Trigger::Delegation { delegation_id } = &run.trigger {
-        let edge = graph::get(conn, delegation_id)?.ok_or_else(|| invalid("missing delegation"))?;
-        return selected_sources(conn, &edge);
-    }
-    Ok(vec![])
+    Ok(Some(delivery_for(conn, &edge)?))
 }
 
 struct Resolver<'a>(&'a Connection);
@@ -1589,14 +1685,10 @@ fn context_checked(ctx: &Context<'_>, request: &ContextRequest) -> Result<Vec<Co
             return Err(invalid("delegated context does not match child"));
         }
         let (selected, mut revoked) = live_selection(ctx.connection, &edge)?;
-        let parent_conversation =
-            store::required(ctx.connection, &edge.parent_run_id)?.conversation_id;
-        let (image_note, missing_images) = super::attachments::selected_images_context(
-            ctx,
-            &parent_conversation,
-            &edge.selected_context.selected_images,
-        )
-        .map_err(|_| invalid("selected image is unreadable"))?;
+        let delivery = delivery_for(ctx.connection, &edge)?;
+        let (image_note, missing_images) =
+            super::attachments::selected_images_context(ctx, delivery.grants())
+                .map_err(|_| invalid("selected image is unreadable"))?;
         revoked.extend(missing_images);
         let mut contract = format!("You are executing a delegated Task from bot {}. When the task is finished, call complete_task(summary) with the complete result. Free text alone does not complete the task and is not a successful result.",edge.parent_bot);
         if !revoked.is_empty() {
@@ -1712,22 +1804,17 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
             )
             .ok()?;
         let mut attachments = Vec::new();
-        for (conversation, message) in selected_sources(ctx.connection, &edge).ok()? {
-            for file in super::attachments::for_message(ctx, &conversation, &message) {
+        let delivery = delivery_for(ctx.connection, &edge).ok()?;
+        for (conversation, message) in delivery.sources() {
+            for file in super::attachments::for_message(ctx, conversation, message) {
                 if !attachments.iter().any(|a: &Value| a["id"] == file["id"]) {
                     attachments.push(file);
                 }
             }
         }
-        if let Ok(parent) = store::required(ctx.connection, &edge.parent_run_id) {
-            for file in super::attachments::selected_image_dtos(
-                ctx,
-                &parent.conversation_id,
-                &edge.selected_context.selected_images,
-            ) {
-                if !attachments.iter().any(|a: &Value| a["id"] == file["id"]) {
-                    attachments.push(file);
-                }
+        for file in super::attachments::selected_image_dtos(ctx, delivery.grants().live()) {
+            if !attachments.iter().any(|a: &Value| a["id"] == file["id"]) {
+                attachments.push(file);
             }
         }
         let vault = super::forms::vault(ctx).ok()?;

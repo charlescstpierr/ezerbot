@@ -1,7 +1,8 @@
 //! PS09/A47–A49 establishes OS-encrypted local persistence, not a Keychain
 //! schema. Reconstruction: generic passwords, one item per name, service scoped
 //! to the canonical workspace path. Native calls never contain shell arguments,
-//! logs or OS error descriptions. All UI interaction is disabled (fail to file).
+//! logs or OS error descriptions. All UI interaction is disabled. A refused
+//! write fails closed and is not copied into the plaintext companion file.
 use super::*;
 use security_framework::{
     item::{update_item, ItemClass, ItemSearchOptions, ItemUpdateOptions, Limit},
@@ -85,7 +86,7 @@ fn states() -> MutexGuard<'static, BTreeMap<PathBuf, State>> {
 }
 pub(super) fn status(path: &Path) -> StorageStatus {
     if states().get(path).is_some_and(|s| s.failed) {
-        StorageStatus { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Ezerbot continue avec un fichier local lisible seulement par votre compte macOS, mais non chiffré. Les secrets déjà transférés restent dans le trousseau et peuvent être indisponibles. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage pour reprendre le transfert.") }
+        StorageStatus { backend: "file_fallback", label: "Trousseau macOS indisponible", notice_kind: Some("warning"), notice: Some("Le trousseau macOS est indisponible ou son accès a été refusé. Les nouveaux secrets ne sont pas enregistrés. Les secrets déjà présents dans le trousseau restent en place. Déverrouillez-le ou vérifiez les autorisations d’Ezerbot dans Trousseaux d’accès, puis vérifiez le stockage.") }
     } else {
         StorageStatus {
             backend: "keychain",
@@ -180,17 +181,13 @@ impl Backend for Native {
         for item in items {
             let attrs = item.simplify_dict().ok_or_else(unavailable)?;
             let name = attrs.get("acct").ok_or_else(unavailable)?;
-            if canonical_secret_name(name)? != *name {
-                return Err(unavailable());
-            }
             let (bytes, _) = self
                 .keychain
                 .find_generic_password(&self.service, name)
                 .map_err(|_| unavailable())?;
             let secret: StoredSecret =
                 serde_json::from_slice(bytes.as_ref()).map_err(|_| unavailable())?;
-            validate_purpose(&secret.purpose)?;
-            validate_value(&secret.value)?;
+            validate_stored(name, &secret).map_err(|_| unavailable())?;
             secrets.insert(name.clone(), secret);
         }
         Ok(secrets)
@@ -262,20 +259,16 @@ pub(super) fn set(vault: &Vault, target: &Target, name: &str, secret: &StoredSec
     let mut states = states();
     let state = states.entry(vault.path.clone()).or_default();
     let mut file = vault.read_file()?;
-    match target
+    let accepted = target
         .connect(&vault.path)
         .and_then(|backend| backend.put_verified(name, secret))
-    {
-        Ok(()) => {
-            file.remove(name);
-            vault.write(&file)?;
-        }
-        Err(_) => {
-            state.failed = true;
-            file.insert(name.into(), secret.clone());
-            vault.write(&file)?;
-        }
+        .is_ok();
+    if let Err(error) = super::commit_keychain_secret(&mut file, name, secret, accepted) {
+        state.failed = true;
+        return Err(error);
     }
+    vault.write(&file)?;
+    state.failed = false;
     state.cached.insert(name.into(), secret.clone());
     Ok(())
 }

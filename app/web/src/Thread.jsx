@@ -1,9 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 import { createMathPlugin } from "@streamdown/math";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { BookOpen, Check, Clock, Monitor, RefreshCw, Square, TriangleAlert } from "lucide-react";
+import { MessageMenu } from "./message-menu.jsx";
+import { messageActions, messageMenuOpenId } from "./message-actions.js";
 import { MessageAttachments } from "./image-gallery.jsx";
 import { galleryImages, proseWithoutGallery } from "./image-gallery.js";
 import { code } from "./code.js";
@@ -138,7 +140,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
   );
 }
 
-function UserMessage({ message, busy, onCopy, onRetry }) {
+function UserMessage({ message, busy, onCopy, onRetry, onReact, onResend, onDelete, menuOpen, onMenuOpenChange }) {
   const demonstration = isDemonstrationMessage(message);
   if (isTeachMessage(message) || demonstration) return (
     <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
@@ -148,6 +150,7 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
     </article>
   );
   const followUp = message.payload?.source === "follow_up";
+  const menu = messageActions(message, { busy });
   return (
     <article className="gb-message gb-user" data-message-id={message.id} aria-label={followUp ? "Suivi de votre part" : undefined}>
       <header className="gb-meta"><strong>Vous</strong><Timestamp value={message.created_at} /></header>
@@ -158,11 +161,11 @@ function UserMessage({ message, busy, onCopy, onRetry }) {
       <MessageAttachments message={message} />
       <footer className="gb-actions">
         {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />{followUp ? "Enregistré" : "Envoyé"}</span>}
-        {["queued", "dispatching"].includes(message.state) && <span className="gb-status">Envoi en cours…</span>}
-        {message.state === "refused" && <span className="gb-status gb-status-alert"><TriangleAlert />Envoi refusé</span>}
+        {["queued", "dispatching"].includes(message.state) && !menu.status && <span className="gb-status">Envoi en cours…</span>}
+        <MessageMenu message={message} busy={busy} text={message.body || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={onCopy} onReact={onReact} onResend={onResend} onDelete={onDelete} />
         <CopyIconButton text={message.body} label="Copier votre message" onCopy={onCopy} />
       </footer>
-      {pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
+      {!menu.status && pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
     </article>
   );
 }
@@ -210,7 +213,7 @@ function TurnLabel({ message }) {
   return message.payload?.turn_id && <small title={`Chaîne : ${message.payload.root_id}`}>{message.payload.parent_turn_id ? "Échange entre bots" : "Tour de groupe"}</small>;
 }
 
-function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad }) {
+function AssistantMessage({ message, plugins, appearance, portal, actions, createMascot, botName, onRateGood, onRateBad, menuOpen, onMenuOpenChange }) {
   const content = useRef(null);
   const streaming = message.state === "streaming";
   const toolPreparing = preparingTool(message);
@@ -261,6 +264,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
+            <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onResend={actions.onResend} onDelete={actions.onDelete} />
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
             {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
             {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
@@ -282,13 +286,15 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onRateGood, onRateBad }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onRateGood, onRateBad }) {
+  const [openMenuId, setOpenMenuId] = useState(null);
+  const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
   const overlay = useRef(null);
   const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
+  const actions = useMemo(() => ({ onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   const findAnchor = useRef(null);
@@ -348,9 +354,11 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onRegenerate, 
           }
           const Card = cards.get(message.kind) || (!chatKinds.has(message.kind) ? FallbackCard : null);
           if (Card) return <div className="gb-card-slot" key={message.id} data-notification-card={message.id} data-run-id={message.payload?.run_id}><Card message={message} busy={busy} botName={authorName} isGroup={isGroup} onAction={(action, detail) => onCardAction?.(message, action, detail)} onCardAction={onCardAction} /></div>;
+          const menuOpen = message.id != null && openMenuId === message.id;
+          const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
-            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} />
-            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} onRateGood={onRateGood} onRateBad={onRateBad} />;
+            ? <UserMessage key={message.id} message={message} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
+            : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}
         <div className="gb-overlay" ref={overlay} />

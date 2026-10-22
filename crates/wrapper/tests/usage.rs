@@ -126,7 +126,7 @@ fn quota_errors_and_signout_during_a_read_never_restore_a_gauge() {
         ));
         let q = f.quota();
         assert_eq!(q["status"], "unavailable");
-        assert_eq!(q["kind"], if status == 403 { "signin" } else { "other" });
+        assert_eq!(q["kind"], "other");
         assert!(!q.to_string().contains("secret-upstream"));
     }
     let f = Fixture::new(ScriptedResponse::json(200, valid()));

@@ -426,6 +426,7 @@
       catch (error) { showConnectionError(error); throw new Error("Le moteur local a renvoyé une réponse illisible."); }
       if (!response.ok) {
         const error = new Error(data.error || "L’action n’a pas pu être terminée.");
+        error.status = response.status;
         if (remoteAccessDisabled(response.status, data)) {
           error.accessDisabled = true;
           showConnectionError(error);
@@ -981,6 +982,9 @@
   const thread = {
     createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
+    onReact: (message, emoji) => reactToMessage(message, emoji),
+    onResend: (message) => resendMessage(message),
+    onDelete: (message) => deleteFailedMessage(message),
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
     onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
@@ -1416,6 +1420,81 @@
       notify(pending ? "Cet envoi attend encore confirmation." : "L’envoi est vérifié. Vous pouvez continuer.");
     } catch (error) { notify(error.message); }
     finally { busy = false; submissionActivity = null; render(); if (confirmed) mascot?.celebrate(); }
+  }
+
+  function attachmentIds(message, extras = {}) {
+    return extras.attachments || (message.attachments || []).map((item) => typeof item === "string" ? item : item.id || item.attachment_id).filter(Boolean);
+  }
+
+  async function reactToMessage(message, emoji) {
+    const conversation = currentConversation();
+    if (!conversation) return;
+    const target = conversation.messages.find((item) => item.id === message.id);
+    const previous = target?.payload?.reaction ?? null;
+    if (target) {
+      const next = previous === emoji ? null : emoji;
+      target.payload = { ...(target.payload && typeof target.payload === "object" ? target.payload : {}) };
+      if (next) target.payload.reaction = next;
+      else delete target.payload.reaction;
+    }
+    render();
+    try {
+      const response = await api("/api/messages/react", { conversation_id: conversation.id, message_id: message.id, emoji });
+      upsertConversation(response.conversation);
+      render();
+    } catch (error) {
+      if (target && currentConversation()?.id === conversation.id) {
+        const current = currentConversation().messages.find((item) => item.id === message.id);
+        if (current) {
+          current.payload = { ...(current.payload && typeof current.payload === "object" ? current.payload : {}) };
+          if (previous) current.payload.reaction = previous;
+          else delete current.payload.reaction;
+        }
+      }
+      render();
+      notify(error.message);
+    }
+  }
+
+  async function resendMessage(message) {
+    const conversation = currentConversation();
+    if (!conversation || busy) return;
+    busy = true;
+    submissionActivity = "send";
+    let delivered = false;
+    render();
+    try {
+      let response;
+      try {
+        response = await api("/api/messages/resend", { conversation_id: conversation.id, message_id: message.id });
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        const extras = pendingSends.get(message.id)?.extras || {};
+        response = await sendRequest(conversation, message.id, message.body, { ...extras, attachments: attachmentIds(message, extras) });
+      }
+      upsertConversation(response.conversation);
+      delivered = response.conversation.messages.some((item) => item.id === message.id && ["accepted", "echoed"].includes(item.state));
+      render();
+      scrollToLatest();
+    } catch (error) { notify(error.message); }
+    finally { busy = false; submissionActivity = null; render(); if (delivered) mascot?.celebrate(); }
+  }
+
+  async function deleteFailedMessage(message) {
+    const conversation = currentConversation();
+    if (!conversation) return;
+    const snapshot = conversation.messages;
+    conversation.messages = snapshot.filter((item) => item.id !== message.id);
+    render();
+    try {
+      const response = await api("/api/messages/delete", { conversation_id: conversation.id, message_id: message.id });
+      upsertConversation(response.conversation);
+      render();
+    } catch (error) {
+      if (currentConversation()?.id === conversation.id) currentConversation().messages = snapshot;
+      render();
+      notify(error.message);
+    }
   }
 
   async function resumeQueued(message) {

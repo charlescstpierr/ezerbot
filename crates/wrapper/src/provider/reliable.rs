@@ -409,8 +409,8 @@ impl Session {
 mod elapsed_interval {
     use super::Session;
     use crate::{App, Endpoints, Provider};
-    use grokbot_engine::contracts::ModelEvent;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use grokbot_engine::contracts::ModelEvent;
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::TcpListener,

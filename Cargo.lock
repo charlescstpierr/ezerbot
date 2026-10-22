@@ -492,6 +492,7 @@ dependencies = [
  "grokbot-skills",
  "grokbot-store",
  "grokbot-submission-journal",
+ "jiff",
  "jsonwebtoken",
  "nix",
  "ring",

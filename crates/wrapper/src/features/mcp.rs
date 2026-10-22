@@ -168,12 +168,18 @@ pub(crate) fn run_gmail_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome 
         catalogue::gmail::call(ctx, &call.name, &call.arguments)
     }
 }
-pub use catalogue::gmail::MailEvent;
+pub use catalogue::gmail::{CalendarCase, CalendarEvent, MailEvent};
 /// The messages that arrived in the connected Gmail inbox since the last call, the oldest
 /// first, each identifier once: the normalized event a routine reads. It never carries a
 /// token. The first call only learns what the inbox already holds.
 pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
     catalogue::gmail::new_messages(ctx)
+}
+/// The agenda events of the connected Google account since the last call: created,
+/// modified, cancelled or begun, each version once, with its identifier, case, start
+/// instant and zone. It never carries a token. The first call only learns the agenda.
+pub fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
+    catalogue::gmail::calendar_events(ctx)
 }
 /// The publishing tools of the connections: each opens a draft card and sends nothing
 /// until that card is validated.

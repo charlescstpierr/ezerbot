@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -311,13 +311,80 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             raise SystemExit(f"la visionneuse de l’image générée est incomplète: {viewer}")
         state["viewer"] = viewer["labels"]
         return state
+    if sphere == "pages":
+        # Une conversation neuve à chaque passage : la capture « avant » la montre sans Page, « après » est prise à l’envoi.
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+        return wait_js(
+            evidence,
+            """() => {
+              const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+              const stage = document.querySelector(".page-stage");
+              return editor && (!stage || stage.hidden) ? {ok: true} : null;
+            }""",
+            "conversation neuve non prête",
+        )
     raise SystemExit(f"sphère inconnue: {sphere}")
+
+
+def pages_request(evidence: Path) -> dict:
+    eval_js(
+        evidence,
+        """() => {
+          const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+          editor.focus();
+          if (!document.execCommand("insertText", false, "Fais-moi une page des forfaits")) throw new Error("saisie refusée");
+          return true;
+        }""",
+    )
+    wait_js(
+        evidence,
+        """() => {
+          const send = document.getElementById("send-button");
+          if (!send || send.disabled) return null;
+          send.click();
+          return {ok: true};
+        }""",
+        "envoi impossible",
+    )
+    state = wait_js(
+        evidence,
+        """() => {
+          const stage = document.querySelector(".page-stage");
+          const choices = stage && !stage.hidden ? [...stage.querySelectorAll(".page-canvas button.page-choice")] : [];
+          if (choices.length !== 3) return null;
+          return {ok: true, text: stage.innerText.slice(0, 400)};
+        }""",
+        "Page absente à côté du fil",
+        timeout=40,
+    )
+    if "9 €" not in state["text"] or "u20ac" in state["text"]:
+        raise SystemExit(f"l’échappement Unicode du prix est mal décodé: {state['text']}")
+    if "Tout < 30 € par mois" not in state["text"]:
+        raise SystemExit(f"les références de caractères JSX sont mal décodées: {state['text']}")
+    chosen = eval_js(
+        evidence,
+        """async () => {
+          const stage = document.querySelector(".page-stage");
+          const choices = [...stage.querySelectorAll(".page-canvas button.page-choice")];
+          choices[1].click();
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          const again = [...stage.querySelectorAll(".page-canvas button.page-choice")];
+          return {text: stage.innerText, focused: again.indexOf(document.activeElement)};
+        }""",
+    )
+    if "Offre choisie : Confort" not in chosen["text"] or chosen["focused"] != 1:
+        raise SystemExit(f"le clic sur « Choisir » n’a pas gardé son choix et son focus: {chosen}")
+    state["choice"] = "Confort"
+    return state
 
 
 def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     size = f"{width}x{height}"
     if sphere == "reunions-routines":
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
+    if sphere == "pages":
+        return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -334,6 +401,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
                   return true;
                 }""",
             )
+        if sphere == "pages" and index == 1:
+            pages_request(evidence)
         if sphere == "reunions-routines" and index == 1:
             eval_js(
                 evidence,

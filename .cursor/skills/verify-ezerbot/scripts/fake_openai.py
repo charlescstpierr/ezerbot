@@ -64,6 +64,44 @@ def _png(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
 
 
+# Les prix portent un échappement \u20ac : la Page doit afficher « 9 € », pas « 9u20ac ».
+PAGE_SOURCE = r"""export default function Forfaits() {
+  const [offre, setOffre] = useState("Essentiel");
+  const lignes = [
+    ["Essentiel", "9 \u20ac"],
+    ["Confort", "19 \u20ac"],
+    ["Famille", "29 \u20ac"],
+  ];
+  return (
+    <article>
+      <h1>Trois forfaits</h1>
+      <p>Tout &lt; 30 &#8364; par mois</p>
+      <p>Offre choisie : {offre}</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Offre</th>
+            <th>Prix</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {lignes.map((ligne) => (
+            <tr>
+              <td>{ligne[0]}</td>
+              <td>{ligne[1]}</td>
+              <td>
+                <button onClick={() => setOffre(ligne[0])}>Choisir</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </article>
+  );
+}
+"""
+
 IMAGE_B64 = base64.b64encode(_png(192, 192)).decode()
 
 USAGE = {
@@ -106,10 +144,27 @@ def response_body(raw: bytes) -> bytes:
             ]
         )
     items = payload.get("input") if isinstance(payload.get("input"), list) else []
-    if any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in items):
+    outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
+    if outputs:
+        done = "Voici la Page." if outputs[-1].get("call_id") == "verify-page" else "Voici l’image."
         return _sse(
             [
-                {"type": "response.output_text.delta", "delta": "Voici l’image."},
+                {"type": "response.output_text.delta", "delta": done},
+                {"type": "response.completed"},
+            ]
+        )
+    if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-page",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-page",
+            "name": "write_page",
+            "arguments": json.dumps({"name": "forfaits.page.tsx", "title": "Trois forfaits", "source": PAGE_SOURCE}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
                 {"type": "response.completed"},
             ]
         )

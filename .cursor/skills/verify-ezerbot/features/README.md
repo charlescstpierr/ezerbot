@@ -42,3 +42,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Mémoire](./memoire.md) couvre la mémoire automatique et la mémoire du bot Ezerbot.
 - [Bibliothèque](./bibliotheque.md) couvre la bibliothèque de fichiers d’un bot : dépôt, liste, retrait et avertissement de troncature.
 - [Images générées](./images.md) couvre la demande d’un dessin, l’image dans la carte et la visionneuse.
+- [Pages](./pages.md) couvre une Page locale écrite par le bot : affichage à côté du fil, choix interactif et texte décodé.

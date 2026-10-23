@@ -160,12 +160,12 @@ pub(in super::super) fn unavailable(ctx: &Context<'_>) -> String {
     }
 }
 
-struct Reply {
-    status: u16,
-    retry_after: Option<u64>,
-    body: Value,
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) retry_after: Option<u64>,
+    pub(super) body: Value,
 }
-fn agent() -> ureq::Agent {
+pub(super) fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(Duration::from_secs(12))
@@ -187,7 +187,7 @@ fn get(m: Manifest, access: &str, method: &str, query: &[(&str, &str)]) -> Resul
 }
 /// What Slack answered, whatever the status: no redirect, bounded body. A transport failure
 /// or an unreadable body carries no detail.
-fn reply_of(outcome: Result<ureq::Response, ureq::Error>) -> Result<Reply, ()> {
+pub(super) fn reply_of(outcome: Result<ureq::Response, ureq::Error>) -> Result<Reply, ()> {
     let response = match outcome {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(_) => return Err(()),
@@ -225,7 +225,7 @@ fn unreachable_slack() -> ApiError {
         "Slack est injoignable pour le moment. Vérifiez la connexion, puis réessayez.",
     )
 }
-fn clean(text: &str, limit: usize) -> String {
+pub(super) fn clean(text: &str, limit: usize) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(limit)

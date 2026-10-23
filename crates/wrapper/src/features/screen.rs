@@ -474,7 +474,7 @@ fn verify_human(ctx: &Context<'_>, call: &ToolCall, lease: &Lease) -> Result<(),
         }
     }
     if let Some(AuthorizedBy::AllowOnce { request_id }) = authority {
-        let binding:Option<String>=ctx.connection.query_row("SELECT c.display_json FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id JOIN wrapper_forms_calls c ON c.request_id=r.id JOIN forms_approval_grants g ON g.request_id=r.id WHERE r.id=?1 AND r.run_id=?2 AND r.status='resolved' AND s.submission_id GLOB 'user:*' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL",params![request_id,ctx.run_id,call.name,grokbot_forms::approvals::args_digest(&call.name,&call.arguments)?],|r|r.get(0)).optional()?;
+        let binding:Option<String>=ctx.connection.query_row("SELECT c.display_json FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id JOIN wrapper_forms_calls c ON c.request_id=r.id JOIN forms_approval_grants g ON g.request_id=r.id WHERE r.id=?1 AND (r.run_id=?2 OR EXISTS(SELECT 1 FROM wrapper_late_approvals l WHERE l.request_id=r.id AND l.run_id=?2 AND l.allowed=1)) AND r.status='resolved' AND s.submission_id GLOB 'user:*' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL",params![request_id,ctx.run_id,call.name,grokbot_forms::approvals::args_digest(&call.name,&call.arguments)?],|r|r.get(0)).optional()?;
         if binding
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .is_some_and(|v| v["session_écran"].as_u64() == Some(lease.id))

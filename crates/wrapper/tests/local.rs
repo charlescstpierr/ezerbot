@@ -489,6 +489,128 @@ fn shell_off_by_default_then_denial_and_allow_once_after_restart() {
     assert_eq!(f.outcome("ok")["output"], *output);
 }
 #[test]
+fn a_command_approved_after_its_turn_ended_runs_once_and_the_bot_reports_it() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    f.post(
+        "/api/approvals/waiting",
+        json!({"task":true,"chat":true,"validity":"24h","reminder":"1h"}),
+    );
+    let marker = f.root().join("late-marker");
+    let command = format!("printf x >> {}", marker.display());
+    // The model asks for the command, learns it is waiting, and ends its turn.
+    f.script(vec![json!({"type":"response.output_item.done","item":{"id":"fc-late","type":"function_call","status":"completed","call_id":"late","name":"run_shell","arguments":f.shell(&command).to_string()}}),json!({"type":"response.completed"})]);
+    f.reply("J’attends son accord.");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":f.chat,"message_id":"late","body":"Exécute cet outil local"}),
+    );
+    f.finish("late");
+    let original = f.run("late");
+    assert_eq!(original.status, RunStatus::Finished);
+    let card = requests::list_for_run(&f.db(), &original.run_id)
+        .unwrap()
+        .remove(0);
+    assert!(!marker.exists());
+    // Charles decides later: the bot is woken in the same conversation and the command runs.
+    f.reply("C’est fait.");
+    f.decide(&card, json!("allow_once"));
+    assert!(!marker.exists());
+    let follow: String = f
+        .db()
+        .query_row(
+            "SELECT run_id FROM engine_runs WHERE run_id LIKE 'late-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    f.finish(&follow);
+    assert_eq!(f.run(&follow).status, RunStatus::Finished);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+    let events = store::events(&f.db(), &follow, 0).unwrap();
+    let result = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::ToolResult)
+        .unwrap();
+    assert_eq!(result.payload["outcome"]["status"], "done");
+    assert_eq!(result.payload["outcome"]["output"]["exit_code"], 0);
+    assert_eq!(
+        result.payload["authorized_by"],
+        json!({"kind":"allow_once","request_id":card.id})
+    );
+    // The model was told who approved what, and saw the result of the very command.
+    let bodies = f.server.seen.lock().unwrap().bodies.clone();
+    let body = bodies.last().unwrap().to_string();
+    assert!(body.contains("Charles a approuvé : run_shell"), "{body}");
+    assert!(body.contains("function_call_output"), "{body}");
+    // Another device deciding again, and further ticks, change nothing.
+    let again = json!({"entry_id":card.entry_id,"submission_id":"other-device","conversation_id":card.route.target_conversation_id,"decision":"allow_once"});
+    assert!(f
+        .app
+        .api(
+            "POST",
+            "/api/approvals/resolve",
+            again.to_string().as_bytes()
+        )
+        .is_err());
+    for _ in 0..20 {
+        f.app.tick(now());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+    let runs: i64 = f
+        .db()
+        .query_row(
+            "SELECT count(*) FROM engine_runs WHERE run_id LIKE 'late-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(runs, 1);
+}
+#[test]
+fn an_app_data_listing_approved_after_its_turn_ended_runs_in_the_follow_up_turn() {
+    let mut f = Fixture::new();
+    f.settings(false, true);
+    f.post(
+        "/api/approvals/waiting",
+        json!({"task":true,"chat":true,"validity":"24h","reminder":"1h"}),
+    );
+    let data = f.path.parent().unwrap().to_path_buf();
+    f.script(vec![json!({"type":"response.output_item.done","item":{"id":"fc-data","type":"function_call","status":"completed","call_id":"data","name":"list_directory","arguments":json!({"path":data}).to_string()}}),json!({"type":"response.completed"})]);
+    f.reply("J’attends son accord.");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":f.chat,"message_id":"data","body":"Liste les données"}),
+    );
+    f.finish("data");
+    let card = requests::list_for_run(&f.db(), &f.run("data").run_id)
+        .unwrap()
+        .remove(0);
+    f.reply("Voilà.");
+    f.decide(&card, json!("allow_once"));
+    let follow: String = f
+        .db()
+        .query_row(
+            "SELECT run_id FROM engine_runs WHERE run_id LIKE 'late-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    f.finish(&follow);
+    // The data-read guard still wants a human card, and it finds the original one.
+    let result = store::events(&f.db(), &follow, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == RunEventKind::ToolResult)
+        .unwrap();
+    assert_eq!(
+        result.payload["outcome"]["status"], "done",
+        "{}",
+        result.payload
+    );
+}
+#[test]
 fn standing_permissions_apply_to_future_commands_and_are_revocable() {
     let mut f = Fixture::new();
     f.settings(true, false);

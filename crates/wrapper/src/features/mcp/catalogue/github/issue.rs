@@ -146,7 +146,9 @@ pub(in super::super::super) fn validate(
     // A draft that already exists is bound to its account: resuming it must not resolve the
     // optional `compte` of the original call again, which other accounts may now make ambiguous.
     if let Some(run) = ctx.run_id {
-        if let Ok((request_id, _)) = crate::features::forms::approval_identity(run, call) {
+        if let Ok((request_id, _)) =
+            crate::features::forms::approval_identity_in(ctx.connection, run, call)
+        {
             let bound: Option<(String, String)> = ctx
                 .connection
                 .query_row(
@@ -285,7 +287,7 @@ fn publish(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let run = ctx.run_id.ok_or_else(|| {
         invalid("Rien n’a été créé : cette demande n’appartient à aucune exécution.")
     })?;
-    let (request_id, _) = crate::features::forms::approval_identity(run, call)?;
+    let (request_id, _) = crate::features::forms::approval_identity_in(ctx.connection, run, call)?;
     let row: Option<Stored> = ctx.connection.query_row(
         "SELECT repository,issue,login,account_id,title,text,fingerprint,state,comment_url FROM wrapper_github_drafts WHERE request_id=?1",
         [&request_id],

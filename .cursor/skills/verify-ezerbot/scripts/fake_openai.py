@@ -277,7 +277,12 @@ def response_body(raw: bytes) -> bytes:
         )
     if outputs:
         last = outputs[-1].get("call_id")
-        done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
+        if last == "verify-late":
+            # Tour qui continue sans attendre (« En attente »), ou tour de suite d'une décision tardive.
+            waiting = "En attente" in str(outputs[-1].get("output"))
+            done = "J’attends son accord pour envoyer le résumé." if waiting else "Tu as approuvé : envoyer le résumé. C’est parti. Le résumé est envoyé."
+        else:
+            done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": done},
@@ -300,6 +305,21 @@ def response_body(raw: bytes) -> bytes:
                     {"type": "response.completed"},
                 ]
             )
+    if "envoie le résumé" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-late",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-late",
+            "name": "run_shell",
+            "arguments": json.dumps({"command": "printf 'Résumé envoyé'", "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 4096}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
     if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
         call = {
             "id": "fc-verify-page",

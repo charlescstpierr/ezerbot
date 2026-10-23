@@ -160,6 +160,7 @@ export function Card({ message, busy, onAction }) {
         </fieldset>}
         {(hostAction || lifecycle) && !pending && input.status === "resolved" && <p className={`text-sm${configuration?.status === "failed" ? " gb-status-alert" : ""}`} role={configuration?.status === "failed" ? "alert" : "status"}>{configuration?.status === "failed" ? `Échec : ${configuration.reason} Réessayez depuis Paramètres.` : configuration?.status === "done" ? configuration.output?.message : "Configuration en cours…"}</p>}
         {pending && expired && <p className="text-sm">Le délai de décision est écoulé. Actualisation de l’état…</p>}
+        {input.status === "expired" && <p className="text-sm" role="status">Cette demande a expiré. Aucune action n’a été faite.</p>}
       </div>
     </HumanInputCard>
   );

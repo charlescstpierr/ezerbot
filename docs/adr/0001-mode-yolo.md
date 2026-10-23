@@ -14,6 +14,7 @@ Un interrupteur global « Mode YOLO (tous les droits) », **activé par défaut*
 ## Garde-fous qui survivent au mode
 
 - Les données d'Ezerbot (dossier de la base, coffre, jetons, trousseau) sont **refusées**, pas mises en carte : par chemin réel et inode pour les fichiers, par ce que nomme la commande pour le terminal, et, sur macOS, par un `sandbox-exec` qui interdit au shell et à ses enfants le dossier de la base, le dossier de support d'Ezerbot et le trousseau (fichiers et services `securityd`), pour ce qu'une commande atteint sans le nommer. Le refus est revérifié à l'exécution.
+- L'API de contrôle du wrapper (son port d'écoute et celui de l'accès iPhone) n'a pas de secret : une commande de terminal qui nomme un de ces ports est refusée, et, sur macOS, le `sandbox-exec` interdit au shell toute connexion vers `localhost`, donc vers tout service local de la machine.
 - Un « Toujours refuser » écrit par l'utilisateur gagne encore.
 - Le contrôle de l'écran exige toujours la session démarrée par l'utilisateur ; Échap et Arrêter coupent le bot comme avant ; macOS demande lui-même ses permissions.
 - Restent des cartes, parce qu'elles décident ou font relire plutôt qu'elles n'autorisent un outil : les brouillons d'envoi (courriel, message, commentaire, issue), `propose_skill`, le démarrage et le retrait d'un connecteur, le consentement Recall, la publication des webhooks et l'agent de routines.

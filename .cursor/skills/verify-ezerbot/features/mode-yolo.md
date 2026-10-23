@@ -32,6 +32,6 @@ Preconditions:
 
 ## Gotchas
 
-- Le garde-fou du terminal refuse les commandes qui nomment les données d'Ezerbot, et sur macOS le shell tourne sous `sandbox-exec`, privé de ces données seulement : il n'isole pas le reste du Mac. Un `cwd` dans le HOME jeté est refusé, c'est voulu.
+- Le garde-fou du terminal refuse les commandes qui nomment les données d'Ezerbot, et sur macOS le shell tourne sous `sandbox-exec`, privé de ces données et de tout service local (`localhost`, dont l'API de contrôle du wrapper) : il n'isole pas le reste du Mac. Un `cwd` dans le HOME jeté est refusé, c'est voulu.
 - Le contrôle de l'écran exige toujours une session démarrée par l'utilisateur, même en Mode YOLO : cette sphère ne le couvre pas.
 - Le faux OpenAI ne prouve pas ce que le vrai modèle décide : il vérifie l'admission sans carte, l'écriture sur le disque et l'affichage.

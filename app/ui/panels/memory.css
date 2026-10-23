@@ -44,8 +44,6 @@
 .memory-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
 .memory-filters input { flex: 1 1 100%; min-width: 0; }
 .memory-filters select { flex: 1 1 140px; width: auto; min-width: 0; font-size: 11px; }
-.memory-saturation { border: 1px solid var(--line); border-left: 3px solid var(--accent-ink); border-radius: 8px; padding: 12px; background: var(--soft); color: var(--text); font-size: 11px; line-height: 1.7; }
-.memory-saturation[hidden] { display: none; }
 .memory-profile { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .memory-profile summary { cursor: pointer; font-size: 12px; color: var(--text); }
 .memory-profile summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }

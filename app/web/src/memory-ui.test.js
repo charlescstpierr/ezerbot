@@ -101,14 +101,13 @@ test("sharing refreshes the thread and a rejected card action also reconciles it
   } finally { f.cleanup(); }
 });
 
-test("panel searches accent-insensitively, filters scope/source and warns at saturation", async () => {
+test("panel searches accent-insensitively, filters scope/source and never announces a paused learning", async () => {
   const f = await fixture();
   try {
     f.setCurrent({ fact_id: "fact-boreal", bot_id: "bot", text: "Projet Boréal", scope: "private", learned_at: 1, provenance: { source: "automatic" } });
-    f.setMemoryData({ automatic: { saturated: true, catalogue_chars: 6200 }, sharing_classes: { "fact-boreal": "work" }, profile: { version: 12, sections: [{ title: "Projets et travail", count: 1, facts: [{ text: "Projet Boréal" }] }], log: [{ version: 12, action: "learned", changed_at: 1 }] } });
+    f.setMemoryData({ sharing_classes: { "fact-boreal": "work" }, profile: { version: 12, sections: [{ title: "Projets et travail", count: 1, facts: [{ text: "Projet Boréal" }] }], log: [{ version: 12, action: "learned", changed_at: 1 }] } });
     button(f.root, "Actualiser").listeners.click(); await flush();
-    assert.match(byClass(f.root, "memory-saturation").textContent, /6 000/);
-    assert.equal(byClass(f.root, "memory-saturation").hidden, false);
+    assert.doesNotMatch(f.root.textContent, /Apprentissage automatique en pause/);
     assert.match(byClass(f.root, "memory-profile").textContent, /v12/);
     const search = walk(f.root).find((el) => el.type === "search");
     search.value = "boreal"; search.listeners.input();

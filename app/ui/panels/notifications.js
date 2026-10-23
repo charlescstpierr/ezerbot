@@ -139,7 +139,7 @@
     const dismiss = node("button", "Fermer", "secondary-button"); dismiss.type = "button"; dismiss.onclick = () => dialog.close();
     heading.append(titleNode, dismiss);
     const form = node("form", null, "reply-form");
-    const area = node("textarea", null, "text-input reply-input"); area.setAttribute("aria-label", "Votre réponse"); area.rows = 4; area.maxLength = 20000; area.enterKeyHint = "send";
+    const area = node("textarea", null, "text-input reply-input"); area.setAttribute("aria-label", "Votre réponse"); area.placeholder = "Votre réponse"; area.rows = 4; area.maxLength = 20000; area.enterKeyHint = "send";
     const status = node("p", null, "notification-hint"); status.role = "status";
     const send = node("button", "Envoyer", "primary-button"); send.type = "submit";
     form.append(area, status, send); dialog.append(heading, form);

@@ -376,9 +376,12 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const conversation = panels.state.conversations.find((item) => item.id === window.__replyConversation);
               const reply = conversation?.messages.find((message) => message.role === "assistant" && message.body && message.state !== "streaming");
               if (!reply) return null;
-              window.__replyRun = reply.id.replace(/^reply-/, "");
+              const { items } = await panels.api("/api/notifications");
+              const item = items.find((entry) => entry.kind === "reply" && entry.conversation_id === window.__replyConversation);
+              if (!item) return null;
+              window.__replyNotification = item.id;
               document.getElementById("home-link").click();
-              return {ok: true, run: window.__replyRun};
+              return {ok: true, notification: item.id};
             }""",
             "réponse du bot absente",
             timeout=40,
@@ -626,7 +629,7 @@ def iphone_reply_step(evidence: Path, index: int) -> None:
         state = eval_js(
             evidence,
             """async () => {
-              await window.EzerbotNotifications.activate("reply:" + window.__replyRun, {reply: true});
+              await window.EzerbotNotifications.activate(window.__replyNotification, {reply: true});
               await new Promise((resolve) => setTimeout(resolve, 400));
               const dialog = document.querySelector("dialog.reply-sheet");
               const field = dialog?.querySelector("textarea");

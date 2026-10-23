@@ -707,6 +707,11 @@ pub(in super::super) fn stop_watching(conn: &Connection) -> Result<(), ApiError>
     Ok(())
 }
 
+/// Nobody reads the agenda any more: the next look learns it afresh.
+pub(in super::super) fn stop_watching_calendar(conn: &Connection) -> Result<(), ApiError> {
+    agenda::stop_watching(conn)
+}
+
 /// The agenda events that happened since the last call: created, modified, cancelled or
 /// begun, each version once. The first call only learns the agenda.
 pub(in super::super) fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {

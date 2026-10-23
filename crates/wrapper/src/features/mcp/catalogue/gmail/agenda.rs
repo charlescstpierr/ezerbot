@@ -47,7 +47,9 @@ impl CalendarCase {
 }
 /// An agenda event, as the routines read it. It carries no token and no provider detail.
 /// `debut` is the start instant told in `fuseau`; both are empty or zero when Google
-/// gave no start for a cancelled event.
+/// gave no start for a cancelled event. `version` tells one delivery of the event from
+/// the next: the instant it was last updated (0 for a tombstone that carries none), or
+/// the start instant for a start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: String,
@@ -56,6 +58,7 @@ pub struct CalendarEvent {
     pub debut_ms: i64,
     pub fuseau: String,
     pub titre: String,
+    pub version: i64,
 }
 
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
@@ -288,9 +291,23 @@ fn calendar_event(item: &Value, cas: CalendarCase, zone: &str, stamp: i64) -> Op
             debut_ms,
             fuseau,
             titre: title(item),
+            version: stamp,
         },
         stamp,
     })
+}
+
+/// Nobody reads the agenda any more: the next look learns it afresh, so that what
+/// happened meanwhile is not delivered as new to a consumer that comes later.
+pub(super) fn stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    for table in ["wrapper_calendar_delivered", "wrapper_calendar_watch"] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE account_id=(SELECT lower(account_email) FROM wrapper_connector_catalogue WHERE id='gmail')"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// The events that changed or began since the last call, the changes first in the order

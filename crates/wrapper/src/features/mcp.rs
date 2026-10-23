@@ -197,6 +197,10 @@ pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {
 pub fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
     catalogue::gmail::calendar_events(ctx)
 }
+/// Forget what the agenda held, once no routine watches it: the next look learns it afresh.
+pub fn calendar_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching_calendar(conn)
+}
 /// The publishing tools of the connections (GitHub, Gmail, Slack): each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_draft(name: &str) -> bool {

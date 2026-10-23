@@ -29,12 +29,39 @@ pub enum Schedule {
     Webhook,
     /// Never due by itself: a new message from the connected mailbox starts the routine.
     Mail,
+    /// Never due by itself: an agenda event of the connected account, in one of the
+    /// ticked cases, starts the routine. A start is a dated slot told by the connector
+    /// (see [`crate::occurrences::deliver_slots`]); the other cases are delivered events.
+    Calendar {
+        cases: Vec<CalendarCase>,
+    },
     /// Starts as soon as one of its simple triggers starts. The members are a
     /// flat list: a group inside a group is refused when the routine is saved,
     /// but the type stays open to the simple kinds added later.
     Group {
         members: Vec<Member>,
     },
+}
+
+/// What an agenda event does that can start a routine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarCase {
+    Created,
+    Modified,
+    Cancelled,
+    Begins,
+}
+impl CalendarCase {
+    /// The word a history shows, as the connector says it.
+    pub fn libelle(self) -> &'static str {
+        match self {
+            Self::Created => "créé",
+            Self::Modified => "modifié",
+            Self::Cancelled => "annulé",
+            Self::Begins => "commence",
+        }
+    }
 }
 
 /// A simple trigger of a group. The id is stable across edits, so that each
@@ -67,10 +94,25 @@ impl Schedule {
         }
     }
 
+    /// Whether an agenda event can start the routine: it is a calendar trigger, or a
+    /// group holding one.
+    pub fn has_calendar(&self) -> bool {
+        match self {
+            Schedule::Calendar { .. } => true,
+            Schedule::Group { members } => members
+                .iter()
+                .any(|m| matches!(m.trigger, Schedule::Calendar { .. })),
+            _ => false,
+        }
+    }
+
     /// A simple trigger that only starts on delivery of an outside fact (a call,
-    /// a message): it has no clock slot, so it is never due by itself.
+    /// a message, an agenda event): it has no clock slot, so it is never due by itself.
     pub fn is_delivered(&self) -> bool {
-        matches!(self, Schedule::Webhook | Schedule::Mail)
+        matches!(
+            self,
+            Schedule::Webhook | Schedule::Mail | Schedule::Calendar { .. }
+        )
     }
 
     /// Something other than the clock can start the routine, so a routine with
@@ -163,6 +205,13 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
         }
         Schedule::Mail => {
             return Ok("Courriel : démarre à chaque nouveau message de la boîte connectée".into());
+        }
+        Schedule::Calendar { cases } => {
+            let cases: Vec<&str> = cases.iter().map(|case| case.libelle()).collect();
+            return Ok(format!(
+                "Calendrier : démarre pour un événement de l’agenda connecté ({})",
+                cases.join(", ")
+            ));
         }
         Schedule::Group { members } => {
             let parts = members
@@ -361,7 +410,7 @@ fn readable_duration(ms: u64) -> String {
 pub fn next_after(schedule: &Schedule, time_zone: &str, reference_ms: i64) -> Result<Option<i64>> {
     match schedule {
         Schedule::Once { at } => Ok((*at > reference_ms).then_some(*at)),
-        Schedule::Webhook | Schedule::Mail => Ok(None),
+        Schedule::Webhook | Schedule::Mail | Schedule::Calendar { .. } => Ok(None),
         Schedule::Group { members } => {
             let mut first: Option<i64> = None;
             for member in members {
@@ -934,6 +983,47 @@ mod cron_tests {
                 && group.has_delivered()
                 && !parse("@every 1m").unwrap().has_delivered()
         );
+        assert_eq!(next_after(&group, "UTC", 0).unwrap(), Some(60_000));
+    }
+
+    #[test]
+    fn calendar_is_never_due_by_the_clock_and_keeps_its_wire_shape() {
+        let calendar = Schedule::Calendar {
+            cases: vec![CalendarCase::Created, CalendarCase::Begins],
+        };
+        assert_eq!(
+            serde_json::to_string(&calendar).unwrap(),
+            r#"{"kind":"calendar","cases":["created","begins"]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Schedule>(
+                r#"{"kind":"calendar","cases":["modified","cancelled"]}"#
+            )
+            .unwrap(),
+            Schedule::Calendar {
+                cases: vec![CalendarCase::Modified, CalendarCase::Cancelled]
+            }
+        );
+        assert_eq!(next_after(&calendar, "UTC", i64::MIN).unwrap(), None);
+        assert_eq!(
+            describe_fr(&calendar, "UTC").unwrap(),
+            "Calendrier : démarre pour un événement de l’agenda connecté (créé, commence)"
+        );
+        let group = Schedule::Group {
+            members: vec![
+                Member {
+                    id: "a".into(),
+                    trigger: parse("@every 1m").unwrap(),
+                },
+                Member {
+                    id: "b".into(),
+                    trigger: calendar.clone(),
+                },
+            ],
+        };
+        assert!(calendar.has_calendar() && group.has_calendar() && !Schedule::Mail.has_calendar());
+        assert!(calendar.has_delivered() && group.has_delivered());
+        assert!(calendar.is_delivered() && !parse("@every 1m").unwrap().is_delivered());
         assert_eq!(next_after(&group, "UTC", 0).unwrap(), Some(60_000));
     }
 

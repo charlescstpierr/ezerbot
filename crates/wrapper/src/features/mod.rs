@@ -124,6 +124,7 @@ pub mod usage;
 pub mod voice;
 pub mod voice_call;
 pub mod voice_session;
+pub mod yolo;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
 struct Feature {
@@ -160,6 +161,7 @@ registry!(
     memory,
     memory_auto,
     forms,
+    yolo,
     routines,
     routines_background,
     routine_webhooks,

@@ -88,11 +88,11 @@ const vite = await createServer({
 after(() => vite.close());
 const { DraftCard } = await vite.ssrLoadModule("/src/cards/draft.jsx");
 
-function renderEmailDraft({ status, etat, publication_result }) {
+function renderEmailDraft({ status, etat, publication_result, service = "gmail", tool = "gmail_send_email" }) {
   const request = {
     entry_id: "mail", status: { status }, route: { requesting_bot_id: "grokbot" },
-    kind: { kind: "approval", tool: "gmail_send_email" },
-    arguments: { brouillon: { service: "gmail", action: "Envoyer un courriel", de: "charles@example.test", a: ["ami@example.test"], cc: ["bruno@example.test"], objet: "Objet proposé", texte: "Corps proposé", empreinte: "abc", ...(etat ? { etat } : {}) } },
+    kind: { kind: "approval", tool },
+    arguments: { brouillon: { service, action: "Envoyer un courriel", de: "charles@example.test", a: ["ami@example.test"], cc: ["bruno@example.test"], objet: "Objet proposé", texte: "Corps proposé", empreinte: "abc", ...(etat ? { etat } : {}) } },
     ...(publication_result ? { publication_result } : {}),
   };
   const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
@@ -254,4 +254,27 @@ test("une issue Linear créée nomme son identifiant, et un envoi refusé ou non
     assert.ok(!html.includes("Commentaire publié"), etat);
     assert.ok(!html.includes(">Envoyer<"), etat);
   }
+});
+
+test("la carte brouillon d’un courriel Outlook montre De, À, Cc, Objet et Corps, Envoyer et Annuler, sans « Toujours », et dit ce qui est parti", () => {
+  const outlook = { service: "Microsoft 365", tool: "outlook_send_mail" };
+  const html = renderEmailDraft({ ...outlook, status: "pending" });
+  for (const label of [">De<", ">À<", ">Cc<", "Objet (modifiable)", "Corps du courriel (modifiable)", ">Envoyer<", ">Annuler<", "envoie ce courriel"]) assert.ok(html.includes(label), label);
+  assert.ok(html.includes("data-draft-service=\"Microsoft 365\""));
+  assert.ok(!html.includes("Toujours"));
+  const sent = renderEmailDraft({ ...outlook, status: "resolved", etat: "sent", publication_result: { status: "done", output: { compte: "charles@example.test", a: ["ami@example.test"] } } });
+  assert.ok(sent.includes("Courriel envoyé sous charles@example.test à ami@example.test."));
+  for (const [etat, reason] of [
+    ["refused", "Microsoft a refusé la requête concernant l’envoi du courriel (ErrorInvalidRecipients). Aucun courriel n’est parti."],
+    ["rate_limited", "Microsoft limite le débit des requêtes. Aucun courriel n’est parti."],
+    ["unconfirmed", "Envoi non confirmé · l’accusé de réception de Microsoft manque : le courriel est peut-être parti."],
+  ]) {
+    const failed = renderEmailDraft({ ...outlook, status: "resolved", etat, publication_result: { status: "failed", reason } });
+    assert.ok(failed.includes(reason), etat);
+    assert.ok(!failed.includes("Courriel envoyé"), etat);
+    assert.ok(!failed.includes(">Envoyer<"), etat);
+  }
+  const cancelled = renderEmailDraft({ ...outlook, status: "denied" });
+  assert.ok(cancelled.includes("Annulé · rien n’a été envoyé"));
+  assert.ok(!cancelled.includes(">Envoyer<"));
 });

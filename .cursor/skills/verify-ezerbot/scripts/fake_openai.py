@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import struct
 import zlib
@@ -154,6 +155,44 @@ USAGE = {
 }
 
 
+def _last_user_text(items: list) -> str:
+    """The text of the newest user message: earlier turns of a thread must not re-trigger a tool."""
+    for item in reversed(items):
+        if isinstance(item, dict) and item.get("role") == "user":
+            return json.dumps(item.get("content"), ensure_ascii=False).lower()
+    return ""
+
+
+def yolo_turn(items: list) -> bytes | None:
+    """Mode YOLO : une commande puis une écriture de fichier, dans le dossier de travail jeté du run."""
+    work = os.environ.get("EZERBOT_VERIFY_FAKE_WORK")
+    if not work or not items or not isinstance(items[-1], dict):
+        return None
+    last = items[-1]
+    if last.get("type") == "function_call_output":
+        said = {
+            "verify-shell": "Voici le contenu de votre dossier Documents.",
+            "verify-write": "Le fichier Notes-du-jour.txt est écrit.",
+        }.get(last.get("call_id"))
+        if said is None:
+            return None
+        return _sse([{"type": "response.output_text.delta", "delta": said}, {"type": "response.completed"}])
+    text = _last_user_text(items)
+    if "liste mon dossier documents" in text:
+        name, arguments, call_id = "run_shell", {"command": "ls -1", "cwd": work, "timeout_ms": 5000, "output_limit": 4096}, "verify-shell"
+    elif "écris mes notes du jour" in text:
+        name, call_id = "write_file", "verify-write"
+        arguments = {
+            "path": os.path.join(work, "Notes-du-jour.txt"),
+            "content": "Réunion du matin : valider le budget.\nAppeler le fournisseur avant midi.\n",
+            "expected_sha256": None,
+        }
+    else:
+        return None
+    call = {"id": f"fc-{call_id}", "type": "function_call", "status": "completed", "call_id": call_id, "name": name, "arguments": json.dumps(arguments)}
+    return _sse([{"type": "response.output_item.done", "item": call}, {"type": "response.completed"}])
+
+
 def parent_message(instructions: str) -> str:
     """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
     for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
@@ -211,6 +250,9 @@ def response_body(raw: bytes) -> bytes:
             ]
         )
     items = payload.get("input") if isinstance(payload.get("input"), list) else []
+    yolo = yolo_turn(items)
+    if yolo is not None:
+        return yolo
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
     if outputs and outputs[-1].get("call_id") == "verify-context":
         call = {

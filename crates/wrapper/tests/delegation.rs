@@ -48,7 +48,8 @@ impl Fixture {
             std::fs::write(path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"access-2","refresh_token":"refresh-2","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         }
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
-        let app = App::open_with(&path, provider.clone()).unwrap();
+        let mut app = App::open_with(&path, provider.clone()).unwrap();
+        support::ask_before_acting(&mut app);
         if live {
             wait("catalog", || provider.status()["models_ready"] == true);
         }
@@ -3426,4 +3427,23 @@ fn a_child_can_use_an_image_of_a_selected_entry_as_a_generation_reference() {
         content[1]["image_url"],
         format!("data:image/png;base64,{PNG}")
     );
+}
+
+#[test]
+fn yolo_launches_a_delegated_task_without_the_background_card() {
+    let mut f = Fixture::new(true);
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "yolo-delegate", args("child"));
+    let cards: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM forms_requests", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        cards, 0,
+        "le lancement d'une sous-tâche ne demande plus de carte"
+    );
+    assert_eq!(f.children(&parent).len(), 1);
+    f.child_done(&edge);
+    f.resume(&c, "yolo-delegate");
 }

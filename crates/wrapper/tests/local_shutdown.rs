@@ -38,6 +38,7 @@ impl Host {
             server,
         };
         host.ready();
+        host.post("/api/yolo/mode", json!({"mode": "ask"}));
         host
     }
     fn launch(root: &std::path::Path, server: &FakeOpenAi) -> (Child, String) {

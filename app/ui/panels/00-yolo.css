@@ -1,0 +1,26 @@
+.yolo-settings { min-width: 0; }
+.yolo-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 14px 0 6px; }
+.yolo-modes button { display: grid; gap: 4px; justify-items: start; text-align: left; background: var(--soft); border: 1px solid transparent; border-radius: 8px; padding: 12px 12px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.yolo-modes button strong { font-size: 12px; font-weight: 600; color: var(--text); }
+.yolo-modes button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-ink); }
+.yolo-modes button[aria-pressed="true"] strong { color: var(--accent-ink); }
+.yolo-settings h4 { margin: 18px 0 8px; font-size: 11px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.yolo-guards { margin: 0; padding: 0 0 0 18px; display: grid; gap: 6px; font-size: 11px; line-height: 1.55; color: var(--muted); }
+.yolo-guards strong { color: var(--text); font-weight: 550; }
+.yolo-bot-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; min-width: 0; flex-wrap: wrap; }
+.yolo-bot-row strong { flex: 1 1 100%; font-size: 12px; overflow-wrap: anywhere; }
+.yolo-bot-row select { flex: 1 1 180px; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--text); font: inherit; font-size: 11px; max-width: 100%; }
+.yolo-effective { font-size: 11px; border: 1px solid var(--line); background: var(--soft); border-radius: 99px; padding: 2px 8px; color: var(--muted); white-space: nowrap; }
+.yolo-effective[data-mode="yolo"] { color: var(--accent-ink); border-color: var(--accent-ink); background: var(--accent-soft); }
+.yolo-log { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.yolo-log li { display: grid; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; line-height: 1.45; min-width: 0; }
+.yolo-log li span { color: var(--muted); }
+.yolo-log li code { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 11px; }
+.yolo-settings .yolo-error { color: var(--danger-text); font-size: 11px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.gb-auto-card { padding: 8px 12px; }
+.gb-auto-card > .gb-auto-line, .gb-auto-line { margin: 4px 0; font-size: 12px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.gb-auto-badge { display: inline-block; border: 1px solid var(--accent-ink); background: var(--accent-soft); color: var(--accent-ink); border-radius: 99px; padding: 1px 8px; font-size: 10px; font-weight: 600; letter-spacing: .02em; }
+.gb-auto-card .gb-local-header { align-items: center; justify-content: flex-start; }
+.gb-auto-card .gb-local-header .gb-local-status { margin-left: auto; }
+.gb-auto-card details { margin-top: 6px; }
+.gb-auto-card > details > summary { font-size: 12px; }

@@ -983,7 +983,10 @@ impl OAuth {
                             }),
                         )
                     } else if post && path == format!("{root}/search/jql") {
-                        if sent["jql"] == "project = ENG ORDER BY updated DESC" {
+                        if sent["jql"] == "project = \"IN\" ORDER BY updated DESC" {
+                            // A project whose key is a JQL word: only the quoted form is valid.
+                            (200, json!({"issues":[],"isLast":true}))
+                        } else if sent["jql"] == "project = \"ENG\" ORDER BY updated DESC" {
                             (
                                 200,
                                 json!({"issues":[
@@ -8542,7 +8545,17 @@ fn jira_reads_issues_and_one_issue_without_a_card_and_keeps_the_tokens_out_of_th
     assert_eq!(searches.len(), 2);
     let asked: Value = serde_json::from_str(&searches[0].1).unwrap();
     assert_eq!(asked["maxResults"], 2);
-    assert_eq!(asked["jql"], "project = ENG ORDER BY updated DESC");
+    assert_eq!(asked["jql"], "project = \"ENG\" ORDER BY updated DESC");
+    // A key that is a JQL reserved word is read like any other: it is quoted.
+    let run = f.github_call("jira-reserved", JIRA_ISSUES, json!({"project":"in"}));
+    let output = done(&f, &run);
+    assert_eq!(output["projet"], "IN");
+    assert_eq!(output["issues"].as_array().unwrap().len(), 0);
+    assert_eq!(output["autres_issues"], false);
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("Aucune issue à afficher"));
     let run = f.github_call("jira-issue", JIRA_ISSUE, json!({"issue":"eng-12"}));
     let output = done(&f, &run);
     assert_eq!(output["cle"], "ENG-12");

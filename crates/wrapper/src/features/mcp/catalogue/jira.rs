@@ -374,7 +374,7 @@ fn token_of(ctx: &Context<'_>, account: &Account) -> Result<Access, ApiError> {
 }
 
 /// A project key such as `ENG`: capital letters, digits and underscores, starting with a
-/// letter. Strict enough to sit inside a JQL string without quoting tricks.
+/// letter. Strict enough to sit inside a quoted JQL string.
 pub(super) fn is_project_key(text: &str) -> bool {
     (2..=10).contains(&text.len())
         && text.as_bytes()[0].is_ascii_uppercase()
@@ -519,7 +519,8 @@ fn list_issues(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiError> 
         &rest(&access, "/search/jql")?,
         &access.token,
         Some(json!({
-            "jql": format!("project = {project} ORDER BY updated DESC"),
+            // Quoted: a key such as `IN` or `OR` is a JQL word. The key is validated, so no quote can ride in it.
+            "jql": format!("project = \"{project}\" ORDER BY updated DESC"),
             "maxResults": limit,
             "fields": ["summary", "status", "assignee", "updated"],
         })),

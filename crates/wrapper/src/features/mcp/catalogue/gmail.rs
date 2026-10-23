@@ -243,8 +243,16 @@ pub(in super::super) fn tool_specs() -> Vec<grokbot_engine::contracts::ToolSpec>
     };
     vec![
         read(TOOL, &format!("{MODEL} {ACCOUNTS_NOTE}"), schema()),
-        read(agenda::TOOL, &format!("{} {ACCOUNTS_NOTE}", agenda::MODEL), agenda::schema()),
-        read(drive::TOOL, &format!("{} {ACCOUNTS_NOTE}", drive::MODEL), drive::schema()),
+        read(
+            agenda::TOOL,
+            &format!("{} {ACCOUNTS_NOTE}", agenda::MODEL),
+            agenda::schema(),
+        ),
+        read(
+            drive::TOOL,
+            &format!("{} {ACCOUNTS_NOTE}", drive::MODEL),
+            drive::schema(),
+        ),
         email::tool_spec(),
     ]
 }

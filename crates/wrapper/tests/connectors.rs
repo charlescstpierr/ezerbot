@@ -634,10 +634,7 @@ impl OAuth {
                             json!({"error":{"code":401,"message":"Invalid Credentials"}}),
                         )
                     } else if url == "/gmail/api/gmail/v1/users/me/profile" {
-                        (
-                            200,
-                            json!({"emailAddress":g.owner(),"messagesTotal":6}),
-                        )
+                        (200, json!({"emailAddress":g.owner(),"messagesTotal":6}))
                     } else if post && url == "/gmail/api/gmail/v1/users/me/messages/send" {
                         match g.send_status {
                             0 | 200 => {
@@ -695,12 +692,12 @@ impl OAuth {
                         if g.agenda_status != 200 && g.agenda_status != 0 {
                             (g.agenda_status, json!({"error":{"code":g.agenda_status}}))
                         } else if rest.is_empty() {
+                            (200, json!({"id":g.owner(),"timeZone":AGENDA_ZONE}))
+                        } else if let Some(listing) = rest.strip_prefix("/events?") {
                             (
                                 200,
-                                json!({"id":g.owner(),"timeZone":AGENDA_ZONE}),
+                                GmailScript::events(g.calendar(), listing, g.agenda_page),
                             )
-                        } else if let Some(listing) = rest.strip_prefix("/events?") {
-                            (200, GmailScript::events(g.calendar(), listing, g.agenda_page))
                         } else {
                             (404, json!({}))
                         }
@@ -6718,7 +6715,10 @@ fn agenda_and_drive_ask_which_google_account_and_share_the_conversation_choice_w
     let run = f.github_call_in(&conversation, "gdrive-2", DRIVE_TOOL, json!({"nom":"Plan"}));
     let file = done(&f, &run);
     assert_eq!(file["compte"], SECOND_GOOGLE);
-    assert!(file["extrait"].as_str().unwrap().contains("Plan du travail."));
+    assert!(file["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("Plan du travail."));
     assert_eq!(
         f.gmail_ask(&conversation, "gmail-after-cal", None)["compte"],
         SECOND_GOOGLE
@@ -6733,9 +6733,15 @@ fn agenda_and_drive_ask_which_google_account_and_share_the_conversation_choice_w
     );
     let file = done(&f, &run);
     assert_eq!(file["compte"], "charles@example.test");
-    assert!(file["extrait"].as_str().unwrap().contains("Plan personnel."));
+    assert!(file["extrait"]
+        .as_str()
+        .unwrap()
+        .contains("Plan personnel."));
     let run = f.github_call_in(&conversation, "gcal-3", CALENDAR_TOOL, json!({}));
-    assert_eq!(done(&f, &run)["evenements"][0]["titre"], "Réunion personnelle");
+    assert_eq!(
+        done(&f, &run)["evenements"][0]["titre"],
+        "Réunion personnelle"
+    );
 }
 
 #[test]

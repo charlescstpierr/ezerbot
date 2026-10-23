@@ -1695,13 +1695,13 @@ impl Session {
         instructions: &str,
         input: &str,
     ) -> Result<String, Failure> {
-        self.bounded_text(instructions, input, 900, 4096, 12)
+        self.bounded_text(instructions, input, 900, 4096, 12, false)
     }
 
     /// Same bounded call for a meeting summary: a longer answer and a longer wait,
     /// still no tools, history or retries. The transcript is data, never a turn.
     pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
-        self.bounded_text(instructions, input, 1500, 8192, 45)
+        self.bounded_text(instructions, input, 1500, 8192, 45, true)
     }
 
     fn bounded_text(
@@ -1711,6 +1711,7 @@ impl Session {
         max_tokens: u32,
         max_bytes: usize,
         timeout: u64,
+        renew: bool,
     ) -> Result<String, Failure> {
         use grokbot_engine::contracts::ModelEvent;
         use std::io::Read;
@@ -1752,14 +1753,17 @@ impl Session {
         // A foreground call will renew an expiring token; skipping is harmless.
         // Credential writes use atomic rename. A read-only snapshot needs no
         // rotation lock (and cannot randomly lose a job to the UI's status read).
-        let credentials = self
-            .read()
-            .filter(|c| c.usable(self.inner.codex))
-            .filter(|c| c.expires_at > seconds() + 15)
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
-        let token = credentials
-            .access_token
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
+        // A summary is something Charles asked for or is waiting on: it renews an
+        // expired session like a chat turn, where a background extraction just skips.
+        let token = if renew {
+            self.bearer(false)?
+        } else {
+            self.read()
+                .filter(|c| c.usable(self.inner.codex))
+                .filter(|c| c.expires_at > seconds() + 15)
+                .and_then(|c| c.access_token)
+                .ok_or_else(|| Failure::other("Extraction indisponible."))?
+        };
         let response = self
             .request(&token, &mut body)?
             .timeout(Duration::from_secs(timeout))

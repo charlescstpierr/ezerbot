@@ -48,3 +48,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Mémo vocal](./memo-vocal.md) couvre la vitesse de lecture d’un mémo de 0,5 à 2, le refus d’une vitesse hors plage et le saut au mot de la transcription.
 - [Réponse depuis la notification iPhone](./iphone-reponse.md) couvre la feuille Répondre ouverte depuis la notification d’un bot et l’envoi qui n’arrive qu’une fois dans le fil.
 - [Appel vocal](./voix-appel.md) couvre l’appel en direct : la phrase de transmission de l’audio, le transcript affiché ou masqué, la voix du bot coupée par la parole ou Échap, et le transcript rangé dans le fil.
+- [Répondre en fil](./reponse-fil.md) couvre l’entrée « Répondre en fil » du menu d’un message, le sous-fil lié avec son bandeau, la réponse du bot qui tient compte du message parent et le retour au fil principal.

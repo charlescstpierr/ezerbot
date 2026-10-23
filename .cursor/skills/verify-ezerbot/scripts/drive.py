@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -382,6 +382,32 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               window.__replyNotification = item.id;
               document.getElementById("home-link").click();
               return {ok: true, notification: item.id};
+            }""",
+            "réponse du bot absente",
+            timeout=40,
+        )
+        return {"ok": True}
+    if sphere == "reponse-fil":
+        # Une conversation neuve : une question, la réponse du faux bot, puis le fil ouvert sur la question.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const { conversation } = await panels.api("/api/conversations", {});
+              window.__filMain = conversation.id;
+              window.__filQuestion = "question-" + Date.now();
+              await panels.api("/api/send", {conversation_id: conversation.id, message_id: window.__filQuestion, body: "Quelle est la capitale du Canada ?"});
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.refresh();
+              const conversation = panels.state.conversations.find((item) => item.id === window.__filMain);
+              return conversation?.messages.some((message) => message.role === "assistant" && message.body && message.state === "echoed") ? {ok: true} : null;
             }""",
             "réponse du bot absente",
             timeout=40,
@@ -796,6 +822,75 @@ def iphone_reply_step(evidence: Path, index: int) -> None:
         )
 
 
+def reply_in_thread_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 le fil principal, 1 le menu du message, 2 le sous-fil ouvert, 3 la réponse qui tient compte du parent, 4 retour au fil principal."""
+    if index == 0:
+        eval_js(evidence, """() => { window.GrokbotPanels.openConversation(window.__filMain); return true; }""")
+        wait_js(
+            evidence,
+            """() => document.querySelector(`.gb-message[data-message-id="${window.__filQuestion}"]`) && document.getElementById("thread-banner").hidden ? {ok: true} : null""",
+            "fil principal absent",
+        )
+    if index == 1:
+        eval_js(
+            evidence,
+            """() => { document.querySelector(`.gb-message[data-message-id="${window.__filQuestion}"] button[aria-label="Actions du message"]`).click(); return true; }""",
+        )
+        wait_js(
+            evidence,
+            """() => [...document.querySelectorAll('[role="menu"][aria-label="Actions du message"] [role="menuitem"]')].some((item) => item.textContent === "Répondre en fil") ? {ok: true} : null""",
+            "« Répondre en fil » absent du menu",
+        )
+    if index == 2:
+        eval_js(
+            evidence,
+            """() => { [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === "Répondre en fil").click(); return true; }""",
+        )
+        state = wait_js(
+            evidence,
+            """() => {
+              const banner = document.getElementById("thread-banner");
+              const title = document.getElementById("conversation-title").textContent;
+              const quote = document.getElementById("thread-banner-quote").textContent;
+              return !banner.hidden && title.startsWith("Fil : ") ? {title, quote} : null;
+            }""",
+            "sous-fil non ouvert",
+        )
+        if "Quelle est la capitale du Canada" not in state["quote"]:
+            raise SystemExit(f"le bandeau ne cite pas le message parent: {state}")
+    if index == 3:
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const sub = Object.keys(panels.state.threads).find((id) => panels.state.threads[id].parent_message_id === window.__filQuestion);
+              window.__filSub = sub;
+              await panels.api("/api/send", {conversation_id: sub, message_id: "suite-" + Date.now(), body: "Et en un mot ?"});
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.refresh();
+              const sub = panels.state.conversations.find((item) => item.id === window.__filSub);
+              const reply = sub?.messages.find((message) => message.role === "assistant" && message.state === "echoed" && message.body.includes("Quelle est la capitale du Canada"));
+              const main = panels.state.conversations.find((item) => item.id === window.__filMain);
+              return reply && main.messages.every((message) => message.body !== "Et en un mot ?") ? {ok: true} : null;
+            }""",
+            "la réponse du sous-fil ne tient pas compte du message parent",
+            timeout=40,
+        )
+    if index == 4:
+        eval_js(evidence, """() => { document.getElementById("thread-banner-open").click(); return true; }""")
+        wait_js(
+            evidence,
+            """() => document.getElementById("thread-banner").hidden && document.querySelector(`.gb-message[data-message-id="${window.__filQuestion}"]`) ? {ok: true} : null""",
+            "retour au fil principal absent",
+        )
+
+
 def dictation_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
     if index == 0:
@@ -865,6 +960,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "iphone-reponse":
         return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
+    if sphere == "reponse-fil":
+        return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
@@ -891,6 +988,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             pages_request(evidence)
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
+        if sphere == "reponse-fil":
+            reply_in_thread_step(evidence, index)
         if sphere == "dictee":
             dictation_step(evidence, index)
         if sphere == "voix-bots":

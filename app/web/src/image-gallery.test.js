@@ -221,6 +221,17 @@ test("a generated image and attached images share the grid, while documents and 
   assert.equal((mixedHtml.match(/class="gb-image-cell"/g) || []).length, 1);
 });
 
+test("removing gallery images leaves every other character of the reply untouched", () => {
+  const strip = (body) => gallery.proseWithoutGallery(body, gallery.galleryImages({ body }, { markdown: true }));
+  const hardBreak = "first line  \nsecond line";
+  assert.equal(strip(hardBreak), hardBreak);
+  const fenced = "```\nun\n\n\n\ndeux\n```";
+  assert.equal(strip(fenced), fenced);
+  assert.equal(strip("avant ![x](/api/attachments/abc) après  \nsuite"), "avant  après  \nsuite");
+  assert.equal(strip("Voici.  \n\n\n\n![x](/api/attachments/abc)\n"), "Voici.");
+  assert.equal(strip("![x](/api/attachments/abc)\n\nTexte"), "Texte");
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

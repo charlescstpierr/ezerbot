@@ -67,11 +67,17 @@ export function galleryImages(message, { markdown = false } = {}) {
 export function proseWithoutGallery(body, images) {
   if (!body) return "";
   const urls = new Set((images || []).map((image) => image.url));
-  return body
-    .replace(IMAGE_MARKDOWN, (whole, _alt, url) => (urls.has(url) ? "" : whole))
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  let prose = "";
+  let cursor = 0;
+  for (const match of body.matchAll(IMAGE_MARKDOWN)) {
+    if (!urls.has(match[2])) continue;
+    prose += body.slice(cursor, match.index);
+    cursor = match.index + match[0].length;
+    if (!prose.trim()) cursor += body.slice(cursor).match(/^\s*/)[0].length;
+  }
+  if (cursor === 0) return body;
+  const rest = body.slice(cursor);
+  return rest.trim() ? prose + rest : prose.trimEnd();
 }
 
 export function galleryKey(key, index, count) {

@@ -23,7 +23,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "sujets")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -629,7 +629,137 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               return { ok: true, waiting: panels.state.forms.waiting };
             }""",
         )
+    if sphere == "sujets":
+        return prepare_topics(evidence)
     raise SystemExit(f"sphère inconnue: {sphere}")
+
+
+# Âge, en heures, des fils de la sphère sujets : la barre latérale montre des temps relatifs.
+TOPIC_AGES_HOURS = {"camion": 2, "adresse": 26, "declaration": 74, "cadeaux": 5, "crepes": 30}
+
+
+def prepare_topics(evidence: Path) -> dict:
+    """Deux sujets (Déménagement déplié, Impôts replié), cinq fils d'âges différents, et aucun fil vide laissé par un passage précédent."""
+    eval_js(evidence, close_overlays_js())
+    seeded = eval_js(
+        evidence,
+        """async () => {
+          const panels = window.GrokbotPanels;
+          await panels.refresh();
+          if (panels.state.topics.items.some((topic) => topic.name === "Déménagement")) return {fresh: false};
+          try { await panels.api("/api/bots", {id: "chef", name: "Chef", color: "cyan", instructions: "Organise le travail du groupe."}); } catch { /* déjà créé */ }
+          const move = (await panels.api("/api/topics", {name: "Déménagement", description: "Camion, changement d’adresse et boîte postale."})).topic;
+          const tax = (await panels.api("/api/topics", {name: "Impôts"})).topic;
+          const make = async (title, extra) => (await panels.api("/api/conversations", {title, ...extra})).conversation.id;
+          return {fresh: true, ids: {
+            camion: await make("Louer un camion", {topic_id: move.id}),
+            adresse: await make("Changer d’adresse", {topic_id: move.id, bot_ids: ["grokbot", "chef"]}),
+            declaration: await make("Déclaration de revenus", {topic_id: tax.id}),
+            cadeaux: await make("Idées de cadeaux"),
+            crepes: await make("Recette de crêpes"),
+          }};
+        }""",
+    )
+    if seeded.get("fresh"):
+        # Le temps passe sur une base jetable : chaque fil est vieilli sans toucher à ses messages.
+        run = load_run(evidence)
+        now = int(time.time() * 1000)
+        with sqlite3.connect(run["db"], timeout=15) as conn:
+            for key, hours in TOPIC_AGES_HOURS.items():
+                changed = conn.execute(
+                    "UPDATE wrapper_conversations SET updated_at=? WHERE id=?",
+                    (now - hours * 3600 * 1000, seeded["ids"][key]),
+                ).rowcount
+                if changed != 1:
+                    raise SystemExit(f"le fil {key} n'a pas pu être vieilli")
+    eval_js(
+        evidence,
+        """async () => {
+          const panels = window.GrokbotPanels;
+          panels.leaveConversation();
+          await panels.refresh();
+          // Un « Nouveau fil » resté vide d'un passage précédent ne fausse pas la barre latérale.
+          for (const conversation of panels.state.conversations) {
+            if (panels.state.topics.membership[conversation.id] && conversation.title === "Nouvelle conversation" && !conversation.messages.length) {
+              await panels.api("/api/conversations/delete", {id: conversation.id});
+            }
+          }
+          await panels.refresh();
+          return true;
+        }""",
+    )
+    return wait_js(
+        evidence,
+        """() => {
+          const folders = [...document.querySelectorAll("#topic-list .topic-folder")];
+          const toggle = (name) => folders.find((folder) => folder.querySelector(".topic-name")?.textContent === name)?.querySelector(".topic-toggle");
+          const move = toggle("Déménagement"), tax = toggle("Impôts");
+          if (!move || !tax) return null;
+          // Déménagement déplié, Impôts replié : l'état se lit sur aria-expanded.
+          if (move.getAttribute("aria-expanded") !== "true") { move.click(); return null; }
+          if (tax.getAttribute("aria-expanded") !== "false") { tax.click(); return null; }
+          const times = [...document.querySelectorAll("#topic-list .topic-thread-time")].map((node) => node.textContent);
+          const loose = [...document.querySelectorAll("#conversation-list .conversation-item")].map((node) => node.textContent);
+          const page = document.getElementById("topic-page");
+          return folders.length === 2 && times.length === 2 && loose.length === 2 && (!page || page.hidden) ? {ok: true, times, loose} : null;
+        }""",
+        "la barre latérale ne montre pas deux sujets (un déplié, un replié) et deux fils sans sujet",
+    )
+
+
+def topics_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 la barre latérale, 1 « Nouveau fil » vient de créer un fil rangé, 2 la page du sujet."""
+    if index == 1:
+        eval_js(evidence, """() => { document.querySelector('#topic-list .topic-name').click(); return true; }""")
+        wait_js(evidence, """() => { const page = document.getElementById("topic-page"); return page && !page.hidden && page.querySelector(".topic-new-thread") ? {ok: true} : null; }""", "la page du sujet ne s'ouvre pas")
+        eval_js(evidence, """() => { document.querySelector("#topic-page .topic-new-thread").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const active = document.querySelector("#topic-list .topic-thread.active");
+              const title = document.getElementById("conversation-title").textContent;
+              const page = document.getElementById("topic-page");
+              return active && title === "Nouvelle conversation" && page.hidden ? {name: active.querySelector(".conversation-name").textContent} : null;
+            }""",
+            "« Nouveau fil » n'a pas ouvert un fil rangé dans le sujet",
+        )
+        if state["name"] != "Nouvelle conversation":
+            raise SystemExit(f"le fil créé n'est pas celui attendu: {state}")
+    if index == 2:
+        # Le fil vide de la capture précédente est retiré, puis la page du sujet s'ouvre depuis l'accueil.
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              panels.leaveConversation();
+              await panels.refresh();
+              for (const conversation of panels.state.conversations) {
+                if (panels.state.topics.membership[conversation.id] && conversation.title === "Nouvelle conversation" && !conversation.messages.length) {
+                  await panels.api("/api/conversations/delete", {id: conversation.id});
+                }
+              }
+              await panels.refresh();
+              document.querySelector('#topic-list .topic-name').click();
+              return true;
+            }""",
+        )
+        state = wait_js(
+            evidence,
+            """() => {
+              const page = document.getElementById("topic-page");
+              if (!page || page.hidden) return null;
+              return {
+                title: page.querySelector(".topic-page-title")?.textContent,
+                description: page.querySelector(".topic-page-description")?.textContent,
+                threads: [...page.querySelectorAll(".topic-page-thread-title")].map((node) => node.textContent),
+                memory: page.querySelector(".topic-memory h3")?.textContent,
+                topbar: document.getElementById("conversation-title").textContent,
+              };
+            }""",
+            "la page du sujet ne s'affiche pas",
+        )
+        if state["title"] != "Déménagement" or state["threads"] != ["Louer un camion", "Changer d’adresse"] or state["memory"] != "Mémoire du sujet" or state["topbar"] != "Déménagement":
+            raise SystemExit(f"la page du sujet n'est pas celle attendue: {state}")
 
 
 def task_request(evidence: Path, text: str, prompt: str) -> dict:
@@ -1353,6 +1483,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
     if sphere == "reponse-fil":
         return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
+    if sphere == "sujets":
+        return [f"barre-{theme}-{size}.png", f"nouveau-fil-{theme}-{size}.png", f"sujet-{theme}-{size}.png"]
     if sphere == "approbation-non-bloquante":
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
     if sphere == "approbation-tardive":
@@ -1418,6 +1550,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             background_task_step(evidence, index)
         if sphere == "reponse-fil":
             reply_in_thread_step(evidence, index)
+        if sphere == "sujets":
+            topics_step(evidence, index)
         if sphere == "dictee":
             dictation_step(evidence, index)
         if sphere == "voix-bots":

@@ -207,6 +207,12 @@
       await navigateLink({ kind: "conversation", id });
       return true;
     },
+    // Quitte le fil affiché pour une page qui n’est pas un fil (la page d’un sujet).
+    leaveConversation() {
+      if (busy) return false;
+      selectConversation(null);
+      return true;
+    },
     draft: () => ui.input?.value || "",
     draftDocument: () => ui.input?.document,
     appendDraft(text) { ui.input?.appendText(text); saveDraft(); updateComposer(); },
@@ -612,6 +618,7 @@
 
   function selectConversation(id, focus = false) {
     navigationGeneration++;
+    for (const panel of panels.values()) panelCall(panel, panel.onNavigate);
     approvalFollow.cancel();
     saveDraft();
     selectedId = id;
@@ -647,6 +654,8 @@
     const query = ui.search.value.trim().toLocaleLowerCase("fr");
     const items = state.conversations
       .filter((item) => item.kind !== "task" && item.kind !== "routine")
+      // Un fil rangé dans un sujet vit dans la section SUJETS, pas dans CONVERSATIONS.
+      .filter((item) => !(panels.has("topics") && state.topics?.membership?.[item.id]))
       .filter((item) => !favoriteOnly || item.favorite)
       .filter((item) => !query || item.title.toLocaleLowerCase("fr").includes(query) || (item.description || "").toLocaleLowerCase("fr").includes(query) || item.messages.some((message) => window.GrokbotChat.searchableMessageText(message).toLocaleLowerCase("fr").includes(query)))
       .sort((a, b) => timestamp(b.updated_at) - timestamp(a.updated_at));
@@ -1072,6 +1081,7 @@
     paintFind();
     renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
+    $("topic-button").hidden = !panels.has("topics") || !["chat", "group"].includes(conversation?.kind);
     renderList();
     renderBots();
     renderProvider();
@@ -1892,6 +1902,11 @@
     closeMenu();
     const conversation = currentConversation();
     if (conversation) await updateConversation({ favorite: !conversation.favorite });
+  });
+  $("topic-button").addEventListener("click", () => {
+    closeMenu();
+    const conversation = currentConversation(), topics = panels.get("topics");
+    if (conversation && topics) panelCall(topics, topics.assign, conversation);
   });
   $("copy-link-button").addEventListener("click", () => { const conversation = currentConversation(); if (conversation) void copyLink("thread", { id: conversation.id }); });
   $("bot-copy-link").addEventListener("click", () => { if (editingBotId) void copyLink("agent", { id: editingBotId }); });

@@ -53,3 +53,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Répondre en fil](./reponse-fil.md) couvre l’entrée « Répondre en fil » du menu d’un message, le sous-fil lié avec son bandeau, la réponse du bot qui tient compte du message parent et le retour au fil principal.
 - [Approbation non bloquante](./approbation-non-bloquante.md) couvre le réglage « Continuer sans attendre mes approbations » dans Paramètres : l’état par défaut, la durée de validité, le rappel et l’état coupé où les choix sont grisés.
 - [Approbation tardive](./approbation-tardive.md) couvre la carte décidée après la fin du tour du bot : « Autorisé une fois », la reprise du bot dans le même fil avec le résultat, et la carte Expirée grise sans action.
+- [Sujets](./sujets.md) couvre la section SUJETS de la barre latérale (dossiers repliables, fils décalés avec temps relatifs), « Nouveau fil » dans un sujet et la page d’un sujet avec sa carte « Mémoire du sujet ».

@@ -50,6 +50,41 @@
   }
   // Réunions : une clé Recall.ai, pas de client OAuth. La clé part au coffre et ne revient jamais.
   const meetingStatus = {joining:"authorizing",in_call:"connected",done:"disconnected",cancelled:"disconnected",failed:"error"};
+  // Le transcript et le résumé d'une réunion Recall : du texte seul, jamais un audio ni un lecteur.
+  function meetingReading(meeting) {
+    const out = [];
+    const transcript = node("section", null, "mcp-transcript"); transcript.setAttribute("aria-label", "Transcript de la réunion");
+    transcript.append(node("h5", "Transcript"));
+    const lines = meeting.lines || [];
+    if (!lines.length) {
+      transcript.append(node("p", meeting.active ? "Aucune phrase entendue pour l’instant. Les lignes apparaissent ici au fil de l’appel." : "Aucune ligne n’a été reçue pour cette réunion.", "mcp-note"));
+    } else {
+      const list = node("ol", null, "mcp-lines"); list.tabIndex = 0; list.setAttribute("aria-label", "Lignes dites dans l’appel");
+      for (const line of lines) {
+        const row = node("li", null, "mcp-line");
+        const time = node("time", line.clock, "mcp-line-time"); time.setAttribute("data-at-ms", String(line.at_ms));
+        row.append(time, node("strong", line.speaker, "mcp-line-speaker"), node("span", line.text, "mcp-line-text"));
+        list.append(row);
+      }
+      transcript.append(list);
+      if (meeting.line_count > lines.length) transcript.append(node("p", `Les ${lines.length} dernières lignes sur ${meeting.line_count}.`, "mcp-note"));
+    }
+    out.push(transcript);
+    const summary = meeting.summary;
+    if (summary) {
+      const block = node("section", null, "mcp-summary"); block.setAttribute("aria-label", "Résumé de la réunion");
+      block.append(node("h5", "Résumé"));
+      if (summary.state === "pending") { const wait = node("p", "Le résumé s’écrit…", "mcp-note"); wait.setAttribute("role", "status"); block.append(wait); }
+      if (summary.text) {
+        block.append(node("div", summary.text, "mcp-summary-text"));
+        if (summary.previous) block.append(node("p", "Ce texte remplace une version précédente du résumé.", "mcp-note"));
+      }
+      if (summary.state === "failed" && summary.error) block.append(node("p", summary.error, "mcp-error"));
+      block.append(node("p", summary.reminder, "mcp-note"));
+      out.push(block);
+    }
+    return out;
+  }
   function recallCard(item) {
     const card = node("article", null, "mcp-server mcp-catalogue-card");
     card.setAttribute("data-connector", item.id);
@@ -106,6 +141,13 @@
       line.append(node("strong", "Réunion "), badge, document.createTextNode(` · ${meeting.host} · vu par les participants comme « ${meeting.bot_name} »`));
       card.append(line);
       if (meeting.message) card.append(node("p", meeting.message, meeting.state === "failed" ? "mcp-error" : "mcp-note"));
+      card.append(...meetingReading(meeting));
+      if (meeting.can_summarize) {
+        const text = meeting.summary?.text;
+        const again = button(text ? "Relancer le résumé" : meeting.summary ? "Réessayer le résumé" : "Produire le résumé", () => act("/api/recall/summarize", {id:meeting.id}, again));
+        again.setAttribute("data-connector-action","summarize");
+        actions.append(again);
+      }
       if (live) {
         const leave = button("Quitter la réunion", () => act("/api/recall/leave", {id:meeting.id}, leave), "primary-button"); leave.setAttribute("data-connector-action","leave");
         actions.append(leave);
@@ -140,7 +182,13 @@
       const view = previous && rememberCard(previous.node);
       if (item.kind === "recall") {
         const recall = recallCard(item);
+        // Les nouvelles lignes suivent la fin de la liste, sauf si Charles est remonté lire plus haut.
+        const was = previous?.node.querySelector(".mcp-lines");
+        const follow = !was || was.scrollTop + was.clientHeight >= was.scrollHeight - 8;
+        const top = was?.scrollTop || 0;
         if (previous) previous.node.replaceWith(recall); else catalogue.append(recall);
+        const now = recall.querySelector(".mcp-lines");
+        if (now) now.scrollTop = follow ? now.scrollHeight : top;
         catalogueCards.set(item.id,{key:cardKey,node:recall,text});
         restoreCard(recall,view);
         continue;

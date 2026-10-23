@@ -1695,6 +1695,23 @@ impl Session {
         instructions: &str,
         input: &str,
     ) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 900, 4096, 12)
+    }
+
+    /// Same bounded call for a meeting summary: a longer answer and a longer wait,
+    /// still no tools, history or retries. The transcript is data, never a turn.
+    pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 1500, 8192, 45)
+    }
+
+    fn bounded_text(
+        &self,
+        instructions: &str,
+        input: &str,
+        max_tokens: u32,
+        max_bytes: usize,
+        timeout: u64,
+    ) -> Result<String, Failure> {
         use grokbot_engine::contracts::ModelEvent;
         use std::io::Read;
         let models = self.models();
@@ -1717,7 +1734,7 @@ impl Session {
             .ok_or_else(|| Failure::other("Modèle indisponible."))?;
         let mut body = json!({"model":model.slug,"instructions":instructions,
             "input":[{"role":"user","content":input}],"store":false,"stream":true,
-            "max_output_tokens":900});
+            "max_output_tokens":max_tokens});
         if let Some(effort) = model
             .efforts
             .iter()
@@ -1745,7 +1762,7 @@ impl Session {
             .ok_or_else(|| Failure::other("Extraction indisponible."))?;
         let response = self
             .request(&token, &mut body)?
-            .timeout(Duration::from_secs(12))
+            .timeout(Duration::from_secs(timeout))
             .send_json(body)
             .map_err(|error| {
                 self.request_failure(error);
@@ -1762,7 +1779,9 @@ impl Session {
             &diagnostics,
             &mut |event| {
                 match event {
-                    ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {
+                    ModelEvent::TextDelta { text: delta }
+                        if text.len() + delta.len() <= max_bytes =>
+                    {
                         text.push_str(&delta)
                     }
                     ModelEvent::Completed => completed = true,

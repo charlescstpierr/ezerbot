@@ -34,7 +34,9 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         transcript TEXT NOT NULL, language TEXT NOT NULL, duration_ms INTEGER NOT NULL,
         audio BLOB NOT NULL, created_at INTEGER NOT NULL, words TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS wrapper_voice_microphone (id INTEGER PRIMARY KEY CHECK(id=1), microphone TEXT NOT NULL);
-        INSERT OR IGNORE INTO wrapper_voice_microphone VALUES(1,'');",
+        INSERT OR IGNORE INTO wrapper_voice_microphone VALUES(1,'');
+        CREATE TABLE IF NOT EXISTS wrapper_dictation_language (id INTEGER PRIMARY KEY CHECK(id=1), language TEXT NOT NULL);
+        INSERT OR IGNORE INTO wrapper_dictation_language VALUES(1,'');",
     )?;
     // Memos kept before the words had a start list none.
     let timed: bool = conn.query_row(
@@ -79,6 +81,38 @@ fn save_microphone(conn: &Connection, body: &[u8]) -> Result<Value, ApiError> {
         [&input.id],
     )?;
     Ok(json!({"microphone":input.id}))
+}
+
+/// Empty preserves the interface-language default until a locale is chosen.
+fn language(conn: &Connection) -> Result<String, ApiError> {
+    Ok(conn.query_row(
+        "SELECT language FROM wrapper_dictation_language WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn save_language(conn: &Connection, body: &[u8]) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Choice {
+        language: String,
+    }
+    let choice: Choice = parse(body)?;
+    if choice.language.is_empty()
+        || choice.language.len() > 32
+        || !choice
+            .language
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(ApiError::new(400, "Langue de dictée invalide."));
+    }
+    conn.execute(
+        "UPDATE wrapper_dictation_language SET language=?1 WHERE id=1",
+        [&choice.language],
+    )?;
+    Ok(json!({"language":choice.language}))
 }
 
 /// Accept only bounded mono PCM16 WAV, not arbitrary bytes labelled audio/wav.
@@ -283,7 +317,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
     .unwrap_or_default();
     let bots = super::voice_session::state(ctx.connection)
         .unwrap_or_else(|_| json!({"bots":{},"voices":[],"single":false}));
-    json!({"max_seconds":MAX_SECONDS,"microphone":microphone(ctx.connection).unwrap_or_default(),"drafts":drafts,"debug_fake":cfg!(debug_assertions),"bots":bots["bots"],"voices":bots["voices"],"single":bots["single"]})
+    json!({"language":language(ctx.connection).unwrap_or_default(),"max_seconds":MAX_SECONDS,"microphone":microphone(ctx.connection).unwrap_or_default(),"drafts":drafts,"debug_fake":cfg!(debug_assertions),"bots":bots["bots"],"voices":bots["voices"],"single":bots["single"]})
 }
 
 pub fn routes(
@@ -306,6 +340,9 @@ pub fn routes(
         }
         ("POST", "/api/voice/voices") => {
             Some(super::voice_session::save_catalogue(&app.connection, body).map(ApiResponse::Json))
+        }
+        ("POST", "/api/voice/language") => {
+            Some(save_language(&app.connection, body).map(ApiResponse::Json))
         }
         ("POST", "/api/voice/microphone") => {
             Some(save_microphone(&app.connection, body).map(ApiResponse::Json))
@@ -436,6 +473,7 @@ pub(crate) struct DebugVoice {
     skew: u64,
     unplugged: Vec<String>,
     microphone: (String, String, bool),
+    language: String,
 }
 /// The fixture's microphones. The first one is the system default.
 #[cfg(debug_assertions)]
@@ -523,6 +561,10 @@ impl DebugVoice {
             }
             self.accumulated = 0;
             self.token = command.token;
+            self.language = command
+                .language
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "fr".into());
             self.started = self.now();
             self.attempts = 0;
             // A local capture keeps the microphone of the recording already
@@ -624,7 +666,7 @@ impl DebugVoice {
             "microphone_id":self.microphone.0,"microphone_name":self.microphone.1,"microphone_fallback":self.microphone.2,
             "words":if ready && self.memo { fake_words(transcript, if long_memo {20_000} else {1_000}, long_memo) } else { json!([]) },
             // Only a memo or a local capture hands its audio over; a dictation keeps none.
-            "data":if ready && self.scenario != "no_audio" && (self.memo || self.meeting) {STANDARD.encode(&audio)} else {String::new()},"language":command.language.unwrap_or_else(|| "fr".into()),
+            "data":if ready && self.scenario != "no_audio" && (self.memo || self.meeting) {STANDARD.encode(&audio)} else {String::new()},"language":self.language,
             "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }

@@ -292,6 +292,9 @@ impl Provider {
     ) -> Result<String, Failure> {
         self.session().extract_memory(instructions, input)
     }
+    pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
+        self.session().summarize(instructions, input)
+    }
     pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
         self.session().review(body)
     }

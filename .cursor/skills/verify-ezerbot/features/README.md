@@ -46,3 +46,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Dictée et microphone](./dictee.md) couvre le réglage du microphone, son repli quand il disparaît et la dictée qui pose le texte dans le brouillon.
 - [Voix par bot](./voix-bots.md) couvre la voix, la vitesse et la langue de chaque bot, l’attribution de deux voix différentes et le refus d’une vitesse au-delà de 2.
 - [Mémo vocal](./memo-vocal.md) couvre la vitesse de lecture d’un mémo de 0,5 à 2, le refus d’une vitesse hors plage et le saut au mot de la transcription.
+- [Réponse depuis la notification iPhone](./iphone-reponse.md) couvre la feuille Répondre ouverte depuis la notification d’un bot et l’envoi qui n’arrive qu’une fois dans le fil.

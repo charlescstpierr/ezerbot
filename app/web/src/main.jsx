@@ -14,6 +14,7 @@ import { createApprovalFollow, revealPendingApproval } from "./approval-follow.j
 import { createDeepLinkQueue } from "./deep-links.js";
 import { createVoiceReader, voiceNeedsAction } from "./voice-conversation.js";
 import { mountFloating } from "./floating.jsx";
+import { sourceOpening } from "./sources.js";
 import { demonstrationSummaryView } from "./demonstration-presentation.js";
 
 const roots = new WeakMap();
@@ -24,6 +25,7 @@ window.GrokbotChat = {
   createVoiceReader, voiceNeedsAction,
   demonstrationSummaryView,
   createDeepLinkQueue,
+  sourceOpening,
   teachPrompt: TEACH_PROMPT,
   isTeachMessage,
   searchableMessageText,

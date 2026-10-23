@@ -323,6 +323,16 @@ def response_body(raw: bytes) -> bytes:
                 {"type": "response.completed"},
             ]
         )
+    if "cite tes sources" in json.dumps(items, ensure_ascii=False).lower():
+        # Trois lectures de la bibliothèque, citées par leur numéro, et un [7] que rien ne soutient.
+        delta = "Le loyer est de 1 200 dollars par mois [1], et le budget le confirme [2]. Le bail fixe le paiement au premier du mois [3]. Un ancien chiffre circule encore sans source [7]."
+        return _sse(
+            [
+                {"type": "response.created"},
+                {"type": "response.output_text.delta", "delta": delta},
+                {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 2}}},
+            ]
+        )
     return _sse(
         [
             {"type": "response.created"},

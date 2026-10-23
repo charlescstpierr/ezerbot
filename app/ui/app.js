@@ -1012,6 +1012,24 @@
     onSignIn: () => { void signIn(); },
     onCardAction: cardAction,
     get usageUrl() { return usageUrl(); },
+    // « Ouvrir la source » : un lien Google dans le navigateur, un fichier de la bibliothèque dans la fiche du bot.
+    async onOpenSource(source, message) {
+      const opening = window.GrokbotChat.sourceOpening(source, { connectors: state.mcp?.catalogue });
+      if (opening.problem) return { ok: false, message: opening.problem };
+      if (opening.url) {
+        // Un vrai clic sur un lien : la coque native ouvre alors l'adresse dans le navigateur.
+        const link = element("a");
+        link.href = opening.url; link.target = "_blank"; link.rel = "noopener noreferrer";
+        document.body.append(link); link.click(); link.remove();
+        return { ok: true };
+      }
+      const bot = botById(message?.payload?.bot_id) || currentBot();
+      if (!bot || bot.deleted) return { ok: false, message: "Ce bot n’existe plus, sa bibliothèque non plus." };
+      const library = await api(`/api/library?bot_id=${encodeURIComponent(bot.id)}`);
+      if (!(library.files || []).some((file) => file.id === opening.library)) return { ok: false, message: "Ce fichier n’est plus dans la bibliothèque." };
+      openBotDialog(bot);
+      return { ok: true };
+    },
     async onCopy(text) {
       try { await copyText(text); return true; }
       catch { notify("La copie n’est pas disponible. Sélectionnez le texte pour le copier."); return false; }

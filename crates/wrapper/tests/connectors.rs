@@ -7164,6 +7164,56 @@ fn calendar_events_are_sources_and_the_listing_carries_their_numbers() {
 }
 
 #[test]
+fn a_private_value_in_a_mail_subject_never_reaches_the_registry_or_the_reply_payload() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    vault
+        .set("SOURCE_TEST", "Essai", "motsecret-4242-prive")
+        .unwrap();
+    f.oauth.seen.lock().unwrap().gmail.inbox = vec![json!({
+        "id":"m5","from":"Alice <alice@example.test>","subject":"Code motsecret-4242-prive",
+        "date":"Tue, 20 Oct 2026 09:00:00 +0000","text":"Bonjour motsecret-4242-prive",
+    })];
+    let (run, reply) =
+        f.read_and_answer("cite-secret", GMAIL_TOOL, json!({"count":1}), "Voir [1].");
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT group_concat(title||coalesce(excerpt,''),'') FROM wrapper_run_sources WHERE run_id=?1",
+            [&run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("motsecret-4242-prive"), "{stored}");
+    assert!(!reply["payload"]
+        .to_string()
+        .contains("motsecret-4242-prive"));
+    assert_eq!(reply["payload"]["sources"][0]["identifiant"], "m5");
+}
+
+#[test]
+fn a_drive_question_about_which_account_to_use_is_not_a_source() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    f.drive(vec![
+        json!({"id":"doc1","name":"Plan 2026","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Objectif."}),
+    ]);
+    let (run, reply) = f.read_and_answer(
+        "cite-ask",
+        DRIVE_TOOL,
+        json!({"nom":"Plan 2026"}),
+        "Quel compte [1] ?",
+    );
+    let output = done(&f, &run);
+    assert!(output.get("fichier").is_none(), "{output}");
+    assert!(output.get("sources").is_none(), "{output}");
+    assert_eq!(reply["payload"]["sources"], json!([]));
+    assert_eq!(reply["payload"]["citations"][0]["etat"], "introuvable");
+}
+
+#[test]
 fn the_registry_survives_a_restart_and_keeps_no_full_mail() {
     let mut f = Fixture::new();
     f.gmail_connect();

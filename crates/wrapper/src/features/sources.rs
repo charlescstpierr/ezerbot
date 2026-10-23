@@ -127,8 +127,10 @@ impl Draft {
         self.date = field(value);
         self
     }
+    /// Whole: the identifier is what opens the source, and it tells two sources apart.
     pub fn locator(mut self, value: &str) -> Self {
-        self.locator = field(value);
+        let value = value.trim();
+        self.locator = (!value.is_empty()).then(|| value.to_owned());
         self
     }
     pub fn range(mut self, value: &str) -> Self {
@@ -276,7 +278,10 @@ fn number_output(conn: &Connection, run_id: &str, tool: &str, output: &Value) ->
             renumber(&mut output, &numbers);
         }
         "drive_read_file" => {
-            let file = &output["fichier"];
+            // A question about which account to read from has no file: nothing was read.
+            let file = output
+                .get("fichier")
+                .filter(|file| file["id"].is_string())?;
             let sheet = file["type"] == "Google Sheets";
             let mut draft = Draft::new(
                 if sheet { Kind::Sheet } else { Kind::Drive },
@@ -391,26 +396,45 @@ pub fn cited(body: &str) -> Vec<i64> {
         }
         let chars: Vec<char> = line.chars().collect();
         let mut index = 0;
-        let mut code = false;
         while index < chars.len() {
-            let c = chars[index];
-            if c == '`' {
-                code = !code;
-            } else if c == '[' && !code {
-                if let Some((numbers, next)) = citation(&chars, index) {
-                    for n in numbers {
-                        if !found.contains(&n) {
-                            found.push(n);
+            match chars[index] {
+                '`' => index = after_code(&chars, index),
+                '[' => match citation(&chars, index) {
+                    Some((numbers, next)) => {
+                        for n in numbers {
+                            if !found.contains(&n) {
+                                found.push(n);
+                            }
                         }
+                        index = next;
                     }
-                    index = next;
-                    continue;
-                }
+                    None => index += 1,
+                },
+                _ => index += 1,
             }
-            index += 1;
         }
     }
     found
+}
+
+/// Past the code span opened by the backtick run at `start`: it ends at the next run of the
+/// same length. A run that nothing closes is plain text.
+fn after_code(chars: &[char], start: usize) -> usize {
+    let run = |from: usize| chars[from..].iter().take_while(|&&c| c == '`').count();
+    let open = run(start);
+    let mut index = start + open;
+    while index < chars.len() {
+        if chars[index] == '`' {
+            let close = run(index);
+            if close == open {
+                return index + close;
+            }
+            index += close;
+        } else {
+            index += 1;
+        }
+    }
+    start + open
 }
 
 /// `[12]` or `[1, 2]` at `start`, with the index after it.
@@ -482,6 +506,8 @@ mod tests {
         assert_eq!(cited("Voir [1, 3] puis [1][4]."), [1, 3, 4]);
         assert!(cited("let x = a[1]; `b [2]` et [3](https://x.test) puis [4]: lien").is_empty());
         assert!(cited("```\n[5]\n```\nrien").is_empty());
+        assert!(cited("exemple ``a [7] ` b`` fin").is_empty());
+        assert_eq!(cited("une ` seule puis [2]"), [2]);
         assert!(cited("[a] [] [12345] [ 7 x ]").is_empty());
     }
 

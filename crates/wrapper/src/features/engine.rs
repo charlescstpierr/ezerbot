@@ -1686,13 +1686,13 @@ impl RunServices for Services<'_> {
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };
-        let outcome = super::sources::annotate(&ctx, call, outcome);
         // No private vault values may leak through command/file output.
         match vault(self.path)
             .and_then(|v| redact::redact_value(&v, &serde_json::to_value(outcome)?))
             .and_then(|value| Ok(serde_json::from_value(value)?))
         {
-            Ok(outcome) => outcome,
+            // The registry is written from the redacted output, never from the raw one.
+            Ok(outcome) => super::sources::annotate(&ctx, call, outcome),
             Err(_) => ToolOutcome::Failed {
                 reason: "Sortie locale indisponible.".into(),
             },
@@ -2743,7 +2743,7 @@ fn run_reply(
         proposals,
         kind: "message".into(),
         payload: json!({"run_id":run.run_id,"bot_id":run.bot_id,"parts":parts,"usage":store::token_usage(conn, &run.run_id)?,
-            "sources":super::sources::registry(conn, &run.run_id)?,"citations":citations}),
+            "sources":redact::redact_value(&event_vault(conn)?, &json!(super::sources::registry(conn, &run.run_id)?))?,"citations":citations}),
         attachments: vec![],
     })
 }

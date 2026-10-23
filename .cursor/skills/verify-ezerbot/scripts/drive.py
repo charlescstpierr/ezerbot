@@ -690,7 +690,7 @@ def reminder_step(evidence: Path, index: int) -> None:
     """rappel : la notification du rappel dans la liste, depuis un autre fil ; attente : sa carte avec la ligne d'ancienneté ; bandeau : la reprise de l'app."""
     if index == 0:
         late_ask(evidence)
-        target = eval_js(
+        eval_js(
             evidence,
             """() => {
               const request = window.GrokbotPanels.state.forms.requests.find((item) => item.status?.status === "pending" && item.kind?.kind === "approval");
@@ -759,7 +759,7 @@ def reminder_step(evidence: Path, index: int) -> None:
               const line = document.querySelector("[data-approval-wait]");
               const card = document.querySelector('[data-card-kind="approval"][data-request-status="pending"]');
               if (!line || !card) return null;
-              card.scrollIntoView({{block: "center"}});
+              line.scrollIntoView({{block: "center"}});
               return {{ok: true, line: line.textContent, card: card.innerText, order: !!(line.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING), buttons: [...card.querySelectorAll("button")].map((node) => node.textContent)}};
             }}""",
             "la carte n'a pas sa ligne d'ancienneté",

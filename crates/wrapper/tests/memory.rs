@@ -697,7 +697,7 @@ fn five_hundred_facts_recalled_outside_prompt_with_scoped_search_and_status() {
         .unwrap()
         .is_empty());
     let listed = post(&mut app, "/api/memory", json!({"bot_id":"grokbot"}));
-    assert_eq!(listed["automatic"]["saturated"], true);
+    assert!(listed.get("automatic").is_none());
     assert_eq!(listed["profile"]["total"], 500);
     assert_eq!(
         listed["sharing_classes"][old["fact_id"].as_str().unwrap()],

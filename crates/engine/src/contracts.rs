@@ -172,6 +172,11 @@ pub enum AuthorizedBy {
     AutoReview {
         rule_id: String,
     },
+    /// Mode YOLO: the owner switched every approval off, globally or for this
+    /// bot. `source` is `global` or `bot`; it records which switch applied.
+    Yolo {
+        source: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +667,9 @@ mod contracts_tests {
             AuthorizedBy::AutoReview {
                 rule_id: "review-1".into(),
             },
+            AuthorizedBy::Yolo {
+                source: "global".into(),
+            },
         ] {
             round_trip(ApprovalCheck::Authorized { by });
         }
@@ -680,6 +688,15 @@ mod contracts_tests {
             })
             .unwrap(),
             json!({"status": "authorized", "by": {"kind": "rule", "rule_id": "rule-1"}})
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalCheck::Authorized {
+                by: AuthorizedBy::Yolo {
+                    source: "bot".into()
+                }
+            })
+            .unwrap(),
+            json!({"status": "authorized", "by": {"kind": "yolo", "source": "bot"}})
         );
     }
 

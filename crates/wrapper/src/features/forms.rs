@@ -626,6 +626,10 @@ pub fn check_tool_approval(
             }),
         };
     }
+    // Mode YOLO lifts the card; its guards (app data, standing refusals) are in `yolo::check`.
+    if let Some(decision) = super::yolo::check(ctx, run, call)? {
+        return Ok(decision);
+    }
     // A standing allow or deny never covers an outbound send, a deletion, or a
     // shell command that is compound or not proven safe.
     let policy = approval_policy(ctx, &call.name, &call.arguments);
@@ -736,7 +740,14 @@ pub(crate) fn verify_tool_admitted(ctx: &Context<'_>, call: &ToolCall) -> Result
         ));
     }
     let (id, digest) = guarded_identity(ctx, &run, call)?;
-    if let Some(request) = existing_request(ctx, &id, &digest)? {
+    let asked = existing_request(ctx, &id, &digest)?;
+    if asked.is_none()
+        && super::yolo::covered(&call.name)
+        && super::yolo::active(ctx.connection, &run.bot_id)
+    {
+        return Ok(());
+    }
+    if let Some(request) = asked {
         let admitted: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_approval_grants WHERE request_id=?1 AND tool=?2 AND args_digest=?3 AND consumed_at IS NOT NULL)",params![id,call.name,digest],|r|r.get(0))?;
         if admitted && matches!(request.status, RequestStatus::Resolved { .. }) {
             return Ok(());
@@ -1684,7 +1695,7 @@ fn approval_policy(
     policy
 }
 
-fn remote_tool_name(ctx: &Context<'_>, tool: &str) -> Option<String> {
+pub(super) fn remote_tool_name(ctx: &Context<'_>, tool: &str) -> Option<String> {
     if tool.starts_with("mcp_") && !super::mcp::is_lifecycle(tool) {
         super::mcp::display(ctx, tool)
             .and_then(|label| label.get("tool").and_then(Value::as_str).map(str::to_owned))

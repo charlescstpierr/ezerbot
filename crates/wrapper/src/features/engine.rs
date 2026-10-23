@@ -635,6 +635,19 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                         "Une réponse de tâche ne peut pas être régénérée.",
                     ));
                 }
+                // The turn that follows a late decision has no message of its own to send again,
+                // and what Charles approved must never run a second time.
+                let late: bool = app.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM wrapper_late_approvals WHERE run_id=?1)",
+                    [&old.run_id],
+                    |r| r.get(0),
+                )?;
+                if late {
+                    return Err(ApiError::new(
+                        409,
+                        "Cette reprise suit une décision tardive : elle ne peut pas être relancée. Écrivez un nouveau message pour continuer.",
+                    ));
+                }
                 let live: bool = app.connection.query_row(
                     "SELECT live FROM wrapper_engine_runs WHERE run_id=?1",
                     [&old.run_id],

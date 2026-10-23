@@ -2371,3 +2371,35 @@ fn a_card_decided_while_its_turn_blocks_keeps_the_ordinary_resume() {
     );
     assert_eq!(f.protected_effects(), 1);
 }
+
+#[test]
+fn the_follow_up_turn_of_a_late_decision_cannot_be_regenerated() {
+    let mut f = Fixture::new();
+    let request = f.waiting_card();
+    f.decide(&request, "late", json!("allow_once"));
+    let follow = f.late_run();
+    f.drive(&follow, &ScriptedGateway::default());
+    assert_eq!(f.protected_effects(), 1);
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/regenerate",
+            &serde_json::to_vec(&json!({"conversation_id":f.conversation,"message_id":follow}))
+                .unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(
+        error.message.contains("décision tardive"),
+        "{}",
+        error.message
+    );
+    // The turn stays as it ended and nothing the card approved runs again.
+    assert_eq!(
+        store::required(&f.conn, &follow).unwrap().status,
+        RunStatus::Finished
+    );
+    assert_eq!(f.late_runs(), 1);
+    assert_eq!(f.protected_effects(), 1);
+}

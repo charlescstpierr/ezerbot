@@ -782,7 +782,7 @@ fn require_human_data_read(
 ) -> Result<(), ApiError> {
     let human = if let grokbot_engine::contracts::AuthorizedBy::AllowOnce { request_id } = authority
     {
-        ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id WHERE r.id=?1 AND r.run_id=?2 AND r.status='resolved' AND s.submission_id GLOB 'user:*')", params![request_id,ctx.run_id], |r| r.get::<_,bool>(0))?
+        ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id WHERE r.id=?1 AND (r.run_id=?2 OR EXISTS(SELECT 1 FROM wrapper_late_approvals l WHERE l.request_id=r.id AND l.run_id=?2 AND l.allowed=1)) AND r.status='resolved' AND s.submission_id GLOB 'user:*')", params![request_id,ctx.run_id], |r| r.get::<_,bool>(0))?
     } else {
         false
     };

@@ -568,6 +568,48 @@ fn a_command_approved_after_its_turn_ended_runs_once_and_the_bot_reports_it() {
     assert_eq!(runs, 1);
 }
 #[test]
+fn an_app_data_listing_approved_after_its_turn_ended_runs_in_the_follow_up_turn() {
+    let mut f = Fixture::new();
+    f.settings(false, true);
+    f.post(
+        "/api/approvals/waiting",
+        json!({"task":true,"chat":true,"validity":"24h","reminder":"1h"}),
+    );
+    let data = f.path.parent().unwrap().to_path_buf();
+    f.script(vec![json!({"type":"response.output_item.done","item":{"id":"fc-data","type":"function_call","status":"completed","call_id":"data","name":"list_directory","arguments":json!({"path":data}).to_string()}}),json!({"type":"response.completed"})]);
+    f.reply("J’attends son accord.");
+    f.post(
+        "/api/send",
+        json!({"conversation_id":f.chat,"message_id":"data","body":"Liste les données"}),
+    );
+    f.finish("data");
+    let card = requests::list_for_run(&f.db(), &f.run("data").run_id)
+        .unwrap()
+        .remove(0);
+    f.reply("Voilà.");
+    f.decide(&card, json!("allow_once"));
+    let follow: String = f
+        .db()
+        .query_row(
+            "SELECT run_id FROM engine_runs WHERE run_id LIKE 'late-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    f.finish(&follow);
+    // The data-read guard still wants a human card, and it finds the original one.
+    let result = store::events(&f.db(), &follow, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == RunEventKind::ToolResult)
+        .unwrap();
+    assert_eq!(
+        result.payload["outcome"]["status"], "done",
+        "{}",
+        result.payload
+    );
+}
+#[test]
 fn standing_permissions_apply_to_future_commands_and_are_revocable() {
     let mut f = Fixture::new();
     f.settings(true, false);

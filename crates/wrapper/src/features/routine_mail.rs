@@ -255,16 +255,25 @@ pub fn poll(ctx: &Context<'_>) -> Result<usize, ApiError> {
 /// the host loop so that a slow answer never freezes the app. Once nobody listens the
 /// connector forgets what it held, so that a routine armed later starts from the inbox
 /// as it is then, not from a backlog.
+/// Whether the inbox is looked at now. A watch that is not armed (a routine just started
+/// listening, or listens again after a pause) learns the inbox at once: the cooldown of an
+/// earlier watch would let the messages that arrive meanwhile be taken for known mail.
+fn due(armed: bool, now: u64, last_poll: u64) -> bool {
+    !armed || now.saturating_sub(last_poll) >= POLL_MS
+}
+
+fn armed(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT armed FROM wrapper_routine_mail_watch WHERE id=1",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
 pub fn tick(ctx: &Context<'_>) {
     if !listening(ctx.connection) {
-        let armed: bool = ctx
-            .connection
-            .query_row(
-                "SELECT armed FROM wrapper_routine_mail_watch WHERE id=1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
+        let armed = armed(ctx.connection);
         if armed
             && !IN_FLIGHT.load(Ordering::Acquire)
             && mcp::gmail_stop_watching(ctx.connection).is_ok()
@@ -280,8 +289,11 @@ pub fn tick(ctx: &Context<'_>) {
         return;
     }
     let now = crate::now();
-    if now.saturating_sub(LAST_POLL.load(Ordering::Acquire)) < POLL_MS
-        || IN_FLIGHT.swap(true, Ordering::AcqRel)
+    if !due(
+        armed(ctx.connection),
+        now,
+        LAST_POLL.load(Ordering::Acquire),
+    ) || IN_FLIGHT.swap(true, Ordering::AcqRel)
     {
         return;
     }
@@ -319,4 +331,20 @@ pub fn tick(ctx: &Context<'_>) {
             eprintln!("Routines : la boîte Gmail n’a pas pu être consultée.");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_watch_that_is_not_armed_looks_at_the_inbox_at_once() {
+        let now = 1_000_000;
+        // Armed: once a minute.
+        assert!(!due(true, now, now - 1_000));
+        assert!(due(true, now, now - POLL_MS));
+        // Not armed (first listener, or listening again after a pause): no cooldown.
+        assert!(due(false, now, now - 1_000));
+        assert!(due(false, now, now));
+    }
 }

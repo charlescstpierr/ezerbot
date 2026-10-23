@@ -131,11 +131,14 @@
   };
   function render(state) {
     if (!settings) return;
-    const next = JSON.stringify([state.local, state.bots?.map(b => [b.id,b.name,b.deleted])]);
+    const next = JSON.stringify([state.local, state.yolo?.mode, state.yolo?.bots, state.bots?.map(b => [b.id,b.name,b.deleted])]);
     if (next === key) return;
     key = next;
     settings.className = "setting-section local-settings";
-    settings.replaceChildren(node("h3", "Terminal et fichiers sur ce Mac"), node("p", "Désactivés par défaut. Chaque commande et chaque écriture demandent votre accord, sauf règle « Toujours ». Le terminal n’est pas un sandbox : une commande peut accéder à tout votre Mac."));
+    const yoloBot = (bot) => state.yolo?.bots?.find(b => b.bot_id === bot.id)?.effective === "yolo";
+    settings.replaceChildren(node("h3", "Terminal et fichiers sur ce Mac"), node("p", state.yolo?.mode === "yolo"
+      ? "Le Mode YOLO ouvre le terminal et les fichiers aux bots qui le suivent, sans carte ; vos réglages ci-dessous reprennent effet dès que vous revenez à « Demander avant d’agir ». Le terminal n’est pas un sandbox : une commande peut accéder à tout votre Mac, sauf aux données d’Ezerbot."
+      : "Désactivés par défaut. Chaque commande et chaque écriture demandent votre accord, sauf règle « Toujours ». Le terminal n’est pas un sandbox : une commande peut accéder à tout votre Mac."));
     if (state.local?.error) { settings.append(node("p", state.local.error)); return; }
     for (const bot of state.bots || []) {
       if (bot.deleted) continue;
@@ -146,6 +149,7 @@
         const label = node("label"); label.className = "setting-toggle";
         const input = node("input"); input.type = "checkbox"; input.name = `local-${bot.id}-${field}`; input.checked = Boolean(current[field]);
         input.setAttribute("aria-label", `${title} pour ${bot.name}`); input.setAttribute("role", "switch");
+        if (yoloBot(bot)) { input.checked = true; input.disabled = true; input.title = "Ouvert par le Mode YOLO"; }
         input.addEventListener("change", () => save("/api/local/bot", { bot_id: bot.id, [field]: input.checked }, input));
         const track = node("span"); track.className = "toggle-track"; track.setAttribute("aria-hidden", "true");
         label.append(node("span", title), input, track); row.append(label);
@@ -153,6 +157,11 @@
       settings.append(row);
     }
     settings.append(node("h4", "Dossiers accordés en lecture"), node("p", "Tous les bots dont les fichiers sont activés peuvent lire ces dossiers sans carte. Ailleurs, une carte reste obligatoire, même avec une règle permanente. Retirer un dossier bloque les prochaines lectures automatiques."));
+    if (state.yolo?.mode === "yolo" && state.yolo.home) {
+      const home = node("p", "Mode YOLO : le dossier personnel est accordé ");
+      home.className = "local-yolo-home"; home.append(node("code", state.yolo.home));
+      settings.append(home);
+    }
     const folders = state.local?.folders || [];
     if (!folders.length) settings.append(node("p", "Aucun dossier accordé."));
     for (const path of folders) {

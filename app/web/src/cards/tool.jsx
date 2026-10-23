@@ -5,6 +5,7 @@ import { LocalResult } from "../local-result.js";
 import { ScreenCard, screenTools } from "../screen.jsx";
 import { GeneratedDocument, DocumentTool } from "../generated-document.jsx";
 import { GeneratedImage } from "../generated-image.jsx";
+import { AUTOMATIC_LABEL, automaticLine, isAutomatic, sourceLabel } from "../yolo-view.js";
 
 export const kind = "tool";
 
@@ -23,10 +24,11 @@ export function Data({ value }) {
   return <pre className="gb-engine-data">{text ?? "Non disponible"}</pre>;
 }
 
-export function Disclosure({ message, title, label, children }) {
+export function Disclosure({ message, title, label, automatic, line, children }) {
   const [open, setOpen] = useState(false);
   return (
-    <article className="gb-message gb-engine-card" data-message-id={message.id} data-card-kind={message.kind}>
+    <article className={`gb-message gb-engine-card${automatic ? " gb-auto-card" : ""}`} data-message-id={message.id} data-card-kind={message.kind} data-auto={automatic ? "yolo" : undefined}>
+      {line && <p className="gb-auto-line" title={line.title}>{line.text}</p>}
       <details onToggle={(event) => setOpen(event.currentTarget.open)}>
         <summary><strong>{title}</strong>{label && <span className="gb-engine-label">{label}</span>}</summary>
         {open && <div className="gb-engine-details">{children}</div>}
@@ -84,11 +86,13 @@ function LocalCard({ message, run, onAction, busy }) {
   const running = output?.background === true && output?.status === "en cours";
   const status = failure?.label || (output?.status ? localStatusLabel(output.status) : outcome ? "Terminé" : pending ? "En cours" : "Arrêtée");
   const tone = failure?.tone || (output?.status === "échec" ? "danger" : ["annulé", "délai dépassé", "arrêtée"].includes(output?.status) ? "warning" : running || !outcome ? "neutral" : "success");
-  return <article className="gb-message gb-engine-card gb-local-card" data-message-id={message.id} data-card-kind="tool" data-local-state={outcome?.status === "failed" ? "failed" : output?.status || (pending && runStatus === "running" ? "running" : "")}>
-    <div className="gb-local-header"><strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
+  const automatic = isAutomatic(authority);
+  const command = <pre className="gb-local-command">{typeof (call.name === "run_shell" ? args.command : args.path) === "string" ? preview : "Paramètres de l’action indisponibles ou invalides."}</pre>;
+  return <article className={`gb-message gb-engine-card gb-local-card${automatic ? " gb-auto-card" : ""}`} data-message-id={message.id} data-card-kind="tool" data-auto={automatic ? "yolo" : undefined} data-local-state={outcome?.status === "failed" ? "failed" : output?.status || (pending && runStatus === "running" ? "running" : "")}>
+    <div className="gb-local-header">{automatic && <span className="gb-auto-badge">{AUTOMATIC_LABEL}</span>}<strong>{localToolLabel(call.name)}</strong><span className="gb-local-status" data-tone={tone}>{status}</span></div>
     {authority?.kind === "rule" && <p>Autorisée automatiquement par une règle « Toujours » (Paramètres › Autorisations permanentes).</p>}
     {authority?.kind === "folder_grant" && <p>Lecture autorisée dans un dossier accordé.</p>}
-    <pre className="gb-local-command">{typeof (call.name === "run_shell" ? args.command : args.path) === "string" ? preview : "Paramètres de l’action indisponibles ou invalides."}</pre>
+    {automatic ? <p className="gb-auto-line" title={sourceLabel(authority)}>{automaticLine({ call, outcome })}</p> : command}
     {failure && <p className="gb-local-failure" data-tone={failure.tone} role={failure.tone === "warning" ? "alert" : "status"}>{failure.message}</p>}
     {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
     {pending && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
@@ -97,7 +101,7 @@ function LocalCard({ message, run, onAction, busy }) {
     {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
     {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}
     {output?.output_incomplete && <p>Sortie incomplète : la collecte a été arrêtée pour ne pas bloquer l’annulation.</p>}
-    {outcome && <details><summary>{failure ? "Afficher les détails" : "Afficher la sortie"}</summary>{failure ? <Data value={call.arguments} /> : call.name === "run_shell" ? <><h4>Sortie standard</h4><Data value={output.stdout || "(vide)"} /><h4>Erreurs</h4><Data value={output.stderr || "(vide)"} /></> : <LocalResult name={call.name} output={output} arguments={args} />}</details>}
+    {outcome && <details><summary>{failure ? "Afficher les détails" : "Afficher la sortie"}</summary>{automatic && command}{failure ? <Data value={call.arguments} /> : call.name === "run_shell" ? <><h4>Sortie standard</h4><Data value={output.stdout || "(vide)"} /><h4>Erreurs</h4><Data value={output.stderr || "(vide)"} /></> : <LocalResult name={call.name} output={output} arguments={args} />}</details>}
   </article>;
 }
 
@@ -130,8 +134,9 @@ export function Card({ message, onAction, busy }) {
       : run?.status === "awaiting_approval" ? "L’approbation se décide dans la conversation du bot principal."
         : "Aucun résultat enregistré pour cet appel.";
   }
+  const automatic = isAutomatic(authorized_by);
   return (
-    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : background ? "Routines en arrière-plan" : publication ? "Webhooks de routines" : `Outil · ${call.name}`} label={label}>
+    <Disclosure message={message} title={connector ? `Connecteur · ${connector.server} · ${connector.tool}` : background ? "Routines en arrière-plan" : publication ? "Webhooks de routines" : `Outil · ${call.name}`} label={automatic ? `${AUTOMATIC_LABEL} · ${label}` : label} automatic={automatic} line={automatic ? { text: automaticLine({ call, outcome, connector }), title: sourceLabel(authorized_by) } : undefined}>
       {!background && !publication && <p className="gb-engine-note">Identifiant d’appel : <code>{call.call_id}</code></p>}
       {authorized_by?.kind === "rule" && <p className="gb-engine-note">Autorisé automatiquement par la règle « Toujours » ({requesting_bot || "Bot demandeur"} · {connector ? `${connector.server} · ${connector.tool}` : call.name}).</p>}
       {background || publication ? <p>{background ? (call.arguments?.enabled ? "Installer l’agent de routines" : "Retirer l’agent de routines") : (call.arguments?.enabled ? "Publier les webhooks sur Internet" : "Retirer la publication des webhooks")}</p> : <><h4>Arguments</h4><Data value={call.arguments} /></>}

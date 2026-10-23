@@ -32,6 +32,7 @@ empty_hooks!(
     tick,
     tools,
     call_tool,
+    context,
     entry,
     on_run_event,
     link_attachments
@@ -42,7 +43,8 @@ pub const ASK: &str = "ask";
 const INHERIT: &str = "inherit";
 const LOG_LIMIT: usize = 100;
 const LOG_KEEP: i64 = 2000;
-pub const PROTECTED: &str = "Mode YOLO : les données et les identifiants d’Ezerbot restent hors de portée des outils.";
+pub const PROTECTED: &str =
+    "Mode YOLO : les données et les identifiants d’Ezerbot restent hors de portée des outils.";
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Une base neuve ou existante reçoit le mode YOLO une seule fois ; le choix
@@ -242,22 +244,6 @@ fn record(ctx: &Context<'_>, run: &Run, call: &ToolCall, source: &str) -> Result
     Ok(())
 }
 
-pub fn context(
-    ctx: &Context<'_>,
-    request: &grokbot_engine::contracts::ContextRequest,
-) -> Vec<grokbot_engine::contracts::ContextBlock> {
-    use grokbot_engine::contracts::{ContextBlock, ContextSource};
-    if !active(ctx.connection, &request.bot_id) {
-        return vec![];
-    }
-    vec![ContextBlock {
-        source: ContextSource::BotInstructions,
-        priority: super::priority::INSTRUCTIONS,
-        budget: 2_048,
-        text: "Mode YOLO actif : vos outils s’exécutent sans carte d’approbation, chaque action est tout de même inscrite au journal d’activité. Les données et les identifiants d’Ezerbot restent refusés. Les brouillons d’envoi (courriel, message, commentaire) restent à relire par l’utilisateur.".into(),
-    }]
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Global {
@@ -303,7 +289,10 @@ pub fn routes(
             }
             match input.mode.as_str() {
                 INHERIT => {
-                    tx.execute("DELETE FROM wrapper_yolo_bots WHERE bot_id=?1", [&input.bot_id])?;
+                    tx.execute(
+                        "DELETE FROM wrapper_yolo_bots WHERE bot_id=?1",
+                        [&input.bot_id],
+                    )?;
                 }
                 YOLO | ASK => {
                     tx.execute(
@@ -328,8 +317,8 @@ pub fn routes(
 pub fn state(ctx: &Context<'_>) -> Value {
     let load = || -> Result<Value, ApiError> {
         let conn = ctx.connection;
-        let mut statement =
-            conn.prepare("SELECT id FROM wrapper_bots WHERE account_id=?1 AND deleted=0 ORDER BY id")?;
+        let mut statement = conn
+            .prepare("SELECT id FROM wrapper_bots WHERE account_id=?1 AND deleted=0 ORDER BY id")?;
         let ids = statement
             .query_map([ACCOUNT], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -241,8 +241,14 @@ fn a_new_workspace_starts_in_yolo_and_runs_a_command_and_a_file_write_without_a_
         .map(|entry| entry["tool"].as_str().unwrap())
         .collect();
     assert_eq!(tools, ["read_file", "write_file", "run_shell"]);
-    assert!(log[2]["summary"].as_str().unwrap().contains("printf bonjour-yolo"));
-    assert!(log[1]["summary"].as_str().unwrap().contains("ecrit-par-yolo.txt"));
+    assert!(log[2]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("printf bonjour-yolo"));
+    assert!(log[1]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("ecrit-par-yolo.txt"));
     assert_eq!(log[0]["source"], "global");
 }
 
@@ -266,7 +272,11 @@ fn the_migration_turns_yolo_on_for_an_existing_workspace_without_touching_its_se
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(stored, (true, false), "les réglages d'avant restent intacts");
+    assert_eq!(
+        stored,
+        (true, false),
+        "les réglages d'avant restent intacts"
+    );
     // Fichiers était désactivé : le mode l'active sans carte.
     let target = f.root().join("lu.txt");
     std::fs::write(&target, "contenu").unwrap();
@@ -297,7 +307,11 @@ fn switching_back_to_ask_brings_the_cards_back_and_one_click_returns_to_yolo() {
     assert_eq!(request.status, requests::RequestStatus::Pending);
     f.post("/api/approvals/resolve", json!({"entry_id":request.entry_id,"submission_id":"decision","conversation_id":request.route.target_conversation_id,"decision":"deny"}));
     f.finish("ask-1");
-    assert_eq!(f.yolo()["log"], json!([]), "rien n'est auto-approuvé en mode Demander");
+    assert_eq!(
+        f.yolo()["log"],
+        json!([]),
+        "rien n'est auto-approuvé en mode Demander"
+    );
     f.mode("yolo");
     let out = f.runs_without_a_card("yolo-1", "run_shell", f.shell("printf auto"));
     assert_eq!(out["output"]["stdout"], "auto");
@@ -307,9 +321,14 @@ fn switching_back_to_ask_brings_the_cards_back_and_one_click_returns_to_yolo() {
 #[test]
 fn a_bot_override_beats_the_global_switch_in_both_directions() {
     let mut f = Fixture::new();
-    f.post("/api/bots", json!({"id":"pair","name":"Pair","color":"cyan"}));
-    let pair_chat = f.post("/api/conversations", json!({"bot_id":"pair","title":"Pair"}))
-        ["conversation"]["id"]
+    f.post(
+        "/api/bots",
+        json!({"id":"pair","name":"Pair","color":"cyan"}),
+    );
+    let pair_chat = f.post(
+        "/api/conversations",
+        json!({"bot_id":"pair","title":"Pair"}),
+    )["conversation"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -342,7 +361,12 @@ fn a_bot_override_beats_the_global_switch_in_both_directions() {
     f.mode("ask");
     f.bot_mode("pair", "yolo");
     f.local("grokbot", true, true);
-    f.send_in(&pair_chat, "pair-auto", "run_shell", f.shell("printf pair-auto"));
+    f.send_in(
+        &pair_chat,
+        "pair-auto",
+        "run_shell",
+        f.shell("printf pair-auto"),
+    );
     f.finish("pair-auto");
     assert!(f.requests("pair-auto").is_empty());
     assert_eq!(
@@ -411,7 +435,10 @@ fn ezerbot_data_and_credentials_stay_out_of_reach_even_in_yolo() {
     for (id, tool, args) in attempts {
         f.send(id, tool, args);
         f.finish(id);
-        assert!(f.requests(id).is_empty(), "{id} ne doit pas ouvrir de carte");
+        assert!(
+            f.requests(id).is_empty(),
+            "{id} ne doit pas ouvrir de carte"
+        );
         let out = f.outcome(id);
         assert_eq!(out["status"], "failed", "{id}: {out}");
         assert_eq!(out["reason"], PROTECTED, "{id}");
@@ -520,7 +547,10 @@ fn screen_control_still_needs_a_session_the_owner_started_even_in_yolo() {
     assert!(f.requests("capture").is_empty());
     let out = f.outcome("capture");
     assert_eq!(out["status"], "failed");
-    assert!(out["reason"].as_str().unwrap().contains("Aucune session active"));
+    assert!(out["reason"]
+        .as_str()
+        .unwrap()
+        .contains("Aucune session active"));
 }
 
 #[test]
@@ -534,7 +564,13 @@ fn settings_cards_and_drafts_keep_their_card_in_yolo() {
     ] {
         assert!(!covered(tool), "{tool} doit garder sa carte");
     }
-    for tool in ["run_shell", "write_file", "delegate", "computer_click", "create_document"] {
+    for tool in [
+        "run_shell",
+        "write_file",
+        "delegate",
+        "computer_click",
+        "create_document",
+    ] {
         assert!(covered(tool), "{tool} doit être couvert");
     }
 }

@@ -52,6 +52,8 @@ impl Fixture {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("app.sqlite");
         let mut app = App::open(&path).unwrap();
+        app.api("POST", "/api/yolo/mode", br#"{"mode":"ask"}"#)
+            .unwrap();
         let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]
             ["id"]
             .as_str()

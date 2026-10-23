@@ -48,7 +48,8 @@ impl Fixture {
             std::fs::write(path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"access_token":"access-2","refresh_token":"refresh-2","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
         }
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
-        let app = App::open_with(&path, provider.clone()).unwrap();
+        let mut app = App::open_with(&path, provider.clone()).unwrap();
+        support::ask_before_acting(&mut app);
         if live {
             wait("catalog", || provider.status()["models_ready"] == true);
         }

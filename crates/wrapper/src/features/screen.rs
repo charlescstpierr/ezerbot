@@ -466,7 +466,9 @@ fn verify_human(ctx: &Context<'_>, call: &ToolCall, lease: &Lease) -> Result<(),
         .flatten();
     let authority = raw.and_then(|s| serde_json::from_str::<AuthorizedBy>(&s).ok());
     // Mode YOLO : la session consentie reste exigée ; elle porte Arrêter et Échap.
-    if matches!(authority, Some(AuthorizedBy::Yolo { .. })) && super::yolo::active(ctx.connection, &lease.bot) {
+    if matches!(authority, Some(AuthorizedBy::Yolo { .. }))
+        && super::yolo::active(ctx.connection, &lease.bot)
+    {
         return Ok(());
     }
     if let Some(AuthorizedBy::AllowOnce { request_id }) = authority {

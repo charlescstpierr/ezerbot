@@ -944,7 +944,8 @@ impl Fixture {
         let provider = Provider::with_endpoints(&path, ai.endpoints(), false);
         let oauth = OAuth::new();
         std::env::set_var("GROKBOT_FAKE_CONNECTORS", &oauth.base);
-        let app = App::open_with(&path, provider.clone()).unwrap();
+        let mut app = App::open_with(&path, provider.clone()).unwrap();
+        support::ask_before_acting(&mut app);
         wait("models", || provider.status()["models_ready"] == true);
         Self {
             app,

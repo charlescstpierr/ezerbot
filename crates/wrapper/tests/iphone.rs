@@ -444,3 +444,47 @@ fn paired_phone_can_stop_a_background_task() {
         .unwrap();
     assert_eq!(result["status"], "arrêtée");
 }
+
+fn user_messages(app: &mut App, conversation: &str, body: &str) -> usize {
+    app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == conversation)
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .filter(|m| m["role"] == "user" && m["body"] == body)
+        .count()
+}
+
+#[test]
+fn phone_reply_lands_once_in_the_mac_thread_and_never_when_access_is_cut() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    let conversation = f.post("/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reply = json!({"conversation_id":conversation,"message_id":"sheet-1","body":"Vu depuis la notification"});
+    f.remote("POST", "/api/send", reply.clone(), Some(&token))
+        .unwrap();
+    f.remote("POST", "/api/send", reply, Some(&token)).unwrap();
+    assert_eq!(
+        user_messages(&mut f.app, &conversation, "Vu depuis la notification"),
+        1
+    );
+    f.post("/api/iphone/enabled", json!({"enabled":false}));
+    let refused = f
+        .remote(
+            "POST",
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":"sheet-2","body":"Saisie sans Mac"}),
+            Some(&token),
+        )
+        .unwrap_err();
+    assert_eq!(refused.status, 403);
+    assert_eq!(refused.message, iphone::ACCESS_DISABLED);
+    assert_eq!(
+        user_messages(&mut f.app, &conversation, "Saisie sans Mac"),
+        0
+    );
+}

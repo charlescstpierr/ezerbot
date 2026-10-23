@@ -4,11 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '../web/public');
-function worker() {
+function worker({ clients: windows = [] } = {}) {
   const events = new Map(), notices = [], opened = [], writes = [];
   const self = { location: { origin: 'https://mac.qa.ts.net' }, addEventListener: (name, handler) => events.set(name, handler),
     registration: { showNotification: async (title, options) => notices.push({ title, options }) },
-    clients: { matchAll: async () => [], openWindow: async url => opened.push(url), claim: async () => {} }, skipWaiting: async () => {} };
+    clients: { matchAll: async () => windows, openWindow: async url => opened.push(url), claim: async () => {} }, skipWaiting: async () => {} };
   let shellCached = true;
   const cache = { addAll: async assets => writes.push(...assets), put: async request => writes.push(typeof request === 'string' ? request : request.url) };
   const caches = { open: async () => cache, keys: async () => [], delete: async () => true, match: async request => shellCached ? { offline: request } : undefined };
@@ -57,6 +57,27 @@ test('push displays generic text and click opens an encoded same-origin destinat
   let closed = false; await w.fire('notificationclick', { notification: { data: { notification: 'input:a/b' }, close: () => { closed = true; } } });
   assert.ok(closed); assert.deepEqual(w.opened, ['/?notification=input%3Aa%2Fb']);
   await w.fire('push', { data: { json: () => ({ title: {} }) } }); assert.equal(w.notices.length, 1);
+});
+test('a bot reply notifies under the bot name, without its text, and offers Répondre', async () => {
+  const w = worker(); await w.fire('push', { data: { json: () => ({ title: 'Atlas', kind: 'reply', id: 'reply:run-1', conversation_id: 'c1', card_id: 'reply-run-1', text: 'Le code est 1234' }) } });
+  assert.equal(w.notices.length, 1); assert.equal(w.notices[0].title, 'Atlas');
+  assert.equal(w.notices[0].options.body, 'Ouvrez Ezerbot pour consulter cet événement.');
+  assert.ok(!JSON.stringify(w.notices[0]).includes('1234'));
+  assert.equal(JSON.stringify(w.notices[0].options.actions), JSON.stringify([{ action: 'reply', title: 'Répondre' }]));
+  await w.fire('push', { data: { json: () => ({ title: 'Autorisation demandée', kind: 'approval', id: 'input:a' }) } });
+  assert.equal(w.notices[1].options.actions, undefined);
+});
+test('Répondre opens the reply sheet of that conversation while a plain tap only opens it', async () => {
+  const w = worker();
+  const click = (action, data = { notification: 'reply:run-1' }) => w.fire('notificationclick', { action, notification: { data, close() {} } });
+  await click('reply'); await click('');
+  assert.deepEqual(w.opened, ['/?notification=reply%3Arun-1&reply=1', '/?notification=reply%3Arun-1']);
+  const messages = [];
+  const open = worker({ clients: [{ url: 'https://mac.qa.ts.net/', postMessage: message => messages.push(message), focus: async () => {} }] });
+  await open.fire('notificationclick', { action: 'reply', notification: { data: { notification: 'reply:run-1' }, close() {} } });
+  await open.fire('notificationclick', { notification: { data: { notification: 'reply:run-1' }, close() {} } });
+  assert.equal(JSON.stringify(messages), JSON.stringify([{ notification: 'reply:run-1', reply: true }, { notification: 'reply:run-1' }]));
+  assert.deepEqual(open.opened, []);
 });
 test('install manifest describes standalone French app and real maskable PNG dimensions', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.webmanifest'), 'utf8'));

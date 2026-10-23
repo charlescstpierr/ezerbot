@@ -17,6 +17,9 @@ class Element {
   getClientRects() { return this.rects || [{}]; }
   getBoundingClientRect() { return { height: this.height ?? 50 }; }
   focus() { this.focused = true; }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  remove() { this.removed = true; }
   scrollIntoView(options) { this.scrolled = options; }
   get classList() {
     const element = this;
@@ -28,15 +31,21 @@ const descendants = root => [root, ...root.children.flatMap(descendants)];
 const find = (root, predicate) => descendants(root).find(predicate);
 const byClass = (root, cls) => find(root, el => el.className.split(" ").includes(cls));
 const flush = () => new Promise(resolve => setImmediate(resolve));
-async function fixture({ enabled = true, dnd = false, items = [], status = "recording" } = {}) {
+async function fixture({ enabled = true, dnd = false, items = [], status = "recording", search = "", bots = [] } = {}) {
   const top = new Element("div"), panels = new Element("div"), settings = new Element("div");
   const remote = { settings: { enabled, dnd, reply: true, approval: true, form: true, secret: true, routine: true, delegation: true }, items, unread: items.length, deliveries: [] };
   let interval, registration;
-  const nodes = [], frames = [];
+  const nodes = [], frames = [], calls = [], sendOutcomes = [];
   const target = { id: "routine:occ", conversation_id: "chat", card_id: "reply-run" };
   const host = {
     register(value) { registration = value; value.settingsSection(settings); },
-    async api(path, body) { if (path.endsWith("/open")) return target; if (path.endsWith("/settings")) remote.settings = body; return JSON.parse(JSON.stringify(remote)); },
+    calls,
+    state: { conversations: [{ id: "chat", bot_id: "atlas" }], bots: [{ id: "atlas", name: "Atlas" }] },
+    async api(path, body) {
+      calls.push([path, body]);
+      if (path === "/api/send") { if (sendOutcomes.length) { const outcome = sendOutcomes.shift(); if (outcome) throw outcome; } return { ok: true }; }
+      if (path.endsWith("/open")) return target; if (path.endsWith("/settings")) remote.settings = body; return JSON.parse(JSON.stringify(remote));
+    },
     openConversation(id) { registration.onState({}, { conversation: { id } }); return true; },
     async refresh() {}, notify() {},
   };
@@ -44,12 +53,12 @@ async function fixture({ enabled = true, dnd = false, items = [], status = "reco
     getElementById: id => id === "chat-scroll" ? { clientHeight: 200 } : panels, querySelector: selector => selector === ".topbar-actions" ? top : null,
     querySelectorAll: selector => selector.includes("data-notification-card") ? nodes : [], hasFocus: () => true, visibilityState: "visible", addEventListener() {},
   };
-  const window = { GrokbotPanels: host, webkit: { messageHandlers: { ezerbotNotifications: { async postMessage() { return { status }; } } } }, addEventListener() {} };
+  const window = { GrokbotPanels: host, location: { search, pathname: "/" }, history: { replaceState(_, __, url) { this.url = url; } }, webkit: { messageHandlers: { ezerbotNotifications: { async postMessage() { return { status }; } } } }, addEventListener() {} };
   runInNewContext(readFileSync(new URL("../../ui/panels/notifications.js", import.meta.url), "utf8"), {
-    window, document, setInterval(fn) { interval = fn; }, setTimeout() {}, requestAnimationFrame(fn) { frames.push(fn); },
+    window, document, URLSearchParams, crypto: { randomUUID: (() => { let n = 0; return () => `message-${++n}`; })() }, setInterval(fn) { interval = fn; }, setTimeout() {}, requestAnimationFrame(fn) { frames.push(fn); },
   });
   await flush();
-  return { top, panels, settings, remote, registration, window, nodes, frames, async poll() { await interval(); await flush(); } };
+  return { top, panels, settings, remote, registration, window, nodes, frames, calls, sendOutcomes, async poll() { await interval(); await flush(); } };
 }
 const item = (kind, title) => ({ id: `${kind}:1`, kind, title, card_id: "card", conversation_id: "chat", conversation_title: "Conversation", created_at: Date.now() });
 
@@ -110,4 +119,81 @@ test("dialog scroll stays in the list and target focus uses theme ink without th
   assert.match(css, /\[data-notification-card\]:focus, \[data-message-id\]:focus \{ outline: none;/);
   assert.match(css, /\.notification-target \{[^}]*inset 0 0 0 2px var\(--accent-ink\)/);
   assert.match(css, /\.notification-target::after \{[^}]*z-index: 2;[^}]*border: 2px solid var\(--accent-ink\);[^}]*pointer-events: none;/);
+});
+
+const sheet = f => descendants(f.panels).find(el => el.className.includes("reply-sheet"));
+const submit = async (f, text) => {
+  const form = find(sheet(f), el => el.tagName === "form");
+  find(sheet(f), el => el.tagName === "textarea").value = text;
+  const first = form.onsubmit({ preventDefault() {} }), second = form.onsubmit({ preventDefault() {} });
+  await Promise.all([first, second]); await flush();
+};
+const sent = f => JSON.parse(JSON.stringify(f.calls.filter(([path]) => path === "/api/send")));
+
+test("Répondre opens a sheet on that conversation, named for its bot, field ready", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  const dialog = sheet(f), field = find(dialog, el => el.tagName === "textarea");
+  assert.equal(dialog.open, true);
+  assert.equal(byClass(dialog, "dialog-header").textContent.startsWith("Répondre à Atlas"), true);
+  assert.equal(field.focused, true);
+  assert.equal(find(dialog, el => el.tagName === "button" && el.textContent === "Envoyer").disabled, undefined);
+  assert.deepEqual(sent(f), []);
+});
+
+test("a plain tap opens the conversation without any sheet", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ");
+  assert.equal(sheet(f), undefined);
+  assert.ok(f.calls.some(([path]) => path === "/api/notifications/open"));
+});
+
+test("the reply is sent once to that conversation, even when Envoyer is pressed twice", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  await submit(f, "  Vu depuis la notification ");
+  assert.deepEqual(sent(f), [["/api/send", { conversation_id: "chat", message_id: "message-1", body: "Vu depuis la notification" }]]);
+  assert.equal(sheet(f).open, false);
+});
+
+test("an empty reply sends nothing", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  await submit(f, "   ");
+  assert.deepEqual(sent(f), []);
+  assert.equal(sheet(f).open, true);
+});
+
+test("with the Mac out of reach the sheet says so, keeps the text and a retry reuses the same message", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  f.sendOutcomes.push(new Error("La connexion au moteur local est interrompue."));
+  await submit(f, "Vu depuis la notification");
+  const status = byClass(sheet(f), "notification-warning");
+  assert.match(status.textContent, /Le Mac est injoignable\. Votre message n’a pas été envoyé ni mis en file/);
+  assert.equal(status.role, "alert");
+  assert.equal(sheet(f).open, true);
+  assert.equal(find(sheet(f), el => el.tagName === "textarea").value, "Vu depuis la notification");
+  await submit(f, "Vu depuis la notification");
+  assert.deepEqual(sent(f).map(([, body]) => body.message_id), ["message-1", "message-1"]);
+  assert.equal(sheet(f).open, false);
+});
+
+test("a refusal from the Mac is shown as the Mac wrote it", async () => {
+  const f = await fixture();
+  await f.window.EzerbotNotifications.activate("routine:occ", { reply: true });
+  f.sendOutcomes.push(Object.assign(new Error("L’accès iPhone est désactivé sur le Mac."), { status: 403 }));
+  await submit(f, "Bonjour");
+  assert.equal(byClass(sheet(f), "notification-warning").textContent, "L’accès iPhone est désactivé sur le Mac.");
+});
+
+test("opening the app from a push shows the reply sheet, or only the conversation for a plain tap", async () => {
+  const reply = await fixture({ search: "?notification=routine%3Aocc&reply=1" });
+  await reply.poll(); await flush(); await flush();
+  assert.equal(sheet(reply).open, true);
+  assert.equal(reply.window.history.url, "/");
+  const plain = await fixture({ search: "?notification=routine%3Aocc" });
+  await plain.poll(); await flush(); await flush();
+  assert.equal(sheet(plain), undefined);
+  assert.ok(plain.calls.some(([path]) => path === "/api/notifications/open"));
 });

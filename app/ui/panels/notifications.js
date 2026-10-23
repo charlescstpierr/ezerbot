@@ -5,6 +5,12 @@
   const kinds = { reply: "Réponses terminées", approval: "Autorisations demandées", form: "Formulaires en attente", secret: "Secrets demandés", routine: "Routines terminées ou en échec", delegation: "Sous-tâches terminées" };
   let current = null, data = null, loading = false, section, message, nativeFocus = null, pendingOpen = null;
   let permission = "unknown", error = "", pollFailure = "", saving = false;
+  // A tap on a push while the app was closed opens /?notification=…[&reply=1].
+  let launch = null;
+  try {
+    const query = new URLSearchParams(window.location?.search || "");
+    if (query.get("notification")) { launch = { id: query.get("notification"), reply: query.get("reply") === "1" }; window.history?.replaceState(null, "", window.location.pathname); }
+  } catch { /* no launch destination */ }
   let listSignature = "", settingsSignature = "";
   const bridge = () => window.webkit?.messageHandlers?.ezerbotNotifications;
   async function native(command, fields = {}) {
@@ -113,16 +119,60 @@
     section.append(toggle("dnd", "Ne pas déranger", "Suspend les alertes ; les événements restent dans la liste des non lus."));
     for (const [key, label] of Object.entries(kinds)) section.append(toggle(key, label));
   }
+  // Répondre: a sheet on the conversation, field ready. One message id per text, so
+  // a second tap on Envoyer (or a retry after a lost answer) never posts twice.
+  let reply = null;
+  const MAC_UNREACHABLE = "Le Mac est injoignable. Votre message n’a pas été envoyé ni mis en file. Vérifiez que le Mac est allumé avec Ezerbot ouvert, puis réessayez.";
+  function botName(conversationId) {
+    const state = host.state, conversation = state?.conversations?.find(item => item.id === conversationId);
+    return state?.bots?.find(bot => bot.id === conversation?.bot_id)?.name || "";
+  }
+  function replyStatus(text, failed = false) {
+    reply.status.textContent = text; reply.status.className = failed ? "notification-warning" : "notification-hint"; reply.status.role = failed ? "alert" : "status";
+  }
+  function openReply(conversationId) {
+    reply?.dialog.remove?.();
+    const name = botName(conversationId);
+    const dialog = node("dialog", null, "dialog reply-sheet"); dialog.setAttribute("aria-labelledby", "reply-title");
+    const heading = node("div", null, "dialog-header");
+    const titleNode = node("h2", name ? `Répondre à ${name}` : "Répondre"); titleNode.id = "reply-title";
+    const dismiss = node("button", "Fermer", "secondary-button"); dismiss.type = "button"; dismiss.onclick = () => dialog.close();
+    heading.append(titleNode, dismiss);
+    const form = node("form", null, "reply-form");
+    const area = node("textarea", null, "text-input reply-input"); area.setAttribute("aria-label", "Votre réponse"); area.rows = 4; area.maxLength = 20000; area.enterKeyHint = "send";
+    const status = node("p", null, "notification-hint"); status.role = "status";
+    const send = node("button", "Envoyer", "primary-button"); send.type = "submit";
+    form.append(area, status, send); dialog.append(heading, form);
+    reply = { dialog, area, status, send, conversationId, sending: false, sentBody: null, messageId: null };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const current = reply, body = area.value.trim();
+      if (!body || current.sending) return;
+      if (body !== current.sentBody) { current.sentBody = body; current.messageId = crypto.randomUUID(); }
+      current.sending = true; send.disabled = true; replyStatus("Envoi en cours…");
+      try {
+        await host.api("/api/send", { conversation_id: current.conversationId, message_id: current.messageId, body });
+        await host.refresh().catch(() => {});
+        dialog.close();
+      } catch (e) {
+        // A refusal from the Mac says why; a missing answer means the Mac is out of reach.
+        replyStatus(e.status ? e.message : MAC_UNREACHABLE, true); send.disabled = false;
+      } finally { current.sending = false; }
+    };
+    document.getElementById("panels").append(dialog);
+    dialog.showModal(); area.focus();
+  }
   function presence() {
     return { focused: (nativeFocus ?? document.hasFocus()) && document.visibilityState === "visible", visible: Boolean(current) && !document.querySelector("dialog[open]"), conversation_id: current?.id || null };
   }
-  async function open(id) {
+  async function open(id, options = {}) {
     try {
       const target = await host.api("/api/notifications/open", { id });
       document.querySelectorAll("dialog[open]").forEach(el => el.close());
       pendingOpen = target;
       await host.refresh();
       focusTarget();
+      if (options.reply) openReply(target.conversation_id);
     } catch (e) { host.notify(e.message); }
   }
   function focusTarget() {
@@ -176,11 +226,12 @@
       const visible = p.focused && p.visible ? data.items.filter(item => item.conversation_id === p.conversation_id).map(item => item.id) : [];
       if (visible.length) { data = await host.api("/api/notifications/read", { ids: visible }); renderList(); }
       focusTarget();
+      if (launch) { const { id, reply: wantsReply } = launch; launch = null; open(id, { reply: wantsReply }); }
     } catch (e) { pollFailure = e.message; renderSettings(); }
     finally { loading = false; }
   }
   window.EzerbotNotifications = {
-    activate: id => open(id),
+    activate: (id, options) => open(id, options),
     focus: value => {
       nativeFocus = Boolean(value);
       if (nativeFocus) native("status").then(result => { permission = result.status; renderSettings(); }).catch(() => {});

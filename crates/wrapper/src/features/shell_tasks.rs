@@ -9,10 +9,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::Sender,
         Arc, Mutex, OnceLock,
     },
     time::Duration,
@@ -23,6 +25,31 @@ pub(crate) struct Piece {
     pub text: String,
     pub truncated: bool,
     pub incomplete: bool,
+    /// The unterminated last line the program wrote, whatever the output cap
+    /// kept. A prompt is that line, because the program is waiting on it.
+    pub tail: String,
+    pub tail_seq: u64,
+}
+
+const TAIL_BYTES: usize = 256;
+
+/// Orders the two streams' tails: only the stream written last can be the
+/// prompt the program is waiting on.
+pub(crate) fn next_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    SEQ.fetch_add(1, Ordering::SeqCst)
+}
+
+/// The line left unfinished by `previous` followed by `chunk`.
+pub(crate) fn extend_tail(previous: &[u8], chunk: &[u8]) -> Vec<u8> {
+    let mut tail = match chunk.iter().rposition(|byte| *byte == b'\n') {
+        Some(end) => chunk[end + 1..].to_vec(),
+        None => [previous, chunk].concat(),
+    };
+    if tail.len() > TAIL_BYTES {
+        tail.drain(..tail.len() - TAIL_BYTES);
+    }
+    tail
 }
 
 pub(crate) struct Snap {
@@ -55,11 +82,29 @@ impl Drop for DoneFlag {
     }
 }
 
+/// How the host talks to a running task: the program's standard input, and the
+/// channel that carries the echo of each line into its stdout reader, so the
+/// echo takes the same output cap and order as the program's own output.
+pub(crate) struct Wire {
+    pub stdin: Box<dyn Write + Send>,
+    pub echo: Sender<Vec<u8>>,
+}
+
+pub(crate) type SharedWire = Arc<Mutex<Option<Wire>>>;
+
+#[derive(Clone)]
+pub(crate) struct Tails {
+    pub stdout: Arc<Mutex<Piece>>,
+    pub stderr: Arc<Mutex<Piece>>,
+}
+
 struct Live {
     db: PathBuf,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     pgid: u32,
+    wire: SharedWire,
+    tails: Tails,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Live>> {
@@ -104,7 +149,14 @@ pub(crate) fn insert(
     Ok(())
 }
 
-pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> TaskControl {
+pub(crate) fn register(
+    db: &Path,
+    run_id: &str,
+    call_id: &str,
+    pgid: u32,
+    wire: SharedWire,
+    tails: Tails,
+) -> TaskControl {
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let mut tasks = registry().lock().unwrap_or_else(|error| error.into_inner());
@@ -115,6 +167,8 @@ pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> Tas
             stop: stop.clone(),
             done: done.clone(),
             pgid,
+            wire,
+            tails,
         },
     );
     TaskControl { stop, done }
@@ -600,6 +654,110 @@ pub(crate) fn stop(conn: &Connection, db: &Path, body: &[u8]) -> Result<Value, A
     Ok(json!({"status":"arrêtée"}))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskInput {
+    run_id: String,
+    call_id: String,
+    line: String,
+}
+
+/// One line and its newline must fit in a pipe write that cannot be split.
+const MAX_LINE_BYTES: usize = 511;
+
+fn gone() -> ApiError {
+    ApiError::new(
+        409,
+        "Cette tâche n’est plus en cours : la saisie n’a pas été envoyée.",
+    )
+}
+
+/// Prompts that ask for a secret. The same class the screen control refuses
+/// (a secure field): the known class is refused, not every secret guessed.
+pub(crate) fn asks_for_password(prompt: &str) -> bool {
+    let prompt = prompt.to_lowercase();
+    [
+        "password",
+        "passwd",
+        "passphrase",
+        "passcode",
+        "mot de passe",
+        "mots de passe",
+        "motdepasse",
+        "phrase de passe",
+        "phrase secrète",
+        "code secret",
+    ]
+    .iter()
+    .any(|word| prompt.contains(word))
+}
+
+pub(crate) fn input(db: &Path, body: &[u8]) -> Result<Value, ApiError> {
+    let input: TaskInput = crate::parse(body)?;
+    crate::validate_id(&input.run_id)?;
+    crate::validate_id(&input.call_id)?;
+    if input.line.len() > MAX_LINE_BYTES {
+        return Err(ApiError::new(
+            400,
+            "Cette ligne est trop longue : 511 octets au maximum.",
+        ));
+    }
+    if input.line.contains(['\n', '\r', '\0']) {
+        return Err(ApiError::new(400, "Envoyez une seule ligne à la fois."));
+    }
+    let live = registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&key(db, &input.run_id, &input.call_id))
+        .map(|task| (task.stop.clone(), task.wire.clone(), task.tails.clone()));
+    let Some((stop, wire, tails)) = live else {
+        return Err(gone());
+    };
+    // The worker closes the wire when the program ends or is stopped, under
+    // this same lock, so a closed wire is the final word on Terminée/Arrêtée.
+    let mut wire = wire.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(wire) = wire.as_mut().filter(|_| !stop.load(Ordering::SeqCst)) else {
+        return Err(gone());
+    };
+    let (out, err) = (
+        tails
+            .stdout
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        tails
+            .stderr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    let prompt = if err.tail_seq > out.tail_seq {
+        &err.tail
+    } else {
+        &out.tail
+    };
+    if asks_for_password(prompt) {
+        return Err(ApiError::new(
+            409,
+            "Ce programme demande un mot de passe : la saisie n’a pas été envoyée. Saisissez-le vous-même, hors d’Ezerbot.",
+        ));
+    }
+    drop((out, err));
+    let line = format!("{}\n", input.line);
+    match wire.stdin.write(line.as_bytes()) {
+        Ok(written) if written == line.len() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(ApiError::new(
+                409,
+                "Le programme ne lit pas son entrée pour l’instant : la saisie n’a pas été envoyée.",
+            ));
+        }
+        _ => return Err(gone()),
+    }
+    // Only a line the program received is shown, so a refusal never changes
+    // the output.
+    let _ = wire.echo.send(line.into_bytes());
+    Ok(json!({"status":"envoyée"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +769,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn only_a_prompt_for_a_secret_is_refused() {
+        for prompt in [
+            "Password: ",
+            "user@host's password: ",
+            "Mot de passe : ",
+            "Enter passphrase for key '/Users/x/.ssh/id': ",
+            "Entrez le code secret ",
+        ] {
+            assert!(asks_for_password(prompt), "{prompt}");
+        }
+        for prompt in ["", "Continuer ? [y/N] ", "Nom du projet : ", "oui"] {
+            assert!(!asks_for_password(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn the_tail_is_the_unfinished_last_line_whatever_the_chunking() {
+        assert_eq!(extend_tail(b"Pass", b"word: "), b"Password: ");
+        assert_eq!(extend_tail(b"Password: ", b"oui\nOK? "), b"OK? ");
+        assert_eq!(extend_tail(b"Password: ", b"oui\n"), b"");
+        let long = vec![b'a'; 1000];
+        assert_eq!(extend_tail(b"", &long).len(), TAIL_BYTES);
     }
 
     fn db() -> (Temp, Connection) {

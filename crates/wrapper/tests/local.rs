@@ -1308,6 +1308,202 @@ fn stop_kills_only_that_group_and_quitting_marks_the_other_stopped() {
     assert_eq!(f.tool_output("two")["status"], "arrêtée");
 }
 
+fn start_background(f: &mut Fixture, id: &str, command: &str) {
+    let mut args = f.shell(command);
+    args["background"] = json!(true);
+    args["timeout_ms"] = json!(100);
+    f.send(id, "run_shell", args);
+    let request = f.request(id);
+    f.reply("ok");
+    f.decide(&request, json!("allow_once"));
+    f.finish(id);
+}
+
+fn task_input(f: &mut Fixture, id: &str, line: &str) -> Result<Value, grokbot_wrapper::ApiError> {
+    let run_id = f.run(id).run_id;
+    f.app.api(
+        "POST",
+        "/api/local/tasks/input",
+        json!({"run_id": run_id, "call_id": id, "line": line})
+            .to_string()
+            .as_bytes(),
+    )
+}
+
+fn wait_output(f: &mut Fixture, id: &str, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+    for _ in 0..200 {
+        let output = f.tool_output(id);
+        if done(&output) {
+            return output;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("{what} : {}", f.tool_output(id));
+}
+
+#[test]
+fn a_line_sent_to_a_running_task_is_read_by_the_process_and_shown_in_its_output() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(
+        &mut f,
+        "ask",
+        "read -r answer; printf '%s' \"$answer\" > lu.txt; echo \"recu=$answer\"",
+    );
+    assert_eq!(f.tool_output("ask")["status"], "en cours");
+    assert!(!f.root().join("lu.txt").exists());
+    let reply = task_input(&mut f, "ask", "oui").unwrap();
+    assert_eq!(reply["status"], "envoyée");
+    let output = wait_output(&mut f, "ask", "la tâche n’a pas fini", |o| {
+        o["status"] == "terminé"
+    });
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("lu.txt")).unwrap(),
+        "oui",
+        "le processus n’a pas lu la ligne envoyée"
+    );
+    let stdout = output["stdout"].as_str().unwrap();
+    assert!(stdout.contains("recu=oui"), "{stdout:?}");
+    assert!(
+        stdout.lines().any(|line| line == "oui"),
+        "la ligne envoyée n’est pas recopiée dans la sortie : {stdout:?}"
+    );
+    assert_eq!(output["exit_code"], json!(0));
+}
+
+#[test]
+fn a_finished_or_stopped_task_refuses_a_line_in_french_and_its_output_does_not_change() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(&mut f, "done", "read -r a; echo \"recu=$a\"");
+    task_input(&mut f, "done", "un").unwrap();
+    let finished = wait_output(&mut f, "done", "la tâche n’a pas fini", |o| {
+        o["status"] == "terminé"
+    });
+    let error = task_input(&mut f, "done", "deux").unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(
+        error.message.contains("n’est plus en cours")
+            && error.message.contains("n’a pas été envoyée"),
+        "{}",
+        error.message
+    );
+    start_background(&mut f, "halt", "echo debut; cat; echo fin");
+    wait_output(&mut f, "halt", "pas de sortie", |o| {
+        o["stdout"].as_str().unwrap_or("").contains("debut")
+    });
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("halt").run_id, "call_id": "halt"}),
+    );
+    let stopped = wait_output(&mut f, "halt", "pas arrêtée", |o| {
+        o["status"] == "arrêtée"
+    });
+    let error = task_input(&mut f, "halt", "trop tard").unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(
+        error.message.contains("n’est plus en cours"),
+        "{}",
+        error.message
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(f.tool_output("done"), finished);
+    assert_eq!(f.tool_output("halt"), stopped);
+    assert!(!finished["stdout"].as_str().unwrap().contains("deux"));
+    assert!(!stopped["stdout"].as_str().unwrap().contains("trop tard"));
+}
+
+#[test]
+fn a_password_prompt_receives_no_byte_and_the_refusal_names_the_prompt() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    for (id, prompt) in [
+        ("pw1", "printf 'Mot de passe : '"),
+        ("pw2", "printf 'Enter passphrase for key: ' >&2"),
+    ] {
+        start_background(
+            &mut f,
+            id,
+            &format!("{prompt}; read -r secret; printf '%s' \"$secret\" > {id}.txt; echo fin"),
+        );
+        let sent = format!("hunter-{id}");
+        wait_output(&mut f, id, "l’invite n’est pas affichée", |o| {
+            let text = format!(
+                "{}{}",
+                o["stdout"].as_str().unwrap_or(""),
+                o["stderr"].as_str().unwrap_or("")
+            );
+            text.contains("Mot de passe") || text.contains("passphrase")
+        });
+        let error = task_input(&mut f, id, &sent).unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("mot de passe"), "{}", error.message);
+        assert!(
+            error.message.contains("n’a pas été envoyée"),
+            "{}",
+            error.message
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        let output = f.tool_output(id);
+        assert_eq!(
+            output["status"], "en cours",
+            "le programme a reçu des octets"
+        );
+        assert!(!f.root().join(format!("{id}.txt")).exists());
+        assert!(!output["stdout"].as_str().unwrap().contains(&sent));
+        assert!(!output["stderr"].as_str().unwrap().contains(&sent));
+        f.post(
+            "/api/local/tasks/stop",
+            json!({"run_id": f.run(id).run_id, "call_id": id}),
+        );
+    }
+}
+
+#[test]
+fn a_prompt_that_is_not_for_a_password_still_receives_the_line_and_one_line_at_a_time() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(
+        &mut f,
+        "yn",
+        "printf 'Continuer ? [y/N] '; read -r a; echo \"reponse=$a\"",
+    );
+    wait_output(&mut f, "yn", "l’invite n’est pas affichée", |o| {
+        o["stdout"].as_str().unwrap_or("").contains("[y/N]")
+    });
+    for refused in ["a\nb", "a\rb", ""] {
+        let error = task_input(&mut f, "yn", refused);
+        if refused.is_empty() {
+            assert!(error.is_ok(), "une ligne vide est une réponse valide");
+            break;
+        }
+        assert_eq!(error.unwrap_err().status, 400);
+    }
+    let output = wait_output(&mut f, "yn", "la tâche n’a pas fini", |o| {
+        o["status"] == "terminé"
+    });
+    assert!(output["stdout"].as_str().unwrap().contains("reponse="));
+}
+
+#[test]
+fn the_echo_of_a_line_counts_against_the_output_cap_and_the_card_says_so() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(&mut f, "cap", "cat");
+    let line = "x".repeat(100);
+    for _ in 0..12 {
+        task_input(&mut f, "cap", &line).unwrap();
+    }
+    let output = wait_output(&mut f, "cap", "la coupure n’est pas signalée", |o| {
+        o["truncated"] == json!(true)
+    });
+    assert!(output["stdout"].as_str().unwrap().len() <= 1024);
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("cap").run_id, "call_id": "cap"}),
+    );
+}
+
 #[test]
 fn foreground_shell_keeps_its_timeout_ceiling_and_background_shows_a_nonzero_code() {
     let mut f = Fixture::new();

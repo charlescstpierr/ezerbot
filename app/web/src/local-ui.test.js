@@ -307,3 +307,13 @@ test("Arrêter targets one background task and the thread keeps polling while it
   message.payload.outcome.output.status="arrêtée";
   assert.equal(registration.wantsPolling({conversation:{messages:[message]}}),false);
 });
+
+test("a line goes to one task through the input route and a refusal reaches the card", async()=>{
+  const {requests,registration,panels,notifications}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  assert.equal(await registration.onCardAction(message,"local.task.input",{line:"oui"},{conversation:{id:"chat"}}),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/local/tasks/input",body:{run_id:"run-bg",call_id:"call-bg",line:"oui"}}]);
+  panels.api=async()=>{throw new Error("Cette tâche n’est plus en cours : la saisie n’a pas été envoyée.");};
+  await assert.rejects(registration.onCardAction(message,"local.task.input",{line:"non"},{conversation:{id:"chat"}}),/n’est plus en cours/);
+  assert.deepEqual(notifications,[]);
+});

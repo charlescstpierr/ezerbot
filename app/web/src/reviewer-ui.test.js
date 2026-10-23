@@ -265,7 +265,7 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
-const { Card: ToolCard, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { Card: ToolCard, TaskInputView, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
 const { ScreenCard } = await vite.ssrLoadModule("/src/screen.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
 
@@ -485,6 +485,28 @@ test("a background shell card stays En cours with Arrêter, then shows Terminée
   assert.match(stopped, /Arrêtée/); assert.match(stopped, /Sortie tronquée/); assert.ok(!stopped.includes("Code de sortie"));
   const failed = html({ status: "échec", background: true, stdout: "", stderr: "raté", exit_code: 3 });
   assert.match(failed, /Code de sortie non nul/); assert.match(failed, /Code de sortie : 3/);
+});
+
+test("only a running background card takes a line, and a refusal stays on the card", () => {
+  const call = { call_id: "c", name: "run_shell", arguments: { command: "./demande.sh", cwd: "/tmp", background: true } };
+  const html = (output) => renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "m", kind: "tool", payload: { run_id: "run", call, outcome: { status: "done", output } } } }));
+  const running = html({ status: "en cours", background: true, stdout: "Continuer ? ", stderr: "" });
+  assert.match(running, /<input[^>]*aria-label="Saisie pour la tâche"/);
+  assert.match(running, />Envoyer<\/button>/);
+  assert.ok(running.indexOf(">Arrêter<") < running.indexOf("Saisie pour la tâche"));
+  for (const status of ["terminé", "échec", "arrêtée"]) {
+    const settled = html({ status, background: true, stdout: "", stderr: "", exit_code: status === "terminé" ? 0 : null });
+    assert.ok(!settled.includes("Saisie pour la tâche"), status);
+    assert.ok(!settled.includes(">Envoyer<"), status);
+  }
+  const foreground = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "f", kind: "tool", payload: { run_id: "run", call: { ...call, arguments: { ...call.arguments, background: false } }, outcome: { status: "done", output: { status: "terminé", exit_code: 0, stdout: "", stderr: "" } } } } }));
+  assert.ok(!foreground.includes("Saisie pour la tâche"));
+  const refused = renderToStaticMarkup(React.createElement(TaskInputView, { line: "hunter2", notice: "Ce programme demande un mot de passe : la saisie n’a pas été envoyée. Saisissez-le vous-même, hors d’Ezerbot.", sending: false }));
+  assert.match(refused, /role="alert"/); assert.match(refused, /mot de passe : la saisie n’a pas été envoyée/);
+  assert.match(refused, /value="hunter2"/);
+  globalThis.window = { EzerbotIPhone: { remote: true } };
+  try { assert.ok(!html({ status: "en cours", background: true, stdout: "", stderr: "" }).includes("Saisie pour la tâche"), "l’iPhone n’envoie pas de saisie"); }
+  finally { delete globalThis.window; }
 });
 
 test("interrupted tool cards are stopped, not left running or waiting", () => {

@@ -87,17 +87,28 @@ fn manifest(id: &str) -> Result<Manifest, ApiError> {
         .copied()
         .ok_or_else(|| invalid("Ce connecteur n’est pas dans le catalogue."))
 }
-/// A catalogue row is a service plus, for GitHub, one account slot: `github`, `github:2`…
+/// A catalogue row is a service plus, for GitHub and Gmail, one account slot: `github`,
+/// `github:2`, `gmail:2`…
 fn row_manifest(row: &str) -> Result<Manifest, ApiError> {
     manifest(row.split_once(':').map_or(row, |(service, _)| service))
 }
-/// The GitHub account slots, the first one first.
-fn github_rows(ctx: &Context<'_>) -> Result<Vec<(String, String)>, ApiError> {
-    let mut stmt = ctx.connection.prepare("SELECT id,phase FROM wrapper_connector_catalogue WHERE id='github' OR id GLOB 'github:*' ORDER BY id='github' DESC,rowid")?;
+/// The services that keep several accounts, one slot and one secret each. Slack keeps one.
+fn multi_account(id: &str) -> bool {
+    matches!(id, "github" | "gmail")
+}
+/// The account slots of a service, the first one first.
+fn service_rows(ctx: &Context<'_>, service: &str) -> Result<Vec<(String, String)>, ApiError> {
+    let mut stmt = ctx.connection.prepare("SELECT id,phase FROM wrapper_connector_catalogue WHERE id=?1 OR id GLOB ?2 ORDER BY id=?1 DESC,rowid")?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![service, format!("{service}:*")], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+/// The GitHub account slots, the first one first.
+fn github_rows(ctx: &Context<'_>) -> Result<Vec<(String, String)>, ApiError> {
+    service_rows(ctx, "github")
 }
 fn server_id(id: &str) -> String {
     format!("c{}", &format!("{:x}", Sha256::digest(id.as_bytes()))[..15])
@@ -145,17 +156,17 @@ pub(super) fn state(ctx: &Context<'_>) -> Result<Value, ApiError> {
     let local = super::state_servers(ctx)?;
     let mut items = Vec::new();
     for m in MANIFESTS {
-        if m.id != "github" {
+        if !multi_account(m.id) {
             items.push(item_of(ctx, *m, m.id, &local)?);
             continue;
         }
         // The card follows the first account that is still there; a disconnected
         // first slot gives way to the next one instead of hiding it.
-        let rows = github_rows(ctx)?;
+        let rows = service_rows(ctx, m.id)?;
         let lead = rows
             .iter()
             .find(|(_, phase)| phase != "disconnected")
-            .map_or("github", |(row, _)| row.as_str());
+            .map_or(m.id, |(row, _)| row.as_str());
         let mut item = item_of(ctx, *m, lead, &local)?;
         let mut accounts = Vec::new();
         for (row, _) in rows.iter().filter(|(_, phase)| phase != "disconnected") {
@@ -257,7 +268,7 @@ fn item_of(
         .and_then(|(code, expires)| code.map(|code| json!({"user_code":code,"verification_uri":github::DEVICE_PAGE,"expires_at":expires})))
         .unwrap_or(Value::Null);
     Ok(
-        json!({"device":device,"device_flow":m.id=="github","configured":!matches!(m.id,"github"|"gmail"|"slack")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
+        json!({"device":device,"device_flow":m.id=="github","multi_account":multi_account(m.id),"configured":!matches!(m.id,"github"|"gmail"|"slack")||has_client,"unconfigured_message":(!has_client).then(||match m.id{"gmail"=>Some(gmail::not_configured().message),"slack"=>Some(slack::not_configured().message),_=>None}).flatten(),"id":m.id,"slot":row_id,"name":m.name,"description":m.description,"permissions":m.permissions,"scopes":m.scopes,"scopes_label":scopes_label(m),"redirect_uri":Value::Null,"source":m.source,"license":m.license,"setup":m.setup,"needs_client":!matches!(m.id,"notion"|"github"|"gmail"|"slack"),"has_client":has_client,"has_tokens":has_tokens,"can_refresh":can_refresh,"account":private.get("EMAIL"),"warning":warning,"status":status,"message":message,"authorization_url":url,"expires_at":expires,"server":server}),
     )
 }
 #[derive(Deserialize)]
@@ -268,10 +279,10 @@ struct Connect {
     client_id: String,
     #[serde(default)]
     client_secret: String,
-    /// The GitHub account slot to (re)connect; the first one when absent.
+    /// The account slot to (re)connect; the first one when absent.
     #[serde(default)]
     account: Option<String>,
-    /// Add a GitHub account beside the ones already connected.
+    /// Add an account beside the ones already connected (GitHub and Gmail).
     #[serde(default)]
     another: bool,
 }
@@ -282,33 +293,41 @@ struct Slot {
     #[serde(default)]
     account: Option<String>,
 }
-/// The catalogue row a request names: the service itself, or one of its GitHub slots.
+/// The catalogue row a request names: the service itself, or one of its account slots.
 fn slot_row(ctx: &Context<'_>, m: Manifest, account: Option<&str>) -> Result<String, ApiError> {
     let Some(account) = account.filter(|a| *a != m.id) else {
         return Ok(m.id.to_owned());
     };
-    if m.id == "github" && github_rows(ctx)?.iter().any(|(row, _)| row == account) {
+    if multi_account(m.id)
+        && service_rows(ctx, m.id)?
+            .iter()
+            .any(|(row, _)| row == account)
+    {
         return Ok(account.to_owned());
     }
-    Err(invalid("Ce compte GitHub n’existe plus."))
+    Err(invalid(&format!("Ce compte {} n’existe plus.", m.name)))
 }
-/// Where a new GitHub account goes: a free slot, never over a live connection or a wait.
-fn another_slot(ctx: &Context<'_>) -> Result<String, ApiError> {
-    let rows = github_rows(ctx)?;
+/// Where a new account goes: a free slot, never over a live connection or a wait.
+fn another_slot(ctx: &Context<'_>, m: Manifest) -> Result<String, ApiError> {
+    let rows = service_rows(ctx, m.id)?;
     if rows.iter().any(|(_, phase)| phase == "authorizing") {
         return Err(ApiError::new(
             409,
-            "Une connexion GitHub attend déjà un code. Terminez-la ou annulez-la avant d’ajouter un autre compte.",
+            if m.id == "github" {
+                "Une connexion GitHub attend déjà un code. Terminez-la ou annulez-la avant d’ajouter un autre compte."
+            } else {
+                "Une connexion Gmail attend déjà votre autorisation dans le navigateur. Terminez-la, ou attendez qu’elle expire, avant d’ajouter un autre compte."
+            },
         ));
     }
     if rows.is_empty() {
-        return Ok("github".into());
+        return Ok(m.id.into());
     }
     if let Some((row, _)) = rows.iter().find(|(_, phase)| phase == "disconnected") {
         return Ok(row.clone());
     }
     Ok((2..)
-        .map(|n| format!("github:{n}"))
+        .map(|n| format!("{}:{n}", m.id))
         .find(|row| rows.iter().all(|(taken, _)| taken != row))
         .expect("an unbounded range has a free slot"))
 }
@@ -328,7 +347,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         let input: Slot = parse(body)?;
         let m = manifest(&input.id)?;
         let row = slot_row(&ctx, m, input.account.as_deref())?;
-        if m.id != "github" {
+        if !multi_account(m.id) {
             return Err(invalid(
                 "Ce service ne se connecte pas par un code à entrer.",
             ));
@@ -340,7 +359,7 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
         if cancelled == 0 {
             return Err(ApiError::new(
                 409,
-                "Aucune connexion GitHub n’est en attente d’un code.",
+                format!("Aucune connexion {} n’est en attente.", m.name),
             ));
         }
         return Ok(json!({"message":"Connexion annulée. Aucun jeton n’a été conservé."}));
@@ -379,11 +398,11 @@ pub(super) fn routes(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiErr
     {
         return Err(invalid("Identifiants OAuth invalides."));
     }
-    if (input.another || input.account.is_some()) && m.id != "github" {
+    if (input.another || input.account.is_some()) && !multi_account(m.id) {
         return Err(invalid("Ce service ne garde qu’un compte."));
     }
     let row = if input.another {
-        another_slot(&ctx)?
+        another_slot(&ctx, m)?
     } else {
         slot_row(&ctx, m, input.account.as_deref())?
     };
@@ -900,7 +919,7 @@ pub(super) fn remove(
     // A conversation that had chosen this account is asked again, never sent to another.
     tx.execute("DELETE FROM wrapper_github_account_choice WHERE account_id=(SELECT account_id FROM wrapper_connector_catalogue WHERE server_id=?1)",[&server.id])?;
     if m.id == "gmail" {
-        gmail::forget_mailbox(&tx, &server.id)?;
+        gmail::forget_account(&tx, &server.id)?;
     }
     tx.execute("UPDATE wrapper_connector_catalogue SET phase='disconnected',message=?2,expires_at=0,account_email=NULL,account_id=NULL,device_user_code=NULL,device_expires_at=0 WHERE server_id=?1",params![server.id,message])?;
     tx.commit()?;

@@ -695,6 +695,13 @@ test('the history names a run started by a mail with its sender and subject', as
   assert.doesNotMatch(text, /Manuel|Planifié/);
 });
 
+test('the history names the Google account that received the mail', async () => {
+  const started = { ...occurrence('mail-run', 'done', 'mail::m1'), trigger: { kind: 'mail', label: 'Courriel', received_at: 1_760_000_000_000, compte: 'travail@example.test', expediteur: 'Alice <alice@example.com>', objet: 'Facture d’octobre' } };
+  const h = harness(async () => page([started]));
+  await h.t.showHistory(mailRoutine);
+  assert.match(h.t.content.textContent, /Courriel · travail@example\.test · Alice <alice@example.com> · Facture d’octobre · reçu le/);
+});
+
 test('the list describes a mail routine', async () => {
   const h = harness(async () => ({ routines: [mailRoutine] }));
   h.panels.state.routines.items = [{ routine: mailRoutine }];
@@ -842,4 +849,146 @@ test('the list describes a GitHub routine by its repository and events', async (
   h.panels.state.routines.items = [{ routine: githubRoutine, queue: { waiting: 0 } }];
   h.t.renderList();
   assert.match(h.t.content.textContent, /GitHub charles\/essai : pull request ouverte, commentaire/);
+});
+
+// -------------------------------------------------------------- Calendrier ----
+
+const calendarRoutine = { ...routine, name: 'Agenda', enabled: true, body: { kind: 'inline_prompt', prompt: 'Prépare la réunion.' }, trigger: { kind: 'calendar', cases: ['created', 'begins'] } };
+function calendarEditor(connected, sent = [], stored = calendarRoutine) {
+  const h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [stored] };
+    sent.push({ url, body });
+    return { routine: stored };
+  });
+  h.panels.state.routine_calendar = { connected };
+  return h;
+}
+const caseBox = (h, text) => inputOf(labelled(h, text)[0]);
+const tick = (h, box, checked) => { box.checked = checked; box.listeners.input?.(); h.t.content.querySelectorAll('form')[0].listeners.input(); };
+
+test('the editor offers the calendar trigger with its four cases, and saves the ticked ones', async () => {
+  const sent = [], h = calendarEditor(true, sent);
+  await h.t.edit(null);
+  const select = triggerSelect(h);
+  assert.ok(select.children.some(o => o.value === 'calendar' && /Calendrier/.test(o.textContent)));
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, select, 'calendar');
+  for (const text of ['Un événement est créé', 'Un événement est modifié', 'Un événement est annulé', 'Un événement commence']) assert.equal(labelled(h, text).length, 1, text);
+  // « commence » is ticked from the start: the trigger a user comes for.
+  assert.equal(caseBox(h, 'Un événement commence').checked, true);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(commence\)/);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /heure prévue\.$/); // no zone: the routine's zone says nothing here
+  tick(h, caseBox(h, 'Un événement est créé'), true);
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.ok(created, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(created.body.trigger)), { kind: 'calendar', cases: ['created', 'begins'] });
+});
+
+test('a calendar trigger with no case ticked is explained and sends nothing', async () => {
+  const sent = [], h = calendarEditor(true, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, triggerSelect(h), 'calendar');
+  tick(h, caseBox(h, 'Un événement commence'), false);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /Cochez au moins un cas/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Cochez au moins un cas/);
+  assert.equal(sent.length, 0);
+});
+
+test('without a connected Google account the editor explains it and sends nothing', async () => {
+  const sent = [], h = calendarEditor(false, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, triggerSelect(h), 'calendar');
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /agenda du compte Google connecté/);
+  assert.match(preview.textContent, /Google n’est pas connecté/);
+  assert.match(preview.textContent, /Paramètres › Connecteurs/);
+  assert.match(preview.textContent, /n’est pas enregistrée avec ce déclencheur/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Google n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a routine already armed on the calendar keeps its cases and can be renamed without Google', async () => {
+  const sent = [], h = calendarEditor(false, sent);
+  await h.t.edit(calendarRoutine);
+  assert.equal(triggerSelect(h).value, 'calendar');
+  assert.equal(caseBox(h, 'Un événement est créé').checked, true);
+  assert.equal(caseBox(h, 'Un événement est modifié').checked, false);
+  assert.equal(caseBox(h, 'Un événement commence').checked, true);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda du matin');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.equal(update.body.name, 'Agenda du matin');
+  assert.equal(update.body.trigger, undefined);
+  // Ticking another case is a change of trigger and is sent whole.
+  sent.length = 0;
+  await h.t.edit(calendarRoutine);
+  tick(h, caseBox(h, 'Un événement est annulé'), true);
+  await submit(h);
+  const changed = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(changed, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(changed.body.trigger)), { kind: 'calendar', cases: ['created', 'cancelled', 'begins'] });
+});
+
+test('a group can hold a calendar trigger with its own cases, and refuses a new one while Google is absent', async () => {
+  const withCalendar = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'calendar', cases: ['modified'] } }] } };
+  const sent = [];
+  const h = harness(async (url, body) => { if (url.startsWith('/api/routines?')) return { routines: [withCalendar] }; sent.push({ url, body }); return { routine: withCalendar }; });
+  h.panels.state.routine_calendar = { connected: false };
+  await h.t.edit(withCalendar);
+  const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'calendar') && !el.children.some(o => o.value === 'group'));
+  assert.deepEqual(kinds.map(k => k.value), ['schedule', 'calendar']);
+  // The first box of each kind belongs to the single trigger, hidden here; the last one to the calendar row.
+  assert.equal(inputOf(labelled(h, 'Un événement est modifié').at(-1)).checked, true);
+  // The calendar trigger already in the group stays valid: editing the other one is saved.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger.members[1])), { id: 'trigger-b', trigger: { kind: 'calendar', cases: ['modified'] } });
+  // A calendar trigger added to the group while Google is absent is refused.
+  sent.length = 0;
+  await h.t.edit(withCalendar);
+  h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+  const added = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'calendar') && !el.children.some(o => o.value === 'group'));
+  type(added[added.length - 1], 'calendar');
+  await submit(h);
+  assert.match(h.t.status.textContent, /Google n’est pas connecté/);
+  assert.equal(sent.length, 0);
+  // With Google connected the same row is saved with the case it ticks.
+  h.panels.state.routine_calendar = { connected: true };
+  await submit(h);
+  const saved = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(saved, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.trigger.members[2].trigger)), { kind: 'calendar', cases: ['begins'] });
+});
+
+test('the history names a calendar run with its case, its title and its planned start', async () => {
+  const start = 1_760_000_000_000;
+  const onTime = { ...occurrence('cal-run', 'done', null), scheduled_at_utc: start, trigger: { kind: 'calendar', label: 'Calendrier', cas: 'commence', titre: 'Réunion d’équipe', debut_ms: start, fuseau: 'America/Toronto', received_at: start + 30_000, compte: 'moi@example.com' } };
+  const caughtUp = { ...occurrence('cal-late', 'done', null), scheduled_at_utc: start - 7_200_000, trigger: { kind: 'calendar', label: 'Calendrier', cas: 'commence', titre: 'Point du matin', debut_ms: start - 7_200_000, fuseau: 'America/Toronto', received_at: start } };
+  const created = { ...occurrence('cal-new', 'done', 'calendar::created:evt-1:1'), trigger: { kind: 'calendar', label: 'Calendrier', cas: 'créé', titre: 'Dîner', debut_ms: start, fuseau: 'America/Toronto', received_at: start } };
+  const h = harness(async () => page([onTime, caughtUp, created]));
+  await h.t.showHistory(calendarRoutine);
+  const rows = h.t.content.querySelectorAll('.routines-occurrence').map(r => r.textContent);
+  assert.match(rows[0], /Calendrier · moi@example.com · commence · Réunion d’équipe · prévu le /);
+  assert.doesNotMatch(rows[0], /rattrapé|Manuel/);
+  assert.match(rows[1], /Calendrier · commence · Point du matin · prévu le .* · rattrapé/);
+  assert.match(rows[2], /Calendrier · créé · Dîner · vu le /);
+  assert.doesNotMatch(rows.join(''), /Manuel/);
+});
+
+test('the list describes a calendar routine', async () => {
+  const h = harness(async () => ({ routines: [calendarRoutine] }));
+  h.panels.state.routines.items = [{ routine: calendarRoutine }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(créé, commence\)/);
 });

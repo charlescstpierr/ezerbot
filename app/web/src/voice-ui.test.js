@@ -314,3 +314,14 @@ test("opening the setting with a microphone that is gone announces the fallback 
   assert.ok(descendants(section).some(el => el.textContent === phrase));
   assert.deepEqual(saved(f),[{id:""}]);
 });
+
+test("dictation passes the saved locale to Speech while the interface stays French", async () => {
+  const f = fixture();
+  for (const language of ["en-US", "fr-CA"]) {
+    f.ctx.state.voice.language = language;
+    f.registration.onState(f.ctx.state, f.ctx);
+    await cls(f.root,"voice-mic").onclick();
+    assert.equal(f.bodies.filter(body => body.command === "start").at(-1).language, language);
+    await cls(f.root,"voice-mic").onclick();
+  }
+});

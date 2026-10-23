@@ -1,6 +1,7 @@
 //! RFC 8291 aes128gcm + RFC 8292 VAPID. ring supplies all cryptographic
 //! primitives; no hand-written cipher. Push contains generic titles, never text,
-//! secret names, tool arguments, or credentials. No production endpoints in debug.
+//! secret names, tool arguments, or credentials. A reply is titled with its bot's
+//! name. No production endpoints in debug.
 use super::*;
 use ring::{
     aead, agreement, hmac,
@@ -215,7 +216,11 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
     )?;
     super::super::notifications::project(ctx.connection, ctx.now_ms, false)?;
     let prefs = super::super::notifications::settings(ctx.connection)?;
-    let mut stmt=ctx.connection.prepare("SELECT d.id,d.subscription,n.id,n.kind,n.conversation_id,n.card_id,n.title,d.visible,d.conversation_id,d.last_seen
+    let mut stmt=ctx.connection.prepare("SELECT d.id,d.subscription,n.id,n.kind,n.conversation_id,n.card_id,
+        COALESCE((SELECT b.name FROM wrapper_bots b WHERE n.kind='reply' AND b.account_id=n.account_id AND b.id=COALESCE(
+            (SELECT r.bot_id FROM engine_runs r WHERE r.run_id=substr(n.id,7)),
+            (SELECT c.bot_id FROM wrapper_conversations c WHERE c.account_id=n.account_id AND c.id=n.conversation_id))),n.title),
+        d.visible,d.conversation_id,d.last_seen
         FROM iphone_devices d CROSS JOIN wrapper_notifications n WHERE d.status='active' AND d.subscription IS NOT NULL
         AND n.created_at>=d.created_at AND n.unread=1 AND NOT EXISTS(SELECT 1 FROM iphone_push_claims p WHERE p.device_id=d.id AND p.notification_id=n.id)
         AND EXISTS(SELECT 1 FROM wrapper_conversations c WHERE c.id=n.conversation_id AND c.deleted=0)
@@ -263,7 +268,7 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
             continue;
         }
         if let Ok(sub) = serde_json::from_str::<Subscription>(&raw) {
-            jobs.push(Job{id,sub,payload:json!({"title":title,"id":notification,"conversation_id":conversation,"card_id":card}).to_string().into_bytes(),notification});
+            jobs.push(Job{id,sub,payload:json!({"title":title,"kind":kind,"id":notification,"conversation_id":conversation,"card_id":card}).to_string().into_bytes(),notification});
         }
     }
     if jobs.is_empty() {
@@ -325,6 +330,8 @@ fn send(conn: &Connection, job: &Job) -> Result<(), (bool, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// GROKBOT_FAKE_PUSH and BUSY are process-wide: one fake-push scenario at a time.
+    static FAKE_PUSH: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[test]
     fn hkdf_matches_rfc5869_sha256_test_case_one() {
         let output = derive(
@@ -415,6 +422,141 @@ mod tests {
         assert!(!endpoint_allowed("https://web.push.apple.com/path"));
         assert!(!endpoint_allowed("http://169.254.169.254/latest"));
     }
+    /// Opens an RFC 8291 packet the way the phone does.
+    fn open_packet(private: agreement::EphemeralPrivateKey, auth: &[u8], packet: &[u8]) -> Vec<u8> {
+        let public = private.compute_public_key().unwrap();
+        let mut info = b"WebPush: info\0".to_vec();
+        info.extend_from_slice(public.as_ref());
+        info.extend_from_slice(&packet[21..86]);
+        let ikm = agreement::agree_ephemeral(
+            private,
+            &agreement::UnparsedPublicKey::new(&agreement::ECDH_P256, &packet[21..86]),
+            |shared| derive(auth, shared, &info, 32),
+        )
+        .unwrap();
+        let cek = derive(&packet[..16], &ikm, b"Content-Encoding: aes128gcm\0", 16);
+        let nonce = derive(&packet[..16], &ikm, b"Content-Encoding: nonce\0", 12);
+        let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &cek).unwrap());
+        let mut ciphertext = packet[86..].to_vec();
+        let plain = key
+            .open_in_place(
+                aead::Nonce::try_assume_unique_for_key(&nonce).unwrap(),
+                aead::Aad::empty(),
+                &mut ciphertext,
+            )
+            .unwrap();
+        plain[..plain.len() - 1].to_vec()
+    }
+    #[cfg(debug_assertions)]
+    #[test]
+    fn reply_push_is_titled_with_the_bot_and_carries_no_reply_text() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            time::{Duration, Instant},
+        };
+        let _serial = FAKE_PUSH.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let previous = std::env::var_os("GROKBOT_FAKE_PUSH");
+        std::env::set_var("GROKBOT_FAKE_PUSH", &base);
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    std::env::set_var("GROKBOT_FAKE_PUSH", value)
+                } else {
+                    std::env::remove_var("GROKBOT_FAKE_PUSH")
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                if let Ok((stream, _)) = listener.accept() {
+                    break stream;
+                }
+                assert!(Instant::now() < deadline, "fake push timeout");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut data = vec![];
+            let mut buf = [0; 4096];
+            let body = loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                data.extend_from_slice(&buf[..n]);
+                if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let length: usize = String::from_utf8_lossy(&data[..at])
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, v)| v.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if data.len() >= at + 4 + length {
+                        break data[at + 4..at + 4 + length].to_vec();
+                    }
+                }
+            };
+            write!(
+                stream,
+                "HTTP/1.1 201 Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            body
+        });
+        let root = std::env::temp_dir().join(format!(
+            "iphone-reply-push-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
+        app.api(
+            "POST",
+            "/api/bots",
+            br#"{"id":"atlas","name":"Atlas","color":"cyan"}"#,
+        )
+        .unwrap();
+        let conversation = app
+            .api("POST", "/api/conversations", br#"{"bot_id":"atlas"}"#)
+            .unwrap()["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let private =
+            agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &SystemRandom::new())
+                .unwrap();
+        let public = private.compute_public_key().unwrap();
+        let ctx = app.feature_context();
+        let conn = ctx.connection;
+        conn.execute("UPDATE iphone_settings SET enabled=1", [])
+            .unwrap();
+        conn.execute("UPDATE wrapper_notification_settings SET settings=json_set(settings,'$.enabled',json('true'))",[]).unwrap();
+        conn.execute("INSERT INTO iphone_devices(id,name,credential_hash,receipt_hash,status,expires,created_at) VALUES('device','iPhone','hash','receipt','active',0,0)",[]).unwrap();
+        subscribe(conn,"device",&json!({"subscription":{"endpoint":format!("{base}/push"),"expirationTime":null,"keys":{"p256dh":B64.encode(public.as_ref()),"auth":B64.encode([9;16])}}}).to_string().into_bytes()).unwrap();
+        conn.execute("INSERT INTO wrapper_notifications VALUES('local-workspace','reply:run-1','reply',?1,'reply-run-1','Réponse terminée',?2,1,0)",params![conversation,crate::now()]).unwrap();
+        tick(&ctx).unwrap();
+        let packet = server.join().unwrap();
+        while BUSY.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let payload: Value =
+            serde_json::from_slice(&open_packet(private, &[9; 16], &packet)).unwrap();
+        assert_eq!(
+            payload,
+            json!({"title":"Atlas","kind":"reply","id":"reply:run-1","conversation_id":conversation,"card_id":"reply-run-1"})
+        );
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[cfg(debug_assertions)]
     #[test]
     fn fake_push_policy_claims_restart_and_expired_subscription() {
@@ -423,6 +565,7 @@ mod tests {
             net::TcpListener,
             time::{Duration, Instant},
         };
+        let _serial = FAKE_PUSH.lock().unwrap_or_else(|e| e.into_inner());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

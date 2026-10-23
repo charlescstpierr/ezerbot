@@ -76,6 +76,8 @@ pub const MAX_MISSED_PER_TICK: usize = 100;
 /// A host that ticks every 500 ms and an agent that passes every minute never
 /// leave a longer silence while meant to run. Longer means the Mac was off or asleep.
 pub const TICK_GAP_MS: i64 = 120_000;
+/// How long a closed deliberate absence is remembered, for slots told after it ended.
+const ABSENCE_KEPT_MS: i64 = 30 * 24 * 3_600_000;
 /// The heartbeat is written at most this often, so an idle app does not take the
 /// write lock on every 500 ms tick.
 const HEARTBEAT_EVERY_MS: i64 = 5_000;
@@ -112,6 +114,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             reason TEXT,
             catch_up INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
             member_id TEXT NOT NULL DEFAULT '',
+            slot_key TEXT NOT NULL DEFAULT '',
             CHECK (status NOT IN ('running', 'done') OR run_id IS NOT NULL),
             CHECK (status != 'failed' OR reason IS NOT NULL)
          );
@@ -138,6 +141,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             absent_since INTEGER
          );
          INSERT OR IGNORE INTO scheduler_presence(id) VALUES (1);
+         CREATE TABLE IF NOT EXISTS scheduler_absences (
+            from_ms INTEGER NOT NULL, until_ms INTEGER NOT NULL
+         );
          INSERT INTO component_versions(component, version)
             VALUES ('scheduler.occurrences', 1) ON CONFLICT(component) DO NOTHING;",
     )?;
@@ -197,12 +203,31 @@ pub fn migrate(conn: &Connection) -> Result<()> {
                 ON scheduler_missed_ranges(routine_id, from_inclusive DESC, schedule_version DESC);",
         )?;
     }
-    conn.execute_batch(
-        "DROP INDEX IF EXISTS scheduler_scheduled_slot;
-         CREATE UNIQUE INDEX IF NOT EXISTS scheduler_scheduled_member_slot
-            ON scheduler_occurrences(routine_id, member_id, schedule_version, scheduled_at_utc)
-            WHERE manual_nonce IS NULL;",
+    // Upgrade databases made before a slot could be told by the outside: the
+    // identity of a slot gains its key, empty for every slot the clock counted.
+    if !columns("scheduler_occurrences")?
+        .iter()
+        .any(|name| name == "slot_key")
+    {
+        conn.execute_batch(
+            "ALTER TABLE scheduler_occurrences ADD COLUMN slot_key TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    let keyed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index'
+         AND name='scheduler_scheduled_member_slot' AND sql LIKE '%slot_key%')",
+        [],
+        |row| row.get(0),
     )?;
+    if !keyed {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS scheduler_scheduled_slot;
+             DROP INDEX IF EXISTS scheduler_scheduled_member_slot;
+             CREATE UNIQUE INDEX scheduler_scheduled_member_slot
+                ON scheduler_occurrences(routine_id, member_id, schedule_version, scheduled_at_utc, slot_key)
+                WHERE manual_nonce IS NULL;",
+        )?;
+    }
     routine::check_schema(conn, "scheduler.occurrences")
 }
 
@@ -358,6 +383,17 @@ pub fn record_tick(conn: &Connection, now_ms: i64) -> Result<()> {
         |row| row.get(0),
     )?;
     if stale {
+        // The absence ends here, but a slot told later can still fall inside it.
+        conn.execute(
+            "INSERT INTO scheduler_absences(from_ms, until_ms)
+             SELECT absent_since, MAX(?1, absent_since) FROM scheduler_presence
+             WHERE id=1 AND absent_since IS NOT NULL",
+            [now_ms],
+        )?;
+        conn.execute(
+            "DELETE FROM scheduler_absences WHERE until_ms < ?1",
+            [now_ms.saturating_sub(ABSENCE_KEPT_MS)],
+        )?;
         conn.execute(
             "UPDATE scheduler_presence SET last_tick_at=?1, absent_since=NULL WHERE id=1",
             [now_ms],
@@ -393,7 +429,7 @@ struct Source {
 
 fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>> {
     match &routine.trigger {
-        cron::Schedule::Webhook | cron::Schedule::Mail => Ok(vec![]),
+        trigger if trigger.is_delivered() => Ok(vec![]),
         cron::Schedule::Group { .. } => {
             let mut query = conn.prepare(
                 "SELECT member_id, version, trigger, materialized_after FROM scheduler_members
@@ -574,21 +610,155 @@ fn insert_slot(
     status: &str,
     catch_up: bool,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO scheduler_occurrences
-         (occurrence_id, routine_id, member_id, schedule_version, scheduled_at_utc, status, catch_up)
-         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(routine_id, member_id, schedule_version, scheduled_at_utc) WHERE manual_nonce IS NULL DO NOTHING",
-        params![
-            routine.routine_id,
-            source.member_id,
-            source.version,
-            slot,
-            status,
-            catch_up
-        ],
+    claim_slot(
+        conn,
+        &routine.routine_id,
+        &source.member_id,
+        source.version,
+        slot,
+        "",
+        status,
+        catch_up,
     )?;
     Ok(())
+}
+
+/// Claim the identity of a slot: routine, trigger, version, instant and key. `true` when
+/// this call made it, `false` when it was already claimed and nothing changed.
+#[allow(clippy::too_many_arguments)]
+fn claim_slot(
+    conn: &Connection,
+    routine_id: &str,
+    member_id: &str,
+    version: u64,
+    slot: i64,
+    key: &str,
+    status: &str,
+    catch_up: bool,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "INSERT INTO scheduler_occurrences
+         (occurrence_id, routine_id, member_id, schedule_version, scheduled_at_utc, slot_key, status, catch_up)
+         VALUES ('occ_' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(routine_id, member_id, schedule_version, scheduled_at_utc, slot_key) WHERE manual_nonce IS NULL DO NOTHING",
+        params![routine_id, member_id, version, slot, key, status, catch_up],
+    )? == 1)
+}
+
+/// A slot told by the outside rather than counted by the clock: an agenda event that
+/// begins. `key` names what begins, so that two events at one instant are two slots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Told {
+    pub key: String,
+    pub at_ms: i64,
+}
+
+/// A told slot as the scheduler holds it, and whether this call made it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delivered {
+    pub occurrence: Occurrence,
+    /// The key it was told with.
+    pub slot_key: String,
+    pub fresh: bool,
+}
+
+/// Whether the planner was not asked to run at `at_ms`: the app was quit with the
+/// background agent off, an absence that is open or that a later tick closed.
+fn in_absence(conn: &Connection, at_ms: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM scheduler_absences WHERE from_ms <= ?1 AND ?1 < until_ms)
+             OR EXISTS(SELECT 1 FROM scheduler_presence WHERE id=1 AND absent_since <= ?1)",
+        [at_ms],
+        |row| row.get(0),
+    )?)
+}
+
+/// Slots told to one simple trigger (`member_id`, empty for a lone trigger) of a
+/// routine, as the catch-up policy sees them (docs/specs/routines.md, « Rattrapage »).
+/// A slot is claimed once by its routine, trigger version, instant and key, so a
+/// second delivery, a second tick or a future executor never starts it twice.
+/// - A slot the planner was meant to run for (no deliberate absence at that instant)
+///   is owed: it queues as a pending, `catch_up` occurrence and starts in order.
+/// - Slots inside a deliberate absence follow the limited rule: only the newest can
+///   run, and only inside the late window; the others are Missed.
+///
+/// The clock and the absences are what the host recorded, never read here.
+pub fn deliver_slots(
+    conn: &Connection,
+    routine_id: &str,
+    member_id: &str,
+    told: &[Told],
+    now_ms: i64,
+    policy: &CatchUpPolicy,
+) -> Result<Vec<Delivered>> {
+    let routine = routine::require(conn, routine_id)?;
+    // A start from before the trigger was active is not owed: a pause, or a trigger added
+    // or edited since, is a cut, as for a slot the clock counts. The cursor of a lone
+    // trigger is the routine's, that of a member is its own.
+    let (since, cursor): (i64, i64) = conn.query_row(
+        "SELECT active_since, materialized_after FROM scheduler_routines WHERE routine_id=?1",
+        [routine_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (version, activated): (u64, i64) = if member_id.is_empty() {
+        (routine.schedule_version, cursor)
+    } else {
+        conn.query_row(
+            "SELECT version, materialized_after FROM scheduler_members WHERE routine_id=?1 AND member_id=?2 AND live=1",
+            params![routine_id, member_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| Error::InvalidInput("unknown trigger".into()))?
+    };
+    let activated = activated.max(since);
+    let earliest = now_ms.saturating_sub(i64::from(policy.late_minutes.max(1)) * 60_000);
+    let mut sorted: Vec<&Told> = told.iter().filter(|slot| slot.at_ms > activated).collect();
+    sorted.sort_by(|a, b| (a.at_ms, &a.key).cmp(&(b.at_ms, &b.key)));
+    let mut absent = Vec::new();
+    let mut delivered = Vec::new();
+    for slot in sorted {
+        if in_absence(conn, slot.at_ms)? {
+            absent.push(slot);
+            continue;
+        }
+        let fresh = claim_slot(
+            conn, routine_id, member_id, version, slot.at_ms, &slot.key, "pending", true,
+        )?;
+        delivered.push((slot, fresh));
+    }
+    let newest = absent.len().saturating_sub(1);
+    for (place, slot) in absent.iter().enumerate() {
+        let runnable = place == newest && slot.at_ms >= earliest;
+        let fresh = claim_slot(
+            conn,
+            routine_id,
+            member_id,
+            version,
+            slot.at_ms,
+            &slot.key,
+            if runnable { "pending" } else { "missed" },
+            false,
+        )?;
+        delivered.push((slot, fresh));
+    }
+    let mut query = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM scheduler_occurrences WHERE routine_id=?1 AND member_id=?2
+         AND schedule_version=?3 AND scheduled_at_utc=?4 AND slot_key=?5 AND manual_nonce IS NULL"
+    ))?;
+    delivered
+        .into_iter()
+        .map(|(slot, fresh)| {
+            Ok(Delivered {
+                occurrence: query.query_row(
+                    params![routine_id, member_id, version, slot.at_ms, slot.key],
+                    from_row,
+                )?,
+                slot_key: slot.key.clone(),
+                fresh,
+            })
+        })
+        .collect()
 }
 
 // Intervals jump arithmetically, preserving their original phase/anchor. Cron
@@ -600,6 +770,7 @@ fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Re
         | cron::Schedule::Webhook
         | cron::Schedule::Mail
         | cron::Schedule::Github { .. }
+        | cron::Schedule::Calendar { .. }
         | cron::Schedule::Group { .. } => Ok(first),
         cron::Schedule::Every { interval_ms, .. } => {
             let first = i128::from(first);
@@ -660,12 +831,17 @@ pub fn missed_ranges(conn: &Connection, routine_id: &str) -> Result<Vec<MissedRa
 /// call, a new message or a GitHub event. It is automatic intent, so pause and
 /// edits cut it off, unlike a manual launch.
 pub fn is_event_nonce(nonce: &str) -> bool {
-    nonce.starts_with("webhook:") || nonce.starts_with("mail:") || nonce.starts_with("github:")
+    nonce.starts_with("webhook:")
+        || nonce.starts_with("mail:")
+        || nonce.starts_with("github:")
+        || nonce.starts_with("calendar:")
 }
 
 /// [`is_event_nonce`] as SQL, for the nonce column `column`.
 pub fn event_nonce_sql(column: &str) -> String {
-    format!("({column} LIKE 'webhook:%' OR {column} LIKE 'mail:%' OR {column} LIKE 'github:%')")
+    format!(
+        "({column} LIKE 'webhook:%' OR {column} LIKE 'mail:%' OR {column} LIKE 'github:%' OR {column} LIKE 'calendar:%')"
+    )
 }
 
 /// Manual runs are allowed on paused routines, independently of automatic
@@ -1953,6 +2129,55 @@ mod occurrences_tests {
     }
 
     #[test]
+    fn a_database_from_before_told_slots_keeps_its_slots_and_claims_them_once() {
+        let (conn, routine) = setup();
+        tick(&conn, 7_230_000);
+        let before = list(&conn, &routine.routine_id).unwrap();
+        conn.execute_batch(
+            "DROP INDEX scheduler_scheduled_member_slot;
+             ALTER TABLE scheduler_occurrences DROP COLUMN slot_key;
+             DROP TABLE scheduler_absences;
+             CREATE UNIQUE INDEX scheduler_scheduled_member_slot
+                ON scheduler_occurrences(routine_id, member_id, schedule_version, scheduled_at_utc)
+                WHERE manual_nonce IS NULL;",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(list(&conn, &routine.routine_id).unwrap(), before);
+        // The keyed identity still claims a clock slot once.
+        tick(&conn, 7_230_000);
+        assert_eq!(
+            list(&conn, &routine.routine_id).unwrap().len(),
+            before.len()
+        );
+        // And an absence is remembered from now on.
+        begin_absence(&conn, 1).unwrap();
+        with_tx(&conn, |conn| record_tick(conn, 9_000_000)).unwrap();
+        assert!(in_absence(&conn, 5).unwrap() && !in_absence(&conn, 9_000_001).unwrap());
+    }
+
+    #[test]
+    fn a_calendar_trigger_needs_at_least_one_case_each_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::migrate(&conn).unwrap();
+        let refused = |cases: &[cron::CalendarCase]| {
+            let mut input = fixture();
+            input.trigger = calendar(cases);
+            routine::create(&conn, &input).is_err()
+        };
+        assert!(refused(&[]));
+        assert!(refused(&[
+            cron::CalendarCase::Begins,
+            cron::CalendarCase::Begins
+        ]));
+        assert!(!refused(&[
+            cron::CalendarCase::Created,
+            cron::CalendarCase::Begins
+        ]));
+    }
+
+    #[test]
     fn a_fired_one_shot_of_a_group_does_not_block_editing_the_rest() {
         let once = cron::Schedule::Once { at: 100_000 };
         let (conn, routine) = grouped(vec![("a", every(1)), ("b", once.clone())]);
@@ -2058,5 +2283,277 @@ mod occurrences_tests {
         assert_eq!(ranges[0].schedule_version, ranges[1].schedule_version);
         let page = missed_ranges_page(&conn, &routine.routine_id, None).unwrap();
         assert_eq!(page.items.len(), 2);
+    }
+
+    fn calendar(cases: &[cron::CalendarCase]) -> cron::Schedule {
+        cron::Schedule::Calendar {
+            cases: cases.to_vec(),
+        }
+    }
+    fn told(key: &str, at_ms: i64) -> Told {
+        Told {
+            key: key.into(),
+            at_ms,
+        }
+    }
+    fn slots(conn: &Connection, routine: &Routine) -> Vec<(i64, &'static str)> {
+        list(conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o.scheduled_at_utc,
+                    match o.status {
+                        OccurrenceStatus::Pending => "pending",
+                        OccurrenceStatus::Missed => "missed",
+                        _ => "other",
+                    },
+                )
+            })
+            .collect()
+    }
+    fn begins() -> cron::Schedule {
+        calendar(&[cron::CalendarCase::Begins])
+    }
+
+    #[test]
+    fn a_calendar_trigger_has_no_clock_slot_and_leaves_the_others_alone() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("c", begins())]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .all(|o| o.member_id == "a"));
+        let (conn, routine) = grouped(vec![("c1", begins()), ("c2", begins())]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_told_slot_is_claimed_once_by_its_key_and_instant() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("c", begins())]);
+        let id = &routine.routine_id;
+        let policy = CatchUpPolicy::default();
+        let first = deliver_slots(
+            &conn,
+            id,
+            "c",
+            &[told("x", 5_000), told("y", 5_000)],
+            6_000,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|d| d.fresh));
+        // A second delivery of the same facts finds both claimed and starts nothing.
+        let again = deliver_slots(
+            &conn,
+            id,
+            "c",
+            &[told("x", 5_000), told("y", 5_000)],
+            7_000,
+            &policy,
+        )
+        .unwrap();
+        assert!(again.iter().all(|d| !d.fresh));
+        assert_eq!(
+            again
+                .iter()
+                .map(|d| &d.occurrence.occurrence_id)
+                .collect::<Vec<_>>(),
+            first
+                .iter()
+                .map(|d| &d.occurrence.occurrence_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(slots(&conn, &routine).len(), 2);
+        // The same key at another instant is a new slot.
+        let moved = deliver_slots(&conn, id, "c", &[told("x", 9_000)], 9_500, &policy).unwrap();
+        assert!(moved[0].fresh);
+        assert_eq!(slots(&conn, &routine).len(), 3);
+        assert!(first[0].occurrence.manual_nonce.is_none());
+        assert_eq!(first[0].occurrence.member_id, "c");
+    }
+
+    #[test]
+    fn a_told_slot_outside_any_absence_queues_as_catch_up_in_order() {
+        let (conn, routine) = grouped(vec![("a", every(60)), ("c", begins())]);
+        let late = 3 * 3_600_000;
+        deliver_slots(
+            &conn,
+            &routine.routine_id,
+            "c",
+            &[told("b", 2 * 3_600_000), told("a", 3_600_000)],
+            late,
+            &CatchUpPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            slots(&conn, &routine),
+            vec![(3_600_000, "pending"), (2 * 3_600_000, "pending")]
+        );
+        // An hour-old slot is owed, not late: the window never expires it, and the
+        // routine runs them one at a time, oldest first.
+        tick(&conn, late + 1_000);
+        let heads = |conn: &Connection| -> Vec<i64> {
+            pending_heads(conn)
+                .unwrap()
+                .into_iter()
+                .filter(|o| o.member_id == "c")
+                .map(|o| o.scheduled_at_utc)
+                .collect()
+        };
+        assert_eq!(heads(&conn), vec![3_600_000]);
+        assert!(queue(&conn, &routine.routine_id).unwrap().waiting >= 2);
+    }
+
+    #[test]
+    fn a_told_slot_in_a_deliberate_absence_follows_the_limited_rule() {
+        const HOUR: i64 = 3_600_000;
+        let (conn, routine) = grouped(vec![("a", every(600)), ("c", begins())]);
+        let id = &routine.routine_id;
+        with_tx(&conn, |conn| record_tick(conn, 0)).unwrap();
+        begin_absence(&conn, HOUR / 2).unwrap();
+        // The first tick after the reopening closes the absence; its record stays.
+        with_tx(&conn, |conn| record_tick(conn, 3 * HOUR)).unwrap();
+        let policy = CatchUpPolicy::default();
+        deliver_slots(
+            &conn,
+            id,
+            "c",
+            &[
+                told("old", HOUR),
+                told("recent", 5 * HOUR / 2),
+                told("older", HOUR / 2 + 1),
+            ],
+            3 * HOUR + 10_000,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(
+            slots(&conn, &routine),
+            vec![
+                (HOUR / 2 + 1, "missed"),
+                (HOUR, "missed"),
+                (5 * HOUR / 2, "pending")
+            ]
+        );
+        // A start after the absence ended is owed in full, whatever its age.
+        deliver_slots(
+            &conn,
+            id,
+            "c",
+            &[told("owed", 3 * HOUR + 1_000)],
+            4 * HOUR + 30 * 60_000,
+            &policy,
+        )
+        .unwrap();
+        let owed = list(&conn, id).unwrap();
+        assert_eq!(owed.last().unwrap().scheduled_at_utc, 3 * HOUR + 1_000);
+        assert_eq!(owed.last().unwrap().status, OccurrenceStatus::Pending);
+        // The newest of an absence still expires when it is older than the window.
+        let (conn, routine) = grouped(vec![("a", every(600)), ("c", begins())]);
+        with_tx(&conn, |conn| record_tick(conn, 0)).unwrap();
+        begin_absence(&conn, 1).unwrap();
+        with_tx(&conn, |conn| record_tick(conn, 5 * HOUR)).unwrap();
+        deliver_slots(
+            &conn,
+            &routine.routine_id,
+            "c",
+            &[told("stale", HOUR)],
+            5 * HOUR + 1,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(slots(&conn, &routine), vec![(HOUR, "missed")]);
+    }
+
+    #[test]
+    fn an_open_absence_counts_before_the_tick_that_closes_it() {
+        const HOUR: i64 = 3_600_000;
+        let (conn, routine) = grouped(vec![("a", every(600)), ("c", begins())]);
+        with_tx(&conn, |conn| record_tick(conn, 0)).unwrap();
+        begin_absence(&conn, 1).unwrap();
+        deliver_slots(
+            &conn,
+            &routine.routine_id,
+            "c",
+            &[told("one", HOUR), told("two", 2 * HOUR)],
+            2 * HOUR + 1_000,
+            &CatchUpPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            slots(&conn, &routine),
+            vec![(HOUR, "missed"), (2 * HOUR, "pending")]
+        );
+    }
+
+    #[test]
+    fn a_start_from_before_the_trigger_was_active_is_not_owed() {
+        let (conn, routine) = grouped(vec![("a", every(60)), ("c", begins())]);
+        let id = &routine.routine_id;
+        let policy = CatchUpPolicy::default();
+        // Paused at 10 000 and resumed at 50 000: what began between is not caught up.
+        routine::set_enabled(&conn, id, false, 10_000).unwrap();
+        routine::set_enabled(&conn, id, true, 50_000).unwrap();
+        let told_after_resume = [told("during", 30_000), told("after", 60_000)];
+        let delivered = deliver_slots(&conn, id, "c", &told_after_resume, 70_000, &policy).unwrap();
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|d| d.occurrence.scheduled_at_utc)
+                .collect::<Vec<_>>(),
+            vec![60_000]
+        );
+        assert_eq!(slots(&conn, &routine), vec![(60_000, "pending")]);
+        // A trigger added by an edit starts from the edit, even while the watch kept running.
+        let mut edited = routine::get(&conn, id).unwrap().unwrap();
+        edited.trigger = group_of(vec![
+            ("a", every(60)),
+            ("c", begins()),
+            (
+                "d",
+                calendar(&[cron::CalendarCase::Created, cron::CalendarCase::Begins]),
+            ),
+        ]);
+        routine::update(&conn, &edited, 200_000).unwrap();
+        let before_edit = [told("old", 150_000), told("new", 250_000)];
+        let added = deliver_slots(&conn, id, "d", &before_edit, 300_000, &policy).unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .map(|d| d.occurrence.scheduled_at_utc)
+                .collect::<Vec<_>>(),
+            vec![250_000]
+        );
+    }
+
+    #[test]
+    fn a_told_slot_obeys_the_cutoff_of_its_trigger() {
+        let (conn, routine) = grouped(vec![("a", every(60)), ("c", begins())]);
+        let id = &routine.routine_id;
+        deliver_slots(
+            &conn,
+            id,
+            "c",
+            &[told("x", 5_000)],
+            6_000,
+            &CatchUpPolicy::default(),
+        )
+        .unwrap();
+        // A pause is a cut: what has not started becomes Missed.
+        routine::set_enabled(&conn, id, false, 7_000).unwrap();
+        assert_eq!(retire_catch_up(&conn, id).unwrap(), 1);
+        assert_eq!(slots(&conn, &routine), vec![(5_000, "missed")]);
+        assert!(deliver_slots(
+            &conn,
+            id,
+            "nobody",
+            &[told("y", 1)],
+            8_000,
+            &CatchUpPolicy::default()
+        )
+        .is_err());
     }
 }

@@ -13,7 +13,10 @@
 //! A body is {kind:inline_prompt,prompt} or {kind:skill_invocation,skill_id,version};
 //! schedule is a cron/@every string, or trigger is a typed scheduler Schedule.
 //! /run-now requires nonce. History includes compact missed_ranges, not only runs.
-use super::{mcp, routine_github, routine_mail, routine_webhooks, write_transaction, Context};
+use super::{
+    mcp, routine_calendar, routine_github, routine_mail, routine_webhooks, write_transaction,
+    Context,
+};
 use crate::{parse, validate_id, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
     contracts::{
@@ -143,6 +146,35 @@ fn require_mailbox(
         return Err(ApiError::new(
             400,
             "Le déclencheur « nouveau courriel » lit la boîte Gmail connectée, et Gmail n’est pas connecté. Connectez-le dans Paramètres › Connecteurs, puis choisissez à nouveau ce déclencheur : rien n’a été enregistré.",
+        ));
+    }
+    Ok(())
+}
+/// A calendar trigger needs an agenda that could deliver: without a connected Google
+/// account, the editor says why and nothing is saved. A trigger already in the routine stays
+/// as it is, so that renaming a routine whose connector was disconnected is not blocked.
+fn require_agenda(
+    conn: &Connection,
+    trigger: &Schedule,
+    previous: Option<&Schedule>,
+) -> Result<(), ApiError> {
+    let calendar = |t: &Schedule| matches!(t, Schedule::Calendar { .. });
+    let kept = |id: &str| match previous {
+        Some(t) if calendar(t) => id.is_empty(),
+        Some(Schedule::Group { members }) => {
+            members.iter().any(|m| calendar(&m.trigger) && m.id == id)
+        }
+        _ => false,
+    };
+    let new = match trigger {
+        t if calendar(t) => !kept(""),
+        Schedule::Group { members } => members.iter().any(|m| calendar(&m.trigger) && !kept(&m.id)),
+        _ => false,
+    };
+    if new && !mcp::gmail_connected(conn) {
+        return Err(ApiError::new(
+            400,
+            "Le déclencheur « événement de calendrier » lit l’agenda du compte Google connecté, et Google n’est pas connecté. Connectez-le dans Paramètres › Connecteurs (Gmail), puis choisissez à nouveau ce déclencheur : rien n’a été enregistré.",
         ));
     }
     Ok(())
@@ -546,6 +578,7 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
     let trigger = name_members(ctx.connection, trigger, None)?;
     require_mailbox(ctx.connection, &trigger, None)?;
     require_github(ctx, &trigger, None)?;
+    require_agenda(ctx.connection, &trigger, None)?;
     let id = format!("routine-{}", random(ctx.connection)?);
     let conversation = format!("routine-{}", random(ctx.connection)?);
     let now = clock(ctx)?;
@@ -616,6 +649,7 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
         r.trigger = name_members(ctx.connection, r.trigger, Some(&previous))?;
         require_mailbox(ctx.connection, &r.trigger, Some(&previous))?;
         require_github(ctx, &r.trigger, Some(&previous))?;
+        require_agenda(ctx.connection, &r.trigger, Some(&previous))?;
     }
     if let Some(zone) = input.time_zone {
         r.time_zone = zone;
@@ -631,6 +665,7 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
         occurrences::retire_catch_up(ctx.connection, &r.routine_id)?;
         routine_mail::cut_off(ctx.connection, &r.routine_id)?;
         routine_github::cut_off(ctx.connection, &r.routine_id)?;
+        routine_calendar::cut_off(ctx.connection, &r.routine_id)?;
         r = owned(ctx.connection, &r.bot_id, &r.routine_id)?;
         ctx.connection.execute("INSERT INTO wrapper_routine_provenance VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET model_edited_at=excluded.model_edited_at",params![r.routine_id,clock(ctx)?])?;
         ask_confirmation(ctx, &r)?;
@@ -848,6 +883,7 @@ pub fn routes(
                         occurrences::retire_catch_up(&tx, &r.routine_id)?;
                         routine_mail::cut_off(&tx, &r.routine_id)?;
                         routine_github::cut_off(&tx, &r.routine_id)?;
+                        routine_calendar::cut_off(&tx, &r.routine_id)?;
                         json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
                     }
                     _ => unreachable!(),
@@ -905,6 +941,10 @@ fn history(
                 &tx,
                 &occurrence.occurrence_id,
             )?)
+            .or(routine_calendar::history_trigger(
+                &tx,
+                &occurrence.occurrence_id,
+            )?)
         {
             value["trigger"] = trigger;
         }
@@ -925,12 +965,13 @@ fn history(
         "ranges_cursor":encode(ranges.cursor),"next_ranges_cursor":ranges.next.map(encode)}),
     )
 }
-/// What starts a simple trigger: a webhook call, a new mail, or the clock.
+/// What starts a simple trigger: a webhook call, a new mail, an agenda event, or the clock.
 fn kind_of(trigger: &Schedule) -> &'static str {
     match trigger {
         Schedule::Webhook => "webhook",
         Schedule::Mail => "mail",
         Schedule::Github { .. } => "github",
+        Schedule::Calendar { .. } => "calendar",
         _ => "schedule",
     }
 }
@@ -965,6 +1006,7 @@ fn name_trigger(
         "webhook" => "Webhook",
         "mail" => "Courriel",
         "github" => "GitHub",
+        "calendar" => "Calendrier",
         _ => "Horaire",
     };
     // The place among its siblings only exists while the member is in the group.
@@ -1353,8 +1395,8 @@ pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
 // Started is dispatched inside start_run's creation transaction, BEFORE launch.
 // Attaching there makes even synchronous simulated completion and a crash between
 // creation/launch safe. The unique engine occurrence trigger is the final arbiter.
-/// A call or a message that started an occurrence by itself: automatic intent, so pause
-/// and edit cut it off, unlike a manual launch.
+/// A call, a message or an agenda event that started an occurrence by itself: automatic
+/// intent, so pause and edit cut it off, unlike a manual launch.
 fn is_delivery_nonce(nonce: &str) -> bool {
     occurrences::is_event_nonce(nonce)
 }
@@ -1455,6 +1497,10 @@ fn dispatch(ctx: &Context<'_>, o: &Occurrence) -> Result<Dispatch, ApiError> {
     if let Some(context) = routine_webhooks::run_context(ctx.connection, &o.occurrence_id)?
         .or(routine_mail::run_context(ctx.connection, &o.occurrence_id)?)
         .or(routine_github::run_context(
+            ctx.connection,
+            &o.occurrence_id,
+        )?)
+        .or(routine_calendar::run_context(
             ctx.connection,
             &o.occurrence_id,
         )?)

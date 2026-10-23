@@ -24,14 +24,19 @@ self.addEventListener("push", event => {
   let data; try { data = event.data.json(); } catch { return; }
   if (typeof data.title !== "string" || typeof data.id !== "string") return;
   // The Mac already applies per-kind settings, DND and current-phone presence.
-  event.waitUntil(self.registration.showNotification(data.title, { body: "Ouvrez Ezerbot pour consulter cet événement.", icon: "/icon-192.png", badge: "/icon-192.png", tag: data.id, data: { notification: data.id } }));
+  // The text of the reply is never in the payload: only the bot's name, as title.
+  const options = { body: "Ouvrez Ezerbot pour consulter cet événement.", icon: "/icon-192.png", badge: "/icon-192.png", tag: data.id, data: { notification: data.id } };
+  // iOS shows no action buttons on a web notification: a plain tap opens the conversation.
+  if (data.kind === "reply") options.actions = [{ action: "reply", title: "Répondre" }];
+  event.waitUntil(self.registration.showNotification(data.title, options));
 });
 self.addEventListener("notificationclick", event => {
   event.notification.close(); const id = event.notification.data?.notification;
   if (typeof id !== "string") return;
+  const reply = event.action === "reply";
   event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async clients => {
     const client = clients.find(client => new URL(client.url).origin === self.location.origin);
-    if (client) { client.postMessage({ notification: id }); await client.focus(); }
-    else await self.clients.openWindow(`/?notification=${encodeURIComponent(id)}`);
+    if (client) { client.postMessage(reply ? { notification: id, reply: true } : { notification: id }); await client.focus(); }
+    else await self.clients.openWindow(`/?notification=${encodeURIComponent(id)}${reply ? "&reply=1" : ""}`);
   }));
 });

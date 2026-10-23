@@ -260,7 +260,7 @@ test("a denied bot selection restores the confirmed check without erasing anothe
   assert.ok(catalogueCard(f.root,"slack")===draft);assert.equal(secret.value,"unsent-private-draft");assert.ok(f.document.activeElement===secret);
 });
 
-const github = {...service,id:"github",name:"GitHub",needs_client:false,has_client:true,configured:true,device_flow:true,device:null,scopes:"",scopes_label:"Permissions de la GitHub App d’Ezerbot, choisies chez GitHub",redirect_uri:null};
+const github = {...service,id:"github",name:"GitHub",needs_client:false,has_client:true,configured:true,device_flow:true,multi_account:true,device:null,scopes:"",scopes_label:"Permissions de la GitHub App d’Ezerbot, choisies chez GitHub",redirect_uri:null};
 
 test("GitHub offers no client fields and connects in one click", async () => {
   const { root, calls } = await mount([], {}, [github]);
@@ -501,6 +501,62 @@ test("a GitHub slot refused before its first connection is not a custom server",
   const { root } = await mount([first,refused], {}, [item]);
   assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0);
   assert.match(root.textContent, /Aucun connecteur ajouté/);
+});
+
+const twoGoogleAccounts = () => {
+  const first = {id:"g1",enabled_bots:["grokbot"],tools:[{name:"list_recent_messages",description:"Lire"}]};
+  const second = {id:"g2",enabled_bots:[],tools:[{name:"list_recent_messages",description:"Lire"}]};
+  const accounts = [
+    {id:"gmail",account:"charles@example.test",status:"connected",device:null,has_tokens:true,server:first},
+    {id:"gmail:2",account:"travail@example.test",status:"connected",device:null,has_tokens:true,server:second},
+  ];
+  return {first,second,item:{...gmail,multi_account:true,slot:"gmail",status:"connected",has_tokens:true,account:"charles@example.test",server:first,accounts}};
+};
+
+test("Gmail offers « Ajouter un autre compte » once connected, and Slack never does", async () => {
+  const alone = {...gmail,multi_account:true,slot:"gmail",status:"connected",has_tokens:true,account:"charles@example.test",server:{id:"g1",enabled_bots:[],tools:[]},accounts:[]};
+  const slack = {...gmail,id:"slack",name:"Slack",multi_account:false,status:"connected",has_tokens:true,account:"Atelier",server:{id:"s1",enabled_bots:[],tools:[]}};
+  const { root, calls } = await mount([], {}, [alone, slack]);
+  const card = catalogueCard(root,"gmail");
+  const add = card.all().find(n => n.attrs["data-connector-action"] === "add-account");
+  assert.equal(add.textContent, "Ajouter un autre compte");
+  await add.events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"gmail",another:true}});
+  assert.equal(catalogueCard(root,"slack").all().filter(n => n.attrs["data-connector-action"] === "add-account").length, 0);
+});
+
+test("Gmail shows both addresses, and disconnects or enables only the account it names", async () => {
+  const {first,second,item} = twoGoogleAccounts();
+  const { root, calls } = await mount([first,second], {}, [item]);
+  const card = catalogueCard(root,"gmail");
+  assert.match(card.textContent, /Compte connecté : travail@example\.test/);
+  assert.equal(root.all().filter(n => n.className === "mcp-server" && n.tag === "article").length, 0, "the accounts are not custom servers");
+  const block = card.all().find(n => n.attrs["data-account"] === "gmail:2");
+  await block.all().find(n => n.attrs["data-connector-action"] === "disconnect-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/disconnect",body:{id:"gmail",account:"gmail:2"}});
+  const check = block.all().find(n => n.type === "checkbox"); check.checked = true;
+  await check.events.change();
+  assert.deepEqual(calls[1], {path:"/api/mcp/select",body:{id:"g2",bot_id:"grokbot",enabled:true}});
+  const lead = card.all().find(n => n.attrs["data-connector-action"] === "disconnect");
+  assert.equal(lead.attrs["aria-label"], "Déconnecter charles@example.test");
+  await lead.events.click();
+  assert.deepEqual(calls[2], {path:"/api/connectors/disconnect",body:{id:"gmail"}});
+});
+
+test("a second Google account waits for the browser beside the first and is cancelled by its own button", async () => {
+  const {first,item} = twoGoogleAccounts();
+  item.accounts[1] = {id:"gmail:2",account:null,status:"authorizing",device:null,authorization_url:"http://127.0.0.1:5000/authorize",has_tokens:false,server:{id:"g2",enabled_bots:[],tools:[]}};
+  const { root, calls } = await mount([first], {}, [item]);
+  const card = catalogueCard(root,"gmail");
+  const block = card.all().find(n => n.attrs["data-account"] === "gmail:2");
+  assert.match(block.textContent, /Compte Gmail · nouveau compte · En attente de votre autorisation dans le navigateur/);
+  const link = block.all().find(n => n.tag === "a");
+  assert.equal(link.textContent, "Ouvrir la page de connexion");
+  assert.equal(link.href, "http://127.0.0.1:5000/authorize");
+  assert.equal(link.attrs["data-connector-action"], "authorize-account");
+  assert.equal(card.all().filter(n => n.attrs["data-connector-action"] === "add-account").length, 0, "one wait at a time");
+  await block.all().find(n => n.attrs["data-connector-action"] === "cancel-account").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"gmail",account:"gmail:2"}});
 });
 
 const pickAddress = root => {

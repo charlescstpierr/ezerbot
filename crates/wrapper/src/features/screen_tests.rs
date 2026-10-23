@@ -281,3 +281,120 @@ fn approving_inside_the_shell_does_not_invalidate_an_active_permit_but_outside_i
     startup(&path);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_yolo_gesture_admitted_under_one_session_never_acts_in_its_replacement() {
+    let _mac = TEST_MAC.lock().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-screen-yolo-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("workspace.sqlite");
+    // Le Mode YOLO est actif par défaut : aucun réglage Écran n'est nécessaire.
+    let mut app = App::open(&path).unwrap();
+    let chat = app
+        .api("POST", "/api/conversations", br#"{"title":"YOLO"}"#)
+        .unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let grant = |app: &mut App| {
+        app.api(
+            "POST",
+            "/api/screen/grant",
+            json!({"bot_id":"grokbot","conversation_id":chat,"minutes":1})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        current(&path).unwrap()
+    };
+    let first = grant(&mut app);
+    let admit = |app: &App, id: &str| {
+        let run = Run {
+            run_id: format!("screen-yolo-{id}"),
+            bot_id: "grokbot".into(),
+            conversation_id: chat.clone(),
+            trigger: Trigger::UserMessage {
+                message_id: format!("m-{id}"),
+                attempt: 0,
+            },
+            kind: RunKind::Chat,
+            status: RunStatus::Running,
+            task_status: None,
+            turn_end: None,
+            budgets: RunBudgets::default(),
+            started_at: crate::now() as i64,
+        };
+        let call = ToolCall {
+            call_id: format!("click-{id}"),
+            name: "computer_click".into(),
+            arguments: json!({"x":10,"y":20,"button":"left"}),
+        };
+        let mut session = None;
+        with_tx(
+            &app.connection,
+            |conn| -> grokbot_engine::contracts::Result<()> {
+                model::start(conn, &run)?;
+                let ctx = Context {
+                    connection: conn,
+                    bot_id: Some("grokbot"),
+                    conversation_id: Some(&chat),
+                    run_id: Some(&run.run_id),
+                    ..app.feature_context()
+                };
+                let ApprovalCheck::Authorized { by } =
+                    super::super::forms::check_tool_approval(&ctx, &run, &call).unwrap()
+                else {
+                    panic!("le Mode YOLO doit admettre le geste sans carte");
+                };
+                session = match &by {
+                    grokbot_engine::contracts::AuthorizedBy::Yolo { session, .. } => *session,
+                    other => panic!("{other:?}"),
+                };
+                conn.execute(
+                "INSERT INTO engine_external_tools(run_id,call_id,authorized_by) VALUES (?1,?2,?3)",
+                params![run.run_id, call.call_id, json!(by).to_string()],
+            )?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        (run, call, session)
+    };
+    let (old_run, old_call, bound) = admit(&app, "old");
+    assert_eq!(bound, Some(first.id));
+    // La session est révoquée, une autre est accordée au même bot et au même fil.
+    first.stop();
+    let second = grant(&mut app);
+    assert_ne!(second.id, first.id);
+    let run_now = |run: &Run, call: &ToolCall| {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let provider = crate::Provider::with_endpoints(&path, crate::Endpoints::default(), false);
+        let ctx = Context {
+            connection: &conn,
+            provider: &provider,
+            db_path: &path,
+            now_ms: crate::now(),
+            bot_id: Some(&run.bot_id),
+            conversation_id: Some(&run.conversation_id),
+            run_id: Some(&run.run_id),
+        };
+        execute(&ctx, call, Arc::new(AtomicBool::new(false)))
+    };
+    assert!(matches!(
+        run_now(&old_run, &old_call),
+        ToolOutcome::Failed { .. }
+    ));
+    assert!(second.events.lock().unwrap().is_empty());
+    // Un geste admis sous la session vivante agit.
+    let (run, call, bound) = admit(&app, "new");
+    assert_eq!(bound, Some(second.id));
+    assert!(matches!(run_now(&run, &call), ToolOutcome::Done { .. }));
+    assert_eq!(second.events.lock().unwrap().len(), 1);
+    second.stop();
+    startup(&path);
+    let _ = std::fs::remove_dir_all(root);
+}

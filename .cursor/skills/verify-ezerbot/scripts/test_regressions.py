@@ -308,5 +308,54 @@ class FakeReferenceTests(unittest.TestCase):
         self.assertEqual(json.loads(call["arguments"])["reference_image_paths"], ["attachment_photo"])
 
 
+class FakeYoloTests(unittest.TestCase):
+    def events(self, items: list) -> list[dict]:
+        body = json.dumps({"input": items}).encode()
+        return [
+            json.loads(line[len("data: ") :])
+            for line in fake_openai.response_body(body).decode().splitlines()
+            if line.startswith("data: ")
+        ]
+
+    def setUp(self) -> None:
+        self.previous = os.environ.get("EZERBOT_VERIFY_FAKE_WORK")
+        os.environ["EZERBOT_VERIFY_FAKE_WORK"] = "/tmp/verify-work/Documents"
+
+    def tearDown(self) -> None:
+        if self.previous is None:
+            os.environ.pop("EZERBOT_VERIFY_FAKE_WORK", None)
+        else:
+            os.environ["EZERBOT_VERIFY_FAKE_WORK"] = self.previous
+
+    def test_each_request_asks_for_its_own_tool_even_after_an_earlier_turn(self) -> None:
+        shell = self.events([{"role": "user", "content": "Liste mon dossier Documents"}])[0]["item"]
+        self.assertEqual((shell["name"], json.loads(shell["arguments"])["cwd"]), ("run_shell", "/tmp/verify-work/Documents"))
+        history = [
+            {"role": "user", "content": "Liste mon dossier Documents"},
+            {"type": "function_call_output", "call_id": "verify-shell", "output": "ok"},
+            {"role": "user", "content": "Écris mes notes du jour"},
+        ]
+        write = self.events(history)[0]["item"]
+        arguments = json.loads(write["arguments"])
+        self.assertEqual(write["name"], "write_file")
+        self.assertIsNone(arguments["expected_sha256"])
+        self.assertTrue(arguments["path"].endswith("/Documents/Notes-du-jour.txt"))
+
+    def test_the_tool_result_gets_a_closing_sentence_and_nothing_else_is_scripted(self) -> None:
+        done = self.events([{"type": "function_call_output", "call_id": "verify-write", "output": "ok"}])
+        self.assertIn("Notes-du-jour.txt", done[0]["delta"])
+        plain = self.events([{"role": "user", "content": "Bonjour"}])
+        self.assertEqual(plain[0]["type"], "response.created")
+        os.environ.pop("EZERBOT_VERIFY_FAKE_WORK")
+        self.assertEqual(self.events([{"role": "user", "content": "Liste mon dossier Documents"}])[0]["type"], "response.created")
+
+    def test_the_sphere_is_driven_and_named(self) -> None:
+        self.assertIn("mode-yolo", drive.SPHERES)
+        self.assertEqual(
+            drive.shot_names("mode-yolo", "dark", 1140, 780),
+            ["parametres-dark-1140x780.png", "terminal-dark-1140x780.png", "ecriture-dark-1140x780.png"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

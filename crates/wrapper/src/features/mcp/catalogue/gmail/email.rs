@@ -11,7 +11,7 @@ use grokbot_engine::contracts::{ToolCall, ToolOutcome, ToolSpec};
 pub(in super::super::super) const TOOL: &str = "gmail_send_email";
 const MAX_SUBJECT: usize = 255;
 const MAX_BODY: usize = 65_536;
-const MAX_RECIPIENTS: usize = 20;
+pub(in super::super) const MAX_RECIPIENTS: usize = 20;
 const ACTION: &str = "Envoyer un courriel";
 /// What the model writes for the connected account, which it may not know the address of.
 const MYSELF: &str = "moi";
@@ -73,7 +73,7 @@ fn unmasked(ctx: &Context<'_>, text: &str, what: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
-fn check_subject(ctx: &Context<'_>, subject: &str) -> Result<(), ApiError> {
+pub(in super::super) fn check_subject(ctx: &Context<'_>, subject: &str) -> Result<(), ApiError> {
     if subject.trim().is_empty() {
         return Err(invalid(
             "L’objet est vide : écrivez un objet avant d’envoyer.",
@@ -89,7 +89,7 @@ fn check_subject(ctx: &Context<'_>, subject: &str) -> Result<(), ApiError> {
     }
     unmasked(ctx, subject, "L’objet")
 }
-fn check_body(ctx: &Context<'_>, body: &str) -> Result<(), ApiError> {
+pub(in super::super) fn check_body(ctx: &Context<'_>, body: &str) -> Result<(), ApiError> {
     if body.chars().count() > MAX_BODY {
         return Err(invalid("Le corps dépasse 65 536 caractères."));
     }
@@ -132,7 +132,11 @@ fn address(text: &str, login: &str) -> Result<String, ApiError> {
         )))
     }
 }
-fn recipients(ctx: &Context<'_>, entries: &[String], login: &str) -> Result<Vec<String>, ApiError> {
+pub(in super::super) fn recipients(
+    ctx: &Context<'_>,
+    entries: &[String],
+    login: &str,
+) -> Result<Vec<String>, ApiError> {
     let mut found: Vec<String> = Vec::new();
     for entry in entries {
         let one = address(entry, login)?;

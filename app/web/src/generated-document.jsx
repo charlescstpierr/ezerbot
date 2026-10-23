@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatAttachmentSize } from "./attachment-presentation.js";
 import { documentToolView } from "./generated-presentation.js";
+import { AUTOMATIC_LABEL, isAutomatic } from "./yolo-view.js";
 
 function SaveDialog({ file, pending, error, onSave, onClose }) {
   const dialog = useRef(null);
@@ -77,7 +78,7 @@ export function DocumentTool({ message, run }) {
   const { call, outcome, authorized_by } = message.payload;
   const view = documentToolView(message.payload, run);
   return <article className="gb-message gb-engine-card gb-local-card gb-document-status" data-message-id={message.id} data-card-kind="tool" data-local-state={view.state}>
-    <div className="gb-local-header"><strong>{view.title}</strong><span className="gb-local-status" data-tone={view.tone}>{view.label}</span></div>
+    <div className="gb-local-header">{isAutomatic(authorized_by) && <span className="gb-auto-badge">{AUTOMATIC_LABEL}</span>}<strong>{view.title}</strong><span className="gb-local-status" data-tone={view.tone}>{view.label}</span></div>
     {view.failure ? <p className="gb-local-failure" data-tone={view.tone} role="alert">{view.summary}</p> : <p role="status">{outcome?.output?.message || view.note}</p>}
     {typeof call.arguments?.path === "string" && <pre className="gb-local-command">{call.arguments.path}</pre>}
     {view.failure && view.summary !== view.failure.message && <details><summary>Détails techniques</summary><pre className="gb-local-command">{view.failure.message}</pre></details>}

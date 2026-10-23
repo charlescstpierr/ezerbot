@@ -163,6 +163,25 @@ pub(crate) fn run_linear_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome
         catalogue::linear::call(ctx, &call.name, &call.arguments)
     }
 }
+/// The Microsoft 365 tools (Outlook): a native adapter, run outside any SQLite writer. The reads
+/// start without a card; sending a mail is a draft card.
+pub(crate) fn is_microsoft_tool(name: &str) -> bool {
+    catalogue::microsoft::is_read(name) || is_microsoft_draft(name)
+}
+pub(crate) fn is_microsoft_draft(name: &str) -> bool {
+    catalogue::microsoft::mail::is_tool(name)
+}
+/// Why a Microsoft 365 tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn microsoft_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::microsoft::unavailable(ctx)
+}
+pub(crate) fn run_microsoft_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    if is_microsoft_draft(&call.name) {
+        catalogue::microsoft::mail::call(ctx, call)
+    } else {
+        catalogue::microsoft::call(ctx, &call.name, &call.arguments)
+    }
+}
 /// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
     catalogue::github::unavailable(ctx)
@@ -234,7 +253,7 @@ pub fn calendar_acknowledge(conn: &Connection, seqs: &[i64]) -> Result<(), ApiEr
 pub fn calendar_stop_watching(conn: &Connection) -> Result<(), ApiError> {
     catalogue::gmail::stop_watching_calendar(conn)
 }
-/// The publishing tools of the connections (GitHub, Gmail, Slack, Linear) and of the meeting chat: each opens a draft card and sends nothing
+/// The publishing tools of the connections (GitHub, Gmail, Slack, Linear, Microsoft 365) and of the meeting chat: each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_draft(name: &str) -> bool {
     is_github_comment(name)
@@ -242,6 +261,7 @@ pub(crate) fn is_draft(name: &str) -> bool {
         || is_gmail_email(name)
         || is_slack_post(name)
         || is_linear_draft(name)
+        || is_microsoft_draft(name)
         || super::recall::is_reply(name)
 }
 pub(crate) fn is_github_comment(name: &str) -> bool {
@@ -252,13 +272,18 @@ pub(crate) fn is_github_issue(name: &str) -> bool {
 }
 /// A draft whose card has a title the user may correct: an issue title, a subject.
 pub(crate) fn has_draft_title(name: &str) -> bool {
-    is_github_issue(name) || is_gmail_email(name) || catalogue::linear::draft::is_create(name)
+    is_github_issue(name)
+        || is_gmail_email(name)
+        || is_microsoft_draft(name)
+        || catalogue::linear::draft::is_create(name)
 }
 pub(crate) fn validate_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     if super::recall::is_reply(&call.name) {
         super::recall::reply_validate(ctx, call)
     } else if is_linear_draft(&call.name) {
         catalogue::linear::draft::validate(ctx, call)
+    } else if is_microsoft_draft(&call.name) {
+        catalogue::microsoft::mail::validate(ctx, call)
     } else if is_slack_post(&call.name) {
         catalogue::slack::post::validate(ctx, call)
     } else if is_gmail_email(&call.name) {
@@ -279,6 +304,8 @@ pub(crate) fn draft_display(
         super::recall::reply_prepare(ctx, request_id, call)
     } else if is_linear_draft(&call.name) {
         catalogue::linear::draft::prepare(ctx, request_id, call)
+    } else if is_microsoft_draft(&call.name) {
+        catalogue::microsoft::mail::prepare(ctx, request_id, call)
     } else if is_slack_post(&call.name) {
         catalogue::slack::post::prepare(ctx, request_id, call)
     } else if is_gmail_email(&call.name) {
@@ -294,10 +321,11 @@ pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> 
         .or_else(|| catalogue::gmail::email_call_id(ctx, request_id))
         .or_else(|| catalogue::slack::post::call_id(ctx, request_id))
         .or_else(|| catalogue::linear::draft::call_id(ctx, request_id))
+        .or_else(|| catalogue::microsoft::mail::call_id(ctx, request_id))
         .or_else(|| super::recall::reply_call_id(ctx, request_id))
 }
 /// What Charles corrected on a draft card: a comment or a Slack message has a text, a Linear issue a title and a description, an issue a title and a body,
-/// an email a subject and a body.
+/// an email (Gmail or Outlook) a subject and a body.
 pub(crate) fn edit_draft(
     ctx: &Context<'_>,
     request_id: &str,
@@ -309,6 +337,8 @@ pub(crate) fn edit_draft(
         super::recall::reply_edit(ctx, request_id, text.unwrap_or_default())
     } else if is_linear_draft(tool) {
         catalogue::linear::draft::edit(ctx, request_id, title, text)
+    } else if is_microsoft_draft(tool) {
+        catalogue::microsoft::mail::edit(ctx, request_id, title, text)
     } else if is_slack_post(tool) {
         catalogue::slack::post::edit(ctx, request_id, text.unwrap_or_default())
     } else if is_gmail_email(tool) {
@@ -550,6 +580,9 @@ fn namespace(server: &Server, tool: &Value) -> String {
     format!("mcp_{}_{}", server.id, &hash[..16])
 }
 fn enabled(conn: &Connection, server: &str, bot: &str) -> bool {
+    if super::yolo::active(conn, bot) {
+        return true;
+    }
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM wrapper_mcp_bots WHERE server_id=?1 AND bot_id=?2)",
         params![server, bot],

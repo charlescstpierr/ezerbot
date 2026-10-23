@@ -7,6 +7,7 @@
   const EXTENSIONS = ["pdf", "docx", "xlsx", "csv", "pptx", "md", "txt"];
   const FORMAT_ERROR = "Format non accepté : PDF, DOCX, XLSX, CSV, PPTX, MD ou TXT.";
   const SIZE_ERROR = "Le document dépasse la limite de 20 Mo.";
+  const fullError = (max) => `La bibliothèque de ce bot est pleine : ${max} fichiers au maximum. Retirez un fichier avant d’en déposer un autre.`;
   const node = (tag, className, text) => {
     const el = document.createElement(tag);
     if (className) el.className = className;
@@ -50,7 +51,9 @@
       const section = node("section", "library-panel");
       section.setAttribute("aria-label", "Bibliothèque du bot");
       section.append(node("h3", "", "Bibliothèque"));
-      section.append(node("p", "library-note", "Plafond : 20 Mo. Le fichier reste sur ce bot : un nouveau fil peut le citer. Un autre bot ne le reçoit pas."));
+      const limitsNote = node("p", "library-note library-limits");
+      section.append(limitsNote);
+      section.append(node("p", "library-note", "Le fichier reste sur ce bot : un nouveau fil peut le citer, avec son nom et la page. Un autre bot ne le reçoit pas."));
       container.append(section);
       if (!bot?.id || bot.deleted) {
         section.append(node("p", "library-note", "Enregistrez d’abord ce bot pour déposer des fichiers dans sa bibliothèque."));
@@ -59,6 +62,12 @@
       let alive = true;
       let shown = [];
       let pending = null;
+      let limits = { ceiling: "20 Mo", max_files: 20 };
+      const showLimits = () => {
+        const count = shown.length;
+        limitsNote.textContent = `Plafond : ${limits.ceiling} par fichier · ${count} sur ${limits.max_files} fichiers.`;
+      };
+      showLimits();
       const drop = node("div", "library-drop");
       drop.tabIndex = 0;
       drop.setAttribute("role", "button");
@@ -82,9 +91,17 @@
       confirm.append(confirmText, confirmRemove, cancel);
       section.append(drop, fileInput, status, error, list, confirm);
 
+      function apply(data) {
+        if (!alive) return;
+        if (typeof data?.ceiling === "string" && Number.isInteger(data.max_files)) {
+          limits = { ceiling: data.ceiling, max_files: data.max_files };
+        }
+        render(data?.files || []);
+      }
       function render(files) {
         if (!alive) return;
         shown = Array.isArray(files) ? files : [];
+        showLimits();
         if (pending && !shown.some((file) => file.id === pending.id)) {
           pending = null;
           confirm.hidden = true;
@@ -122,7 +139,7 @@
           if (!alive) return;
           pending = null;
           confirm.hidden = true;
-          render(saved.files || []);
+          apply(saved);
           error.textContent = "";
           status.textContent = `${file.name} a été retiré.`;
         } catch (failure) {
@@ -154,10 +171,15 @@
           return;
         }
         const replacing = shown.some((item) => item.name === file.name);
+        if (!replacing && shown.length >= limits.max_files) {
+          status.textContent = "";
+          error.textContent = fullError(limits.max_files);
+          return;
+        }
         try {
           const saved = await panels.api("/api/library", { bot_id: bot.id, name: file.name, data });
           if (!alive) return;
-          render(saved.files || []);
+          apply(saved);
           status.textContent = replacing
             ? `${file.name} remplace la version précédente.`
             : `${file.name} est dans la bibliothèque.`;
@@ -194,7 +216,7 @@
         await ingestAll(files);
       });
       panels.api(`/api/library?bot_id=${encodeURIComponent(bot.id)}`).then((data) => {
-        render(data.files || []);
+        apply(data);
       }).catch((failure) => {
         if (!alive) return;
         error.textContent = failure.message;

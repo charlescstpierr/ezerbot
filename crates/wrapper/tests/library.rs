@@ -594,13 +594,17 @@ fn truncation_warning_is_kept_and_the_model_does_not_deny_the_cut() {
     f.connect();
     f.bot("bot-a", "Alpha");
     let mut text = "Début visible du tarif.\n".to_string();
-    text.push_str(&"x".repeat(documents::MAX_TEXT));
+    text.push_str(&"x".repeat(documents::LIBRARY.text));
     text.push_str("FIN_NON_TRANSMISE");
     let saved = f.deposit("bot-a", "long.txt", text.as_bytes());
     let note = saved["files"][0]["note"].as_str().unwrap();
     assert!(
         note.contains("Texte tronqué"),
         "la liste annonce la coupure : {saved}"
+    );
+    assert!(
+        note.contains("aux 2\u{202f}000\u{202f}000 premiers caractères"),
+        "la note donne le plafond de la bibliothèque : {note}"
     );
     assert!(
         !saved.to_string().contains("FIN_NON_TRANSMISE"),
@@ -660,6 +664,196 @@ fn truncation_warning_is_kept_and_the_model_does_not_deny_the_cut() {
         reply.contains("n’a pas été transmise") && !reply.contains("Je n’ai pas"),
         "le modèle ne nie pas le passage coupé : {reply}"
     );
+}
+
+const LIBRARY_BUDGET: usize = 12_000;
+
+#[test]
+fn the_catalogue_states_the_ceiling_and_the_file_limit() {
+    let mut f = Fixture::new();
+    f.bot("bot-a", "Alpha");
+    let saved = f.deposit("bot-a", FILE_NAME, TARIFF.as_bytes());
+    assert_eq!(saved["ceiling"], "20 Mo");
+    assert_eq!(saved["max_files"], 20);
+}
+
+#[test]
+fn a_full_library_refuses_a_new_name_but_still_replaces_a_file() {
+    let mut f = Fixture::new();
+    f.bot("bot-a", "Alpha");
+    f.bot("bot-b", "Bravo");
+    for index in 0..20 {
+        f.deposit("bot-a", &format!("fichier-{index}.md"), b"contenu v1");
+    }
+    let refused = f
+        .deposit_result("bot-a", "de-trop.md", b"contenu")
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    assert!(
+        refused.message.contains("20 fichiers au maximum"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(f.listed("bot-a").len(), 20);
+
+    let replaced = f.deposit("bot-a", "fichier-3.md", b"contenu v2");
+    assert_eq!(replaced["files"].as_array().unwrap().len(), 20);
+    f.deposit("bot-b", "autre.md", b"le bot voisin a sa propre place");
+    assert_eq!(f.listed("bot-b").len(), 1);
+
+    let id = f.listed("bot-a")[0]["id"].as_str().unwrap().to_owned();
+    f.remove("bot-a", &id);
+    f.deposit("bot-a", "de-trop.md", b"contenu");
+    assert_eq!(f.listed("bot-a").len(), 20);
+}
+
+#[test]
+fn a_text_far_beyond_the_ceiling_is_cut_and_says_so_in_the_prompt() {
+    let mut f = Fixture::new();
+    f.bot("bot-a", "Alpha");
+    // 3 000 pages estimées (4 000 caractères la page) : bien au-delà des 500 pages de la bibliothèque.
+    let mut text = String::from("DEBUT-LISIBLE ");
+    text.push_str(&"mot ".repeat(3_000 * 1_000));
+    text.push_str("FIN-HORS-PLAFOND");
+    let saved = f.deposit("bot-a", "tres-long.txt", text.as_bytes());
+    let note = saved["files"][0]["note"].as_str().unwrap();
+    assert!(
+        note.contains("Texte tronqué") && note.contains("sur 3\u{202f}001"),
+        "{note}"
+    );
+    let conversation = f.conversation("bot-a");
+    let prompt = f.library_prompt(&conversation);
+    assert!(prompt.contains("Texte tronqué"), "{prompt}");
+    assert!(!prompt.contains("FIN-HORS-PLAFOND"));
+    assert!(prompt.chars().count() <= LIBRARY_BUDGET);
+}
+
+#[cfg(target_os = "macos")]
+mod long_pdf {
+    use super::*;
+
+    const PDF_NAME: &str = "rapport.pdf";
+    const FACT: &str = "Le code du coffre est ZEBRA-4242.";
+
+    /// A real PDF of `pages` text pages with a valid xref, `FACT` on page 40.
+    fn pdf(pages: usize) -> Vec<u8> {
+        let mut objects: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                (0..pages)
+                    .map(|page| format!("{} 0 R", 4 + 2 * page))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        ];
+        for page in 1..=pages {
+            let mut stream = String::from("BT /F1 6 Tf 7 TL 20 780 Td\n");
+            for line in 0..100 {
+                let text = if page == 40 && line == 0 {
+                    FACT.to_owned()
+                } else {
+                    format!(
+                        "Ligne {line} du chapitre {page} sans rapport avec la question posee ici."
+                    )
+                };
+                stream.push_str(&format!("({text}) Tj T*\n"));
+            }
+            stream.push_str("ET");
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                5 + 2 * (page - 1)
+            ));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{stream}\nendstream",
+                stream.len()
+            ));
+        }
+        let mut out = "%PDF-1.4\n".to_string();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+        }
+        let xref = out.len();
+        out.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objects.len() + 1
+        ));
+        for offset in offsets {
+            out.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF",
+            objects.len() + 1
+        ));
+        out.into_bytes()
+    }
+
+    #[test]
+    fn a_fifty_page_pdf_is_read_whole_and_the_page_is_cited() {
+        let mut f = Fixture::new();
+        f.connect();
+        f.bot("bot-a", "Alpha");
+        f.bot("bot-b", "Bravo");
+        let saved = f.deposit("bot-a", PDF_NAME, &pdf(50));
+        let file = &saved["files"][0];
+        assert_eq!(file["name"], PDF_NAME);
+        assert!(
+            file.get("note").is_none(),
+            "aucun avertissement de troncature : {saved}"
+        );
+
+        f.reopen();
+        let alpha = f.conversation("bot-a");
+        let bravo = f.conversation("bot-b");
+        let question = "Quel est le code du coffre ?";
+        f.ask_about(&alpha, "question-page", question);
+        f.ask_about(&bravo, "question-voisin", question);
+
+        let prompt = f.library_prompt(&alpha);
+        assert!(prompt.chars().count() <= LIBRARY_BUDGET, "{}", prompt.len());
+        assert!(
+            prompt.contains(PDF_NAME)
+                && prompt.contains("ZEBRA-4242")
+                && prompt.contains("[Page 40]"),
+            "le passage de la page 40 doit être transmis : {prompt}"
+        );
+        assert!(!prompt.contains("\"note\""), "{prompt}");
+        let neighbour = f.library_prompt(&bravo);
+        assert!(!neighbour.contains(PDF_NAME) && !neighbour.contains("ZEBRA"));
+
+        f.server.seen.lock().unwrap().reply_for = Some(Arc::new(|body: &Value| {
+            let instructions = body["instructions"].as_str().unwrap_or("");
+            if instructions.starts_with("Extraction de mémoire automatique.")
+                || instructions.contains("Tu écris le titre")
+            {
+                return None;
+            }
+            let blob = body.to_string();
+            let text = if blob.contains(PDF_NAME)
+                && blob.contains("ZEBRA-4242")
+                && blob.contains("[Page 40]")
+            {
+                "Le code est ZEBRA-4242 (rapport.pdf, page 40)."
+            } else {
+                "Je n’ai pas ce document."
+            };
+            Some(ScriptedResponse::events(&[
+                json!({"type": "response.created"}),
+                json!({"type": "response.output_text.delta", "delta": text}),
+                json!({"type": "response.completed"}),
+            ]))
+        }));
+        let fresh = f.conversation("bot-a");
+        f.ask_about(&fresh, "question-nouveau-fil", question);
+        let reply = f.reply(&fresh, "question-nouveau-fil");
+        assert!(
+            reply.contains("rapport.pdf, page 40") && reply.contains("ZEBRA-4242"),
+            "{reply}"
+        );
+    }
 }
 
 fn stored_zip(parts: &[(&str, &[u8])]) -> Vec<u8> {

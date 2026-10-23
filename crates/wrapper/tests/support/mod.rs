@@ -78,6 +78,9 @@ pub struct Seen {
     pub responses: VecDeque<ScriptedResponse>,
     /// Automatic memory runs independently; never consume a chat's scripted reply.
     pub memory_responses: VecDeque<ScriptedResponse>,
+    /// Résumés de réunions Recall : un appel ponctuel, jamais une réponse de conversation.
+    pub summary_responses: VecDeque<ScriptedResponse>,
+    pub summary_requests: Vec<Value>,
     pub memory_model: bool,
     pub memory_delay: Duration,
     /// Optional provider telemetry for default chat replies (titles remain independent).
@@ -487,6 +490,17 @@ impl FakeOpenAi {
                                 json!({"type":"response.completed"}),
                             ]));
                                 delay = seen.memory_delay;
+                                (reply.status, reply.content_type, reply.body)
+                            } else if request_body["instructions"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .starts_with("Résumé de réunion Recall.")
+                            {
+                                seen.summary_requests.push(request_body.clone());
+                                let reply = seen.summary_responses.pop_front().unwrap_or_else(|| ScriptedResponse::events(&[
+                                json!({"type":"response.output_text.delta","delta":"Décisions : aucune."}),
+                                json!({"type":"response.completed"}),
+                            ]));
                                 (reply.status, reply.content_type, reply.body)
                             } else if let Some(reply) = seen
                                 .reply_for

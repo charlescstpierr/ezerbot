@@ -3004,3 +3004,76 @@ fn a_pause_cuts_off_a_queued_message_even_when_the_routine_is_resumed_before_the
         1
     );
 }
+
+fn mail_of_account(id: &str, account: &str) -> features::mcp::MailEvent {
+    features::mcp::MailEvent {
+        compte: account.into(),
+        ..mail(id)
+    }
+}
+
+#[test]
+fn a_mail_run_names_the_google_account_that_received_the_message() {
+    let mut f = Fixture::new(true);
+    connect_gmail(&f);
+    let r = mail_routine(&mut f, "MAIL_PROMPT");
+    f.events(vec![
+        call("done", "complete_task", json!({"summary":"Lu"})),
+        complete(),
+    ]);
+    f.events(vec![complete()]);
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail_of_account("m1", "travail@example.test"))
+            .unwrap(),
+        1
+    );
+    f.app.tick(now());
+    f.wait_run(&r);
+    // The history, the prompt the run was given and the thread all say whose inbox it was.
+    let history = f.history(&r);
+    assert_eq!(
+        history["occurrences"][0]["trigger"]["compte"],
+        "travail@example.test"
+    );
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(seen.bodies.iter().any(|b| {
+            let text = b.to_string();
+            text.contains("MAIL_PROMPT") && text.contains("travail@example.test")
+        }));
+    }
+    let thread = thread_of(&mut f, &r);
+    assert!(thread.contains("travail@example.test"), "{thread}");
+}
+
+#[test]
+fn the_same_message_identifier_in_two_google_accounts_is_two_runs() {
+    let mut f = Fixture::new(false);
+    connect_gmail(&f);
+    let r = mail_routine(&mut f, "Deux boîtes");
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail_of_account("m1", "charles@example.test"))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail_of_account("m1", "travail@example.test"))
+            .unwrap(),
+        1
+    );
+    // Each message is still delivered once.
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail_of_account("m1", "travail@example.test"))
+            .unwrap(),
+        0
+    );
+    let history = f.history(&r);
+    let mut accounts: Vec<_> = history["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["trigger"]["compte"].as_str().unwrap().to_owned())
+        .collect();
+    accounts.sort();
+    assert_eq!(accounts, ["charles@example.test", "travail@example.test"]);
+}

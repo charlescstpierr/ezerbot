@@ -148,6 +148,10 @@ pub(crate) fn run_slack_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome 
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
     catalogue::github::unavailable(ctx)
 }
+/// Why a routine cannot be given a GitHub trigger: `None` when an account is connected.
+pub(crate) fn github_routine_gap(ctx: &Context<'_>) -> Result<Option<String>, ApiError> {
+    catalogue::github::routine_gap(ctx)
+}
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     if is_github_comment(&call.name) {
         catalogue::github::comment::call(ctx, call)
@@ -182,6 +186,14 @@ pub use catalogue::gmail::{CalendarCase, CalendarEvent, MailEvent};
 /// token. The first call only learns what the inbox already holds.
 pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
     catalogue::gmail::new_messages(ctx)
+}
+/// Whether a Gmail account is connected: a new-mail trigger of a routine can only be armed then.
+pub fn gmail_connected(conn: &Connection) -> bool {
+    catalogue::gmail::any_connected(conn)
+}
+/// Forget what the inbox held, once no routine watches it: the next look learns it afresh.
+pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching(conn)
 }
 /// The agenda events of the connected Google account since the last call: created,
 /// modified, cancelled or begun, each version once, with its identifier, case, start

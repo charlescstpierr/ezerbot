@@ -86,7 +86,9 @@ L’identité d’un événement est la routine, le déclencheur et l’identifi
 - commentaire (commentaire de pull request, commentaire d’issue, commentaire de revue inline)
 - issue ouverte
 
-**Courriel** : un nouveau message dans la boîte du connecteur. Le fil reçoit l’expéditeur, l’objet, la date et le texte. Le même identifiant de message ne part qu’une fois.
+Contrat d’entrée, l’événement normalisé que le connecteur remet à la routine : un identifiant (`id`, le sien, stable d’une redelivery à l’autre), le dépôt (`propriétaire/dépôt`, sans tenir compte de la casse), le nom de l’événement (`pull_request_opened`, `pull_request_pushed`, `pull_request_merged`, `comment` ou `issue_opened`), puis, pour le fil, le numéro, le titre, l’auteur, l’adresse et le texte. Tout autre nom d’événement est ignoré sans erreur et ne démarre rien. Le texte est une donnée non fiable, jamais une instruction. L’événement part à sa livraison, sur les routines actives qui écoutent ce dépôt et cet événement ; une routine en pause ne le garde pas. Le fil reçoit l’événement comme un message venu de l’extérieur, et l’historique affiche « GitHub », l’événement, le dépôt et le numéro, avec l’heure de réception. L’éditeur n’enregistre un déclencheur GitHub que si un compte GitHub est connecté, et le dit sinon.
+
+**Courriel** : un nouveau message dans la boîte d’un compte Google connecté. Le fil, le contexte du run et l’historique nomment le compte qui l’a reçu ; le fil reçoit aussi l’expéditeur, l’objet, la date et le texte. Le même identifiant de message ne part qu’une fois par compte : reçu dans deux boîtes, il fait deux runs.
 
 **Calendrier**, cas au choix : événement créé, modifié, annulé, ou qui commence. Le début est un créneau à l’instant de début, dans le fuseau de l’événement, et suit la politique de rattrapage de l’horaire. Création, modification et annulation partent quand le connecteur les livre.
 
@@ -200,6 +202,7 @@ Le juge regarde le Mac : panneau Routines, historique, fil de la routine, Param�
 - **Funnel est public.** L’URL est sur Internet. Le jeton Bearer, le chemin seul, l’approbation et le port séparé de la PWA limitent l’exposition. Un administrateur de tailnet peut interdire Funnel : le panneau doit alors montrer le refus, pas une URL morte présentée comme publique.
 - **Webhook application fermée.** L’appel échoue. GitHub peut réessayer de son côté. Ezerbot ne stocke pas l’appel manqué. Un futur ingress peut combler ce trou sans changer l’identité d’occurrence.
 - **Double exécution le jour où le cloud existera.** Le Mac et un exécuteur distant pourraient tous deux voir une identité non réclamée. La parade de cette spec est l’identité stable et la réclamation unique. Elle est nécessaire et insuffisante tant que l’exécuteur distant n’existe pas.
+- **Livraison par le connecteur.** Le connecteur GitHub de `docs/specs/connecteurs.md` n’a pas de webhook dans son premier lot : il ne livre pas encore d’événement à la routine. Le déclencheur consomme l’événement normalisé ci-dessus, prouvé par des tests qui en injectent un. Faire livrer ces événements par le connecteur (interrogation des événements du dépôt, ou webhook) est le travail du connecteur, pas de ce déclencheur.
 - **Connecteurs mouvants.** `docs/specs/connecteurs.md` est en cours. Les tickets GitHub, courriel et calendrier consomment ses événements ; ils ne les inventent pas. Si le vocabulaire du connecteur bouge, ces tickets suivent le connecteur, pas l’inverse.
 - **Corps de webhook sensible.** Le JSON va dans le fil, parce que l’utilisateur l’a envoyé à sa routine. Le jeton Bearer n’y va pas.
 

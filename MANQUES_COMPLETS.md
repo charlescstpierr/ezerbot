@@ -141,7 +141,7 @@ Les familles et obligations du tableau proviennent de `evidence/parity.json`. La
 | MCP et connecteurs | Chemin client retracé | Non implémenté | Manifeste, registry, OAuth broker et révocation | Connexion expirée, tool inconnu, refus scope et déconnexion |
 | Skills et plugins | Chemin client retracé | Bibliothèque/import locaux livrés | Écriture modèle, plugins et publication d’équipe | Imports natifs/dossiers, réimport nommé et contexte hostile |
 | Apprentissage par démonstration | Chemin client retracé | Non implémenté | DemonstrationSession et draft de skill, save/discard explicites | Start doublé, stop save, stop discard, limite durée, changement de compte et erreur de capture |
-| Routines, horaires et triggers | Contrat partiel | Horaires/occurrences locaux livrés | Triggers provider (GitHub, courriel, calendrier) et historique paginé | Confirmation dans le chat principal, vrai fournisseur et webhook doublé |
+| Routines, horaires et triggers | Contrat partiel | Horaires/occurrences locaux livrés | Triggers provider (GitHub, calendrier) et historique paginé ; le courriel est livré | Confirmation dans le chat principal, vrai fournisseur et webhook doublé |
 | Templates et marketplace | Contrat partiel | Non implémenté | Versions de modèle, provenance et import sans sessions privées | Import public/team, update de modèle, scopes et fichiers exclus |
 | Voix, dictée et mémos | Chemin client retracé | Non implémenté | VoiceSession, audio streaming, transcription et TTS | Reconnect, interruption vocale, epoch audio et fin de mémo |
 | Meetings et capture | Contrat partiel | Non implémenté | Session de capture consentie et artefacts distincts | Arrêt capture, permission refusée, limites durée et rétention |

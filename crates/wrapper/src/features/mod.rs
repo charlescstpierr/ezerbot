@@ -103,6 +103,8 @@ pub mod multibot;
 pub mod notifications;
 pub mod pages;
 pub mod recall;
+pub mod routine_github;
+pub mod routine_mail;
 pub mod routine_webhooks;
 pub mod routines;
 pub mod routines_background;
@@ -151,6 +153,8 @@ registry!(
     routines,
     routines_background,
     routine_webhooks,
+    routine_github,
+    routine_mail,
     delegation,
     attachments,
     library,

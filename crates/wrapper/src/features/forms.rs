@@ -26,7 +26,7 @@ use grokbot_forms::{
     redact::redact_value,
     requests::{self, Field, HumanInputRequest, InputKind, RequestStatus},
     rules,
-    vault::{canonical_secret_name, Vault, MAX_SECRET_PURPOSE_CHARACTERS},
+    vault::{canonical_secret_name, Vault, MAX_SECRET_PURPOSE_CHARACTERS, MAX_SECRET_VALUE_BYTES},
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
@@ -111,6 +111,12 @@ struct FormArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SiteArgs {
+    origin: String,
+    fields: Vec<Field>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SecretArgs {
     name: String,
     purpose: String,
@@ -125,7 +131,12 @@ pub fn tools() -> Vec<ToolSpec> {
         object(json!({"kind":{"type":"string","enum":["text","number","boolean"]}}), json!(["kind"])),
         object(json!({"kind":{"type":"string","enum":["choice"]},"options":{"type":"array","items":{"type":"string"}}}), json!(["kind","options"]))
     ]});
+    let site_fields = object(
+        json!({"name":{"type":"string"},"label":{"type":"string"},"field_type":field_type,"required":{"type":"boolean"}}),
+        json!(["name", "label", "field_type", "required"]),
+    );
     vec![
+        ("request_site_form", "Request private values for a confirmed web origin; receive only a status.", object(json!({"origin":{"type":"string"},"fields":{"type":"array","items":site_fields}}), json!(["origin","fields"]))),
         ("request_form", "Ask the user for typed form input; suspend this run.", object(json!({"fields":{"type":"array","items":object(json!({
             "name":{"type":"string"},"label":{"type":"string"},"field_type":field_type,"required":{"type":"boolean"}
         }),json!(["name","label","field_type","required"]))}}), json!(["fields"]))),
@@ -178,21 +189,24 @@ fn clock(ctx: &Context<'_>) -> i64 {
 }
 fn card_kind(kind: &InputKind) -> &'static str {
     match kind {
-        InputKind::Form { .. } => "form",
+        InputKind::Form { .. } | InputKind::SiteForm { .. } => "form",
         InputKind::Approval { .. } => "approval",
         InputKind::Secret { .. } => "secret",
     }
 }
 fn cause(kind: &InputKind) -> WakeCause {
     match kind {
-        InputKind::Form { .. } => WakeCause::Form,
+        InputKind::Form { .. } | InputKind::SiteForm { .. } => WakeCause::Form,
         InputKind::Approval { .. } => WakeCause::Approval,
         InputKind::Secret { .. } => WakeCause::Secret,
     }
 }
 
 pub fn call_tool(ctx: &Context<'_>, call: &ToolCall) -> Option<ToolOutcome> {
-    if !matches!(call.name.as_str(), "request_form" | "request_secret") {
+    if !matches!(
+        call.name.as_str(),
+        "request_form" | "request_secret" | "request_site_form"
+    ) {
         return None;
     }
     // Failed outcomes are still journalled by the engine. A savepoint ensures a
@@ -296,7 +310,20 @@ fn request(ctx: &Context<'_>, call: &ToolCall) -> Result<HumanInputRequest, ApiE
     if let Some(existing) = existing_request(ctx, &id, &digest)? {
         return Ok(existing);
     }
-    let kind = if call.name == "request_form" {
+    let kind = if call.name == "request_site_form" {
+        let args: SiteArgs = parse_args(&call.arguments)?;
+        let url =
+            url::Url::parse(&args.origin).map_err(|_| ApiError::new(400, "Invalid site origin"))?;
+        let origin = url.origin().ascii_serialization();
+        if !matches!(url.scheme(), "https" | "http") || origin != args.origin {
+            return Err(ApiError::new(400, "An exact HTTP(S) origin is required"));
+        }
+        InputKind::SiteForm {
+            origin,
+            fields: args.fields,
+            expires_at: clock(ctx).saturating_add(600_000),
+        }
+    } else if call.name == "request_form" {
         let args: FormArgs = parse_args(&call.arguments)?;
         InputKind::Form {
             fields: args.fields,
@@ -820,6 +847,9 @@ struct Submission {
     values: Value,
     // No Debug/Serialize: this is the only raw-secret DTO, never an event/message.
     value: Option<String>,
+    origin: Option<String>,
+    #[serde(default)]
+    refused: bool,
 }
 fn empty_values() -> Value {
     json!({})
@@ -928,6 +958,7 @@ pub fn routes(
         (
             "POST",
             "/api/forms/submit"
+                | "/api/forms/site-submit"
                 | "/api/forms/cancel"
                 | "/api/forms/skill-content"
                 | "/api/approvals/resolve"
@@ -1026,11 +1057,73 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
     // All mutating routes are reached only through the local HTTP host's Origin
     // and X-Grokbot-Request guards. No model tool can dispatch a decision route.
     let receipt = match path {
+        "/api/forms/site-submit" => {
+            let input: Submission = parse(body)?;
+            let submission = user_submission(&input.submission_id)?;
+            let request = for_entry(&tx, &input.entry_id, &input.conversation_id)?;
+            let InputKind::SiteForm {
+                origin,
+                fields,
+                expires_at,
+            } = &request.kind
+            else {
+                return Err(ApiError::new(400, "Site form required"));
+            };
+            let existing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM forms_resolutions WHERE entry_id=?1)",
+                [&input.entry_id],
+                |r| r.get(0),
+            )?;
+            if existing {
+                let submission = if matches!(request.status, RequestStatus::Expired { .. }) {
+                    tx.query_row(
+                        "SELECT submission_id FROM forms_resolutions WHERE entry_id=?1",
+                        [&input.entry_id],
+                        |r| r.get(0),
+                    )?
+                } else {
+                    submission
+                };
+                requests::receipt(&tx, &input.entry_id, &submission)?
+            } else {
+                let target = input.origin.as_deref().unwrap_or("");
+                let store = clock(&ctx) < *expires_at && !input.refused && target == origin;
+                let envelope = json!({"origin":origin,"values":input.values}).to_string();
+                if store {
+                    requests::validate_values(fields, &input.values)?;
+                    if envelope.len() > MAX_SECRET_VALUE_BYTES {
+                        return Err(ApiError::new(413,
+                            "Formulaire trop volumineux : limite de 4096 octets, origine et noms des champs compris."));
+                    }
+                }
+                let receipt = requests::resolve_site(
+                    &tx,
+                    &request,
+                    &submission,
+                    clock(&ctx),
+                    target,
+                    input.refused,
+                )?;
+                let receipt = attach(&tx, &request, receipt)?;
+                if store {
+                    // Local-only envelope, bound to this immutable request and origin.
+                    vault(&ctx)?.set(
+                        &format!("SITE_{}", request.id.to_uppercase()),
+                        "Formulaire de site privé",
+                        &envelope,
+                    )?;
+                }
+                receipt
+            }
+        }
         "/api/forms/submit" => {
             let input: Submission = parse(body)?;
             let submission = user_submission(&input.submission_id)?;
             let request = for_entry(&tx, &input.entry_id, &input.conversation_id)?;
-            if matches!(request.kind, InputKind::Approval { .. }) {
+            if matches!(
+                request.kind,
+                InputKind::Approval { .. } | InputKind::SiteForm { .. }
+            ) {
                 return Err(ApiError::new(400, "Use the approval decision API"));
             }
             // Replay before reading/validating the value or touching the vault.
@@ -1252,6 +1345,10 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
             )?;
             if existing {
                 requests::receipt(&tx, &input.entry_id, &submission)?
+            } else if let InputKind::SiteForm { origin, .. } = &request.kind {
+                let receipt =
+                    requests::resolve_site(&tx, &request, &submission, clock(&ctx), origin, true)?;
+                attach(&tx, &request, receipt)?
             } else {
                 cancel_request(&tx, &request, &submission)?
             }
@@ -1270,6 +1367,10 @@ pub(crate) fn cancel_request(
     request: &HumanInputRequest,
     submission: &str,
 ) -> Result<grokbot_engine::contracts::ResumeReceipt, ApiError> {
+    if let InputKind::SiteForm { origin, .. } = &request.kind {
+        let receipt = requests::resolve_site(conn, request, submission, 0, origin, true)?;
+        return attach(conn, request, receipt);
+    }
     if request.status != RequestStatus::Pending {
         return Err(ApiError::new(409, "Request is no longer pending"));
     }
@@ -1757,13 +1858,25 @@ pub fn entry(ctx: &Context<'_>, kind: &str, id: &str) -> Option<Message> {
 
 pub fn tick(ctx: &Context<'_>) {
     let expire = || -> Result<(), ApiError> {
-        let due: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_requests WHERE status='pending' AND json_extract(kind_json,'$.kind')='approval' AND json_extract(kind_json,'$.expires_at')<=?1)", [clock(ctx)], |row| row.get(0))?;
+        let due: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM forms_requests WHERE status='pending' AND json_extract(kind_json,'$.kind') IN ('approval','site_form') AND json_extract(kind_json,'$.expires_at')<=?1)", [clock(ctx)], |row| row.get(0))?;
         if !due && orphaned_requests(ctx.connection)?.is_empty() {
             return Ok(());
         }
         let tx = write_transaction(ctx.connection)?;
         for (request, receipt) in approvals::expire_pending(&tx, clock(ctx))? {
             attach(&tx, &request, receipt)?;
+        }
+        let ids = {
+            let mut stmt = tx.prepare("SELECT id FROM forms_requests WHERE status='pending' AND json_extract(kind_json,'$.kind')='site_form' AND json_extract(kind_json,'$.expires_at')<=?1")?;
+            let rows = stmt.query_map([clock(ctx)], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for id in ids {
+            if let Some(request) = requests::get(&tx, &id)? {
+                let receipt =
+                    requests::resolve_site(&tx, &request, "expired", clock(ctx), "", false)?;
+                attach(&tx, &request, receipt)?;
+            }
         }
         // A task/routine's visible deciding chat can be deleted independently of
         // its origin. Without this resolution a form/secret has no expiry and

@@ -495,8 +495,8 @@ fn refresh_hang_never_blocks_state_or_dispatches_after_cancellation() {
 #[test]
 fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
     for expired in [false, true] {
-        // Session errors, not deadlines, are under test. A parallel hung refresh
-        // can hold the process-wide auth lock beyond the default two seconds.
+        // Other fault-injection cases hold the process-wide auth lock during a
+        // hung refresh. This case checks auth classification, not timeouts.
         let mut f = Fixture::with_deadline(expired, Duration::from_secs(10));
         if expired {
             // Finish the initial quota read before expiring the shared token;
@@ -510,7 +510,7 @@ fn missing_or_expired_signin_is_a_durable_card_not_simulated_text() {
         assert_eq!(
             reply["error_kind"],
             if expired { "signin_expired" } else { "signin" },
-            "{reply}"
+            "reply={reply}"
         );
         if expired {
             assert!(reply["error"]

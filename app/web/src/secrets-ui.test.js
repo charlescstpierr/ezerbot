@@ -169,3 +169,20 @@ test("un formulaire de secret périmé affiche la phrase exacte et n’écrit pa
   assert.match(forms, /Stockage des secrets/);
   assert.match(forms, /identifiants ChatGPT sont gérés séparément/);
 });
+
+test("un formulaire de site envoie les valeurs au canal privé puis les oublie", async () => {
+  const document = { createElement: (tag) => new Element(tag, document), getElementById: () => null };
+  const calls = [];
+  const panels = { state: { forms: {} }, register(value) { this.panel = value; },
+    async api(path, body) { calls.push({ path, body, sent: JSON.stringify(body) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; },
+    async refresh() {}, notify() {} };
+  const window = { GrokbotPanels: panels, dispatchEvent() {}, setTimeout, clearTimeout, Event: class {} };
+  runInNewContext(readFileSync(new URL("../../ui/panels/forms.js", import.meta.url), "utf8"), { document, window, setTimeout, clearTimeout, Event: window.Event });
+  const message = { kind: "form", payload: { entry_id: "site", route: { target_conversation_id: "conv" }, kind: { kind: "site_form", origin: "https://example.org" } } };
+  await panels.panel.onCardAction(message, "forms.site", { values: { password: SECRET } }, { conversation: { id: "conv" } });
+  assert.equal(calls[0]?.path, "/api/forms/site-submit");
+  assert.match(calls[0].sent, new RegExp(SECRET));
+  assert.equal(calls[0].body.origin, "https://example.org");
+  assert.equal(Object.hasOwn(calls[0].body, "values"), false);
+  assert.doesNotMatch(JSON.stringify(window.GrokbotForms.view("site")), new RegExp(SECRET));
+});

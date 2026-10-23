@@ -198,12 +198,6 @@ fn trigger_of(
     }
 }
 
-/// Webhook occurrences reuse the manual-nonce identity but, unlike a manual
-/// launch, obey pause and edit cutoffs.
-pub(crate) fn is_call_nonce(nonce: &str) -> bool {
-    nonce.starts_with("webhook:")
-}
-
 /// The call that started this occurrence, if it came from a webhook.
 pub(crate) fn call_of(
     conn: &Connection,

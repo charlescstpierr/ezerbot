@@ -1512,3 +1512,215 @@ fn bot_secret_panel_lists_metadata_only_keeps_the_vault_and_rejects_stale_forms(
         .iter()
         .all(|secret| secret.get("value").is_none()));
 }
+
+#[test]
+fn site_form_keeps_values_outside_bot_and_replays_without_writing() {
+    const SENTINEL: &str = "SENTINEL_SITE_PRIVATE_171";
+    // The native host writes the wrapper's stderr to logs/engine.log. Run in
+    // isolation to inspect both output streams without redirecting other tests.
+    const CHILD: &str = "EZERBOT_SITE_FORM_LOG_CAPTURE";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "site_form_keeps_values_outside_bot_and_replays_without_writing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!bytes
+                .windows(SENTINEL.len())
+                .any(|w| w == SENTINEL.as_bytes()));
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let mut f = Fixture::new();
+    let request = f.suspended_request("run", "site", "request_site_form",
+        json!({"origin":"https://example.org","fields":[{"name":"password","label":"Mot de passe","field_type":{"kind":"text"},"required":true}]}));
+    let sentinel = SENTINEL;
+    let body = json!({"entry_id":request.entry_id,"submission_id":"site-1","conversation_id":f.conversation,
+        "origin":"https://example.org","values":{"password":sentinel}});
+    let first = f.post("/api/forms/site-submit", body.clone());
+    let result =
+        requests::resolved_values(&f.conn, first["receipt"]["resolution_id"].as_str().unwrap())
+            .unwrap();
+    assert_eq!(result, json!("enregistré dans le coffre local"));
+    let vault = forms::vault(&f.app.feature_context()).unwrap();
+    let saved = vault
+        .get(&format!("SITE_{}", request.id.to_uppercase()))
+        .unwrap()
+        .unwrap();
+    assert!(saved.contains(sentinel));
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, sentinel).unwrap(),
+        "[...]"
+    );
+    let mut persisted: Value =
+        serde_json::from_slice(&std::fs::read(vault.path()).unwrap()).unwrap();
+    // More than 30 minutes old, including across a fresh vault open (#81).
+    let old = f.app.feature_context().now_ms as i64 - 31 * 60 * 1000;
+    persisted[format!("SITE_{}", request.id.to_uppercase())]["updated_at"] = json!(old);
+    std::fs::write(vault.path(), serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+    let reopened = forms::vault(&f.app.feature_context()).unwrap();
+    assert_eq!(
+        reopened
+            .get(&format!("SITE_{}", request.id.to_uppercase()))
+            .unwrap(),
+        Some(saved.clone())
+    );
+
+    assert_eq!(
+        grokbot_forms::redact::redact(&reopened, sentinel).unwrap(),
+        "[...]"
+    );
+    vault
+        .set(
+            "SITE_SHORT",
+            "Formulaire de site privé",
+            r#"{"origin":"https://example.org","values":{"pin":"a","empty":"","count":42,"code":"long-code-77"}}"#,
+        )
+        .unwrap();
+    // Values shorter than the minimum never join global masking: JSON keys stay readable.
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, r#"{"name":"a","id":42}"#).unwrap(),
+        r#"{"name":"a","id":42}"#
+    );
+    assert_eq!(
+        grokbot_forms::redact::redact(&vault, "code long-code-77").unwrap(),
+        "code [...]"
+    );
+
+    let mut replay = body;
+    replay["values"] = json!({"password":"replacement"});
+    assert_eq!(
+        f.post("/api/forms/site-submit", replay)["receipt"],
+        first["receipt"]
+    );
+    assert_eq!(
+        vault
+            .get(&format!("SITE_{}", request.id.to_uppercase()))
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    let gateway = ScriptedGateway::default();
+    assert_eq!(
+        f.drive("run", &gateway),
+        RunProgress::Ended(TurnEnd::Finished)
+    );
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let export = f.post(
+        "/api/templates/export",
+        json!({"bot_id":"grokbot","include_memories":true}),
+    );
+    // Also inspect files emitted by application diagnostics, if any.
+    if let Ok(logs) = std::fs::read_dir(f.directory.join("logs")) {
+        for log in logs {
+            let path = log.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|w| w == sentinel.as_bytes()),
+                "secret in {}",
+                path.display()
+            );
+        }
+    }
+    let evidence = json!([
+        state,
+        export,
+        store::events(&f.conn, "run", 0).unwrap(),
+        *gateway.requests.lock().unwrap()
+    ]);
+    assert!(!evidence.to_string().contains(sentinel));
+    for name in ["app.sqlite", "app.sqlite-wal"] {
+        let bytes = std::fs::read(f.directory.join(name)).unwrap_or_default();
+        assert!(!bytes
+            .windows(sentinel.len())
+            .any(|window| window == sentinel.as_bytes()));
+    }
+    assert!(evidence
+        .to_string()
+        .contains("enregistré dans le coffre local"));
+}
+
+#[test]
+fn site_form_expiry_refusal_and_target_change_have_no_vault_effect() {
+    for (origin, refused, expired, expected) in [
+        ("https://other.org", false, false, "cible changée"),
+        ("https://example.org", true, false, "refusé"),
+        ("https://example.org", false, true, "demande périmée"),
+    ] {
+        let mut f = Fixture::new();
+        let request = f.request(
+            "site",
+            "request_site_form",
+            json!({"origin":"https://example.org","fields":[]}),
+        );
+        if expired {
+            f.conn.execute("UPDATE forms_requests SET kind_json=json_set(kind_json,'$.expires_at',1) WHERE id=?1", [&request.id]).unwrap();
+            forms::tick(&f.app.feature_context());
+        }
+        let response = f.post("/api/forms/site-submit", json!({"entry_id":request.entry_id,"submission_id":"decision","conversation_id":f.conversation,"origin":origin,"refused":refused}));
+        assert_eq!(
+            requests::resolved_values(
+                &f.conn,
+                response["receipt"]["resolution_id"].as_str().unwrap()
+            )
+            .unwrap(),
+            json!(expected)
+        );
+        assert!(forms::vault(&f.app.feature_context())
+            .unwrap()
+            .get(&format!("SITE_{}", request.id.to_uppercase()))
+            .unwrap()
+            .is_none());
+        if expired {
+            assert!(matches!(
+                requests::get(&f.conn, &request.id).unwrap().unwrap().status,
+                RequestStatus::Expired { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn site_forms_reject_oversized_envelope_before_writing() {
+    let mut f = Fixture::new();
+    let request = f.suspended_request("run", "site", "request_site_form",
+        json!({"origin":"https://example.org","fields":[{"name":"password","label":"Mot de passe","field_type":{"kind":"text"},"required":true}]}));
+    let body = json!({"entry_id":request.entry_id,"submission_id":"large","conversation_id":f.conversation,
+        "origin":"https://example.org","values":{"password":"é".repeat(2040)}});
+    let error = f
+        .app
+        .api(
+            "POST",
+            "/api/forms/site-submit",
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, 413);
+    assert!(error
+        .message
+        .starts_with("Formulaire trop volumineux : limite de 4096 octets"));
+    assert!(forms::vault(&f.app.feature_context())
+        .unwrap()
+        .list()
+        .unwrap()
+        .is_empty());
+    let count: i64 = f
+        .conn
+        .query_row("SELECT COUNT(*) FROM forms_resolutions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}

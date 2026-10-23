@@ -1,0 +1,8 @@
+Bonjour le monde.
+
+Fixture parlée française, synthétisée avec eSpeak NG 1.51, voix fr-fr,
+vitesse 145, puis convertie en PCM mono 16 kHz avec ffmpeg.
+Test réel du moteur Apple hors ligne : bash tools/test-dictation-fixture.sh
+Prérequis : macOS, autorisation Speech déjà accordée, fr-CA et en-US installés.
+Ce test ne demande pas de microphone ni de permission et impose la reconnaissance
+sur l'appareil via le chemin de production EzerbotVoice.transcribe.

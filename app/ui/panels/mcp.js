@@ -173,7 +173,7 @@
       };
       if (item.redirect_uri) copyable("URL de retour OAuth", item.redirect_uri);
       if (item.id === "notion") setup.append(node("p", "Autorisations choisies pendant le consentement Notion.", "mcp-note"));
-      else if (item.device_flow) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
+      else if (item.device_flow || !item.needs_client) setup.append(node("p", `${item.scopes_label} · aucune application OAuth à créer, aucun secret à saisir.`, "mcp-note"));
       else copyable("Portées OAuth", item.scopes_label || item.scopes);
       setup.append(node("p", `${item.license} · ${item.source}`, "mcp-note"));
       let form, client, secret;
@@ -190,6 +190,7 @@
       }
       card.append(setup);
       if (item.device_flow && !item.configured) card.append(node("p", "L’application GitHub d’Ezerbot n’est pas configurée dans cette version. Il n’y a ni identifiant ni secret à saisir ici : Connecter restera indisponible tant qu’elle n’est pas préparée.", "mcp-warning"));
+      if (item.unconfigured_message && !item.configured) card.append(node("p", item.unconfigured_message, "mcp-warning"));
       const deviceBlock = (code, name, action = "authorize") => {
         const device = node("div", null, "mcp-device"); device.setAttribute("role", "group"); device.setAttribute("aria-label", "Code de connexion GitHub");
         const until = new Date(code.expires_at).toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});

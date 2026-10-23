@@ -100,6 +100,23 @@ test("memo attaches WAV plus transcript and error retry does not rerecord", asyn
   assert.equal(f.calls.filter(c=>c==="start").length,2);
   assert.equal(cls(f.root,"voice-status-row").hidden,true, "the kept memo chip replaces the review note");
 });
+test("a memo hands the word starts of its transcript to the Mac with the audio", async () => {
+  const words = [{text:"Bonjour",start_ms:0},{text:"le",start_ms:500},{text:"monde.",start_ms:null}];
+  const f = fixture(); cls(f.root,"voice-mode").children[0].checked = true; f.startExtras = {words};
+  await cls(f.root,"voice-mic").onclick(); await cls(f.root,"voice-mic").onclick();
+  assert.equal(f.uploads[0].path,"/api/voice/memos");
+  assert.equal(JSON.stringify(f.uploads[0].body.words),JSON.stringify(words));
+});
+test("a memo recorded without word starts uploads an empty list", async () => {
+  const f = fixture(); cls(f.root,"voice-mode").children[0].checked = true;
+  await cls(f.root,"voice-mic").onclick(); await cls(f.root,"voice-mic").onclick();
+  assert.equal(JSON.stringify(f.uploads[0].body.words),"[]");
+});
+test("a dictation never uploads words", async () => {
+  const f = fixture(); f.startExtras = {words:[{text:"Bonjour",start_ms:0}]};
+  await cls(f.root,"voice-mic").onclick(); await cls(f.root,"voice-mic").onclick();
+  assert.equal(f.uploads.length,0);
+});
 test("a memo after dictation on the welcome screen survives creation of its conversation", async () => {
   const f = fixture(); f.ctx.conversation=null; f.registration.onState(f.ctx.state,f.ctx);
   await cls(f.root,"voice-mic").onclick(); await cls(f.root,"voice-mic").onclick();

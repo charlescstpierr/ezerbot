@@ -32,12 +32,23 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         "CREATE TABLE IF NOT EXISTS wrapper_voice_memos (
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, message_id TEXT,
         transcript TEXT NOT NULL, language TEXT NOT NULL, duration_ms INTEGER NOT NULL,
-        audio BLOB NOT NULL, created_at INTEGER NOT NULL);
+        audio BLOB NOT NULL, created_at INTEGER NOT NULL, words TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS wrapper_voice_microphone (id INTEGER PRIMARY KEY CHECK(id=1), microphone TEXT NOT NULL);
         INSERT OR IGNORE INTO wrapper_voice_microphone VALUES(1,'');
         CREATE TABLE IF NOT EXISTS wrapper_dictation_language (id INTEGER PRIMARY KEY CHECK(id=1), language TEXT NOT NULL);
         INSERT OR IGNORE INTO wrapper_dictation_language VALUES(1,'');",
     )?;
+    // Memos kept before the words had a start list none.
+    let timed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_voice_memos') WHERE name='words')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !timed {
+        conn.execute_batch(
+            "ALTER TABLE wrapper_voice_memos ADD COLUMN words TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
     super::voice_session::migrate(conn)?;
     Ok(())
 }
@@ -189,16 +200,60 @@ pub(super) fn wav_duration_bounded(bytes: &[u8], max_seconds: u32) -> Result<u32
     Ok(((len / 32) as u32).min(max_seconds * 1000))
 }
 
+const MAX_WORDS: usize = 2000;
+const MAX_WORD_BYTES: usize = 64;
+
+/// The words of a memo as the Mac heard them, each with the instant it starts in
+/// the audio. A start that is missing, or lies beyond the end of the recording,
+/// is kept as `null`: that word is shown but is not a place to jump to.
+fn checked_words(words: Vec<Value>, duration_ms: u32) -> Result<Vec<Value>, ApiError> {
+    let invalid = || {
+        ApiError::new(
+            400,
+            "Mots du mémo invalides. Réessayez l’enregistrement du mémo.",
+        )
+    };
+    if words.len() > MAX_WORDS {
+        return Err(invalid());
+    }
+    words
+        .into_iter()
+        .map(|word| {
+            let object = word.as_object().ok_or_else(invalid)?;
+            if object.keys().any(|key| key != "text" && key != "start_ms") {
+                return Err(invalid());
+            }
+            let text = object
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| {
+                    !text.is_empty()
+                        && text.len() <= MAX_WORD_BYTES
+                        && !text.chars().any(char::is_control)
+                })
+                .ok_or_else(invalid)?;
+            let start = match object.get("start_ms") {
+                None | Some(Value::Null) => None,
+                Some(start) => Some(start.as_u64().ok_or_else(invalid)?),
+            }
+            .filter(|start| *start <= u64::from(duration_ms));
+            Ok(json!({"text":text,"start_ms":start}))
+        })
+        .collect()
+}
+
 fn dto(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let id: String = row.get(0)?;
+    let words: Value =
+        serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_else(|_| json!([]));
     Ok(
         json!({"id":id,"kind":"voice","name":"Mémo vocal","transcript":row.get::<_,String>(1)?,
         "language":row.get::<_,String>(2)?,"duration_ms":row.get::<_,u32>(3)?,
-        "byte_length":row.get::<_,usize>(4)?,"url":format!("/api/voice/audio/{id}")}),
+        "byte_length":row.get::<_,usize>(4)?,"words":words,"url":format!("/api/voice/audio/{id}")}),
     )
 }
 const SELECT: &str =
-    "SELECT id,transcript,language,duration_ms,length(audio) FROM wrapper_voice_memos";
+    "SELECT id,transcript,language,duration_ms,length(audio),words FROM wrapper_voice_memos";
 pub fn for_message(
     conn: &Connection,
     conversation: &str,
@@ -217,9 +272,13 @@ pub fn model_text(
     conversation: &str,
     message: &str,
 ) -> Result<String, ApiError> {
-    let memos = for_message(conn, conversation, message)?;
+    let mut memos = for_message(conn, conversation, message)?;
     if memos.is_empty() {
         return Ok(String::new());
+    }
+    // The transcript already says the words; their times are for the player only.
+    for memo in &mut memos {
+        memo.as_object_mut().expect("memo object").remove("words");
     }
     let data = serde_json::to_string(&memos)
         .expect("voice JSON")
@@ -249,7 +308,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let rows = q
             .query_map([], |row| {
                 let mut value = dto(row)?;
-                value["conversation_id"] = json!(row.get::<_, String>(5)?);
+                value["conversation_id"] = json!(row.get::<_, String>(6)?);
                 Ok(value)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -297,6 +356,8 @@ pub fn routes(
                 data: String,
                 transcript: String,
                 language: String,
+                #[serde(default)]
+                words: Vec<Value>,
             }
             let input: Upload = parse(body)?;
             app.require_conversation(&input.conversation_id)?;
@@ -320,6 +381,7 @@ pub fn routes(
                 .decode(&input.data)
                 .map_err(|_| ApiError::new(400, "Enregistrement illisible."))?;
             let duration = wav_duration(&audio)?;
+            let words = checked_words(input.words, duration)?;
             // Bind deduplication to the conversation, audio AND immutable transcript.
             let id = format!(
                 "voice_{:x}",
@@ -329,7 +391,8 @@ pub fn routes(
                         input.upload_id,
                         input.data,
                         transcript,
-                        input.language
+                        input.language,
+                        words
                     ]))
                     .unwrap()
                 )
@@ -343,7 +406,7 @@ pub fn routes(
                 ));
             }
             tx.execute(
-                "INSERT OR IGNORE INTO wrapper_voice_memos VALUES (?1,?2,NULL,?3,?4,?5,?6,?7)",
+                "INSERT OR IGNORE INTO wrapper_voice_memos (id,conversation_id,message_id,transcript,language,duration_ms,audio,created_at,words) VALUES (?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
                 params![
                     id,
                     input.conversation_id,
@@ -351,7 +414,8 @@ pub fn routes(
                     input.language,
                     duration,
                     audio,
-                    crate::now()
+                    crate::now(),
+                    serde_json::to_string(&words).expect("voice JSON")
                 ],
             )?;
             let memo = tx.query_row(&format!("{SELECT} WHERE id=?1"), [&id], dto)?;
@@ -574,9 +638,11 @@ impl DebugVoice {
             && ready
             && matches!(self.scenario.as_str(), "partial" | "partial_persistent");
         let partial = segmented && (self.attempts < 2 || self.scenario == "partial_persistent");
+        // A memo of twenty seconds, to hear a speed and a jump to a word.
+        let long_memo = self.memo && ready && self.scenario == "long_memo";
         let mut audio = fixture.to_vec();
-        if segmented {
-            audio.resize(44 + 121 * 32_000, 0);
+        if segmented || long_memo {
+            audio.resize(44 + if long_memo { 20 } else { 121 } * 32_000, 0);
             let length = audio.len();
             audio[4..8].copy_from_slice(&((length - 8) as u32).to_le_bytes());
             audio[40..44].copy_from_slice(&((length - 44) as u32).to_le_bytes());
@@ -587,6 +653,8 @@ impl DebugVoice {
             "Décision : préparer la rencontre.\n[Passage non transcrit de 1:00 à 2:00]\nAction : Alice prépare la démo."
         } else if segmented {
             "Décision : préparer la rencontre.\nPassage récupéré : rendez-vous jeudi.\nAction : Alice prépare la démo."
+        } else if long_memo {
+            "Premier point le budget du trimestre. Deuxième point le calendrier des livraisons. Troisième point la démonstration de jeudi avec toute l’équipe. Merci et à demain."
         } else {
             "Bonjour, voici mon mémo vocal pour préparer la réunion de demain."
         };
@@ -596,9 +664,28 @@ impl DebugVoice {
             "transcript":transcript,"partial":partial,"missing_segments":if partial {1} else {0},
             "max_seconds":self.max_seconds(),
             "microphone_id":self.microphone.0,"microphone_name":self.microphone.1,"microphone_fallback":self.microphone.2,
+            "words":if ready && self.memo { fake_words(transcript, if long_memo {20_000} else {1_000}, long_memo) } else { json!([]) },
             // Only a memo or a local capture hands its audio over; a dictation keeps none.
             "data":if ready && self.scenario != "no_audio" && (self.memo || self.meeting) {STANDARD.encode(&audio)} else {String::new()},"language":self.language,
             "too_long":ready && (elapsed >= cap || self.scenario == "too_long"),"fake":true}),
         )
     }
+}
+
+/// What the Mac's recognizer would hand over: each word with its start, evenly
+/// spread over the recording. The fifth word has none when `untimed` is set.
+#[cfg(debug_assertions)]
+fn fake_words(transcript: &str, duration_ms: u64, untimed: bool) -> Value {
+    let words: Vec<&str> = transcript.split_whitespace().collect();
+    Value::Array(
+        words
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let start = (!untimed || index != 4)
+                    .then(|| index as u64 * (duration_ms - 100) / words.len().max(1) as u64);
+                json!({"text":text,"start_ms":start})
+            })
+            .collect(),
+    )
 }

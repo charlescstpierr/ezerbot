@@ -360,7 +360,12 @@
         conversation_id: context.conversation.id,
       };
       let path;
-      if (action === "forms.cancel") path = "/api/forms/cancel";
+      if (action === "forms.site" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.values = detail?.values;
+        body.origin = request.kind.origin; body.refused = detail?.refused === true;
+      } else if (action === "forms.cancel" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.refused = true;
+      } else if (action === "forms.cancel") path = "/api/forms/cancel";
       else if (action === "forms.submit" && message.kind === "form") {
         path = "/api/forms/submit"; body.values = detail?.values;
       } else if (action === "forms.secret" && message.kind === "secret") {
@@ -388,15 +393,17 @@
         activity.set(request.entry_id, { busy: false, receipt: response.receipt });
       } catch (error) {
         // api() wraps transport/decoding failures in these fixed shell messages;
-        // other rejections are HTTP errors. Never echo the exception or data.
+        // Site form HTTP errors explain validation without echoing field values.
         const uncertain = error instanceof TypeError || ["Missing receipt",
           "La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible.",
         ].includes(error?.message);
         activity.set(request.entry_id, { ...previous, busy: false,
           error: error?.message === STALE_FORM ? STALE_FORM
+            : request.kind?.kind === "site_form" && !uncertain ? error.message
             : uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
+        if (request.kind?.kind === "site_form") delete body.values;
         delete body.value;
         delete body.text;
         delete body.title;
@@ -405,7 +412,7 @@
       // Reconcile lost responses and decisions made in another window. A refresh
       // failure must not discard a receipt already acknowledged by the server.
       try { await panels.refresh(); } catch { /* The shell displays connection state. */ }
-      return true;
+      return request.kind?.kind === "site_form" ? Boolean(activity.get(request.entry_id)?.receipt) : true;
     },
   });
 })();

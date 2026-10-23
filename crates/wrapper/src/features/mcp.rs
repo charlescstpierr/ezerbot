@@ -183,6 +183,14 @@ pub use catalogue::gmail::{CalendarCase, CalendarEvent, MailEvent};
 pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
     catalogue::gmail::new_messages(ctx)
 }
+/// Whether a Gmail account is connected: a new-mail trigger of a routine can only be armed then.
+pub fn gmail_connected(conn: &Connection) -> bool {
+    catalogue::gmail::any_connected(conn)
+}
+/// Forget what the inbox held, once no routine watches it: the next look learns it afresh.
+pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching(conn)
+}
 /// The agenda events of the connected Google account since the last call: created,
 /// modified, cancelled or begun, each version once, with its identifier, case, start
 /// instant and zone. It never carries a token. The first call only learns the agenda.

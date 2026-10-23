@@ -28,3 +28,6 @@ app/qa/
 /artifacts/public-multibot/
 /artifacts/rea-focus/
 /evidence/multibot-rea-bundle.json
+
+# Vite dependency caches, wherever vite runs from
+**/node_modules/

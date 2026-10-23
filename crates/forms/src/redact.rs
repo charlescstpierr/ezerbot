@@ -94,10 +94,20 @@ fn mask(text: &str, values: &[String]) -> String {
         let mut matched = false;
         // Check every character boundary, including starts *inside* an earlier
         // match, to mask the union of overlapping secrets rather than leak tails.
+        let mut mask_end = 0;
         for (start, _) in result.char_indices() {
+            // Site fields can be shorter than MASK. Never mask the replacement
+            // itself, or a field such as "." would prevent convergence.
+            if result[start..].starts_with(MASK) {
+                mask_end = start + MASK.len();
+            }
             let end = values
                 .iter()
-                .filter(|value| !value.is_empty() && result[start..].starts_with(value.as_str()))
+                .filter(|value| {
+                    !value.is_empty()
+                        && (start >= mask_end || value.len() > MASK.len())
+                        && result[start..].starts_with(value.as_str())
+                })
                 .map(|value| start + value.len())
                 .max();
             if let Some(end) = end {

@@ -593,6 +593,7 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
         // Model changes cannot silently repurpose an active, confirmed routine.
         routine::set_enabled(ctx.connection, &r.routine_id, false, clock(ctx)?)?;
         occurrences::retire_catch_up(ctx.connection, &r.routine_id)?;
+        routine_mail::cut_off(ctx.connection, &r.routine_id)?;
         r = owned(ctx.connection, &r.bot_id, &r.routine_id)?;
         ctx.connection.execute("INSERT INTO wrapper_routine_provenance VALUES (?1,?2) ON CONFLICT(routine_id) DO UPDATE SET model_edited_at=excluded.model_edited_at",params![r.routine_id,clock(ctx)?])?;
         ask_confirmation(ctx, &r)?;
@@ -808,6 +809,7 @@ pub fn routes(
                     "/api/routines/pause" => {
                         routine::set_enabled(&tx, &r.routine_id, false, clock(&ctx)?)?;
                         occurrences::retire_catch_up(&tx, &r.routine_id)?;
+                        routine_mail::cut_off(&tx, &r.routine_id)?;
                         json!({"routine":routine_value(&tx,&owned(&tx,&r.bot_id,&r.routine_id)?)?})
                     }
                     _ => unreachable!(),

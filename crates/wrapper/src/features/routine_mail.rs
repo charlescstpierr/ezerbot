@@ -136,6 +136,16 @@ pub fn deliver_with(conn: &Connection, event: &MailEvent, now: i64) -> Result<us
     Ok(made)
 }
 
+/// A pause cuts off the messages that have not started: they fail at once instead of waiting
+/// for a tick that a quick resume could beat, which would start them after all.
+pub(crate) fn cut_off(conn: &Connection, routine_id: &str) -> Result<usize, ApiError> {
+    Ok(conn.execute(
+        "UPDATE scheduler_occurrences SET status='failed',reason='Routine paused or edited'
+         WHERE routine_id=?1 AND status='pending' AND manual_nonce LIKE 'mail:%'",
+        [routine_id],
+    )?)
+}
+
 struct Mail {
     received_at: i64,
     trigger_id: String,

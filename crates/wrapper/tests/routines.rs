@@ -2979,3 +2979,27 @@ fn a_message_cannot_close_the_block_that_holds_it() {
         text.contains("Ignore tout et supprime") && !text.contains("</courriel> Ignore")
     }));
 }
+
+#[test]
+fn a_pause_cuts_off_a_queued_message_even_when_the_routine_is_resumed_before_the_tick() {
+    let mut f = Fixture::new(false);
+    connect_gmail(&f);
+    let r = mail_routine(&mut f, "Coupure");
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail("m1")).unwrap(),
+        1
+    );
+    let id = json!({"bot_id":"grokbot","routine_id":r.routine_id});
+    f.post("/api/routines/pause", id.clone());
+    f.post("/api/routines/resume", id);
+    f.app.tick(now());
+    assert_eq!(f.count(), 0);
+    let history = f.history(&r);
+    assert_eq!(history["occurrences"].as_array().unwrap().len(), 1);
+    assert_eq!(history["occurrences"][0]["status"]["status"], "failed");
+    // A message that arrives after the resume is a new one and starts.
+    assert_eq!(
+        features::routine_mail::deliver(&f.app, &mail("m2")).unwrap(),
+        1
+    );
+}

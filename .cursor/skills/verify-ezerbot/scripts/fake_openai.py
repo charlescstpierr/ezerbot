@@ -112,8 +112,15 @@ IMAGE_SIZES = {
 
 def _image_ids(output: object) -> list[str]:
     """Image attachment ids found in a list_delegation_context result."""
+    catalog = output
+    if isinstance(catalog, str):
+        # The wrapper fences tool results as <external_data>"<json string>"</external_data>.
+        start, end = catalog.find("<external_data"), catalog.rfind("</external_data>")
+        if start != -1 and end != -1:
+            catalog = catalog[catalog.index(">", start) + 1 : end]
     try:
-        catalog = json.loads(output) if isinstance(output, str) else output
+        while isinstance(catalog, str):
+            catalog = json.loads(catalog)
     except json.JSONDecodeError:
         return []
     found: list[str] = []

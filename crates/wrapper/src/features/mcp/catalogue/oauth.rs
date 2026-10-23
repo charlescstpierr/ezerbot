@@ -147,9 +147,11 @@ fn accept_token(
             .join(" ")
     });
     validate_scopes(m, granted.as_deref().or(raw["scope"].as_str()))?;
+    // A Microsoft access token is a signed JWT or an opaque blob of several KB.
+    let longest = if m.id == "microsoft365" { 8192 } else { 3000 };
     let access = raw["access_token"]
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 3000 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && s.len() <= longest && !s.chars().any(char::is_control))
         .ok_or_else(fail)?;
     env.insert("ACCESS_TOKEN".into(), access.into());
     if let Some(refresh) = raw["refresh_token"].as_str().filter(|s| !s.is_empty()) {

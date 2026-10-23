@@ -624,7 +624,7 @@ fn credentials(ctx: &Context<'_>, id: &str) -> Result<Option<HashMap<String, Str
 fn save(ctx: &Context<'_>, id: &str, env: &HashMap<String, String>) -> Result<(), ApiError> {
     let mut private = env.clone();
     private.remove("EMAIL");
-    super::super::forms::vault(ctx)?.set(&secret_name(id), PURPOSE, &json!({"variables":private}).to_string()).map_err(|_|invalid("Impossible de conserver les identifiants OAuth dans le coffre local (4 Ko maximum). Vérifiez le stockage des secrets, puis reconnectez le service."))?;
+    super::super::forms::vault(ctx)?.set(&secret_name(id), PURPOSE, &json!({"variables":private}).to_string()).map_err(|_|invalid("Impossible de conserver les identifiants OAuth dans le coffre local (16 Ko maximum). Vérifiez le stockage des secrets, puis reconnectez le service."))?;
     if let Some(email) = env.get("EMAIL") {
         ctx.connection.execute(
             "UPDATE wrapper_connector_catalogue SET account_email=?2 WHERE server_id=?1",

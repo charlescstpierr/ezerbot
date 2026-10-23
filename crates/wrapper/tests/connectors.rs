@@ -75,6 +75,8 @@ struct MicrosoftScript {
     sent: Vec<Value>,
     /// The first page of the day is not the whole day.
     more_events: bool,
+    /// Tokens of the size a Microsoft account may answer: several KB each.
+    large_tokens: bool,
     /// The window of each agenda read, as Graph was asked for it.
     windows: Vec<(String, String)>,
 }
@@ -915,6 +917,11 @@ impl OAuth {
                         .as_ref()
                         .is_some_and(|t| auth.as_deref() == Some(format!("Bearer {t}").as_str()));
                     if url == "/microsoft365/token" {
+                        let (pad_access, pad_refresh) = if ms.large_tokens {
+                            ("A".repeat(4600), "R".repeat(2200))
+                        } else {
+                            (String::new(), String::new())
+                        };
                         assert!(
                             fields.contains_key("scope"),
                             "a public client names its permissions at the token endpoint"
@@ -930,11 +937,13 @@ impl OAuth {
                                     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
                                     challenge
                                 );
-                                ms.live = Some(MICROSOFT_ACCESS.to_owned());
-                                ms.refresh = Some(MICROSOFT_REFRESH.to_owned());
+                                let access = format!("{MICROSOFT_ACCESS}{pad_access}");
+                                let refresh = format!("{MICROSOFT_REFRESH}{pad_refresh}");
+                                ms.live = Some(access.clone());
+                                ms.refresh = Some(refresh.clone());
                                 (
                                     200,
-                                    json!({"access_token":MICROSOFT_ACCESS,"refresh_token":MICROSOFT_REFRESH,"token_type":"Bearer","expires_in":3599,"scope":granted}),
+                                    json!({"access_token":access,"refresh_token":refresh,"token_type":"Bearer","expires_in":3599,"scope":granted}),
                                 )
                             }
                             _ if ms.refresh_dead
@@ -944,9 +953,14 @@ impl OAuth {
                             }
                             _ => {
                                 ms.renewals += 1;
-                                let renewed = format!("{MICROSOFT_ACCESS}-renewed-{}", ms.renewals);
-                                let rotated =
-                                    format!("{MICROSOFT_REFRESH}-rotated-{}", ms.renewals);
+                                let renewed = format!(
+                                    "{MICROSOFT_ACCESS}-renewed-{}{pad_access}",
+                                    ms.renewals
+                                );
+                                let rotated = format!(
+                                    "{MICROSOFT_REFRESH}-rotated-{}{pad_refresh}",
+                                    ms.renewals
+                                );
                                 ms.live = Some(renewed.clone());
                                 ms.refresh = Some(rotated.clone());
                                 (
@@ -8392,6 +8406,37 @@ fn microsoft_connects_with_the_public_client_and_pkce_and_keeps_the_tokens_in_th
     assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
     let shown = f.state().to_string();
     assert!(!shown.contains(MICROSOFT_ACCESS) && !shown.contains(MICROSOFT_REFRESH));
+}
+
+#[test]
+fn microsoft_keeps_the_large_tokens_a_real_account_answers_and_reads_with_them() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().microsoft.large_tokens = true;
+    f.microsoft_connect();
+    assert_eq!(f.item("microsoft365")["status"], "connected");
+    let kept = f.microsoft_secret().unwrap();
+    assert!(kept["ACCESS_TOKEN"].as_str().unwrap().len() > 4600);
+    assert!(kept["REFRESH_TOKEN"].as_str().unwrap().len() > 2200);
+    let run = f.github_call("outlook-large", MICROSOFT_MESSAGES, json!({}));
+    assert_eq!(done(&f, &run)["courriels"].as_array().unwrap().len(), 5);
+    f.assert_microsoft_tokens_nowhere(&run);
+    // A renewal writes the rotated pair back, as large as the first.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='microsoft365'",
+            [],
+        )
+        .unwrap();
+    let run = f.github_call("outlook-large-renew", MICROSOFT_MESSAGES, json!({}));
+    done(&f, &run);
+    assert_eq!(f.oauth.seen.lock().unwrap().microsoft.renewals, 1);
+    assert!(
+        f.microsoft_secret().unwrap()["REFRESH_TOKEN"]
+            .as_str()
+            .unwrap()
+            .len()
+            > 2200
+    );
 }
 
 #[test]

@@ -339,7 +339,7 @@ pub(super) fn item(ctx: &Context<'_>) -> Result<Value, ApiError> {
         .optional()?
         .map(|m| m.json(ctx.connection));
     Ok(json!({
-        "id":"reunions","kind":"recall","name":"Réunions",
+        "id":"reunions","category":"Réunions","kind":"recall","name":"Réunions",
         "description":"Invitez un bot dans une réunion Google Meet, Zoom ou Microsoft Teams : il transcrit l’appel.",
         "permissions":"Le bot rejoint les réunions dont vous collez le lien, après une carte de consentement à chaque invitation. Il est visible des participants. Le micro du Mac n’est pas utilisé.",
         "setup":"Créez une clé d’API dans votre compte Recall.ai, puis collez-la ci-dessous. Elle est conservée dans le coffre local, jamais réaffichée, et ne part que vers Recall.ai.",

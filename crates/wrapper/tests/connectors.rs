@@ -6948,3 +6948,22 @@ fn a_connected_inbox_starts_a_mail_routine_once_per_message() {
         .unwrap()
         .contains("bruno@example.test"));
 }
+
+#[test]
+fn catalogue_categories_are_required_and_empty_database_never_contacts_providers() {
+    let mut f = Fixture::new();
+    let state = f.state();
+    let categories = [
+        "Courriel et agenda",
+        "Fichiers et notes",
+        "Messagerie",
+        "Développement",
+        "Réunions",
+    ];
+    for item in state["mcp"]["catalogue"].as_array().unwrap() {
+        assert!(categories.contains(&item["category"].as_str().unwrap()));
+        assert_eq!(item["status"], "disconnected");
+        assert!(!["linear", "microsoft365", "jira"].contains(&item["id"].as_str().unwrap()));
+    }
+    assert_eq!(f.oauth.count(""), 0);
+}

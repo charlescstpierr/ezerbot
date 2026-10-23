@@ -120,7 +120,8 @@
     const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
-  const scheduleLabel = (parsed) => parsed.trigger.kind === "every" ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  // A calendar trigger counts no clock: the zone of the routine says nothing about when it starts.
+  const scheduleLabel = (parsed) => parsed.trigger.kind === "every" || parsed.trigger.kind === "calendar" ? parsed.text : `${parsed.text} (${parsed.zone})`;
   // The cases of an agenda event that can start a routine: the wire value, the word a history shows, the checkbox.
   const CALENDAR_CASES = [["created", "créé", "Un événement est créé"], ["modified", "modifié", "Un événement est modifié"], ["cancelled", "annulé", "Un événement est annulé"], ["begins", "commence", "Un événement commence"]];
   const calendarWords = (cases) => CALENDAR_CASES.filter(([value]) => cases.includes(value)).map(([, word]) => word).join(", ");

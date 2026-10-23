@@ -729,6 +729,7 @@ test('the editor offers the calendar trigger with its four cases, and saves the 
   // « commence » is ticked from the start: the trigger a user comes for.
   assert.equal(caseBox(h, 'Un événement commence').checked, true);
   assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(commence\)/);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /heure prévue\.$/); // no zone: the routine's zone says nothing here
   tick(h, caseBox(h, 'Un événement est créé'), true);
   await submit(h);
   const created = sent.find(s => s.url === '/api/routines');

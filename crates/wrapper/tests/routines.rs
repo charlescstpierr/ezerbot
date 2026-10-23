@@ -3005,6 +3005,372 @@ fn a_pause_cuts_off_a_queued_message_even_when_the_routine_is_resumed_before_the
     );
 }
 
+// ------------------------------------------------------------------ GitHub ----
+
+/// The GitHub connector holds a connected account. The sign-in itself is the
+/// connectors' own test: a routine only needs to know that events can arrive.
+fn connect_github(f: &Fixture) {
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_connector_catalogue(id,server_id,phase,account_email,account_id) VALUES ('github','cgithubfixture','connected','charles','42')",
+            [],
+        )
+        .unwrap();
+}
+fn github_trigger(events: &[&str]) -> Value {
+    json!({"kind":"github","repo":"charles/essai","events":events})
+}
+fn github_event(id: &str, kind: &str) -> features::routine_github::Event {
+    features::routine_github::Event {
+        id: id.into(),
+        repo: "charles/essai".into(),
+        kind: kind.into(),
+        number: Some(12),
+        title: "Ajouter la recherche".into(),
+        author: "ines".into(),
+        url: "https://github.com/charles/essai/pull/12".into(),
+        text: "GITHUB_BODY_42".into(),
+    }
+}
+fn github_routine(f: &mut Fixture, events: &[&str]) -> Routine {
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Revue","prompt":"GITHUB_PROMPT","trigger":github_trigger(events),"time_zone":"UTC"}),
+    );
+    serde_json::from_value(created["routine"].clone()).unwrap()
+}
+fn deliver(f: &mut Fixture, id: &str, kind: &str) -> features::routine_github::Delivery {
+    features::routine_github::deliver(&mut f.app, &github_event(id, kind)).unwrap()
+}
+#[test]
+fn a_github_event_starts_one_named_run_in_history_and_thread_and_a_redelivery_adds_none() {
+    let mut f = Fixture::new(true);
+    connect_github(&f);
+    let r = github_routine(&mut f, &["pull_request_opened", "comment"]);
+    f.events(vec![
+        call("done", "complete_task", json!({"summary":"Relu"})),
+        complete(),
+    ]);
+    f.events(vec![complete()]);
+    let first = deliver(&mut f, "evt-1", "pull_request_opened");
+    assert_eq!((first.started, first.duplicates), (1, 0));
+    f.app.tick(now());
+    f.wait_run(&r);
+    let history = f.history(&r);
+    let occurrences = history["occurrences"].as_array().unwrap();
+    assert_eq!(occurrences.len(), 1);
+    let trigger = &occurrences[0]["trigger"];
+    assert_eq!(trigger["kind"], "github");
+    assert_eq!(trigger["label"], "GitHub");
+    assert_eq!(trigger["event_label"], "pull request ouverte");
+    assert_eq!(trigger["repo"], "charles/essai");
+    assert_eq!(occurrences[0]["status"]["status"], "done");
+    {
+        let seen = f.server.seen.lock().unwrap();
+        assert!(seen.bodies.iter().any(|b| {
+            let text = b.to_string();
+            text.contains("GITHUB_PROMPT")
+                && text.contains("GITHUB_BODY_42")
+                && text.contains("github-event")
+                && text.contains("non fiable")
+        }));
+    }
+    let thread = thread_of(&mut f, &r);
+    assert!(thread.contains("pull request ouverte"));
+    assert!(thread.contains("Ajouter la recherche"));
+    // The same delivery a second time leaves one run.
+    let again = deliver(&mut f, "evt-1", "pull_request_opened");
+    assert_eq!((again.started, again.duplicates), (0, 1));
+    f.app.tick(now());
+    assert_eq!(f.history(&r)["occurrences"].as_array().unwrap().len(), 1);
+    assert_eq!(f.count(), 1);
+    // A restart does not forget it either.
+    f.reopen();
+    assert_eq!(deliver(&mut f, "evt-1", "pull_request_opened").started, 0);
+}
+
+#[test]
+fn an_event_outside_the_chosen_ones_or_the_repository_starts_nothing() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let r = github_routine(&mut f, &["pull_request_opened"]);
+    for (id, kind) in [
+        ("a", "issue_opened"),
+        ("b", "pull_request_merged"),
+        ("c", "pull_request_closed"),
+        ("d", "check_run"),
+        ("e", "review_requested"),
+    ] {
+        assert_eq!(deliver(&mut f, id, kind).started, 0, "{kind}");
+    }
+    let other = features::routine_github::Event {
+        repo: "charles/autre".into(),
+        ..github_event("f", "pull_request_opened")
+    };
+    assert_eq!(
+        features::routine_github::deliver(&mut f.app, &other)
+            .unwrap()
+            .started,
+        0
+    );
+    f.app.tick(now());
+    assert!(f.history(&r)["occurrences"].as_array().unwrap().is_empty());
+    assert_eq!(f.count(), 0);
+}
+
+#[test]
+fn the_five_github_events_can_be_chosen_and_each_starts_a_named_run() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let all = [
+        "pull_request_opened",
+        "pull_request_pushed",
+        "pull_request_merged",
+        "comment",
+        "issue_opened",
+    ];
+    let r = github_routine(&mut f, &all);
+    for (n, kind) in all.iter().enumerate() {
+        assert_eq!(
+            deliver(&mut f, &format!("evt-{n}"), kind).started,
+            1,
+            "{kind}"
+        );
+    }
+    let history = f.history(&r);
+    let mut labels: Vec<String> = history["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["trigger"]["event_label"].as_str().unwrap().to_owned())
+        .collect();
+    labels.sort();
+    assert_eq!(
+        labels,
+        [
+            "commentaire",
+            "issue ouverte",
+            "pull request mergée",
+            "pull request ouverte",
+            "pull request poussée"
+        ]
+    );
+    // A sixth event is not on the list: the editor does not take it.
+    let refused = f
+        .app
+        .api(
+            "POST",
+            "/api/routines",
+            json!({"bot_id":"grokbot","name":"Fermée","prompt":"x","trigger":github_trigger(&["pull_request_closed"]),"time_zone":"UTC"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    let none = f
+        .app
+        .api(
+            "POST",
+            "/api/routines",
+            json!({"bot_id":"grokbot","name":"Aucune","prompt":"x","trigger":github_trigger(&[]),"time_zone":"UTC"})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap_err();
+    assert_eq!(none.status, 400);
+}
+
+#[test]
+fn without_a_connected_github_the_editor_says_so_and_saves_nothing() {
+    let mut f = Fixture::new(false);
+    let create = json!({"bot_id":"grokbot","name":"Revue","prompt":"x","trigger":github_trigger(&["comment"]),"time_zone":"UTC"});
+    let refused = f
+        .app
+        .api("POST", "/api/routines", create.to_string().as_bytes())
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    assert!(
+        refused.message.contains("GitHub n’est pas connecté"),
+        "{}",
+        refused.message
+    );
+    assert!(refused.message.contains("pas été enregistrée"));
+    // Inside a group too.
+    let grouped = json!({"bot_id":"grokbot","name":"Revue","prompt":"x","trigger":group(vec![every_minute(), json!({"trigger":github_trigger(&["comment"])})]),"time_zone":"UTC"});
+    assert_eq!(
+        f.app
+            .api("POST", "/api/routines", grouped.to_string().as_bytes())
+            .unwrap_err()
+            .status,
+        400
+    );
+    let listed = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert!(listed["routines"].as_array().unwrap().is_empty());
+    // Switching a saved routine to GitHub is refused the same way, and it is unchanged.
+    let r = f.create("Plain");
+    let edit = json!({"bot_id":"grokbot","routine_id":r.routine_id,"modified_at":r.modified_at,"schedule_version":r.schedule_version,"trigger":github_trigger(&["comment"])});
+    let refused = f
+        .app
+        .api("POST", "/api/routines/update", edit.to_string().as_bytes())
+        .unwrap_err();
+    assert!(refused.message.contains("GitHub n’est pas connecté"));
+    let listed = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap();
+    assert_eq!(listed["routines"][0]["trigger"]["kind"], "every");
+    // A connected account that has expired is said to need reconnecting.
+    f.db()
+        .execute(
+            "INSERT INTO wrapper_connector_catalogue(id,server_id,phase,account_email,account_id) VALUES ('github','cgithubfixture','reconnect','charles','42')",
+            [],
+        )
+        .unwrap();
+    let refused = f
+        .app
+        .api("POST", "/api/routines", create.to_string().as_bytes())
+        .unwrap_err();
+    assert!(
+        refused.message.contains("Reconnectez GitHub"),
+        "{}",
+        refused.message
+    );
+}
+
+#[test]
+fn in_a_group_the_due_slot_alone_and_the_github_event_alone_each_start_a_named_run() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let (r, _) = group_routine(
+        &mut f,
+        vec![
+            every_minute(),
+            json!({"trigger":github_trigger(&["comment"])}),
+        ],
+    );
+    f.tick_due(&r);
+    let history = f.history(&r);
+    assert_eq!(kinds(&history), ["schedule"]);
+    assert_eq!(history["occurrences"][0]["trigger"]["label"], "Horaire");
+    assert_eq!(deliver(&mut f, "evt-1", "comment").started, 1);
+    f.app.tick((r.modified_at + 60_000) as u64);
+    let history = f.history(&r);
+    let mut seen = kinds(&history);
+    seen.sort();
+    assert_eq!(seen, ["github", "schedule"]);
+    let github = history["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["trigger"]["kind"] == "github")
+        .unwrap();
+    assert_eq!(github["trigger"]["label"], "GitHub");
+    assert_eq!(github["trigger"]["event_label"], "commentaire");
+    // The same event twice on the same trigger stays one.
+    assert_eq!(deliver(&mut f, "evt-1", "comment").started, 0);
+    assert_eq!(deliver(&mut f, "evt-2", "comment").started, 1);
+}
+
+#[test]
+fn a_paused_routine_hears_no_github_event_and_a_queued_one_obeys_the_pause() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let r = github_routine(&mut f, &["comment"]);
+    let id = json!({"bot_id":"grokbot","routine_id":r.routine_id});
+    // Accepted, then paused before the host tick launches it.
+    assert_eq!(deliver(&mut f, "evt-1", "comment").started, 1);
+    f.post("/api/routines/pause", id.clone());
+    f.app.tick(now());
+    assert_eq!(f.count(), 0);
+    assert_eq!(
+        f.history(&r)["occurrences"][0]["status"]["status"],
+        "failed"
+    );
+    // While paused, an event is not kept.
+    assert_eq!(deliver(&mut f, "evt-2", "comment").started, 0);
+    assert_eq!(f.history(&r)["occurrences"].as_array().unwrap().len(), 1);
+    // A GitHub routine resumes without waiting for a future slot.
+    f.post("/api/routines/resume", id);
+    assert_eq!(deliver(&mut f, "evt-3", "comment").started, 1);
+}
+
+#[test]
+fn a_saved_github_trigger_stays_editable_after_the_connector_is_gone_but_a_new_one_is_refused() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let github = || json!({"trigger":github_trigger(&["comment"])});
+    let (r, _) = group_routine(&mut f, vec![every_minute(), github()]);
+    let alone = github_routine(&mut f, &["comment"]);
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='disconnected' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    let update = |f: &mut Fixture, routine: &Routine, change: Value| {
+        let mut body = json!({"bot_id":"grokbot","routine_id":routine.routine_id,"modified_at":routine.modified_at,"schedule_version":routine.schedule_version});
+        body.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        f.app
+            .api("POST", "/api/routines/update", body.to_string().as_bytes())
+    };
+    // The group keeps its GitHub member: its own schedule member is edited and saved.
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap()["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let members = stored["trigger"]["members"].clone();
+    let slower = json!({"kind":"group","members":[
+        {"id":members[0]["id"],"trigger":{"kind":"every","interval_ms":120000,"phase_ms":null}},
+        {"id":members[1]["id"],"trigger":members[1]["trigger"]}]});
+    let saved = update(
+        &mut f,
+        &serde_json::from_value(stored.clone()).unwrap(),
+        json!({"trigger":slower}),
+    );
+    assert!(saved.is_ok(), "{saved:?}");
+    // A GitHub member added now is a new trigger that nothing could deliver: refused.
+    let again = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap()["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let mut grown = again["trigger"].clone();
+    grown["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"trigger":{"kind":"github","repo":"charles/autre","events":["comment"]}}));
+    let refused = update(
+        &mut f,
+        &serde_json::from_value(again).unwrap(),
+        json!({"trigger":grown}),
+    )
+    .unwrap_err();
+    assert!(
+        refused.message.contains("GitHub est déconnecté"),
+        "{}",
+        refused.message
+    );
+    // A routine with one GitHub trigger can still be renamed.
+    let renamed = update(&mut f, &alone, json!({"name":"Revue du dépôt"}));
+    assert!(renamed.is_ok(), "{renamed:?}");
+}
+
 fn mail_of_account(id: &str, account: &str) -> features::mcp::MailEvent {
     features::mcp::MailEvent {
         compte: account.into(),

@@ -440,6 +440,20 @@ fn validate_group(
 ) -> Result<()> {
     match trigger {
         Schedule::Webhook | Schedule::Mail => Ok(()),
+        Schedule::Github { repo, events } => {
+            if !cron::valid_github_repo(repo) {
+                return Err(Error::InvalidInput(
+                    "Dépôt GitHub invalide : écrivez-le sous la forme propriétaire/dépôt.".into(),
+                ));
+            }
+            let distinct: HashSet<_> = events.iter().collect();
+            if events.is_empty() || distinct.len() != events.len() {
+                return Err(Error::InvalidInput(
+                    "Cochez au moins un événement GitHub, chacun une seule fois.".into(),
+                ));
+            }
+            Ok(())
+        }
         Schedule::Group { members } => {
             if members.len() < 2 {
                 return Err(Error::InvalidInput(
@@ -583,6 +597,48 @@ pub(crate) mod routine_tests {
         stored = update(&conn, &stored, 1).unwrap();
         assert_eq!(stored.schedule_version, 1);
         assert_eq!(get(&conn, &stored.routine_id).unwrap(), Some(stored));
+    }
+
+    #[test]
+    fn github_routine_needs_a_repository_and_distinct_events_and_no_future_slot() {
+        use crate::cron::GithubEvent;
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let github = |repo: &str, events: Vec<GithubEvent>| Schedule::Github {
+            repo: repo.into(),
+            events,
+        };
+        let mut input = fixture();
+        for refused in [
+            github("charles", vec![GithubEvent::Comment]),
+            github("charles/essai", vec![]),
+            github(
+                "charles/essai",
+                vec![GithubEvent::Comment, GithubEvent::Comment],
+            ),
+        ] {
+            input.trigger = refused;
+            assert!(create(&conn, &input).is_err());
+        }
+        input.trigger = github("charles/essai", vec![GithubEvent::IssueOpened]);
+        let mut stored = create(&conn, &input).unwrap();
+        stored.name = "Renamed".into();
+        stored = update(&conn, &stored, 1).unwrap();
+        assert_eq!(stored.schedule_version, 1);
+        // Inside a group the member is checked as well.
+        stored.trigger = Schedule::Group {
+            members: vec![
+                cron::Member {
+                    id: "a".into(),
+                    trigger: cron::parse("@every 1m").unwrap(),
+                },
+                cron::Member {
+                    id: "b".into(),
+                    trigger: github("nope", vec![GithubEvent::Comment]),
+                },
+            ],
+        };
+        assert!(update(&conn, &stored, 2).is_err());
     }
 
     #[test]

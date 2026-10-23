@@ -104,6 +104,12 @@ PAGE_SOURCE = r"""export default function Forfaits() {
 }
 """
 
+# Deux programmes qui attendent une ligne : l'un la lit et la répète, l'autre demande un mot de passe.
+TASKS = (
+    ("lance le script de saisie", "verify-task-saisie", "printf 'Continuer ? [oui/non] '; read -r reponse; echo \"reponse=$reponse\""),
+    ("lance le script du mot de passe", "verify-task-mdp", "printf 'Mot de passe : '; read -r secret; echo fini"),
+)
+
 IMAGE_B64 = base64.b64encode(_png(192, 192)).decode()
 # gpt-image-1.5 renders 1536x1024 and 1024x1536 for the wide and tall frames; the fixtures keep those ratios.
 IMAGE_SIZES = {
@@ -270,13 +276,30 @@ def response_body(raw: bytes) -> bytes:
             ]
         )
     if outputs:
-        done = "Voici la Page." if outputs[-1].get("call_id") == "verify-page" else "Voici l’image."
+        last = outputs[-1].get("call_id")
+        done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": done},
                 {"type": "response.completed"},
             ]
         )
+    for needle, call_id, command in TASKS:
+        if needle in json.dumps(items, ensure_ascii=False).lower():
+            call = {
+                "id": f"fc-{call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": "run_shell",
+                "arguments": json.dumps({"command": command, "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 131072, "background": True}),
+            }
+            return _sse(
+                [
+                    {"type": "response.output_item.done", "item": call},
+                    {"type": "response.completed"},
+                ]
+            )
     if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
         call = {
             "id": "fc-verify-page",

@@ -50,4 +50,5 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Réponse depuis la notification iPhone](./iphone-reponse.md) couvre la feuille Répondre ouverte depuis la notification d’un bot et l’envoi qui n’arrive qu’une fois dans le fil.
 - [Appel vocal](./voix-appel.md) couvre l’appel en direct : la phrase de transmission de l’audio, le transcript affiché ou masqué, la voix du bot coupée par la parole ou Échap, et le transcript rangé dans le fil.
 - [Mode YOLO](./mode-yolo.md) couvre l'activation par défaut, la commande et l'écriture de fichier faites sans carte (« Fait automatiquement »), le journal d'activité, le mode par bot, le retour à « Demander avant d'agir » et les garde-fous.
+- [Tâches de fond](./taches-de-fond.md) couvre la carte d’une commande en arrière-plan : la saisie d’une ligne sur son entrée standard, sa recopie dans la sortie, le refus après Terminée et sur une invite de mot de passe.
 - [Répondre en fil](./reponse-fil.md) couvre l’entrée « Répondre en fil » du menu d’un message, le sous-fil lié avec son bandeau, la réponse du bot qui tient compte du message parent et le retour au fil principal.

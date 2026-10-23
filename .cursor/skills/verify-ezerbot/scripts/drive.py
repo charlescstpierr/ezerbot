@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "mode-yolo")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "mode-yolo")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -261,8 +261,6 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "bibliothèque du bot non prête",
         )
-    if sphere == "mode-yolo":
-        return prepare_mode_yolo(evidence)
     if sphere == "images":
         eval_js(evidence, close_overlays_js())
         done = """() => {
@@ -540,7 +538,158 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "bouton Appel vocal non prêt",
         )
+    if sphere == "mode-yolo":
+        return prepare_mode_yolo(evidence)
+    if sphere == "taches-de-fond":
+        # Le shell est accordé au bot, et aucune tâche d'un passage précédent ne tourne encore.
+        eval_js(evidence, close_overlays_js())
+        return eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.refresh();
+              let stopped = 0;
+              for (const conversation of panels.state.conversations || []) {
+                for (const message of conversation.messages || []) {
+                  const output = message.payload?.outcome?.output;
+                  if (message.kind === "tool" && output?.background === true && output?.status === "en cours") {
+                    await panels.api("/api/local/tasks/stop", { run_id: message.payload.run_id, call_id: message.payload.call?.call_id });
+                    stopped += 1;
+                  }
+                }
+              }
+              await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true });
+              return { ok: true, stopped };
+            }""",
+        )
     raise SystemExit(f"sphère inconnue: {sphere}")
+
+
+def task_request(evidence: Path, text: str, prompt: str) -> dict:
+    """Une conversation neuve, la demande, l'approbation « Autoriser une fois », puis la carte En cours avec son invite visible."""
+    eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+    wait_js(
+        evidence,
+        """() => document.querySelector('.gb-editor[aria-label="Votre message"]') ? {ok: true} : null""",
+        "conversation neuve non prête",
+    )
+    eval_js(
+        evidence,
+        f"""() => {{
+          const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+          editor.focus();
+          if (!document.execCommand("insertText", false, {json.dumps(text)})) throw new Error("saisie refusée");
+          return true;
+        }}""",
+    )
+    wait_js(
+        evidence,
+        """() => {
+          const send = document.getElementById("send-button");
+          if (!send || send.disabled) return null;
+          send.click();
+          return {ok: true};
+        }""",
+        "envoi impossible",
+    )
+    wait_js(
+        evidence,
+        """() => {
+          const button = [...document.querySelectorAll('[data-card-kind="approval"] button')].find((node) => node.textContent === "Autoriser une fois" && !node.disabled);
+          if (!button) return null;
+          button.click();
+          return {ok: true};
+        }""",
+        "approbation du shell absente",
+        timeout=40,
+    )
+    return wait_js(
+        evidence,
+        f"""() => {{
+          const card = document.querySelector('[data-card-kind="tool"][data-local-state="en cours"]');
+          const field = card?.querySelector(".gb-local-input input");
+          const details = card?.querySelector("details");
+          if (!card || !field || !details) return null;
+          details.open = true;
+          return card.innerText.includes({json.dumps(prompt)}) ? {{ok: true, text: card.innerText.slice(0, 400)}} : null;
+        }}""",
+        "carte En cours avec son invite et son champ absente",
+        timeout=40,
+    )
+
+
+def task_send(evidence: Path, line: str) -> None:
+    eval_js(
+        evidence,
+        f"""() => {{
+          const card = document.querySelector('[data-card-kind="tool"] .gb-local-input')?.closest("article");
+          const field = card.querySelector(".gb-local-input input");
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(field, {json.dumps(line)});
+          field.dispatchEvent(new Event("input", {{bubbles: true}}));
+          card.querySelector(".gb-local-input").requestSubmit();
+          return true;
+        }}""",
+    )
+
+
+def background_task_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 la carte En cours devant son invite, 1 « oui » envoyé et Terminée, 2 un mot de passe refusé."""
+    if index == 0:
+        state = task_request(evidence, "Lance le script de saisie", "Continuer ? [oui/non]")
+        if "Arrêter" not in state["text"] or "En cours" not in state["text"]:
+            raise SystemExit(f"la carte En cours n'offre pas Arrêter: {state}")
+    if index == 1:
+        task_send(evidence, "oui")
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="tool"][data-local-state="terminé"]');
+              if (!card) return null;
+              card.querySelector("details").open = true;
+              const text = card.innerText;
+              return text.includes("reponse=oui") ? {ok: true, text, field: !!card.querySelector(".gb-local-input")} : null;
+            }""",
+            "le programme n'a pas lu « oui »",
+            timeout=30,
+        )
+        # L'invite n'a pas de fin de ligne : la ligne recopiée la suit, comme dans un terminal.
+        if "Continuer ? [oui/non] oui\nreponse=oui" not in state["text"] or state["field"] or "Code de sortie : 0" not in state["text"]:
+            raise SystemExit(f"« oui » n'est pas recopié dans la sortie d'une carte Terminée sans champ: {state}")
+        refused = eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.refresh();
+              const message = panels.state.conversations.flatMap((conversation) => conversation.messages || []).find((item) => item.kind === "tool" && item.payload?.call?.call_id === "verify-task-saisie" && item.payload?.outcome?.output?.status === "terminé");
+              const before = message.payload.outcome.output.stdout;
+              let error = "";
+              try { await panels.api("/api/local/tasks/input", { run_id: message.payload.run_id, call_id: "verify-task-saisie", line: "trop tard" }); }
+              catch (failure) { error = failure.message; }
+              await panels.refresh();
+              const again = panels.state.conversations.flatMap((conversation) => conversation.messages || []).find((item) => item.payload?.call?.call_id === "verify-task-saisie" && item.payload?.outcome?.output?.status === "terminé");
+              return { error, unchanged: again.payload.outcome.output.stdout === before };
+            }""",
+        )
+        if "n’est plus en cours" not in refused["error"] or not refused["unchanged"]:
+            raise SystemExit(f"une saisie après Terminée n'est pas refusée en français sans changer la sortie: {refused}")
+    if index == 2:
+        task_request(evidence, "Lance le script du mot de passe", "Mot de passe :")
+        task_send(evidence, "secret-123")
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="tool"][data-local-state="en cours"]');
+              const alert = card?.querySelector('.gb-local-failure[role="alert"]');
+              if (!alert) return null;
+              return {ok: true, alert: alert.innerText, text: card.innerText, field: card.querySelector(".gb-local-input input")?.value};
+            }""",
+            "le refus du mot de passe n'est pas sur la carte",
+            timeout=30,
+        )
+        if "mot de passe : la saisie n’a pas été envoyée" not in state["alert"]:
+            raise SystemExit(f"le refus ne dit pas que rien n'est parti: {state}")
+        if "secret-123" in state["text"] or state["field"] != "secret-123":
+            raise SystemExit(f"la ligne refusée est apparue dans la sortie au lieu de rester dans le champ: {state}")
 
 
 YOLO_PROMPTS = ("Liste mon dossier Documents", "Écris mes notes du jour")
@@ -1156,8 +1305,6 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     size = f"{width}x{height}"
     if sphere == "reunions-routines":
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
-    if sphere == "mode-yolo":
-        return [f"parametres-{theme}-{size}.png", f"terminal-{theme}-{size}.png", f"ecriture-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
     if sphere == "images-reference":
@@ -1172,6 +1319,10 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
         return [f"avant-{theme}-{size}.png", f"appel-{theme}-{size}.png", f"transcript-{theme}-{size}.png", f"fil-{theme}-{size}.png"]
+    if sphere == "mode-yolo":
+        return [f"parametres-{theme}-{size}.png", f"terminal-{theme}-{size}.png", f"ecriture-{theme}-{size}.png"]
+    if sphere == "taches-de-fond":
+        return [f"invite-{theme}-{size}.png", f"saisie-{theme}-{size}.png", f"mot-de-passe-{theme}-{size}.png"]
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
@@ -1192,8 +1343,6 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)
-        if sphere == "mode-yolo":
-            yolo_step(evidence, index)
         if sphere == "images-reference":
             # La photo ne tient pas avec l'image dans une fenêtre minimale : un plan sur la photo, un plan sur le résultat.
             where = "start" if index == 0 else "end"
@@ -1208,6 +1357,10 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
+        if sphere == "mode-yolo":
+            yolo_step(evidence, index)
+        if sphere == "taches-de-fond":
+            background_task_step(evidence, index)
         if sphere == "reponse-fil":
             reply_in_thread_step(evidence, index)
         if sphere == "dictee":

@@ -75,6 +75,37 @@ export function openConnectors(connector) {
   });
 }
 
+export function TaskInputView({ line, onLine, onSubmit, sending, notice }) {
+  return <>
+    <form className="gb-local-input" onSubmit={onSubmit}>
+      <input type="text" name="task-input" value={line} maxLength={511} autoComplete="off" spellCheck={false} placeholder="Une ligne pour le programme" aria-label="Saisie pour la tâche" onChange={(event) => onLine?.(event.target.value)} />
+      <button type="submit" className="gb-retry" disabled={sending}>Envoyer</button>
+    </form>
+    {notice && <p className="gb-local-failure" data-tone="warning" role="alert">{notice}</p>}
+  </>;
+}
+
+// The field empties once its line is sent, unless Charles has typed more since.
+export const settleDraft = (current, sent) => current === sent ? "" : current;
+
+// One line to the program's standard input. A refusal (finished task, password
+// prompt) is the engine's French sentence, kept on the card with the line.
+function TaskInput({ onSend }) {
+  const [line, setLine] = useState("");
+  const [sending, setSending] = useState(false);
+  const [notice, setNotice] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    if (sending) return;
+    setSending(true);
+    const sent = line;
+    try { await onSend(sent); setLine((current) => settleDraft(current, sent)); setNotice(""); }
+    catch (error) { setNotice(error?.message || "La saisie n’a pas été envoyée."); }
+    finally { setSending(false); }
+  };
+  return <TaskInputView line={line} onLine={setLine} onSubmit={submit} sending={sending} notice={notice} />;
+}
+
 function LocalCard({ message, run, onAction, busy }) {
   const { call, outcome, authorized_by: authority, approval_status: approvalStatus, run_status: storedStatus } = message.payload;
   const output = outcome?.output;
@@ -97,6 +128,7 @@ function LocalCard({ message, run, onAction, busy }) {
     {call.name === "run_shell" && shellArguments && <p>Dossier : {args.cwd} · {localLimits(args)}</p>}
     {pending && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.stop")}>Annuler l’exécution</button>}
     {running && <button type="button" className="gb-retry gb-local-stop" disabled={busy} onClick={() => onAction?.("local.task.stop")}>Arrêter</button>}
+    {running && !(typeof window !== "undefined" && window.EzerbotIPhone?.remote) && <TaskInput onSend={(line) => onAction?.("local.task.input", { line })} />}
     {output?.exit_code != null && <p>Code de sortie : {output.exit_code}</p>}
     {output?.signal != null && <p>Arrêtée de force (signal {output.signal}).</p>}
     {output?.truncated && call.name === "run_shell" && <p>Sortie tronquée : la limite a été atteinte.</p>}

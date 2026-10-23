@@ -2,7 +2,7 @@
 
 ## Rappel ciblé
 
-Le contexte contient un aperçu des faits récents (2 000 caractères, enregistrements JSON entiers), le nombre de faits actifs et une instruction de recherche. Il ne contient plus tout le catalogue. L’outil `recall_memory { query, limit }` cherche dans les faits privés du bot courant et les faits d’équipe locale. Il renvoie texte exact, identifiant et provenance ; les faits remplacés, oubliés ou privés d’un autre bot sont exclus avant le classement.
+Le contexte contient un aperçu des faits récents (2 000 caractères, enregistrements JSON entiers), le nombre de faits actifs et une instruction de recherche. Il ne contient plus tout le catalogue. L’outil `recall_memory { query, limit }` cherche dans les faits privés du bot courant, les faits d’équipe locale et, si le fil est rangé dans un sujet, les faits de ce sujet (portée `topic`), classés ensemble. Il renvoie texte exact, identifiant et provenance ; les faits remplacés, oubliés ou privés d’un autre bot sont exclus avant le classement.
 
 Recherche lexicale locale, sans réseau ni embeddings : mots exacts prioritaires, sous-chaînes ensuite, accents français ignorés, dates puis identifiants pour départager. `query` accepte 1–300 caractères, `limit` 1–20 ; les résultats ont un budget d’environ 12 000 caractères. Le modèle doit reformuler avec des mots-clés/synonymes en cas de résultat vide. Ce n’est pas une garantie de rappel sémantique ni de justesse d’un modèle particulier.
 

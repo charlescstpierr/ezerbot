@@ -185,7 +185,7 @@ Ce qui revient à l’ouverture : les transcripts, résumés, brouillons non env
 - Le choix de microphone est un réglage du Mac, partagé par la dictée, le mode voix et l’appel. Il survit au redémarrage. Il ne survit pas à un micro disparu : le repli est immédiat et annoncé.
 - La voix du bot est un réglage du bot, pas du Mac. Vitesse de 0,5 à 2. Le mode voix lit avec cette voix. L’appel parle avec cette voix.
 - L’appel vocal est une session en direct, secret éphémère, transcript texte seulement. Le mode voix n’est pas réécrit en appel. Les deux gestes ont deux boutons.
-- La notification iPhone reste un titre et un corps générique. Le chemin Répondre ajoute le texte saisi par Charles au fil, comme un message utilisateur de cette conversation. Le Mac ouvert est le seul accepteur.
+- La notification iPhone garde un corps générique. Son titre est le nom du bot pour une réponse, générique pour les autres événements. Le chemin Répondre ajoute le texte saisi par Charles au fil, comme un message utilisateur de cette conversation. Le Mac ouvert est le seul accepteur.
 - Aucun secret (clé Recall, secret d’appel, cookie d’appareil, jeton) n’entre dans le fil, le transcript, la notification, la mémoire, ni l’export.
 
 ## Décisions de test

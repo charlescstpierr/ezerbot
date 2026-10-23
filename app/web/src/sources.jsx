@@ -37,10 +37,10 @@ function OpenSourceButton({ source, message, onOpenSource }) {
   );
 }
 
-export function SourceCard({ source, message, onOpenSource, onClose, id, align, style, floating, cardRef }) {
+export function SourceCard({ source, message, onOpenSource, onClose, id, style, floating, cardRef }) {
   const facts = sourceFacts(source);
   return (
-    <span className="gb-source-card" id={id} ref={cardRef} style={style} data-floating={floating || undefined} role="group" aria-label={`Source ${source.n}`} data-align={align}>
+    <span className="gb-source-card" id={id} ref={cardRef} style={style} data-floating={floating || undefined} role="group" aria-label={`Source ${source.n}`}>
       <span className="gb-source-kind"><SourceIcon source={source} />{kindOf(source).label}</span>
       <strong className="gb-source-title">{source.titre}</strong>
       {facts.length > 0 && (

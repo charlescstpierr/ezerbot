@@ -27,6 +27,13 @@ const SLACK_ACCESS: &str = "xoxp-slack-access-secret-never-visible";
 const LINEAR_CLIENT: &str = "linear-public-client-fixture";
 const LINEAR_ACCESS: &str = "lin_oauth_access-secret-never-visible";
 const LINEAR_REFRESH: &str = "lin_refresh_secret-never-visible";
+/// The Atlassian app of Ezerbot, as a build or the judge configures it. Atlassian's flow needs
+/// a client secret: it is read from the environment of the process, never typed or stored.
+const JIRA_CLIENT: &str = "jira-public-client-fixture";
+const JIRA_SECRET: &str = "jira-client-secret-never-visible";
+const JIRA_ACCESS: &str = "jira_oauth_access-secret-never-visible";
+const JIRA_REFRESH: &str = "jira_refresh_secret-never-visible";
+const JIRA_CLOUD: &str = "1324a887-451b-4da2-b2e6-c0a0e1a3f8e0";
 /// The public client of Ezerbot's Microsoft Entra app, as a build or the judge configures it.
 const MICROSOFT_CLIENT: &str = "11111111-2222-3333-4444-555555555555";
 const MICROSOFT_ACCESS: &str = "EwB-microsoft-access-secret-never-visible";
@@ -54,6 +61,7 @@ struct SeenOAuth {
     gmail: GmailScript,
     slack: SlackScript,
     linear: LinearScript,
+    jira: JiraScript,
     microsoft: MicrosoftScript,
 }
 /// Scripted Microsoft provider: the PKCE exchange, the Graph reads and the mail send.
@@ -260,6 +268,31 @@ impl LinearScript {
             )
         }
     }
+}
+/// Scripted Atlassian provider: the 3LO exchange that asks for a client secret, the account and
+/// site lookups, the REST reads and the comment route. It offers no revocation.
+#[derive(Default)]
+struct JiraScript {
+    /// What the authorization URL asked for, echoed back as granted.
+    scope: String,
+    /// The access token the provider still accepts.
+    live: Option<String>,
+    /// The refresh token the provider still accepts: it rotates at every renewal.
+    refresh: String,
+    /// The refresh token is dead: the provider refuses to renew.
+    refresh_dead: bool,
+    /// Access tokens last this many seconds; 0 is an hour.
+    expires_in: u64,
+    renewals: u32,
+    /// Bodies of the comments the provider accepted, in order.
+    commented: Vec<Value>,
+    /// What the comment route answers instead of accepting the comment.
+    comment_reply: Option<(u16, Value)>,
+    /// The sites the token can reach, when a test needs others than the one site.
+    sites: Option<Value>,
+}
+fn adf(text: &str) -> Value {
+    json!({"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":text}]}]})
 }
 /// Scripted GitHub App provider: device flow, user, refresh and one REST route.
 struct GithubScript {
@@ -1042,6 +1075,123 @@ impl OAuth {
                     } else {
                         (404, json!({}))
                     }
+                } else if url.starts_with("/jira/") {
+                    let jira = &mut seen.jira;
+                    let path = url.split('?').next().unwrap().to_owned();
+                    let live = jira
+                        .live
+                        .as_ref()
+                        .is_some_and(|t| auth.as_deref() == Some(format!("Bearer {t}").as_str()));
+                    let sent: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    let lifetime = if jira.expires_in == 0 {
+                        3600
+                    } else {
+                        jira.expires_in
+                    };
+                    let scope = jira.scope.clone();
+                    let root = format!("/jira/api/{JIRA_CLOUD}/rest/api/3");
+                    let site_url = "https://atelier.atlassian.net";
+                    if path == "/jira/token" {
+                        assert_eq!(sent["client_id"], JIRA_CLIENT);
+                        assert_eq!(sent["client_secret"], JIRA_SECRET);
+                        match sent["grant_type"].as_str() {
+                            Some("authorization_code") => {
+                                assert_eq!(sent["code"], "fake-code");
+                                assert!(sent.get("code_verifier").is_none());
+                                jira.live = Some(JIRA_ACCESS.to_owned());
+                                jira.refresh = JIRA_REFRESH.to_owned();
+                                (
+                                    200,
+                                    json!({"access_token":JIRA_ACCESS,"refresh_token":JIRA_REFRESH,"token_type":"Bearer","expires_in":lifetime,"scope":scope}),
+                                )
+                            }
+                            _ if jira.refresh_dead
+                                || sent["refresh_token"] != jira.refresh.as_str() =>
+                            {
+                                (403, json!({"error":"invalid_grant"}))
+                            }
+                            _ => {
+                                jira.renewals += 1;
+                                let renewed = format!("{JIRA_ACCESS}-renewed-{}", jira.renewals);
+                                jira.refresh = format!("{JIRA_REFRESH}-{}", jira.renewals);
+                                jira.live = Some(renewed.clone());
+                                (
+                                    200,
+                                    json!({"access_token":renewed,"refresh_token":jira.refresh,"token_type":"Bearer","expires_in":lifetime,"scope":scope}),
+                                )
+                            }
+                        }
+                    } else if !live {
+                        (401, json!({"code":401,"message":"Unauthorized"}))
+                    } else if path == "/jira/me" {
+                        (
+                            200,
+                            json!({"account_id":"5b10ac8d82e05b22cc7d4ef5","email":"charles@atelier.test","name":"Charles Test"}),
+                        )
+                    } else if path == "/jira/resources" {
+                        (
+                            200,
+                            jira.sites.clone().unwrap_or_else(|| {
+                                json!([{"id":JIRA_CLOUD,"url":site_url,"name":"Atelier Ezerbot","scopes":["read:jira-work","write:jira-work","read:me"]}])
+                            }),
+                        )
+                    } else if post && path == format!("{root}/search/jql") {
+                        if sent["jql"] == "project = \"IN\" ORDER BY updated DESC" {
+                            // A project whose key is a JQL word: only the quoted form is valid.
+                            (200, json!({"issues":[],"isLast":true}))
+                        } else if sent["jql"] == "project = \"ENG\" ORDER BY updated DESC" {
+                            (
+                                200,
+                                json!({"issues":[
+                                    {"key":"ENG-12","fields":{"summary":"Corriger le bouton de connexion","status":{"name":"In Progress"},"assignee":{"displayName":"Alice Martin"},"updated":"2025-10-09T08:55:12.000+0000"}},
+                                    {"key":"ENG-11","fields":{"summary":"Documenter l’import","status":{"name":"To Do"},"assignee":null,"updated":"2025-10-08T10:00:00.000+0000"}}
+                                ],"isLast":false,"nextPageToken":"page-2"}),
+                            )
+                        } else {
+                            (
+                                400,
+                                json!({"errorMessages":["Error in the JQL Query: The value 'FANTOME' does not exist for the field 'project'."],"errors":{}}),
+                            )
+                        }
+                    } else if post
+                        && path.starts_with(&format!("{root}/issue/"))
+                        && path.ends_with("/comment")
+                    {
+                        if let Some(reply) = jira.comment_reply.clone() {
+                            reply
+                        } else if path == format!("{root}/issue/ENG-12/comment") {
+                            jira.commented.push(sent);
+                            (
+                                201,
+                                json!({"id":"10042","created":"2025-10-10T09:00:00.000+0000"}),
+                            )
+                        } else {
+                            (
+                                404,
+                                json!({"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}),
+                            )
+                        }
+                    } else if !post && path == format!("{root}/issue/ENG-12") {
+                        (
+                            200,
+                            json!({"key":"ENG-12","fields":{
+                            "summary":"Corriger le bouton de connexion","status":{"name":"In Progress"},
+                            "assignee":{"displayName":"Alice Martin"},"project":{"key":"ENG","name":"Engineering"},
+                            "created":"2025-10-01T09:00:00.000+0000","updated":"2025-10-09T08:55:12.000+0000",
+                            "description":adf("Le bouton ne répond pas sur Safari."),
+                            "comment":{"total":2,"comments":[
+                                {"author":{"displayName":"Bruno Petit"},"created":"2025-10-02T10:30:00.000+0000","body":adf("Reproduit sur Safari 17.")},
+                                {"author":{"displayName":"Alice Martin"},"created":"2025-10-03T11:45:00.000+0000","body":adf("Correctif en cours.")}
+                            ]}}}),
+                        )
+                    } else if !post && path.starts_with(&format!("{root}/issue/")) {
+                        (
+                            404,
+                            json!({"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}),
+                        )
+                    } else {
+                        (404, json!({}))
+                    }
                 } else if url.starts_with("/slack/") {
                     let challenge = seen.challenge.clone();
                     let slack = &mut seen.slack;
@@ -1313,7 +1463,7 @@ impl Fixture {
     fn connect(&mut self, id: &str) -> String {
         let body = if !matches!(
             id,
-            "notion" | "github" | "gmail" | "slack" | "linear" | "microsoft365"
+            "notion" | "github" | "gmail" | "slack" | "linear" | "jira" | "microsoft365"
         ) && self.item(id)["has_client"] != true
         {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
@@ -1367,10 +1517,18 @@ impl Fixture {
     fn callback_to(&mut self, id: &str, auth: &str, deny: bool, wrong_state: bool) -> u16 {
         let auth = url::Url::parse(auth).unwrap();
         let fields: std::collections::HashMap<_, _> = auth.query_pairs().into_owned().collect();
-        assert_eq!(fields["code_challenge_method"], "S256");
+        if id == "jira" {
+            // Atlassian's 3LO flow is bound by its state and its secret, not by PKCE.
+            assert!(!fields.contains_key("code_challenge"));
+        } else {
+            assert_eq!(fields["code_challenge_method"], "S256");
+        }
         {
             let mut seen = self.oauth.seen.lock().unwrap();
-            seen.challenge = fields["code_challenge"].clone();
+            seen.challenge = fields.get("code_challenge").cloned().unwrap_or_default();
+            if id == "jira" {
+                seen.jira.scope = fields["scope"].clone();
+            }
             if id == "slack" {
                 // What Slack is asked for is what the fake grants.
                 seen.slack.scope = fields["scope"].replace(' ', ",");
@@ -1439,6 +1597,8 @@ impl Drop for Fixture {
         std::env::remove_var("EZERBOT_GOOGLE_CLIENT_ID");
         std::env::remove_var("EZERBOT_SLACK_CLIENT_ID");
         std::env::remove_var("EZERBOT_LINEAR_CLIENT_ID");
+        std::env::remove_var("EZERBOT_JIRA_CLIENT_ID");
+        std::env::remove_var("EZERBOT_JIRA_CLIENT_SECRET");
         std::env::remove_var("EZERBOT_MICROSOFT_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
@@ -7304,7 +7464,6 @@ fn catalogue_categories_are_required_and_empty_database_never_contacts_providers
     for item in state["mcp"]["catalogue"].as_array().unwrap() {
         assert!(categories.contains(&item["category"].as_str().unwrap()));
         assert_eq!(item["status"], "disconnected");
-        assert!(!["jira"].contains(&item["id"].as_str().unwrap()));
     }
     assert_eq!(f.oauth.count(""), 0);
 }
@@ -9427,4 +9586,770 @@ fn the_registry_survives_a_restart_and_keeps_no_full_mail() {
         reply["payload"]["citations"],
         json!([{"n":1,"etat":"verifiee"}])
     );
+}
+
+const JIRA_ISSUES: &str = "jira_list_issues";
+const JIRA_ISSUE: &str = "jira_get_issue";
+const JIRA_COMMENT: &str = "jira_comment_issue";
+const JIRA_ACCOUNT: &str = "charles@atelier.test · Atelier Ezerbot";
+
+impl Fixture {
+    /// The client of Ezerbot's Atlassian app is build configuration, never a form field.
+    fn with_jira_client(&self) {
+        std::env::set_var("EZERBOT_JIRA_CLIENT_ID", JIRA_CLIENT);
+        std::env::set_var("EZERBOT_JIRA_CLIENT_SECRET", JIRA_SECRET);
+    }
+    /// Connect in one click, finish the browser leg, and enable the tools for the default bot.
+    fn jira_connect(&mut self) {
+        self.with_jira_client();
+        let run = self.connect("jira");
+        self.decide(&run, json!("allow_once"));
+        assert_eq!(self.item("jira")["status"], "authorizing");
+        assert_eq!(self.callback("jira", false, false), 200);
+        wait("jira connected", || {
+            self.item("jira")["status"] == "connected"
+        });
+        let server = self.item("jira")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn jira_requests(&self, part: &str) -> Vec<(String, String)> {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, body)| {
+                url.starts_with("/jira/") && (url.contains(part) || body.contains(part))
+            })
+            .cloned()
+            .collect()
+    }
+    fn jira_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='jira'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn jira_commented(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().jira.commented.clone()
+    }
+    /// Comments sent to the provider, whatever it answered.
+    fn jira_sends(&self) -> usize {
+        self.jira_requests("/comment").len()
+    }
+    /// A preparation that must be refused before any card opens.
+    fn jira_prepare_refused(&mut self, id: &str, tool: &str, arguments: Value) -> String {
+        let conversation = self.github_conversation();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Commente dans Jira."}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        self.github_settle(&run);
+        run
+    }
+    fn jira_card(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+    /// Nothing of the tokens or of the secret is in the state, the database, the run or the
+    /// model's input.
+    fn assert_jira_tokens_nowhere(&self, run: &str) {
+        let inputs = format!("{:?}", self.ai.seen.lock().unwrap().bodies);
+        let events = format!("{:?}", store::events(&self.db(), run, 0).unwrap());
+        let database = std::fs::read(&self.path).unwrap();
+        for secret in [JIRA_ACCESS, JIRA_REFRESH, JIRA_SECRET, "jira_oauth_"] {
+            assert!(!inputs.contains(secret), "model input holds {secret}");
+            assert!(!events.contains(secret), "run events hold {secret}");
+            assert!(!database
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn jira_card_lists_permissions_and_actions_and_has_no_client_fields() {
+    let mut f = Fixture::new();
+    let jira = f.item("jira");
+    assert_eq!(jira["name"], "Jira Cloud");
+    assert_eq!(jira["category"], "Développement");
+    assert_eq!(jira["needs_client"], false);
+    assert_eq!(jira["configured"], false);
+    assert_eq!(jira["redirect_uri"], Value::Null);
+    assert!(jira["unconfigured_message"]
+        .as_str()
+        .unwrap()
+        .contains("client Jira d’Ezerbot n’est pas configuré"));
+    for body in [
+        br#"{"id":"jira"}"#.as_slice(),
+        br#"{"id":"jira","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert!(error
+            .message
+            .contains("client Jira d’Ezerbot n’est pas configuré"));
+    }
+    // An identifier alone is no client: Atlassian asks for the secret too.
+    std::env::set_var("EZERBOT_JIRA_CLIENT_ID", JIRA_CLIENT);
+    assert_eq!(f.item("jira")["configured"], false);
+    assert!(f.jira_requests("").is_empty());
+    assert_eq!(f.item("jira")["status"], "disconnected");
+    f.with_jira_client();
+    let jira = f.item("jira");
+    assert_eq!(jira["configured"], true);
+    assert_eq!(jira["unconfigured_message"], Value::Null);
+    assert_eq!(
+        jira["scopes"],
+        "read:jira-work write:jira-work read:me offline_access"
+    );
+    let permissions = jira["permissions"].as_str().unwrap();
+    assert!(permissions.contains("Lecture des issues"));
+    assert!(permissions.contains("carte brouillon"));
+    assert!(permissions.contains("ne crée, ne modifie, ne ferme ni n’assigne aucune issue"));
+    let typed = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"jira","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert!(typed
+        .message
+        .contains("ni identifiant ni secret saisis ici"));
+    assert!(f.jira_secret().is_none());
+}
+
+#[test]
+fn jira_connects_with_the_documented_flow_and_keeps_the_tokens_in_the_vault() {
+    let mut f = Fixture::new();
+    f.with_jira_client();
+    let run = f.connect("jira");
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    let card = &request["arguments"]["catalogue"];
+    assert_eq!(card["service"], "Jira Cloud");
+    assert!(card["connexion"]
+        .as_str()
+        .unwrap()
+        .contains("conservés dans le trousseau"));
+    f.decide(&run, json!("allow_once"));
+    let item = f.item("jira");
+    assert_eq!(item["status"], "authorizing");
+    let authorize = url::Url::parse(item["authorization_url"].as_str().unwrap()).unwrap();
+    let query: std::collections::HashMap<_, _> = authorize.query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], JIRA_CLIENT);
+    assert_eq!(query["audience"], "api.atlassian.com");
+    assert_eq!(query["prompt"], "consent");
+    assert_eq!(
+        query["scope"],
+        "read:jira-work write:jira-work read:me offline_access"
+    );
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(query["redirect_uri"].ends_with("/oauth/jira/callback"));
+    // The secret never rides the browser's URL.
+    assert!(!authorize.as_str().contains(JIRA_SECRET));
+    assert_eq!(f.callback("jira", false, false), 200);
+    wait("jira connected", || f.item("jira")["status"] == "connected");
+    let exchanges = f.jira_requests("/token");
+    assert_eq!(exchanges.len(), 1);
+    let sent: Value = serde_json::from_str(&exchanges[0].1).unwrap();
+    assert_eq!(sent["client_secret"], JIRA_SECRET);
+    // The card shows the account and the site Atlassian named, and the actions.
+    let item = f.item("jira");
+    assert_eq!(item["account"], JIRA_ACCOUNT);
+    assert_eq!(item["has_tokens"], true);
+    assert_eq!(item["can_refresh"], true);
+    let tools: Vec<_> = item["server"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(tools, ["list_issues", "get_issue", "comment_issue"]);
+    let kept = f.jira_secret().unwrap();
+    assert_eq!(kept["ACCESS_TOKEN"], JIRA_ACCESS);
+    assert_eq!(kept["REFRESH_TOKEN"], JIRA_REFRESH);
+    assert!(kept.get("CLOUD_ID").is_none() && kept.get("SITE_URL").is_none());
+    let site: String = f
+        .db()
+        .query_row(
+            "SELECT account_id FROM wrapper_connector_catalogue WHERE id='jira'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(site, format!("{JIRA_CLOUD} https://atelier.atlassian.net"));
+    assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
+    assert!(!kept.to_string().contains(JIRA_SECRET));
+    let shown = f.state().to_string();
+    assert!(!shown.contains(JIRA_ACCESS) && !shown.contains(JIRA_REFRESH));
+    assert!(!shown.contains(JIRA_SECRET));
+}
+
+#[test]
+fn jira_binds_the_first_site_that_carries_both_permissions() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().jira.sites = Some(json!([
+        {"id":"0000aaaa-0000-0000-0000-000000000000","url":"https://lecture.atlassian.net","name":"Lecture seule","scopes":["read:jira-work"]},
+        {"id":JIRA_CLOUD,"url":"https://atelier.atlassian.net/","name":"Atelier Ezerbot","scopes":["read:jira-work","write:jira-work"]}
+    ]));
+    f.jira_connect();
+    assert_eq!(f.item("jira")["account"], JIRA_ACCOUNT);
+    // The site is no secret: it sits beside the account, never in the vault where it would be masked.
+    assert!(f.jira_secret().unwrap().get("SITE_URL").is_none());
+    let run = f.github_call("jira-site", JIRA_ISSUE, json!({"issue":"ENG-12"}));
+    let output = done(&f, &run);
+    assert_eq!(output["url"], "https://atelier.atlassian.net/browse/ENG-12");
+}
+
+#[test]
+fn jira_refuses_a_grant_that_lacks_a_permission_and_keeps_no_token() {
+    let mut g = Fixture::new();
+    g.with_jira_client();
+    let run = g.connect("jira");
+    g.decide(&run, json!("allow_once"));
+    let auth = g.item("jira")["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fields: std::collections::HashMap<_, _> = url::Url::parse(&auth)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    g.oauth.seen.lock().unwrap().jira.scope = "read:jira-work read:me".into();
+    let callback = format!(
+        "{}?state={}&code=fake-code",
+        fields["redirect_uri"], fields["state"]
+    );
+    let status = match ureq::get(&callback).call() {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("callback transport {e}"),
+    };
+    assert_eq!(status, 400);
+    wait("jira reconnect", || g.item("jira")["status"] == "reconnect");
+    assert!(g.jira_secret().is_none(), "a refused grant keeps no token");
+}
+
+#[test]
+fn jira_reads_issues_and_one_issue_without_a_card_and_keeps_the_tokens_out_of_the_thread() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    for (index, project) in ["ENG", "eng"].into_iter().enumerate() {
+        let run = f.github_call(
+            &format!("jira-issues-{index}"),
+            JIRA_ISSUES,
+            json!({"project":project,"limit":2}),
+        );
+        let output = done(&f, &run);
+        assert_eq!(output["compte"], JIRA_ACCOUNT);
+        assert_eq!(output["projet"], "ENG", "{project}");
+        assert_eq!(output["autres_issues"], true);
+        assert_eq!(output["issues"][0]["cle"], "ENG-12");
+        assert_eq!(output["issues"][0]["etat"], "In Progress");
+        assert_eq!(output["issues"][0]["assigne"], "Alice Martin");
+        assert_eq!(output["issues"][1]["assigne"], "");
+        let text = output["texte"].as_str().unwrap();
+        assert!(text.contains("ENG-12 · Corriger le bouton de connexion · état : In Progress · assigné : Alice Martin · modifiée le 2025-10-09 08:55 UTC"), "{text}");
+        assert!(text.contains("assigné : personne"), "{text}");
+        assert!(
+            text.contains("https://atelier.atlassian.net/browse/ENG-12"),
+            "{text}"
+        );
+    }
+    let searches = f.jira_requests("/search/jql");
+    assert_eq!(searches.len(), 2);
+    let asked: Value = serde_json::from_str(&searches[0].1).unwrap();
+    assert_eq!(asked["maxResults"], 2);
+    assert_eq!(asked["jql"], "project = \"ENG\" ORDER BY updated DESC");
+    // A key that is a JQL reserved word is read like any other: it is quoted.
+    let run = f.github_call("jira-reserved", JIRA_ISSUES, json!({"project":"in"}));
+    let output = done(&f, &run);
+    assert_eq!(output["projet"], "IN");
+    assert_eq!(output["issues"].as_array().unwrap().len(), 0);
+    assert_eq!(output["autres_issues"], false);
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("Aucune issue à afficher"));
+    let run = f.github_call("jira-issue", JIRA_ISSUE, json!({"issue":"eng-12"}));
+    let output = done(&f, &run);
+    assert_eq!(output["cle"], "ENG-12");
+    assert_eq!(output["resume"], "Corriger le bouton de connexion");
+    assert_eq!(output["etat"], "In Progress");
+    assert_eq!(output["assigne"], "Alice Martin");
+    assert_eq!(output["projet"], "ENG");
+    assert_eq!(output["description"], "Le bouton ne répond pas sur Safari.");
+    assert_eq!(output["commentaires"].as_array().unwrap().len(), 2);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("[2025-10-02 10:30 UTC] Bruno Petit : Reproduit sur Safari 17."),
+        "{text}"
+    );
+    assert!(text.contains("Créée le 2025-10-01 09:00 UTC"), "{text}");
+    assert!(text.contains("2 commentaire(s) :"), "{text}");
+    f.assert_jira_tokens_nowhere(&run);
+    assert_eq!(f.jira_sends(), 0, "reading changes nothing");
+    assert!(!f.state().to_string().contains(JIRA_ACCESS));
+}
+
+#[test]
+fn jira_says_what_a_refused_read_means() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let run = f.github_call("jira-no-project", JIRA_ISSUES, json!({"project":"FANTOME"}));
+    assert!(failed(&f, &run).contains("Jira ne trouve pas le projet FANTOME"));
+    // A key that could carry JQL never reaches the provider.
+    let before = f.jira_requests("/search/jql").len();
+    let run = f.github_call(
+        "jira-jql",
+        JIRA_ISSUES,
+        json!({"project":"ENG OR project = SECRET"}),
+    );
+    assert!(failed(&f, &run).contains("clé du projet Jira"));
+    assert_eq!(f.jira_requests("/search/jql").len(), before);
+    let run = f.github_call("jira-bad-id", JIRA_ISSUE, json!({"issue":"pas une clé"}));
+    assert!(failed(&f, &run).contains("par exemple ENG-12"));
+    let run = f.github_call("jira-missing", JIRA_ISSUE, json!({"issue":"ENG-404"}));
+    assert!(failed(&f, &run).contains("Jira ne trouve pas l’issue ENG-404"));
+    let run = f.github_call(
+        "jira-big",
+        JIRA_ISSUES,
+        json!({"project":"ENG","limit":500}),
+    );
+    assert!(failed(&f, &run).contains("entre 1 et 50"));
+    assert_eq!(f.item("jira")["status"], "connected");
+}
+
+#[test]
+fn jira_revoked_access_asks_to_reconnect() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    f.oauth.seen.lock().unwrap().jira.live = None;
+    let run = f.github_call("jira-revoked", JIRA_ISSUE, json!({"issue":"ENG-12"}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Jira"), "{reason}");
+    assert_eq!(f.item("jira")["status"], "reconnect");
+}
+
+#[test]
+fn jira_renews_an_expired_token_with_the_secret_and_the_rotated_refresh_token() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    for round in 1..=2u32 {
+        f.db()
+            .execute(
+                "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='jira'",
+                [],
+            )
+            .unwrap();
+        let run = f.github_call(
+            &format!("jira-renew-{round}"),
+            JIRA_ISSUE,
+            json!({"issue":"ENG-12"}),
+        );
+        done(&f, &run);
+        assert_eq!(f.oauth.seen.lock().unwrap().jira.renewals, round);
+    }
+    // The second renewal presented the refresh token the first one returned.
+    let renewals: Vec<Value> = f
+        .jira_requests("refresh_token")
+        .into_iter()
+        .map(|(_, body)| serde_json::from_str(&body).unwrap())
+        .collect();
+    assert_eq!(renewals.len(), 2);
+    assert_eq!(renewals[0]["refresh_token"], JIRA_REFRESH);
+    assert_eq!(renewals[1]["refresh_token"], format!("{JIRA_REFRESH}-1"));
+    assert_eq!(renewals[0]["client_secret"], JIRA_SECRET);
+    assert_eq!(
+        f.jira_secret().unwrap()["REFRESH_TOKEN"],
+        format!("{JIRA_REFRESH}-2")
+    );
+    assert_eq!(f.item("jira")["account"], JIRA_ACCOUNT);
+    // A refresh that fails never reuses the expired access.
+    f.oauth.seen.lock().unwrap().jira.refresh_dead = true;
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='jira'",
+            [],
+        )
+        .unwrap();
+    let before = f.jira_requests("/issue/").len();
+    let run = f.github_call("jira-dead", JIRA_ISSUE, json!({"issue":"ENG-12"}));
+    assert!(failed(&f, &run).contains("Reconnectez Jira"));
+    assert_eq!(f.item("jira")["status"], "reconnect");
+    assert_eq!(f.jira_requests("/issue/").len(), before);
+}
+
+#[test]
+fn jira_disabled_tools_are_not_invocable_and_nothing_works_after_disconnect() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let server = f.item("jira")["server"]["id"].clone();
+    let scoped = |f: &Fixture| {
+        grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+            connection: &f.db(),
+            provider: &f.provider,
+            db_path: &f.path,
+            now_ms: 0,
+            bot_id: Some("grokbot"),
+            conversation_id: None,
+            run_id: None,
+        })
+        .into_iter()
+        .filter(|t| t.name.starts_with("jira_"))
+        .map(|t| (t.name, t.requires_approval))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        scoped(&f),
+        [
+            (JIRA_ISSUES.to_owned(), false),
+            (JIRA_ISSUE.to_owned(), false),
+            (JIRA_COMMENT.to_owned(), true),
+        ]
+    );
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":false}),
+    );
+    assert!(scoped(&f).is_empty());
+    let run = f.github_call("jira-off", JIRA_ISSUES, json!({"project":"ENG"}));
+    assert!(failed(&f, &run).contains("Jira n’est pas activé pour ce bot"));
+    let run = f.jira_prepare_refused(
+        "jira-off-draft",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Jira n’est pas activé pour ce bot"));
+    assert_eq!(f.jira_sends(), 0);
+
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":true}),
+    );
+    let run = f.post("/api/connectors/disconnect", json!({"id":"jira"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("jira")["status"], "disconnected");
+    // Atlassian documents no revocation: nothing is asked, and the card says it is unconfirmed.
+    assert_eq!(f.item("jira")["warning"], true);
+    assert!(f.jira_requests("revoke").is_empty());
+    assert!(f.jira_secret().is_none());
+    assert!(scoped(&f).is_empty());
+    let calls = f.jira_requests("/jira/api").len();
+    let run = f.github_call("jira-after", JIRA_ISSUES, json!({"project":"ENG"}));
+    assert!(failed(&f, &run).contains("Jira est déconnecté"));
+    let run = f.jira_prepare_refused(
+        "jira-after-draft",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Jira est déconnecté"));
+    assert_eq!(
+        f.jira_requests("/jira/api").len(),
+        calls,
+        "no call after disconnect"
+    );
+}
+
+#[test]
+fn jira_comment_waits_on_a_draft_card_and_cancel_publishes_nothing() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let (run, card) = f.github_prepare(
+        "jira-draft-1",
+        JIRA_COMMENT,
+        json!({"issue":"eng-12","text":"Premier jet"}),
+    );
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Jira Cloud");
+    assert_eq!(draft["action"], "Commenter une issue Jira");
+    assert_eq!(draft["compte"], JIRA_ACCOUNT);
+    assert_eq!(draft["issue"], "ENG-12");
+    assert_eq!(draft["texte"], "Premier jet");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.jira_sends(), 0, "nothing before the click");
+    // There is no “Toujours”.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("jira-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    // Annuler: zero effect, and the card says so.
+    f.github_resolve(&card, "jira-cancel-1", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.jira_sends(), 0);
+    assert!(f.jira_commented().is_empty());
+    assert_eq!(f.jira_card(&card)["status"]["status"], "denied");
+}
+
+#[test]
+fn jira_comment_keeps_its_draft_card_in_yolo_and_cancel_publishes_nothing() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    assert_eq!(f.state()["yolo"]["mode"], "yolo");
+    let (run, card) = f.github_prepare(
+        "jira-yolo-1",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Jet en YOLO"}),
+    );
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["arguments"]["brouillon"]["texte"], "Jet en YOLO");
+    assert_eq!(f.jira_sends(), 0, "YOLO lifts no draft card");
+    f.github_resolve(&card, "jira-yolo-cancel", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.jira_sends(), 0);
+    assert!(f.jira_commented().is_empty());
+    assert_eq!(f.jira_card(&card)["status"]["status"], "denied");
+}
+
+#[test]
+fn jira_comment_is_published_once_from_the_corrected_text() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let (run, card) = f.github_prepare(
+        "jira-draft-2",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Version proposée"}),
+    );
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    // A blank comment is refused on the card.
+    assert_eq!(
+        f.github_resolve(&card, "jira-blank", json!("allow_once"), Some("  "))
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(f.jira_sends(), 0);
+    f.github_resolve(
+        &card,
+        "jira-send-1",
+        json!("allow_once"),
+        Some("Première ligne\n\nSeconde ligne"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let output = done(&f, &run);
+    assert_eq!(output["issue"], "ENG-12");
+    assert_eq!(output["compte"], JIRA_ACCOUNT);
+    assert_eq!(output["texte"], "Première ligne\n\nSeconde ligne");
+    assert_eq!(
+        output["url"],
+        "https://atelier.atlassian.net/browse/ENG-12?focusedCommentId=10042"
+    );
+    // The comment leaves as an Atlassian document, one paragraph per line.
+    assert_eq!(
+        f.jira_commented(),
+        vec![json!({"body":{"type":"doc","version":1,"content":[
+            {"type":"paragraph","content":[{"type":"text","text":"Première ligne"}]},
+            {"type":"paragraph","content":[{"type":"text","text":"Seconde ligne"}]}
+        ]}})]
+    );
+    let settled = f.jira_card(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    // A second Envoyer never publishes again.
+    f.github_resolve(&card, "jira-send-1", json!("allow_once"), Some("Autre"))
+        .unwrap();
+    f.app.tick(0);
+    assert_eq!(f.jira_commented().len(), 1);
+    assert_eq!(f.jira_sends(), 1);
+    // The model learned what was published, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("focusedCommentId=10042"));
+    f.assert_jira_tokens_nowhere(&run);
+}
+
+#[test]
+fn jira_draft_refuses_a_bad_target_without_a_card_and_an_unknown_issue_without_an_effect() {
+    let mut f = Fixture::new();
+    let run = f.jira_prepare_refused(
+        "jira-not-connected",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"x"}),
+    );
+    assert!(failed(&f, &run).contains("Jira n’est pas connecté"));
+    f.jira_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let cases = [
+        json!({"issue":"ENG-12","text":"   "}),
+        json!({"issue":"pas-un-id","text":"Bonjour"}),
+        json!({"issue":"ENG-12","text":"Bonjour\u{7}"}),
+        json!({"issue":"ENG-12","text":"x".repeat(30_001)}),
+        json!({"issue":"ENG-12","text":"Bonjour","extra":true}),
+        json!({"issue":"ENG-12/../../x","text":"Bonjour"}),
+    ];
+    for (index, arguments) in cases.into_iter().enumerate() {
+        let run = f.jira_prepare_refused(&format!("jira-bad-{index}"), JIRA_COMMENT, arguments);
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{index}"
+        );
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.jira_sends(), 0);
+    // An issue the account does not see opens a card, and the click publishes nothing.
+    let (run, card) = f.github_prepare(
+        "jira-ghost",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-404","text":"Bonjour"}),
+    );
+    f.github_resolve(&card, "jira-ghost-send", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("Jira ne trouve pas l’issue ENG-404")
+            && reason.contains("Rien n’a été publié"),
+        "{reason}"
+    );
+    assert_eq!(
+        f.jira_card(&card)["arguments"]["brouillon"]["etat"],
+        "refused"
+    );
+    assert!(f.jira_commented().is_empty());
+}
+
+#[test]
+fn jira_draft_shows_refused_rate_limited_and_unconfirmed_and_never_sends_twice() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let cases = [
+        (
+            "refused",
+            (
+                400,
+                json!({"errorMessages":["Comment body is not valid"],"errors":{}}),
+            ),
+            "Rien n’a été publié",
+        ),
+        (
+            "rate_limited",
+            (429, json!({"message":"Rate limit exceeded"})),
+            "Rien n’a été publié",
+        ),
+        ("unconfirmed", (503, json!({})), "peut-être été publié"),
+    ];
+    let mut calls = 0;
+    for (state, reply, said) in cases {
+        f.oauth.seen.lock().unwrap().jira.comment_reply = Some(reply);
+        let id = format!("jira-state-{state}");
+        let (run, card) = f.github_prepare(
+            &id,
+            JIRA_COMMENT,
+            json!({"issue":"ENG-12","text":"Bonjour"}),
+        );
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(said), "{state}: {reason}");
+        calls += 1;
+        assert_eq!(f.jira_sends(), calls, "{state}");
+        let shown = f.jira_card(&card);
+        assert_eq!(shown["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(shown["publication_result"]["status"], "failed");
+        // Never silent, never retried: the run is over and the card is spent.
+        f.app.tick(0);
+        assert_eq!(f.jira_sends(), calls, "{state} was sent again");
+        assert!(
+            f.jira_commented().is_empty(),
+            "{state} counted as a publication"
+        );
+    }
+}
+
+#[test]
+fn jira_draft_is_refused_after_a_changed_account_or_site() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    let (run, card) = f.github_prepare(
+        "jira-draft-6",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    // Another site names another account label: the draft was not prepared for it.
+    f.db()
+        .execute("UPDATE wrapper_connector_catalogue SET account_email='charles@atelier.test · Autre site' WHERE id='jira'", [])
+        .unwrap();
+    f.github_resolve(&card, "jira-send-5", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("compte Jira a changé"));
+    assert_eq!(f.jira_sends(), 0);
+}
+
+#[test]
+fn jira_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_name() {
+    let mut g = Fixture::new();
+    g.jira_connect();
+    let (run, card) = g.github_prepare(
+        "jira-draft-7",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    // A new sign-in to an account of the same name is a new generation.
+    g.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET generation=generation+1 WHERE id='jira'",
+            [],
+        )
+        .unwrap();
+    g.github_resolve(&card, "jira-send-6", json!("allow_once"), None)
+        .unwrap();
+    g.github_settle(&run);
+    assert!(failed(&g, &run).contains("compte Jira a changé"));
+    assert_eq!(g.jira_sends(), 0);
 }

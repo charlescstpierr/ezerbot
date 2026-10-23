@@ -359,6 +359,31 @@ test("a connected Linear card names the account and a client that is not configu
   assert.equal(card.all().find(n => n.className === "mcp-warning").textContent, said);
 });
 
+const jiraClient = {...service,id:"jira",name:"Jira Cloud",category:"Développement",description:"Lister et lire les issues d’un projet de votre site Jira Cloud, et préparer des commentaires depuis le chat.",permissions:"Lecture des issues, de leurs commentaires et de l’identité du compte ; un commentaire n’est publié qu’après votre clic sur sa carte brouillon, sous votre nom.",needs_client:false,configured:true,has_client:true,unconfigured_message:null,setup:"Aucune application OAuth à créer et aucun secret à saisir. Connecter ouvre Atlassian dans le navigateur."};
+
+test("Jira shows its permissions and actions, offers no client fields and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [jiraClient]);
+  const card = catalogueCard(root,"jira");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.match(card.textContent, /Autorisations : Lecture des issues, de leurs commentaires/);
+  assert.match(card.textContent, /publié qu’après votre clic sur sa carte brouillon/);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"jira"}});
+});
+
+test("a connected Jira card names the account and the site, and a client that is not configured is explained without a form", async () => {
+  const account = "charles@atelier.test · Atelier Ezerbot";
+  const connected = await mount([], {}, [{...jiraClient,status:"connected",has_tokens:true,account,server:{id:"j1",enabled_bots:[],tools:[]}}]);
+  assert.match(catalogueCard(connected.root,"jira").textContent, new RegExp(`Compte connecté : ${account}`));
+  const said = "Le client Jira d’Ezerbot n’est pas configuré dans cette version. Atlassian exige un identifiant et un secret d’application, et le rangement de ce secret reste à décider : il n’y a rien à saisir ici, et la connexion reste indisponible tant que le client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...jiraClient,configured:false,has_client:false,unconfigured_message:said}]);
+  const card = catalogueCard(root,"jira");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.equal(card.all().find(n => n.className === "mcp-warning").textContent, said);
+});
+
 test("the device code is shown, copyable and cancellable while GitHub waits", async () => {
   const expires_at = Date.UTC(2026,9,22,12,15);
   const item = {...github,status:"authorizing",authorization_url:"https://github.com/login/device",device:{user_code:"WDJB-MJHT",verification_uri:"https://github.com/login/device",expires_at},server:{id:"c1",enabled_bots:[],tools:[]}};

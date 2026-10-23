@@ -163,6 +163,25 @@ pub(crate) fn run_linear_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome
         catalogue::linear::call(ctx, &call.name, &call.arguments)
     }
 }
+/// The Jira tools: a native adapter, run outside any SQLite writer. The reads start
+/// without a card; commenting is a draft card.
+pub(crate) fn is_jira_tool(name: &str) -> bool {
+    catalogue::jira::is_read(name) || is_jira_draft(name)
+}
+pub(crate) fn is_jira_draft(name: &str) -> bool {
+    catalogue::jira::draft::is_tool(name)
+}
+/// Why a Jira tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn jira_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::jira::unavailable(ctx)
+}
+pub(crate) fn run_jira_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    if is_jira_draft(&call.name) {
+        catalogue::jira::draft::call(ctx, call)
+    } else {
+        catalogue::jira::call(ctx, &call.name, &call.arguments)
+    }
+}
 /// The Microsoft 365 tools (Outlook): a native adapter, run outside any SQLite writer. The reads
 /// start without a card; sending a mail is a draft card.
 pub(crate) fn is_microsoft_tool(name: &str) -> bool {
@@ -253,7 +272,7 @@ pub fn calendar_acknowledge(conn: &Connection, seqs: &[i64]) -> Result<(), ApiEr
 pub fn calendar_stop_watching(conn: &Connection) -> Result<(), ApiError> {
     catalogue::gmail::stop_watching_calendar(conn)
 }
-/// The publishing tools of the connections (GitHub, Gmail, Slack, Linear, Microsoft 365) and of the meeting chat: each opens a draft card and sends nothing
+/// The publishing tools of the connections (GitHub, Gmail, Slack, Linear, Jira, Microsoft 365) and of the meeting chat: each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_draft(name: &str) -> bool {
     is_github_comment(name)
@@ -261,6 +280,7 @@ pub(crate) fn is_draft(name: &str) -> bool {
         || is_gmail_email(name)
         || is_slack_post(name)
         || is_linear_draft(name)
+        || is_jira_draft(name)
         || is_microsoft_draft(name)
         || super::recall::is_reply(name)
 }
@@ -280,6 +300,8 @@ pub(crate) fn has_draft_title(name: &str) -> bool {
 pub(crate) fn validate_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
     if super::recall::is_reply(&call.name) {
         super::recall::reply_validate(ctx, call)
+    } else if is_jira_draft(&call.name) {
+        catalogue::jira::draft::validate(ctx, call)
     } else if is_linear_draft(&call.name) {
         catalogue::linear::draft::validate(ctx, call)
     } else if is_microsoft_draft(&call.name) {
@@ -302,6 +324,8 @@ pub(crate) fn draft_display(
 ) -> Result<Value, ApiError> {
     if super::recall::is_reply(&call.name) {
         super::recall::reply_prepare(ctx, request_id, call)
+    } else if is_jira_draft(&call.name) {
+        catalogue::jira::draft::prepare(ctx, request_id, call)
     } else if is_linear_draft(&call.name) {
         catalogue::linear::draft::prepare(ctx, request_id, call)
     } else if is_microsoft_draft(&call.name) {
@@ -321,10 +345,11 @@ pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> 
         .or_else(|| catalogue::gmail::email_call_id(ctx, request_id))
         .or_else(|| catalogue::slack::post::call_id(ctx, request_id))
         .or_else(|| catalogue::linear::draft::call_id(ctx, request_id))
+        .or_else(|| catalogue::jira::draft::call_id(ctx, request_id))
         .or_else(|| catalogue::microsoft::mail::call_id(ctx, request_id))
         .or_else(|| super::recall::reply_call_id(ctx, request_id))
 }
-/// What Charles corrected on a draft card: a comment or a Slack message has a text, a Linear issue a title and a description, an issue a title and a body,
+/// What Charles corrected on a draft card: a comment or a Slack message has a text, a Linear issue a title and a description, a Jira comment a text, an issue a title and a body,
 /// an email (Gmail or Outlook) a subject and a body.
 pub(crate) fn edit_draft(
     ctx: &Context<'_>,
@@ -335,6 +360,8 @@ pub(crate) fn edit_draft(
 ) -> Result<(), ApiError> {
     if super::recall::is_reply(tool) {
         super::recall::reply_edit(ctx, request_id, text.unwrap_or_default())
+    } else if is_jira_draft(tool) {
+        catalogue::jira::draft::edit(ctx, request_id, text)
     } else if is_linear_draft(tool) {
         catalogue::linear::draft::edit(ctx, request_id, title, text)
     } else if is_microsoft_draft(tool) {

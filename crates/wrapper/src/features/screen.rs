@@ -100,7 +100,9 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), ApiError> {
 }
 pub fn tick(ctx: &Context<'_>) {
     if let Some(lease) = current(ctx.db_path) {
-        let available: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id JOIN wrapper_screen_bots s ON s.bot_id=b.id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0 AND s.enabled=1)",params![ACCOUNT,lease.conversation,lease.bot],|r|r.get(0)).unwrap_or(false);
+        let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0)",params![ACCOUNT,lease.conversation,lease.bot],|r|r.get(0)).unwrap_or(false);
+        // Le Mode YOLO compte comme l'activation du bot ; le quitter révoque la session.
+        let available = live && enabled(ctx.connection, &lease.bot);
         if !lease.live() || !available {
             lease.stop();
         }
@@ -160,6 +162,9 @@ pub fn reconcile(conn: &rusqlite::Connection, path: &Path) -> Result<(), ApiErro
     Ok(())
 }
 pub fn enabled(conn: &rusqlite::Connection, bot: &str) -> bool {
+    if super::yolo::active(conn, bot) {
+        return true;
+    }
     conn.query_row(
         "SELECT enabled FROM wrapper_screen_bots WHERE bot_id=?1",
         [bot],
@@ -462,6 +467,12 @@ fn verify_human(ctx: &Context<'_>, call: &ToolCall, lease: &Lease) -> Result<(),
         .optional()?
         .flatten();
     let authority = raw.and_then(|s| serde_json::from_str::<AuthorizedBy>(&s).ok());
+    // Mode YOLO : la session consentie reste exigée ; elle porte Arrêter et Échap.
+    if let Some(AuthorizedBy::Yolo { session, .. }) = &authority {
+        if *session == Some(lease.id) && super::yolo::active(ctx.connection, &lease.bot) {
+            return Ok(());
+        }
+    }
     if let Some(AuthorizedBy::AllowOnce { request_id }) = authority {
         let binding:Option<String>=ctx.connection.query_row("SELECT c.display_json FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id JOIN wrapper_forms_calls c ON c.request_id=r.id JOIN forms_approval_grants g ON g.request_id=r.id WHERE r.id=?1 AND (r.run_id=?2 OR EXISTS(SELECT 1 FROM wrapper_late_approvals l WHERE l.request_id=r.id AND l.run_id=?2 AND l.allowed=1)) AND r.status='resolved' AND s.submission_id GLOB 'user:*' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL",params![request_id,ctx.run_id,call.name,grokbot_forms::approvals::args_digest(&call.name,&call.arguments)?],|r|r.get(0)).optional()?;
         if binding

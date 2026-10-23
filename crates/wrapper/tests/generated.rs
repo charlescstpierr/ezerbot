@@ -45,6 +45,7 @@ impl Fixture {
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
         let mut app = App::open_with(&path, provider.clone()).unwrap();
+        support::ask_before_acting(&mut app);
         wait("models", || provider.status()["models_ready"] == true);
         let chat = app
             .api(
@@ -536,4 +537,32 @@ fn model_saves_keep_the_format_and_respect_the_file_write_switch() {
                 .as_bytes()
         )
         .is_err());
+}
+
+#[test]
+fn yolo_saves_a_generated_document_without_a_card_and_still_refuses_the_data_folder() {
+    let mut f = Fixture::new();
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    let file = f.create("md");
+    let destination = f.root().join("Copie-yolo.md");
+    f.send(
+        "save-yolo",
+        "document_action",
+        json!({"id":file["id"],"action":"save","path":destination}),
+    );
+    f.finish("save-yolo");
+    assert_eq!(f.outcome("save-yolo")["status"], "done");
+    assert!(destination.exists());
+    assert!(requests::list_for_run(&f.db(), &f.run("save-yolo").run_id)
+        .unwrap()
+        .is_empty());
+    let intrus = f.path.parent().unwrap().join("intrus.md");
+    f.send(
+        "data-yolo",
+        "document_action",
+        json!({"id":file["id"],"action":"save","path":intrus}),
+    );
+    f.finish("data-yolo");
+    assert_eq!(f.outcome("data-yolo")["status"], "failed");
+    assert!(!intrus.exists());
 }

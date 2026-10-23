@@ -287,6 +287,7 @@ impl Fixture {
         let provider = Provider::with_backends(&db, fake.endpoints(), fake.endpoints(), false);
         provider.configure_fake_chat(deadline, false);
         let mut app = App::open_with(&db, provider.clone()).unwrap();
+        post(&mut app, "/api/yolo/mode", json!({"mode": "ask"}));
         let chat = post(&mut app, "/api/conversations", json!({}))["conversation"]["id"]
             .as_str()
             .unwrap()

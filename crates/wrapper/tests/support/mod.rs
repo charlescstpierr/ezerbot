@@ -639,6 +639,14 @@ impl Drop for FakeOpenAi {
     }
 }
 
+/// Ces tests décrivent le mode « Demander avant d'agir » : le Mode YOLO, activé par
+/// défaut, lève les cartes d'approbation qu'ils vérifient. `tests/yolo.rs` couvre
+/// le mode YOLO lui-même.
+pub fn ask_before_acting(app: &mut grokbot_wrapper::App) {
+    app.api("POST", "/api/yolo/mode", br#"{"mode":"ask"}"#)
+        .expect("retour au mode Demander avant d'agir");
+}
+
 pub fn wait(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ready() {

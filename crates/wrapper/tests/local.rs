@@ -47,6 +47,7 @@ impl Fixture {
         let server = FakeOpenAi::new(Arc::new(Mutex::new(Seen::default())));
         let provider = Provider::with_endpoints(&path, server.endpoints(), false);
         let mut app = App::open_with(&path, provider.clone()).unwrap();
+        support::ask_before_acting(&mut app);
         wait("models", || provider.status()["models_ready"] == true);
         let chat = app
             .api(

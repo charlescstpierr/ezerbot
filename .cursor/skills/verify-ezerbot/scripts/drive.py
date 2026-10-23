@@ -25,7 +25,7 @@ THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
 # EZERBOT_VERIFY_BASELINE=1 rejoue la sphère approbation-rappel sur un produit sans le rappel : mêmes gestes, aucune attente des éléments nouveaux, seules les captures « avant » comptent.
 BASELINE = os.environ.get("EZERBOT_VERIFY_BASELINE") == "1"
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante", "approbation-tardive", "approbation-rappel", "sujets", "mode-yolo")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -604,6 +604,8 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "bouton Appel vocal non prêt",
         )
+    if sphere == "mode-yolo":
+        return prepare_mode_yolo(evidence)
     if sphere == "taches-de-fond":
         # Le shell est accordé au bot, et aucune tâche d'un passage précédent ne tourne encore.
         eval_js(evidence, close_overlays_js())
@@ -629,10 +631,12 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
     if sphere == "approbation-tardive":
         eval_js(evidence, close_overlays_js())
         # Le shell est permis et le chat direct continue sans attendre : la carte survit au tour du bot.
+        # Le Mode YOLO, actif par défaut, lèverait la carte : la sphère joue « Demander avant d'agir ».
         return eval_js(
             evidence,
             """async () => {
               const panels = window.GrokbotPanels;
+              if (panels.state.yolo) await panels.api("/api/yolo/mode", { mode: "ask" });
               await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true });
               await panels.api("/api/approvals/waiting", { task: true, chat: true, validity: "24h", reminder: "1h" });
               await panels.refresh();
@@ -1187,6 +1191,149 @@ def background_task_step(evidence: Path, index: int) -> None:
             raise SystemExit(f"la ligne refusée est apparue dans la sortie au lieu de rester dans le champ: {state}")
 
 
+YOLO_PROMPTS = ("Liste mon dossier Documents", "Écris mes notes du jour")
+
+
+def yolo_mode(evidence: Path):
+    """« yolo » ou « ask » sur une build avec le Mode YOLO, None sur une build d'avant (la preuve « avant »)."""
+    return eval_js(evidence, """() => window.GrokbotPanels?.state?.yolo?.mode ?? null""")
+
+
+def send_in_new_chat(evidence: Path, text: str, new_chat: bool) -> None:
+    if new_chat:
+        eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
+    wait_js(evidence, """() => document.querySelector('.gb-editor[aria-label="Votre message"]') ? {ok: true} : null""", "compositeur non prêt")
+    eval_js(
+        evidence,
+        f"""() => {{
+          const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+          editor.focus();
+          if (!document.execCommand("insertText", false, {json.dumps(text, ensure_ascii=False)})) throw new Error("saisie refusée");
+          return true;
+        }}""",
+    )
+    wait_js(
+        evidence,
+        """() => {
+          const send = document.getElementById("send-button");
+          if (!send || send.disabled) return null;
+          send.click();
+          return {ok: true};
+        }""",
+        "envoi impossible",
+    )
+
+
+def prepare_mode_yolo(evidence: Path) -> dict:
+    """Après : une commande et une écriture faites sans carte. Avant : les mêmes demandes, chacune derrière sa carte."""
+    eval_js(evidence, close_overlays_js())
+    mode = yolo_mode(evidence)
+    run = load_run(evidence)
+    work = Path(run["work"]) if run.get("work") else None
+    if work is None:
+        raise SystemExit("le dossier de travail du Mode YOLO est absent : relancer avec --sphere mode-yolo")
+    if mode == "yolo":
+        autos = """() => document.querySelectorAll('article[data-auto="yolo"]').length"""
+        if eval_js(evidence, autos) < 2:
+            first = eval_js(evidence, autos) == 0
+            if first:
+                send_in_new_chat(evidence, YOLO_PROMPTS[0], True)
+                wait_js(evidence, """() => [...document.querySelectorAll('article[data-auto="yolo"]')].some((card) => card.textContent.includes("Commande exécutée")) ? {ok: true} : null""", "commande automatique absente", timeout=40)
+            send_in_new_chat(evidence, YOLO_PROMPTS[1], False)
+            wait_js(evidence, """() => [...document.querySelectorAll('article[data-auto="yolo"]')].some((card) => card.textContent.includes("Fichier créé")) ? {ok: true} : null""", "écriture automatique absente", timeout=40)
+        state = wait_js(
+            evidence,
+            """() => {
+              const cards = [...document.querySelectorAll('article[data-auto="yolo"]')];
+              const badges = cards.every((card) => card.querySelector(".gb-auto-badge")?.textContent === "Fait automatiquement");
+              const approvals = document.querySelectorAll('[data-card-kind="approval"]').length;
+              return cards.length >= 2 && badges && approvals === 0 ? {ok: true, cards: cards.length, approvals} : null;
+            }""",
+            "cartes automatiques incomplètes ou carte d'approbation inattendue",
+        )
+        written = work / "Notes-du-jour.txt"
+        if not written.is_file() or "valider le budget" not in written.read_text():
+            raise SystemExit(f"le fichier écrit sans carte est absent ou incomplet: {written}")
+        state["file"] = str(written.name)
+        state["mode"] = mode
+        return state
+    if mode is not None:
+        raise SystemExit(f"mode YOLO inattendu pour la preuve: {mode}")
+    # Avant : le terminal et les fichiers sont éteints par défaut ; on les allume comme l'ancien parcours l'exigeait.
+    ids = eval_js(evidence, """() => window.__yoloBefore || null""")
+    if not ids:
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true, files: true });
+              await panels.refresh();
+              return true;
+            }""",
+        )
+        ids = []
+        for text in YOLO_PROMPTS:
+            conversation = eval_js(
+                evidence,
+                """async () => {
+                  const panels = window.GrokbotPanels;
+                  const { conversation } = await panels.api("/api/conversations", {});
+                  await panels.refresh();
+                  panels.openConversation(conversation.id);
+                  return conversation.id;
+                }""",
+            )
+            ids.append(conversation)
+            wait_js(evidence, f"""() => window.GrokbotPanels.state.conversations.find((c) => c.id === {json.dumps(conversation)}) ? {{ok: true}} : null""", "conversation absente")
+            send_in_new_chat(evidence, text, False)
+            wait_js(evidence, """() => document.querySelector('[data-card-kind="approval"]') ? {ok: true} : null""", "carte d'approbation absente", timeout=40)
+        eval_js(evidence, f"""() => {{ window.__yoloBefore = {json.dumps(ids)}; return true; }}""")
+    return {"ok": True, "mode": None, "conversations": ids}
+
+
+def yolo_step(evidence: Path, index: int) -> None:
+    mode = yolo_mode(evidence)
+    eval_js(evidence, close_overlays_js())
+    if index == 0:
+        eval_js(evidence, """() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+        selector = '[data-panel="yolo"]' if mode else ".local-settings"
+        wait_js(
+            evidence,
+            f"""() => {{
+              const panel = document.querySelector({json.dumps(selector)});
+              if (!panel) return null;
+              panel.scrollIntoView({{block: "start"}});
+              return {{ok: true, text: panel.innerText.slice(0, 120)}};
+            }}""",
+            "section Paramètres absente",
+        )
+        return
+    if mode:
+        wait_js(
+            evidence,
+            f"""() => {{
+              const card = document.querySelectorAll('article[data-auto="yolo"]')[{index - 1}];
+              if (!card) return null;
+              card.scrollIntoView({{block: "center"}});
+              return {{ok: true, text: card.innerText.slice(0, 200)}};
+            }}""",
+            "carte automatique absente",
+        )
+        return
+    ids = eval_js(evidence, """() => window.__yoloBefore""")
+    eval_js(evidence, f"""() => {{ window.GrokbotPanels.openConversation({json.dumps(ids[index - 1])}); return true; }}""")
+    wait_js(
+        evidence,
+        """() => {
+          const card = document.querySelector('[data-card-kind="approval"]');
+          if (!card) return null;
+          card.scrollIntoView({block: "center"});
+          return {ok: true};
+        }""",
+        "carte d'approbation d'avant absente",
+    )
+
+
 def pages_request(evidence: Path) -> dict:
     eval_js(
         evidence,
@@ -1679,6 +1826,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
         return [f"avant-{theme}-{size}.png", f"appel-{theme}-{size}.png", f"transcript-{theme}-{size}.png", f"fil-{theme}-{size}.png"]
+    if sphere == "mode-yolo":
+        return [f"parametres-{theme}-{size}.png", f"terminal-{theme}-{size}.png", f"ecriture-{theme}-{size}.png"]
     if sphere == "taches-de-fond":
         return [f"invite-{theme}-{size}.png", f"saisie-{theme}-{size}.png", f"mot-de-passe-{theme}-{size}.png"]
     if sphere == "dictee":
@@ -1729,6 +1878,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
+        if sphere == "mode-yolo":
+            yolo_step(evidence, index)
         if sphere == "approbation-non-bloquante":
             waiting_step(evidence, index)
         if sphere == "approbation-tardive":

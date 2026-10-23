@@ -45,6 +45,7 @@ impl Fixture {
             binary: env!("CARGO_BIN_EXE_grokbot-wrapper").into(),
         };
         f.open();
+        f.post("/api/yolo/mode", json!({"mode": "ask"}));
         f
     }
     fn command(&self) -> Command {

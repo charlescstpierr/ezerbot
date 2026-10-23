@@ -32,3 +32,28 @@ test('ouvrir un fichier local utilise le bot de la réponse et son identifiant',
   assert.equal(path, '/api/library/source?bot_id=bot1&id=file3');
   assert.deepEqual(result, { text: 'Texte local' });
 });
+for (const [type, service, pattern] of [['feuille', 'drive', /\/file\/d\/mail1\/view/], ['fichier_drive', 'drive', /\/file\/d\/mail1\/view/], ['evenement', 'calendar', /\/event\?eid=/]]) {
+  test(`${type} vérifie son service indépendamment de Gmail`, async () => {
+    for (const connected of [true, false]) {
+      const opened = [];
+      const result = await openSource({ ...source, type }, {
+        open: url => opened.push(url),
+        fetch: async () => ({ ok: true, json: async () => ({ mcp: { catalogue: [
+          { id: 'gmail', account: source.compte, status: connected ? 'disconnected' : 'connected' },
+          { id: service, accounts: [{ account: source.compte, status: connected ? 'connected' : 'disconnected' }] },
+        ] } }) }),
+      });
+      assert.equal(opened.length, connected ? 1 : 0);
+      if (connected) { assert.equal(result, ''); assert.match(opened[0], pattern); }
+      else assert.match(result, /Ce compte n'est plus connecté/);
+    }
+  });
+}
+test('une pièce jointe indisponible ne prétend pas que le compte est déconnecté', async () => {
+  const result = await openSource({ ...source, type: 'piece_jointe' }, {
+    fetch: async () => { throw new Error('aucune requête attendue'); },
+    open: () => assert.fail('aucune fenêtre attendue'),
+  });
+  assert.match(result, /Cette pièce jointe ne peut pas être ouverte/);
+  assert.doesNotMatch(result, /compte/);
+});

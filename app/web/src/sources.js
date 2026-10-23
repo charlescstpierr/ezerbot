@@ -23,6 +23,7 @@ export const citationPlugin = citations => () => tree => {
   walk(tree);
 };
 export async function openSource(source, { fetch = globalThis.fetch, open = url => globalThis.open(url, '_blank', 'noopener'), botId } = {}) {
+  if (source.type === 'piece_jointe') return "Cette pièce jointe ne peut pas être ouverte depuis les sources.";
   try {
     const id = encodeURIComponent(source.identifiant || '');
     if (!id) throw new Error();
@@ -35,7 +36,8 @@ export async function openSource(source, { fetch = globalThis.fetch, open = url 
     const response = await fetch('/api/state');
     if (!response.ok) throw new Error();
     const state = await response.json();
-    const accounts = (state.mcp?.catalogue || []).filter(item => item.id === 'gmail' || item.id === 'google').flatMap(item => [item, ...(item.accounts || [])]);
+    const service = { courriel: 'gmail', feuille: 'drive', fichier_drive: 'drive', evenement: 'calendar' }[source.type];
+    const accounts = (state.mcp?.catalogue || []).filter(item => item.id === service).flatMap(item => [item, ...(item.accounts || [])]);
     if (!accounts.some(item => item.status === 'connected' && item.account === source.compte)) return "Ce compte n'est plus connecté — reconnecte-le pour ouvrir la source.";
     const account = encodeURIComponent(source.compte);
     if (source.type === 'courriel') open(`https://mail.google.com/mail/u/${account}/#all/${id}`);

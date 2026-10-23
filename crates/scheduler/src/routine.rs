@@ -439,7 +439,7 @@ fn validate_group(
     kept: &HashSet<String>,
 ) -> Result<()> {
     match trigger {
-        Schedule::Webhook => Ok(()),
+        Schedule::Webhook | Schedule::Mail => Ok(()),
         Schedule::Group { members } => {
             if members.len() < 2 {
                 return Err(Error::InvalidInput(

@@ -6069,3 +6069,41 @@ fn slack_message_is_refused_after_a_new_sign_in_even_to_a_workspace_of_the_same_
     assert_eq!(f.slack_post_calls(), 0);
     assert!(f.slack_posts().is_empty());
 }
+
+#[test]
+fn a_connected_inbox_starts_a_mail_routine_once_per_message() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let created = f.post(
+        "/api/routines",
+        json!({"bot_id":"grokbot","name":"Courrier","prompt":"Résumer","trigger":{"kind":"mail"}}),
+    );
+    let routine = created["routine"]["routine_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let history = |f: &mut Fixture| {
+        f.post(
+            "/api/routines/history",
+            json!({"bot_id":"grokbot","routine_id":routine}),
+        )["occurrences"]
+            .clone()
+    };
+    let poll = |f: &Fixture| {
+        grokbot_wrapper::features::routine_mail::poll(&f.app.feature_context()).unwrap()
+    };
+    // The first look only learns the inbox: what it already holds is not new.
+    assert_eq!(poll(&f), 0);
+    assert!(history(&mut f).as_array().unwrap().is_empty());
+    f.add_mail("m7", "Facture");
+    assert_eq!(poll(&f), 1);
+    assert_eq!(poll(&f), 0);
+    let runs = history(&mut f);
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(runs[0]["trigger"]["label"], "Courriel");
+    assert_eq!(runs[0]["trigger"]["objet"], "Facture");
+    assert!(runs[0]["trigger"]["expediteur"]
+        .as_str()
+        .unwrap()
+        .contains("bruno@example.test"));
+}

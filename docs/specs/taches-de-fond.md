@@ -1,6 +1,6 @@
 # Tâches de fond
 
-Statut : décisions du 21 octobre 2026, copie du comportement visible de Grok Bot 0.72.1 pour le shell long, recalé sur le Mac de Charles. Aucune implémentation de ce lot n’est commencée. La première tranche est le lancement en arrière-plan. Les tranches sont à créer comme issues enfants d’une carte `wayfinder:map` « Tâches de fond ». Cette page ne crée pas les issues. L’annexe en donne le corps.
+Statut : décisions du 21 octobre 2026, copie du comportement visible de Grok Bot 0.72.1 pour le shell long, recalé sur le Mac de Charles. La première tranche, le lancement en arrière-plan (T8 : mode `background` de `run_shell`, Arrêter, arrêt à la fermeture), est implémentée. La saisie sur l’entrée standard (T9 : une ligne depuis la carte, recopiée dans la sortie, refusée après Terminée ou Arrêtée et sur une invite de mot de passe) l’est aussi. Les tranches sont à créer comme issues enfants d’une carte `wayfinder:map` « Tâches de fond ». Cette page ne crée pas les issues. L’annexe en donne le corps.
 
 L’ordinateur cloud (T10, SCR-4, IPH-3) est reporté. Il est décrit au hors-périmètre et n’a pas de ticket.
 

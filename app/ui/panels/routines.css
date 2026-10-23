@@ -30,6 +30,9 @@
 .routines-fields .text-input { margin-top: 6px; }
 .routines-fields > .routines-enabled { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .routines-content > button { margin-right: 8px; margin-bottom: 12px; }
+.routines-events { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; }
+.routines-events legend { padding: 0 4px; font-size: 12px; color: var(--muted); }
+.routines-event { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .routines-ranges { margin: 16px 0; }
 .routines-ranges > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .routines-fields textarea { white-space: pre-wrap; min-height: 130px; }
@@ -44,3 +47,9 @@
   .routines-dialog { padding: 18px; }
   .routines-actions { gap: 10px; }
 }
+.routines-funnel { margin: 0 0 8px; padding: 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); }
+.routines-funnel h3 { margin: 0 0 8px; }
+.routines-webhook { margin: 12px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; }
+.routines-webhook h4 { margin: 0 0 8px; }
+.routines-webhook-url, .routines-webhook-token { margin: 6px 0; font-size: 12px; overflow-wrap: anywhere; word-break: break-all; }
+.routines-webhook code, .routines-funnel code { font-size: 12px; overflow-wrap: anywhere; word-break: break-all; }

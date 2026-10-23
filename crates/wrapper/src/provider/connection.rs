@@ -292,6 +292,9 @@ impl Provider {
     ) -> Result<String, Failure> {
         self.session().extract_memory(instructions, input)
     }
+    pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
+        self.session().summarize(instructions, input)
+    }
     pub(crate) fn review(&self, body: Value) -> Result<String, Failure> {
         self.session().review(body)
     }
@@ -359,6 +362,22 @@ impl Provider {
     }
     pub(crate) fn title_finished(&self) {
         self.primary.title_finished();
+    }
+
+    /// API base of the selected session. Image calls derive their host from this.
+    pub(crate) fn image_api_base(&self) -> String {
+        self.session().inner.endpoints.api.clone()
+    }
+
+    /// Bearer and account headers for image generation. The token is never
+    /// copied into the account vault.
+    pub(crate) fn image_auth(&self) -> Result<(String, codex::Headers), Failure> {
+        self.session().image_auth()
+    }
+
+    /// Mainline model of a Codex responses call. The image tool names its own model.
+    pub(crate) fn image_responses_model(&self) -> &'static str {
+        codex::DEFAULT_MODEL
     }
 }
 

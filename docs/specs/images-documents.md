@@ -22,7 +22,7 @@ Un PDF avec un emoji ou un tableau échoue ou reste en Courier. Une analyse qui 
 
 ## Solution
 
-Le bot appelle lui-même `generate_image` quand la demande le justifie, avec la clé OpenAI de Charles, modèle gpt-image. L’image arrive dans le fil. Les images d’un message forment une grille, et un clic ouvre la visionneuse. Une photo jointe transmise à un enfant part avec ses octets.
+Le bot appelle lui-même `generate_image` quand la demande le justifie, avec le jeton de la session ChatGPT déjà ouverte, modèle `gpt-image-1.5`. L’image arrive dans le fil. Les images d’un message forment une grille, et un clic ouvre la visionneuse. Une photo jointe transmise à un enfant part avec ses octets.
 
 Une analyse autonome devient une Page : fichier `.page.tsx` compilé sur le Mac, affiché à côté du fil. Le PDF embarque une police qui couvre les accents et l’emoji, et il sait faire un tableau. Le même contenu tient en docx et en pptx. Chaque bot a une bibliothèque : les fichiers déposés sont cherchés et cités dans ses nouveaux fils, et dans les siens seulement.
 
@@ -32,8 +32,8 @@ La vidéo, la retouche et le partage public d’une Page restent dehors. Les dé
 
 Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’est rouverte. La section Preuves rattache chaque geste copié à son fichier, sa fonction ou son symbole, et marque les inférences.
 
-1. **La génération n’a pas de carte d’approbation.** Le bot appelle `generate_image` quand la phrase le justifie. L’indicateur est « Génération d’une image… ». L’image remplace l’indicateur. Un refus `content_safety_blocked` ou un modèle restreint devient une phrase française, une fois, sans nouvel appel. Sans clé OpenAI, la carte « Connecte ton compte OpenAI » s’affiche et le fournisseur n’est pas appelé. La clé reste au trousseau. Elle ne va pas dans le fil, les journaux, ni le contexte du modèle.
-2. **Les références et le cadre sont ceux de Grok Bot.** `reference_image_paths` désigne des images déjà jointes au fil. `aspect_ratio` vaut 1:1, 16:9, 9:16, 4:3 ou 3:4. Un autre cadre est refusé en français, sans appel. Pas de masque, pas de retouche, pas de variation.
+1. **La génération n’a pas de carte d’approbation.** Le bot appelle `generate_image` quand la phrase le justifie. L’indicateur est « Génération d’une image… ». L’image remplace l’indicateur. Un refus `content_safety_blocked` reste la phrase de sécurité. Tout autre refus de l’hôte (4xx) devient « Ce modèle d’image est restreint pour ce compte. », une fois, sans nouvel appel. Sans session ChatGPT, la carte « Connectez votre compte ChatGPT » s’affiche avec le bouton « Se connecter à ChatGPT », et le fournisseur n’est pas appelé. Il n’y a pas de clé `OPENAI_API_KEY` ni de second moyen de connexion. Le jeton de session ne va pas dans le coffre, le fil, les journaux, ni le contexte du modèle. La déconnexion retire la session et laisse les secrets du coffre en place.
+2. **Les références et le cadre sont ceux de Grok Bot.** `reference_image_paths` désigne des images déjà jointes au fil. Une image BMP, que le chat n’envoie jamais au modèle, est refusée en français comme référence, sans appel. `aspect_ratio` vaut 1:1, 16:9, 9:16, 4:3 ou 3:4. Un autre cadre est refusé en français, sans appel. Pas de masque, pas de retouche, pas de variation.
 3. **La galerie est dans le fil.** Plusieurs images d’un message sont une grille. Un clic ouvre la visionneuse plein écran : flèches, légende, « Enregistrer l’image… », « Copier l’image ». Le clavier circule. Il n’y a pas de page galerie.
 4. **L’enfant reçoit l’image.** Quand `delegate` porte sur une image jointe, `selected_images` contient les octets ou le chemin et le type MIME. Le nom seul ne suffit pas. L’enfant décrit cette image. Un fil qui ne l’a pas ne l’envoie pas.
 5. **Une Page est locale.** Quand le résultat est une analyse autonome (graphique, tableau interactif, outil réutilisable), le bot écrit un `.page.tsx`. Ezerbot le compile sur le Mac et l’affiche dans un cadre à côté du fil. Une erreur de compilation revient au bot avec la ligne et le caractère. Le bot corrige seul. Charles peut renommer, ouvrir en pleine page, et retrouver la Page dans la liste « Pages » du bot. Elle survit au redémarrage. Pas de lien public, pas de partage d’équipe.
@@ -45,10 +45,10 @@ Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’e
 1. En tant que Charles, je veux écrire « Dessine un phare au crépuscule » et voir le bot générer l’image sans que je nomme un outil, afin d’obtenir le dessin.
 2. En tant que Charles, je veux lire « Génération d’une image… » pendant l’appel, afin de savoir que le dessin est en cours.
 3. En tant que Charles, je veux que l’indicateur cède la place à l’image, ou à la phrase d’erreur, afin de ne pas rester devant un appel qui aurait fini.
-4. En tant que Charles, je veux, tant que la clé OpenAI manque, la carte « Connecte ton compte OpenAI » et aucun appel, afin de ne pas prendre une absence pour une image.
+4. En tant que Charles, je veux, tant que la session ChatGPT manque, la carte « Connectez votre compte ChatGPT » et le bouton « Se connecter à ChatGPT », sans appel, afin de ne pas prendre une absence pour une image.
 5. En tant que Charles, je veux qu’un refus de sécurité s’affiche en français, une seule fois, afin de comprendre le blocage.
 6. En tant que Charles, je veux qu’un modèle restreint s’affiche en français, une seule fois, afin de le distinguer d’une panne réseau.
-7. En tant que Charles, je veux que la clé reste absente du fil, des journaux et du contexte du modèle, afin qu’un export ne la contienne pas.
+7. En tant que Charles, je veux que le jeton de session reste absent du fil, des journaux et du contexte du modèle, afin qu’un export ne le contienne pas.
 8. En tant que Charles, je veux qu’aucune carte d’approbation ne s’ouvre avant la génération, afin de garder le geste direct.
 9. En tant que Charles, je veux joindre une photo et demander le même style, afin que cette photo soit envoyée comme référence.
 10. En tant que Charles, je veux un cadre 1:1, 16:9, 9:16, 4:3 ou 3:4, afin de recevoir l’image dans ce rapport.
@@ -82,27 +82,27 @@ Grill du 21 octobre 2026. Les réponses R1, R3 et R4 sont copiées. Aucune n’e
 
 ## Décisions d’implémentation
 
-- L’outil s’appelle `generate_image`. Les arguments sont `description`, `aspect_ratio` optionnel, et, à partir de la tranche références, `reference_image_paths`. Le modèle envoyé au fournisseur est gpt-image. Le cadre omis vaut 1:1. La clé est celle du compte OpenAI de Charles, lue dans le trousseau déjà utilisé pour les secrets de compte. Ce lot n’ajoute pas un second coffre ni un formulaire « colle ta clé ».
-- Le fournisseur de production est l’API d’images OpenAI. Les tests visent un fournisseur de boucle. Tout autre hôte est refusé. La clé ne sort pas de cet hôte.
+- L’outil s’appelle `generate_image`. Les arguments sont `description`, `aspect_ratio` optionnel, et, à partir de la tranche références, `reference_image_paths`. L’appel part sur `https://chatgpt.com/backend-api/codex/responses`, avec les en-têtes du chat (`Authorization`, `chatgpt-account-id`, `originator`, et `x-openai-internal-codex-residency` quand le jeton porte une résidence). Le corps porte l’outil `image_generation` (`model` `gpt-image-1.5`, `size` : `1024x1024` pour 1:1 ou un cadre omis, `1536x1024` pour 16:9 et 4:3, `1024x1536` pour 9:16 et 3:4). Il ne porte pas `aspect_ratio` et n’appelle pas `api.openai.com/v1/images/generations`. L’image est le base64 du résultat `image_generation_call`. L’autorisation est le jeton courant de la session ChatGPT. Ce lot n’ajoute pas un second coffre, une clé `OPENAI_API_KEY`, ni un formulaire « colle ta clé ».
+- Le fournisseur de production est la route Codex déjà utilisée par le chat. Les tests visent un fournisseur de boucle. Tout autre hôte est refusé. Le jeton ne sort pas de cet hôte et n’est pas copié dans le coffre. Le délai de génération couvre environ 180 secondes.
 - Une image générée est une pièce du message, au même titre qu’une image jointe. La grille et la visionneuse lisent les deux. Le plafond de dix images et de 20 Mo déjà en vigueur pour une pièce jointe reste celui d’un dépôt. Une image générée qui dépasserait ce plafond est une phrase française, pas un fichier tronqué.
-- `selected_images` est un champ du contexte de `delegate`. Chaque entrée a les octets, ou un chemin local plus le type MIME. Le résumé texte du parent peut accompagner l’image. Il ne la remplace pas.
+- `selected_images` est un champ du contexte de `delegate`. Chaque entrée a les octets, ou un chemin local plus le type MIME. Le résumé texte du parent peut accompagner l’image. Il ne la remplace pas. Tant que le parent la confie encore, par `selected_images` ou dans un message choisi par `selected_context.entry_ids`, l’enfant peut la citer dans `reference_image_paths` ; une fois le droit révoqué, elle est refusée sans appel.
 - Une Page est un fichier du bot, pas un message. Le compilateur est local. Le diagnostic (ligne, caractère, message) est le texte que le bot reçoit pour réécrire le fichier. Charles ne voit pas la clé, et il ne voit pas un cadre vide présenté comme une Page réussie. La liste « Pages » est celle de ce bot.
 - La génération pdf, docx et pptx reste `create_document`. La police embarquée du PDF remplace Courier. Le tableau est reconnu dans le contenu déjà accepté par cet outil. Les coupes de longueur déjà écrites pour une diapositive restent, sauf à manger un emoji ou une cellule : ceux-là doivent apparaître.
 - La bibliothèque est une liste de fichiers du bot. Le rappel dans un nouveau fil réutilise la recherche lexicale locale déjà utilisée pour la mémoire quand l’ensemble ne tient pas dans le prompt. Il n’y a pas d’index distant. La citation nomme le fichier. Retirer ou remplacer change cette liste avant le prochain fil.
 
 ## Décisions de test
 
-Un bon test observe le comportement visible : l’indicateur, l’image dans le fil, la phrase française, l’absence de la clé dans le transcript et les journaux, le nombre d’appels au fournisseur, la grille, le fichier enregistré, le contenu reçu par l’enfant, le cadre de la Page, le texte extrait du PDF, la citation, et le refus de l’autre bot. Il ne vérifie pas l’ordre interne des fonctions.
+Un bon test observe le comportement visible : l’indicateur, l’image dans le fil, la phrase française, l’absence du jeton de session dans le transcript et les journaux, le nombre d’appels au fournisseur, la grille, le fichier enregistré, le contenu reçu par l’enfant, le cadre de la Page, le texte extrait du PDF, la citation, et le refus de l’autre bot. Il ne vérifie pas l’ordre interne des fonctions.
 
-La couture image est un fournisseur de boucle, puis le rendu de la bulle. On n’ajoute pas de harnais. Le test compte un appel pour une demande, zéro appel sans clé, zéro appel pour un cadre inconnu, et un seul appel pour un refus de sécurité. La couture Page injecte un diagnostic de compilation et observe le fichier réécrit, puis la Page encore présente après redémarrage du moteur. La couture PDF extrait é, ç et les cellules du tableau, et constate l’emoji au rendu. La couture bibliothèque parle à deux bots.
+La couture image est un fournisseur de boucle, puis le rendu de la bulle. On n’ajoute pas de harnais. Le test compte un appel pour une demande, zéro appel sans session, et un seul appel pour un refus de sécurité ou un refus d’hôte. Le corps de boucle verrouille l’outil `image_generation` (`model`, `size`), les en-têtes `Authorization`, `chatgpt-account-id`, `originator` et `x-openai-internal-codex-residency`, et l’absence de `aspect_ratio`. La couture Page injecte un diagnostic de compilation et observe le fichier réécrit, puis la Page encore présente après redémarrage du moteur. La couture PDF extrait é, ç et les cellules du tableau, et constate l’emoji au rendu. La couture bibliothèque parle à deux bots.
 
 Chaque tranche commence par un test rouge sur sa couture, puis le code qui le rend vert. Le fournisseur scripté ne prouve pas le compte réel. Le juge visuel sur le Mac de Charles est le critère d’acceptation des parcours ci-dessous. Une capture immobile ne suffit pas.
 
 ## Critères d’acceptation
 
-Le juge coche ces parcours dans l’app, avec le compte OpenAI de Charles capable d’appeler gpt-image, et des fichiers à lui. La clé n’apparaît nulle part à l’écran.
+Le juge coche ces parcours dans l’app, avec le compte ChatGPT de Charles capable d’appeler `gpt-image-1.5`, et des fichiers à lui. Le jeton n’apparaît nulle part à l’écran.
 
-1. **Génération.** Phrase : « Dessine un phare au crépuscule. » L’indicateur « Génération d’une image… » apparaît, puis une image dans le fil. Aucune carte d’approbation. Déconnecter le compte, ou partir d’un profil sans clé : la carte « Connecte ton compte OpenAI » s’affiche et aucune image n’est ajoutée. Un refus de sécurité scripté, rejoué sur le fournisseur de boucle devant le juge si le compte réel ne le produit pas, affiche une phrase française et ne relance pas l’appel.
+1. **Génération.** Phrase : « Dessine un phare au crépuscule. » L’indicateur « Génération d’une image… » apparaît, puis une image dans le fil. Aucune carte d’approbation. Sans session ChatGPT : la carte « Connectez votre compte ChatGPT » et le bouton « Se connecter à ChatGPT » s’affichent, et aucune image n’est ajoutée. Un refus de sécurité scripté, rejoué sur le fournisseur de boucle devant le juge si le compte réel ne le produit pas, affiche une phrase française et ne relance pas l’appel. Un refus d’hôte affiche « Ce modèle d’image est restreint pour ce compte. », une seule fois.
 2. **Référence et cadre.** Joindre une photo. Phrase : « Le même style, en 16:9. » L’image résultante est en 16:9 et le juge reconnaît le style de la photo. Demander un cadre « 2:1 » affiche un refus français et n’ajoute pas d’image.
 3. **Grille.** Un message qui contient trois images les montre en grille. Le clic ouvre la visionneuse, la légende est lisible, les flèches et les touches changent d’image. « Enregistrer l’image… » produit un fichier ouvrable. « Copier l’image » dépose une image dans le presse-papiers, collable dans un autre document. Aucun écran « Galerie » n’est ajouté au menu.
 4. **Enfant.** Joindre une capture connue. Phrase : « Délègue la description de cette photo. » Le fil `task:` décrit cette capture. Une délégation dans un autre fil, sans la photo, ne décrit pas cette capture.
@@ -126,9 +126,8 @@ Le juge coche ces parcours dans l’app, avec le compte OpenAI de Charles capabl
 
 ## Risques
 
-- **La clé est un secret de compte.** Elle suit la règle déjà prise pour les jetons : trousseau, pas de repli fichier pour un secret de compte quand le trousseau est actif. Le juge du parcours 1 vérifie qu’elle n’est pas à l’écran. Les tests vérifient qu’elle n’est pas dans le transcript.
+- **La session est le seul accès.** Le jeton vient de « Se connecter à ChatGPT ». Il n’est pas recopié dans le coffre. Si l’hôte d’images refuse ce compte, la phrase « Ce modèle d’image est restreint pour ce compte. » est le comportement visible. Le juge du parcours 1 a besoin d’un compte qui produit une vraie image. Les tests, eux, tournent sur la boucle.
 - **Un refus de sécurité mal classé relancerait l’appel.** Le test compte un seul appel, puis la phrase. Pas de boucle.
-- **gpt-image peut refuser le compte connecté.** La phrase « modèle restreint » est le comportement visible. Le juge du parcours 1 a besoin d’un compte qui produit une vraie image. Les tests, eux, tournent sur la boucle.
 - **Une Page exécute du code local écrit par le bot.** Elle n’est pas partagée. Une compilation en échec ne doit pas être affichée comme une Page vide réussie : le diagnostic reste visible tant que le bot n’a pas réécrit un fichier qui compile.
 - **Le PDF change de police.** Les accents qui passaient par WinAnsi doivent encore passer. Le parcours 6 et le test d’extraction sont là pour cela. Un glyphe hors police échoue encore en français.
 - **La bibliothèque peut être volumineuse.** Le plafond de 20 Mo par fichier et la recherche lexicale locale évitent d’envoyer tous les fichiers à chaque tour. Un fichier retiré doit disparaître du rappel au fil suivant : le parcours 8 le coche.
@@ -138,8 +137,8 @@ Le juge coche ces parcours dans l’app, avec le compte OpenAI de Charles capabl
 
 Source : Grok Bot 0.72.1, extraction asar en lecture seule. `grokbot-rea.md` §d et `tickets-parite.md` R1, R3, R4. Les chemins sont relatifs à `dist/`. [P] est une chaîne citée. [I] est une inférence. Un choix Ezerbot n’est pas une preuve Grok.
 
-- **Génération sans carte.** [P] `GenerateImageRequestResponse` (`approved`, `rejected`) n’est qu’un proto hérité inutilisé dans `electron-main/proto.cjs`. Le renderer n’a que « Generating a photo » dans `renderer/assets/index.eager-app-*.js` (R1). [P] outil `GenerateImageArgs` (`description`, `file_path` optionnel, `reference_image_paths`, `aspect_ratio`) dans `electron-main/proto.cjs`. [P] RPC `RunGenerateImage`, requête `RunGenerateImageRequest` (`description`, `reference_images`, `model_id`, `max_mode`, `aspect_ratio`). [P] erreurs `RunGenerateImageError` : `model_restricted`, `content_safety_blocked` (rea §d). L’indicateur « Génération d’une image… », la carte « Connecte ton compte OpenAI », la clé au trousseau et l’absence de nouvel appel sont le choix Ezerbot de T1, pas des chaînes extraites.
-- **Modèle.** [P] aucune occurrence de `imagine`, `grok-2-image`, `flux`, `gpt-image` ni `images/generations` (rea §d). [P] l’avatar part de `modelId` `SAND_DEFAULT_MODEL_ID`, où `Pp="grok-4.5"` dans `electron-main/main-core.cjs`, avec `aspectRatio:"1:1"`. [I] le modèle d’image de Grok est probablement Grok Imagine. gpt-image et la clé OpenAI de Charles sont le choix Ezerbot.
+- **Génération sans carte.** [P] `GenerateImageRequestResponse` (`approved`, `rejected`) n’est qu’un proto hérité inutilisé dans `electron-main/proto.cjs`. Le renderer n’a que « Generating a photo » dans `renderer/assets/index.eager-app-*.js` (R1). [P] outil `GenerateImageArgs` (`description`, `file_path` optionnel, `reference_image_paths`, `aspect_ratio`) dans `electron-main/proto.cjs`. [P] RPC `RunGenerateImage`, requête `RunGenerateImageRequest` (`description`, `reference_images`, `model_id`, `max_mode`, `aspect_ratio`). [P] erreurs `RunGenerateImageError` : `model_restricted`, `content_safety_blocked` (rea §d). L’indicateur « Génération d’une image… », la carte « Connectez votre compte ChatGPT », le bouton « Se connecter à ChatGPT » et l’absence de nouvel appel sont le choix Ezerbot de T1, pas des chaînes extraites. Il n’y a pas de seconde connexion ni de clé `OPENAI_API_KEY`.
+- **Modèle.** [P] aucune occurrence de `imagine`, `grok-2-image`, `flux`, `gpt-image` ni `images/generations` (rea §d). [P] l’avatar part de `modelId` `SAND_DEFAULT_MODEL_ID`, où `Pp="grok-4.5"` dans `electron-main/main-core.cjs`, avec `aspectRatio:"1:1"`. [I] le modèle d’image de Grok est probablement Grok Imagine. `gpt-image-1.5` et le jeton de la session ChatGPT sont le choix Ezerbot. Le corps utilise `size`, pas `aspect_ratio`.
 - **Références et cadre.** [P] `reference_image_paths` et `reference_images` (rea §d). [P] la seule valeur de cadre citée est `aspectRatio:"1:1"`, pour l’avatar. [I] la liste fermée 1:1, 16:9, 9:16, 4:3, 3:4 est celle de T2. L’extrait ne cite pas ces quatre autres rapports.
 - **Galerie.** [P] `gallery`, `galleryIndex`, `captions` dans `renderer/assets/index.eager-app-BBYQQe1M.js`, plus « Enregistrer l'image… » et « Copier l'image » (rea §d). [I] « aucune page de galerie dédiée n’a été trouvée » est une absence dans l’extrait, pas une preuve exhaustive. Les flèches et le clavier ne sont pas des symboles cités. [P] pas de retouche : pas de `inpaint`, `edit_image` ni `variation` hors CSS. `chunk-agent-avatar-editor-*.js` et l’IPC `generateAgentAvatarImage` concernent l’avatar du bot, pas la galerie du fil.
 - **Vidéo.** [P] drapeau `grok_bot_generate_video`, défaut `!1` (rea §d). Hors périmètre. L’extrait d’images ne nomme pas d’autre fichier pour ce drapeau.
@@ -174,22 +173,22 @@ Carte « Images, documents et bibliothèque ». Spec : `docs/specs/images-docume
 
 ## What to build
 
-Le bot appelle `generate_image` quand Charles demande un dessin. L’argument est la description. Le cadre omis vaut 1:1. Le modèle est gpt-image. La clé OpenAI de Charles est lue dans le trousseau. Elle n’est pas écrite dans le fil, les journaux, ni le contexte.
+Le bot appelle `generate_image` quand Charles demande un dessin. L’argument est la description. Le cadre omis vaut 1:1 et part en `size` `1024x1024` dans l’outil `image_generation` (`model` `gpt-image-1.5`) envoyé à `https://chatgpt.com/backend-api/codex/responses`. Les en-têtes sont ceux du chat. L’image est extraite du base64 de la réponse. L’autorisation est le jeton courant de la session ChatGPT. Il n’est pas écrit dans le coffre, le fil, les journaux, ni le contexte.
 
-Pendant l’appel, le fil affiche « Génération d’une image… ». L’image le remplace. Un refus `content_safety_blocked` ou un modèle restreint affiche une phrase française et n’appelle pas le fournisseur une seconde fois. Sans clé, la carte « Connecte ton compte OpenAI » s’affiche et le compte d’appels reste à zéro. Aucune carte d’approbation.
+Pendant l’appel, le fil affiche « Génération d’une image… ». L’image le remplace. Un refus `content_safety_blocked` affiche la phrase de sécurité. Tout autre refus 4xx affiche « Ce modèle d’image est restreint pour ce compte. ». Aucun de ces refus ne rappelle le fournisseur. Sans session, la carte « Connectez votre compte ChatGPT » s’affiche avec « Se connecter à ChatGPT » et le compte d’appels reste à zéro. Aucune carte d’approbation. La déconnexion n’efface pas un secret du coffre.
 
 Démo : « Dessine un phare au crépuscule », puis l’image.
 
-TDD : d’abord un test rouge du wrapper contre le fournisseur de boucle (un appel, image dans le fil, refus de sécurité affiché, zéro appel sans clé, clé absente du transcript).
+TDD : d’abord un test rouge du wrapper contre le fournisseur de boucle (un appel, image dans le fil, corps `model` + `size` sans `aspect_ratio`, refus de sécurité affiché, zéro appel sans session, secret de coffre intact après déconnexion).
 
 ## Acceptance criteria
 
 - [ ] TDD : le test du comportement visible est rouge avant le changement et vert après.
 - [ ] « Dessine un phare au crépuscule » produit un appel et une image dans le fil, avec l’indicateur pendant l’appel.
 - [ ] Aucune carte d’approbation n’est proposée.
-- [ ] Sans clé, la carte « Connecte ton compte OpenAI » s’affiche et le fournisseur n’est pas appelé.
-- [ ] Un refus de sécurité et un modèle restreint sont des phrases françaises, avec un seul appel chacun.
-- [ ] La clé est absente du transcript, des journaux et de l’export.
+- [ ] Sans session, la carte « Connectez votre compte ChatGPT » et le bouton « Se connecter à ChatGPT » s’affichent, et le fournisseur n’est pas appelé.
+- [ ] Un refus de sécurité et un refus d’hôte sont des phrases françaises, avec un seul appel chacun. Le refus d’hôte dit « Ce modèle d’image est restreint pour ce compte. ».
+- [ ] Le jeton de session est absent du transcript, des journaux et de l’export. La déconnexion ne retire pas un secret du coffre.
 - [ ] Joindre une image et la faire décrire fonctionne encore.
 - [ ] Juge visuel sur le Mac, vrai compte : parcours 1 de la spec.
 

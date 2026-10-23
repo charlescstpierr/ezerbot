@@ -424,3 +424,98 @@ fn remote_decisions_use_the_same_digest_bound_approval_gate() {
     ));
     tx.commit().unwrap();
 }
+
+#[test]
+fn paired_phone_can_stop_a_background_task() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    f.app.feature_context().connection.execute(
+        "INSERT INTO wrapper_shell_tasks(run_id,call_id,status) VALUES ('run','call','en cours')", [],
+    ).unwrap();
+    let body = json!({"run_id":"run","call_id":"call"});
+    assert_eq!(
+        f.remote("POST", "/api/local/tasks/stop", body.clone(), None)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let result = f
+        .remote("POST", "/api/local/tasks/stop", body, Some(&token))
+        .unwrap();
+    assert_eq!(result["status"], "arrêtée");
+}
+
+fn user_messages(app: &mut App, conversation: &str, body: &str) -> usize {
+    app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == conversation)
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .filter(|m| m["role"] == "user" && m["body"] == body)
+        .count()
+}
+
+#[test]
+fn phone_reply_lands_once_in_the_mac_thread_and_never_when_access_is_cut() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    let conversation = f.post("/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reply = json!({"conversation_id":conversation,"message_id":"sheet-1","body":"Vu depuis la notification"});
+    f.remote("POST", "/api/send", reply.clone(), Some(&token))
+        .unwrap();
+    f.remote("POST", "/api/send", reply, Some(&token)).unwrap();
+    assert_eq!(
+        user_messages(&mut f.app, &conversation, "Vu depuis la notification"),
+        1
+    );
+    f.post("/api/iphone/enabled", json!({"enabled":false}));
+    let refused = f
+        .remote(
+            "POST",
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":"sheet-2","body":"Saisie sans Mac"}),
+            Some(&token),
+        )
+        .unwrap_err();
+    assert_eq!(refused.status, 403);
+    assert_eq!(refused.message, iphone::ACCESS_DISABLED);
+    assert_eq!(
+        user_messages(&mut f.app, &conversation, "Saisie sans Mac"),
+        0
+    );
+}
+
+#[test]
+fn paired_phone_can_reply_in_a_thread_and_an_unpaired_one_cannot() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    let conversation = f.post("/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"phrase","body":"Une phrase précise"}),
+    );
+    let body = json!({"conversation_id":conversation,"message_id":"phrase"});
+    assert_eq!(
+        f.remote("POST", "/api/messages/thread", body.clone(), None)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let opened = f
+        .remote("POST", "/api/messages/thread", body.clone(), Some(&token))
+        .unwrap();
+    assert_eq!(opened["thread"]["parent_message_id"], "phrase");
+    let thread = opened["conversation"]["id"].as_str().unwrap();
+    assert_ne!(thread, conversation);
+    let again = f
+        .remote("POST", "/api/messages/thread", body, Some(&token))
+        .unwrap();
+    assert_eq!(again["conversation"]["id"], thread);
+}

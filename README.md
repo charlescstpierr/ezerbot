@@ -26,7 +26,7 @@ Ce dossier documente le client Grok Bot 0.70.2 installé sur le Mac et définit 
 
 ## Ouvrir Ezerbot, l’application locale
 
-Double-cliquer sur `Ouvrir Ezerbot.command` ou sur `app/build/Ezerbot.app`. L’app propose les thèmes clair et sombre, les conversations, la recherche, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
+Double-cliquer sur `Ouvrir Ezerbot.command` ou sur `app/build/Ezerbot.app`. L’app propose les thèmes clair et sombre, les conversations, la recherche, la recherche dans le fil (⌘F), la notation locale et exportable des réponses, les favoris, le renommage et la reprise des envois incertains. L’historique et les préférences restent sur le Mac dans `~/Library/Application Support/Grokbot/workspace.sqlite`.
 
 ```sh
 bash tools/build-app.sh
@@ -54,7 +54,7 @@ Ces fonctions sont implémentées dans notre reconstruction, pas récupérées d
 | Mémoire | Faits privés/équipe, correction, oubli et partage par lots | « Équipe » = tous les bots locaux; oublier ne supprime pas vos messages |
 | Runs et contexte | Boucle modèle/outils, reprise durable, arrêt, relance, tâches et compaction | Budgets locaux; tâche terminée seulement par `complete_task` |
 | Formulaires, approbations, secrets | Cartes typées, reçu de reprise, coffre séparé; infrastructure d’approbation testée | Aucun outil livré n’exige encore de carte d’approbation; règles Toujours évaluées, réviseur en langage naturel absent |
-| Routines | Cron, intervalle ou date unique; prompt libre ou skill épinglée; historique | Moteur ouvert requis; proposition du modèle activée après confirmation dans le chat principal, sans carte d’approbation séparée |
+| Routines | Cron, intervalle, date unique, webhook Bearer publié par Tailscale Funnel ([spec](docs/specs/routines.md#webhook-et-nat)), nouveau courriel d’un compte Google connecté, événement de l’agenda Google connecté (créé, modifié, annulé ou qui commence, avec le rattrapage au réveil pour son début) ou déclencheur GitHub (pull request, commentaire, issue d’un dépôt), voir la [spec](docs/specs/routines.md#github-courriel-calendrier), ou groupe de plusieurs déclencheurs, dont le premier qui part lance la routine ([spec](docs/specs/routines.md#groupe)); prompt libre ou skill épinglée; historique | Moteur ouvert requis; proposition du modèle activée après confirmation dans le chat principal, sans carte d’approbation séparée; le connecteur GitHub ne livre pas encore ses événements aux routines |
 | Délégation | Enfants parallèles, contexte sélectionné, résultats au parent et arrêt en cascade | 4 actifs, 3 par racine, profondeur 3, file 16; fils de tâche en lecture seule dans l’interface |
 | Images | Collage, dépôt/sélecteur, miniature et prédescription avec le brouillon | 20 Mio/image; vision dépendante du modèle; légendes aux tours suivants et à la compaction, pas encore transmises automatiquement aux enfants |
 

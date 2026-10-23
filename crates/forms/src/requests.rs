@@ -33,6 +33,11 @@ pub enum InputKind {
     Form {
         fields: Vec<Field>,
     },
+    SiteForm {
+        origin: String,
+        fields: Vec<Field>,
+        expires_at: i64,
+    },
     Approval {
         tool: String,
         args_digest: String,
@@ -78,6 +83,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE(entry_id, submission_id)
         );",
     )?;
+    let has_detached: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('forms_requests') WHERE name='detached')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_detached {
+        conn.execute_batch(
+            "ALTER TABLE forms_requests ADD COLUMN detached INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     Ok(())
 }
 
@@ -107,7 +122,7 @@ pub(crate) fn valid_digest(digest: &str) -> bool {
 
 fn validate_kind(kind: &InputKind) -> Result<()> {
     match kind {
-        InputKind::Form { fields } => {
+        InputKind::Form { fields } | InputKind::SiteForm { fields, .. } => {
             let mut names = HashSet::new();
             for field in fields {
                 if !nonempty(&field.name) || !names.insert(&field.name) {
@@ -283,7 +298,7 @@ pub(crate) fn replay(
     }
 }
 
-fn validate_values(fields: &[Field], values: &Value) -> Result<()> {
+pub fn validate_values(fields: &[Field], values: &Value) -> Result<()> {
     let values = values
         .as_object()
         .ok_or_else(|| invalid("form values must be an object"))?;
@@ -357,6 +372,41 @@ pub fn submit_secret_ref(
         submission_id,
         &serde_json::to_value(secret)?,
         "resolved",
+    )
+}
+
+/// Site submissions persist only a closed status vocabulary, never field values.
+pub fn resolve_site(
+    conn: &Connection,
+    request: &HumanInputRequest,
+    submission: &str,
+    now: i64,
+    origin: &str,
+    refused: bool,
+) -> Result<ResumeReceipt> {
+    let InputKind::SiteForm {
+        origin: target,
+        expires_at,
+        ..
+    } = &request.kind
+    else {
+        return Err(invalid("site form required"));
+    };
+    let (value, status) = if now >= *expires_at {
+        ("demande périmée", "expired")
+    } else if refused {
+        ("refusé", "denied")
+    } else if origin != target {
+        ("cible changée", "resolved")
+    } else {
+        ("enregistré dans le coffre local", "resolved")
+    };
+    resolve(
+        conn,
+        request,
+        submission,
+        &Value::String(value.into()),
+        status,
     )
 }
 
@@ -437,7 +487,7 @@ pub fn attach_wake(conn: &Connection, resolution_id: &str, wake: &Wake) -> Resul
         .ok_or_else(|| invalid("unknown human-input resolution"))?;
     let request = for_entry(conn, &entry_id)?;
     let cause = match request.kind {
-        InputKind::Form { .. } => WakeCause::Form,
+        InputKind::Form { .. } | InputKind::SiteForm { .. } => WakeCause::Form,
         InputKind::Approval { .. } => WakeCause::Approval,
         InputKind::Secret { .. } => WakeCause::Secret,
     };
@@ -472,13 +522,31 @@ pub fn resolved_values(conn: &Connection, resolution_id: &str) -> Result<Value> 
 /// Cancels waiting input and invalidates approved-but-not-yet-dispatched tools.
 /// Like PS03, this does not undo an effect already dispatched by the caller.
 pub fn cancel_for_run(conn: &Connection, run_id: &str) -> Result<usize> {
+    cancel_where(conn, run_id, "")
+}
+
+/// A turn that ends by itself leaves detached approvals waiting: the run went on
+/// without them, and only their own expiry or an explicit stop settles them.
+pub fn cancel_for_turn_end(conn: &Connection, run_id: &str) -> Result<usize> {
+    cancel_where(conn, run_id, "AND detached=0")
+}
+
+fn cancel_where(conn: &Connection, run_id: &str, extra: &str) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE forms_requests SET status='cancelled' WHERE run_id=?1 AND
+        &format!(
+            "UPDATE forms_requests SET status='cancelled' WHERE run_id=?1 {extra} AND
          (status='pending' OR (status='resolved' AND json_extract(kind_json, '$.kind')='approval'
           AND EXISTS (SELECT 1 FROM forms_approval_grants g
-                      WHERE g.request_id=forms_requests.id AND g.consumed_at IS NULL)))",
+                      WHERE g.request_id=forms_requests.id AND g.consumed_at IS NULL)))"
+        ),
         [run_id],
     )?)
+}
+
+/// The approval no longer holds its run: the run continued without waiting for it.
+pub fn detach(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE forms_requests SET detached=1 WHERE id=?1", [id])?;
+    Ok(())
 }
 
 #[cfg(test)]

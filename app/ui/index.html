@@ -85,10 +85,28 @@
         <button id="edit-bot-button"><svg class="icon"><use href="#i-bot"/></svg>Modifier le bot</button>
         <button id="learn-skill-button"><svg class="icon"><use href="#i-learn"/></svg>Apprendre ceci comme skill</button>
         <button id="export-button"><svg class="icon"><use href="#i-download"/></svg>Exporter la conversation</button>
+        <button id="export-ratings-button"><svg class="icon"><use href="#i-download"/></svg>Exporter les notations</button>
         <div class="menu-divider"></div>
         <button class="danger-text" id="delete-button"><svg class="icon"><use href="#i-trash"/></svg>Supprimer</button>
       </div>
     </header>
+
+    <div class="find-bar" id="find-bar" role="search" aria-labelledby="find-title" hidden>
+      <p class="find-title" id="find-title">Chercher dans le fil</p>
+      <label class="find-field"><input class="text-input" id="find-input" type="search" autocomplete="off" placeholder="Mot ou phrase" aria-labelledby="find-title"></label>
+      <p class="find-count" id="find-count" aria-live="polite"></p>
+      <button class="secondary-button" type="button" id="find-previous">Précédent</button>
+      <button class="secondary-button" type="button" id="find-next">Suivant</button>
+      <button class="secondary-button" type="button" id="find-close">Fermer</button>
+    </div>
+
+    <div class="thread-banner" id="thread-banner" role="region" aria-labelledby="thread-banner-title" hidden>
+      <div class="thread-banner-copy">
+        <p class="thread-banner-title" id="thread-banner-title">Fil lié à un message</p>
+        <p class="thread-banner-quote" id="thread-banner-quote"></p>
+      </div>
+      <button class="secondary-button" type="button" id="thread-banner-open">Voir dans le fil principal</button>
+    </div>
 
     <div class="connection-banner" id="connection-banner" role="alert" hidden><span id="connection-message">La connexion locale est interrompue.</span><button id="reconnect-button">Réessayer <svg class="icon"><use href="#i-refresh"/></svg></button></div>
     <section class="chat-scroll" id="chat-scroll" aria-label="Conversation">
@@ -137,8 +155,24 @@
     <!-- Drapeau de dev explicite : #ezerbot-dev-simulate-loss. Caché dans l'app livrée. -->
     <style>#ezerbot-dev-simulate-loss { display: none; } #ezerbot-dev-simulate-loss:target { display: block; }</style>
     <section class="setting-section" id="ezerbot-dev-simulate-loss"><label class="setting-toggle"><span><strong>Tester une coupure</strong><small>Le prochain envoi attendra une vérification, puis la conversation reprendra.</small></span><input id="simulate-loss" type="checkbox" role="switch"><span class="toggle-track" aria-hidden="true"></span></label></section>
-    <section class="setting-section shortcuts" id="settings-shortcuts"><h3>Raccourcis</h3><div><span>Nouvelle conversation</span><kbd>⌘ N</kbd></div><div><span>Rechercher une conversation</span><kbd>⌘ K</kbd></div><div><span>Envoyer un message</span><kbd>Entrée</kbd></div></section>
+    <section class="setting-section shortcuts" id="settings-shortcuts"><h3>Raccourcis</h3><div><span>Nouvelle conversation</span><kbd>⌘ N</kbd></div><div><span>Rechercher une conversation</span><kbd>⌘ K</kbd></div><div><span>Chercher dans le fil</span><kbd>⌘ F</kbd></div><div><span>Ouvrir les skills</span><kbd>⌘ ⇧ W</kbd></div><div><span>Dicter un message</span><kbd>⌘ D</kbd></div><div><span>Envoyer un message</span><kbd>Entrée</kbd></div></section>
     <div class="dialog-footer"><span class="version-note">Ezerbot · application locale</span><button class="primary-button" data-close-dialog>Terminé</button></div>
+  </dialog>
+
+  <dialog class="dialog small-dialog" id="rating-dialog" aria-labelledby="rating-title">
+    <form id="rating-form">
+      <div class="dialog-header"><h2 id="rating-title">Comment s’améliorer ?</h2><button class="icon-button" type="button" data-close-dialog aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <fieldset class="rating-reasons">
+        <legend class="visually-hidden">Motif</legend>
+        <label><input type="radio" name="motif" value="pas-demande">Pas ce que j’ai demandé</label>
+        <label><input type="radio" name="motif" value="inexact">Inexact</label>
+        <label><input type="radio" name="motif" value="qualite">Qualité faible</label>
+        <label><input type="radio" name="motif" value="lent">Trop lent</label>
+      </fieldset>
+      <label class="form-label" for="rating-details">Détails</label>
+      <textarea class="text-input" id="rating-details" maxlength="4000" rows="3"></textarea>
+      <div class="dialog-footer"><button class="secondary-button" type="button" id="rating-close" data-close-dialog>Fermer</button><button class="primary-button" type="submit" id="rating-send">Envoyer</button></div>
+    </form>
   </dialog>
 
   <dialog class="dialog small-dialog" id="rename-dialog" aria-labelledby="rename-title"><form id="rename-form"><div class="dialog-header"><h2 id="rename-title">Renommer la conversation</h2><button class="icon-button" type="button" data-close-dialog aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button></div><label class="form-label" id="rename-label" for="rename-input">Nom de la conversation</label><input class="text-input" id="rename-input" maxlength="80" required autocomplete="off"><label class="form-label group-rename" for="rename-description" hidden>Description</label><textarea class="text-input group-rename" id="rename-description" maxlength="280" rows="3" hidden></textarea><div class="group-rename" id="rename-avatar" hidden><p class="form-label" id="rename-avatar-label">Avatar</p><div class="accent-options" id="rename-avatar-colors" role="group" aria-labelledby="rename-avatar-label"></div><label class="form-label" for="rename-mark">Signe</label><input class="text-input" id="rename-mark" maxlength="4" autocomplete="off" placeholder="A"></div><div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog>Annuler</button><button class="primary-button" type="submit">Enregistrer</button></div></form></dialog>

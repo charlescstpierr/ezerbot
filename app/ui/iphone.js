@@ -79,7 +79,7 @@
     };
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
     window.addEventListener("online", () => window.GrokbotPanels?.refresh().catch(() => {}));
-    navigator.serviceWorker?.addEventListener("message", e => { if (e.data?.notification) window.EzerbotNotifications?.activate(e.data.notification); });
+    navigator.serviceWorker?.addEventListener("message", e => { if (e.data?.notification) window.EzerbotNotifications?.activate(e.data.notification, { reply: e.data.reply === true, push: true }); });
   }
   window.EzerbotIPhone = { remote, pairing };
 })();

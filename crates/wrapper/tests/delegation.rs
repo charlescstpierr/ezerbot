@@ -167,9 +167,73 @@ impl Fixture {
             .as_millis() as u64;
         self.app.tick(ms);
     }
-    fn wait_parent(&self, c: &str, m: &str, status: RunStatus) {
+    fn wait_parent(&mut self, c: &str, m: &str, status: RunStatus) {
+        let mut delivered = false;
         wait("parent state", || {
+            // A background launch pauses on its own card. Existing engine tests
+            // that wait for the child (or for the parent to finish) allow it once.
+            if self.run(c, m).status == RunStatus::AwaitingApproval {
+                if self.allow_pending_background() || !delivered {
+                    self.tick_suspended();
+                    delivered = true;
+                }
+            } else {
+                delivered = false;
+            }
             self.run(c, m).status == status && self.provider.status()["titling"] == false
+        });
+    }
+    fn allow_pending_background(&mut self) -> bool {
+        let state = self.app.api("GET", "/api/state", b"").unwrap();
+        let mut pending = Vec::new();
+        for conversation in state["conversations"].as_array().into_iter().flatten() {
+            for message in conversation["messages"].as_array().into_iter().flatten() {
+                if message["kind"] == "approval"
+                    && message["payload"]["status"]["status"] == "pending"
+                    && message["payload"]["policy"]["scope"] == "action"
+                {
+                    pending.push((
+                        message["payload"]["entry_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                        message["payload"]["route"]["target_conversation_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        if pending.is_empty() {
+            return false;
+        }
+        for (entry, conversation) in pending {
+            self.post(
+                "/api/approvals/resolve",
+                json!({
+                    "entry_id": entry,
+                    "submission_id": format!("bg-{entry}"),
+                    "conversation_id": conversation,
+                    "decision": "allow_once"
+                }),
+            );
+        }
+        true
+    }
+    fn tick_suspended(&mut self) {
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        self.app.tick_suspended(ms);
+    }
+    fn reopen(&mut self) {
+        assert_eq!(self.provider.status()["titling"], false);
+        self.provider = Provider::with_endpoints(&self.path, self.server.endpoints(), false);
+        self.app = App::open_with(&self.path, self.provider.clone()).unwrap();
+        wait("reopened models", || {
+            self.provider.status()["models_ready"] == true
         });
     }
     fn begin(&mut self, c: &str, m: &str, args: Value) -> (Run, Delegation) {
@@ -261,6 +325,15 @@ fn call(id: &str, name: &str, args: Value) -> Value {
 fn args(bot: &str) -> Value {
     json!({"child_bot":bot,"objective":"Verify selected material","selected_context":{"texts":[],"entry_ids":[],"fact_ids":[],"skill_ids":[]}})
 }
+fn form_request(state: &Value) -> &Value {
+    state["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["kind"]["kind"] == "form")
+        .expect("formulaire")
+}
+
 fn suspended(outcome: ToolOutcome) -> String {
     match outcome {
         ToolOutcome::Suspend {
@@ -426,7 +499,17 @@ fn tool_budget_cannot_skip_the_final_batch_wait() {
     }
     tx.commit().unwrap();
     f.tick();
+    let mut budget_delivered = false;
     wait("budget batch waits", || {
+        if store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingApproval
+            && (f.allow_pending_background() || !budget_delivered)
+        {
+            f.tick_suspended();
+            budget_delivered = true;
+        }
+        if store::required(&f.db(), &root.run_id).unwrap().status != RunStatus::AwaitingApproval {
+            budget_delivered = false;
+        }
         store::required(&f.db(), &root.run_id).unwrap().status == RunStatus::AwaitingChildren
     });
     let edge = f.children(&root).remove(0);
@@ -727,6 +810,89 @@ fn checked_context_is_reused_once_and_cache_is_scoped_to_assembly() {
 }
 
 #[test]
+fn denied_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(false);
+}
+
+#[test]
+fn expired_last_delegate_still_waits_for_approved_sibling() {
+    rejected_last_delegate_still_waits_for_approved_sibling(true);
+}
+
+fn rejected_last_delegate_still_waits_for_approved_sibling(expired: bool) {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    f.events(vec![
+        call("approved", "delegate", args("child")),
+        call("denied", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "mixed", "Run two independent tasks");
+    wait("first approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.provider.status()["titling"] == false
+    });
+    assert!(f.allow_pending_background());
+    f.tick_suspended();
+    wait("second approval", || {
+        f.run(&c, "mixed").status == RunStatus::AwaitingApproval
+            && f.children(&f.run(&c, "mixed")).len() == 1
+            && f.provider.status()["titling"] == false
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|conversation| conversation["messages"].as_array().unwrap())
+        .find(|message| {
+            message["kind"] == "approval" && message["payload"]["status"]["status"] == "pending"
+        })
+        .expect("pending sibling approval");
+    let request = &card["payload"];
+    if expired {
+        let db = f.db();
+        let parent = f.run(&c, "mixed");
+        let ctx = Context {
+            now_ms: request["kind"]["expires_at"].as_u64().unwrap() + 1,
+            ..f.context(&db, &parent)
+        };
+        features::forms::tick(&ctx);
+    } else {
+        f.post(
+            "/api/approvals/resolve",
+            json!({
+                "entry_id": request["entry_id"],
+                "submission_id": "deny-sibling",
+                "conversation_id": c,
+                "decision": "deny"
+            }),
+        );
+    }
+    f.events(vec![completed()]);
+    f.tick_suspended();
+    wait("approval settled", || {
+        f.provider.status()["titling"] == false
+    });
+    let parent = f.run(&c, "mixed");
+    assert_eq!(parent.status, RunStatus::AwaitingChildren);
+    let children = f.children(&parent);
+    assert_eq!(children.len(), 1, "the denied task must never launch");
+    assert!(matches!(
+        children[0].status,
+        DelegationStatus::Queued | DelegationStatus::Running
+    ));
+    // The unused parent response must still be queued while children run.
+    f.server.seen.lock().unwrap().responses.pop_front().unwrap();
+    f.child_done(&children[0]);
+    f.resume(&c, "mixed");
+    let seen = f.server.seen.lock().unwrap();
+    let resumed = seen.bodies.last().unwrap().to_string();
+    assert!(resumed.contains("Verified child summary"));
+    assert!(resumed.contains(if expired { "écoulé" } else { "refusée" }));
+}
+
+#[test]
 fn parallel_delegates_in_one_response_run_concurrently() {
     let mut f = Fixture::new(true);
     let c = f.conversation();
@@ -747,13 +913,13 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     let state = f.app.api("GET", "/api/state", b"").unwrap();
     assert_eq!(state["delegation"]["active_by_conversation"][&c], 2);
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.kind == RunEventKind::Suspended)
-            .count(),
-        1
-    );
+    let children_wait = events
+        .iter()
+        .find(|e| e.kind == RunEventKind::Suspended && e.payload["cause"]["kind"] == "children")
+        .expect("attente des sous-tâches");
+    assert!(events
+        .iter()
+        .any(|e| { e.kind == RunEventKind::Suspended && e.payload["approval"] == true }));
     assert_eq!(
         events
             .iter()
@@ -763,11 +929,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
         "done"
     );
     assert_eq!(
-        events
-            .iter()
-            .find(|e| e.kind == RunEventKind::Suspended)
-            .unwrap()
-            .payload["cause"]["ids"]
+        children_wait.payload["cause"]["ids"]
             .as_array()
             .unwrap()
             .len(),
@@ -803,7 +965,7 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     assert!(!model::ready_to_resume(&f.db(), &parent.run_id).unwrap());
     assert_eq!(f.run(&c, "parallel").status, RunStatus::AwaitingChildren);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "second-done",
@@ -824,12 +986,17 @@ fn parallel_delegates_in_one_response_run_concurrently() {
     });
     f.resume(&c, "parallel");
     let events = store::events(&f.db(), &parent.run_id, 0).unwrap();
+    let approvals = events
+        .iter()
+        .filter(|e| e.kind == RunEventKind::Suspended && e.payload["approval"] == true)
+        .count();
     assert_eq!(
         events
             .iter()
             .filter(|e| e.kind == RunEventKind::Resumed)
             .count(),
-        1
+        approvals + 1,
+        "une reprise pour chaque carte, puis une seule pour le lot de sous-tâches"
     );
     let seen = f.server.seen.lock().unwrap();
     let body = seen.bodies.last().unwrap().to_string();
@@ -1031,7 +1198,7 @@ fn revoking_one_selected_fact_keeps_other_context_and_reports_revocation() {
         json!({"bot_id":"grokbot","fact_id":fact}),
     );
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let entry = state["forms"]["requests"][0]["entry_id"].clone();
+    let entry = form_request(&state)["entry_id"].clone();
     f.events(vec![
         call(
             "done",
@@ -1702,7 +1869,7 @@ fn child_human_input_routes_to_principal_and_is_cancelled_with_parent() {
     });
     wait("released child", || f.provider.status()["titling"] == false);
     let state = f.app.api("GET", "/api/state", b"").unwrap();
-    let request = &state["forms"]["requests"][0];
+    let request = form_request(&state);
     assert_eq!(request["route"]["target_conversation_id"], c);
     assert_eq!(request["route"]["target_bot_id"], "grokbot");
     assert_eq!(request["route"]["requesting_bot_id"], "child");
@@ -2130,6 +2297,7 @@ fn selected_image_follows_when_the_task_input_is_forwarded() {
         completed(),
     ]);
     wait("grandchild request", || {
+        f.allow_pending_background();
         f.tick();
         f.server.seen.lock().unwrap().bodies.iter().any(|body| {
             body["instructions"]
@@ -2480,7 +2648,25 @@ fn group_member_can_delegate_and_receive_a_scoped_child_followup() {
     ]);
     f.post("/api/send",json!({"conversation_id":c,"message_id":"group-root","body":"Analyse en sous-tâche","mentions":[{"id":"grokbot","label":"Ezerbot"}]}));
     f.tick();
+    let mut group_delivered = false;
     wait("group delegates", || {
+        let waiting = f
+            .db()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_runs WHERE status='awaiting_approval')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if waiting && (f.allow_pending_background() || !group_delivered) {
+            // Group turns resume from the multibot driver, which a full tick runs
+            // after the engine has already scanned queued children.
+            f.tick();
+            group_delivered = true;
+        }
+        if !waiting {
+            group_delivered = false;
+        }
         f.db()
             .query_row("SELECT COUNT(*) FROM delegation_graph", [], |r| {
                 r.get::<_, i64>(0)
@@ -2938,4 +3124,306 @@ fn running_followup_beats_stale_completion_and_reaches_same_child_run() {
     assert!(events.iter().any(|e| e.kind == RunEventKind::ToolResult
         && e.payload["call_id"] == "stale-completion"
         && e.payload["outcome"]["status"] == "failed"));
+}
+
+#[test]
+fn background_delegate_card_saves_the_action_survives_restart_and_revoke_asks_again() {
+    let mut f = Fixture::new(true);
+    let c = f.conversation();
+    let mut first = args("child");
+    first["objective"] = json!(format!("Préparer {}", "le dossier ".repeat(30)));
+    f.events(vec![call("delegate-call", "delegate", first), completed()]);
+    f.send(&c, "bg-task", "Lance la tâche de fond");
+    wait("carte de tâche", || {
+        f.run(&c, "bg-task").status == RunStatus::AwaitingApproval
+    });
+    let state = f.app.api("GET", "/api/state", b"").unwrap();
+    let card = state["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["kind"] == "approval")
+        .expect("carte");
+    assert_eq!(card["payload"]["policy"]["scope"], "action");
+    assert_eq!(card["payload"]["policy"]["remember"], true);
+    assert_eq!(
+        card["payload"]["background_task"]["kind"],
+        "Exécuter une tâche sur l'ordinateur"
+    );
+    assert_eq!(card["payload"]["background_task"]["bot_name"], "Ezerbot");
+    assert!(card["payload"]["background_task"]["summary"]
+        .as_str()
+        .unwrap()
+        .ends_with("… (raccourci)"));
+    f.post(
+        "/api/approvals/resolve",
+        json!({
+            "entry_id": card["payload"]["entry_id"],
+            "submission_id": "always-bg",
+            "conversation_id": card["payload"]["route"]["target_conversation_id"],
+            "decision": {"always_allow": {"scope": "global"}}
+        }),
+    );
+    f.wait_parent(&c, "bg-task", RunStatus::AwaitingChildren);
+    let settled = f.app.api("GET", "/api/state", b"").unwrap();
+    let shown = settled["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["messages"].as_array().unwrap().clone())
+        .find(|message| message["id"] == card["id"])
+        .unwrap();
+    assert!(shown["payload"]["decision"]["always_allow"].is_object());
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-next", "La même sorte de tâche");
+    f.wait_parent(&c, "bg-next", RunStatus::AwaitingChildren);
+    assert_ne!(f.run(&c, "bg-next").status, RunStatus::AwaitingApproval);
+    f.reopen();
+    f.events(vec![
+        call("delegate-call", "delegate", args("other")),
+        completed(),
+    ]);
+    f.send(&c, "bg-restart", "Après redémarrage");
+    f.wait_parent(&c, "bg-restart", RunStatus::AwaitingChildren);
+    f.post(
+        "/api/approvals/rules/revoke",
+        json!({
+            "requesting_bot_id": "grokbot",
+            "target_bot_id": "grokbot",
+            "tool": "background_computer",
+            "args_digest": "",
+            "scope": "global"
+        }),
+    );
+    f.events(vec![
+        call("delegate-call", "delegate", args("child")),
+        completed(),
+    ]);
+    f.send(&c, "bg-revoked", "La règle est retirée");
+    wait("carte revenue", || {
+        f.run(&c, "bg-revoked").status == RunStatus::AwaitingApproval
+    });
+}
+
+#[test]
+fn a_delegated_child_can_use_its_granted_image_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Dessine dans le style de cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue le dessin dans ce style."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-style", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "style-photo",
+            "body": "Délègue le dessin dans ce style.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "style-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "style-photo")).remove(0);
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.child_result(&edge, "Image générée.");
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        1,
+        "l'enfant n'a pas pu citer l'image qui lui a été confiée"
+    );
+    let content = seen.image_calls[0]["input"][0]["content"]
+        .as_array()
+        .expect("la référence doit partir avec la demande");
+    assert_eq!(
+        content[1]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+    assert_eq!(seen.image_calls[0]["tools"][0]["size"], "1536x1024");
+}
+
+#[test]
+fn a_delegated_child_cannot_use_a_revoked_image_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Dessine dans le style de cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue le dessin dans ce style."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-style", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "style-photo",
+            "body": "Délègue le dessin dans ce style.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "style-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "style-photo")).remove(0);
+    features::conversations::append_entry(&f.db(), &c, "reset", "reset-selection", 123).unwrap();
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Référence refusée."}),
+        call(
+            "finish-child",
+            "complete_task",
+            json!({"summary":"Référence refusée."}),
+        ),
+        completed(),
+    ]);
+    f.tick();
+    wait("child settled", || {
+        !matches!(
+            graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+            DelegationStatus::Running | DelegationStatus::Queued
+        )
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        0,
+        "une image révoquée ne doit plus partir"
+    );
+}
+
+/// The delegation fixture's sign-in token is opaque; image generation needs one
+/// that carries an account, as a real ChatGPT session does.
+fn image_session(f: &Fixture) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let session = format!(
+        "e30.{}.e30",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id":"account-child"}})
+                .to_string()
+        )
+    );
+    std::fs::write(f.path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"account_id":"account-child","access_token":session,"refresh_token":"refresh-2","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+}
+
+#[test]
+fn a_child_can_use_an_image_of_a_selected_entry_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f
+        .app
+        .api("POST", "/api/attachments", &STANDARD.decode(PNG).unwrap())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({"conversation_id":c,"attachment_id":image,"draft":"Photo de style"});
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Photo reçue."}),
+        completed(),
+    ]);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"style-entry","body":"Photo de style","attachments":[image]}));
+    f.wait_parent(&c, "style-entry", RunStatus::Finished);
+    let mut a = args("child");
+    a["objective"] = json!("Dessine dans le style de cette photo");
+    a["selected_context"]["entry_ids"] = json!(["style-entry"]);
+    let (_, edge) = f.begin(&c, "delegate-entry", a);
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.child_result(&edge, "Image générée.");
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        1,
+        "l'enfant n'a pas pu citer l'image du message sélectionné"
+    );
+    let content = seen.image_calls[0]["input"][0]["content"]
+        .as_array()
+        .expect("la référence doit partir avec la demande");
+    assert_eq!(
+        content[1]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
 }

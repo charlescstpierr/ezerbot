@@ -168,15 +168,11 @@ pub fn routes(
 
 fn listing(conn: &Connection, bot: &str) -> Result<Value, ApiError> {
     let facts = facts::list_active(conn, bot)?;
-    let catalogue_chars: usize = facts.iter().map(|f| f.text.chars().count() + 100).sum();
     let classes: serde_json::Map<String, Value> = facts
         .iter()
         .map(|f| (f.fact_id.clone(), json!(recall::sharing_class(f))))
         .collect();
-    Ok(
-        json!({"facts":facts,"sharing_classes":classes,"profile":profile::read(conn,bot)?,
-        "automatic":{"saturated":catalogue_chars > super::memory_auto::EXISTING_CHARS,"catalogue_chars":catalogue_chars,"limit":super::memory_auto::EXISTING_CHARS}}),
-    )
+    Ok(json!({"facts":facts,"sharing_classes":classes,"profile":profile::read(conn,bot)?}))
 }
 
 /// A durable proposal contains references only; forgotten/corrected text is never

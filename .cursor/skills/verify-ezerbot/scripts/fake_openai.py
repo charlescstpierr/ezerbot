@@ -8,7 +8,11 @@ so automatic memory can see a small model). Prints one JSON line, then serves.
 
 from __future__ import annotations
 
+import base64
 import json
+import re
+import struct
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -45,6 +49,102 @@ MODELS = {
     ]
 }
 
+def _png(width: int, height: int) -> bytes:
+    """A small gradient PNG, so the generated picture is visible in a screenshot."""
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            rows += bytes((40 + 180 * x // width, 90 + 100 * y // height, 200 - 120 * x // width))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
+
+
+# Les prix portent un échappement \u20ac : la Page doit afficher « 9 € », pas « 9u20ac ».
+PAGE_SOURCE = r"""export default function Forfaits() {
+  const [offre, setOffre] = useState("Essentiel");
+  const lignes = [
+    ["Essentiel", "9 \u20ac"],
+    ["Confort", "19 \u20ac"],
+    ["Famille", "29 \u20ac"],
+  ];
+  return (
+    <article>
+      <h1>Trois forfaits</h1>
+      <p>Tout &lt; 30 &#8364; par mois</p>
+      <p>Offre choisie : {offre}</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Offre</th>
+            <th>Prix</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {lignes.map((ligne) => (
+            <tr>
+              <td>{ligne[0]}</td>
+              <td>{ligne[1]}</td>
+              <td>
+                <button onClick={() => setOffre(ligne[0])}>Choisir</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </article>
+  );
+}
+"""
+
+# Deux programmes qui attendent une ligne : l'un la lit et la répète, l'autre demande un mot de passe.
+TASKS = (
+    ("lance le script de saisie", "verify-task-saisie", "printf 'Continuer ? [oui/non] '; read -r reponse; echo \"reponse=$reponse\""),
+    ("lance le script du mot de passe", "verify-task-mdp", "printf 'Mot de passe : '; read -r secret; echo fini"),
+)
+
+IMAGE_B64 = base64.b64encode(_png(192, 192)).decode()
+# gpt-image-1.5 renders 1536x1024 and 1024x1536 for the wide and tall frames; the fixtures keep those ratios.
+IMAGE_SIZES = {
+    "1536x1024": base64.b64encode(_png(288, 192)).decode(),
+    "1024x1536": base64.b64encode(_png(192, 288)).decode(),
+}
+
+
+def _image_ids(output: object) -> list[str]:
+    """Image attachment ids found in a list_delegation_context result."""
+    catalog = output
+    if isinstance(catalog, str):
+        # The wrapper fences tool results as <external_data>"<json string>"</external_data>.
+        start, end = catalog.find("<external_data"), catalog.rfind("</external_data>")
+        if start != -1 and end != -1:
+            catalog = catalog[catalog.index(">", start) + 1 : end]
+    try:
+        while isinstance(catalog, str):
+            catalog = json.loads(catalog)
+    except json.JSONDecodeError:
+        return []
+    found: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "image" and isinstance(node.get("id"), str):
+                found.append(node["id"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(catalog)
+    return found
+
 USAGE = {
     "plan_type": "plus",
     "rate_limit": {
@@ -54,6 +154,18 @@ USAGE = {
 }
 
 
+def parent_message(instructions: str) -> str:
+    """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
+    for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
+        try:
+            text = json.loads(found.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(text, str) and "Message parent" in text and "pour répondre :\n" in text:
+            return text.split("pour répondre :\n", 1)[1].strip()
+    return ""
+
+
 def response_body(raw: bytes) -> bytes:
     text = raw.decode(errors="replace")
     try:
@@ -61,6 +173,20 @@ def response_body(raw: bytes) -> bytes:
     except json.JSONDecodeError:
         payload = {}
     instructions = str(payload.get("instructions") or "")
+    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+    drawing = next((tool for tool in tools if isinstance(tool, dict) and tool.get("type") == "image_generation"), None)
+    if drawing:
+        item = {
+            "type": "image_generation_call",
+            "status": "completed",
+            "result": IMAGE_SIZES.get(drawing.get("size"), IMAGE_B64),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": item},
+                {"type": "response.completed", "response": {"output": [item]}},
+            ]
+        )
     if instructions.startswith("Extraction de mémoire automatique."):
         return _sse(
             [
@@ -72,6 +198,128 @@ def response_body(raw: bytes) -> bytes:
         return _sse(
             [
                 {"type": "response.output_text.delta", "delta": "« Vérification visuelle. »"},
+                {"type": "response.completed"},
+            ]
+        )
+    parent = parent_message(instructions)
+    if parent:
+        return _sse(
+            [
+                {"type": "response.created"},
+                {"type": "response.output_text.delta", "delta": f"En tenant compte du message parent : « {parent[:80]} »"},
+                {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 2}}},
+            ]
+        )
+    items = payload.get("input") if isinstance(payload.get("input"), list) else []
+    outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
+    if outputs and outputs[-1].get("call_id") == "verify-context":
+        call = {
+            "id": "fc-verify-reference",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-reference",
+            "name": "generate_image",
+            "arguments": json.dumps(
+                {
+                    "description": "le même style, en large",
+                    "aspect_ratio": "16:9",
+                    "reference_image_paths": _image_ids(outputs[-1].get("output"))[:1],
+                }
+            ),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
+    if outputs:
+        last = outputs[-1].get("call_id")
+        if last == "verify-late":
+            # Tour qui continue sans attendre (« En attente »), ou tour de suite d'une décision tardive.
+            waiting = "En attente" in str(outputs[-1].get("output"))
+            done = "J’attends son accord pour envoyer le résumé." if waiting else "Tu as approuvé : envoyer le résumé. C’est parti. Le résumé est envoyé."
+        else:
+            done = "Voici la Page." if last == "verify-page" else "La tâche tourne." if str(last).startswith("verify-task") else "Voici l’image."
+        return _sse(
+            [
+                {"type": "response.output_text.delta", "delta": done},
+                {"type": "response.completed"},
+            ]
+        )
+    for needle, call_id, command in TASKS:
+        if needle in json.dumps(items, ensure_ascii=False).lower():
+            call = {
+                "id": f"fc-{call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": "run_shell",
+                "arguments": json.dumps({"command": command, "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 131072, "background": True}),
+            }
+            return _sse(
+                [
+                    {"type": "response.output_item.done", "item": call},
+                    {"type": "response.completed"},
+                ]
+            )
+    if "envoie le résumé" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-late",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-late",
+            "name": "run_shell",
+            "arguments": json.dumps({"command": "printf 'Résumé envoyé'", "cwd": "/tmp", "timeout_ms": 30000, "output_limit": 4096}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
+    if "une page des forfaits" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-page",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-page",
+            "name": "write_page",
+            "arguments": json.dumps({"name": "forfaits.page.tsx", "title": "Trois forfaits", "source": PAGE_SOURCE}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
+    if "le même style" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-context",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-context",
+            "name": "list_delegation_context",
+            "arguments": "{}",
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
+    if "dessine" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-image",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-image",
+            "name": "generate_image",
+            "arguments": json.dumps({"description": "un phare au crépuscule", "aspect_ratio": "1:1"}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
                 {"type": "response.completed"},
             ]
         )
@@ -110,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path == "/v1/models":
+        if path in ("/v1/models", "/backend-api/codex/models"):
             self._send(200, json.dumps(MODELS).encode(), "application/json")
         elif path == "/backend-api/wham/usage":
             self._send(200, json.dumps(USAGE).encode(), "application/json")

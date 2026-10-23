@@ -17,6 +17,10 @@ pub const VAULT_FILE_MODE: u32 = 0o600;
 pub const MAX_SECRET_NAME_CHARACTERS: usize = 128;
 pub const MAX_SECRET_PURPOSE_CHARACTERS: usize = 500;
 pub const MIN_SECRET_VALUE_CHARACTERS: usize = 8;
+/// Site form fields shorter than this never join GLOBAL masking: a value like
+/// "a" or "42" would otherwise mask JSON keys, IDs and prose everywhere.
+/// Kept strictly longer than redact::MASK.
+pub const MIN_SITE_MASK_CHARACTERS: usize = 6;
 pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
@@ -315,6 +319,22 @@ impl Vault {
                                 .filter_map(|v| v.as_str())
                                 .filter(|v| v.encode_utf16().count() >= MIN_SECRET_VALUE_CHARACTERS)
                                 .map(str::to_owned),
+                        );
+                    }
+                }
+            }
+            // Site envelopes stay local; each field must also be masked alone.
+            if name.starts_with("SITE_") && secret.purpose == "Formulaire de site privé" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                    if let Some(fields) = value["values"].as_object() {
+                        values.extend(
+                            fields
+                                .values()
+                                .map(|v| match v {
+                                    serde_json::Value::String(text) => text.clone(),
+                                    other => other.to_string(),
+                                })
+                                .filter(|v| v.encode_utf16().count() >= MIN_SITE_MASK_CHARACTERS),
                         );
                     }
                 }
@@ -715,6 +735,44 @@ mod tests {
             fs::metadata(lock_path).unwrap().permissions().mode() & 0o7777,
             VAULT_FILE_MODE
         );
+    }
+
+    #[test]
+    fn active_keychain_refusal_does_not_store_plaintext() {
+        let test = TestVault::new();
+        let path = test.vault.path().to_owned();
+        let before = fs::read(&path).unwrap();
+        let vault = Vault::open_refusing_keychain(&path).unwrap();
+        let error = vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap_err();
+        assert!(!error.to_string().contains("image-key-secret-9931"));
+        assert!(!format!("{error:?}").contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(Vault::open(&path)
+            .unwrap()
+            .get("OPENAI_API_KEY")
+            .unwrap()
+            .is_none());
+        test.vault
+            .set(
+                "OPENAI_API_KEY",
+                "Compte OpenAI pour générer des images",
+                "image-key-secret-9931",
+            )
+            .unwrap();
+        let seeded = fs::read(&path).unwrap();
+        let deletion = Vault::open_refusing_keychain(&path)
+            .unwrap()
+            .remove("OPENAI_API_KEY")
+            .unwrap_err();
+        assert!(deletion.to_string().contains("Suppression non confirmée"));
+        assert!(!deletion.to_string().contains("image-key-secret-9931"));
+        assert_eq!(fs::read(&path).unwrap(), seeded);
     }
 
     #[test]

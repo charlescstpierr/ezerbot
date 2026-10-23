@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { documentIconPaths, formatAttachmentSize } from "./attachment-presentation.js";
 import { copyGalleryImage, galleryFailureText, galleryImages, galleryKey, saveGalleryImage } from "./image-gallery.js";
+import { createMemoPlayer, formatMemoSpeed, startingMemoSpeed } from "./memo-playback.js";
 
 function galleryIO() {
   return {
@@ -71,13 +72,63 @@ function ImageViewer({ images, index, onIndex, onClose }) {
   );
 }
 
-function VoiceMemo({ attachment, message }) {
+function VoiceMemo({ attachment, message, memoSpeed }) {
   const id = attachment.id;
+  const audio = useRef(null);
+  const player = useRef(null);
+  const [speed, setSpeed] = useState(() => startingMemoSpeed(memoSpeed));
+  const [text, setText] = useState(() => formatMemoSpeed(startingMemoSpeed(memoSpeed)));
+  const [refusal, setRefusal] = useState("");
+  const [notice, setNotice] = useState("");
+  const words = Array.isArray(attachment.words) ? attachment.words.filter((word) => typeof word?.text === "string" && word.text) : [];
+  const playerFor = () => {
+    if (!player.current || player.current.element !== audio.current) {
+      player.current = Object.assign(createMemoPlayer(audio.current, speed), { element: audio.current });
+    }
+    return player.current;
+  };
+  useEffect(() => { if (audio.current) playerFor().apply(); }, []);
+  const commitSpeed = () => {
+    if (!audio.current) return;
+    const result = playerFor().setSpeed(text);
+    setRefusal(result.ok ? "" : result.message);
+    setSpeed(result.speed);
+    setText(formatMemoSpeed(result.speed));
+  };
+  const jump = (word) => {
+    const result = playerFor().jump(word);
+    setNotice(result.message);
+  };
   return (
     <div className="gb-voice-memo">
       <strong>Mémo vocal · {Math.ceil((attachment.duration_ms || 0) / 1000)} s</strong>
-      <audio controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" />
-      {attachment.transcript?.trim() && !message.body?.includes(attachment.transcript.trim()) && <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>}
+      <audio ref={audio} controls preload="metadata" src={`/api/voice/audio/${encodeURIComponent(id)}`} aria-label="Écouter le mémo vocal" onLoadedMetadata={() => playerFor().apply()} />
+      <label className="gb-memo-speed">
+        <span>Vitesse</span>
+        <input type="text" inputMode="decimal" value={text} aria-label="Vitesse de lecture du mémo, de 0,5 à 2" aria-invalid={refusal ? "true" : undefined} data-speed={speed}
+          onChange={(event) => setText(event.target.value)} onBlur={commitSpeed}
+          onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSpeed(); } }} />
+        <span aria-hidden="true">×</span>
+      </label>
+      {refusal && <p className="gb-memo-refusal" role="alert">{refusal}</p>}
+      {words.length > 0
+        ? (
+          <details className="gb-memo-transcript" open>
+            <summary>Transcription</summary>
+            <p className="gb-memo-words" lang={attachment.language || undefined}>
+              {words.map((word, index) => (
+                <span key={index}>
+                  {index > 0 && " "}
+                  {Number.isFinite(word.start_ms)
+                    ? <button type="button" className="gb-memo-word" data-start-ms={word.start_ms} title={`Lire à partir de ce mot (${(word.start_ms / 1000).toFixed(1).replace(".", ",")} s)`} onClick={() => jump(word)}>{word.text}</button>
+                    : <span className="gb-memo-word is-untimed" title="Pas d’horodatage pour ce mot" onClick={() => jump(word)}>{word.text}</span>}
+                </span>
+              ))}
+            </p>
+          </details>
+        )
+        : attachment.transcript?.trim() && !message.body?.includes(attachment.transcript.trim()) && <details><summary>Transcription</summary><p>{attachment.transcript}</p></details>}
+      {notice && <p className="gb-memo-notice" role="status">{notice}</p>}
     </div>
   );
 }
@@ -94,7 +145,7 @@ function DocumentChip({ attachment }) {
   );
 }
 
-export function MessageAttachments({ message, align = "end", markdown = false, openIndex = null }) {
+export function MessageAttachments({ message, align = "end", markdown = false, openIndex = null, memoSpeed }) {
   const images = galleryImages(message, { markdown });
   const others = (message?.attachments || []).filter((attachment) => attachment && typeof attachment === "object" && (attachment.kind === "voice" || attachment.kind === "document"));
   const [index, setIndex] = useState(openIndex);
@@ -113,7 +164,7 @@ export function MessageAttachments({ message, align = "end", markdown = false, o
         </div>
       )}
       {others.map((attachment, attachmentIndex) => attachment.kind === "voice"
-        ? <VoiceMemo key={`${attachment.id}-${attachmentIndex}`} attachment={attachment} message={message} />
+        ? <VoiceMemo key={`${attachment.id}-${attachmentIndex}`} attachment={attachment} message={message} memoSpeed={memoSpeed} />
         : <DocumentChip key={`${attachment.id}-${attachmentIndex}`} attachment={attachment} />)}
       {open !== null && <ImageViewer images={images} index={open} onIndex={setIndex} onClose={() => setIndex(null)} />}
     </div>

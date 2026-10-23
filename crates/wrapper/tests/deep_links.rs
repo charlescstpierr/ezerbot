@@ -58,6 +58,12 @@ fn grammar_canonicalizes_without_treating_text_as_a_command() {
     for section in SETTINGS {
         assert!(parse_link(&format!("ezerbot://app/v1/settings?id={section}")).is_ok());
     }
+    assert_eq!(
+        parse_link("ezerbot://app/v1/settings?id=usage")
+            .unwrap()
+            .destination,
+        Destination::Settings { id: "usage".into() }
+    );
 }
 
 #[test]

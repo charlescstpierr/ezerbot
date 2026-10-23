@@ -237,7 +237,9 @@ pub fn remote(
                 "/api/send"
                     | "/api/reconcile"
                     | "/api/regenerate"
+                    | "/api/messages/thread"
                     | "/api/stop"
+                    | "/api/local/tasks/stop"
                     | "/api/delegation/cancel"
                     | "/api/provider/welcomed"
                     | "/api/storage/drafts"
@@ -249,6 +251,7 @@ pub fn remote(
                     | "/api/conversations/delete"
                     | "/api/preferences"
                     | "/api/forms/submit"
+                    | "/api/forms/site-submit"
                     | "/api/forms/cancel"
                     | "/api/forms/skill-content"
                     | "/api/approvals/resolve"
@@ -280,7 +283,9 @@ pub fn remote(
                 "local",
                 "screen",
                 "voice",
+                "voice_call",
                 "routines_background",
+                "routine_webhooks",
                 "updates",
             ] {
                 value.as_object_mut().unwrap().remove(key);
@@ -497,7 +502,7 @@ pub fn routes(
         Ok(ApiResponse::Json(value))
     })())
 }
-fn tailscale(args: &[String]) -> Result<std::process::Output, ApiError> {
+pub(crate) fn tailscale(args: &[String]) -> Result<std::process::Output, ApiError> {
     // Debug NEVER invokes a real CLI, including status. No installation, login,
     // network mutation or real Serve invocation can occur during tests/QA.
     #[cfg(debug_assertions)]

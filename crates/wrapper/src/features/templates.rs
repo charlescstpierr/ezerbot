@@ -8,6 +8,8 @@
 //! content in one transaction; replaying the same bot_id returns the same bot.
 //! POST /api/templates/export {bot_id, include_memories} returns {document, code,
 //! link, warnings}; POST /api/templates/decode {text} reads a link, a share code or a file.
+//! POST /api/templates/copy {bot_id, new_bot_id, include_memories} exports a bot and
+//! imports it under a « … (copie) » name in one step; the original is left untouched.
 //! Imported documents are untrusted: they pass the route validators, their
 //! routines start paused and their connectors stay suggestions.
 use super::{routines, skills, write_transaction, Context};
@@ -389,7 +391,10 @@ pub fn routes(
         ("GET", "/api/templates")
             | (
                 "POST",
-                "/api/templates/create" | "/api/templates/export" | "/api/templates/decode"
+                "/api/templates/create"
+                    | "/api/templates/export"
+                    | "/api/templates/decode"
+                    | "/api/templates/copy"
             )
     ) {
         return None;
@@ -399,6 +404,7 @@ pub fn routes(
             "/api/templates" => Ok(list()),
             "/api/templates/create" => parse(body).and_then(|input| create(app, input)),
             "/api/templates/export" => parse(body).and_then(|input| export(app, input)),
+            "/api/templates/copy" => parse(body).and_then(|input| copy(app, input)),
             _ => parse(body).and_then(decode),
         }
         .map(ApiResponse::Json),
@@ -529,11 +535,16 @@ struct ExportInput {
     include_memories: bool,
 }
 
-fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
-    validate_id(&input.bot_id)?;
-    app.require_bot(&input.bot_id)?;
+/// A bot as a portable document, plus what could not be carried along.
+fn export_document(
+    app: &App,
+    bot_id: &str,
+    include_memories: bool,
+) -> Result<(Document, Vec<String>), ApiError> {
+    validate_id(bot_id)?;
+    app.require_bot(bot_id)?;
     let bot = app
-        .bot(&input.bot_id)?
+        .bot(bot_id)?
         .ok_or_else(|| ApiError::new(404, "Bot introuvable."))?;
     let conn = &app.connection;
     let skills = library::list(conn, &bot.id)?;
@@ -586,7 +597,7 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
         }
     }
     // Sensitive and team facts never leave with a bot.
-    let memories = if input.include_memories {
+    let memories = if include_memories {
         facts::list_active(conn, &bot.id)?
             .into_iter()
             .filter(|fact| fact.bot_id == bot.id && fact.scope == Scope::Private && !fact.sensitive)
@@ -615,6 +626,11 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
     };
     // The same validation as import: export must not emit a document import would reject.
     plan(&document)?;
+    Ok((document, warnings))
+}
+
+fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
+    let (document, warnings) = export_document(app, &input.bot_id, input.include_memories)?;
     let code = encode(&document)?;
     Ok(json!({
         "document": document,
@@ -622,6 +638,45 @@ fn export(app: &App, input: ExportInput) -> Result<Value, ApiError> {
         "code": format!("{CODE_PREFIX}{code}"),
         "warnings": warnings,
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CopyInput {
+    bot_id: String,
+    new_bot_id: String,
+    #[serde(default)]
+    include_memories: bool,
+}
+
+const COPY_SUFFIX: &str = " (copie)";
+const MAX_BOT_NAME_CHARS: usize = 40;
+
+/// « Nom (copie) », shortened when the original name leaves no room for the suffix.
+fn copy_name(name: &str) -> String {
+    let room = MAX_BOT_NAME_CHARS - COPY_SUFFIX.chars().count();
+    let base: String = name.trim().chars().take(room).collect();
+    format!("{}{COPY_SUFFIX}", base.trim_end())
+}
+
+/// Exports a bot and imports the document as a new bot: the same documents, validators
+/// and replay rule as a shared bot. Only active, non-sensitive private facts follow when
+/// `include_memories` is set; conversations are never part of a document.
+fn copy(app: &App, input: CopyInput) -> Result<Value, ApiError> {
+    validate_id(&input.new_bot_id)?;
+    let (mut document, warnings) = export_document(app, &input.bot_id, input.include_memories)?;
+    document.bot.name = copy_name(&document.bot.name);
+    let mut response = create(
+        app,
+        CreateInput {
+            bot_id: input.new_bot_id,
+            template_id: None,
+            document: Some(document),
+            activate_routines: false,
+        },
+    )?;
+    response["warnings"] = json!(warnings);
+    Ok(response)
 }
 
 fn encode(document: &Document) -> Result<String, ApiError> {
@@ -904,6 +959,179 @@ mod tests {
         assert_eq!(copied, 0);
         drop(app);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_copy_carries_active_facts_only_and_never_conversations() {
+        let (path, mut app) = temporary("copy");
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-veille", "template_id": "veille"}),
+        )
+        .unwrap();
+        let fact = |text: &str| Fact {
+            fact_id: String::new(),
+            bot_id: "bot-veille".into(),
+            scope: Scope::Private,
+            text: text.into(),
+            provenance: Provenance {
+                conversation_id: None,
+                entry_id: None,
+                source: Source::UserStated,
+            },
+            learned_at: 1,
+            status: FactStatus::Active,
+            sensitive: false,
+        };
+        let kept = facts::remember(&app.connection, &fact("Suit le marché solaire")).unwrap();
+        let forgotten = facts::remember(&app.connection, &fact("Habite à Laval")).unwrap();
+        let replaced = facts::remember(&app.connection, &fact("Préfère le matin")).unwrap();
+        facts::forget(&app.connection, "bot-veille", &forgotten.fact_id).unwrap();
+        facts::correct(
+            &app.connection,
+            "bot-veille",
+            &replaced.fact_id,
+            "Préfère le soir",
+            &Provenance {
+                conversation_id: None,
+                entry_id: None,
+                source: Source::UserStated,
+            },
+            2,
+        )
+        .unwrap();
+        let conversation = post(
+            &mut app,
+            "/api/conversations",
+            json!({"bot_id": "bot-veille"}),
+        )
+        .unwrap()["conversation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        post(&mut app, "/api/send", json!({"conversation_id": conversation, "message_id": "m1", "body": "Mon secret de conversation"})).unwrap();
+        let before = app.api("GET", "/api/state", b"").unwrap();
+
+        let with = post(
+            &mut app,
+            "/api/templates/copy",
+            json!({"bot_id": "bot-veille", "new_bot_id": "bot-avec", "include_memories": true}),
+        )
+        .unwrap();
+        assert_eq!(with["bot"]["name"], "Veille (copie)");
+        assert_ne!(with["bot"]["id"], "bot-veille");
+        let memory = app.api("GET", "/api/memory?bot_id=bot-avec", b"").unwrap();
+        let mut texts: Vec<_> = memory["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fact| fact["text"].as_str().unwrap().to_owned())
+            .collect();
+        texts.sort();
+        assert_eq!(texts, vec!["Préfère le soir", "Suit le marché solaire"]);
+        assert!(!memory.to_string().contains("Habite à Laval"));
+        assert!(!memory.to_string().contains("Préfère le matin"));
+
+        let without = post(
+            &mut app,
+            "/api/templates/copy",
+            json!({"bot_id": "bot-veille", "new_bot_id": "bot-sans"}),
+        )
+        .unwrap();
+        assert_eq!(without["bot"]["name"], "Veille (copie)");
+        let memory = app.api("GET", "/api/memory?bot_id=bot-sans", b"").unwrap();
+        assert!(memory["facts"].as_array().unwrap().is_empty());
+
+        // The copy keeps the skills, its routines wait for a review, and no thread follows.
+        let skills = app.api("GET", "/api/skills?bot_id=bot-avec", b"").unwrap();
+        assert_eq!(skills["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(with["routines_enabled"], false);
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        for copied in ["bot-avec", "bot-sans"] {
+            assert!(state["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["bot_id"] != copied || c["kind"] == "routine"));
+        }
+
+        // The original is untouched: same facts, same conversation, same name.
+        let original = app
+            .api("GET", "/api/memory?bot_id=bot-veille", b"")
+            .unwrap();
+        assert!(original.to_string().contains(&kept.fact_id));
+        let bot = state["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|bot| bot["id"] == "bot-veille")
+            .unwrap();
+        let earlier = before["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|bot| bot["id"] == "bot-veille")
+            .unwrap();
+        assert_eq!(bot, earlier);
+        assert!(state["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == conversation.as_str() && c["bot_id"] == "bot-veille"));
+
+        // Replaying the click returns the same copy instead of a third bot.
+        let replay = post(
+            &mut app,
+            "/api/templates/copy",
+            json!({"bot_id": "bot-veille", "new_bot_id": "bot-avec", "include_memories": true}),
+        )
+        .unwrap();
+        assert_eq!(replay["replayed"], true);
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        let copies = state["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|bot| bot["name"] == "Veille (copie)")
+            .count();
+        assert_eq!(copies, 2);
+
+        let missing = post(
+            &mut app,
+            "/api/templates/copy",
+            json!({"bot_id": "bot-inconnu", "new_bot_id": "bot-x"}),
+        )
+        .unwrap_err();
+        assert_eq!(missing.status, 404);
+        drop(app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_copy_name_fits_the_bot_name_limit() {
+        assert_eq!(copy_name("Veille"), "Veille (copie)");
+        let long = "é".repeat(40);
+        let name = copy_name(&long);
+        assert_eq!(name.chars().count(), 40);
+        assert!(name.ends_with(" (copie)"));
+        assert!(valid_bot_name_ok(&name));
+        assert_eq!(
+            copy_name(&format!("{} ", "a".repeat(31))),
+            format!("{} (copie)", "a".repeat(31))
+        );
+    }
+
+    fn valid_bot_name_ok(name: &str) -> bool {
+        BotChanges {
+            name: Some(name.into()),
+            color: None,
+            shape: None,
+            description: None,
+            instructions: None,
+        }
+        .validated()
+        .is_ok()
     }
 
     #[test]
@@ -1360,5 +1588,60 @@ mod tests {
         );
         drop(app);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_imported_webhook_routine_gets_its_trigger_and_token() {
+        let path = std::env::temp_dir().join(format!(
+            "ezerbot-templates-webhook-{}-{}.sqlite",
+            std::process::id(),
+            now()
+        ));
+        let mut app = App::open(&path).unwrap();
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-veille", "template_id": "veille"}),
+        )
+        .unwrap();
+        let exported = post(
+            &mut app,
+            "/api/templates/export",
+            json!({"bot_id": "bot-veille"}),
+        )
+        .unwrap();
+        let decoded = post(
+            &mut app,
+            "/api/templates/decode",
+            json!({"text": exported["link"]}),
+        )
+        .unwrap();
+        let mut document = decoded["document"].clone();
+        for routine in document["routines"].as_array_mut().unwrap() {
+            let routine = routine.as_object_mut().unwrap();
+            routine.remove("schedule_description");
+            routine.remove("schedule");
+            routine.insert("trigger".into(), json!({"kind": "webhook"}));
+        }
+        post(
+            &mut app,
+            "/api/templates/create",
+            json!({"bot_id": "bot-copie", "document": document}),
+        )
+        .unwrap();
+        let routines = app
+            .api("GET", "/api/routines?bot_id=bot-copie", b"")
+            .unwrap();
+        let id = routines["routines"][0]["routine_id"].as_str().unwrap();
+        assert_eq!(routines["routines"][0]["trigger"]["kind"], "webhook");
+        let state = app.api("GET", "/api/state", b"").unwrap();
+        assert!(state["routine_webhooks"]["items"][id]["trigger_id"].is_string());
+        let token = post(
+            &mut app,
+            "/api/routines/webhook/token",
+            json!({"bot_id": "bot-copie", "routine_id": id}),
+        )
+        .unwrap();
+        assert!(token["token"].as_str().unwrap().starts_with("ezwh_"));
     }
 }

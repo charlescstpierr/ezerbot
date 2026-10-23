@@ -41,25 +41,32 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
   const labels = { pending: "En attente de vous", resolved: "Réponse enregistrée", denied: "Refusée", expired: "Expirée", cancelled: "Annulée" };
   const wake = receipt?.wake;
   const delivered = wake?.status === "delivered" && typeof wake.run_id === "string" && Number.isInteger(wake.first_event_seq);
-  const available = request.entry_id && request.route && request.kind?.kind === message.kind && labels[status];
+  const available = request.entry_id && request.route && (request.kind?.kind === message.kind || message.kind === "form" && request.kind?.kind === "site_form") && labels[status];
   const recorded = message.kind === "approval" ? "Autorisée" : message.kind === "secret" ? "Secret enregistré" : "Réponse enregistrée";
+  const authorization = message.kind === "approval" && status === "resolved" && !request.background_task
+    ? (request.decision?.always_allow ? "Toujours autorisé" : "Autorisé une fois") : null;
   const statusLabel = status === "resolved" ? recorded : status === "pending" && receipt ? "Résolution reçue · Vérification de l’état…" : labels[status];
   const requesterId = request.route?.requesting_bot_id;
   const requesterName = window.GrokbotPanels?.state?.bots?.find((bot) => bot.id === requesterId)?.name || requesterId;
   const requesterLabel = /^[aeiouyàâäéèêëîïôöùûü]/i.test(requesterName) ? `d’${requesterName}` : `de ${requesterName}`;
+  // A card that outlived its turn (#215) has no run to resume: the bot is told in a new turn.
+  const detached = message.kind === "approval" && request.detached === true;
+  const expiredApproval = message.kind === "approval" && status === "expired";
   const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
     ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
   return (
-    <article className="gb-message rounded-xl border border-border bg-card p-4 text-foreground" data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
+    <article className={`gb-message rounded-xl border border-border bg-card p-4 text-foreground${expiredApproval ? " gb-approval-expired" : ""}`} data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong>{badge}</header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">{request.connector?.origin === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {statusText || statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">{(request.connector?.origin ?? request.recall?.origin) === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {authorization ? <span className="gb-status-ok" role="status">{authorization}</span> : statusText || statusLabel}</p>
         {children}
         {showDelivery && <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}
-          {!busy && wake?.status === "pending" && "Le bot reprend…"}
-          {!busy && delivered && ({ denied: "Refus pris en compte", cancelled: "Annulation prise en compte", expired: "Expiration prise en compte" }[status] || "Repris")}
-          {!busy && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
+          {!busy && detached && status === "resolved" && "Le bot reprend dans la conversation."}
+          {!busy && detached && status === "denied" && "Refus transmis au bot."}
+          {!busy && !detached && wake?.status === "pending" && "Le bot reprend…"}
+          {!busy && !detached && delivered && ({ denied: "Refus pris en compte", cancelled: "Annulation prise en compte", expired: "Expiration prise en compte" }[status] || "Repris")}
+          {!busy && !detached && wake?.status === "failed" && `La reprise a échoué. ${failureReason}`}
         </div>}
       </>}
       {error && <p className="mt-2 text-sm text-muted-foreground" role="alert">{error}</p>}
@@ -72,6 +79,7 @@ export function Card({ message, busy, onAction }) {
   const input = useHumanInput(message, onAction);
   const { request, pending, act } = input;
   const fields = request.kind?.fields || [];
+  const site = request.kind?.kind === "site_form";
   const disabled = busy || input.busy || !pending;
   async function submit(event) {
     event.preventDefault();
@@ -85,10 +93,12 @@ export function Card({ message, busy, onAction }) {
       if (value === "" && !field.required) return [];
       return [[field.name, field.field_type.kind === "number" ? Number(value) : value]];
     }));
-    await act("forms.submit", { values });
+    const accepted = await act(site ? "forms.site" : "forms.submit", { values });
+    if (site && accepted) form.reset();
   }
   return (
-    <HumanInputCard message={message} title="Informations demandées" input={input}>
+    <HumanInputCard message={message} title={site ? `Site confirmé : ${request.kind.origin}` : "Informations demandées"} input={input}>
+      {site && <p className="mb-3 text-sm">Jamais montré à votre bot. Enregistré de façon sécurisée dans le coffre local.</p>}
       {pending && <form className="space-y-3" onSubmit={submit}>
         <fieldset className="space-y-3" disabled={disabled}>
           {fields.map((field, index) => <label className="block space-y-1 text-sm" key={field.name}>
@@ -98,9 +108,9 @@ export function Card({ message, busy, onAction }) {
               : field.field_type.kind === "boolean"
                 // Required boolean means a value is required, not that it must be true.
                 ? <input type="checkbox" name={`field-${index}`} />
-                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} pattern={field.required && field.field_type.kind === "text" ? ".*\\S.*" : undefined} />}
+                : <input className={inputClass} name={`field-${index}`} type={field.field_type.kind === "number" ? "number" : site ? "password" : "text"} step={field.field_type.kind === "number" ? "any" : undefined} required={field.required} pattern={field.required && field.field_type.kind === "text" ? ".*\\S.*" : undefined} />}
           </label>)}
-          <div className="flex flex-wrap gap-2"><button className="gb-retry gb-retry-primary" type="submit">Envoyer les réponses</button><button className="gb-retry" type="button" onClick={() => act("forms.cancel")}>Annuler</button></div>
+          <div className="flex flex-wrap gap-2"><button className="gb-retry gb-retry-primary" type="submit">Envoyer les réponses</button><button className="gb-retry" type="button" onClick={(event) => { if (site) event.currentTarget.form.reset(); act("forms.cancel"); }}>{site ? "Refuser" : "Annuler"}</button></div>
         </fieldset>
       </form>}
     </HumanInputCard>

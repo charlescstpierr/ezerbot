@@ -155,7 +155,7 @@ test("generated-file actions reveal the decision controls at 820×560 without a 
   while(frames.length)frames.shift()();assert.equal(actionMoves,1);
 });
 
-for (const tool of ["mcp_start_fixture", "routines_background_configure"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
+for (const tool of ["mcp_start_fixture", "routines_background_configure", "routines_webhook_publish"]) test(`${tool} approvals without a user turn keep their decisions reachable on resize`,()=>{
   const scroll=Object.assign(new Element("section"),{clientWidth:860,clientHeight:521,scrollTop:0});
   let resized,cardMoves=0,actions=0;const frames=[];
   class ResizeObserver {constructor(callback){resized=callback;}observe(){}}
@@ -296,4 +296,32 @@ test("granted paths remain text and cancellation uses the existing run stop rout
   assert.equal(all(root).find(e=>e.tagName==="code").textContent,"/tmp/<dossier>");
   assert.equal(await registration.onCardAction({kind:"tool",payload:{run_id:"run-local"}},"local.stop",{}, {conversation:{id:"chat"}}),true);
   assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/stop",body:{conversation_id:"chat",message_id:"run-local"}}]);
+});
+
+test("Arrêter targets one background task and the thread keeps polling while it runs",async()=>{
+  const {requests,registration}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  assert.equal(registration.wantsPolling({conversation:{messages:[message]}}),true);
+  assert.equal(await registration.onCardAction(message,"local.task.stop",{},{conversation:{id:"chat"}}),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/local/tasks/stop",body:{run_id:"run-bg",call_id:"call-bg"}}]);
+  message.payload.outcome.output.status="arrêtée";
+  assert.equal(registration.wantsPolling({conversation:{messages:[message]}}),false);
+});
+
+test("a line goes to one task through the input route and a refusal reaches the card", async()=>{
+  const {requests,registration,panels,notifications}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  assert.equal(await registration.onCardAction(message,"local.task.input",{line:"oui"},{conversation:{id:"chat"}}),true);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)),[{path:"/api/local/tasks/input",body:{run_id:"run-bg",call_id:"call-bg",line:"oui"}}]);
+  panels.api=async()=>{throw new Error("Cette tâche n’est plus en cours : la saisie n’a pas été envoyée.");};
+  await assert.rejects(registration.onCardAction(message,"local.task.input",{line:"non"},{conversation:{id:"chat"}}),/n’est plus en cours/);
+  assert.deepEqual(notifications,[]);
+});
+
+test("a line that reached the task is not reported as refused when the refresh fails",async()=>{
+  const {requests,registration,panels}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  panels.refresh=async()=>{throw new Error("offline");};
+  assert.equal(await registration.onCardAction(message,"local.task.input",{line:"oui"},{conversation:{id:"chat"}}),true);
+  assert.equal(requests.length,1);
 });

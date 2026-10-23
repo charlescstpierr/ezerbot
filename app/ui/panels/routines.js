@@ -120,10 +120,31 @@
     const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
-  const scheduleLabel = (parsed) => parsed.trigger.kind === "every" ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  // A calendar trigger counts no clock: the zone of the routine says nothing about when it starts.
+  const scheduleLabel = (parsed) => ["every", "github", "calendar"].includes(parsed.trigger.kind) ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  // The cases of an agenda event that can start a routine: the wire value, the word a history shows, the checkbox.
+  const CALENDAR_CASES = [["created", "créé", "Un événement est créé"], ["modified", "modifié", "Un événement est modifié"], ["cancelled", "annulé", "Un événement est annulé"], ["begins", "commence", "Un événement commence"]];
+  const calendarWords = (cases) => CALENDAR_CASES.filter(([value]) => cases.includes(value)).map(([, word]) => word).join(", ");
+  // The five events a GitHub trigger can listen to, in the order the editor lists them.
+  const githubEvents = [["pull_request_opened", "pull request ouverte"], ["pull_request_pushed", "pull request poussée"], ["pull_request_merged", "pull request mergée"], ["comment", "commentaire (pull request, issue ou revue inline)"], ["issue_opened", "issue ouverte"]];
+  const githubEventLabel = (event) => (githubEvents.find(([value]) => value === event) || [event, event])[1].replace(/ \(.*\)$/, "");
+  const githubRepo = /^[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/;
+  // An account must be connected for a GitHub trigger to receive anything: otherwise it would look as if it listened.
+  function githubGap() {
+    const accounts = (panels.state.mcp?.catalogue || []).filter((item) => String(item.id).split(":")[0] === "github");
+    if (accounts.some((item) => item.status === "connected")) return "";
+    const base = accounts.some((item) => item.status === "reconnect") ? "La connexion GitHub a expiré ou a été révoquée. Reconnectez GitHub dans Paramètres › Connecteurs." : "GitHub n’est pas connecté. Connectez-le dans Paramètres › Connecteurs.";
+    return `${base} La routine n’est pas enregistrée avec ce déclencheur GitHub.`;
+  }
+  const sameGithub = (left, right) => left?.repo === right?.repo && JSON.stringify([...(left?.events || [])].sort()) === JSON.stringify([...(right?.events || [])].sort());
   function describe(r) {
     if (r.schedule_description) return r.schedule_description;
     try {
+      if (r.trigger.kind === "group") return `Groupe, dès que l’un part : ${r.trigger.members.map((m) => describe({ trigger: m.trigger, time_zone: r.time_zone })).join(" · ")}`;
+      if (r.trigger.kind === "webhook") return "Webhook : démarre à chaque appel authentifié";
+      if (r.trigger.kind === "github") return `GitHub ${r.trigger.repo} : ${r.trigger.events.map(githubEventLabel).join(", ")}`;
+      if (r.trigger.kind === "mail") return "Courriel : démarre à chaque nouveau message de la boîte connectée";
+      if (r.trigger.kind === "calendar") return `Calendrier : démarre pour un événement de l’agenda connecté (${calendarWords(r.trigger.cases)})`;
       if (r.trigger.kind === "once") return `Une fois : ${date(r.trigger.at, r.time_zone)} · ${r.time_zone}`;
       const t = r.trigger;
       const expression = t.kind === "cron" ? t.expression : `@every ${t.interval_ms}ms${t.phase_ms === null || t.phase_ms === undefined ? "" : `/${t.phase_ms}ms`}`;
@@ -132,10 +153,16 @@
     } catch { return "Horaire illisible — consultez ou corrigez cette routine."; }
   }
 
+  // A group's triggers each have their own ranges, which can share a version and a start.
+  const rangeKey = (range) => `${range.member_id ? `${range.member_id}.` : ""}${range.schedule_version}.${range.from_inclusive}`;
   let dialog, botSelect, content, status, toolbar, view = "list", current = null;
   let covered = [], restoreCovered = true;
   let busy = false, revision = 0, signature = "", historyAt = 0, historyLoading = false, reloading = false, historySignature = "", fieldId = 0;
   let historyView = null, uncertainResume = null, notices, hostOnline = true;
+  // Funnel is asked live (never trusted from an old poll); a Bearer token is kept
+  // in memory only while it is shown, right after its creation or regeneration.
+  let funnel = null, funnelLoading = false, funnelBusy = false, regenerating = null;
+  const revealed = new Map();
   // Retain the intent across a page reload, without storing prompts or outputs.
   let savedLaunches = [];
   try { savedLaunches = JSON.parse(sessionStorage.getItem("ezerbot.routine-launches") || "[]"); } catch { /* Optional browser storage. */ }
@@ -235,10 +262,10 @@
     toolbar.append(button("Nouvelle routine", () => edit(null), "primary-button"), button("Actualiser", reload));
     status = node("p", "routines-note"); status.setAttribute("role", "status");
     content = node("div", "routines-content"); notices = node("div", "routines-live-notices");
-    dialog.append(header, label, node("p", "routines-note", "Les routines s’exécutent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé dans Paramètres. Au retour : un seul rattrapage dans les 60 dernières minutes ; les autres créneaux sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
+    dialog.append(header, label, node("p", "routines-note", "Les routines horaires partent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé. Si le Mac était éteint ou en veille, ou si l’agent activé n’a pas pu tourner, chaque créneau dû est rattrapé au prochain passage, dans l’ordre. Si le Mac était allumé et que ni l’app ni l’agent ne tournait, un seul créneau des 60 dernières minutes est rattrapé ; les autres sont marqués manqués. Une pause ne se rattrape pas."), toolbar, notices, status, content);
     dialog.addEventListener("close", () => {
       if (dialog.open) return;
-      revision++; current = null; content.replaceChildren();
+      revision++; current = null; content.replaceChildren(); revealed.clear(); regenerating = null;
       for (const { entry, scrollTop, focus } of covered.splice(0)) {
         entry.classList.remove("routines-covered");
         if (restoreCovered && entry.open) {
@@ -264,13 +291,28 @@
       return snapshot;
     });
     message(""); dialog.showModal(); hostOnline = panels.connected !== false; renderNotices(); renderList();
-    void reload();
+    void reload(); void loadFunnel();
+  }
+  const webhookItems = () => panels.state.routine_webhooks?.items || {};
+  // A group holds one webhook per webhook member, each with its own URL and token.
+  const hasWebhook = (trigger) => trigger?.kind === "webhook" || (trigger?.kind === "group" && trigger.members.some((m) => m.trigger.kind === "webhook"));
+  const hooksOf = (r) => { const info = webhookItems()[r.routine_id]; return !info ? [] : r.trigger?.kind === "group" ? info.webhooks || [] : [info]; };
+  const secretKey = (r, info) => r.trigger?.kind === "group" ? info.trigger_id : r.routine_id;
+  const hookBody = (r, info) => r.trigger?.kind === "group" ? { ...idBody(r), trigger_id: info.trigger_id } : idBody(r);
+  // A publication stays managed after its last webhook is gone: it must stay withdrawable.
+  const publicationOn = () => Boolean(panels.state.routine_webhooks?.funnel?.enabled);
+  async function loadFunnel() {
+    if (funnelLoading || !(Object.keys(webhookItems()).length || publicationOn())) return;
+    const token = revision; funnelLoading = true;
+    try { funnel = await panels.api("/api/routines/funnel"); }
+    catch (error) { funnel = { state: "unconfirmed", reason: `Tailscale n’a pas pu être vérifié : ${frenchError(error)}`, public_base: null }; }
+    finally { funnelLoading = false; if (active(token)) { signature = ""; renderList(); } }
   }
   async function reload() {
     if (busy || reloading) return;
     const token = revision; reloading = true;
     try {
-      await panels.refresh();
+      await panels.refresh(); void loadFunnel();
       // Explicit refresh must repair cached running states too, not only /state.
       for (const { routine: r } of items()) {
         if (!active(token) || busy) break;
@@ -283,18 +325,85 @@
     } catch (error) { if (active(token)) message(`Actualisation impossible : ${frenchError(error)}`, true, reload); }
     finally { reloading = false; if (active(token)) kick(); }
   }
+  async function copy(text, done) {
+    try { await panels.copyText(text); panels.notify(done); }
+    catch { panels.notify("La copie a échoué. Sélectionnez le texte et copiez-le à la main."); }
+  }
+  function funnelPanel() {
+    const box = node("section", "routines-funnel"), listener = panels.state.routine_webhooks?.listener;
+    box.append(node("h3", "", "Publication sur Internet · Tailscale Funnel"), node("p", "routines-note", "Seul le chemin des webhooks devient public, sur son propre port HTTPS. L’adresse privée de l’iPhone (Tailscale Serve) ne change pas, et chaque appel exige son jeton Bearer. L’écoute vit tant qu’Ezerbot est ouvert : un appel reçu pendant que l’app est fermée est perdu."));
+    if (listener?.error) { const warning = node("p", "routines-error", listener.error); warning.setAttribute("role", "alert"); box.append(warning); }
+    const state = node("p", funnel?.state === "published" ? "routines-note" : "routines-warning", !funnel ? "Vérification de Tailscale en cours…" : funnel.state === "published" ? "Publié par Tailscale Funnel." : funnel.reason || "Publication non confirmée.");
+    state.setAttribute("role", "status"); state.dataset.funnelState = funnel?.state || "loading"; box.append(state);
+    const actions = node("div", "routines-actions");
+    // An enabled publication that cannot be verified may still be public: keep it removable.
+    const enabled = Boolean(funnel?.enabled) || publicationOn();
+    if (funnel && (enabled || ["published", "withdraw_failed"].includes(funnel.state))) actions.append(button("Retirer la publication…", () => publishFunnel(false)));
+    if (funnel && ["off", "refused", "unconfirmed"].includes(funnel.state) && Object.keys(webhookItems()).length) actions.append(button("Publier avec Tailscale Funnel…", () => publishFunnel(true), "primary-button"));
+    actions.append(button("Vérifier Tailscale", () => { funnel = null; signature = ""; renderList(); void loadFunnel(); }));
+    if (funnelBusy) actions.querySelectorAll("button").forEach((el) => { el.disabled = true; });
+    box.append(actions); return box;
+  }
+  async function publishFunnel(enabled) {
+    if (funnelBusy) return;
+    funnelBusy = true; signature = ""; renderList();
+    try {
+      const result = await panels.api("/api/routines/funnel", { enabled });
+      if (result.conversation_id) { await panels.refresh(); openThread(result.conversation_id, result.approval_message_id); panels.notify("Confirmez l’action dans la carte d’approbation."); }
+    } catch (error) { message(`Publication impossible : ${error.message}`, true); }
+    finally { funnelBusy = false; signature = ""; renderList(); }
+  }
+  function webhookBlock(r, info, title = "Webhook") {
+    const box = node("div", "routines-webhook"), key = secretKey(r, info);
+    box.append(node("h4", "", title));
+    const url = funnel?.state === "published" && funnel.public_base && info ? `${funnel.public_base}/${r.routine_id}/${info.trigger_id}` : "";
+    if (url) {
+      const line = node("p", "routines-webhook-url"); line.append(node("code", "", url));
+      box.append(node("p", "routines-note", "URL publique (HTTPS)"), line, button("Copier l’URL", () => copy(url, "URL copiée.")));
+    } else box.append(node("p", "routines-warning", funnel ? `Pas d’URL publique : ${funnel.reason || "publication non confirmée."}` : "Aucune URL publique n’est affichée avant la confirmation de Tailscale."));
+    box.append(node("p", "routines-note", "Appelez l’URL en POST avec l’en-tête Authorization: Bearer <jeton>. Le jeton n’est pas dans l’URL. Le corps JSON est transmis au bot ; une clé Idempotency-Key évite un second départ lors d’un nouvel essai."));
+    const secret = revealed.get(key), token = node("p", "routines-webhook-token");
+    token.append(node("span", "", "Jeton Bearer : "), node("code", "", secret || "••••••••••••••••"));
+    box.append(token);
+    if (secret) box.append(node("p", "routines-warning", "Copiez ce jeton maintenant. Il sera masqué ensuite, mais il restera copiable."));
+    const actions = node("div", "routines-actions");
+    actions.append(button("Copier le jeton", async () => {
+      try { const reply = await panels.api("/api/routines/webhook/token", hookBody(r, info)); await copy(reply.token, "Jeton copié."); }
+      catch (error) { message(`Copie impossible : ${error.message}`, true); }
+    }));
+    if (secret) actions.append(button("Masquer le jeton", () => { revealed.delete(key); signature = ""; renderList(); }));
+    actions.append(button("Régénérer le jeton…", () => { regenerating = key; signature = ""; renderList(); }));
+    box.append(actions);
+    if (regenerating === key) {
+      const confirm = node("div", "routines-delete");
+      confirm.append(node("p", "routines-warning", "Régénérer le jeton ? L’ancien jeton cesse de fonctionner tout de suite : mettez à jour l’appelant."), button("Régénérer", async () => {
+        try { const reply = await panels.api("/api/routines/webhook/regenerate", hookBody(r, info)); revealed.set(key, reply.token); regenerating = null; message("Jeton régénéré. L’ancien jeton est refusé."); }
+        catch (error) { message(`Régénération impossible : ${error.message}`, true); }
+        signature = ""; renderList();
+      }, "danger-button"), button("Garder le jeton", () => { regenerating = null; signature = ""; renderList(); }));
+      box.append(confirm);
+    }
+    return box;
+  }
   function renderList() {
     if (!dialog?.open || view !== "list") return;
     const list = items();
-    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories]]);
+    const next = JSON.stringify([list, busy, [...launches].map(([id, job]) => [id, job, Date.now() < job.until]), [...histories], funnel, funnelBusy, [...revealed.keys()], regenerating, webhookItems(), panels.state.routine_webhooks?.listener, panels.state.routine_webhooks?.funnel?.enabled]);
     if (signature === next) return;
     signature = next; toolbar.hidden = false; content.replaceChildren();
     if (panels.state.routines?.error) content.append(node("p", "routines-error", panels.state.routines.error));
     if (!list.length) content.append(node("p", "routines-note", "Aucune routine pour ce bot."));
+    if (list.some((item) => hasWebhook(item.routine.trigger)) || publicationOn()) content.append(funnelPanel());
     for (const item of list) {
       const r = item.routine, row = node("article", "routines-row"); row.dataset.routineId = r.routine_id;
       row.append(node("h3", "", r.name), node("p", "routines-state", r.enabled ? "Active" : "En pause"), node("p", "routines-note", describe(r)));
+      if (item.queue?.waiting > 0) {
+        const waiting = node("p", "routines-note", `${item.queue.waiting} ${item.queue.waiting > 1 ? "occurrences" : "occurrence"} en attente · prochaine prévue ${date(item.queue.next_at, r.time_zone)}`);
+        waiting.dataset.queue = String(item.queue.waiting); waiting.setAttribute("role", "status"); row.append(waiting);
+      }
       if (r.review_stamp) row.append(node("p", "routines-note", r.review_stamp));
+      const hooks = hooksOf(r);
+      hooks.forEach((info, index) => row.append(webhookBlock(r, info, r.trigger?.kind === "group" && hooks.length > 1 ? `Webhook ${index + 1}` : "Webhook")));
       if (r.origin === "model" || r.model_edited_at || r.untrusted) row.append(node("p", "routines-warning", "Proposée ou modifiée par un bot · texte non vérifié."));
       if (item.error) row.append(node("p", "routines-error", `Dernier diagnostic : ${frenchError({ message: item.error }, true)}`));
       const actions = node("div", "routines-actions");
@@ -338,7 +447,7 @@
   function editor(r, resume, pinned) {
     content.replaceChildren(button("Retour à la liste", back));
     const form = node("form", "routines-editor"), fields = node("fieldset", "routines-fields");
-    function field(label, tag = "input") { const wrap = node("label", "form-label", label), input = node(tag, "text-input"); input.id = input.name = `routine-field-${++fieldId}`; wrap.append(input); fields.append(wrap); return input; }
+    function field(label, tag = "input", parent = fields) { const wrap = node("label", "form-label", label), input = node(tag, "text-input"); input.id = input.name = `routine-field-${++fieldId}`; wrap.append(input); parent.append(wrap); return input; }
     const name = field("Nom"); name.value = r?.name || ""; name.maxLength = 80;
     const kind = field("Contenu", "select");
     for (const [value, label] of [["inline_prompt", "Prompt libre"], ["skill_invocation", "Skill · version épinglée"]]) { const opt = node("option", "", label); opt.value = value; kind.append(opt); }
@@ -361,35 +470,123 @@
     const skillHint = node("p", "routines-note", availableSkills.length ? "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions." : "Aucune skill pour ce bot : créez-en une dans Modifier le bot › Skills."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
-    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
-    mode.value = r?.trigger.kind === "once" ? "once" : "schedule";
+    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["calendar", "Calendrier · un événement de l’agenda Google connecté"], ["group", "Groupe · part dès que l’un de ses déclencheurs part"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
+    mode.value = ["once", "webhook", "mail", "github", "calendar", "group"].includes(r?.trigger.kind) ? r.trigger.kind : "schedule";
     const expression = field("Cron (5 champs), alias ou @every");
     expression.value = r?.trigger.kind === "cron" ? r.trigger.expression : r?.trigger.kind === "every" ? `@every ${r.trigger.interval_ms}ms${r.trigger.phase_ms === null || r.trigger.phase_ms === undefined ? "" : `/${r.trigger.phase_ms}ms`}` : "0 9 * * *";
     const once = field("Date et heure UTC"); once.type = "datetime-local"; once.step = "0.001";
     once.value = r?.trigger.kind === "once" ? new Date(r.trigger.at).toISOString().slice(0, -1) : "";
+    // A start is the case a user comes for; a routine already on the calendar keeps the cases it had.
+    const checkbox = (label, parent, checked) => { const box = field(label, "input", parent); box.type = "checkbox"; box.className = ""; box.checked = checked; box.parentElement.classList.add("routines-enabled"); return box; };
+    const calendarBoxes = CALENDAR_CASES.map(([value, , label]) => { const box = checkbox(label, fields, (r?.trigger.kind === "calendar" ? r.trigger.cases : ["begins"]).includes(value)); box.dataset.case = value; return box; });
+    const ticked = (boxes) => boxes.filter((box) => box.checked).map((box) => box.dataset.case);
     const zone = field("Fuseau IANA"); zone.value = r?.trigger.time_zone || r?.time_zone || localZone; zone.placeholder = "America/Montreal";
+    // One repository and some of five events; the same fields serve a lone trigger and a trigger of a group.
+    function githubFields(parent, value, onChange) {
+      const repo = field("Dépôt GitHub (propriétaire/dépôt)", "input", parent); repo.placeholder = "propriétaire/dépôt"; repo.value = value.repo || ""; repo.maxLength = 140;
+      const box = node("fieldset", "routines-events"); box.append(node("legend", "", "Événements qui font partir la routine"));
+      const checks = githubEvents.map(([event, label]) => {
+        const wrap = node("label", "routines-event"), check = node("input"); check.type = "checkbox"; check.value = event; check.checked = (value.events || []).includes(event);
+        check.id = check.name = `routine-field-${++fieldId}`; wrap.append(check, node("span", "", label)); box.append(wrap); return check;
+      });
+      parent.append(box);
+      const read = () => ({ repo: repo.value.trim(), events: checks.filter((check) => check.checked).map((check) => check.value) });
+      for (const el of [repo, ...checks]) { el.addEventListener("input", () => onChange?.(read())); el.addEventListener("change", () => onChange?.(read())); }
+      return { repo, box, read };
+    }
+    const github = githubFields(fields, r?.trigger.kind === "github" ? r.trigger : {});
+    const githubNote = node("p", "routines-note", "La routine part quand le connecteur GitHub livre un événement de ce dépôt, aux seuls événements cochés. Une même livraison ne part qu’une fois. Un événement arrivé pendant que la routine est en pause n’est pas gardé.");
+    fields.append(githubNote);
+    // A group is a flat list of simple triggers: there is no group kind to pick inside it.
+    const groupBox = node("div", "routines-group"), groupRows = node("div", "routines-group-rows"), rows = [];
+    const expressionOf = (trigger) => trigger.kind === "cron" ? `${trigger.time_zone ? `CRON_TZ=${trigger.time_zone} ` : ""}${trigger.expression}` : trigger.kind === "every" ? `@every ${trigger.interval_ms}ms${trigger.phase_ms === null || trigger.phase_ms === undefined ? "" : `/${trigger.phase_ms}ms`}` : "0 9 * * *";
+    function renderRows() {
+      groupRows.replaceChildren();
+      rows.forEach((row, index) => {
+        const box = node("div", "routines-group-row"); row.box = box;
+        box.append(node("h4", "", `Déclencheur ${index + 1}`));
+        row.kind = field("Genre", "select", box); row.expression = field("Cron (5 champs), alias ou @every", "input", box); row.once = field("Date et heure UTC", "input", box); row.once.type = "datetime-local"; row.once.step = "0.001";
+        for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["calendar", "Calendrier · un événement de l’agenda Google connecté"]]) { const opt = node("option", "", label); opt.value = value; row.kind.append(opt); }
+        row.kind.value = row.value.kind; row.expression.value = row.value.expression; row.once.value = row.value.once;
+        for (const key of ["kind", "expression", "once"]) row[key].addEventListener("input", () => { row.value[key] = row[key].value; });
+        row.github = githubFields(box, row.value, (picked) => { Object.assign(row.value, picked); });
+        row.boxes = CALENDAR_CASES.map(([value, , label]) => { const input = checkbox(label, box, row.value.cases.includes(value)); input.dataset.case = value; input.addEventListener("input", () => { row.value.cases = ticked(row.boxes); }); return input; });
+        // While reviewing an activation nothing here may change: only what is read gets activated.
+        if (!resume) box.append(button("Retirer ce déclencheur", () => { rows.splice(index, 1); renderRows(); update(); }));
+        groupRows.append(box);
+      });
+    }
+    const addRow = (value) => { rows.push({ id: value.id || "", stored: { kind: value.kind, once: value.once, repo: value.repo, events: value.events }, value: { kind: value.kind, expression: value.expression, once: value.once, repo: value.repo || "", events: value.events || [], cases: value.cases || ["begins"] } }); };
+    const memberValue = (member) => ({ id: member.id, kind: ["once", "webhook", "mail", "github", "calendar"].includes(member.trigger.kind) ? member.trigger.kind : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "", repo: member.trigger.repo, events: member.trigger.events, cases: member.trigger.cases });
+    if (r?.trigger.kind === "group") { for (const member of r.trigger.members) addRow(memberValue(member)); renderRows(); }
+    groupBox.append(node("h4", "", "Déclencheurs du groupe"), node("p", "routines-note", "Au moins deux déclencheurs simples, sans groupe dans un groupe. La routine part dès que l’un d’eux part ; chaque départ est une occurrence nommée dans l’historique."), groupRows);
+    const groupActions = node("div", "routines-actions");
+    if (!resume) groupActions.append(button("Ajouter un déclencheur", () => { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); renderRows(); update(); }));
+    groupBox.append(groupActions);
+    fields.append(groupBox);
     fields.append(node("p", "routines-note", "Exemples : 0 9 * * 1-5, @daily, @every 1h30m, @every 1h/10m. Un préfixe TZ= prime sur le champ Fuseau. Pour une seule fois, saisissez l’UTC ; l’aperçu le convertit dans le fuseau choisi. Le serveur valide l’horaire ; cet aperçu ne prédit pas le prochain départ."));
     const preview = node("p", "routines-preview"); preview.setAttribute("role", "status"); fields.append(preview);
     const enabled = r ? null : field("Activer à la création");
     if (enabled) { enabled.type = "checkbox"; enabled.checked = true; enabled.className = ""; enabled.parentElement.classList.add("routines-enabled"); }
-    function parsed() {
-      if (mode.value === "once") {
-        const at = Date.parse(`${once.value}Z`);
-        if (!once.value || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
-        if (at <= Date.now()) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
+    // A mail trigger only listens to a connected Gmail: without it nothing is saved. One already in the routine stays.
+    const mailConnected = () => panels.state.routine_mail?.connected === true;
+    const calendarConnected = () => panels.state.routine_calendar?.connected === true;
+    function simple(genre, expressionText, onceText, spent = false, picked = null, kept = false, cases = []) {
+      if (genre === "calendar") {
+        if (!cases.length) throw new Error("Cochez au moins un cas : un événement créé, modifié, annulé ou qui commence.");
+        if (!spent && !calendarConnected()) throw new Error("Le déclencheur « événement de calendrier » lit l’agenda du compte Google connecté, et Google n’est pas connecté. Connectez-le dans Paramètres › Connecteurs (Gmail) : cette routine n’est pas enregistrée avec ce déclencheur.");
+        return { trigger: { kind: "calendar", cases: CALENDAR_CASES.filter(([value]) => cases.includes(value)).map(([value]) => value) }, zone: validZone(zone.value.trim() || localZone), text: `Calendrier : démarre pour un événement de l’agenda connecté (${calendarWords(cases)}). Le titre et le début arrivent dans le fil de la routine ; un début manqué pendant que le Mac était éteint est rattrapé à son heure prévue.` };
+      }
+      if (genre === "mail") {
+        if (!spent && !mailConnected()) throw new Error("Le déclencheur « nouveau courriel » lit la boîte Gmail connectée, et Gmail n’est pas connecté. Connectez-le dans Paramètres › Connecteurs : cette routine n’est pas enregistrée avec ce déclencheur.");
+        return { trigger: { kind: "mail" }, zone: validZone(zone.value.trim() || localZone), text: "Courriel : démarre à chaque nouveau message de la boîte Gmail connectée. L’expéditeur, l’objet, la date et le texte arrivent dans le fil de la routine." };
+      }
+      if (genre === "once") {
+        const at = Date.parse(`${onceText}Z`);
+        if (!onceText || !Number.isFinite(at)) throw new Error("Choisissez une date UTC valide.");
+        // A one-shot of the group that already fired and is left as it was does not block an edit of the rest.
+        if (at <= Date.now() && !spent) throw new Error("Choisissez un instant futur (saisie en UTC, indépendamment du fuseau d’aperçu).");
         validZone(zone.value.trim());
         return { trigger: { kind: "once", at }, zone: zone.value.trim(), text: `Une fois : ${date(at, zone.value.trim())}` };
       }
-      return schedule(expression.value, zone.value.trim());
+      if (genre === "github") {
+        // A trigger already saved and left as it is does not need the connector again to rename the routine.
+        const gap = kept ? "" : githubGap();
+        if (gap) throw new Error(gap);
+        if (!githubRepo.test(picked.repo) || picked.repo.split("/").some((part) => part === "." || part === "..")) throw new Error("Écrivez le dépôt GitHub sous la forme propriétaire/dépôt.");
+        if (!picked.events.length) throw new Error("Cochez au moins un événement GitHub.");
+        const events = githubEvents.map(([event]) => event).filter((event) => picked.events.includes(event));
+        return { trigger: { kind: "github", repo: picked.repo, events }, zone: validZone(zone.value.trim() || localZone), text: `GitHub ${picked.repo} : ${events.map(githubEventLabel).join(", ")}` };
+      }
+      if (genre === "webhook") return { trigger: { kind: "webhook" }, zone: validZone(zone.value.trim() || localZone), text: "Webhook : démarre à chaque appel authentifié par le jeton Bearer. Le jeton et l’URL s’affichent après l’enregistrement." };
+      return schedule(expressionText, zone.value.trim());
+    }
+    function parsed() {
+      if (mode.value === "group") {
+        if (rows.length < 2) throw new Error("Un groupe contient au moins deux déclencheurs. Ajoutez-en un autre ou choisissez un déclencheur simple.");
+        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once, Boolean(row.id) && row.value.kind === row.stored.kind && (row.value.kind === "mail" || row.value.kind === "calendar" || (row.value.kind === "once" && row.value.once === row.stored.once)), { repo: row.value.repo.trim(), events: row.value.events }, Boolean(row.id) && row.stored.kind === "github" && row.value.kind === "github" && sameGithub(row.value, row.stored), row.value.cases));
+        const members = parts.map((part, index) => {
+          // A TZ= prefix on one trigger belongs to that trigger, not to the whole routine.
+          // Only an explicit TZ= prefix pins that trigger, even to the zone the routine has too.
+          const own = part.trigger.kind === "cron" && /^(?:CRON_TZ|TZ)=\S+\s/.test(rows[index].value.expression.trim()) ? { ...part.trigger, time_zone: part.zone } : part.trigger;
+          return rows[index].id ? { id: rows[index].id, trigger: own } : { trigger: own };
+        });
+        return { trigger: { kind: "group", members }, zone: validZone(zone.value.trim() || localZone), text: `Groupe : ${parts.map((part) => part.text).join(" · ")}` };
+      }
+      return simple(mode.value, expression.value, once.value, ["mail", "calendar"].includes(mode.value) && r?.trigger.kind === mode.value, github.read(), r?.trigger.kind === "github" && mode.value === "github" && sameGithub(github.read(), r.trigger), ticked(calendarBoxes));
     }
     function update() {
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
-      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once";
+      if (mode.value === "group" && !rows.length) { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); addRow({ kind: "webhook", expression: "0 9 * * *", once: "" }); renderRows(); }
+      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = ["webhook", "mail", "github", "calendar"].includes(mode.value); groupBox.hidden = mode.value !== "group";
+      for (const box of calendarBoxes) box.parentElement.hidden = mode.value !== "calendar";
+      github.repo.parentElement.hidden = github.box.hidden = githubNote.hidden = mode.value !== "github";
+      for (const row of rows) { row.expression.parentElement.hidden = row.value.kind !== "schedule"; row.once.parentElement.hidden = row.value.kind !== "once"; row.github.repo.parentElement.hidden = row.github.box.hidden = row.value.kind !== "github"; for (const box of row.boxes) box.parentElement.hidden = row.value.kind !== "calendar"; }
       try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
-    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value });
+    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, cases: ticked(calendarBoxes).join(), zone: zone.value, github: JSON.stringify(github.read()), group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
     const initial = baseline();
     form.addEventListener("input", update); form.addEventListener("change", update); update();
     const actions = node("div", "routines-actions");
@@ -410,7 +607,7 @@
               payload.body = { kind: "skill_invocation", skill_id: skill.value.trim(), version: Number(version.value) };
             }
           }
-          if (!r || ["mode", "expression", "once", "zone"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
+          if (!r || ["mode", "expression", "once", "cases", "zone", "github", "group"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
           if (r) Object.assign(payload, { routine_id: r.routine_id, modified_at: r.modified_at, schedule_version: r.schedule_version });
           else payload.enabled = enabled.checked;
           if (r && Object.keys(payload).length === 4) { back(); return; }
@@ -424,7 +621,7 @@
         confirm.append(node("p", "routines-warning", "Supprimer cette routine ? Les prochains départs seront supprimés, mais un run déjà lancé n’est pas interrompu."), button("Confirmer la suppression", () => mutate("/api/routines/delete", idBody(r), "Routine supprimée."), "danger-button"), button("Garder la routine", () => confirm.remove())); fields.append(confirm);
       }, "danger-link"));
     } else {
-      fields.querySelectorAll("input, textarea, select").forEach((el) => { el.readOnly = true; if (el.tagName === "SELECT") { el.dataset.readOnly = "true"; el.disabled = true; } });
+      fields.querySelectorAll("input, textarea, select").forEach((el) => { el.readOnly = true; if (el.tagName === "SELECT" || el.type === "checkbox") { el.dataset.readOnly = "true"; el.disabled = true; } });
       fields.append(node("p", "routines-warning", "Relisez tout le contenu avant d’activer. Une routine proposée par un bot se confirme normalement dans le chat principal. Ce bouton est une activation explicite par vous, sans approbation séparée."));
       actions.append(button("Activer cette routine", () => mutate("/api/routines/resume", { ...idBody(r), modified_at: r.modified_at, schedule_version: r.schedule_version }, "Routine activée.", r), "primary-button"));
     }
@@ -441,9 +638,14 @@
         if (latest.modified_at !== reviewed.modified_at || latest.schedule_version !== reviewed.schedule_version) throw new Error("La routine a changé depuis votre lecture. Revenez à la liste et relisez-la avant de l’activer.");
       }
       sent = true;
-      await panels.api(path, payload);
+      const reply = await panels.api(path, payload);
+      if (reply?.routine) {
+        const grouped = reply.routine.trigger?.kind === "group";
+        for (const hook of grouped ? reply.webhooks || [] : [reply.webhook]) if (hook?.token) revealed.set(grouped ? hook.trigger_id : reply.routine.routine_id, hook.token);
+      }
       if (active(token)) { view = "list"; current = null; signature = ""; message(success); }
       try { await panels.refresh(); } catch { if (active(token)) message(`${success} Liste à actualiser.`, true); }
+      if (reply?.webhook || reply?.webhooks?.length) void loadFunnel();
     } catch (error) {
       if (active(token)) {
         const conflict = /Stale routine edit|changé depuis votre lecture|Routine changed|409/i.test(error.message);
@@ -480,7 +682,7 @@
   }
   function mergePage(h, remember = true) {
     for (const o of h.occurrences) historyView.occurrences.set(o.occurrence_id, o);
-    for (const range of h.missed_ranges) historyView.ranges.set(`${range.schedule_version}.${range.from_inclusive}`, range);
+    for (const range of h.missed_ranges) historyView.ranges.set(`${rangeKey(range)}`, range);
     if (remember) historyView.pages.set(`${h.cursor}/${h.ranges_cursor}`, [h.cursor, h.ranges_cursor]);
   }
   function emptyHistory() {
@@ -515,12 +717,12 @@
     try {
       const h = await readHistory(r, cursor, rangesCursor); settleLaunch(r);
       if (active(token)) {
-        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${range.schedule_version}.${range.from_inclusive}`));
+        const newItems = more === "occurrences" ? h.occurrences.filter((o) => !historyView.occurrences.has(o.occurrence_id)) : h.missed_ranges.filter((range) => !historyView.ranges.has(`${rangeKey(range)}`));
         mergePage(h);
         if (!more || more === "occurrences") historyView.next = h.next_cursor;
         if (!more || more === "ranges") historyView.nextRanges = h.next_ranges_cursor;
         historyView.failures[more || "initial"] = null;
-        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${newItems[0].schedule_version}.${newItems[0].from_inclusive}`;
+        if (historyView.focusTarget && newItems.length) historyView.focusTarget = more === "occurrences" ? `occurrence-${newItems[0].occurrence_id}` : `range-${rangeKey(newItems[0])}`;
         if (!more) message("");
       }
     } catch (error) {
@@ -576,7 +778,7 @@
   function renderHistory(r) {
     renderNotices();
     const occurrences = [...historyView.occurrences.values()].sort((a, b) => b.scheduled_at_utc - a.scheduled_at_utc || (a.occurrence_id < b.occurrence_id ? 1 : -1));
-    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version);
+    const visibleRanges = [...historyView.ranges.values()].sort((a, b) => b.from_inclusive - a.from_inclusive || b.schedule_version - a.schedule_version || (a.member_id || "") .localeCompare(b.member_id || ""));
     const next = JSON.stringify([r.routine_id, occurrences, visibleRanges, historyView.next, historyView.nextRanges, historyView.failures]);
     if (historySignature === next) return;
     historySignature = next;
@@ -591,7 +793,7 @@
     if (!visibleRanges.length) ranges.append(node("p", "routines-note", "Aucune plage manquée."));
     for (const range of visibleRanges) {
       const row = node("p", "routines-warning", `Manquées du ${date(range.from_inclusive, range.time_zone)} inclus au ${date(range.until_exclusive, range.time_zone)} exclu · ${range.time_zone} · version ${range.schedule_version} · ${describe({ trigger: range.trigger, time_zone: range.time_zone })}`);
-      row.tabIndex = -1; row.dataset.historyFocus = `range-${range.schedule_version}.${range.from_inclusive}`; ranges.append(row);
+      row.tabIndex = -1; row.dataset.historyFocus = `range-${rangeKey(range)}`; ranges.append(row);
     }
     pageControls(ranges, r, "ranges");
     content.append(ranges, node("h4", "", `${occurrences.length} ${occurrences.length > 1 ? "occurrences chargées" : "occurrence chargée"}${historyView.next ? " · d’autres plus anciennes disponibles" : ""} · plus récentes en premier`));
@@ -600,7 +802,9 @@
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status; row.dataset.occurrenceId = o.occurrence_id;
       row.tabIndex = -1; row.dataset.historyFocus = `occurrence-${o.occurrence_id}`;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", `${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
+      // An agenda start is a dated slot: its planned time is the one the event began at, and a late one says it was caught up.
+      const calendarNote = (t) => { const named = t.fuseau || r.time_zone; return t.cas === "commence" ? `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · prévu le ${date(o.scheduled_at_utc, named)} · ${named}${t.received_at - t.debut_ms > 120000 ? " · rattrapé" : ""}` : `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · vu le ${date(t.received_at, r.time_zone)} · ${r.time_zone}`; };
+      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "calendar" ? calendarNote(o.trigger) : o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "mail" ? `${o.trigger.label} · ${o.trigger.compte ? `${o.trigger.compte} · ` : ""}${o.trigger.expediteur} · ${o.trigger.objet} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "github" ? `${o.trigger.label} · ${o.trigger.event_label} · ${o.trigger.repo}${o.trigger.number ? ` #${o.trigger.number}` : ""}${o.trigger.title ? ` · ${o.trigger.title}` : ""} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
       if (o.conversation_id) {
         const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));

@@ -1,0 +1,79 @@
+.sidebar-pages { flex: 0 1 auto; min-height: 0; margin: 0 0 10px; }
+.sidebar-pages .section-label { display: block; margin: 0 12px 7px; }
+.page-list { max-height: 132px; overflow: auto; margin: 0 -3px; scrollbar-width: thin; }
+.page-link { position: relative; display: block; width: 100%; min-width: 0; padding: 8px 10px 8px 12px; margin-bottom: 2px; border-radius: 7px; text-align: left; color: var(--muted); font-size: 11px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-link:hover { background: var(--soft); color: var(--text); }
+.page-link[aria-current="page"] { background: var(--pane); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.page-link[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; background: var(--accent-ink); }
+
+.main-panel:has(.page-stage:not([hidden])) {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "top top"
+    "banner banner"
+    "chat page"
+    "dock dock";
+}
+.main-panel:has(.page-stage:not([hidden])) > .topbar { grid-area: top; }
+.main-panel:has(.page-stage:not([hidden])) > .connection-banner { grid-area: banner; }
+.main-panel:has(.page-stage:not([hidden])) > .chat-scroll { grid-area: chat; }
+.main-panel:has(.page-stage:not([hidden])) > .page-stage { grid-area: page; }
+.main-panel:has(.page-stage:not([hidden])) > .composer-dock { grid-area: dock; }
+.main-panel.page-full:has(.page-stage:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "top"
+    "banner"
+    "page"
+    "dock";
+}
+
+.page-stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--pane); border-left: 1px solid var(--line); }
+.main-panel.page-full > .page-stage { border-left: 0; }
+.page-stage-bar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.page-rename { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: 0.08em; }
+.page-rename .text-input { padding: 8px 10px; font-size: 13px; font-weight: 550; letter-spacing: 0; }
+.page-stage-bar .secondary-button { flex: 0 0 auto; padding: 8px 10px; white-space: nowrap; }
+.page-diagnostic { margin: 14px; padding: 12px 14px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 12px; line-height: 1.5; }
+.page-canvas { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px 28px; }
+.page-canvas h1, .page-canvas h2, .page-canvas h3 { margin: 0 0 8px; letter-spacing: -0.04em; font-weight: 600; }
+.page-canvas h1 { font-size: 22px; }
+.page-canvas h2 { font-size: 18px; }
+.page-canvas h3 { font-size: 15px; }
+.page-canvas p { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.page-canvas table { width: 100%; border-collapse: collapse; }
+.page-canvas th, .page-canvas td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 13px; }
+.page-canvas th { color: var(--muted); font-size: 11px; font-weight: 600; }
+.page-choice { border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; background: var(--soft); color: var(--text); font-size: 11px; }
+.page-choice:hover { background: var(--accent); color: var(--accent-on); }
+.page-canvas ul, .page-canvas ol { margin: 0 0 14px; padding-left: 18px; }
+.page-canvas li { margin: 4px 0; }
+
+@media (max-width: 860px) {
+  .main-panel:has(.page-stage:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) minmax(200px, 46vh) auto;
+    grid-template-areas:
+      "top"
+      "banner"
+      "chat"
+      "page"
+      "dock";
+  }
+  .main-panel.page-full:has(.page-stage:not([hidden])) {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "top"
+      "banner"
+      "page"
+      "dock";
+  }
+  .page-stage { border-left: 0; border-top: 1px solid var(--line); }
+  .page-stage-bar { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-link, .page-choice { transition: none; }
+}

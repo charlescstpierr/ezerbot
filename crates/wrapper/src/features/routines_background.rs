@@ -5,7 +5,7 @@
 use super::Context;
 use crate::{ApiError, ApiResponse, App};
 use grokbot_engine::contracts::{ToolCall, ToolOutcome, ToolSpec};
-use grokbot_scheduler::{cron, routine};
+use grokbot_scheduler::{occurrences, routine};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -445,22 +445,24 @@ pub fn due(db: &Path, now: i64) -> Result<bool, ApiError> {
     if recovery {
         return Ok(true);
     }
-    let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id WHERE o.status='pending' AND r.deleted=0 AND (r.enabled=1 OR o.manual_nonce IS NOT NULL))", [], |r|r.get(0))?;
+    let event = occurrences::event_nonce_sql("o.manual_nonce");
+    let pending: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id WHERE o.status='pending' AND r.deleted=0 AND (r.enabled=1 OR (o.manual_nonce IS NOT NULL AND NOT {event})))"), [], |r|r.get(0))?;
     if pending {
         return Ok(true);
     }
-    let mut stmt = conn.prepare("SELECT routine_id,materialized_after FROM scheduler_routines WHERE enabled=1 AND deleted=0")?;
+    let mut stmt =
+        conn.prepare("SELECT routine_id FROM scheduler_routines WHERE enabled=1 AND deleted=0")?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, cursor) in rows {
+    for id in rows {
         // Corruption must wake the real scheduler so it can quarantine and
         // publish a failed occurrence instead of silently hiding the error.
         let r = match routine::get(&conn, &id) {
             Ok(Some(r)) => r,
             _ => return Ok(true),
         };
-        match cron::next_after(&r.trigger, &r.time_zone, cursor) {
+        match occurrences::next_slot(&conn, &r) {
             Ok(Some(at)) if at <= now => return Ok(true),
             Err(_) => return Ok(true),
             _ => {}
@@ -553,14 +555,59 @@ fn drive(app: &mut App) -> Result<(), ApiError> {
             return Err(fail("Le passage a atteint sa limite. Les routines reprendront avec leur budget conservé au prochain réveil ou à l’ouverture d’Ezerbot."));
         }
         let ctx = app.feature_context();
+        // A long run is not a silence: the next pass must not take it for a gap.
+        super::routines::heartbeat(&ctx);
         super::engine::tick_routines(&ctx);
         let active: bool = ctx.connection.query_row("WITH RECURSIVE threads(id) AS (SELECT conversation_id FROM scheduler_routines UNION SELECT c.id FROM wrapper_conversations c JOIN threads t ON c.parent_id=t.id) SELECT EXISTS(SELECT 1 FROM engine_runs e JOIN threads t ON e.conversation_id=t.id WHERE e.status IN ('queued','running','interrupted'))", [], |r|r.get(0))?;
         if !active && !app.provider.has_run_workers() {
+            // The catch-up queue runs one slot at a time: start the next one
+            // now rather than waiting a minute for the next pass.
+            if queue_advanced(&ctx) {
+                continue;
+            }
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// Scheduled slots of active routines that have not started yet.
+fn waiting(ctx: &Context<'_>) -> i64 {
+    ctx.connection
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM scheduler_occurrences o JOIN scheduler_routines r ON r.routine_id=o.routine_id
+             WHERE o.status='pending' AND o.manual_nonce IS NULL AND r.enabled=1 AND r.deleted=0
+             AND o.schedule_version={}",
+                occurrences::current_version_sql("o", "r")
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+/// Scheduled occurrences that a dispatch has taken out of the queue. A tick may
+/// also materialize a new slot, so the queue length alone cannot show progress.
+fn started(ctx: &Context<'_>) -> i64 {
+    ctx.connection
+        .query_row(
+            "SELECT COUNT(*) FROM scheduler_occurrences WHERE manual_nonce IS NULL
+             AND status IN ('running','done','failed')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+}
+/// Dispatch the next queued slot, and say whether one started. Stops at a slot
+/// that cannot start, so a refusal never keeps the pass alive.
+fn queue_advanced(ctx: &Context<'_>) -> bool {
+    if waiting(ctx) == 0 {
+        return false;
+    }
+    let before = started(ctx);
+    super::routines::tick(ctx);
+    started(ctx) > before
 }
 
 fn pass_deadline() -> Duration {

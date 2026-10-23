@@ -6,7 +6,8 @@ const vm = require('node:vm');
 
 class Element {
   constructor(tag, document) { this.ownerDocument = document; this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.listeners = {}; this.scrollTop = 0; this.open = true; this.isConnected = true; this.classList = { toggle() {}, add() {}, remove() {} }; }
-  append(...children) { this.children.push(...children); }
+  append(...children) { for (const child of children) if (child instanceof Element) child.parentElement = this; this.children.push(...children); }
+  get firstChild() { return this.children[0]; }
   contains(value) { return !!value && (this === value || this.children.some(c => c instanceof Element && c.contains(value))); }
   replaceChildren(...children) { if (this.contains(this.ownerDocument.activeElement)) this.ownerDocument.activeElement = this.ownerDocument.body; this.children = children; }
   setAttribute(key, value) { this.attributes[key] = value; }
@@ -41,7 +42,7 @@ function harness(api) {
   const context = vm.createContext({ window, document, Intl, Date: class extends Date { static now() { return clock; } }, crypto: { randomUUID: () => `intent-${++sequence}` }, sessionStorage: { getItem: k => storage.get(k), setItem: (k,v) => storage.set(k,v) }, console, TextEncoder });
   // Expose lexical state only in this test VM; production has no test API.
   const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8').replace('  panels.register({', `
-  window.test = { runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
+  window.test = { renderList, loadFunnel, revealed, runNow, showHistory, pollHistory, retryLoadedPages, edit, mutate, back, settleLaunch, launches, histories, frenchError,
     setup(r) { dialog = document.createElement('dialog'); botSelect = document.createElement('select'); botSelect.value = r.bot_id;
       content = document.createElement('div'); status = document.createElement('p'); toolbar = document.createElement('div'); notices = document.createElement('div');
       dialog.append(notices, status, content); document.body.append(dialog);
@@ -331,4 +332,663 @@ test('confirmation read errors are French and actionable', async () => {
   assert.match(h.t.status.textContent, /Confirmation indisponible/);
   assert.match(h.t.status.textContent, /Réessayer/);
   assert.doesNotMatch(h.t.status.textContent, /database busy/);
+});
+
+test('the list shows how many catch-up occurrences wait and when the next one is planned', () => {
+  const h = harness(async () => ({}));
+  const queued = (queue) => { h.panels.state.routines.items = [{ routine, queue }]; h.t.renderList(); return h.t.content.querySelectorAll('[data-queue]'); };
+  assert.equal(queued({ waiting: 0, next_at: null }).length, 0);
+  const [one] = queued({ waiting: 1, next_at: Date.UTC(2026, 9, 22, 14, 0, 0) });
+  assert.match(one.textContent, /^1 occurrence en attente · prochaine prévue /);
+  assert.match(one.textContent, /14:00:00/);
+  const [many] = queued({ waiting: 3, next_at: Date.UTC(2026, 9, 22, 15, 0, 0) });
+  assert.match(many.textContent, /^3 occurrences en attente/);
+  assert.equal(many.attributes.role, 'status');
+});
+
+test('the panel states the catch-up rule: the queue after an outage, the sixty-minute window otherwise, and that a pause is not caught up', () => {
+  const source = fs.readFileSync(`${__dirname}/routines.js`, 'utf8');
+  const note = /"(Les routines horaires partent quand[^"]*)"/.exec(source)[1];
+  assert.equal(note, 'Les routines horaires partent quand le moteur local est ouvert, ou quand l’agent en arrière-plan est activé. Si le Mac était éteint ou en veille, ou si l’agent activé n’a pas pu tourner, chaque créneau dû est rattrapé au prochain passage, dans l’ordre. Si le Mac était allumé et que ni l’app ni l’agent ne tournait, un seul créneau des 60 dernières minutes est rattrapé ; les autres sont marqués manqués. Une pause ne se rattrape pas.');
+});
+
+const hook = { ...routine, name: 'Déploiement', trigger: { kind: 'webhook' }, enabled: true, body: { kind: 'inline_prompt', prompt: 'Traite l’appel reçu.' } };
+function webhookHarness(funnel, extra = {}) {
+  const h = harness(async url => {
+    if (url === '/api/routines/funnel') return funnel;
+    if (extra.api) return extra.api(url);
+    throw new Error(`inattendu : ${url}`);
+  });
+  h.panels.state.routines.items = [{ routine: hook }];
+  h.panels.state.routine_webhooks = { listener: { port: 47864, listening: true, error: null }, funnel: {}, items: { [hook.routine_id]: { trigger_id: 'trigger-abc', url: null } } };
+  return h;
+}
+
+test('a published webhook shows its HTTPS Funnel URL and the Bearer reminder, with the token masked', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' });
+  await h.t.loadFunnel();
+  const text = h.t.content.textContent;
+  assert.match(text, /https:\/\/mac\.qa\.ts\.net:8443\/hooks\/routine-test\/trigger-abc/);
+  assert.match(text, /Authorization: Bearer <jeton>/);
+  assert.match(text, /Jeton Bearer : ••••/);
+  assert.match(text, /Webhook : démarre à chaque appel|Webhook/);
+  assert.doesNotMatch(text, /ezwh_/);
+  assert.match(text, /Retirer la publication/);
+});
+
+test('without a confirmed Funnel the panel gives the reason and no public URL', async () => {
+  for (const [state, reason] of [['tailscale_stopped', 'Tailscale est arrêté ou déconnecté du tailnet.'], ['refused', 'Le tailnet a refusé Funnel.'], ['unconfirmed', 'La publication Funnel n’est pas encore confirmée par Tailscale.']]) {
+    const h = webhookHarness({ state, reason, public_base: null });
+    await h.t.loadFunnel();
+    const text = h.t.content.textContent;
+    assert.match(text, new RegExp(reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(text, /Pas d’URL publique/);
+    assert.doesNotMatch(text, /https:\/\//);
+  }
+});
+
+test('a stale published poll never shows an URL until the live check confirms it', async () => {
+  const h = webhookHarness({ state: 'tailscale_stopped', reason: 'Tailscale est arrêté ou déconnecté du tailnet.', public_base: null });
+  h.panels.state.routine_webhooks.items[hook.routine_id].url = 'https://old.ts.net:8443/hooks/x/y';
+  h.panels.state.routine_webhooks.funnel = { state: 'published', public_base: 'https://old.ts.net:8443/hooks' };
+  h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /old\.ts\.net/);
+  await h.t.loadFunnel();
+  assert.doesNotMatch(h.t.content.textContent, /old\.ts\.net/);
+});
+
+test('the token is shown in clear after creation, then masked and still copyable', async () => {
+  const copied = [];
+  const h = webhookHarness({ state: 'off', reason: 'Le webhook n’est pas publié sur Internet.', public_base: null }, {
+    api: async url => {
+      if (url === '/api/routines') return { routine: hook, webhook: { trigger_id: 'trigger-abc', token: 'ezwh_secret_token' } };
+      if (url === '/api/routines/webhook/token') return { token: 'ezwh_secret_token' };
+      throw new Error(`inattendu : ${url}`);
+    },
+  });
+  h.panels.copyText = async text => { copied.push(text); };
+  await h.t.mutate('/api/routines', { bot_id: 'grokbot', name: 'Déploiement', trigger: { kind: 'webhook' } }, 'Routine créée.');
+  assert.match(h.t.content.textContent, /ezwh_secret_token/);
+  assert.match(h.t.content.textContent, /Copiez ce jeton maintenant/);
+  h.t.revealed.clear(); h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /ezwh_/);
+  assert.match(h.t.content.textContent, /Jeton Bearer : ••••/);
+  const copy = h.t.content.querySelectorAll('button').find(b => b.textContent === 'Copier le jeton');
+  await copy.click();
+  assert.deepEqual(copied, ['ezwh_secret_token']);
+});
+
+test('history names the Webhook trigger and its reception time', async () => {
+  const received = { ...occurrence('hook-run', 'done', 'webhook:trigger-abc:call:1'), trigger: { kind: 'webhook', label: 'Webhook', received_at: 1_760_000_000_000 } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([received]) });
+  await h.t.showHistory(hook);
+  assert.match(h.t.content.textContent, /Webhook · reçu le/);
+  assert.doesNotMatch(h.t.content.textContent, /Manuel|Planifié/);
+});
+
+test('a routine editor offers a Webhook trigger without schedule fields', async () => {
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => ({ routines: [hook] }) });
+  await h.t.edit(hook);
+  const select = h.t.content.querySelectorAll('select').find(el => el.children.some(o => o.value === 'webhook'));
+  assert.ok(select, 'the trigger selector lists webhook');
+  assert.equal(select.value, 'webhook');
+});
+
+test('a withdrawal Tailscale refused keeps offering the retry and shows no public URL', async () => {
+  const h = webhookHarness({ state: 'withdraw_failed', reason: 'Tailscale n’a pas pu retirer la publication Funnel : l’adresse publique peut rester joignable. Réessayez de la retirer.', public_base: null });
+  await h.t.loadFunnel();
+  assert.match(h.t.content.textContent, /peut rester joignable/);
+  assert.match(h.t.content.textContent, /Retirer la publication/);
+  assert.doesNotMatch(h.t.content.textContent, /Publier avec Tailscale Funnel/);
+  assert.doesNotMatch(h.t.content.textContent, /https:\/\//);
+});
+
+test('a publication stays withdrawable after the last webhook routine is gone', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' });
+  h.panels.state.routines.items = [{ routine }];
+  h.panels.state.routine_webhooks = { listener: { port: 47864, listening: true, error: null }, funnel: { enabled: true, state: 'published' }, items: {} };
+  await h.t.loadFunnel();
+  assert.match(h.t.content.textContent, /Publication sur Internet/);
+  assert.match(h.t.content.textContent, /Retirer la publication/);
+  h.panels.state.routine_webhooks.funnel.enabled = false;
+  h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /Publication sur Internet/);
+});
+
+test('an enabled publication Tailscale cannot confirm stays removable, even without any webhook routine', async () => {
+  const h = webhookHarness({ state: 'unconfirmed', enabled: true, reason: 'La publication Funnel n’est pas encore confirmée par Tailscale.', public_base: null });
+  h.panels.state.routines.items = [{ routine }];
+  h.panels.state.routine_webhooks = { listener: { port: 47864, listening: true, error: null }, funnel: { enabled: true, state: 'unconfirmed' }, items: {} };
+  await h.t.loadFunnel();
+  assert.match(h.t.content.textContent, /Retirer la publication/);
+  assert.doesNotMatch(h.t.content.textContent, /Publier avec Tailscale Funnel/);
+  assert.doesNotMatch(h.t.content.textContent, /https:\/\//);
+});
+
+const everyMinute = { kind: 'every', interval_ms: 60000, phase_ms: null };
+const groupRoutine = { ...routine, name: 'Groupe', enabled: true, body: { kind: 'inline_prompt', prompt: 'Rapport' }, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'webhook' } }, { id: 'trigger-c', trigger: { kind: 'webhook' } }] } };
+const labelled = (h, text) => h.t.content.querySelectorAll('.form-label').filter(l => String(l.children[0]).startsWith(text));
+const inputOf = label => label.children.find(c => c.tagName === 'INPUT' || c.tagName === 'SELECT');
+const type = (input, value) => { input.value = value; input.listeners.input?.(); };
+function groupEditor(sent) {
+  return harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [groupRoutine] };
+    sent.push({ url, body });
+    return { routine: groupRoutine, webhooks: [] };
+  });
+}
+
+test('a group editor lists its simple triggers and refuses a group of fewer than two', async () => {
+  const sent = [], h = groupEditor(sent);
+  await h.t.edit(groupRoutine);
+  const remove = () => h.t.content.querySelectorAll('button').filter(b => b.textContent === 'Retirer ce déclencheur');
+  assert.equal(remove().length, 3);
+  assert.doesNotMatch(h.t.content.textContent, /Groupe : .*Groupe/);
+  remove()[2].click(); remove()[1].click();
+  assert.equal(remove().length, 1);
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /au moins deux déclencheurs/);
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  assert.match(h.t.status.textContent, /au moins deux déclencheurs/);
+  assert.equal(sent.length, 0);
+});
+
+test('saving a group keeps the IDs of the triggers it already has and sends only what changed', async () => {
+  const sent = [], h = groupEditor(sent);
+  await h.t.edit(groupRoutine);
+  // The second "Cron" label is the first trigger of the group, after the routine's own field.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger)), { kind: 'group', members: [
+    { id: 'trigger-a', trigger: { kind: 'every', interval_ms: 120000, phase_ms: null } },
+    { id: 'trigger-b', trigger: { kind: 'webhook' } },
+    { id: 'trigger-c', trigger: { kind: 'webhook' } },
+  ] });
+});
+
+test('each webhook of a group has its own URL and its own token, shown once after saving', async () => {
+  const h = webhookHarness({ state: 'published', reason: null, public_base: 'https://mac.qa.ts.net:8443/hooks' }, {
+    api: async url => { if (url === '/api/routines/update') return { routine: groupRoutine, webhooks: [{ trigger_id: 'trigger-b', token: 'ezwh_first' }, { trigger_id: 'trigger-c', token: 'ezwh_second' }] }; throw new Error(`inattendu : ${url}`); },
+  });
+  h.panels.state.routines.items = [{ routine: groupRoutine }];
+  h.panels.state.routine_webhooks.items = { [groupRoutine.routine_id]: { trigger_id: 'trigger-b', webhooks: [{ trigger_id: 'trigger-b' }, { trigger_id: 'trigger-c' }] } };
+  await h.t.mutate('/api/routines/update', { bot_id: 'grokbot', routine_id: groupRoutine.routine_id }, 'Routine enregistrée.');
+  await h.t.loadFunnel();
+  const text = h.t.content.textContent;
+  assert.match(text, /Webhook 1/);
+  assert.match(text, /Webhook 2/);
+  assert.match(text, /hooks\/routine-test\/trigger-b/);
+  assert.match(text, /hooks\/routine-test\/trigger-c/);
+  assert.match(text, /ezwh_first/);
+  assert.match(text, /ezwh_second/);
+  h.t.revealed.clear(); h.t.renderList();
+  assert.doesNotMatch(h.t.content.textContent, /ezwh_/);
+});
+
+test('history names the simple trigger of a group that started each run', async () => {
+  const schedule = { ...occurrence('group-schedule', 'done', null), trigger: { kind: 'schedule', label: 'Horaire', description: 'Chaque minute, à partir de l’activation', trigger_id: 'trigger-a' } };
+  const call = { ...occurrence('group-hook', 'done', 'webhook:trigger-c:call:1'), trigger: { kind: 'webhook', label: 'Webhook 2', received_at: 1_760_000_000_000, trigger_id: 'trigger-c' } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([schedule, call]) });
+  await h.t.showHistory(groupRoutine);
+  assert.match(h.t.content.textContent, /Horaire \(Chaque minute, à partir de l’activation\) · /);
+  assert.match(h.t.content.textContent, /Webhook 2 · reçu le/);
+});
+
+// The harness clock reads 10 000 ms: the one-shot at 5 000 ms is in the past.
+const pinned = { ...groupRoutine, time_zone: 'UTC', trigger: { kind: 'group', members: [
+  { id: 'trigger-a', trigger: { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' } },
+  { id: 'trigger-b', trigger: everyMinute },
+  { id: 'trigger-c', trigger: { kind: 'once', at: 5000 } },
+] } };
+const savedTrigger = async (routineToEdit, change) => {
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [routineToEdit] };
+    sent.push({ url, body });
+    return { routine: routineToEdit, webhooks: [] };
+  });
+  await h.t.edit(routineToEdit);
+  change(h);
+  h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  return { sent, h };
+};
+
+test('saving a group keeps the explicit timezone of a trigger even when it equals the routine timezone', async () => {
+  const { sent } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  const members = JSON.parse(JSON.stringify(sent.find(s => s.url === '/api/routines/update').body.trigger.members));
+  assert.deepEqual(members[0].trigger, { kind: 'cron', expression: '0 9 * * *', time_zone: 'UTC' });
+  assert.equal(members[1].trigger.interval_ms, 120000);
+});
+
+test('a one-shot of the group that already fired and was not touched does not block saving the rest', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(inputOf(labelled(h, 'Cron (5 champs)')[2]), '@every 2m'));
+  assert.ok(sent.some(s => s.url === '/api/routines/update'), h.t.status.textContent);
+});
+
+test('a one-shot of the group moved into the past is still refused', async () => {
+  const { sent, h } = await savedTrigger(pinned, h => type(labelled(h, 'Date et heure UTC')[3].children.find(c => c.tagName === 'INPUT'), '1970-01-01T00:00:01.000'));
+  assert.equal(sent.length, 0);
+  assert.match(h.t.status.textContent, /instant futur/);
+});
+
+test('reviewing a group before its activation offers no way to change its triggers', async () => {
+  const h = harness(async url => url.startsWith('/api/routines?') ? { routines: [groupRoutine] } : {});
+  await h.t.edit(groupRoutine, true);
+  const labels = h.t.content.querySelectorAll('button').map(b => b.textContent);
+  assert.ok(labels.includes('Activer cette routine'));
+  assert.ok(!labels.includes('Retirer ce déclencheur'));
+  assert.ok(!labels.includes('Ajouter un déclencheur'));
+});
+
+test('missed ranges of two group members with the same version and start are both listed', async () => {
+  const range = (member) => ({ routine_id: routine.routine_id, member_id: member, schedule_version: 1, from_inclusive: 1000, until_exclusive: 5000, time_zone: 'UTC', trigger: everyMinute });
+  const h = harness(async () => page([], { missed_ranges: [range('trigger-a'), range('trigger-b')] }));
+  await h.t.showHistory(routine);
+  assert.match(h.t.content.textContent, /Plages d’occurrences manquées \(2\)/);
+  assert.equal(h.t.content.querySelectorAll('.routines-warning').length, 2);
+});
+
+test('replacing a webhook of a group by an identical one is saved, not mistaken for no change', async () => {
+  const two = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: { kind: 'webhook' } }, { id: 'trigger-b', trigger: { kind: 'webhook' } }] } };
+  const { sent, h } = await savedTrigger(two, h => {
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Retirer ce déclencheur').click();
+    h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+    const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'webhook') && !el.children.some(o => o.value === 'group'));
+    type(kinds[kinds.length - 1], 'webhook');
+  });
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  const members = JSON.parse(JSON.stringify(update.body.trigger.members));
+  assert.deepEqual(members, [{ id: 'trigger-b', trigger: { kind: 'webhook' } }, { trigger: { kind: 'webhook' } }]);
+});
+
+// ---------------------------------------------------------------- Courriel ----
+
+const mailRoutine = { ...routine, name: 'Courrier', enabled: true, body: { kind: 'inline_prompt', prompt: 'Résume le courriel.' }, trigger: { kind: 'mail' } };
+const triggerSelect = h => h.t.content.querySelectorAll('select').find(el => el.children.some(o => o.value === 'group'));
+function mailEditor(connected, sent = []) {
+  const h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [mailRoutine] };
+    sent.push({ url, body });
+    return { routine: mailRoutine };
+  });
+  h.panels.state.routine_mail = { connected };
+  return h;
+}
+const choose = (h, select, value) => { select.value = value; h.t.content.querySelectorAll('form')[0].listeners.input(); };
+const submit = async h => { h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} }); await new Promise(resolve => setImmediate(resolve)); };
+
+test('the editor offers the new-mail trigger, and with Gmail connected it saves { kind: "mail" }', async () => {
+  const sent = [], h = mailEditor(true, sent);
+  await h.t.edit(null);
+  const select = triggerSelect(h);
+  assert.ok(select.children.some(o => o.value === 'mail' && /Courriel/.test(o.textContent)));
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Résume le courriel.');
+  choose(h, select, 'mail');
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /nouveau message de la boîte Gmail connectée/);
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.deepEqual(JSON.parse(JSON.stringify(created.body.trigger)), { kind: 'mail' });
+});
+
+test('without a connected Gmail the editor explains it and sends nothing', async () => {
+  const sent = [], h = mailEditor(false, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Résume le courriel.');
+  choose(h, triggerSelect(h), 'mail');
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /Gmail n’est pas connecté/);
+  assert.match(preview.textContent, /Paramètres › Connecteurs/);
+  assert.match(preview.textContent, /n’est pas enregistrée avec ce déclencheur/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Gmail n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a routine already armed on mail can still be renamed after Gmail is disconnected', async () => {
+  const sent = [], h = mailEditor(false, sent);
+  await h.t.edit(mailRoutine);
+  assert.equal(triggerSelect(h).value, 'mail');
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier du matin');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.equal(update.body.name, 'Courrier du matin');
+  assert.equal(update.body.trigger, undefined);
+});
+
+test('a group can hold the new-mail trigger, and refuses a new one while Gmail is absent', async () => {
+  const withMail = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'mail' } }] } };
+  const sent = [];
+  const h = harness(async (url, body) => { if (url.startsWith('/api/routines?')) return { routines: [withMail] }; sent.push({ url, body }); return { routine: withMail }; });
+  h.panels.state.routine_mail = { connected: false };
+  await h.t.edit(withMail);
+  const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'mail') && !el.children.some(o => o.value === 'group'));
+  assert.deepEqual(kinds.map(k => k.value), ['schedule', 'mail']);
+  // The mail trigger already in the group stays valid: editing the other one is saved.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger.members[1])), { id: 'trigger-b', trigger: { kind: 'mail' } });
+  // A mail trigger added to the group while Gmail is absent is refused.
+  sent.length = 0;
+  await h.t.edit(withMail);
+  h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+  const added = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'mail') && !el.children.some(o => o.value === 'group'));
+  type(added[added.length - 1], 'mail');
+  await submit(h);
+  assert.match(h.t.status.textContent, /Gmail n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('the history names a run started by a mail with its sender and subject', async () => {
+  const started = { ...occurrence('mail-run', 'done', 'mail::m1'), trigger: { kind: 'mail', label: 'Courriel', received_at: 1_760_000_000_000, expediteur: 'Alice <alice@example.com>', objet: 'Facture d’octobre' } };
+  const h = harness(async () => page([started]));
+  await h.t.showHistory(mailRoutine);
+  const text = h.t.content.textContent;
+  assert.match(text, /Courriel · Alice <alice@example.com> · Facture d’octobre · reçu le/);
+  assert.doesNotMatch(text, /Manuel|Planifié/);
+});
+
+test('the history names the Google account that received the mail', async () => {
+  const started = { ...occurrence('mail-run', 'done', 'mail::m1'), trigger: { kind: 'mail', label: 'Courriel', received_at: 1_760_000_000_000, compte: 'travail@example.test', expediteur: 'Alice <alice@example.com>', objet: 'Facture d’octobre' } };
+  const h = harness(async () => page([started]));
+  await h.t.showHistory(mailRoutine);
+  assert.match(h.t.content.textContent, /Courriel · travail@example\.test · Alice <alice@example.com> · Facture d’octobre · reçu le/);
+});
+
+test('the list describes a mail routine', async () => {
+  const h = harness(async () => ({ routines: [mailRoutine] }));
+  h.panels.state.routines.items = [{ routine: mailRoutine }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /Courriel : démarre à chaque nouveau message de la boîte connectée/);
+});
+
+// ------------------------------------------------------------------ GitHub ----
+
+const githubRoutine = { ...routine, name: 'Revue', enabled: true, body: { kind: 'inline_prompt', prompt: 'Relire' }, trigger: { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] } };
+const connected = [{ id: 'github', status: 'connected' }];
+const eventBoxes = h => h.t.content.querySelectorAll('.routines-event').map(label => label.children[0]);
+const pick = (check, on = true) => { check.checked = on; check.listeners.change?.(); };
+const editorChanged = h => h.t.content.querySelectorAll('form')[0].listeners.input();
+async function githubEditor(catalogue, existing = null) {
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [existing || githubRoutine] };
+    sent.push({ url, body: JSON.parse(JSON.stringify(body)) });
+    return { routine: existing || githubRoutine, webhooks: [] };
+  });
+  h.panels.state.mcp = { catalogue };
+  await h.t.edit(existing);
+  return { h, sent };
+}
+async function newGithubRoutine(catalogue) {
+  const { h, sent } = await githubEditor(catalogue);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Revue');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Relire la pull request');
+  const mode = inputOf(labelled(h, 'Déclencheur')[0]);
+  mode.value = 'github'; editorChanged(h);
+  return { h, sent, mode };
+}
+
+test('the editor offers GitHub with a repository and exactly the five events', async () => {
+  const { h, mode } = await newGithubRoutine(connected);
+  assert.ok(mode.children.some(option => option.value === 'github'), 'the trigger selector lists GitHub');
+  const repo = labelled(h, 'Dépôt GitHub')[0];
+  assert.equal(repo.hidden, false);
+  mode.value = 'schedule'; editorChanged(h);
+  assert.equal(repo.hidden, true, 'the repository is only asked for under a GitHub trigger');
+  mode.value = 'github'; editorChanged(h);
+  const labels = h.t.content.querySelectorAll('.routines-event').map(label => label.textContent);
+  assert.deepEqual(labels, [
+    'pull request ouverte',
+    'pull request poussée',
+    'pull request mergée',
+    'commentaire (pull request, issue ou revue inline)',
+    'issue ouverte',
+  ]);
+  assert.ok(eventBoxes(h).every(check => check.type === 'checkbox' && !check.checked));
+  assert.match(h.t.content.textContent, /connecteur GitHub livre un événement/);
+});
+
+test('a GitHub trigger is saved with the chosen repository and events, in the order of the list', async () => {
+  const { h, sent } = await newGithubRoutine(connected);
+  type(inputOf(labelled(h, 'Dépôt GitHub')[0]), ' charles/essai ');
+  const boxes = eventBoxes(h);
+  pick(boxes[3]); pick(boxes[0]);
+  editorChanged(h);
+  // The preview names the repository and the events, with no time zone: nothing here is timed.
+  assert.equal(h.t.content.querySelectorAll('.routines-preview')[0].textContent, 'GitHub charles/essai : pull request ouverte, commentaire');
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.deepEqual(created.body.trigger, { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] });
+});
+
+test('without a connected GitHub the editor says so and saves nothing', async () => {
+  for (const [catalogue, wording] of [[[], /GitHub n’est pas connecté/], [[{ id: 'github', status: 'reconnect' }], /Reconnectez GitHub/]]) {
+    const { h, sent } = await newGithubRoutine(catalogue);
+    type(inputOf(labelled(h, 'Dépôt GitHub')[0]), 'charles/essai');
+    pick(eventBoxes(h)[0]);
+    editorChanged(h);
+    const preview = h.t.content.querySelectorAll('.routines-preview')[0].textContent;
+    assert.match(preview, wording);
+    assert.match(preview, /n’est pas enregistrée avec ce déclencheur GitHub/);
+    await submit(h);
+    assert.match(h.t.status.textContent, wording);
+    assert.equal(sent.length, 0);
+  }
+});
+
+test('a GitHub trigger needs a well-formed repository and at least one event', async () => {
+  const { h, sent } = await newGithubRoutine(connected);
+  const repo = inputOf(labelled(h, 'Dépôt GitHub')[0]);
+  pick(eventBoxes(h)[0]);
+  for (const wrong of ['', 'charles', 'charles/', '../etc', 'a/b/c', 'a/..']) {
+    type(repo, wrong); await submit(h);
+    assert.match(h.t.status.textContent, /propriétaire\/dépôt/, wrong);
+  }
+  type(repo, 'charles/essai'); pick(eventBoxes(h)[0], false); await submit(h);
+  assert.match(h.t.status.textContent, /Cochez au moins un événement GitHub/);
+  assert.equal(sent.length, 0);
+});
+
+test('renaming a saved GitHub routine does not need the connector, and sends no trigger', async () => {
+  const { h, sent } = await githubEditor([], githubRoutine);
+  assert.equal(inputOf(labelled(h, 'Dépôt GitHub')[0]).value, 'charles/essai');
+  assert.deepEqual(eventBoxes(h).map(check => check.checked), [true, false, false, true, false]);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Revue du dépôt');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.equal(update.body.name, 'Revue du dépôt');
+  assert.equal(update.body.trigger, undefined);
+});
+
+test('changing the repository of a saved GitHub routine is a new trigger and asks for the connector again', async () => {
+  const { h, sent } = await githubEditor([], githubRoutine);
+  type(inputOf(labelled(h, 'Dépôt GitHub')[0]), 'charles/autre');
+  await submit(h);
+  assert.match(h.t.status.textContent, /GitHub n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a group can hold a GitHub trigger next to a schedule and keeps the IDs of its triggers', async () => {
+  const grouped = { ...githubRoutine, name: 'Groupe', trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-g', trigger: githubRoutine.trigger }] } };
+  const { h, sent } = await githubEditor(connected, grouped);
+  const repos = labelled(h, 'Dépôt GitHub');
+  // The routine's own fields, then one set per trigger of the group (hidden unless it is a GitHub one).
+  assert.equal(repos.length, 3);
+  assert.deepEqual(repos.map(label => label.hidden), [true, true, false]);
+  const row = inputOf(repos[2]);
+  assert.equal(row.value, 'charles/essai');
+  type(row, 'charles/autre');
+  const boxes = h.t.content.querySelectorAll('.routines-event').map(label => label.children[0]);
+  assert.equal(boxes.length, 15);
+  pick(boxes[10 + 4]);
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.deepEqual(update.body.trigger, { kind: 'group', members: [
+    { id: 'trigger-a', trigger: { kind: 'every', interval_ms: 60000, phase_ms: null } },
+    { id: 'trigger-g', trigger: { kind: 'github', repo: 'charles/autre', events: ['pull_request_opened', 'comment', 'issue_opened'] } },
+  ] });
+});
+
+test('history names the GitHub trigger, the event and what it concerned', async () => {
+  const run = { ...occurrence('github-run', 'done', 'github::evt-1'), trigger: { kind: 'github', label: 'GitHub', event: 'pull_request_opened', event_label: 'pull request ouverte', repo: 'charles/essai', number: 12, title: 'Ajouter la recherche', received_at: 1_760_000_000_000 } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([run]) });
+  await h.t.showHistory(githubRoutine);
+  assert.match(h.t.content.textContent, /GitHub · pull request ouverte · charles\/essai #12 · Ajouter la recherche · reçu le/);
+  assert.doesNotMatch(h.t.content.textContent, /Manuel|Planifié/);
+});
+
+test('the list describes a GitHub routine by its repository and events', async () => {
+  const h = harness(async () => ({}));
+  h.panels.state.routines.items = [{ routine: githubRoutine, queue: { waiting: 0 } }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /GitHub charles\/essai : pull request ouverte, commentaire/);
+});
+
+// -------------------------------------------------------------- Calendrier ----
+
+const calendarRoutine = { ...routine, name: 'Agenda', enabled: true, body: { kind: 'inline_prompt', prompt: 'Prépare la réunion.' }, trigger: { kind: 'calendar', cases: ['created', 'begins'] } };
+function calendarEditor(connected, sent = [], stored = calendarRoutine) {
+  const h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [stored] };
+    sent.push({ url, body });
+    return { routine: stored };
+  });
+  h.panels.state.routine_calendar = { connected };
+  return h;
+}
+const caseBox = (h, text) => inputOf(labelled(h, text)[0]);
+const tick = (h, box, checked) => { box.checked = checked; box.listeners.input?.(); h.t.content.querySelectorAll('form')[0].listeners.input(); };
+
+test('the editor offers the calendar trigger with its four cases, and saves the ticked ones', async () => {
+  const sent = [], h = calendarEditor(true, sent);
+  await h.t.edit(null);
+  const select = triggerSelect(h);
+  assert.ok(select.children.some(o => o.value === 'calendar' && /Calendrier/.test(o.textContent)));
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, select, 'calendar');
+  for (const text of ['Un événement est créé', 'Un événement est modifié', 'Un événement est annulé', 'Un événement commence']) assert.equal(labelled(h, text).length, 1, text);
+  // « commence » is ticked from the start: the trigger a user comes for.
+  assert.equal(caseBox(h, 'Un événement commence').checked, true);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(commence\)/);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /heure prévue\.$/); // no zone: the routine's zone says nothing here
+  tick(h, caseBox(h, 'Un événement est créé'), true);
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.ok(created, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(created.body.trigger)), { kind: 'calendar', cases: ['created', 'begins'] });
+});
+
+test('a calendar trigger with no case ticked is explained and sends nothing', async () => {
+  const sent = [], h = calendarEditor(true, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, triggerSelect(h), 'calendar');
+  tick(h, caseBox(h, 'Un événement commence'), false);
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /Cochez au moins un cas/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Cochez au moins un cas/);
+  assert.equal(sent.length, 0);
+});
+
+test('without a connected Google account the editor explains it and sends nothing', async () => {
+  const sent = [], h = calendarEditor(false, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Prépare la réunion.');
+  choose(h, triggerSelect(h), 'calendar');
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /agenda du compte Google connecté/);
+  assert.match(preview.textContent, /Google n’est pas connecté/);
+  assert.match(preview.textContent, /Paramètres › Connecteurs/);
+  assert.match(preview.textContent, /n’est pas enregistrée avec ce déclencheur/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Google n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a routine already armed on the calendar keeps its cases and can be renamed without Google', async () => {
+  const sent = [], h = calendarEditor(false, sent);
+  await h.t.edit(calendarRoutine);
+  assert.equal(triggerSelect(h).value, 'calendar');
+  assert.equal(caseBox(h, 'Un événement est créé').checked, true);
+  assert.equal(caseBox(h, 'Un événement est modifié').checked, false);
+  assert.equal(caseBox(h, 'Un événement commence').checked, true);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Agenda du matin');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.equal(update.body.name, 'Agenda du matin');
+  assert.equal(update.body.trigger, undefined);
+  // Ticking another case is a change of trigger and is sent whole.
+  sent.length = 0;
+  await h.t.edit(calendarRoutine);
+  tick(h, caseBox(h, 'Un événement est annulé'), true);
+  await submit(h);
+  const changed = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(changed, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(changed.body.trigger)), { kind: 'calendar', cases: ['created', 'cancelled', 'begins'] });
+});
+
+test('a group can hold a calendar trigger with its own cases, and refuses a new one while Google is absent', async () => {
+  const withCalendar = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'calendar', cases: ['modified'] } }] } };
+  const sent = [];
+  const h = harness(async (url, body) => { if (url.startsWith('/api/routines?')) return { routines: [withCalendar] }; sent.push({ url, body }); return { routine: withCalendar }; });
+  h.panels.state.routine_calendar = { connected: false };
+  await h.t.edit(withCalendar);
+  const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'calendar') && !el.children.some(o => o.value === 'group'));
+  assert.deepEqual(kinds.map(k => k.value), ['schedule', 'calendar']);
+  // The first box of each kind belongs to the single trigger, hidden here; the last one to the calendar row.
+  assert.equal(inputOf(labelled(h, 'Un événement est modifié').at(-1)).checked, true);
+  // The calendar trigger already in the group stays valid: editing the other one is saved.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger.members[1])), { id: 'trigger-b', trigger: { kind: 'calendar', cases: ['modified'] } });
+  // A calendar trigger added to the group while Google is absent is refused.
+  sent.length = 0;
+  await h.t.edit(withCalendar);
+  h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+  const added = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'calendar') && !el.children.some(o => o.value === 'group'));
+  type(added[added.length - 1], 'calendar');
+  await submit(h);
+  assert.match(h.t.status.textContent, /Google n’est pas connecté/);
+  assert.equal(sent.length, 0);
+  // With Google connected the same row is saved with the case it ticks.
+  h.panels.state.routine_calendar = { connected: true };
+  await submit(h);
+  const saved = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(saved, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.trigger.members[2].trigger)), { kind: 'calendar', cases: ['begins'] });
+});
+
+test('the history names a calendar run with its case, its title and its planned start', async () => {
+  const start = 1_760_000_000_000;
+  const onTime = { ...occurrence('cal-run', 'done', null), scheduled_at_utc: start, trigger: { kind: 'calendar', label: 'Calendrier', cas: 'commence', titre: 'Réunion d’équipe', debut_ms: start, fuseau: 'America/Toronto', received_at: start + 30_000, compte: 'moi@example.com' } };
+  const caughtUp = { ...occurrence('cal-late', 'done', null), scheduled_at_utc: start - 7_200_000, trigger: { kind: 'calendar', label: 'Calendrier', cas: 'commence', titre: 'Point du matin', debut_ms: start - 7_200_000, fuseau: 'America/Toronto', received_at: start } };
+  const created = { ...occurrence('cal-new', 'done', 'calendar::created:evt-1:1'), trigger: { kind: 'calendar', label: 'Calendrier', cas: 'créé', titre: 'Dîner', debut_ms: start, fuseau: 'America/Toronto', received_at: start } };
+  const h = harness(async () => page([onTime, caughtUp, created]));
+  await h.t.showHistory(calendarRoutine);
+  const rows = h.t.content.querySelectorAll('.routines-occurrence').map(r => r.textContent);
+  assert.match(rows[0], /Calendrier · moi@example.com · commence · Réunion d’équipe · prévu le /);
+  assert.doesNotMatch(rows[0], /rattrapé|Manuel/);
+  assert.match(rows[1], /Calendrier · commence · Point du matin · prévu le .* · rattrapé/);
+  assert.match(rows[2], /Calendrier · créé · Dîner · vu le /);
+  assert.doesNotMatch(rows.join(''), /Manuel/);
+});
+
+test('the list describes a calendar routine', async () => {
+  const h = harness(async () => ({ routines: [calendarRoutine] }));
+  h.panels.state.routines.items = [{ routine: calendarRoutine }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /Calendrier : démarre pour un événement de l’agenda connecté \(créé, commence\)/);
 });

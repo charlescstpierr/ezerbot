@@ -40,6 +40,8 @@ struct SendMessage {
     mentions: Vec<super::multibot::Mention>,
     #[serde(default)]
     simulate_loss: bool,
+    #[serde(default)]
+    apply_skill_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -392,6 +394,14 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                 text,
                 app.provider.connected() || !app.provider.simulation_allowed(),
             )?;
+            if let Some(skill_id) = &input.apply_skill_id {
+                super::skills::record_launch(
+                    &tx,
+                    &input.conversation_id,
+                    &input.message_id,
+                    skill_id,
+                )?;
+            }
             super::conversations::append_entry(
                 &tx,
                 &input.conversation_id,
@@ -623,6 +633,19 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
                     return Err(ApiError::new(
                         409,
                         "Une réponse de tâche ne peut pas être régénérée.",
+                    ));
+                }
+                // The turn that follows a late decision has no message of its own to send again,
+                // and what Charles approved must never run a second time.
+                let late: bool = app.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM wrapper_late_approvals WHERE run_id=?1)",
+                    [&old.run_id],
+                    |r| r.get(0),
+                )?;
+                if late {
+                    return Err(ApiError::new(
+                        409,
+                        "Cette reprise suit une décision tardive : elle ne peut pas être relancée. Écrivez un nouveau message pour continuer.",
                     ));
                 }
                 let live: bool = app.connection.query_row(
@@ -901,7 +924,27 @@ pub fn start_run(
     trigger: Trigger,
     input: HistoryItem,
 ) -> Result<Run, ApiError> {
-    create_run(ctx, trigger, input, None)
+    create_run(ctx, trigger, input, None, None)
+}
+/// Follow-up turn of a decision made after its turn ended (#216). The turn is named by
+/// the decision, so a retried start finds it again. `call` is the action Charles
+/// approved: the host writes it in the turn, the model never chooses its arguments.
+pub(crate) fn start_late_run(
+    ctx: &super::Context<'_>,
+    run_id: &str,
+    text: String,
+    call: Option<&grokbot_engine::contracts::ToolCall>,
+) -> Result<Run, ApiError> {
+    create_run(
+        ctx,
+        Trigger::UserMessage {
+            message_id: String::new(),
+            attempt: 0,
+        },
+        item(run_id, Role::User, text),
+        None,
+        Some((run_id, call)),
+    )
 }
 pub(crate) fn start_group_run(
     ctx: &super::Context<'_>,
@@ -914,6 +957,7 @@ pub(crate) fn start_group_run(
         user_trigger(ctx.conversation_id.unwrap(), turn, 0),
         item(turn, Role::User, prompt.into()),
         Some((turn, snapshot)),
+        None,
     )
 }
 fn create_run(
@@ -921,6 +965,7 @@ fn create_run(
     trigger: Trigger,
     input: HistoryItem,
     group: Option<(&str, &str)>,
+    late: Option<(&str, Option<&grokbot_engine::contracts::ToolCall>)>,
 ) -> Result<Run, ApiError> {
     let bot = ctx
         .bot_id
@@ -940,9 +985,11 @@ fn create_run(
         RunKind::Task
     };
     let run = Run {
-        run_id: group
-            .map(|(id, _)| format!("group-{id}"))
-            .unwrap_or(format!("run-{}", random_id(ctx.connection)?)),
+        run_id: match (group, late) {
+            (Some((id, _)), _) => format!("group-{id}"),
+            (None, Some((id, _))) => id.into(),
+            (None, None) => format!("run-{}", random_id(ctx.connection)?),
+        },
         bot_id: bot.into(),
         conversation_id: conversation.into(),
         trigger,
@@ -974,7 +1021,26 @@ fn create_run(
             if let Some((turn, snapshot)) = group {
                 conn.execute("UPDATE wrapper_group_turns SET run_id=?2,snapshot=?3,status='running' WHERE id=?1 AND status='queued'", params![turn,saved.run_id,snapshot])?;
             }
-            if group.is_none() && !matches!(saved.trigger, Trigger::UserMessage { .. }) {
+            if let Some((_, Some(call))) = late {
+                // Written once: a retried start finds the call already in the turn.
+                let written = store::events(conn, &saved.run_id, 0)?
+                    .iter()
+                    .any(|e| e.kind == RunEventKind::ToolCall);
+                if !written {
+                    if saved.status == RunStatus::Queued {
+                        model::set_running_at(conn, &saved.run_id, now() as i64)?;
+                    }
+                    store::append_event(
+                        conn,
+                        &saved.run_id,
+                        RunEventKind::ToolCall,
+                        &json!({"call_id":call.call_id,"name":call.name,"arguments":call.arguments,"response":0}),
+                    )?;
+                }
+            }
+            if group.is_none()
+                && (late.is_some() || !matches!(saved.trigger, Trigger::UserMessage { .. }))
+            {
                 super::conversations::append_entry(
                     conn,
                     conversation,
@@ -987,7 +1053,10 @@ fn create_run(
             Ok(saved)
         },
     )?;
-    launch(ctx, &saved)?;
+    // A late decision's turn is picked up by the host tick, like every resumed approval.
+    if late.is_none() {
+        launch(ctx, &saved)?;
+    }
     Ok(saved)
 }
 /// Settings actions are durable host-authored calls, not model instructions.
@@ -997,7 +1066,7 @@ pub(crate) fn queue_approved_action(
     name: &str,
     arguments: Value,
 ) -> Result<Value, ApiError> {
-    if name == super::routines_background::ACTION {
+    if name == super::routines_background::ACTION || name == super::routine_webhooks::ACTION {
         let existing: Option<(String, String, String)> = ctx.connection.query_row(
             "SELECT r.conversation_id,r.run_id,e.payload FROM engine_runs r JOIN engine_run_events e ON e.run_id=r.run_id WHERE r.run_id LIKE 'mcp-host-%' AND r.status IN ('queued','running','interrupted','awaiting_approval') AND e.kind='tool_call' AND json_extract(e.payload,'$.name')=?1 AND NOT EXISTS(SELECT 1 FROM forms_requests f WHERE f.run_id=r.run_id AND f.status<>'pending') ORDER BY r.rowid DESC LIMIT 1",
             [name], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
@@ -1036,7 +1105,7 @@ pub(crate) fn queue_approved_action(
     let mut services = Services::new(&local)?;
     run_loop::with_run_events(ctx.connection, &mut services, &run.run_id, |conn, _| {
         model::start(conn, &run)?;
-        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,if name == super::routines_background::ACTION { "Routines quand Ezerbot est fermé".into() } else { "Gestion du connecteur MCP".into() }))?])?;
+        conn.execute("INSERT INTO wrapper_engine_runs(run_id,input_json,live,model) VALUES (?1,?2,0,'mcp-local')",params![run.run_id,serde_json::to_string(&item(&run.run_id,Role::User,if name == super::routines_background::ACTION { "Routines quand Ezerbot est fermé".into() } else if name == super::routine_webhooks::ACTION { "Publication des webhooks de routines".into() } else { "Gestion du connecteur MCP".into() }))?])?;
         model::set_running_at(conn, &run.run_id, now() as i64)?;
         store::append_event(
             conn,
@@ -1073,22 +1142,32 @@ pub(crate) fn stop_run(ctx: &super::Context<'_>, run: &Run, end: TurnEnd) -> Res
     Ok(())
 }
 pub fn tick(ctx: &super::Context<'_>) {
-    tick_selected(ctx, false);
+    tick_selected(ctx, false, false);
 }
 pub(crate) fn tick_routines(ctx: &super::Context<'_>) {
-    tick_selected(ctx, true);
+    tick_selected(ctx, true, false);
 }
-fn tick_selected(ctx: &super::Context<'_>, routines_only: bool) {
+/// Resume a run parked on an approval without starting queued child tasks.
+/// The desktop loop uses [`tick`], which also launches those children.
+pub fn tick_suspended(ctx: &super::Context<'_>) {
+    tick_selected(ctx, false, true);
+}
+fn tick_selected(ctx: &super::Context<'_>, routines_only: bool, suspended_only: bool) {
     // run() commits Resumed and the matching receipt together. Merely scanning
     // pending wakes must NEVER mark them Delivered (SR01/SR02).
-    for status in [
-        RunStatus::Queued,
-        RunStatus::Running,
-        RunStatus::Interrupted,
-        RunStatus::AwaitingHumanInput,
-        RunStatus::AwaitingApproval,
-        RunStatus::AwaitingChildren,
-    ] {
+    let mut statuses = vec![RunStatus::AwaitingHumanInput, RunStatus::AwaitingApproval];
+    if !suspended_only {
+        statuses.splice(
+            0..0,
+            [
+                RunStatus::Queued,
+                RunStatus::Running,
+                RunStatus::Interrupted,
+            ],
+        );
+        statuses.push(RunStatus::AwaitingChildren);
+    }
+    for status in statuses {
         if let Ok(runs) = store::runs_with_status(ctx.connection, status) {
             for run in runs {
                 if routines_only {
@@ -1542,8 +1621,10 @@ impl RunServices for Services<'_> {
             run_id: self.host_mcp.then_some("mcp-host-"),
         };
         tools.extend(super::mcp::scoped_tools(&ctx));
+        tools.extend(super::recall::scoped_tools(&ctx));
         if self.host_mcp {
             tools.extend(super::routines_background::host_tools());
+            tools.extend(super::routine_webhooks::host_tools());
         }
         tools
     }
@@ -1593,7 +1674,9 @@ impl RunServices for Services<'_> {
         Ok(serde_json::from_value(value)?)
     }
     fn is_external_tool(&self, call: &grokbot_engine::contracts::ToolCall) -> bool {
-        call.name.starts_with("mcp_") || call.name == super::routines_background::ACTION
+        call.name.starts_with("mcp_")
+            || call.name == super::routines_background::ACTION
+            || call.name == super::routine_webhooks::ACTION
     }
     fn call_external_tool(
         &mut self,
@@ -1607,6 +1690,11 @@ impl RunServices for Services<'_> {
         super::local::is_tool(&call.name)
             || super::screen::is_tool(&call.name)
             || super::generated::is_external(&call.name)
+            || super::images::is_external(&call.name)
+            || super::recall::is_tool(&call.name)
+            || super::mcp::is_github_tool(&call.name)
+            || super::mcp::is_slack_tool(&call.name)
+            || super::mcp::is_gmail_tool(&call.name)
     }
     fn external_unavailable_reason(
         &self,
@@ -1614,10 +1702,21 @@ impl RunServices for Services<'_> {
         call: &grokbot_engine::contracts::ToolCall,
     ) -> Option<String> {
         let ctx = self.ctx(self.connection, run);
+        if super::mcp::is_github_tool(&call.name) {
+            return Some(super::mcp::github_unavailable(&ctx));
+        }
+        if super::mcp::is_slack_tool(&call.name) {
+            return Some(super::mcp::slack_unavailable(&ctx));
+        }
+        if super::mcp::is_gmail_tool(&call.name) {
+            return Some(super::mcp::gmail_unavailable(&ctx));
+        }
         let result = if super::screen::is_tool(&call.name) {
             super::screen::validate(&ctx, call)
         } else if super::generated::is_external(&call.name) {
             super::generated::validate(&ctx, call)
+        } else if super::recall::is_tool(&call.name) {
+            super::recall::validate(&ctx, call)
         } else {
             super::local::validate(&ctx, call)
         };
@@ -1633,6 +1732,16 @@ impl RunServices for Services<'_> {
             super::screen::execute(&ctx, call, self.cancel.clone())
         } else if super::generated::is_external(&call.name) {
             super::generated::execute(&ctx, call, self.cancel.clone())
+        } else if super::images::is_external(&call.name) {
+            super::images::execute(&ctx, call, &self.cancel)
+        } else if super::recall::is_tool(&call.name) {
+            super::recall::execute(&ctx, call)
+        } else if super::mcp::is_github_tool(&call.name) {
+            super::mcp::run_github_tool(&ctx, call)
+        } else if super::mcp::is_slack_tool(&call.name) {
+            super::mcp::run_slack_tool(&ctx, call)
+        } else if super::mcp::is_gmail_tool(&call.name) {
+            super::mcp::run_gmail_tool(&ctx, call)
         } else {
             super::local::execute(&ctx, call, self.cancel.clone())
         };
@@ -1667,8 +1776,22 @@ impl RunServices for Services<'_> {
                 });
             }
         }
+        if super::mcp::is_draft(&call.name) {
+            if let Err(error) = super::mcp::validate_draft(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
         if super::generated::is_external(&call.name) {
             if let Err(error) = super::generated::validate(&self.ctx(conn, run), call) {
+                return Ok(ApprovalCheck::Denied {
+                    reason: error.message,
+                });
+            }
+        }
+        if super::recall::is_tool(&call.name) {
+            if let Err(error) = super::recall::validate(&self.ctx(conn, run), call) {
                 return Ok(ApprovalCheck::Denied {
                     reason: error.message,
                 });
@@ -1685,6 +1808,15 @@ impl RunServices for Services<'_> {
         }
         Ok(decision)
     }
+    fn approval_denied(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+        call: &grokbot_engine::contracts::ToolCall,
+        reason: String,
+    ) -> grokbot_engine::contracts::Result<ToolOutcome> {
+        super::delegation::approval_denied(&self.ctx(conn, run), call, run, reason)
+    }
     fn request_approval(
         &mut self,
         conn: &Connection,
@@ -1692,6 +1824,13 @@ impl RunServices for Services<'_> {
         call: &grokbot_engine::contracts::ToolCall,
     ) -> grokbot_engine::contracts::Result<SuspendCause> {
         super::forms::request_tool_approval(&self.ctx(conn, run), run, call).map_err(engine_error)
+    }
+    fn continue_without_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+    ) -> grokbot_engine::contracts::Result<bool> {
+        super::forms::continues_without_approval(conn, run).map_err(engine_error)
     }
     fn is_cancelled(&self, _: &str) -> bool {
         self.cancel.load(Ordering::SeqCst)
@@ -1889,6 +2028,14 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
     // replay_items coalesces each completed response before this defense-in-depth
     // redaction, including legacy events written by a pre-cutover generator.
     let vault = event_vault(conn)?;
+    let mut tool_names = HashMap::new();
+    for item in &items {
+        for tool in &item.tool_items {
+            if let ToolItem::Call { call } = tool {
+                tool_names.insert(call.call_id.clone(), call.name.clone());
+            }
+        }
+    }
     for item in &mut items {
         item.text = redact::redact(&vault, &item.text)?;
         for tool in &mut item.tool_items {
@@ -1896,6 +2043,25 @@ fn replay(conn: &Connection, run: &Run) -> grokbot_engine::contracts::Result<Vec
                 if output["status"] == "suspend" {
                     if let Some(value) = resolution(conn, run, call_id)? {
                         *output = json!({"status":"resolved","value":value});
+                    }
+                } else if tool_names
+                    .get(call_id)
+                    .is_some_and(|name| super::local::is_tool(name))
+                {
+                    // The journal is updated after the turn: a background shell
+                    // finishes, or a cancellation drains, without a second event.
+                    let stored: Option<Option<String>> = conn
+                        .query_row(
+                            "SELECT outcome FROM engine_external_tools WHERE run_id=?1 AND call_id=?2",
+                            params![run.run_id, call_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(value) = stored
+                        .flatten()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                    {
+                        *output = value;
                     }
                 }
             }
@@ -2793,17 +2959,27 @@ pub fn entry(ctx: &super::Context<'_>, kind: &str, id: &str) -> Option<Message> 
         // Keep canonical skill content in its lazy approval, not every state row.
         display_call.as_object_mut()?.remove("arguments");
     }
-    Some(card(
+    let mut message = card(
         id,
         "tool",
         String::new(),
-        json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome,
+        json!({"run_id":run_id,"run_status":run.status,"call":display_call,"outcome":outcome.clone(),
             "authorized_by":admission,"requesting_bot":requester,
             "approval_status":super::forms::tool_approval_status(ctx,run_id,&call),
             "screen_image":screen_image,
             "connector":super::mcp::call_display(ctx,&call.name,&call.arguments)}),
         run.started_at.max(0) as u64,
-    ))
+    );
+    if call.name == super::images::TOOL {
+        super::images::present(
+            ctx,
+            &run.conversation_id,
+            id,
+            outcome.as_ref(),
+            &mut message,
+        );
+    }
+    Some(message)
 }
 fn card(id: &str, kind: &str, body: String, payload: Value, created_at: u64) -> Message {
     Message {

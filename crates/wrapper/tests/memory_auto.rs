@@ -1173,13 +1173,11 @@ fn share_card_keeps_journal_time_and_the_run_that_offered_it() {
     );
 }
 
-#[test]
-fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
-    let mut f = Fixture::new();
-    let c = f.conv("grokbot");
-    for i in 0..30 {
+fn remember_many(f: &Fixture, count: i64) {
+    let conn = f.db();
+    for i in 0..count {
         facts::remember(
-            &f.db(),
+            &conn,
             &facts::Fact {
                 fact_id: String::new(),
                 bot_id: "grokbot".into(),
@@ -1197,24 +1195,65 @@ fn full_deduplication_catalogue_skips_instead_of_duplicating_unseen_facts() {
         )
         .unwrap();
     }
-    f.send(&c, "one", "Je préfère le thé vert.");
-    f.settle();
-    assert!(f.calls().is_empty());
-    assert_eq!(f.facts("grokbot").len(), 30);
-    assert!(f.cards(&c).is_empty());
-    let status = f.post("/api/memory", json!({"bot_id":"grokbot"}));
-    assert_eq!(status["automatic"]["saturated"], true);
-    assert!(status["automatic"]["catalogue_chars"].as_u64().unwrap() > 6000);
-    for fact in f.facts("grokbot").into_iter().take(20) {
-        f.post(
-            "/api/memory/forget",
-            json!({"bot_id":"grokbot","fact_id":fact.fact_id}),
-        );
-    }
-    assert_eq!(
-        f.post("/api/memory", json!({"bot_id":"grokbot"}))["automatic"]["saturated"],
-        false
+}
+
+fn known_in(request: &Value) -> Vec<Value> {
+    let input = request["input"][0]["content"][0]["text"]
+        .as_str()
+        .or_else(|| request["input"][0]["content"].as_str())
+        .unwrap_or_default();
+    let body: Value = serde_json::from_str(input).unwrap();
+    body["known"].as_array().unwrap().clone()
+}
+
+#[test]
+fn five_hundred_facts_still_learn_a_new_preference_with_only_close_facts_in_the_prompt() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    remember_many(&f, 500);
+    let before = f.facts("grokbot");
+    assert_eq!(before.len(), 500);
+    assert!(
+        before
+            .iter()
+            .map(|x| x.text.chars().count() + 100)
+            .sum::<usize>()
+            > 6000
     );
+    let text = "Je préfère le thé vert.";
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "one", text);
+    f.settle();
+    assert_eq!(f.facts("grokbot").len(), 501);
+    let cards = f.cards(&c);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["payload"]["text"], text);
+    let calls = f.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(known_in(&calls[0]).len() <= 20);
+    let status = f.post("/api/memory", json!({"bot_id":"grokbot"}));
+    assert!(status.get("automatic").is_none());
+}
+
+#[test]
+fn five_hundred_facts_do_not_duplicate_a_fact_repeated_in_a_message() {
+    let mut f = Fixture::new();
+    let c = f.conv("grokbot");
+    remember_many(&f, 500);
+    let text = "Je préfère le thé vert.";
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "one", text);
+    f.settle();
+    assert_eq!(f.facts("grokbot").len(), 501);
+    f.script(json!([fact(text, None)]));
+    f.send(&c, "two", text);
+    f.settle();
+    assert_eq!(f.calls().len(), 2);
+    let known = known_in(&f.calls()[1]);
+    assert!(known.len() <= 20);
+    assert!(known.iter().any(|k| k["text"] == text));
+    assert_eq!(f.facts("grokbot").len(), 501);
+    assert_eq!(f.cards(&c).len(), 1);
 }
 
 #[test]

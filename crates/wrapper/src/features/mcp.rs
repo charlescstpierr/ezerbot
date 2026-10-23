@@ -88,6 +88,18 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
         CREATE TABLE IF NOT EXISTS wrapper_mcp_labels (tool TEXT PRIMARY KEY,display_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_mcp_approval_chat (account_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL);",
     )?;
+    // A server added by address (HTTPS) has no command; its approved address lives here.
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_mcp_servers') WHERE name='endpoint')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        conn.execute(
+            "ALTER TABLE wrapper_mcp_servers ADD COLUMN endpoint TEXT",
+            [],
+        )?;
+    }
     catalogue::migrate(conn)?;
     Ok(())
 }
@@ -109,6 +121,177 @@ pub(crate) fn approval_conversation(ctx: &Context<'_>) -> Result<String, ApiErro
     Ok(id)
 }
 
+/// The GitHub read tools: a native adapter, run outside any SQLite writer.
+pub(crate) fn is_github_tool(name: &str) -> bool {
+    catalogue::github::is_tool(name) || is_github_comment(name) || is_github_issue(name)
+}
+/// The Slack tools: a native adapter, run outside any SQLite writer.
+pub(crate) fn is_slack_tool(name: &str) -> bool {
+    name == catalogue::slack::TOOL || is_slack_post(name)
+}
+/// The Slack publishing tool opens a draft card and sends nothing until that card is validated.
+pub(crate) fn is_slack_post(name: &str) -> bool {
+    name == catalogue::slack::post::TOOL
+}
+/// Why the Slack tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn slack_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::slack::unavailable(ctx)
+}
+pub(crate) fn run_slack_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    if is_slack_post(&call.name) {
+        catalogue::slack::post::call(ctx, call)
+    } else {
+        catalogue::slack::call(ctx, &call.arguments)
+    }
+}
+/// Why a GitHub tool the bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::github::unavailable(ctx)
+}
+/// Why a routine cannot be given a GitHub trigger: `None` when an account is connected.
+pub(crate) fn github_routine_gap(ctx: &Context<'_>) -> Result<Option<String>, ApiError> {
+    catalogue::github::routine_gap(ctx)
+}
+pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    if is_github_comment(&call.name) {
+        catalogue::github::comment::call(ctx, call)
+    } else if is_github_issue(&call.name) {
+        catalogue::github::issue::call(ctx, call)
+    } else {
+        catalogue::github::call(ctx, &call.name, &call.arguments)
+    }
+}
+/// The Gmail tools: a native adapter, run outside any SQLite writer. The read starts
+/// without a card; the send is a draft card.
+pub(crate) fn is_gmail_tool(name: &str) -> bool {
+    catalogue::gmail::is_tool(name) || is_gmail_email(name)
+}
+pub(crate) fn is_gmail_email(name: &str) -> bool {
+    name == catalogue::gmail::EMAIL_TOOL
+}
+/// Why the Gmail tool a bot was not offered cannot run: a sentence, not an unknown tool.
+pub(crate) fn gmail_unavailable(ctx: &Context<'_>) -> String {
+    catalogue::gmail::unavailable(ctx)
+}
+pub(crate) fn run_gmail_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
+    if is_gmail_email(&call.name) {
+        catalogue::gmail::email_call(ctx, call)
+    } else {
+        catalogue::gmail::call(ctx, &call.name, &call.arguments)
+    }
+}
+pub use catalogue::gmail::{CalendarCase, CalendarEvent, MailEvent};
+/// The messages that arrived in the connected Gmail inbox since the last call, the oldest
+/// first, each identifier once: the normalized event a routine reads. It never carries a
+/// token. The first call only learns what the inbox already holds.
+pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError> {
+    catalogue::gmail::new_messages(ctx)
+}
+/// Whether a Gmail account is connected: a new-mail trigger of a routine can only be armed then.
+pub fn gmail_connected(conn: &Connection) -> bool {
+    catalogue::gmail::any_connected(conn)
+}
+/// Forget what the inbox held, once no routine watches it: the next look learns it afresh.
+pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching(conn)
+}
+/// The agenda events of the connected Google account since the last call: created,
+/// modified, cancelled or begun, each version once, with its identifier, case, start
+/// instant and zone. It never carries a token. The first call only learns the agenda.
+pub fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
+    catalogue::gmail::calendar_events(ctx)
+}
+/// The agenda events handed over that no consumer has acknowledged yet, oldest first, each
+/// with its place in the inbox: `calendar_events` moves the cursors, so a consumer takes its
+/// events from here and acknowledges them once they are made into runs.
+pub fn calendar_inbox(conn: &Connection) -> Result<Vec<(i64, CalendarEvent)>, ApiError> {
+    catalogue::gmail::calendar_inbox(conn)
+}
+/// Those inbox events were made into runs: they leave the inbox.
+pub fn calendar_acknowledge(conn: &Connection, seqs: &[i64]) -> Result<(), ApiError> {
+    catalogue::gmail::calendar_acknowledge(conn, seqs)
+}
+/// Forget what the agenda held, once no routine watches it: the next look learns it afresh.
+pub fn calendar_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching_calendar(conn)
+}
+/// The publishing tools of the connections (GitHub, Gmail, Slack) and of the meeting chat: each opens a draft card and sends nothing
+/// until that card is validated.
+pub(crate) fn is_draft(name: &str) -> bool {
+    is_github_comment(name)
+        || is_github_issue(name)
+        || is_gmail_email(name)
+        || is_slack_post(name)
+        || super::recall::is_reply(name)
+}
+pub(crate) fn is_github_comment(name: &str) -> bool {
+    name == catalogue::github::COMMENT_TOOL
+}
+pub(crate) fn is_github_issue(name: &str) -> bool {
+    name == catalogue::github::ISSUE_TOOL
+}
+/// A draft whose card has a title the user may correct: an issue title, a subject.
+pub(crate) fn has_draft_title(name: &str) -> bool {
+    is_github_issue(name) || is_gmail_email(name)
+}
+pub(crate) fn validate_draft(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
+    if super::recall::is_reply(&call.name) {
+        super::recall::reply_validate(ctx, call)
+    } else if is_slack_post(&call.name) {
+        catalogue::slack::post::validate(ctx, call)
+    } else if is_gmail_email(&call.name) {
+        catalogue::gmail::email_validate(ctx, call)
+    } else if is_github_issue(&call.name) {
+        catalogue::github::issue::validate(ctx, call)
+    } else {
+        catalogue::github::comment::validate(ctx, call)
+    }
+}
+/// Content of the draft card, stored with the approval request.
+pub(crate) fn draft_display(
+    ctx: &Context<'_>,
+    request_id: &str,
+    call: &ToolCall,
+) -> Result<Value, ApiError> {
+    if super::recall::is_reply(&call.name) {
+        super::recall::reply_prepare(ctx, request_id, call)
+    } else if is_slack_post(&call.name) {
+        catalogue::slack::post::prepare(ctx, request_id, call)
+    } else if is_gmail_email(&call.name) {
+        catalogue::gmail::email_prepare(ctx, request_id, call)
+    } else if is_github_issue(&call.name) {
+        catalogue::github::issue::prepare(ctx, request_id, call)
+    } else {
+        catalogue::github::comment::prepare(ctx, request_id, call)
+    }
+}
+pub(crate) fn draft_call(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    catalogue::github::comment::call_id(ctx, request_id)
+        .or_else(|| catalogue::gmail::email_call_id(ctx, request_id))
+        .or_else(|| catalogue::slack::post::call_id(ctx, request_id))
+        .or_else(|| super::recall::reply_call_id(ctx, request_id))
+}
+/// What Charles corrected on a draft card: a comment or a Slack message has a text, an issue a title and a body,
+/// an email a subject and a body.
+pub(crate) fn edit_draft(
+    ctx: &Context<'_>,
+    request_id: &str,
+    tool: &str,
+    title: Option<&str>,
+    text: Option<&str>,
+) -> Result<(), ApiError> {
+    if super::recall::is_reply(tool) {
+        super::recall::reply_edit(ctx, request_id, text.unwrap_or_default())
+    } else if is_slack_post(tool) {
+        catalogue::slack::post::edit(ctx, request_id, text.unwrap_or_default())
+    } else if is_gmail_email(tool) {
+        catalogue::gmail::email_edit(ctx, request_id, title, text)
+    } else if is_github_issue(tool) {
+        catalogue::github::issue::edit(ctx, request_id, title, text)
+    } else {
+        catalogue::github::comment::edit(ctx, request_id, text.unwrap_or_default())
+    }
+}
 pub(crate) fn is_lifecycle(name: &str) -> bool {
     name.starts_with("mcp_start_") || name.starts_with("mcp_remove_")
 }
@@ -117,11 +300,20 @@ pub(crate) fn is_lifecycle(name: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct Add {
     name: String,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     arguments: Vec<String>,
     #[serde(default)]
     environment: BTreeMap<String, String>,
+    /// HTTPS address of a remote server, instead of a local command.
+    url: Option<String>,
+    /// Optional bearer secret of that server: it goes to the vault, never back.
+    #[serde(default)]
+    token: String,
+    /// The user confirmed that an `http://127.0.0.1` server runs on this Mac.
+    #[serde(default)]
+    on_this_mac: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,13 +332,14 @@ struct Server {
     id: String,
     name: String,
     command: String,
+    endpoint: Option<String>,
     arguments: Vec<String>,
     names: Vec<String>,
     tools: Vec<Value>,
     error: Option<String>,
 }
 fn servers(conn: &Connection) -> Result<Vec<Server>, ApiError> {
-    let mut stmt = conn.prepare("SELECT id,name,command,arguments_json,environment_names_json,tools_json,error FROM wrapper_mcp_servers ORDER BY name,id")?;
+    let mut stmt = conn.prepare("SELECT id,name,command,arguments_json,environment_names_json,tools_json,error,endpoint FROM wrapper_mcp_servers ORDER BY name,id")?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -157,15 +350,17 @@ fn servers(conn: &Connection) -> Result<Vec<Server>, ApiError> {
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(id, name, command, args, names, tools, error)| {
+        .map(|(id, name, command, args, names, tools, error, endpoint)| {
             Ok(Server {
                 id,
                 name,
                 command,
+                endpoint,
                 arguments: serde_json::from_str(&args)
                     .map_err(|_| invalid("Configuration MCP illisible."))?,
                 names: serde_json::from_str(&names)
@@ -337,6 +532,8 @@ fn enabled(conn: &Connection, server: &str, bot: &str) -> bool {
 }
 pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
     let mut result = Vec::new();
+    // Several accounts of one service share one closed list of tools.
+    let mut native_offered = BTreeSet::new();
     for server in servers(ctx.connection).unwrap_or_default() {
         for action in ["start", "remove"]
             .into_iter()
@@ -361,6 +558,13 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
             .bot_id
             .is_some_and(|bot| enabled(ctx.connection, &server.id, bot))
         {
+            continue;
+        }
+        if let Some(service) = catalogue::native_service(ctx, &server.id) {
+            let tools = catalogue::native_tools(ctx, &server);
+            if !tools.is_empty() && native_offered.insert(service) {
+                result.extend(tools);
+            }
             continue;
         }
         let handle = ctx
@@ -481,6 +685,9 @@ fn needs_recovery(ctx: &Context<'_>, name: &str) -> bool {
 }
 
 pub(crate) fn call_display(ctx: &Context<'_>, name: &str, arguments: &Value) -> Option<Value> {
+    if let Some(label) = super::recall::tool_label(name) {
+        return Some(label);
+    }
     let mut label = display(ctx, name)?;
     let recoverable = needs_recovery(ctx, name);
     let server_id = name
@@ -641,6 +848,9 @@ fn state_servers(ctx: &Context<'_>) -> Result<Vec<Value>, ApiError> {
                 }
                 Err(_) => "busy",
             },
+            None if catalogue::native_status(ctx, &server.id).is_some() => {
+                catalogue::native_status(ctx, &server.id).unwrap_or("disconnected")
+            }
             None if server.error.as_deref() == Some(crate::mcp::DISCONNECTED) => "crashed",
             None if server.error.is_some() => "error",
             None => "disconnected",
@@ -652,7 +862,7 @@ fn state_servers(ctx: &Context<'_>) -> Result<Vec<Value>, ApiError> {
             .query_map([&server.id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let tools: Vec<_> = server.tools.iter().map(|t|json!({"name":t["name"],"description":t["description"],"namespace":namespace(&server,t)})).collect();
-        result.push(json!({"id":server.id,"name":server.name,"command":server.command,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
+        result.push(json!({"id":server.id,"name":server.name,"command":server.command,"url":server.endpoint,"arguments":server.arguments,"environment_names":server.names,"enabled_bots":bots,"status":status,"error":if status=="crashed" {Some("Le serveur MCP s’est arrêté. Redémarrez le connecteur.".to_owned())} else {server.error},"tools":tools}));
     }
     Ok(result)
 }
@@ -678,6 +888,7 @@ pub fn routes(
                 | "/api/mcp/restart"
                 | "/api/mcp/remove"
                 | "/api/connectors/connect"
+                | "/api/connectors/cancel"
                 | "/api/connectors/disconnect"
         )
     {
@@ -685,13 +896,96 @@ pub fn routes(
     }
     Some(route(app, path, body).map(ApiResponse::Json))
 }
+/// A server reached by address: the address is the approved origin, the optional
+/// token a vault secret that is never shown again nor given to the model.
+fn add_remote(ctx: &Context<'_>, add: Add) -> Result<Value, ApiError> {
+    let name = add.name.trim();
+    if !add.command.trim().is_empty() || !add.arguments.is_empty() || !add.environment.is_empty() {
+        return Err(invalid(
+            "Choisissez une commande locale ou une adresse https, pas les deux.",
+        ));
+    }
+    if name.is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control) {
+        return Err(invalid("Nom du connecteur invalide (1 à 60 caractères)."));
+    }
+    let endpoint = crate::mcp::approved_endpoint(add.url.as_deref().unwrap_or(""), add.on_this_mac)
+        .map_err(|message| invalid(&message))?;
+    let token = add.token.trim();
+    if token.len() > 2048 || !token.bytes().all(|c| c.is_ascii_graphic()) {
+        return Err(invalid(
+            "Le jeton est invalide : 2 Ko au plus, sans espace ni caractère de contrôle.",
+        ));
+    }
+    // A shorter value is only masked when it is a whole string: it could leak inside a sentence.
+    if !token.is_empty() && !strong_secret(token) {
+        return Err(invalid(
+            "Le jeton est trop court pour être masqué de façon fiable : 8 caractères au moins.",
+        ));
+    }
+    if !token.is_empty() && (name.contains(token) || endpoint.contains(token)) {
+        return Err(invalid(
+            "Gardez le jeton uniquement dans son champ, pas dans le nom ni dans l’adresse.",
+        ));
+    }
+    let vault = super::forms::vault(ctx)?;
+    let public = json!([name, endpoint]);
+    if redact_value(&vault, &public)? != public {
+        return Err(invalid(
+            "La configuration publique contient un secret. Utilisez le champ du jeton.",
+        ));
+    }
+    let tx = write_transaction(ctx.connection)?;
+    let count: i64 = tx.query_row("SELECT count(*) FROM wrapper_mcp_servers", [], |r| r.get(0))?;
+    if count >= 20 {
+        return Err(invalid("La limite est de 20 connecteurs."));
+    }
+    if servers(&tx)?
+        .iter()
+        .any(|s| s.name.to_lowercase() == name.to_lowercase())
+    {
+        return Err(ApiError::new(
+            409,
+            "Un connecteur porte déjà ce nom. Choisissez un nom distinct pour les approbations.",
+        ));
+    }
+    let id: String = tx.query_row("SELECT lower(hex(randomblob(8)))", [], |r| r.get(0))?;
+    let names = if token.is_empty() {
+        json!([])
+    } else {
+        json!(["ACCESS_TOKEN"])
+    };
+    tx.execute("INSERT INTO wrapper_mcp_servers(id,name,command,arguments_json,environment_names_json,endpoint) VALUES (?1,?2,'','[]',?3,?4)",params![id,name,names.to_string(),endpoint])?;
+    let variables: BTreeMap<&str, &str> = if token.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([("ACCESS_TOKEN", token)])
+    };
+    let raw = json!({"variables":variables}).to_string();
+    if raw.len() > grokbot_forms::vault::MAX_SECRET_VALUE_BYTES {
+        return Err(invalid(
+            "Le jeton dépasse la limite du coffre local (4 Ko au total).",
+        ));
+    }
+    vault.set(
+        &secret_name(&id),
+        grokbot_forms::vault::MCP_ENV_PURPOSE,
+        &raw,
+    )?;
+    tx.commit()?;
+    Ok(json!({"id":id,"mcp":state(ctx)}))
+}
 fn lifecycle_arguments(
     ctx: &Context<'_>,
     server: &Server,
     action: &str,
     restarting: bool,
 ) -> Value {
-    let mut args = json!({"serveur":server.name,"commande":server.command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
+    // The approval shows the exact address the secret may be sent to.
+    let command = server.endpoint.as_deref().unwrap_or(&server.command);
+    let mut args = json!({"serveur":server.name,"commande":command,"arguments":server.arguments,"variables_privées":server.names,"action":if action=="start" {if restarting {"Redémarrer le connecteur"} else {"Démarrer le connecteur"}} else {"Supprimer le connecteur"}});
+    if server.endpoint.is_some() {
+        args["transport"] = json!("https");
+    }
     if let Some(catalogue) = catalogue::preview(ctx, server, action) {
         args["action"] = catalogue["action"].clone();
         args["variables_privées"] = catalogue["variables_privées"].clone();
@@ -707,6 +1001,14 @@ fn route(app: &App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
     let ctx = app.feature_context();
     if path == "/api/mcp/add" {
         let add: Add = parse(body)?;
+        if add.url.is_some() {
+            return add_remote(&ctx, add);
+        }
+        if !add.token.is_empty() || add.on_this_mac {
+            return Err(invalid(
+                "Le jeton et la confirmation « sur ce Mac » ne concernent qu’un serveur ajouté par adresse.",
+            ));
+        }
         let name = add.name.trim();
         let command = add.command.trim();
         if name.is_empty()

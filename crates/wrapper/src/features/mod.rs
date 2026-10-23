@@ -29,6 +29,7 @@ pub mod priority {
     pub const SKILLS: u32 = 30;
     pub const MEMORY: u32 = 40;
     pub const LIBRARY: u32 = 45;
+    pub const THREAD: u32 = 48;
     pub const SUMMARY: u32 = 50;
     pub const HISTORY: u32 = 90;
     pub const CURRENT: u32 = 100;
@@ -91,6 +92,7 @@ pub mod engine;
 pub mod floating;
 pub mod forms;
 pub mod generated;
+pub mod images;
 pub mod iphone;
 pub mod library;
 pub mod local;
@@ -100,15 +102,24 @@ pub mod memory;
 pub mod memory_auto;
 pub mod multibot;
 pub mod notifications;
+pub mod pages;
+pub mod recall;
+pub mod routine_calendar;
+pub mod routine_github;
+pub mod routine_mail;
+pub mod routine_webhooks;
 pub mod routines;
 pub mod routines_background;
 pub mod screen;
+mod shell_tasks;
 pub mod skills;
 pub mod storage;
 pub mod templates;
+pub mod threads;
 pub mod updates;
 pub mod usage;
 pub mod voice;
+pub mod voice_call;
 pub mod voice_session;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
@@ -137,6 +148,7 @@ macro_rules! registry {
 }
 registry!(
     conversations,
+    threads,
     engine,
     multibot,
     skills,
@@ -145,10 +157,16 @@ registry!(
     forms,
     routines,
     routines_background,
+    routine_webhooks,
+    routine_github,
+    routine_mail,
+    routine_calendar,
     delegation,
     attachments,
     library,
     generated,
+    pages,
+    images,
     mcp,
     storage,
     usage,
@@ -157,7 +175,9 @@ registry!(
     floating,
     local,
     voice,
+    voice_call,
     meetings,
+    recall,
     screen,
     templates,
     demonstrations,

@@ -3,11 +3,13 @@ export const localToolLabel = (name) => localToolNames[name] || name;
 if (typeof window !== "undefined") window.GrokbotLocalUi = { toolLabel: localToolLabel };
 
 export function localStatusLabel(status) {
-  return { "terminé": "Terminé", "échec": "Code de sortie non nul", "annulé": "Annulée", "délai dépassé": "Délai dépassé" }[status] || "Statut indisponible";
+  return { "terminé": "Terminé", "échec": "Code de sortie non nul", "annulé": "Annulée", "délai dépassé": "Délai dépassé", "en cours": "En cours", "arrêtée": "Arrêtée" }[status] || "Statut indisponible";
 }
 export function localLimits(args = {}) {
   const number = new Intl.NumberFormat("fr-CA", { maximumFractionDigits: 3 });
-  return `Délai : ${number.format((args.timeout_ms ?? 30000) / 1000)} s · Sortie cumulée : ${number.format((args.output_limit ?? 131072) / 1024)} Kio maximum`;
+  const cap = `Sortie cumulée : ${number.format((args.output_limit ?? 131072) / 1024)} Kio maximum`;
+  if (args.background === true) return `Tâche de fond · sans plafond de temps · ${cap}`;
+  return `Délai : ${number.format((args.timeout_ms ?? 30000) / 1000)} s · ${cap}`;
 }
 export function localFailureView(reason, approvalStatus, runStatus) {
   if (typeof reason !== "string") return null;

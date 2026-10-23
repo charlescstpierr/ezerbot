@@ -6,7 +6,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 
 - Lancer l’instance avec `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves>`.
 - `HOME` et `CFFIXED_USER_HOME` sont un répertoire `mktemp` neuf. Le refus est immédiat si ce `HOME` est le vrai dossier personnel ou si un chemin touche `~/Library/Application Support/Grokbot`.
-- Le faux OpenAI de bouclage et le fichier `workspace.chatgpt-auth.json` fictif sont déjà en place. Ne pas copier d’identifiants ChatGPT.
+- Le faux OpenAI de bouclage et le fichier `workspace.codex-auth.json` fictif sont déjà en place. Ne pas copier d’identifiants ChatGPT.
 - Poser `CHROME_DEVTOOLS_AXI_SESSION` sur l’identifiant du run.
 - Lancer `bash .cursor/skills/verify-ezerbot/scripts/doctor.sh --evidence <preuves>` et exiger `doctor: ok`, la bonne URL, le bon port et le commit extrait.
 - Ne jamais piloter une instance qui n’a pas été démarrée par ce run, ni ouvrir `Ezerbot.app`.
@@ -41,3 +41,15 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Réunions et routines](./reunions-routines.md) couvre la rétention audio et le dialogue Routines.
 - [Mémoire](./memoire.md) couvre la mémoire automatique et la mémoire du bot Ezerbot.
 - [Bibliothèque](./bibliotheque.md) couvre la bibliothèque de fichiers d’un bot : dépôt, liste, retrait et avertissement de troncature.
+- [Images générées](./images.md) couvre la demande d’un dessin, l’image dans la carte et la visionneuse.
+- [Images de référence et cadre](./images-reference.md) couvre la photo jointe envoyée en référence et l’image large rendue à son rapport dans la carte.
+- [Pages](./pages.md) couvre une Page locale écrite par le bot : affichage à côté du fil, choix interactif et texte décodé.
+- [Dictée et microphone](./dictee.md) couvre le réglage du microphone, son repli quand il disparaît et la dictée qui pose le texte dans le brouillon.
+- [Voix par bot](./voix-bots.md) couvre la voix, la vitesse et la langue de chaque bot, l’attribution de deux voix différentes et le refus d’une vitesse au-delà de 2.
+- [Mémo vocal](./memo-vocal.md) couvre la vitesse de lecture d’un mémo de 0,5 à 2, le refus d’une vitesse hors plage et le saut au mot de la transcription.
+- [Réponse depuis la notification iPhone](./iphone-reponse.md) couvre la feuille Répondre ouverte depuis la notification d’un bot et l’envoi qui n’arrive qu’une fois dans le fil.
+- [Appel vocal](./voix-appel.md) couvre l’appel en direct : la phrase de transmission de l’audio, le transcript affiché ou masqué, la voix du bot coupée par la parole ou Échap, et le transcript rangé dans le fil.
+- [Tâches de fond](./taches-de-fond.md) couvre la carte d’une commande en arrière-plan : la saisie d’une ligne sur son entrée standard, sa recopie dans la sortie, le refus après Terminée et sur une invite de mot de passe.
+- [Répondre en fil](./reponse-fil.md) couvre l’entrée « Répondre en fil » du menu d’un message, le sous-fil lié avec son bandeau, la réponse du bot qui tient compte du message parent et le retour au fil principal.
+- [Approbation non bloquante](./approbation-non-bloquante.md) couvre le réglage « Continuer sans attendre mes approbations » dans Paramètres : l’état par défaut, la durée de validité, le rappel et l’état coupé où les choix sont grisés.
+- [Approbation tardive](./approbation-tardive.md) couvre la carte décidée après la fin du tour du bot : « Autorisé une fois », la reprise du bot dans le même fil avec le résultat, et la carte Expirée grise sans action.

@@ -403,6 +403,7 @@ static void shell_task_reap(const ShellChild *child) {
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotDeepLinks"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotFloating"];
     [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotImages"];
+    [configuration.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"ezerbotRatings"];
     WKWebView *view = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:configuration];
     view.navigationDelegate = self;
     view.UIDelegate = self;
@@ -467,6 +468,20 @@ static void shell_task_reap(const ShellChild *child) {
     }
     NSDictionary *body = message.body;
     NSString *command = body[@"command"];
+    if ([message.name isEqual:@"ezerbotRatings"]) {
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        if ([command isEqual:@"read"]) {
+            replyHandler([defaults stringForKey:@"ezerbot.notations"], nil); return;
+        }
+        if ([command isEqual:@"write"] && [body[@"value"] isKindOfClass:NSString.class]) {
+            NSData *data = [body[@"value"] dataUsingEncoding:NSUTF8StringEncoding];
+            if ([[NSJSONSerialization JSONObjectWithData:data options:0 error:nil] isKindOfClass:NSArray.class]) {
+                [defaults setObject:body[@"value"] forKey:@"ezerbot.notations"];
+                replyHandler(@YES, nil); return;
+            }
+        }
+        replyHandler(nil, @"Notation invalide."); return;
+    }
     if ([message.name isEqual:@"ezerbotFloating"]) {
         if ([command isEqual:@"show"]) { [self.floating show]; replyHandler(@YES,nil); return; }
         if ([command isEqual:@"configure"] && [body[@"shortcut"] isKindOfClass:NSString.class]) {
@@ -781,7 +796,33 @@ static void shell_task_reap(const ShellChild *child) {
     }
 }
 
+// Réunions : un bot Recall invité doit sortir de l'appel avant que le moteur
+// ne soit arrêté. Le moteur n'a que SIGTERM puis une seconde, trop peu pour le réseau.
+// Sans réunion, la réponse est immédiate ; la route attend au plus 12 s une invitation sans réponse, et un moteur muet ne retient pas la fermeture plus de 16 s.
+- (void)leaveRecallMeetings {
+    NSURL *base = self.backendURL;
+    if (!base || !self.backendTask.running) return;
+    NSURLComponents *components = [NSURLComponents componentsWithURL:base resolvingAgainstBaseURL:NO];
+    components.path = @"/api/recall/shutdown";
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:components.URL];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"local" forHTTPHeaderField:@"X-Grokbot-Request"];
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.timeoutIntervalForRequest = 15;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        (void)data; (void)response; (void)error;
+        dispatch_semaphore_signal(finished);
+    }] resume];
+    dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_SEC));
+    [session invalidateAndCancel];
+}
+
 - (void)stopBackend {
+    [self leaveRecallMeetings];
     [self.voice cancel];
     [self.voiceSession cancel];
     [self.floating invalidate];

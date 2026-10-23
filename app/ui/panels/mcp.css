@@ -2,9 +2,14 @@
 .mcp-section h4 { margin: 24px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .mcp-catalogue-header { display: grid; gap: 4px; margin-top: 24px; }
 .mcp-catalogue-header > h4, .mcp-catalogue-header > p { margin: 0; }
+.mcp-catalogue-header > .text-input { margin: 8px 0 4px; }
 .mcp-copy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
 .mcp-copy-row code { min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; user-select: all; -webkit-user-select: all; }
 .mcp-copy-row button { font-size: 11px; padding: 7px 9px; }
+.mcp-device { display: grid; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--soft); min-width: 0; }
+.mcp-device > p { margin: 0; }
+.mcp-device .mcp-copy-row code { font-size: 20px; font-weight: 600; letter-spacing: .12em; text-align: center; padding: 10px; background: var(--canvas); }
+.mcp-device > a { justify-self: start; font-size: 11px; line-height: 1.2; padding: 7px 9px; }
 .mcp-catalogue-card > p { line-height: 1.5; margin: 8px 0; }
 .mcp-catalogue-card a { text-decoration: none; }
 .mcp-catalogue-card .mcp-form { padding-bottom: 8px; }
@@ -38,10 +43,25 @@
 .mcp-bots label { display: flex; align-items: center; gap: 6px; flex-direction: row-reverse; }
 .mcp-bots input { accent-color: var(--accent); }
 .mcp-form { display: grid; gap: 12px; padding-top: 12px; min-width: 0; }
-.mcp-form > label { display: grid; gap: 5px; font-size: 12px; }
-.mcp-form input:not([type=checkbox]), .mcp-form textarea { width: 100%; min-width: 0; box-sizing: border-box; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 9px; font: inherit; font-size: 12px; }
+.mcp-form > label, .mcp-remote > label, .mcp-local > label { display: grid; gap: 5px; font-size: 12px; }
+.mcp-remote, .mcp-local { display: grid; gap: 12px; min-width: 0; }
+.mcp-remote > label:has(input[type=checkbox]) { display: flex; align-items: center; gap: 8px; }
+.mcp-remote[hidden], .mcp-local[hidden], .mcp-remote > label[hidden] { display: none !important; }
+.mcp-form input:not([type=checkbox]):not([type=radio]), .mcp-form textarea { width: 100%; min-width: 0; box-sizing: border-box; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 9px; font: inherit; font-size: 12px; }
 .mcp-form input:focus, .mcp-form textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-.mcp-form > button { justify-self: start; }
+.mcp-form > button, .mcp-local > button { justify-self: start; }
 .mcp-environment { display: grid; gap: 8px; }
 .mcp-env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
 @media (max-width: 850px) { .mcp-environment { gap: 14px; } .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; padding-bottom: 10px; border-bottom: 1px solid var(--line); } .mcp-env-row input:first-child { grid-column: 1 / -1; } }
+
+.mcp-category { display: grid; gap: 12px; min-width: 0; }
+.mcp-category[hidden], .mcp-form[hidden] { display: none; }
+.mcp-transcript, .mcp-summary { margin-top: 12px; min-width: 0; }
+.mcp-transcript h5, .mcp-summary h5 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.mcp-lines { list-style: none; margin: 0; padding: 8px; max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); display: grid; gap: 6px; }
+.mcp-lines:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.mcp-line { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; font-size: 12px; line-height: 1.5; min-width: 0; }
+.mcp-line-time { color: var(--muted); font-variant-numeric: tabular-nums; grid-row: 1 / span 2; }
+.mcp-line-speaker { font-weight: 600; overflow-wrap: anywhere; }
+.mcp-line-text { overflow-wrap: anywhere; }
+.mcp-summary-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }

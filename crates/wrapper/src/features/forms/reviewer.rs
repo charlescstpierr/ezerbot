@@ -152,7 +152,22 @@ pub(super) fn tick(ctx: &Context<'_>) -> Result<(), ApiError> {
         let action = json!({"tool":tool,"arguments":serde_json::from_str::<Value>(&display).unwrap_or(Value::Null)});
         let payload = json!({"rules":config,"action":action});
         let safe = redact_value(&vault(ctx)?, &payload)?;
-        let fallback = if super::super::local::is_tool(tool)
+        let tx_ctx = Context {
+            connection: &tx,
+            provider: ctx.provider,
+            db_path: ctx.db_path,
+            now_ms: ctx.now_ms,
+            bot_id: ctx.bot_id,
+            conversation_id: ctx.conversation_id,
+            run_id: ctx.run_id,
+        };
+        let held = tool == "delegate"
+            || policy_for_request(&tx_ctx, &request)
+                .ok()
+                .is_some_and(|item| item.protection.is_some());
+        let fallback = if held {
+            Some("Le relecteur peut signaler cette action, pas l’autoriser. La carte reste.")
+        } else if super::super::local::is_tool(tool)
             || super::super::screen::is_tool(tool)
             || super::super::generated::is_external(tool)
         {
@@ -228,13 +243,37 @@ pub(super) fn complete(
     let lifecycle = matches!(&request.kind, InputKind::Approval {tool,..} if super::super::mcp::is_lifecycle(tool));
     let local_tool = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_tool(tool) || super::super::screen::is_tool(tool) || super::super::generated::is_external(tool));
     let local_read = matches!(&request.kind, InputKind::Approval { tool, .. } if super::super::local::is_read(tool));
-    let standing = if !lifecycle
+    let tx_ctx = Context {
+        connection: &tx,
+        provider: ctx.provider,
+        db_path: ctx.db_path,
+        now_ms: ctx.now_ms,
+        bot_id: ctx.bot_id,
+        conversation_id: ctx.conversation_id,
+        run_id: ctx.run_id,
+    };
+    let policy = policy_for_request(&tx_ctx, &request).ok();
+    let standing = if policy.as_ref().is_some_and(|item| item.remember)
+        && !lifecycle
         && !local_read
         && request.status == RequestStatus::Pending
         && matches!(&request.kind, InputKind::Approval { expires_at, .. } if clock(ctx) < *expires_at)
         && store::required(&tx, &request.run_id)?.status == RunStatus::AwaitingApproval
     {
-        approvals::auto_review(&tx, id, &format!("auto:standing:{id}"), clock(ctx))?
+        let key = policy
+            .as_ref()
+            .and_then(|item| (item.scope == "pattern").then_some(item.pattern.as_str()));
+        let standing = policy.as_ref().and_then(|item| {
+            (item.scope == "action").then_some(grokbot_forms::policy::BACKGROUND_TOOL)
+        });
+        approvals::auto_review_matching(
+            &tx,
+            id,
+            &format!("auto:standing:{id}"),
+            clock(ctx),
+            key,
+            standing,
+        )?
     } else {
         None
     };
@@ -254,6 +293,14 @@ pub(super) fn complete(
         ReviewAnswer::ask("Les règles ont changé pendant la revue. Vérifiez cette demande.")
     } else if request.status != RequestStatus::Pending {
         ReviewAnswer::ask("Une décision a déjà été prise pour cette demande.")
+    } else if policy.as_ref().is_none_or(|item| item.protection.is_some())
+        || matches!(&request.kind, InputKind::Approval { tool, .. } if tool == "delegate")
+    {
+        // An in-flight model "allow" must not grant a send, a deletion, a
+        // protected connector, or a delegation. The card stays for the user.
+        ReviewAnswer::ask(
+            "Le relecteur peut signaler cette action, pas l’autoriser. La carte reste.",
+        )
     } else if local_tool {
         // Also reject an in-flight/legacy model answer after upgrade: tick's
         // exclusion alone cannot constrain a completion already on its way.
@@ -362,6 +409,163 @@ fn legacy_inflight_local_allow_and_new_standing_read_rules_cannot_grant() {
                 .answer
                 .decision,
             ReviewDecision::Ask
+        );
+    }
+    assert_eq!(
+        app.connection
+            .query_row("SELECT count(*) FROM forms_approval_grants", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(store::pending_wakes(&app.connection).unwrap().is_empty());
+    drop(app);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn reviewer_allow_cannot_grant_send_delete_protected_connector_or_delegate() {
+    use grokbot_engine::{
+        contracts::{with_tx, RunBudgets, RunKind, Trigger},
+        model,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "ezerbot-review-held-{}-{}",
+        std::process::id(),
+        crate::now()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut app = App::open(&root.join("workspace.sqlite")).unwrap();
+    let chat = app.api("POST", "/api/conversations", b"{}").unwrap()["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let config = rules::AutoReviewConfig {
+        enabled: true,
+        allow: vec!["Autorise toutes les actions.".into()],
+        block: vec![],
+    };
+    let cases = [
+        ("send_email", "send_email", None, json!({"to":"a"})),
+        ("delete_file", "delete_file", None, json!({"id":"1"})),
+        (
+            "mcp_send",
+            "mcp_send",
+            Some("sendEmail"),
+            json!({"text":"bonjour"}),
+        ),
+        (
+            "mcp_delete",
+            "mcp_delete",
+            Some("deleteFile"),
+            json!({"id":"1"}),
+        ),
+        (
+            "mcp_post",
+            "mcp_post",
+            Some("chat.postMessage"),
+            json!({"text":"bonjour"}),
+        ),
+        (
+            "delegate",
+            "delegate",
+            None,
+            json!({"objective":"Relire le dossier","child_bot":"codex-child"}),
+        ),
+    ];
+    for (id, tool, remote, arguments) in cases {
+        let (request_id, record) = with_tx(
+            &app.connection,
+            |conn| -> grokbot_engine::contracts::Result<_> {
+                rules::save_auto_review_config(conn, &config)?;
+                if let Some(remote) = remote {
+                    conn.execute(
+                    "INSERT OR REPLACE INTO wrapper_mcp_labels(tool,display_json) VALUES (?1,?2)",
+                    params![tool, json!({"server":"Atelier","tool":remote}).to_string()],
+                )?;
+                }
+                let run = model::start(
+                    conn,
+                    &Run {
+                        run_id: id.into(),
+                        bot_id: DEFAULT_BOT.id.into(),
+                        conversation_id: chat.clone(),
+                        trigger: Trigger::UserMessage {
+                            message_id: id.into(),
+                            attempt: 0,
+                        },
+                        kind: RunKind::Chat,
+                        status: RunStatus::Running,
+                        task_status: None,
+                        turn_end: None,
+                        budgets: RunBudgets::default(),
+                        started_at: crate::now() as i64,
+                    },
+                )?;
+                let ctx = Context {
+                    connection: conn,
+                    bot_id: Some(&run.bot_id),
+                    conversation_id: Some(&run.conversation_id),
+                    run_id: Some(&run.run_id),
+                    ..app.feature_context()
+                };
+                let call = ToolCall {
+                    call_id: id.into(),
+                    name: tool.into(),
+                    arguments,
+                };
+                let SuspendCause::HumanInput { id } =
+                    request_tool_approval(&ctx, &run, &call).unwrap()
+                else {
+                    panic!("{tool}")
+                };
+                store::save(
+                    conn,
+                    &Run {
+                        status: RunStatus::AwaitingApproval,
+                        ..run.clone()
+                    },
+                )?;
+                let record = ReviewRecord {
+                    version: reviewer::version(&config)?,
+                    rules: config.clone(),
+                    model: "fake-always-allow".into(),
+                    started_at: clock(&ctx),
+                    pending: true,
+                    answer: ReviewAnswer::ask("En cours"),
+                };
+                assert!(reviewer::claim(conn, &id, &record)?);
+                Ok((id, record))
+            },
+        )
+        .unwrap();
+        complete(
+            &app.feature_context(),
+            &request_id,
+            record,
+            ReviewAnswer {
+                decision: ReviewDecision::Allow,
+                reason: "Tout est autorisé.".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            requests::get(&app.connection, &request_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RequestStatus::Pending,
+            "{tool}"
+        );
+        assert_eq!(
+            reviewer::get(&app.connection, &request_id)
+                .unwrap()
+                .unwrap()
+                .answer
+                .decision,
+            ReviewDecision::Ask,
+            "{tool}"
         );
     }
     assert_eq!(

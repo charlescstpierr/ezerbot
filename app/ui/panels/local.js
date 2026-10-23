@@ -16,7 +16,7 @@
     const turn = messages.slice(lastUser + 1).reverse();
     // Host settings decisions share the approval surface and must also remain
     // reachable after resize; their arguments are not local tool commands.
-    const pending = turn.find(m => m.kind === "approval" && m.payload?.status?.status === "pending" && (localNames.has(m.payload?.kind?.tool) || m.payload?.kind?.tool === "routines_background_configure" || m.payload?.connector?.origin === "settings"));
+    const pending = turn.find(m => m.kind === "approval" && m.payload?.status?.status === "pending" && (localNames.has(m.payload?.kind?.tool) || ["routines_background_configure", "routines_webhook_publish"].includes(m.payload?.kind?.tool) || m.payload?.connector?.origin === "settings" || m.payload?.recall?.origin === "settings"));
     const tool = turn.find(m => m.kind === "tool" && localNames.has(m.payload?.call?.name));
     const failure = tool && (tool.payload?.outcome?.status === "failed" || ["échec", "annulé", "délai dépassé"].includes(tool.payload?.outcome?.output?.status));
     const running = tool && typeof tool.payload?.run_id === "string" && !tool.payload.outcome && tool.payload.run_status === "running"
@@ -180,8 +180,22 @@
   panels.register({
     id: "local", settingsSection(container) { settings = container; render(panels.state); },
     onState(state, context) { render(state); latestContext = context; if (resizeAnchor && attention(context)?.token !== resizeAnchor) { dropAnchor(); } focusAttention(context); },
+    wantsPolling(context) {
+      return (context?.conversation?.messages || []).some((message) => message.payload?.outcome?.output?.background === true && message.payload?.outcome?.output?.status === "en cours");
+    },
     async onCardAction(message, action, detail, context) {
-      if (action !== "local.stop" || message.kind !== "tool") return false;
+      if (message.kind !== "tool") return false;
+      if (action === "local.task.stop") {
+        await panels.api("/api/local/tasks/stop", { run_id: message.payload.run_id, call_id: message.payload.call?.call_id });
+        await panels.refresh(); return true;
+      }
+      if (action === "local.task.input") {
+        await panels.api("/api/local/tasks/input", { run_id: message.payload.run_id, call_id: message.payload.call?.call_id, line: detail?.line ?? "" });
+        // The line has reached the program: a failed refresh must not read as a refused line.
+        try { await panels.refresh(); } catch { /* the next poll reloads the card */ }
+        return true;
+      }
+      if (action !== "local.stop") return false;
       await panels.api("/api/stop", { conversation_id: context.conversation.id, message_id: message.payload.run_id });
       await panels.refresh(); return true;
     },

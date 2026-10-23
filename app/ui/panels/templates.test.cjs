@@ -68,6 +68,7 @@ function harness({ draft = '', servers = [], prepare } = {}) {
       calls.push([path, body]);
       if (path === '/api/templates') return structuredClone(catalogue);
       if (path === '/api/templates/create') return { bot: { id: body.bot_id, name: body.document?.bot.name || 'Tri de boîte' }, routines_enabled: body.activate_routines };
+      if (path === '/api/templates/copy') return { bot: { id: body.new_bot_id, name: `${body.bot_id === 'bot-dev' ? 'Dev' : 'Bot'} (copie)` }, warnings: [] };
       if (path === '/api/templates/decode') return { document: structuredClone(catalogue.templates[0]), template_id: null };
       throw new Error(`unexpected ${path}`);
     },
@@ -289,4 +290,99 @@ test('a starter replaces an untouched starter but never a typed draft', () => {
   assert.equal(fresh.panels.draftText, 'Trie mes courriels.');
   fresh.t.useStarter('bot-b', 'Relis ce diff.');
   assert.equal(fresh.panels.draftText, 'Relis ce diff.');
+});
+
+function copyHarness(prepare) {
+  const h = harness({ prepare });
+  const dialog = new Element('dialog', h.document);
+  dialog.open = true;
+  h.byId['bot-dialog'] = dialog;
+  const container = new Element('div', h.document);
+  h.panels.panel.botSection({ id: 'bot-dev', name: 'Dev' }, container);
+  const trigger = container.querySelector('[data-copy-trigger]');
+  const menu = container.querySelector('.tpl-copy-menu');
+  const choice = (label) => menu.querySelectorAll('button').find((item) => item.textContent.includes(label));
+  return { ...h, container, dialog, trigger, menu, choice };
+}
+
+test('the bot menu offers « Créer une copie » with and without memories', () => {
+  const { trigger, menu, choice } = copyHarness();
+  assert.match(trigger.textContent, /Créer une copie/);
+  assert.equal(trigger.getAttribute('aria-haspopup'), 'menu');
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(menu.hidden, true);
+  trigger.click();
+  assert.equal(menu.hidden, false);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+  assert.deepEqual(menu.querySelectorAll('button').map((item) => item.getAttribute('role')), ['menuitem', 'menuitem']);
+  assert.ok(choice('Avec ses souvenirs'));
+  assert.ok(choice('Sans ses souvenirs'));
+  trigger.click();
+  assert.equal(menu.hidden, true);
+});
+
+test('a copy with memories is requested under a new id and opens the copy', async () => {
+  const { panels, calls, dialog, trigger, choice } = copyHarness();
+  trigger.click();
+  await choice('Avec ses souvenirs').click();
+  const [path, body] = calls.at(-1);
+  assert.equal(path, '/api/templates/copy');
+  assert.equal(body.bot_id, 'bot-dev');
+  assert.notEqual(body.new_bot_id, 'bot-dev');
+  assert.equal(body.include_memories, true);
+  assert.equal(dialog.open, false);
+  assert.deepEqual(panels.selected, [body.new_bot_id]);
+  assert.match(panels.message, /« Dev \(copie\) » est prêt, avec ses souvenirs/);
+});
+
+test('a copy without memories asks for none and says so', async () => {
+  const { panels, calls, trigger, choice } = copyHarness();
+  trigger.click();
+  await choice('Sans ses souvenirs').click();
+  const [, body] = calls.at(-1);
+  assert.equal(body.include_memories, false);
+  assert.match(panels.message, /sans ses souvenirs/);
+});
+
+test('a copy of a bot with routines tells that they are paused', async () => {
+  const { panels, trigger, choice } = copyHarness((panels) => {
+    panels.state.routines = { items: [{ routine: { bot_id: 'bot-dev', routine_id: 'r1' } }] };
+  });
+  trigger.click();
+  await choice('Sans ses souvenirs').click();
+  assert.match(panels.message, /Ses routines sont en pause/);
+});
+
+test('a failed copy shows the error, keeps the dialog and retries under the same id', async () => {
+  let fail = true;
+  const { calls, dialog, container, trigger, choice, panels } = copyHarness((panels, calls) => {
+    const api = panels.api.bind(panels);
+    panels.api = async (path, body) => {
+      if (path === '/api/templates/copy' && fail) { fail = false; calls.push([path, body]); throw new Error('Refusé'); }
+      return api(path, body);
+    };
+  });
+  trigger.click();
+  await choice('Avec ses souvenirs').click();
+  const status = container.querySelector('.tpl-status');
+  assert.equal(status.textContent, 'Refusé');
+  assert.equal(status.classList.contains('error'), true);
+  assert.equal(dialog.open, true);
+  assert.deepEqual(panels.selected, []);
+  trigger.click();
+  await choice('Avec ses souvenirs').click();
+  const ids = calls.filter(([path]) => path === '/api/templates/copy').map(([, body]) => body.new_bot_id);
+  assert.equal(ids.length, 2);
+  assert.equal(ids[0], ids[1]);
+  assert.equal(dialog.open, false);
+});
+
+test('Escape closes the copy menu and returns to its button', () => {
+  const { container, trigger, menu, document } = copyHarness();
+  trigger.click();
+  const box = container.querySelector('.tpl-copy-box');
+  box.dispatch('keydown', { key: 'Escape', stopPropagation() {} });
+  assert.equal(menu.hidden, true);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.activeElement, trigger);
 });

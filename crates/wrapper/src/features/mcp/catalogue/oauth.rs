@@ -1,10 +1,7 @@
 //! Authorization-code + PKCE broker. Callback listener is loopback-only,
 //! single-use, state-bound, bounded in time and invalidated by disconnect/restart.
 use super::*;
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine,
-};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use std::{io::Read, time::Duration};
 use tiny_http::{Header, Response, Server as HttpServer, StatusCode};
 
@@ -48,7 +45,19 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-fn token_fields(env: &HashMap<String, String>) -> Vec<(String, String)> {
+/// What identifies the client at the token and revocation endpoints. Gmail's and Slack's is
+/// the public client of the build and nothing else: no secret is read, so none can be sent.
+fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
+    let public = match m.id {
+        "gmail" => Some(gmail::client_id()),
+        "slack" => Some(slack::client_id()),
+        _ => None,
+    };
+    if let Some(client) = public {
+        return client
+            .map(|id| vec![("client_id".into(), id)])
+            .unwrap_or_default();
+    }
     ["CLIENT_ID", "CLIENT_SECRET"]
         .into_iter()
         .filter_map(|k| env.get(k).map(|v| (k.to_lowercase(), v.clone())))
@@ -85,6 +94,12 @@ fn accept_token(
     if raw.get("error").is_some() || raw["ok"] == false {
         return Err(fail());
     }
+    // Slack names the workspace beside the user token, not inside it.
+    let workspace = raw["team"]["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 100 && !s.chars().any(char::is_control))
+        .map(str::to_owned);
     let raw = if raw["authed_user"]["access_token"].is_string() {
         raw["authed_user"].clone()
     } else {
@@ -113,7 +128,15 @@ fn accept_token(
                 .min(i64::MAX as u64) as i64
         })
         .unwrap_or(0);
-    if m.endpoint.is_empty() {
+    if m.id == "gmail" {
+        // A renewal keeps the account it already named; a sign-in learns it from Google.
+        if !env.contains_key("EMAIL") {
+            let email = gmail::profile_email(m, access)?;
+            // One connection per Google address: a second sign-in of it adds nothing.
+            gmail::refuse_twin(ctx, server, &email)?;
+            env.insert("EMAIL".into(), email);
+        }
+    } else if m.endpoint.is_empty() {
         let user = read_json(
             agent()
                 .get(&endpoint(m, "userinfo"))
@@ -127,11 +150,43 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    save(ctx, &server.id, env)?;
+    if m.id == "slack" {
+        // The workspace is the account shown on the card; a renewal keeps the one it had.
+        // The exchange may give the team's identifier only: the token names the workspace.
+        let workspace = workspace.or_else(|| {
+            env.get("EMAIL")
+                .is_none()
+                .then(|| slack::workspace_of(m, access))
+                .flatten()
+        });
+        if let Some(workspace) = workspace {
+            env.insert("EMAIL".into(), workspace);
+        } else {
+            env.entry("EMAIL".into()).or_insert_with(|| "Slack".into());
+        }
+        // A client typed under an earlier version is not carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        slack::write_tokens(ctx, server, env)?;
+    } else {
+        save(ctx, &server.id, env).map_err(|error| {
+            if m.id == "gmail" {
+                gmail::refused_write(ctx)
+            } else {
+                error
+            }
+        })?;
+    }
     ctx.connection.execute(
         "UPDATE wrapper_connector_catalogue SET expires_at=?2 WHERE server_id=?1",
         params![server.id, expires],
     )?;
+    if m.id == "gmail" {
+        ctx.connection.execute(
+            "UPDATE wrapper_connector_catalogue SET account_id=lower(account_email) WHERE server_id=?1",
+            [&server.id],
+        )?;
+    }
     Ok(())
 }
 pub(super) fn refresh(
@@ -140,7 +195,10 @@ pub(super) fn refresh(
     m: Manifest,
     env: &mut HashMap<String, String>,
 ) -> Result<(), ApiError> {
-    let mut fields = token_fields(env);
+    if m.id == "github" {
+        return super::github::refresh(ctx, server, m, env);
+    }
+    let mut fields = token_fields(m, env);
     fields.push(("grant_type".into(), "refresh_token".into()));
     fields.push((
         "refresh_token".into(),
@@ -176,18 +234,25 @@ pub(super) fn begin(
         }
         save(ctx, &server.id, &env)?;
     }
-    if fake_base().is_some() && !env.contains_key("CLIENT_ID") {
+    if fake_base().is_some() && !matches!(m.id, "gmail" | "slack") && !env.contains_key("CLIENT_ID")
+    {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
         save(ctx, &server.id, &env)?;
     }
+    // Gmail's and Slack's client is the build's, never read from the vault.
     // A dynamic client is registered for this exact redirect URI. Notion assigns
     // a new loopback port on every attempt, so register anew after restart too.
+    let client = match m.id {
+        "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
+        "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
+        _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
+    };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
     {
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", env.get("CLIENT_ID").ok_or_else(fail)?)
+            .append_pair("client_id", &client)
             .append_pair("redirect_uri", &redirect)
             .append_pair("state", &state)
             .append_pair(
@@ -197,9 +262,14 @@ pub(super) fn begin(
             .append_pair("code_challenge_method", "S256")
             .append_pair("scope", m.scopes);
         if m.endpoint.is_empty() {
-            query
-                .append_pair("access_type", "offline")
-                .append_pair("prompt", "consent");
+            query.append_pair("access_type", "offline").append_pair(
+                "prompt",
+                if m.id == "gmail" {
+                    "select_account consent"
+                } else {
+                    "consent"
+                },
+            );
         }
         if m.id == "notion" {
             query.append_pair("resource", m.endpoint);
@@ -292,7 +362,7 @@ pub(super) fn begin(
                         return Err(invalid("Vous avez refusé l’autorisation du service. Aucun nouveau jeton n’a été enregistré."));
                     }
                     let code = value("code").filter(|s| !s.is_empty()).ok_or_else(fail)?;
-                    let mut fields = token_fields(&env);
+                    let mut fields = token_fields(m, &env);
                     fields.extend([
                         ("grant_type".into(), "authorization_code".into()),
                         ("code".into(), code.into()),
@@ -317,7 +387,14 @@ pub(super) fn begin(
                         [format!("mcp_{}_*", server.id)],
                     )?;
                     tx.commit()?;
-                    attach(&ctx, &server, m, &env)?;
+                    let attached = attach(&ctx, &server, m, &env);
+                    if attached.is_err() && m.id == "gmail" {
+                        // A connection that did not come up keeps no token.
+                        if let Ok(vault) = crate::features::forms::vault(&ctx) {
+                            let _ = vault.remove(&secret_name(&server.id));
+                        }
+                    }
+                    attached?;
                     Ok(())
                 })();
                 match completion {
@@ -402,27 +479,16 @@ fn respond(request: tiny_http::Request, status: u16, service: &str, text: &str) 
     );
 }
 pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
-    let token = if matches!(m.id, "slack" | "github") {
+    let token = if m.id == "slack" {
         env.get("ACCESS_TOKEN")
     } else {
         env.get("REFRESH_TOKEN").or_else(|| env.get("ACCESS_TOKEN"))
     };
-    let Some(token) = token else { return true };
-    if m.id == "github" && fake_base().is_none() {
-        let (Some(id), Some(secret)) = (env.get("CLIENT_ID"), env.get("CLIENT_SECRET")) else {
-            return false;
-        };
-        return agent()
-            .delete(&format!("{}/{id}/grant", endpoint(m, "revoke")))
-            .set(
-                "Authorization",
-                &format!("Basic {}", STANDARD.encode(format!("{id}:{secret}"))),
-            )
-            .set("User-Agent", "Ezerbot")
-            .send_json(json!({"access_token":token}))
-            .is_ok();
+    if m.id == "github" {
+        return super::github::revoke(m, env);
     }
-    let mut fields = token_fields(env);
+    let Some(token) = token else { return true };
+    let mut fields = token_fields(m, env);
     fields.push(("token".into(), token.clone()));
     if m.id == "notion" {
         fields.push((

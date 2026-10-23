@@ -173,6 +173,91 @@
     setReviewBusy(reviewBusy);
     form.append(limits, reviewStatus, actions); settings.append(form);
   }
+  // « Continuer sans attendre mes approbations » : la carte attend, le tour continue.
+  // Rien n'est exécuté sans le feu vert : ce réglage ne change que ce que fait le bot en attendant.
+  const WAITING_VALIDITIES = [["1h", "1 h"], ["6h", "6 h"], ["24h", "24 h"], ["7d", "7 jours"]];
+  const WAITING_REMINDERS = [["30min", "30 min"], ["1h", "1 h"], ["3h", "3 h"], ["never", "Jamais"]];
+  let waitingNotice;
+  let waitingBusy = false;
+  function waitingToggle(title, help, checked, name, disabled) {
+    const toggle = document.createElement("label");
+    toggle.className = "setting-toggle";
+    const copy = document.createElement("span");
+    const strong = document.createElement("strong"); strong.textContent = title;
+    const small = document.createElement("small"); small.textContent = help;
+    copy.append(strong, small);
+    const input = document.createElement("input");
+    input.type = "checkbox"; input.name = name; input.checked = checked; input.disabled = disabled;
+    input.setAttribute("role", "switch");
+    const track = document.createElement("span");
+    track.className = "toggle-track"; track.setAttribute("aria-hidden", "true");
+    toggle.append(copy, input, track);
+    return { toggle, input };
+  }
+  function waitingChoice(title, name, options, value, disabled) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "waiting-choice";
+    wrapper.textContent = title;
+    const select = document.createElement("select");
+    select.className = "text-input"; select.name = name; select.setAttribute("aria-label", title);
+    for (const [key, label] of options) {
+      const option = document.createElement("option");
+      option.value = key; option.textContent = label;
+      select.append(option);
+    }
+    select.value = value; select.disabled = disabled;
+    wrapper.append(select);
+    return { wrapper, select };
+  }
+  function waitingEditor(state) {
+    const saved = state.forms?.waiting;
+    if (!saved) return;
+    const section = document.createElement("div");
+    section.className = "waiting-settings";
+    const title = document.createElement("h4");
+    title.textContent = "Approbations non bloquantes";
+    const main = waitingToggle(
+      "Continuer sans attendre mes approbations",
+      saved.task
+        ? "Quand une action demande votre accord, le bot continue le reste du travail et vous remet la demande plus tard. Rien n’est exécuté sans votre feu vert."
+        : "Le bot s’arrête et attend votre réponse pendant 10 minutes, comme avant.",
+      saved.task, "waiting-task", false);
+    const chat = waitingToggle(
+      "Aussi dans le chat direct",
+      "Désactivé par défaut : dans une conversation, le bot attend votre réponse.",
+      saved.chat, "waiting-chat", !saved.task);
+    const validity = waitingChoice("Durée de validité d’une demande", "waiting-validity", WAITING_VALIDITIES, saved.validity, !saved.task);
+    const reminder = waitingChoice("Me rappeler une demande en attente", "waiting-reminder", WAITING_REMINDERS, saved.reminder, !saved.task);
+    const note = document.createElement("p");
+    note.textContent = "Les envois sous votre nom et les suppressions demandent toujours une confirmation, sans « Toujours autoriser ». Passé la durée choisie, la demande expire et rien n’est exécuté.";
+    const status = document.createElement("p");
+    status.setAttribute("role", waitingNotice?.error ? "alert" : "status");
+    status.className = `reviewer-notice${waitingNotice?.error ? " reviewer-error" : ""}`;
+    status.textContent = waitingNotice?.text || "";
+    const controls = [main.input, chat.input, validity.select, reminder.select];
+    async function save(next) {
+      if (waitingBusy) return;
+      waitingBusy = true;
+      for (const control of controls) control.disabled = true;
+      try {
+        await panels.api("/api/approvals/waiting", next);
+        waitingNotice = undefined;
+        try { await panels.refresh(); }
+        catch { waitingNotice = { text: "Réglage enregistré. L’actualisation de l’état reste à faire." }; }
+      } catch {
+        waitingNotice = { text: "Réglage non enregistré. Réessayez lorsque le moteur local est disponible.", error: true };
+      } finally {
+        waitingBusy = false;
+        rulesKey = undefined;
+        renderRules(panels.state);
+      }
+    }
+    const current = () => ({ task: main.input.checked, chat: main.input.checked && chat.input.checked,
+      validity: validity.select.value, reminder: reminder.select.value });
+    for (const control of controls) control.addEventListener("change", () => save(current()));
+    section.append(title, main.toggle, chat.toggle, validity.wrapper, reminder.wrapper, note, status);
+    settings.append(section);
+  }
   const pendingApproval = (request) => request.status?.status === "pending"
     && request.kind?.kind === "approval" && Number.isFinite(request.kind.expires_at);
   function scheduleExpiry(state) {
@@ -187,7 +272,7 @@
   function renderRules(state) {
     if (!settings) return;
     const rules = state.forms?.rules || [];
-    const key = JSON.stringify([rules, state.forms?.reviewer, state.forms?.storage, storageFeedback, storageCheckBusy, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
+    const key = JSON.stringify([rules, state.forms?.reviewer, state.forms?.waiting, waitingNotice, state.forms?.storage, storageFeedback, storageCheckBusy, state.bots?.map((bot) => [bot.id, bot.name]), Boolean(state.forms?.error)]);
     if (key === rulesKey) return;
     rulesKey = key;
     settings.replaceChildren();
@@ -263,8 +348,17 @@
       const server = state.mcp?.servers?.find((s) => s.tools.some((t) => t.namespace === rule.tool) || [`mcp_start_${s.id}`, `mcp_remove_${s.id}`].includes(rule.tool));
       const tool = server?.tools.find((t) => t.namespace === rule.tool)?.name || (rule.tool.startsWith("mcp_start_") ? "Démarrer / redémarrer" : "Supprimer le connecteur");
       const localLabel = window.GrokbotLocalUi?.toolLabel(rule.tool) || rule.tool;
-      const toolName = server ? `${server.name} · ${tool}` : localLabel;
-      description.textContent = `${botName} · ${toolName}${rule.document_summary ? ` · ${rule.document_summary}` : ""} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${rule.scope === "global" ? "Toutes les actions de cet outil" : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`} `;
+      const toolName = rule.tool === "background_computer"
+        ? "Tâche en arrière-plan · Exécuter une tâche sur l'ordinateur"
+        : server ? `${server.name} · ${tool}` : localLabel;
+      const scopeLabel = rule.tool === "background_computer"
+        ? "Ce type d’action"
+        : rule.scope === "global"
+        ? "Toutes les actions de cet outil"
+        : rule.scope === "pattern"
+          ? `Cette commande · ${rule.args_digest}`
+          : `Arguments identiques · ${rule.args_digest.slice(0, 8)}`;
+      description.textContent = `${botName} · ${toolName}${rule.document_summary ? ` · ${rule.document_summary}` : ""} · ${rule.allow ? "Toujours autoriser" : "Toujours refuser"} · ${scopeLabel} `;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Retirer la règle";
@@ -293,6 +387,7 @@
         details.append(summary, code); settings.append(details);
       }
     }
+    waitingEditor(state);
     reviewEditor(state);
   }
 
@@ -351,13 +446,21 @@
         conversation_id: context.conversation.id,
       };
       let path;
-      if (action === "forms.cancel") path = "/api/forms/cancel";
+      if (action === "forms.site" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.values = detail?.values;
+        body.origin = request.kind.origin; body.refused = detail?.refused === true;
+      } else if (action === "forms.cancel" && request.kind?.kind === "site_form") {
+        path = "/api/forms/site-submit"; body.refused = true;
+      } else if (action === "forms.cancel") path = "/api/forms/cancel";
       else if (action === "forms.submit" && message.kind === "form") {
         path = "/api/forms/submit"; body.values = detail?.values;
       } else if (action === "forms.secret" && message.kind === "secret") {
         path = "/api/forms/submit"; body.value = detail?.value;
       } else if (action === "forms.decide" && message.kind === "approval") {
         path = "/api/approvals/resolve"; body.decision = detail?.decision;
+        // A draft card sends the text its owner corrected; the server binds it to the card.
+        if (typeof detail?.text === "string") body.text = detail.text;
+        if (typeof detail?.title === "string") body.title = detail.title;
         // Do not echo the displayed arguments: they may be redacted. The server
         // binds entry_id to the original action digest (wrapper review r2 §2).
       } else return false;
@@ -376,22 +479,26 @@
         activity.set(request.entry_id, { busy: false, receipt: response.receipt });
       } catch (error) {
         // api() wraps transport/decoding failures in these fixed shell messages;
-        // other rejections are HTTP errors. Never echo the exception or data.
+        // Site form HTTP errors explain validation without echoing field values.
         const uncertain = error instanceof TypeError || ["Missing receipt",
           "La connexion au moteur local est interrompue.", "Le moteur local a renvoyé une réponse illisible.",
         ].includes(error?.message);
         activity.set(request.entry_id, { ...previous, busy: false,
           error: error?.message === STALE_FORM ? STALE_FORM
+            : request.kind?.kind === "site_form" && !uncertain ? error.message
             : uncertain ? "Envoi non confirmé. Actualisez l’état avant de réessayer."
             : "Le moteur a refusé la réponse. Vérifiez les champs ou actualisez pour voir la décision déjà enregistrée." });
       } finally {
+        if (request.kind?.kind === "site_form") delete body.values;
         delete body.value;
+        delete body.text;
+        delete body.title;
         changed();
       }
       // Reconcile lost responses and decisions made in another window. A refresh
       // failure must not discard a receipt already acknowledged by the server.
       try { await panels.refresh(); } catch { /* The shell displays connection state. */ }
-      return true;
+      return request.kind?.kind === "site_form" ? Boolean(activity.get(request.entry_id)?.receipt) : true;
     },
   });
 })();

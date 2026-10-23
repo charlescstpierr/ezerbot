@@ -29,6 +29,8 @@
 .gb-local-card > .gb-local-failure { padding:10px; border-radius:7px; font-size:12px; }
 .gb-local-card > .gb-local-failure[data-tone="warning"] { color:var(--warning-text); background:var(--warning-bg); border:1px solid var(--warning-line); }
 .gb-local-card > .gb-local-failure[data-tone="danger"] { color:var(--danger-text); background:var(--soft); border:1px solid var(--line); }
+.gb-local-input { display:flex; gap:8px; margin:8px 0; min-width:0; }
+.gb-local-input input { flex:1; min-width:0; border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:var(--soft); color:var(--text); font:inherit; font-size:12px; }
 .gb-local-waiting { padding:8px 12px; }
 .gb-local-waiting > p { margin:0; }
 .gb-local-diff-added { color:var(--ok); }

@@ -807,6 +807,15 @@ const ACCENTS: [&str; 9] = [
 const DEFAULT_SHAPE: &str = "galet";
 const SHAPES: [&str; 6] = ["galet", "goutte", "nuage", "carre", "fantome", "etoile"];
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Fermer l’app avec l’agent désactivé est une absence voulue des routines.
+        features::routines::depart(&self.feature_context());
+        // Quitter l’app tue les groupes encore suivis. Le redémarrage ne les relance pas.
+        features::local::shutdown(&self.connection, &self.db_path);
+    }
+}
+
 pub struct App {
     db_path: PathBuf,
     connection: Connection,
@@ -817,6 +826,8 @@ pub struct App {
     debug_voice: features::voice::DebugVoice,
     #[cfg(debug_assertions)]
     debug_voice_session: features::voice_session::DebugSession,
+    #[cfg(debug_assertions)]
+    debug_voice_call: features::voice_call::DebugCall,
     // Host-owned: survives a WebView reload, never persisted across app starts.
     deep_link_seen: BTreeMap<String, u64>,
 }
@@ -911,6 +922,7 @@ impl App {
         seed_default_bot(&connection)?;
         migrate_default_bot_name(&connection)?;
         features::migrate(&connection)?;
+        features::local::startup(&connection)?;
         features::screen::startup(path);
         features::demonstrations::startup(&connection, path)?;
         features::engine::startup(&connection)?;
@@ -930,6 +942,8 @@ impl App {
             debug_voice: features::voice::DebugVoice::default(),
             #[cfg(debug_assertions)]
             debug_voice_session: features::voice_session::DebugSession::default(),
+            #[cfg(debug_assertions)]
+            debug_voice_call: features::voice_call::DebugCall::default(),
             deep_link_seen: BTreeMap::new(),
         })
     }
@@ -939,6 +953,14 @@ impl App {
         let mut ctx = self.feature_context();
         ctx.now_ms = now_ms;
         features::tick(&ctx);
+    }
+
+    /// Deliver an approval wake without launching queued background tasks.
+    #[doc(hidden)]
+    pub fn tick_suspended(&mut self, now_ms: u64) {
+        let mut ctx = self.feature_context();
+        ctx.now_ms = now_ms;
+        features::engine::tick_suspended(&ctx);
     }
 
     #[doc(hidden)]
@@ -1103,6 +1125,9 @@ impl App {
             "INSERT INTO wrapper_bots (account_id, id, name, color, shape, description, instructions, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?8, ?5, ?6, ?7, ?7)",
             params![ACCOUNT, id, name, color, description, instructions, timestamp, shape],
         )?;
+        // A bot with no voice of its own takes one that no other bot uses. The bot exists
+        // either way: a failure here only leaves the voice for the next attribution.
+        let _ = features::voice_session::assign_missing(&self.connection);
         self.bot_response(id)
     }
 

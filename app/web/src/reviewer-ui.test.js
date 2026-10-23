@@ -9,7 +9,6 @@ import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { localToolLabel } from "./local-call.js";
 
-// Exercise the shipping settings panel, including DOM replacement on refresh.
 class Element {
   constructor(tag) {
     this.tagName = tag; this.children = []; this.listeners = {}; this.attributes = {};
@@ -144,7 +143,7 @@ test("standing rules precede the separated reviewer, whose switch and grouped ac
   assert.equal(actions.children[1].className, "secondary-button");
 });
 
-const fallbackStorage = { backend: "file_fallback", label: "Fichier local de secours, non chiffré", notice: "Le trousseau est indisponible." };
+const fallbackStorage = { backend: "file_fallback", label: "Trousseau macOS indisponible", notice: "Les nouveaux secrets ne sont pas enregistrés." };
 function updateStorage(f, storage) {
   f.panels.state.forms.storage = storage;
   f.registration.onState(f.panels.state);
@@ -219,8 +218,6 @@ for (const mcpFirst of [false, true]) {
     const local = standingRule("run_shell", true);
     const mcp = standingRule("mcp_atelier_echo", false, "subject");
     const rules = mcpFirst ? [mcp, local] : [local, mcp];
-    // Execute the shipping panel with rules already present: the old code throws
-    // after its first row and never reaches the reviewer editor.
     const f = settingsPanel({ rules, mcp: connector });
     assert.equal(ruleRows(f.root).length, 2);
     assert.match(ruleRows(f.root)[rules.indexOf(local)].textContent, /Terminal sur votre Mac · Toujours autoriser · Toutes les actions/);
@@ -261,8 +258,6 @@ test("multiple local rules, MCP lifecycle and unknown tools preserve every row a
   }
 });
 
-// Render the actual JSX through Vite's transform rather than inspecting source
-// strings. Middleware mode starts no listening server, and no dependency is added.
 const vite = await createServer({
   root: fileURLToPath(new URL("..", import.meta.url)), configFile: false,
   plugins: [react()], server: { middlewareMode: true }, logLevel: "error",
@@ -270,7 +265,8 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
-const { Card: ToolCard, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { Card: ToolCard, TaskInputView, settleDraft, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { ScreenCard } = await vite.ssrLoadModule("/src/screen.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
 
 test("connector lifecycle cards show the provider-specific action and its result, not a bare resume receipt", () => {
@@ -289,6 +285,63 @@ test("connector lifecycle cards show the provider-specific action and its result
       assert.ok(!html.includes("Repris"));assert.ok(!html.includes("CLIENT_SECRET"));assert.ok(!html.includes("Google"));
       assert.equal(html.includes("Adresse du service"),!remove);assert.ok(!html.includes(">Commande<"));
     }
+  } finally {delete globalThis.window;}
+});
+
+test("starting a server added by address shows the address it will contact, not a command or arguments", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"remote",kind:"approval",payload:{
+      entry_id:"remote",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+      kind:{kind:"approval",tool:"mcp_start_remote",expires_at:Date.now()+60000},
+      connector:{server:"Serveur distant",tool:"Démarrer le connecteur",origin:"settings"},
+      arguments:{serveur:"Serveur distant",commande:"https://exemple.fr/mcp",arguments:[],variables_privées:["ACCESS_TOKEN"],transport:"https",action:"Démarrer le connecteur"},
+    }}}));
+    assert.ok(html.includes("Adresse du service"));assert.ok(html.includes("https://exemple.fr/mcp"));
+    assert.ok(!html.includes(">Commande<"));assert.ok(!html.includes("Aucun argument"));
+    assert.ok(html.includes("valeurs masquées"));
+  } finally {delete globalThis.window;}
+});
+
+test("a GitHub disconnection names the account and offers Confirmer and Annuler, never Toujours", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  const card=(tool,compte)=>renderToStaticMarkup(React.createElement(Card,{message:{id:"github",kind:"approval",payload:{
+    entry_id:"github",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+    kind:{kind:"approval",tool,expires_at:Date.now()+60000},
+    connector:{server:"GitHub",tool:tool.startsWith("mcp_remove_")?"Déconnecter GitHub":"Connecter GitHub",origin:"settings"},
+    policy:{remember:false,protection:null,scope:"none"},
+    arguments:{commande:"https://api.github.com",arguments:[],variables_privées:["ACCESS_TOKEN","REFRESH_TOKEN"],catalogue:{transport:"https",service:"GitHub",licence:"Service GitHub",permissions:"Issues",portées:"aucune",connexion:"Un code s’affiche.",déconnexion:compte?`Le compte GitHub ${compte} sera déconnecté.`:"Les jetons sont supprimés.",...(compte?{compte}:{})}},
+  }}}));
+  try {
+    const html=card("mcp_remove_github","charles-test");
+    assert.ok(html.includes("Déconnecter le compte GitHub charles-test ?"));
+    assert.ok(html.includes("Compte : <strong>charles-test</strong>"));
+    assert.ok(html.includes(">Confirmer<")&&html.includes(">Annuler<"));
+    for(const word of ["Toujours","Autoriser une fois","Refuser","Mémoriser"]) assert.ok(!html.includes(word),word);
+    const connect=card("mcp_start_github");
+    assert.ok(connect.includes("Autoriser une fois")&&!connect.includes(">Confirmer<"));
+  } finally {delete globalThis.window;}
+});
+
+test("the webhook publication card names Funnel, the public path and the private iPhone address, and shows its result", () => {
+  globalThis.window={GrokbotForms:{view(){}},GrokbotPanels:{state:{bots:[{id:"grokbot",name:"Ezerbot"}]}}};
+  try {
+    for (const enabled of [true,false]) {
+      const html=renderToStaticMarkup(React.createElement(Card,{message:{id:"webhooks",kind:"approval",payload:{
+        entry_id:"webhooks",status:{status:"pending"},route:{requesting_bot_id:"grokbot"},
+        kind:{kind:"approval",tool:"routines_webhook_publish",expires_at:Date.now()+60000},
+        arguments:{enabled},policy:{remember:false,scope:"none",pattern:"",label:"routines_webhook_publish"},
+      }}}));
+      assert.ok(html.includes(enabled?"Publier les webhooks sur Internet":"Retirer la publication des webhooks"));
+      if(enabled){assert.ok(html.includes("Tailscale Funnel"));assert.ok(html.includes("jeton Bearer"));assert.ok(html.includes("iPhone"));}
+      assert.ok(html.includes("Autoriser une fois"));assert.ok(!html.includes("Toujours autoriser"));assert.ok(!html.includes("agent de routines"));
+    }
+    const done=renderToStaticMarkup(React.createElement(Card,{message:{id:"webhooks",kind:"approval",payload:{
+      entry_id:"webhooks",status:{status:"resolved"},route:{requesting_bot_id:"grokbot"},
+      kind:{kind:"approval",tool:"routines_webhook_publish"},arguments:{enabled:true},
+      configuration_result:{status:"failed",reason:"Le tailnet a refusé Funnel."},
+    }}}));
+    assert.ok(done.includes("Échec : Le tailnet a refusé Funnel."));
   } finally {delete globalThis.window;}
 });
 
@@ -420,11 +473,198 @@ test("running local cards publish their committed phase and a visible stop affor
   assert.match(html, /gb-local-stop/);assert.match(html, /Annuler l’exécution/);
 });
 
+test("a background shell card stays En cours with Arrêter, then shows Terminée or Arrêtée", () => {
+  const call = { call_id: "c", name: "run_shell", arguments: { command: "sleep 90 && echo fini", cwd: "/tmp", background: true, timeout_ms: 100 } };
+  const html = (output) => renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "m", kind: "tool", payload: { run_id: "run", call, outcome: { status: "done", output } } } }));
+  const running = html({ status: "en cours", background: true, stdout: "partiel", stderr: "", exit_code: null, truncated: false });
+  assert.match(running, /En cours/); assert.match(running, />Arrêter</); assert.ok(running.includes("partiel"));
+  assert.match(running, /sans plafond de temps/); assert.ok(!running.includes("Code de sortie"));
+  const done = html({ status: "terminé", background: true, stdout: "fini\n", stderr: "", exit_code: 0, truncated: false });
+  assert.match(done, /Terminé/); assert.match(done, /Code de sortie : 0/); assert.ok(done.includes("fini")); assert.ok(!done.includes(">Arrêter</"));
+  const stopped = html({ status: "arrêtée", background: true, stdout: "", stderr: "", exit_code: null, truncated: true });
+  assert.match(stopped, /Arrêtée/); assert.match(stopped, /Sortie tronquée/); assert.ok(!stopped.includes("Code de sortie"));
+  const failed = html({ status: "échec", background: true, stdout: "", stderr: "raté", exit_code: 3 });
+  assert.match(failed, /Code de sortie non nul/); assert.match(failed, /Code de sortie : 3/);
+});
+
+test("only a running background card takes a line, and a refusal stays on the card", () => {
+  const call = { call_id: "c", name: "run_shell", arguments: { command: "./demande.sh", cwd: "/tmp", background: true } };
+  const html = (output) => renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "m", kind: "tool", payload: { run_id: "run", call, outcome: { status: "done", output } } } }));
+  const running = html({ status: "en cours", background: true, stdout: "Continuer ? ", stderr: "" });
+  assert.match(running, /<input[^>]*aria-label="Saisie pour la tâche"/);
+  assert.match(running, />Envoyer<\/button>/);
+  assert.ok(running.indexOf(">Arrêter<") < running.indexOf("Saisie pour la tâche"));
+  for (const status of ["terminé", "échec", "arrêtée"]) {
+    const settled = html({ status, background: true, stdout: "", stderr: "", exit_code: status === "terminé" ? 0 : null });
+    assert.ok(!settled.includes("Saisie pour la tâche"), status);
+    assert.ok(!settled.includes(">Envoyer<"), status);
+  }
+  const foreground = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "f", kind: "tool", payload: { run_id: "run", call: { ...call, arguments: { ...call.arguments, background: false } }, outcome: { status: "done", output: { status: "terminé", exit_code: 0, stdout: "", stderr: "" } } } } }));
+  assert.ok(!foreground.includes("Saisie pour la tâche"));
+  const refused = renderToStaticMarkup(React.createElement(TaskInputView, { line: "hunter2", notice: "Ce programme demande un mot de passe : la saisie n’a pas été envoyée. Saisissez-le vous-même, hors d’Ezerbot.", sending: false }));
+  assert.match(refused, /role="alert"/); assert.match(refused, /mot de passe : la saisie n’a pas été envoyée/);
+  assert.match(refused, /value="hunter2"/);
+  globalThis.window = { EzerbotIPhone: { remote: true } };
+  try { assert.ok(!html({ status: "en cours", background: true, stdout: "", stderr: "" }).includes("Saisie pour la tâche"), "l’iPhone n’envoie pas de saisie"); }
+  finally { delete globalThis.window; }
+});
+
+test("the task field empties after its line is sent but keeps what was typed meanwhile", () => {
+  assert.equal(settleDraft("oui", "oui"), "");
+  assert.equal(settleDraft("oui, et ensuite", "oui"), "oui, et ensuite");
+  assert.equal(settleDraft("", ""), "");
+});
+
+test("interrupted tool cards are stopped, not left running or waiting", () => {
+  const local = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "stopped", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "run_shell", arguments: {command:"sleep 20",cwd:"/tmp"} },
+  } } }));
+  assert.doesNotMatch(local, /En cours/);
+  assert.doesNotMatch(local, /Annuler l’exécution/);
+  assert.match(local, /Arrêtée/);
+  const generic = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "generic", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+  } } }));
+  assert.doesNotMatch(generic, /Résultat en attente/);
+  assert.match(generic, /Non exécuté/);
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, GrokbotEngine: { version: () => 1, run: () => ({ status: "interrupted" }) } };
+  try {
+    const live = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "live", kind: "tool", payload: {
+      run_id: "run", run_status: "running", call: { call_id: "call", name: "lookup_thing", arguments: {} },
+    } } }));
+    assert.doesNotMatch(live, /Résultat en attente/);
+    assert.match(live, /Non exécuté/);
+  } finally { delete globalThis.window; }
+});
+
+test("an interrupted document card does not promise a later result", () => {
+  const html = renderToStaticMarkup(React.createElement(ToolCard, { message: { id: "doc", kind: "tool", payload: {
+    run_id: "run", run_status: "interrupted", call: { call_id: "call", name: "document_action", arguments: { action: "save", path: "/tmp/note.txt" } },
+  } } }));
+  assert.match(html, /Arrêtée/);
+  assert.match(html, /Aucun résultat n’a été enregistré avant l’arrêt/);
+  assert.doesNotMatch(html, /Le résultat sera affiché ici/);
+  assert.doesNotMatch(html, /En cours/);
+  assert.doesNotMatch(html, /Annuler l’exécution/);
+});
+
 test("generic approval retains its code identifier instead of a local-action label", () => {
   const html = card("pending", "ask", {}, false, "test_generic_tool");
   assert.match(html, /Outil : <code>test_generic_tool<\/code>/);
   assert.ok(!html.includes("Action : test_generic_tool"));
   assert.ok(!html.includes("data-follow-actions"));
+});
+
+test("a remembered shell command is listed by its text and revoked as that pattern", async () => {
+  const rule = { ...standingRule("run_shell", true, "pattern"), args_digest: "printf oui" };
+  const f = settingsPanel({ rules: [rule] });
+  assert.match(ruleRows(f.root)[0].textContent, /Terminal sur votre Mac · Toujours autoriser · Cette commande · printf oui/);
+  await button(ruleRows(f.root)[0], "Retirer la règle").listeners.click();
+  assert.equal(f.requests[0].path, "/api/approvals/rules/revoke");
+  assert.equal(f.requests[0].body.tool, "run_shell");
+  assert.equal(f.requests[0].body.args_digest, "printf oui");
+  assert.equal(f.requests[0].body.scope, "pattern");
+});
+
+function cardWithPolicy(policy, tool, args) {
+  globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(Card, { message: {
+      id: "approval-policy", kind: "approval", payload: {
+        entry_id: "approval-policy", status: { status: "pending" }, route: { requesting_bot_id: "grokbot" },
+        kind: { kind: "approval", tool, expires_at: Date.now() + 60000 }, arguments: args, policy,
+      },
+    } }));
+  } finally { delete globalThis.window; }
+}
+
+test("the approval card offers Toujours autoriser for a rememberable command", () => {
+  const html = cardWithPolicy(
+    { remember: true, scope: "pattern", pattern: "printf oui", label: "printf oui" },
+    "run_shell",
+    { command: "printf oui", cwd: "/tmp" },
+  );
+  assert.ok(html.includes('data-always-scope="pattern"'));
+  assert.ok(html.indexOf("Toujours autoriser") >= 0);
+  assert.ok(html.indexOf("Toujours autoriser") < html.indexOf("Mémoriser une règle"));
+  assert.ok(html.includes("Autoriser une fois"));
+});
+
+test("a background task card names the bot, the action and the shortened prompt", () => {
+  const summary = `${"Préparer le dossier ".repeat(12)}… (raccourci)`;
+  const base = {
+    entry_id: "approval-bg", status: { status: "pending" }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "delegate", expires_at: Date.now() + 60000 },
+    arguments: { objective: "Préparer le dossier" },
+    policy: { remember: true, scope: "action", pattern: "", label: "Exécuter une tâche sur l'ordinateur" },
+    background_task: { kind: "Exécuter une tâche sur l'ordinateur", summary, bot_name: "Ezerbot" },
+  };
+  const render = (payload) => {
+    globalThis.window = { GrokbotForms: { view() {} }, GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+    try {
+      return renderToStaticMarkup(React.createElement(Card, { message: { id: "approval-bg", kind: "approval", payload } }));
+    } finally { delete globalThis.window; }
+  };
+  const pending = render(base);
+  assert.ok(pending.includes("Autoriser Ezerbot à exécuter une tâche en arrière-plan ?"));
+  assert.ok(pending.includes("gb-background-kind"));
+  assert.match(pending, /Exécuter une tâche sur l(?:'|&#x27;)ordinateur/);
+  assert.ok(pending.includes("… (raccourci)"));
+  assert.ok(pending.includes("Autoriser une fois"));
+  assert.ok(pending.includes('data-always-scope="global"'));
+  assert.ok(pending.includes("Toujours autoriser"));
+  assert.ok(pending.includes("Refuser"));
+  assert.ok(!pending.includes("gb-status-ok"));
+  const once = render({ ...base, status: { status: "resolved" }, decision: "allow_once" });
+  assert.ok(once.includes("gb-status-ok"));
+  assert.ok(once.includes("Autorisé une fois"));
+  assert.ok(!once.includes("Toujours autoriser"));
+  const always = render({ ...base, status: { status: "resolved" }, decision: { always_allow: { scope: "global" } } });
+  assert.ok(always.includes("gb-status-ok"));
+  assert.ok(always.includes("Toujours autorisé"));
+  const refused = render({ ...base, status: { status: "denied" }, decision: "deny" });
+  assert.ok(refused.includes("gb-status-alert"));
+  assert.ok(refused.includes("Refusé"));
+  assert.ok(!refused.includes("gb-status-ok"));
+  const protectedLaunch = render({
+    ...base,
+    policy: { remember: false, protection: "destructive", scope: "none", pattern: "", label: "Suppression à confirmer" },
+    background_task: undefined,
+  });
+  assert.ok(protectedLaunch.includes("Confirmation d’une suppression"));
+  assert.ok(!protectedLaunch.includes("Toujours autoriser"));
+});
+
+test("a background computer rule is revoked from Settings as that action type", async () => {
+  const rule = { ...standingRule("background_computer", true, "global"), args_digest: "" };
+  const f = settingsPanel({ rules: [rule] });
+  assert.match(ruleRows(f.root)[0].textContent, /Tâche en arrière-plan · Exécuter une tâche sur l'ordinateur/);
+  assert.match(ruleRows(f.root)[0].textContent, /Ce type d’action/);
+  await button(ruleRows(f.root)[0], "Retirer la règle").listeners.click();
+  assert.equal(f.requests[0].path, "/api/approvals/rules/revoke");
+  assert.equal(f.requests[0].body.tool, "background_computer");
+  assert.equal(f.requests[0].body.args_digest, "");
+  assert.equal(f.requests[0].body.scope, "global");
+  assert.equal(f.requests[0].body.requesting_bot_id, "grokbot");
+});
+
+test("outbound sends and deletions stay on a confirmation card without Toujours autoriser", () => {
+  const outbound = cardWithPolicy(
+    { remember: false, protection: "outbound", scope: "none", pattern: "", label: "Envoi sous votre nom" },
+    "mcp_gmail_send",
+    { to: "a@exemple.fr" },
+  );
+  assert.ok(outbound.includes("Envoi sous votre nom"));
+  assert.ok(outbound.includes("Cet envoi part sous votre nom."));
+  assert.ok(!outbound.includes("Toujours autoriser"));
+  const removal = cardWithPolicy(
+    { remember: false, protection: "destructive", scope: "none", pattern: "", label: "Suppression à confirmer" },
+    "run_shell",
+    { command: "rm note", cwd: "/tmp" },
+  );
+  assert.ok(removal.includes("Confirmation d’une suppression"));
+  assert.ok(removal.includes("Cette suppression demande une confirmation à chaque fois."));
+  assert.ok(!removal.includes("Toujours autoriser"));
 });
 
 test("human fallback is attributed to the reviewer; pending review has decorative progress without disabling decisions", () => {
@@ -436,4 +676,32 @@ test("human fallback is attributed to the reviewer; pending review has decorativ
   assert.ok(progress.includes("Relecteur : "));
   assert.ok(progress.includes("Autoriser une fois"));
   assert.ok(!progress.includes("disabled="));
+});
+
+test("resolved permission cards show the green decision for every action type", () => {
+  globalThis.window = { GrokbotForms: { view() {} } };
+  try {
+    for (const tool of ["test_generic_tool", "run_shell", "mcp_start_test", "routines_background_configure", "routines_webhook_publish", "propose_skill"]) {
+      for (const [decision, label] of [["allow_once", "Autorisé une fois"], [{ always_allow: { scope: "global" } }, "Toujours autorisé"]]) {
+        const html = renderToStaticMarkup(React.createElement(Card, { message: {
+          id: "allowed", kind: "approval", payload: {
+            entry_id: "allowed", route: { requesting_bot_id: "bot" },
+            status: { status: "resolved" }, kind: { kind: "approval", tool }, decision,
+          },
+        } }));
+        assert.match(html, new RegExp(`class="gb-status-ok"[^>]*>${label}<`), tool);
+      }
+    }
+  } finally { delete globalThis.window; }
+});
+
+test("automatic permission grants show a green one-time authorization", () => {
+  assert.match(card("resolved", "allow"), /class="gb-status-ok"[^>]*>Autorisé une fois</);
+});
+
+test("screen grants show their one-time authorization in green inside the muted footer", () => {
+  const html = renderToStaticMarkup(React.createElement(ScreenCard, { message: {
+    id: "screen-allowed", payload: { approval_status: "resolved", run_status: "running", call: { name: "computer_click", arguments: { x: 1, y: 2 } } },
+  } }));
+  assert.match(html, /<footer class="screen-decision"><span class="gb-status-ok"[^>]*>Autorisé une fois<\/span><\/footer>/);
 });

@@ -64,6 +64,17 @@ pub trait RunServices {
         run: &Run,
         call: &ToolCall,
     ) -> Result<ApprovalCheck>;
+    /// Settle a denied/expired call without executing its effects. Adapters may
+    /// wait for work already admitted by sibling calls in the same response.
+    fn approval_denied(
+        &mut self,
+        _conn: &Connection,
+        _run: &Run,
+        _call: &ToolCall,
+        reason: String,
+    ) -> Result<ToolOutcome> {
+        Ok(ToolOutcome::Failed { reason })
+    }
     /// Called only for ApprovalCheck::Ask. Idempotent by (run_id, call_id, canonical
     /// tool/argument digest): reuse the same SuspendCause::HumanInput { id } after
     /// retries/crashes instead of creating another request. Derive its id (or
@@ -77,6 +88,13 @@ pub trait RunServices {
         run: &Run,
         call: &ToolCall,
     ) -> Result<SuspendCause>;
+    /// When true, an ApprovalCheck::Ask does not suspend the run: the request is
+    /// still created by request_approval, but the call settles as not executed
+    /// ("en attente") and the turn goes on with whatever does not depend on it.
+    /// The call is NEVER executed later by this loop: its result is final.
+    fn continue_without_approval(&mut self, _conn: &Connection, _run: &Run) -> Result<bool> {
+        Ok(false)
+    }
     /// External effects must never run in a retried SQLite transaction. Admission
     /// (including single-use approval consumption) commits first. An incomplete
     /// admission after a crash is outcome-unknown and is NEVER automatically replayed.
@@ -114,6 +132,10 @@ pub trait RunServices {
         Ok(None)
     }
 }
+
+/// Final tool result of a call left waiting for a human decision. It must never
+/// let the model believe the action happened.
+pub const APPROVAL_PENDING_REASON: &str = "En attente d’approbation de Charles : rien n’a été exécuté et cette action n’est pas faite. Continuez tout ce qui ne dépend pas de cet appel, puis dites à la fin quelles actions attendent son accord. N’affirmez jamais qu’elle est faite.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunProgress {
@@ -736,9 +758,22 @@ fn execute_external(
         let by = if protected {
             match services.check_approval(conn, &run, call)? {
                 ApprovalCheck::Ask => {
+                    let detached = services.continue_without_approval(conn, &run)?;
                     let cause = services.request_approval(conn, &run, call)?;
                     if !matches!(cause, SuspendCause::HumanInput { .. }) {
                         return Err(invalid("an approval must wait for human input"));
+                    }
+                    if detached {
+                        let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+                        usage.tool_calls += 1;
+                        store::save_budget_usage(conn, run_id, &usage)?;
+                        store::append_event(
+                            conn,
+                            run_id,
+                            RunEventKind::ToolResult,
+                            &json!({"call_id":call.call_id,"outcome":ToolOutcome::Failed{reason:APPROVAL_PENDING_REASON.into()}}),
+                        )?;
+                        return Ok(Start::Complete(None));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Start::Complete(Some(RunProgress::Suspended(cause))));
@@ -865,9 +900,25 @@ fn execute_journaled_external(
         if spec.is_some_and(|s| s.requires_approval) {
             match services.check_approval(conn, &run, call)? {
                 ApprovalCheck::Ask => {
+                    let detached = services.continue_without_approval(conn, &run)?;
                     let cause = services.request_approval(conn, &run, call)?;
                     if !matches!(cause, SuspendCause::HumanInput { .. }) {
                         return Err(invalid("invalid approval wait"));
+                    }
+                    if detached {
+                        // The final outcome is journaled with the detaching of the request, so a
+                        // crash before the result event can never let a later approval run the call.
+                        let mut usage = store::budget_usage(conn, run_id, now_ms())?;
+                        usage.tool_calls += 1;
+                        store::save_budget_usage(conn, run_id, &usage)?;
+                        let outcome = ToolOutcome::Failed {
+                            reason: APPROVAL_PENDING_REASON.into(),
+                        };
+                        conn.execute(
+                            "INSERT INTO engine_external_tools(run_id,call_id,authorized_by,outcome) VALUES (?1,?2,NULL,?3)",
+                            rusqlite::params![run_id, call.call_id, serde_json::to_string(&outcome)?],
+                        )?;
+                        return Ok(Admission::Result(outcome));
                     }
                     suspend(conn, &mut run, call, &cause, true)?;
                     return Ok(Admission::Wait(RunProgress::Suspended(cause)));
@@ -981,6 +1032,7 @@ fn execute(
         let spec = specs.iter().find(|spec| spec.name == call.name);
         let valid_arguments = call.arguments.is_object();
         let mut authorized_by = None;
+        let mut waiting = false;
         let approval = if valid_arguments && spec.is_some_and(|spec| spec.requires_approval) {
             let decision = services.check_approval(conn, &run, call)?;
             if services.is_cancelled(run_id)
@@ -991,6 +1043,7 @@ fn execute(
             }
             match decision {
                 ApprovalCheck::Ask => {
+                    let detached = services.continue_without_approval(conn, &run)?;
                     let cause = services.request_approval(conn, &run, call)?;
                     if services.is_cancelled(run_id)
                         || store::budget_usage(conn, run_id, now_ms())?.elapsed_ms
@@ -1001,10 +1054,15 @@ fn execute(
                     if !matches!(cause, SuspendCause::HumanInput { .. }) {
                         return Err(invalid("an approval must wait for human input"));
                     }
-                    suspend(conn, &mut run, call, &cause, true)?;
-                    return Ok(Some(RunProgress::Suspended(cause)));
+                    if detached {
+                        waiting = true;
+                        None
+                    } else {
+                        suspend(conn, &mut run, call, &cause, true)?;
+                        return Ok(Some(RunProgress::Suspended(cause)));
+                    }
                 }
-                ApprovalCheck::Denied { reason } => Some(ToolOutcome::Failed { reason }),
+                ApprovalCheck::Denied { reason } => Some(reason),
                 ApprovalCheck::Authorized { by } => {
                     authorized_by = Some(by);
                     None
@@ -1024,8 +1082,12 @@ fn execute(
                     "invalid arguments".into()
                 },
             }
-        } else if let Some(denied) = approval {
-            denied
+        } else if waiting {
+            ToolOutcome::Failed {
+                reason: APPROVAL_PENDING_REASON.into(),
+            }
+        } else if let Some(reason) = approval {
+            services.approval_denied(conn, &run, call, reason)?
         } else if spec.is_none() {
             ToolOutcome::Failed {
                 reason: if call.name.starts_with("mcp_") {
@@ -1411,6 +1473,7 @@ mod tests {
         fail_final_hook: bool,
         fail_hook_once: Option<RunEventKind>,
         resolved: Option<Value>,
+        detach: bool,
     }
     impl RunServices for Services {
         fn context(&mut self, _: &Run) -> Result<ModelRequest> {
@@ -1506,6 +1569,9 @@ mod tests {
                 id: "approval".into(),
             })
         }
+        fn continue_without_approval(&mut self, _: &Connection, _: &Run) -> Result<bool> {
+            Ok(self.detach)
+        }
         fn is_journaled_external_tool(&self, call: &ToolCall) -> bool {
             self.journaled_external && call.name != "external"
         }
@@ -1542,6 +1608,13 @@ mod tests {
         }
         fn resolution(&mut self, _: &Connection, _: &Run, _: &str) -> Result<Option<Value>> {
             Ok(self.resolved.clone())
+        }
+    }
+    fn call_event(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
         }
     }
     fn external_fixture() -> Result<(Connection, ToolCall)> {
@@ -2115,6 +2188,131 @@ mod tests {
             store::required(&conn, "run")?.task_status,
             Some(TaskStatus::Working)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn detached_approval_runs_the_free_call_and_leaves_the_protected_one_waiting() -> Result<()> {
+        // The three execution paths (internal, MCP-style external, journaled external)
+        // settle the protected call the same way. Only the internal path has a free
+        // call next to it: the mock makes every call external in the other modes.
+        for (external, journaled) in [(false, false), (true, false), (false, true)] {
+            let conn = database(true, RunBudgets::default())?;
+            let mut calls = vec![call("protected", "work", json!({"value": 1}))];
+            if !external && !journaled {
+                calls.push(call("free", "read", json!({})));
+            }
+            let gateway = Scripted::new(vec![response(calls), response(vec![])]);
+            let mut services = Services {
+                detach: true,
+                external,
+                journaled_external: journaled,
+                specs: vec![spec("work", true), spec("read", false)],
+                ..Services::default()
+            };
+            assert_eq!(
+                run(&conn, &gateway, &mut services, "run")?,
+                RunProgress::Ended(TurnEnd::Finished)
+            );
+            let mode = format!("external={external} journaled={journaled}");
+            assert_eq!(
+                services.calls.contains(&"free".to_string()),
+                !external && !journaled,
+                "{mode}"
+            );
+            assert!(!services.calls.contains(&"protected".to_string()), "{mode}");
+            assert_eq!(services.external_calls, 0, "{mode}");
+            assert_eq!(services.approval_requests, 1, "{mode}");
+            assert_eq!(count(&conn, "grants_used"), 0, "{mode}");
+            assert_eq!(
+                count(&conn, "effects"),
+                services.calls.len() as i64,
+                "{mode}"
+            );
+            let events = store::events(&conn, "run", 0)?;
+            assert!(
+                !events.iter().any(|e| e.kind == RunEventKind::Suspended),
+                "{mode}"
+            );
+            let result = events
+                .iter()
+                .find(|e| e.kind == RunEventKind::ToolResult && e.payload["call_id"] == "protected")
+                .expect("the protected call is settled");
+            assert_eq!(result.payload["outcome"]["status"], "failed", "{mode}");
+            let reason = result.payload["outcome"]["reason"].as_str().unwrap();
+            assert_eq!(reason, APPROVAL_PENDING_REASON, "{mode}");
+            assert!(reason.contains("En attente") && reason.contains("rien n’a été exécuté"));
+            assert!(result.payload.get("authorized_by").is_none(), "{mode}");
+            assert_eq!(
+                store::budget_usage(&conn, "run", now_ms())?.tool_calls,
+                services.calls.len() as u32 + 1,
+                "{mode}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_detached_journaled_call_is_never_executed_after_a_crash_before_its_result() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let call = call_event("protected", "work");
+        with_tx(&conn, |conn| -> Result<()> {
+            model::set_running_at(conn, "run", now_ms())?;
+            store::append_event(conn, "run", RunEventKind::ToolCall, &json!(call))?;
+            Ok(())
+        })?;
+        let mut services = Services {
+            detach: true,
+            journaled_external: true,
+            specs: vec![spec("work", true)],
+            ..Services::default()
+        };
+        // The request is created and detached, then the result event fails to commit.
+        conn.execute_batch("CREATE TRIGGER crash BEFORE INSERT ON engine_run_events WHEN NEW.kind='tool_result' BEGIN SELECT RAISE(ABORT,'crash'); END")?;
+        assert!(execute(&conn, &mut services, "run", &call).is_err());
+        conn.execute_batch("DROP TRIGGER crash")?;
+        assert!(!store::events(&conn, "run", 0)?
+            .iter()
+            .any(|e| e.kind == RunEventKind::ToolResult));
+        // The user approves before recovery: the call must still not run.
+        services.detach = false;
+        services.allowed = true;
+        execute(&conn, &mut services, "run", &call)?;
+        assert_eq!(services.external_calls, 0);
+        assert_eq!(services.approval_calls, 1);
+        let results: Vec<_> = store::events(&conn, "run", 0)?
+            .into_iter()
+            .filter(|e| e.kind == RunEventKind::ToolResult)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].payload["outcome"]["reason"],
+            APPROVAL_PENDING_REASON
+        );
+        assert_eq!(store::budget_usage(&conn, "run", now_ms())?.tool_calls, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn without_the_detach_setting_the_turn_still_suspends() -> Result<()> {
+        let conn = database(true, RunBudgets::default())?;
+        let gateway = Scripted::new(vec![response(vec![
+            call("protected", "work", json!({})),
+            call("free", "read", json!({})),
+        ])]);
+        let mut services = Services {
+            specs: vec![spec("work", true), spec("read", false)],
+            ..Services::default()
+        };
+        assert!(matches!(
+            run(&conn, &gateway, &mut services, "run")?,
+            RunProgress::Suspended(SuspendCause::HumanInput { .. })
+        ));
+        assert_eq!(
+            store::required(&conn, "run")?.status,
+            RunStatus::AwaitingApproval
+        );
+        assert_eq!(count(&conn, "effects"), 0);
         Ok(())
     }
 

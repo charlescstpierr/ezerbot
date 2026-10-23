@@ -341,7 +341,6 @@ struct Attempt {
 struct Inner {
     codex: bool,
     deadlines: Mutex<reliable::Deadlines>,
-    transports: AtomicUsize,
     closing: AtomicUsize,
     simulation: AtomicBool,
     probe: Mutex<Value>,
@@ -358,6 +357,9 @@ struct Inner {
     live_reads: Mutex<HashMap<String, Arc<Mutex<reliable::Settled>>>>,
     #[cfg(test)]
     paused_turns: Mutex<std::collections::HashSet<String>>,
+    /// Retient chaque fil réseau juste avant sa sortie, après qu'il s'est déclaré terminé.
+    #[cfg(test)]
+    held_exits: AtomicBool,
     interrupting: AtomicBool,
     // Titres en cours d'écriture : l'interface relit l'état tant qu'il en reste.
     titling: AtomicUsize,
@@ -824,7 +826,6 @@ impl Session {
             inner: Arc::new(Inner {
                 codex,
                 deadlines: Mutex::new(reliable::Deadlines::default()),
-                transports: AtomicUsize::new(0),
                 closing: AtomicUsize::new(0),
                 simulation: AtomicBool::new(
                     cfg!(debug_assertions)
@@ -845,6 +846,8 @@ impl Session {
                 live_reads: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 paused_turns: Mutex::new(std::collections::HashSet::new()),
+                #[cfg(test)]
+                held_exits: AtomicBool::new(false),
                 interrupting: AtomicBool::new(false),
                 titling: AtomicUsize::new(0),
                 catalog: Mutex::new(Catalog::default()),
@@ -1692,6 +1695,24 @@ impl Session {
         instructions: &str,
         input: &str,
     ) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 900, 4096, 12, false)
+    }
+
+    /// Same bounded call for a meeting summary: a longer answer and a longer wait,
+    /// still no tools, history or retries. The transcript is data, never a turn.
+    pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 1500, 8192, 45, true)
+    }
+
+    fn bounded_text(
+        &self,
+        instructions: &str,
+        input: &str,
+        max_tokens: u32,
+        max_bytes: usize,
+        timeout: u64,
+        renew: bool,
+    ) -> Result<String, Failure> {
         use grokbot_engine::contracts::ModelEvent;
         use std::io::Read;
         let models = self.models();
@@ -1714,7 +1735,7 @@ impl Session {
             .ok_or_else(|| Failure::other("Modèle indisponible."))?;
         let mut body = json!({"model":model.slug,"instructions":instructions,
             "input":[{"role":"user","content":input}],"store":false,"stream":true,
-            "max_output_tokens":900});
+            "max_output_tokens":max_tokens});
         if let Some(effort) = model
             .efforts
             .iter()
@@ -1732,17 +1753,20 @@ impl Session {
         // A foreground call will renew an expiring token; skipping is harmless.
         // Credential writes use atomic rename. A read-only snapshot needs no
         // rotation lock (and cannot randomly lose a job to the UI's status read).
-        let credentials = self
-            .read()
-            .filter(|c| c.usable(self.inner.codex))
-            .filter(|c| c.expires_at > seconds() + 15)
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
-        let token = credentials
-            .access_token
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
+        // A summary is something Charles asked for or is waiting on: it renews an
+        // expired session like a chat turn, where a background extraction just skips.
+        let token = if renew {
+            self.bearer(false)?
+        } else {
+            self.read()
+                .filter(|c| c.usable(self.inner.codex))
+                .filter(|c| c.expires_at > seconds() + 15)
+                .and_then(|c| c.access_token)
+                .ok_or_else(|| Failure::other("Extraction indisponible."))?
+        };
         let response = self
             .request(&token, &mut body)?
-            .timeout(Duration::from_secs(12))
+            .timeout(Duration::from_secs(timeout))
             .send_json(body)
             .map_err(|error| {
                 self.request_failure(error);
@@ -1759,7 +1783,9 @@ impl Session {
             &diagnostics,
             &mut |event| {
                 match event {
-                    ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {
+                    ModelEvent::TextDelta { text: delta }
+                        if text.len() + delta.len() <= max_bytes =>
+                    {
                         text.push_str(&delta)
                     }
                     ModelEvent::Completed => completed = true,
@@ -1911,6 +1937,7 @@ impl Session {
             capability_fallback,
             notices,
             &AtomicBool::new(false),
+            None,
             &mut |_| {},
         )
     }
@@ -1921,6 +1948,7 @@ impl Session {
         capability_fallback: bool,
         notices: &mut Vec<String>,
         abandoned: &AtomicBool,
+        deadline: Option<Instant>,
         on_status: &mut dyn FnMut(u16),
     ) -> Result<ureq::Response, Failure> {
         let mut token = self.bearer(false)?;
@@ -1929,7 +1957,13 @@ impl Session {
             if abandoned.load(Ordering::SeqCst) {
                 return Err(Failure::other("Réponse annulée."));
             }
-            let attempt = self.request(&token, &mut body)?.send_json(body.clone());
+            let mut request = self.request(&token, &mut body)?;
+            if let Some(deadline) = deadline {
+                // A deadline replaces ureq's per-read timeout, so a stream that
+                // sends a byte before each read timeout cannot hold the socket.
+                request = request.timeout(deadline.saturating_duration_since(Instant::now()));
+            }
+            let attempt = request.send_json(body.clone());
             let (status, _, message, param, failure) = match attempt {
                 Ok(response) => {
                     on_status(response.status());

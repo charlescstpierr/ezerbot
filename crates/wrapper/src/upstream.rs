@@ -156,41 +156,44 @@ fn append(path: &std::path::Path, line: &str) {
 fn reset_time(body: &Value) -> Option<String> {
     let error = body.get("error").filter(|v| v.is_object()).unwrap_or(body);
     let value = error.get("reset_at").or_else(|| error.get("resets_at"))?;
-    let connection = rusqlite::Connection::open_in_memory().ok()?;
-    let result: Option<String> =
-        if let Some(seconds) = value.as_i64().or_else(|| value.as_str()?.parse().ok()) {
-            if !(946684800..=4133980799).contains(&seconds) {
-                return None;
-            }
-            connection
-                .query_row(
-                    "SELECT strftime('%d/%m à %H h %M', ?1, 'unixepoch', 'localtime')",
-                    [seconds],
-                    |r| r.get(0),
-                )
-                .ok()?
-        } else {
-            let date = value.as_str()?;
-            if date.len() < 20
-                || date.len() > 40
-                || date.as_bytes().get(4) != Some(&b'-')
-                || date.as_bytes().get(7) != Some(&b'-')
-                || date.as_bytes().get(10) != Some(&b'T')
-                || !date
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || b"-:TtZz+. ".contains(&c))
-            {
-                return None;
-            }
-            connection
-                .query_row(
-                    "SELECT strftime('%d/%m à %H h %M', ?1, 'localtime')",
-                    [date],
-                    |r| r.get(0),
-                )
-                .ok()?
-        };
-    result
+    let seconds = reset_seconds(value)?;
+    if !(946684800..=4133980799).contains(&seconds) {
+        return None;
+    }
+    rusqlite::Connection::open_in_memory()
+        .ok()?
+        .query_row(
+            "SELECT strftime('%d/%m à %H h %M', ?1, 'unixepoch', 'localtime')",
+            [seconds],
+            |r| r.get(0),
+        )
+        .ok()?
+}
+
+/// An upstream reset as Unix seconds: an integer, a string of seconds or an ISO date.
+/// Anything else, including a date without a time, is rejected rather than guessed.
+pub(crate) fn reset_seconds(value: &Value) -> Option<i64> {
+    if let Some(seconds) = value.as_i64().or_else(|| value.as_str()?.parse().ok()) {
+        return Some(seconds);
+    }
+    let date = value.as_str()?;
+    if date.len() < 20
+        || date.len() > 40
+        || date.as_bytes().get(4) != Some(&b'-')
+        || date.as_bytes().get(7) != Some(&b'-')
+        || date.as_bytes().get(10) != Some(&b'T')
+        || !date
+            .bytes()
+            .all(|c| c.is_ascii_digit() || b"-:TtZz+. ".contains(&c))
+    {
+        return None;
+    }
+    rusqlite::Connection::open_in_memory()
+        .ok()?
+        .query_row("SELECT CAST(strftime('%s', ?1) AS INTEGER)", [date], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .ok()?
 }
 
 pub(crate) fn failure_from_body(status: u16, body: &Value) -> Failure {

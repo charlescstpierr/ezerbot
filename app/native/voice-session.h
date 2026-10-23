@@ -16,7 +16,9 @@
 @property(nonatomic, strong) NSTimer *silence;
 @property(nonatomic, strong) id changeObserver;
 @property(nonatomic, strong) NSMutableArray<NSString *> *spoken;
+@property(nonatomic, copy) NSDictionary *microphone;
 #if defined(EZERBOT_RELEASE)
+@property(nonatomic) AudioDeviceID chosenDevice;
 @property(nonatomic, strong) AVAudioEngine *engine;
 @property(nonatomic, strong) SFSpeechRecognizer *recognizer;
 @property(atomic, strong) SFSpeechAudioBufferRecognitionRequest *request;
@@ -40,7 +42,8 @@
 - (NSDictionary *)snapshot {
     return @{ @"token":self.token ?: @"", @"status":self.status ?: @"idle", @"transcript":self.transcript ?: @"",
         @"utterance_id":@(self.utterance), @"final_text":self.finalText ?: @"", @"barged":@(self.barged),
-        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused) };
+        @"speaking":@(self.speaking && !self.paused), @"paused":@(self.paused),
+        @"microphone_id":self.microphone[@"id"] ?: @"", @"microphone_name":self.microphone[@"name"] ?: @"", @"microphone_fallback":self.microphone[@"fallback"] ?: @NO };
 }
 - (void)interrupt {
 #if defined(EZERBOT_RELEASE)
@@ -180,6 +183,11 @@
     if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio]) { [self fail:@"no_microphone"]; return; }
     self.engine = [[AVAudioEngine alloc] init];
     NSError *error = nil;
+    // The microphone chosen in the settings. Without a choice, the system default serves.
+    if (self.chosenDevice != kAudioObjectUnknown) {
+        AudioDeviceID device = self.chosenDevice; AudioUnit unit = self.engine.inputNode.audioUnit;
+        if (unit) AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device));
+    }
     // No raw microphone fallback while the speaker is active: avoid self-transcription.
     if (![self.engine.inputNode setVoiceProcessingEnabled:YES error:&error]) { [self fail:@"audio_failed"]; return; }
     AVAudioFormat *format = [self.engine.inputNode outputFormatForBus:0];
@@ -227,16 +235,25 @@
     if ([command isEqual:@"options"]) {
         NSMutableArray *voices = [NSMutableArray array];
 #if defined(EZERBOT_RELEASE)
-        for (AVSpeechSynthesisVoice *voice in AVSpeechSynthesisVoice.speechVoices) {
-            if ([voice.language hasPrefix:@"fr"]) [voices addObject:@{@"id":voice.identifier,@"name":voice.name,@"language":voice.language}];
-        }
+        // Every voice the Mac can pronounce, French first: a bot without a choice is given the first free one.
+        for (AVSpeechSynthesisVoice *voice in AVSpeechSynthesisVoice.speechVoices) [voices addObject:@{@"id":voice.identifier,@"name":voice.name,@"language":voice.language}];
+        [voices sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            BOOL french = [a[@"language"] hasPrefix:@"fr"], otherFrench = [b[@"language"] hasPrefix:@"fr"];
+            return french == otherFrench ? NSOrderedSame : french ? NSOrderedAscending : NSOrderedDescending;
+        }];
 #else
-        [voices addObject:@{@"id":@"fake-fr-CA",@"name":@"Voix française de test",@"language":@"fr-CA"}];
+        [voices addObject:@{@"id":@"fake-fr-CA",@"name":@"Voix française de test (Canada)",@"language":@"fr-CA"}];
+        [voices addObject:@{@"id":@"fake-fr-FR",@"name":@"Voix française de test (France)",@"language":@"fr-FR"}];
 #endif
         reply(@{@"voices":voices}); return;
     }
     if ([command isEqual:@"start"]) {
         [self cancel]; self.token = token; self.utterance = 0; self.barged = 0;
+        NSString *requested = body[@"microphone"];
+        self.microphone = [EzerbotMicrophones resolve:[requested isKindOfClass:NSString.class] && requested.length <= 256 ? requested : @""];
+#if defined(EZERBOT_RELEASE)
+        self.chosenDevice = [EzerbotMicrophones deviceForResolved:self.microphone];
+#endif
         self.spoken = [NSMutableArray array]; self.status = @"authorizing";
 #if defined(EZERBOT_RELEASE)
         NSUInteger generation = self.generation;
@@ -281,14 +298,15 @@
         if (self.pendingBuffers) [self.player play];
 #endif
     } else if ([command isEqual:@"speak"]) {
-        NSString *text = body[@"text"], *identifier = body[@"voice"];
+        NSString *text = body[@"text"], *identifier = body[@"voice"], *language = body[@"language"] ?: @"";
         NSNumber *speed = body[@"speed"], *barge = body[@"barge"];
-        if (![text isKindOfClass:NSString.class] || !text.length || text.length > 1500 || ![identifier isKindOfClass:NSString.class] || ![speed isKindOfClass:NSNumber.class] || (barge && ![barge isKindOfClass:NSNumber.class]) || !isfinite(speed.doubleValue) || speed.doubleValue < 0.5 || speed.doubleValue > 1.5) { reply(@{@"status":@"invalid"}); return; }
+        if (![text isKindOfClass:NSString.class] || !text.length || text.length > 1500 || ![identifier isKindOfClass:NSString.class] || ![language isKindOfClass:NSString.class] || language.length > 32 || ![speed isKindOfClass:NSNumber.class] || (barge && ![barge isKindOfClass:NSNumber.class]) || !isfinite(speed.doubleValue) || speed.doubleValue < 0.5 || speed.doubleValue > 2) { reply(@{@"status":@"invalid"}); return; }
         if (![self.status isEqual:@"listening"] || (barge && barge.unsignedIntegerValue != self.barged)) { reply([self snapshot]); return; }
 #if defined(EZERBOT_RELEASE)
-        AVSpeechSynthesisVoice *voice = identifier.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:identifier] : [AVSpeechSynthesisVoice voiceWithLanguage:@"fr-CA"];
-        if (!voice && !identifier.length) voice = [AVSpeechSynthesisVoice voiceWithLanguage:@"fr-FR"];
-        if (!voice || ![voice.language hasPrefix:@"fr"]) { [self fail:@"tts_unavailable"]; reply([self snapshot]); return; }
+        // No voice chosen: the Mac's voice for the bot's language, French when the language is Auto.
+        AVSpeechSynthesisVoice *voice = identifier.length ? [AVSpeechSynthesisVoice voiceWithIdentifier:identifier] : [AVSpeechSynthesisVoice voiceWithLanguage:language.length ? language : @"fr-CA"];
+        if (!voice && !identifier.length) voice = [AVSpeechSynthesisVoice voiceWithLanguage:language.length ? language : @"fr-FR"];
+        if (!voice || (language.length && ![voice.language.lowercaseString hasPrefix:language.lowercaseString])) { [self fail:@"tts_unavailable"]; reply([self snapshot]); return; }
         AVSpeechUtterance *utterance = [AVSpeechUtterance speechUtteranceWithString:text];
         utterance.voice = voice; utterance.rate = AVSpeechUtteranceDefaultSpeechRate * speed.floatValue;
         [self.speechQueue addObject:utterance];

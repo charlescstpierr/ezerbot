@@ -18,9 +18,7 @@ export function composerConnectionState({ offline = false, live = false, busy = 
 
 function signInCopy({ providerConnected, expired, group, isTask }) {
   if (providerConnected) return group ? "Envoyez un nouveau message pour obtenir une réponse." : isTask ? "Poursuivez dans la conversation principale." : "Votre question est conservée. Réessayez pour obtenir la réponse.";
-  if (expired) return group ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis envoyez un nouveau message."
-    : isTask ? "Votre session ChatGPT a expiré. Reconnectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
-      : "Votre session ChatGPT a expiré. Votre question est conservée. Reconnectez votre compte ChatGPT, puis réessayez.";
+  if (expired) return "Ta session ChatGPT a expiré. Reconnecte-toi pour continuer.";
   return group ? "Connectez votre compte ChatGPT, puis envoyez un nouveau message."
     : isTask ? "Connectez votre compte ChatGPT, puis poursuivez dans la conversation principale."
       : "Votre question est conservée. Connectez votre compte ChatGPT, puis réessayez.";
@@ -42,13 +40,14 @@ export function signInCardState({ message, isGroup = false, isTask = false, prov
   };
 }
 
+const NO_EVENT = "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.";
+const STALLED = "La réponse d’OpenAI est bloquée : aucun nouvel événement reçu. Réessayez.";
+
 export function presentedFailureText(error, { retry = true, replacement = "Envoyez un nouveau message." } = {}) {
   let text = error || "";
-  // Keepalive pings are not a session renewal. Say that no event arrived.
-  text = text.replaceAll(
-    "OpenAI n’a pas répondu à temps (connexion ou renouvellement de session). Réessayez.",
-    "OpenAI n’a envoyé aucun événement à temps. Réessayez.",
-  );
+  // Keepalive pings are not a session renewal: the connection is alive, the answer is slow.
+  text = text.replaceAll(NO_EVENT, "Connexion lente… on attend la réponse.");
+  text = text.replaceAll(STALLED, retry ? "La réponse n’arrive pas. Réessayer ?" : `La réponse n’arrive pas. ${replacement}`);
   if (!retry) {
     const phrase = replacement.replace(/\.\s*$/, "");
     text = text.replace(/Réessayez\.(?=\s*$)/, `${phrase}.`);
@@ -71,14 +70,16 @@ export function replyProblemState(message, { isGroup = false, isTask = false, en
     retryTitle: !engineConnected ? "Moteur local indisponible" : "Réessayer cette réponse" };
 }
 
-export function floatingFailureState(reply, { providerConnected = false } = {}) {
+export function floatingFailureState(reply, { providerConnected } = {}) {
   if (reply?.state !== "failed") return null;
   const expired = reply.error_kind === "signin_expired";
   const signin = expired || reply.error_kind === "signin";
   const reconnected = signin && providerConnected;
-  const alert = !signin;
+  // Without a session the answer cannot have failed on its own: say so neutrally.
+  const disconnected = !signin && providerConnected === false;
+  const alert = !signin && !disconnected;
   return {
-    title: reconnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : "La réponse a échoué.",
+    title: reconnected ? "Compte ChatGPT connecté" : expired ? "Votre session ChatGPT a expiré" : signin ? "Connexion ChatGPT requise" : disconnected ? "Non connecté" : "La réponse a échoué.",
     alert,
     detailClass: alert ? "floating-error" : "",
     detail: reconnected ? "Votre question est conservée. Ouvrez le fil pour reprendre la réponse."

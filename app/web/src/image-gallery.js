@@ -216,9 +216,34 @@ export async function saveGalleryImage(image, io = {}) {
   return name;
 }
 
-async function pngBlob(bytes, type) {
-  if (type !== "image/png") throw new Error("Image illisible.");
-  return new Blob([bytes], { type });
+async function decodeImage(blob) {
+  if (typeof createImageBitmap === "function") return createImageBitmap(blob);
+  const url = URL.createObjectURL(blob);
+  try {
+    const element = new Image();
+    element.src = url;
+    await element.decode();
+    return element;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function pngBlob(bytes, type, io) {
+  if (type === "image/png") return new Blob([bytes], { type });
+  try {
+    const bitmap = await (io.decode ?? decodeImage)(new Blob([bytes], { type }));
+    const canvas = (io.document ?? globalThis.document).createElement("canvas");
+    canvas.width = bitmap.naturalWidth || bitmap.width;
+    canvas.height = bitmap.naturalHeight || bitmap.height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const png = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!png) throw new Error("Image illisible.");
+    return png;
+  } catch {
+    throw new Error("Image illisible.");
+  }
 }
 
 export async function copyGalleryImage(image, io = {}) {
@@ -230,7 +255,7 @@ export async function copyGalleryImage(image, io = {}) {
   }
   const clipboard = io.clipboard ?? globalThis.navigator?.clipboard;
   if (!clipboard?.write) throw new Error("Le presse-papiers n’est pas disponible.");
-  const blob = loadImageBytes(image, io).then(({ bytes, type }) => pngBlob(bytes, type));
+  const blob = loadImageBytes(image, io).then(({ bytes, type }) => pngBlob(bytes, type, io));
   const loaded = blob.then(() => null, (error) => error);
   const parts = { "image/png": blob };
   try {

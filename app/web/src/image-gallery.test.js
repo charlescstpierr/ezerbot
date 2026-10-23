@@ -308,6 +308,48 @@ test("the browser copy hands the clipboard a promise of the image inside the use
   await assert.rejects(failing, (error) => gallery.galleryFailureText(error, "autre") === "Image introuvable.");
 });
 
+test("copying a JPEG, GIF, WebP or BMP in the browser writes a PNG drawn on a canvas", async () => {
+  const [target] = gallery.galleryImages({ attachments: [{ id: "attachment_j", name: "Ciel violet", caption: "Ciel violet" }] });
+  const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  const drawn = [];
+  const decoded = [];
+  const io = (type) => ({
+    fetch: async () => new Response(JPEG, { status: 200, headers: { "content-type": type } }),
+    async decode(blob) { decoded.push(blob.type); return { width: 3, height: 2, close() { drawn.push("close"); } }; },
+    document: {
+      createElement(tag) {
+        assert.equal(tag, "canvas");
+        return {
+          width: 0,
+          height: 0,
+          getContext(kind) { assert.equal(kind, "2d"); return { drawImage(bitmap, x, y) { drawn.push([bitmap.width, bitmap.height, x, y]); } }; },
+          toBlob(done, mime) { assert.equal(mime, "image/png"); done(new Blob([PNG], { type: "image/png" })); },
+        };
+      },
+    },
+  });
+  for (const type of ["image/jpeg", "image/gif", "image/webp", "image/bmp"]) {
+    const written = [];
+    const result = await gallery.copyGalleryImage(target, { ...io(type), clipboard: { async write(items) { written.push(...items); } } });
+    assert.equal(result.type, "image/png", type);
+    const blob = await (written[0].getType ? written[0].getType("image/png") : written[0]["image/png"]);
+    assert.equal(blob.type, "image/png");
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG, `${type} is converted, not passed through`);
+  }
+  assert.deepEqual(decoded, ["image/jpeg", "image/gif", "image/webp", "image/bmp"]);
+  assert.deepEqual(drawn.slice(0, 2), [[3, 2, 0, 0], "close"]);
+
+  const unreadable = {
+    ...io("image/jpeg"),
+    async decode() { throw new DOMException("The source image cannot be decoded.", "InvalidStateError"); },
+    clipboard: { async write([item]) { await (item.getType ? item.getType("image/png") : item["image/png"]); } },
+  };
+  await assert.rejects(gallery.copyGalleryImage(target, unreadable), (error) => {
+    assert.equal(gallery.galleryFailureText(error, "autre"), "Image illisible.");
+    return true;
+  });
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

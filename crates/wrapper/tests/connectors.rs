@@ -8031,3 +8031,297 @@ fn linear_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_na
     assert!(failed(&g, &run).contains("compte Linear a changé"));
     assert_eq!(g.linear_mutations(), 0);
 }
+
+impl Fixture {
+    /// A turn that reads with `tool`, then answers with `answer`: the run and the reply message
+    /// as the chat shows it.
+    fn read_and_answer(
+        &mut self,
+        id: &str,
+        tool: &str,
+        arguments: Value,
+        answer: &str,
+    ) -> (String, Value) {
+        let conversation = self.github_conversation();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![
+            json!({"type":"response.output_text.delta","delta":answer}),
+            json!({"type":"response.completed"}),
+        ]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":format!("Lis {arguments}.")}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        wait("cited run", || {
+            self.app.tick(0);
+            store::required(&self.db(), &run)
+                .unwrap()
+                .status
+                .is_terminal()
+        });
+        (run, self.reply_to(&conversation, id))
+    }
+    fn reply_to(&mut self, conversation: &str, message: &str) -> Value {
+        self.state()["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == conversation)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == format!("reply-{message}"))
+            .cloned()
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_mail_read_then_cited_gives_a_verified_source_with_sender_subject_date_and_id() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (run, reply) = f.read_and_answer(
+        "cite-mail",
+        GMAIL_TOOL,
+        json!({"count":2}),
+        "Alice demande le budget [1].",
+    );
+    let output = done(&f, &run);
+    // The model is told each number, in the fields and in the listing it copies.
+    assert_eq!(output["courriels"][0]["source"], 1);
+    assert_eq!(output["courriels"][1]["source"], 2);
+    assert_eq!(output["sources"][0]["n"], 1);
+    assert!(
+        output["texte"]
+            .as_str()
+            .unwrap()
+            .contains("\n[1] Courriel 6"),
+        "{output}"
+    );
+    let sources = reply["payload"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0]["n"], 1);
+    assert_eq!(sources[0]["type"], "courriel");
+    assert_eq!(sources[0]["auteur"], "Alice <alice6@example.test>");
+    assert_eq!(sources[0]["titre"], "Courriel 6 <b>important</b>");
+    assert_eq!(sources[0]["date"], "Tue, 20 Oct 2026 09:06:00 +0000");
+    assert_eq!(sources[0]["identifiant"], "m6");
+    assert_eq!(sources[0]["compte"], "charles@example.test");
+    assert_eq!(
+        reply["payload"]["citations"],
+        json!([{"n":1,"etat":"verifiee"}])
+    );
+}
+
+#[test]
+fn a_citation_without_such_a_source_is_marked_not_found() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let (_, reply) = f.read_and_answer(
+        "cite-missing",
+        GMAIL_TOOL,
+        json!({"count":1}),
+        "Le total est de 40 $ [7], et Alice écrit [1].",
+    );
+    let citations = reply["payload"]["citations"].as_array().unwrap();
+    assert_eq!(citations[0]["n"], 7);
+    assert_eq!(citations[0]["etat"], "introuvable");
+    assert_eq!(citations[0]["libelle"], "source introuvable");
+    assert_eq!(citations[1], json!({"n":1,"etat":"verifiee"}));
+    // The reply itself is kept as the model wrote it.
+    assert_eq!(
+        reply["body"],
+        "Le total est de 40 $ [7], et Alice écrit [1]."
+    );
+}
+
+#[test]
+fn a_sheet_read_gives_a_source_with_the_file_and_the_range_read() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.drive(vec![
+        json!({"id":"sheet1","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet","modifiedTime":"2026-10-01T10:00:00.000Z","text":"poste,montant\nloyer,1200\nassurance,80\n"}),
+    ]);
+    let (_, reply) = f.read_and_answer(
+        "cite-sheet",
+        DRIVE_TOOL,
+        json!({"nom":"Budget"}),
+        "Le loyer est de 1 200 $ [1].",
+    );
+    let sources = reply["payload"]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0]["type"], "feuille");
+    assert_eq!(sources[0]["titre"], "Budget");
+    assert_eq!(sources[0]["identifiant"], "sheet1");
+    assert!(
+        sources[0]["plage"]
+            .as_str()
+            .unwrap()
+            .starts_with("lignes 1 à 3"),
+        "{}",
+        sources[0]
+    );
+    assert_eq!(
+        reply["payload"]["citations"],
+        json!([{"n":1,"etat":"verifiee"}])
+    );
+}
+
+#[test]
+fn a_drive_document_is_a_source_without_a_range() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.drive(vec![
+        json!({"id":"doc1","name":"Plan 2026","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Objectif : livrer Ezerbot.\n"}),
+    ]);
+    let (_, reply) = f.read_and_answer(
+        "cite-doc",
+        DRIVE_TOOL,
+        json!({"nom":"Plan 2026"}),
+        "L’objectif est de livrer Ezerbot [1].",
+    );
+    let sources = reply["payload"]["sources"].as_array().unwrap();
+    assert_eq!(sources[0]["type"], "fichier_drive");
+    assert_eq!(sources[0]["titre"], "Plan 2026");
+    assert_eq!(sources[0].get("plage"), None, "only a sheet has a range");
+}
+
+#[test]
+fn calendar_events_are_sources_and_the_listing_carries_their_numbers() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let old = now_ms() - 86_400_000;
+    f.agenda(vec![
+        agenda_event("t2", "Dentiste", &agenda_at(1, 14), old, old, "confirmed"),
+        agenda_event(
+            "t1",
+            "Revue de sprint",
+            &agenda_at(1, 9),
+            old,
+            old,
+            "confirmed",
+        ),
+    ]);
+    let (run, reply) = f.read_and_answer(
+        "cite-agenda",
+        CALENDAR_TOOL,
+        json!({}),
+        "Demain, revue à 9 h [1] puis dentiste [2].",
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["evenements"][0]["source"], 1);
+    assert!(
+        output["texte"].as_str().unwrap().contains("\n[2] "),
+        "{output}"
+    );
+    let sources = reply["payload"]["sources"].as_array().unwrap();
+    assert_eq!(sources[0]["type"], "evenement");
+    assert_eq!(sources[0]["titre"], "Revue de sprint");
+    assert_eq!(sources[0]["identifiant"], "t1");
+    assert_eq!(sources[1]["titre"], "Dentiste");
+    assert_eq!(
+        reply["payload"]["citations"],
+        json!([{"n":1,"etat":"verifiee"},{"n":2,"etat":"verifiee"}])
+    );
+}
+
+#[test]
+fn a_private_value_in_a_mail_subject_never_reaches_the_registry_or_the_reply_payload() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    vault
+        .set("SOURCE_TEST", "Essai", "motsecret-4242-prive")
+        .unwrap();
+    f.oauth.seen.lock().unwrap().gmail.inbox = vec![json!({
+        "id":"m5","from":"Alice <alice@example.test>","subject":"Code motsecret-4242-prive",
+        "date":"Tue, 20 Oct 2026 09:00:00 +0000","text":"Bonjour motsecret-4242-prive",
+    })];
+    let (run, reply) =
+        f.read_and_answer("cite-secret", GMAIL_TOOL, json!({"count":1}), "Voir [1].");
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT group_concat(title||coalesce(excerpt,''),'') FROM wrapper_run_sources WHERE run_id=?1",
+            [&run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("motsecret-4242-prive"), "{stored}");
+    assert!(!reply["payload"]
+        .to_string()
+        .contains("motsecret-4242-prive"));
+    assert_eq!(reply["payload"]["sources"][0]["identifiant"], "m5");
+}
+
+#[test]
+fn a_drive_question_about_which_account_to_use_is_not_a_source() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    f.drive(vec![
+        json!({"id":"doc1","name":"Plan 2026","mimeType":"application/vnd.google-apps.document","modifiedTime":"2026-10-20T10:00:00.000Z","text":"Objectif."}),
+    ]);
+    let (run, reply) = f.read_and_answer(
+        "cite-ask",
+        DRIVE_TOOL,
+        json!({"nom":"Plan 2026"}),
+        "Quel compte [1] ?",
+    );
+    let output = done(&f, &run);
+    assert!(output.get("fichier").is_none(), "{output}");
+    assert!(output.get("sources").is_none(), "{output}");
+    assert_eq!(reply["payload"]["sources"], json!([]));
+    assert_eq!(reply["payload"]["citations"][0]["etat"], "introuvable");
+}
+
+#[test]
+fn the_registry_survives_a_restart_and_keeps_no_full_mail() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    let long = format!(
+        "Début du message. {} FIN-DU-MESSAGE-COMPLET",
+        "texte ".repeat(500)
+    );
+    f.oauth.seen.lock().unwrap().gmail.inbox = vec![json!({
+        "id":"m9","from":"Alice <alice@example.test>","subject":"Long courriel",
+        "date":"Tue, 20 Oct 2026 09:00:00 +0000","text":long,
+    })];
+    let (run, _) = f.read_and_answer(
+        "cite-long",
+        GMAIL_TOOL,
+        json!({"count":1}),
+        "Alice écrit [1].",
+    );
+    f.app = App::open_with(&f.path, f.provider.clone()).unwrap();
+    let kept = grokbot_wrapper::features::sources::registry(&f.db(), &run).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["identifiant"], "m9");
+    let excerpt = kept[0]["extrait"].as_str().unwrap();
+    assert!(excerpt.starts_with("Début du message."));
+    assert!(excerpt.chars().count() <= 200, "{excerpt}");
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT group_concat(title||coalesce(excerpt,''),'') FROM wrapper_run_sources WHERE run_id=?1",
+            [&run],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("FIN-DU-MESSAGE-COMPLET"));
+    // The reply of that turn still tells its sources after the restart.
+    let reply = f.state()["conversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["messages"].as_array().unwrap().clone())
+        .find(|m| m["id"] == "reply-cite-long")
+        .unwrap();
+    assert_eq!(reply["payload"]["sources"][0]["identifiant"], "m9");
+    assert_eq!(
+        reply["payload"]["citations"],
+        json!([{"n":1,"etat":"verifiee"}])
+    );
+}

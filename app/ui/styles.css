@@ -650,8 +650,8 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
   }
   .composer-model:has([data-picker="speed"]) .composer-bot { min-width: 0; }
 }
-/* De 761 à 785 le plancher de 120 px remet le titre sous Notifications dès que le badge Local et le menu sont là. Le banc de test n'a pas ce badge : son titre garde 120 px. */
-@media (min-width: 761px) and (max-width: 785px) {
+/* De 761 à 819 le plancher de 120 px remet le titre sous les actions dès que le badge et le menu sont là. Le banc de test n'a pas ce badge : son titre garde 120 px. */
+@media (min-width: 761px) and (max-width: 819px) {
   .topbar:has(.mode-badge) h1 { min-width: 0; }
 }
 @media (max-width: 370px) {

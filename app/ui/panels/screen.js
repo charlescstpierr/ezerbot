@@ -13,10 +13,20 @@
   const screenOpen = (id) => Boolean(id) && (yoloBot(id) || Boolean(data.bots?.some(b => b.bot_id === id && b.enabled)));
   function updateEntry() {
     entry.hidden = !data.session && !(context.conversation?.kind === "chat" && screenOpen(context.bot?.id));
+    menuItem.hidden = entry.hidden;
   }
   const entry = button("Écran du Mac", () => { renderDialog(); dialog.showModal(); showOverlay(); }, "tool-pill screen-button");
   entry.setAttribute("aria-label", "Écran du Mac"); entry.title = "Écran du Mac";
   document.querySelector(".topbar-actions").prepend(entry);
+  // Sous 1100 px l'en-tête n'a plus la place du titre : la même entrée passe dans le menu de la conversation.
+  const menuItem = node("button", null, "screen-menu-item"); menuItem.type = "button"; menuItem.hidden = true;
+  menuItem.innerHTML = '<svg class="icon"><use href="#i-monitor"/></svg>'; menuItem.append(node("span", "Écran du Mac"));
+  menuItem.onclick = () => {
+    document.getElementById("conversation-menu").hidden = true;
+    document.getElementById("conversation-menu-button").setAttribute("aria-expanded", "false");
+    entry.onclick();
+  };
+  document.getElementById("conversation-menu").prepend(menuItem);
   const dialog = node("dialog", null, "dialog screen-dialog"); dialog.setAttribute("aria-labelledby", "screen-title");
   document.getElementById("panels").append(dialog);
   const overlay = node("div", null, "screen-overlay"); overlay.setAttribute("role", "status"); overlay.hidden = true; document.querySelector(".topbar").after(overlay);

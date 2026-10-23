@@ -195,7 +195,11 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const linear = panel.querySelector('[data-connector="linear"]');
               const linearFree = !!linear && !linear.querySelector("form") && linear.querySelectorAll('input:not([type="checkbox"])').length === 0;
               const linearActions = !!linear && /issues/i.test(linear.textContent) && /carte brouillon/i.test(linear.textContent);
-              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions} : null;
+              // Jira Cloud non plus, et sa fiche sépare la lecture de l'effet par carte brouillon.
+              const jira = panel.querySelector('[data-connector="jira"]');
+              const jiraFree = !!jira && !jira.querySelector("form") && jira.querySelectorAll('input:not([type="checkbox"])').length === 0;
+              const jiraActions = !!jira && /issues/i.test(jira.textContent) && /carte brouillon/i.test(jira.textContent);
+              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions && jiraFree && jiraActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions, jiraFree, jiraActions} : null;
             }""",
             "connecteurs non prêts",
         )
@@ -1366,7 +1370,7 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     if sphere == "parametres-connecteurs":
-        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png"]
+        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png", f"jira-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -1383,16 +1387,17 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
                   return true;
                 }""",
             )
-        if sphere == "parametres-connecteurs" and index == 1:
-            # Un second plan sur la fiche Linear, que le titre Connecteurs en haut du premier laisse hors cadre.
+        if sphere == "parametres-connecteurs" and index in (1, 2):
+            # Des plans sur les fiches Linear puis Jira, que le titre Connecteurs en haut du premier laisse hors cadre.
+            service = "linear" if index == 1 else "jira"
             eval_js(
                 evidence,
                 """() => {
-                  const card = document.querySelector('[data-panel="mcp"] [data-connector="linear"]');
-                  if (!card) throw new Error("fiche Linear absente");
+                  const card = document.querySelector('[data-panel="mcp"] [data-connector="%s"]');
+                  if (!card) throw new Error("fiche %s absente");
                   card.scrollIntoView({block: "center"});
                   return true;
-                }""",
+                }""" % (service, service.capitalize()),
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)

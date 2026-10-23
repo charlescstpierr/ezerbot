@@ -37,7 +37,11 @@ function app() {
     },
     Event: class {}, Date,
   });
-  return { scroll, state: (requests) => registration.onState({ forms: { requests }, conversations: [] }) };
+  return {
+    scroll,
+    state: (requests) => registration.onState({ forms: { requests }, conversations: [] }),
+    shell: () => registration.onState({ bots: [] }),
+  };
 }
 
 test("at the first reading, a short banner says how many requests wait, above the conversation", () => {
@@ -79,4 +83,11 @@ test("the cross closes it for good; an expired request or an empty first reading
   // A request that arrives while the app is in use is not a « reprise »: its notification speaks.
   none.state([approval("fresh")]);
   assert.equal(none.scroll.previous, undefined);
+});
+
+test("the shell state handed over before the first reading is not the first reading", () => {
+  const f = app();
+  f.shell();
+  f.state([approval("a")]);
+  assert.equal(f.scroll.previous.children[0].textContent, "1 demande attend votre décision");
 });

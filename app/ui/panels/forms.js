@@ -271,6 +271,8 @@
     return (state.forms?.requests || []).filter((request) => pendingApproval(request) && request.kind.expires_at > Date.now()).length;
   }
   function observeResume(state) {
+    // register() hands over the shell state before the first reading: no forms yet, nothing to count.
+    if (!Array.isArray(state.forms?.requests)) return;
     const count = waitingCount(state);
     if (!resumeChecked) {
       resumeChecked = true;

@@ -367,8 +367,10 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const image = card?.querySelector("img");
               const photo = [...document.querySelectorAll(".gb-image-grid img")].find((node) => !card.contains(node));
               if (!card || !image || !image.complete || !image.naturalWidth || !photo || !photo.complete) return null;
-              card.scrollIntoView({block: "center"});
+              photo.scrollIntoView({block: "start"});
               const box = image.getBoundingClientRect();
+              const photoBox = photo.getBoundingClientRect();
+              if (photoBox.top < 0 || box.top > window.innerHeight) return null;
               return {ok: true, natural: image.naturalWidth / image.naturalHeight, shown: box.width / box.height, photo: photo.naturalWidth / photo.naturalHeight, refused: !!document.querySelector('.gb-generated-image-card[data-image-state="failed"]')};
             }""",
             "image large et photo absentes",

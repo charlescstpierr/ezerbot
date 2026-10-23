@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal", "voix-appel")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -355,6 +355,38 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             "voix des bots non attribuées",
         )
         return open_bot_voice(evidence, "Ezerbot")
+    if sphere == "iphone-reponse":
+        # Une conversation neuve avec une vraie réponse du faux bot, puis l'accueil : la notification « reply: » reste non lue.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const { conversation } = await panels.api("/api/conversations", {});
+              await panels.api("/api/send", {conversation_id: conversation.id, message_id: "question-" + Date.now(), body: "Bonjour, qui es-tu ?"});
+              window.__replyConversation = conversation.id;
+              return true;
+            }""",
+        )
+        wait_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              await panels.refresh();
+              const conversation = panels.state.conversations.find((item) => item.id === window.__replyConversation);
+              const reply = conversation?.messages.find((message) => message.role === "assistant" && message.body && message.state !== "streaming");
+              if (!reply) return null;
+              const { items } = await panels.api("/api/notifications");
+              const item = items.find((entry) => entry.kind === "reply" && entry.conversation_id === window.__replyConversation);
+              if (!item) return null;
+              window.__replyNotification = item.id;
+              document.getElementById("home-link").click();
+              return {ok: true, notification: item.id};
+            }""",
+            "réponse du bot absente",
+            timeout=40,
+        )
+        return {"ok": True}
     if sphere == "memo-vocal":
         # Un mémo de vingt secondes déjà envoyé, ouvert dans son fil. Il n’est créé qu’une fois par passage complet.
         eval_js(evidence, close_overlays_js())
@@ -703,6 +735,67 @@ def memo_step(evidence: Path, index: int) -> None:
             raise SystemExit(f"un mot sans horodatage a déplacé la lecture ou ne le dit pas: {state}")
 
 
+def iphone_reply_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 le fil avec la réponse du bot, 1 un toucher sur la notification et le bouton Répondre, 2 la feuille ouverte par ce bouton, 3 « Vu depuis la notification » envoyé deux fois."""
+    if index == 0:
+        eval_js(evidence, """() => { window.GrokbotPanels.openConversation(window.__replyConversation); return true; }""")
+        wait_js(
+            evidence,
+            """() => document.querySelector("dialog.reply-sheet[open]") ? null : [...document.querySelectorAll("[data-message-id]")].some((node) => node.innerText.includes("Bonjour, qui es-tu")) ? {ok: true} : null""",
+            "fil de la réponse absent",
+        )
+    if index == 1:
+        eval_js(evidence, """() => { document.getElementById("home-link").click(); return true; }""")
+        state = eval_js(
+            evidence,
+            """async () => {
+              await window.EzerbotNotifications.activate(window.__replyNotification, {push: true});
+              await new Promise((resolve) => setTimeout(resolve, 400));
+              const button = document.querySelector(".reply-offer button");
+              return {label: button?.textContent || "", sheet: !!document.querySelector("dialog.reply-sheet[open]")};
+            }""",
+        )
+        if not state["label"].startswith("Répondre") or state["sheet"]:
+            raise SystemExit(f"un toucher simple n'offre pas Répondre sur la conversation: {state}")
+    if index == 2:
+        state = eval_js(
+            evidence,
+            """async () => {
+              document.querySelector(".reply-offer button").click();
+              await new Promise((resolve) => setTimeout(resolve, 400));
+              const dialog = document.querySelector("dialog.reply-sheet");
+              const field = dialog?.querySelector("textarea");
+              return {open: !!dialog?.open, title: dialog?.querySelector("h2")?.textContent, focused: document.activeElement === field, offer: !!document.querySelector(".reply-offer")};
+            }""",
+        )
+        if not state["open"] or not state["title"].startswith("Répondre à ") or not state["focused"] or state["offer"]:
+            raise SystemExit(f"la feuille de réponse n'est pas prête, champ prêt: {state}")
+    if index == 3:
+        state = eval_js(
+            evidence,
+            """async () => {
+              const dialog = document.querySelector("dialog.reply-sheet");
+              const field = dialog.querySelector("textarea");
+              field.value = "Vu depuis la notification";
+              const form = dialog.querySelector("form");
+              form.requestSubmit(); form.requestSubmit();
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+              await window.GrokbotPanels.refresh();
+              const conversation = window.GrokbotPanels.state.conversations.find((item) => item.id === window.__replyConversation);
+              const sent = conversation.messages.filter((message) => message.role === "user" && message.body === "Vu depuis la notification").length;
+              return {closed: !dialog.open, sent};
+            }""",
+        )
+        if not state["closed"] or state["sent"] != 1:
+            raise SystemExit(f"la réponse n'est pas arrivée une seule fois dans le fil: {state}")
+        eval_js(evidence, """() => { window.GrokbotPanels.openConversation(window.__replyConversation); return true; }""")
+        wait_js(
+            evidence,
+            """() => [...document.querySelectorAll("[data-message-id]")].some((node) => node.innerText.includes("Vu depuis la notification")) ? {ok: true} : null""",
+            "message absent du fil",
+        )
+
+
 def dictation_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 choix du micro USB, 1 micro retiré, 2 dictée en cours, 3 texte dans le brouillon."""
     if index == 0:
@@ -770,6 +863,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
     if sphere == "memo-vocal":
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
+    if sphere == "iphone-reponse":
+        return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
@@ -794,6 +889,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)
+        if sphere == "iphone-reponse":
+            iphone_reply_step(evidence, index)
         if sphere == "dictee":
             dictation_step(evidence, index)
         if sphere == "voix-bots":

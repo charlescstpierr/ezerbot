@@ -237,6 +237,7 @@ pub fn remote(
                 "/api/send"
                     | "/api/reconcile"
                     | "/api/regenerate"
+                    | "/api/messages/thread"
                     | "/api/stop"
                     | "/api/local/tasks/stop"
                     | "/api/delegation/cancel"

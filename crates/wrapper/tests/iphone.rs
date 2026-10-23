@@ -488,3 +488,34 @@ fn phone_reply_lands_once_in_the_mac_thread_and_never_when_access_is_cut() {
         0
     );
 }
+
+#[test]
+fn paired_phone_can_reply_in_a_thread_and_an_unpaired_one_cannot() {
+    let mut f = Fixture::new();
+    let (_, token) = f.pair();
+    let conversation = f.post("/api/conversations", json!({}))["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.post(
+        "/api/send",
+        json!({"conversation_id":conversation,"message_id":"phrase","body":"Une phrase précise"}),
+    );
+    let body = json!({"conversation_id":conversation,"message_id":"phrase"});
+    assert_eq!(
+        f.remote("POST", "/api/messages/thread", body.clone(), None)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let opened = f
+        .remote("POST", "/api/messages/thread", body.clone(), Some(&token))
+        .unwrap();
+    assert_eq!(opened["thread"]["parent_message_id"], "phrase");
+    let thread = opened["conversation"]["id"].as_str().unwrap();
+    assert_ne!(thread, conversation);
+    let again = f
+        .remote("POST", "/api/messages/thread", body, Some(&token))
+        .unwrap();
+    assert_eq!(again["conversation"]["id"], thread);
+}

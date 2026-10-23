@@ -29,6 +29,7 @@ pub mod priority {
     pub const SKILLS: u32 = 30;
     pub const MEMORY: u32 = 40;
     pub const LIBRARY: u32 = 45;
+    pub const THREAD: u32 = 48;
     pub const SUMMARY: u32 = 50;
     pub const HISTORY: u32 = 90;
     pub const CURRENT: u32 = 100;
@@ -114,6 +115,7 @@ mod shell_tasks;
 pub mod skills;
 pub mod storage;
 pub mod templates;
+pub mod threads;
 pub mod updates;
 pub mod usage;
 pub mod voice;
@@ -147,6 +149,7 @@ macro_rules! registry {
 }
 registry!(
     conversations,
+    threads,
     engine,
     multibot,
     skills,

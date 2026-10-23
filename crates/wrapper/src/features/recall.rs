@@ -52,6 +52,7 @@ const HOSTS: [&str; 4] = [
 const REGIONS: [&str; 4] = ["us-west-2", "us-east-1", "eu-central-1", "ap-northeast-1"];
 const POLL_MS: u64 = 4_000;
 const MAX_FAILURES: i64 = 3;
+const FINAL_TRIES: i64 = 30;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: u64 = 8 << 20;
 /// Lignes gardées par réunion, montrées dans la carte, et lues par le modèle en une fois.
@@ -526,7 +527,7 @@ fn create_bot(
         .ok()
         .flatten()
         .flatten();
-    let body = json!({"meeting_url":link,"bot_name":name,"recording_config":{"transcript":{"provider":{"recallai_streaming":{"mode":"prioritize_low_latency"}}}}});
+    let body = json!({"meeting_url":link,"bot_name":name,"recording_config":{"transcript":{"provider":{"recallai_streaming":{}}}}});
     let mut last = Failure { status: None };
     for (region, base) in regions(hint.as_deref()) {
         match call(&base, key, "POST", "/api/v1/bot/", Some(&body)) {
@@ -626,6 +627,7 @@ fn parse_lines(value: &Value) -> Option<Vec<Line>> {
             .and_then(|w| {
                 w["start_time"]
                     .as_f64()
+                    .or_else(|| w["start_timestamp"].as_f64())
                     .or_else(|| w["start_timestamp"]["relative"].as_f64())
             })
             .or_else(|| item["start_time"].as_f64())
@@ -645,8 +647,71 @@ fn parse_lines(value: &Value) -> Option<Vec<Line>> {
     }
     Some(lines)
 }
-fn fetch_lines(key: &str, region: Option<&str>, bot: &str) -> Result<Vec<Line>, Failure> {
+/// Transcript complet d’un enregistrement : un lien signé, lu sans la clé, que seuls
+/// Recall et son stockage peuvent servir.
+fn artifact_url(value: &Value) -> Option<String> {
+    value["recordings"]
+        .as_array()?
+        .iter()
+        .find_map(|r| r["media_shortcuts"]["transcript"]["data"]["download_url"].as_str())
+        .map(str::to_owned)
+}
+fn download_allowed(raw: &str) -> bool {
+    if fake_base().is_some_and(|base| raw.starts_with(&format!("{base}/"))) {
+        return true;
+    }
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && [".recall.ai", ".amazonaws.com"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+fn download(raw: &str) -> Result<Value, Failure> {
+    if !download_allowed(raw) {
+        return Err(Failure { status: None });
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(TIMEOUT)
+        .redirects(0)
+        .build();
+    let response = agent
+        .get(raw)
+        .set("Accept", "application/json")
+        .call()
+        .map_err(|_| Failure { status: None })?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_BODY)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Failure { status: None })?;
+    serde_json::from_slice(&bytes).map_err(|_| Failure { status: None })
+}
+/// (lignes, vrai quand elles viennent de l’enregistrement et font foi). Pendant l’appel,
+/// seul le point de lecture continu répond, et seulement aux espaces de travail qui y
+/// ont encore accès. Une fois l’appel fini, l’enregistrement passe avant.
+fn fetch_lines(
+    key: &str,
+    region: Option<&str>,
+    bot: &str,
+    ended: bool,
+) -> Result<(Vec<Line>, bool), Failure> {
     let base = base_for(region).ok_or(Failure { status: None })?;
+    if ended {
+        let bot_value = call(&base, key, "GET", &format!("/api/v1/bot/{bot}/"), None)?;
+        if let Some(lines) = artifact_url(&bot_value)
+            .and_then(|url| download(&url).ok())
+            .and_then(|value| parse_lines(&value))
+            .filter(|lines| !lines.is_empty())
+        {
+            return Ok((lines, true));
+        }
+    }
     let value = call(
         &base,
         key,
@@ -654,7 +719,9 @@ fn fetch_lines(key: &str, region: Option<&str>, bot: &str) -> Result<Vec<Line>, 
         &format!("/api/v1/bot/{bot}/transcript/"),
         None,
     )?;
-    parse_lines(&value).ok_or(Failure { status: None })
+    parse_lines(&value)
+        .map(|lines| (lines, false))
+        .ok_or(Failure { status: None })
 }
 /// Un état Recall encore inconnu du Mac devient Échec, jamais un mot anglais brut.
 fn map_status(code: &str) -> (&'static str, Option<&'static str>) {
@@ -672,35 +739,41 @@ fn map_status(code: &str) -> (&'static str, Option<&'static str>) {
 
 /// Les lignes sont rangées par position dans la réponse de Recall : relire la même
 /// réponse ne double rien, et une ligne déjà reçue n’est jamais retirée.
-fn store_lines(ctx: &Context<'_>, id: &str, lines: &[Line]) -> Result<(), ApiError> {
+fn store_lines(ctx: &Context<'_>, id: &str, lines: &[Line], replace: bool) -> Result<(), ApiError> {
     // Une valeur du coffre dite à voix haute dans l’appel n’entre pas dans la carte.
+    // Un seul instantané du coffre pour tout le lot : pas une lecture par ligne.
     let vault = super::forms::vault(ctx)?;
-    let safe = lines
+    let batch: Vec<Value> = lines
         .iter()
-        .map(|line| {
-            Ok((
-                redact::redact(&vault, &line.speaker)?,
-                redact::redact(&vault, &line.text)?,
-            ))
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .map(|line| json!([line.speaker, line.text]))
+        .collect();
+    let safe = redact::redact_value(&vault, &Value::Array(batch))?;
     let tx = write_transaction(ctx.connection)?;
-    for (seq, (line, (speaker, text))) in lines.iter().zip(safe).enumerate() {
+    if replace {
+        tx.execute("DELETE FROM wrapper_recall_lines WHERE meeting_id=?1", [id])?;
+    }
+    for (seq, (line, pair)) in lines
+        .iter()
+        .zip(safe.as_array().into_iter().flatten())
+        .enumerate()
+    {
         tx.execute(
             "INSERT INTO wrapper_recall_lines(meeting_id,seq,at_ms,speaker,text) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(meeting_id,seq) DO UPDATE SET at_ms=excluded.at_ms,speaker=excluded.speaker,text=excluded.text",
-            params![id, seq as i64, line.at_ms, speaker, text],
+            params![id, seq as i64, line.at_ms, pair[0].as_str().unwrap_or(""), pair[1].as_str().unwrap_or("")],
         )?;
     }
     tx.commit()?;
     Ok(())
 }
-fn pull_lines(ctx: &Context<'_>, key: &str, meeting: &Meeting) -> bool {
+fn pull_lines(ctx: &Context<'_>, key: &str, meeting: &Meeting, ended: bool) -> bool {
     let Some(bot) = meeting.bot_id.as_deref() else {
         return false;
     };
-    fetch_lines(key, meeting.region.as_deref(), bot)
+    fetch_lines(key, meeting.region.as_deref(), bot, ended)
         .ok()
-        .is_some_and(|lines| store_lines(ctx, &meeting.id, &lines).is_ok())
+        .is_some_and(|(lines, authoritative)| {
+            store_lines(ctx, &meeting.id, &lines, authoritative).is_ok()
+        })
 }
 fn line_count(conn: &Connection, id: &str) -> i64 {
     conn.query_row(
@@ -713,8 +786,9 @@ fn line_count(conn: &Connection, id: &str) -> i64 {
 /// Dernière passe sur le transcript d’une réunion finie, puis son résumé. Sans
 /// réponse de Recall après quelques essais, le résumé part des lignes déjà reçues.
 fn finalize(ctx: &Context<'_>, key: &str, meeting: &Meeting) {
-    let pulled = pull_lines(ctx, key, meeting);
-    if !pulled && meeting.failures + 1 < MAX_FAILURES {
+    let pulled = pull_lines(ctx, key, meeting, true);
+    // L’enregistrement met parfois quelques instants à être prêt : on réessaie un moment.
+    if !pulled && meeting.failures + 1 < FINAL_TRIES {
         let _ = ctx.connection.execute(
             "UPDATE wrapper_recall_meetings SET failures=failures+1 WHERE id=?1",
             [&meeting.id],
@@ -725,16 +799,20 @@ fn finalize(ctx: &Context<'_>, key: &str, meeting: &Meeting) {
         "UPDATE wrapper_recall_meetings SET transcript_final=1,failures=0 WHERE id=?1",
         [&meeting.id],
     );
+    summarize_if_lines(ctx, &meeting.id);
+}
+/// Premier résumé d’une réunion finie qui a au moins une ligne ; jamais un second.
+fn summarize_if_lines(ctx: &Context<'_>, id: &str) {
     let none: bool = ctx
         .connection
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM wrapper_recall_summaries WHERE meeting_id=?1)",
-            [&meeting.id],
+            [id],
             |r| r.get(0),
         )
         .unwrap_or(false);
-    if none && line_count(ctx.connection, &meeting.id) > 0 {
-        let _ = start_summary(ctx, &meeting.id, false);
+    if none && line_count(ctx.connection, id) > 0 {
+        let _ = start_summary(ctx, id, false);
     }
 }
 /// Fermeture propre ou déconnexion : les lignes dues sont tirées une dernière fois, au
@@ -750,7 +828,7 @@ fn settle_transcripts(ctx: &Context<'_>) {
     .unwrap_or_default();
     if let Ok(key) = key(ctx) {
         for meeting in &owed {
-            pull_lines(ctx, &key, meeting);
+            pull_lines(ctx, &key, meeting, true);
         }
     }
     let _ = ctx.connection.execute(
@@ -875,6 +953,17 @@ fn summarize_route(ctx: &Context<'_>, id: &str) -> Result<Value, ApiError> {
         return Err(ApiError::new(
             409,
             "Aucune ligne n’a été reçue : il n’y a rien à résumer.",
+        ));
+    }
+    let owed: bool = ctx.connection.query_row(
+        "SELECT transcript_final=0 FROM wrapper_recall_meetings WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    if owed {
+        return Err(ApiError::new(
+            409,
+            "Les dernières phrases arrivent encore : réessayez dans un instant.",
         ));
     }
     start_summary(ctx, id, true)?;
@@ -1417,7 +1506,7 @@ pub fn sync(ctx: &Context<'_>) {
                 let (state, message) = map_status(&code);
                 // Les phrases se lisent pendant l’appel, et une dernière fois à l’instant où il s’achève.
                 if state == "in_call" || meeting.state == "in_call" {
-                    pull_lines(ctx, &key, &meeting);
+                    pull_lines(ctx, &key, &meeting, false);
                 }
                 if state != meeting.state {
                     // Une fin que Recall annonce (terminée, bot expulsé, refus des participants)
@@ -1425,10 +1514,14 @@ pub fn sync(ctx: &Context<'_>) {
                     let owes = state == "done"
                         || matches!(code.as_str(), "fatal" | "recording_permission_denied");
                     // Comparaison avec l’état lu : un état posé entre-temps (Quitter) gagne.
-                    let _ = ctx.connection.execute(
+                    let changed = ctx.connection.execute(
                         "UPDATE wrapper_recall_meetings SET state=?3,message=?4,updated_at=?5,failures=0,needs_leave=(?3='failed'),transcript_final=(CASE WHEN ?6 THEN 0 ELSE transcript_final END) WHERE id=?1 AND state=?2",
                         params![meeting.id, meeting.state, state, message, crate::now(), owes],
-                    );
+                    ).unwrap_or(0);
+                    // Un état inconnu n’a pas de passe finale, mais les lignes déjà reçues se résument.
+                    if changed > 0 && state == "failed" && !owes {
+                        summarize_if_lines(ctx, &meeting.id);
+                    }
                 } else if meeting.failures > 0 {
                     let _ = ctx.connection.execute(
                         "UPDATE wrapper_recall_meetings SET failures=0 WHERE id=?1",
@@ -1439,10 +1532,13 @@ pub fn sync(ctx: &Context<'_>) {
             Err(failure) => {
                 let refused = matches!(failure.status, Some(401) | Some(403) | Some(404));
                 if refused || meeting.failures + 1 >= MAX_FAILURES {
-                    let _ = ctx.connection.execute(
+                    let changed = ctx.connection.execute(
                         "UPDATE wrapper_recall_meetings SET state='failed',message=?2,needs_leave=1,updated_at=?3 WHERE id=?1 AND state IN ('joining','in_call')",
                         params![meeting.id, RESUME, crate::now()],
-                    );
+                    ).unwrap_or(0);
+                    if changed > 0 {
+                        summarize_if_lines(ctx, &meeting.id);
+                    }
                 } else {
                     let _ = ctx.connection.execute(
                         "UPDATE wrapper_recall_meetings SET failures=failures+1 WHERE id=?1",

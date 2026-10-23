@@ -32,6 +32,8 @@ struct SeenRecall {
     transcript: Vec<Value>,
     transcript_status: u16,
     transcript_gets: usize,
+    /// Transcript complet de l'enregistrement, servi par un lien signé (espaces récents).
+    artifact: Option<Vec<Value>>,
 }
 struct Recall {
     base: String,
@@ -52,8 +54,10 @@ impl Recall {
             transcript: vec![],
             transcript_status: 200,
             transcript_gets: 0,
+            artifact: None,
         }));
         let captured = seen.clone();
+        let origin = base.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let done = stop.clone();
         std::thread::spawn(move || {
@@ -86,6 +90,8 @@ impl Recall {
                 } else if method == "POST" && url.ends_with("/leave_call/") {
                     seen.leaves.push(url.clone());
                     (seen.leave_status, json!({}))
+                } else if method == "GET" && url == "/artifact/transcript.json" {
+                    (200, Value::Array(seen.artifact.clone().unwrap_or_default()))
                 } else if method == "GET" && url.ends_with("/transcript/") {
                     seen.transcript_gets += 1;
                     (
@@ -93,10 +99,11 @@ impl Recall {
                         Value::Array(seen.transcript.clone()),
                     )
                 } else if method == "GET" && url.starts_with("/api/v1/bot/") {
-                    (
-                        200,
-                        json!({"id":"bot-1","status_changes":[{"code":"joining_call"},{"code":seen.code}]}),
-                    )
+                    let mut bot = json!({"id":"bot-1","status_changes":[{"code":"joining_call"},{"code":seen.code}]});
+                    if seen.artifact.is_some() {
+                        bot["recordings"] = json!([{"media_shortcuts":{"transcript":{"data":{"download_url":format!("{origin}/artifact/transcript.json")}}}}]);
+                    }
+                    (200, bot)
                 } else {
                     (404, json!({}))
                 };
@@ -1237,4 +1244,80 @@ fn the_background_tick_alone_brings_the_lines_and_then_the_summary() {
     f.recall.code("call_ended");
     tick(&mut f, &|f| f.summary()["state"] == "ready");
     assert_eq!(f.meeting_state(), "done");
+}
+
+#[test]
+fn a_workspace_without_the_live_endpoint_reads_the_recording_after_the_call() {
+    let mut f = Fixture::new();
+    f.in_call();
+    // Espace de travail récent : le point de lecture continu est refusé, le mode du transcript reste celui de Recall.
+    f.recall.seen.lock().unwrap().transcript_status = 404;
+    f.sync();
+    assert_eq!(f.lines(), vec![]);
+    assert_eq!(f.meeting_state(), "in_call");
+    let created = f.recall.seen.lock().unwrap().creates[0].1.clone();
+    assert_eq!(
+        created["recording_config"]["transcript"]["provider"]["recallai_streaming"],
+        json!({})
+    );
+    f.recall.seen.lock().unwrap().artifact = Some(vec![
+        json!({"participant":{"name":"Alice"},"words":[{"text":"Bonjour","start_timestamp":{"relative":12.0}},{"text":"à","start_timestamp":{"relative":12.4}},{"text":"tous","start_timestamp":{"relative":12.8}}]}),
+        json!({"participant":{"name":"Bruno"},"words":[{"text":"On","start_timestamp":{"relative":65.0}},{"text":"livre","start_timestamp":{"relative":65.4}}]}),
+    ]);
+    f.recall.code("call_ended");
+    f.sync();
+    assert_eq!(f.meeting_state(), "done");
+    f.sync();
+    assert_eq!(
+        f.lines(),
+        vec![
+            ("0:12".into(), "Alice".into(), "Bonjour à tous".into()),
+            ("1:05".into(), "Bruno".into(), "On livre".into()),
+        ]
+    );
+    f.wait_summary("ready");
+}
+
+#[test]
+fn the_documented_numeric_start_timestamp_gives_the_time_of_each_line() {
+    let mut f = Fixture::new();
+    f.in_call();
+    f.recall.seen.lock().unwrap().transcript = vec![
+        json!({"speaker":"Alice","words":[{"text":"Salut","start_timestamp":65.5,"end_timestamp":66.0}]}),
+    ];
+    f.sync();
+    assert_eq!(
+        f.lines(),
+        vec![("1:05".into(), "Alice".into(), "Salut".into())]
+    );
+}
+
+#[test]
+fn a_failure_outside_the_named_statuses_still_summarizes_the_lines_already_received() {
+    let mut f = Fixture::new();
+    f.in_call();
+    f.recall.said(&[("Alice", 2.0, "On commence")]);
+    f.sync();
+    f.recall.code("nouvel_etat_inconnu");
+    f.sync();
+    assert_eq!(f.meeting_state(), "failed");
+    let summary = f.wait_summary("ready");
+    assert!(summary["text"].as_str().unwrap().contains("Décisions"));
+}
+
+#[test]
+fn a_manual_summary_waits_for_the_final_transcript_pull() {
+    let mut f = Fixture::new();
+    f.in_call();
+    f.recall.said(&[("Alice", 1.0, "Première phrase")]);
+    f.sync();
+    f.post("/api/recall/leave", json!({}));
+    let id = f.item()["meeting"]["id"].as_str().unwrap().to_owned();
+    // La passe finale n'a pas eu lieu : un résumé maintenant omettrait les dernières phrases.
+    let error = f.refused("/api/recall/summarize", json!({"id":id}));
+    assert_eq!(error.status, 409);
+    assert!(error.message.contains("arrivent encore"));
+    assert!(f.ai.seen.lock().unwrap().summary_requests.is_empty());
+    f.sync();
+    f.wait_summary("ready");
 }

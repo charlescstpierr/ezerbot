@@ -95,10 +95,16 @@ export function SourcePill({ n, defaultOpen = false }) {
     view?.addEventListener("scroll", measure, true);
     return () => { view?.removeEventListener("resize", measure); view?.removeEventListener("scroll", measure, true); };
   }, [open, floating]);
+  // La carte est hors de la bulle (portail) : le focus y entre à l'ouverture, pour que Tab atteigne ses boutons.
+  const shownAt = open && (!floating || Boolean(place));
+  useEffect(() => {
+    if (shownAt) card.current?.querySelector(".gb-source-open")?.focus();
+  }, [shownAt]);
+  const close = () => { setOpen(false); root.current?.querySelector(".gb-cite-pill")?.focus(); };
   useEffect(() => {
     if (!open) return undefined;
     const view = root.current?.ownerDocument;
-    const key = (event) => { if (event.key === "Escape") { setOpen(false); root.current?.querySelector(".gb-cite-pill")?.focus(); } };
+    const key = (event) => { if (event.key === "Escape") close(); };
     const away = (event) => { if (!root.current?.contains(event.target) && !card.current?.contains(event.target)) setOpen(false); };
     view?.addEventListener("keydown", key);
     view?.addEventListener("pointerdown", away);
@@ -108,7 +114,7 @@ export function SourcePill({ n, defaultOpen = false }) {
     return <span className="gb-cite gb-cite-missing" tabIndex={0} title={state.label} data-tip={state.label} aria-label={`${number} : ${state.label}`}>[{number}]</span>;
   }
   const shown = open && (
-    <SourceCard source={state.source} message={message} onOpenSource={onOpenSource} onClose={() => setOpen(false)} id={id} cardRef={card} floating={floating}
+    <SourceCard source={state.source} message={message} onOpenSource={onOpenSource} onClose={close} id={id} cardRef={card} floating={floating}
       style={floating ? { top: place?.top ?? 0, left: place?.left ?? 0, visibility: place ? undefined : "hidden" } : undefined} />
   );
   return (

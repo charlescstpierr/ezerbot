@@ -99,10 +99,11 @@ pub(super) fn forget_account(tx: &rusqlite::Transaction<'_>, server: &str) -> Re
     Ok(())
 }
 /// One connection per Google address: a sign-in that names an address another slot holds
-/// adds nothing, and no token is written for it.
+/// adds nothing, and no token is written for it. A slot that is being reconnected still
+/// holds its address until its own sign-in ends.
 pub(super) fn refuse_twin(ctx: &Context<'_>, server: &Server, email: &str) -> Result<(), ApiError> {
     let twin: bool = ctx.connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE (id='gmail' OR id GLOB 'gmail:*') AND lower(account_email)=lower(?1) AND server_id!=?2 AND phase IN ('connected','reconnect'))",
+        "SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE (id='gmail' OR id GLOB 'gmail:*') AND lower(account_email)=lower(?1) AND server_id!=?2 AND phase IN ('connected','reconnect','authorizing'))",
         params![email, server.id],
         |r| r.get(0),
     )?;

@@ -271,6 +271,11 @@
     block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte ${item.name} · ${who} · ${(account.status === "authorizing" ? waitingFor(item) : accountStatus[account.status]) || "Déconnecté"}`, "mcp-note"));
     if (account.message && !account.device) block.append(node("p", account.message, account.warning ? "mcp-warning" : ["error","reconnect"].includes(account.status) ? "mcp-error" : "mcp-note"));
     if (account.device) block.append(deviceBlock(account.device, `${item.name} (${who})`, "authorize-account"));
+    if (account.authorization_url && account.status === "authorizing" && !account.device) {
+      const link = node("a", "Ouvrir la page de connexion", "secondary-button");
+      link.href = account.authorization_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.setAttribute("data-connector-action", "authorize-account");
+      block.append(link);
+    }
     const actions = node("div", null, "mcp-actions");
     const target = {id:item.id,account:account.id};
     if (["reconnect","error"].includes(account.status)) {

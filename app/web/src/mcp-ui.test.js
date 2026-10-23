@@ -550,6 +550,10 @@ test("a second Google account waits for the browser beside the first and is canc
   const card = catalogueCard(root,"gmail");
   const block = card.all().find(n => n.attrs["data-account"] === "gmail:2");
   assert.match(block.textContent, /Compte Gmail · nouveau compte · En attente de votre autorisation dans le navigateur/);
+  const link = block.all().find(n => n.tag === "a");
+  assert.equal(link.textContent, "Ouvrir la page de connexion");
+  assert.equal(link.href, "http://127.0.0.1:5000/authorize");
+  assert.equal(link.attrs["data-connector-action"], "authorize-account");
   assert.equal(card.all().filter(n => n.attrs["data-connector-action"] === "add-account").length, 0, "one wait at a time");
   await block.all().find(n => n.attrs["data-connector-action"] === "cancel-account").events.click();
   assert.deepEqual(calls[0], {path:"/api/connectors/cancel",body:{id:"gmail",account:"gmail:2"}});

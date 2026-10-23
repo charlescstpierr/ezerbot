@@ -157,6 +157,8 @@ struct GmailScript {
     owners: std::collections::HashMap<String, String>,
     /// The inbox of a user other than the first, by address.
     inboxes: std::collections::HashMap<String, Vec<Value>>,
+    /// Google no longer renews any access: every renewal is refused.
+    refuse_refresh: bool,
     /// The agenda and the Drive files of a user other than the first, by address.
     agendas: std::collections::HashMap<String, Vec<Value>>,
     drives: std::collections::HashMap<String, Vec<Value>>,
@@ -612,8 +614,9 @@ impl OAuth {
                                 )
                             }
                             Some("refresh_token")
-                                if fields.get("refresh_token").map(String::as_str)
-                                    == Some("gmail-refresh-secret-never-visible") =>
+                                if !g.refuse_refresh
+                                    && fields.get("refresh_token").map(String::as_str)
+                                        == Some("gmail-refresh-secret-never-visible") =>
                             {
                                 g.renewals += 1;
                                 let access = format!("gmail-renewed-secret-{}", g.renewals);
@@ -6795,4 +6798,62 @@ fn calendar_events_are_watched_for_each_google_account_and_name_it() {
     );
     // Each version is delivered once.
     assert!(agenda_events(&f).unwrap().is_empty());
+}
+
+#[test]
+fn gmail_two_slots_reconnecting_together_never_end_up_holding_the_same_address() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    f.gmail_add_account(SECOND_GOOGLE);
+    let accounts = f.gmail_accounts();
+    let (first_slot, second_slot) = (accounts[0]["id"].clone(), accounts[1]["id"].clone());
+    let second_secret = f.vault_secret(&accounts[1]["server"]).unwrap();
+    // Both accounts lost their access, then Charles reconnects both without finishing either.
+    f.oauth.seen.lock().unwrap().gmail.refuse_refresh = true;
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='gmail' OR id GLOB 'gmail:*'",
+            [],
+        )
+        .unwrap();
+    for slot in [&first_slot, &second_slot] {
+        let run = f.post(
+            "/api/connectors/connect",
+            json!({"id":"gmail","account":slot}),
+        )["run_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.decide(&run, json!("allow_once"));
+    }
+    let urls: Vec<String> = f
+        .gmail_accounts()
+        .iter()
+        .map(|a| {
+            assert_eq!(a["status"], "authorizing", "{a}");
+            a["authorization_url"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    // The second slot's browser returns with the first slot's address (the default user).
+    assert_eq!(f.callback_to("gmail", &urls[1], false, false), 400);
+    let after = f.gmail_accounts();
+    let twin = after.iter().find(|a| a["id"] == second_slot).unwrap();
+    assert_eq!(twin["status"], "reconnect");
+    assert!(twin["message"].as_str().unwrap().contains("déjà connecté"));
+    // Nothing was written for it: it keeps the secret it had.
+    assert_eq!(f.vault_secret(&twin["server"]).unwrap(), second_secret);
+    // The first slot can still finish with its own address.
+    assert_eq!(f.callback_to("gmail", &urls[0], false, false), 200);
+    wait("first slot reconnected", || {
+        f.gmail_accounts()
+            .iter()
+            .any(|a| a["id"] == first_slot && a["status"] == "connected")
+    });
+    let held: Vec<_> = f
+        .gmail_accounts()
+        .iter()
+        .filter(|a| a["account"] == "charles@example.test")
+        .map(|a| a["id"].clone())
+        .collect();
+    assert_eq!(held, vec![first_slot]);
 }

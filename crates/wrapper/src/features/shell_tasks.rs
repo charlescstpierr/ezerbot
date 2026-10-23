@@ -9,10 +9,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
         Arc, Mutex, OnceLock,
     },
     time::Duration,
@@ -23,6 +25,48 @@ pub(crate) struct Piece {
     pub text: String,
     pub truncated: bool,
     pub incomplete: bool,
+    /// The last line the program wrote asks for a password. Kept whatever the
+    /// output cap kept, and whatever the other stream wrote since.
+    pub asks_password: bool,
+}
+
+const PROMPT_LINE_BYTES: usize = 4096;
+
+/// The program's last non-blank line, with its newline when it ended one. A
+/// prompt may end its line: `echo Password:` waits for input as much as
+/// `printf 'Password: '` does. Whether that line asks for a password is
+/// decided on the whole line, so a long prompt cannot push its keyword out of
+/// the bounded text kept here.
+#[derive(Default)]
+pub(crate) struct PromptLine {
+    line: Vec<u8>,
+    asks_password: bool,
+}
+
+impl PromptLine {
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
+        let all = [self.line.as_slice(), chunk].concat();
+        let mut lines: Vec<&[u8]> = all.split_inclusive(|byte| *byte == b'\n').collect();
+        while lines
+            .last()
+            .is_some_and(|line| line.iter().all(u8::is_ascii_whitespace))
+        {
+            lines.pop();
+        }
+        let Some(last) = lines.last() else {
+            return;
+        };
+        let asks = asks_for_password(&String::from_utf8_lossy(last));
+        // The same line, grown or followed by blanks, keeps what it asked.
+        let same_line = std::ptr::eq(last.as_ptr(), all.as_ptr());
+        self.asks_password = asks || (same_line && self.asks_password);
+        let keep = last.len().saturating_sub(PROMPT_LINE_BYTES);
+        self.line = last[keep..].to_vec();
+    }
+
+    pub(crate) fn asks_password(&self) -> bool {
+        self.asks_password
+    }
 }
 
 pub(crate) struct Snap {
@@ -55,11 +99,29 @@ impl Drop for DoneFlag {
     }
 }
 
+/// How the host talks to a running task: the program's standard input, and the
+/// channel that carries the echo of each line into its stdout reader, so the
+/// echo takes the same output cap and order as the program's own output.
+pub(crate) struct Wire {
+    pub stdin: Box<dyn Write + Send>,
+    pub echo: Sender<Vec<u8>>,
+}
+
+pub(crate) type SharedWire = Arc<Mutex<Option<Wire>>>;
+
+#[derive(Clone)]
+pub(crate) struct Tails {
+    pub stdout: Arc<Mutex<Piece>>,
+    pub stderr: Arc<Mutex<Piece>>,
+}
+
 struct Live {
     db: PathBuf,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     pgid: u32,
+    wire: SharedWire,
+    tails: Tails,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Live>> {
@@ -104,7 +166,14 @@ pub(crate) fn insert(
     Ok(())
 }
 
-pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> TaskControl {
+pub(crate) fn register(
+    db: &Path,
+    run_id: &str,
+    call_id: &str,
+    pgid: u32,
+    wire: SharedWire,
+    tails: Tails,
+) -> TaskControl {
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let mut tasks = registry().lock().unwrap_or_else(|error| error.into_inner());
@@ -115,6 +184,8 @@ pub(crate) fn register(db: &Path, run_id: &str, call_id: &str, pgid: u32) -> Tas
             stop: stop.clone(),
             done: done.clone(),
             pgid,
+            wire,
+            tails,
         },
     );
     TaskControl { stop, done }
@@ -600,6 +671,106 @@ pub(crate) fn stop(conn: &Connection, db: &Path, body: &[u8]) -> Result<Value, A
     Ok(json!({"status":"arrêtée"}))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskInput {
+    run_id: String,
+    call_id: String,
+    line: String,
+}
+
+/// One line and its newline must fit in a pipe write that cannot be split.
+const MAX_LINE_BYTES: usize = 511;
+
+fn gone() -> ApiError {
+    ApiError::new(
+        409,
+        "Cette tâche n’est plus en cours : la saisie n’a pas été envoyée.",
+    )
+}
+
+/// Prompts that ask for a secret. The same class the screen control refuses
+/// (a secure field): the known class is refused, not every secret guessed.
+pub(crate) fn asks_for_password(prompt: &str) -> bool {
+    let prompt = prompt.to_lowercase();
+    [
+        "password",
+        "passwd",
+        "passphrase",
+        "passcode",
+        "mot de passe",
+        "mots de passe",
+        "motdepasse",
+        "phrase de passe",
+        "phrase secrète",
+        "code secret",
+    ]
+    .iter()
+    .any(|word| prompt.contains(word))
+}
+
+pub(crate) fn input(db: &Path, body: &[u8]) -> Result<Value, ApiError> {
+    let input: TaskInput = crate::parse(body)?;
+    crate::validate_id(&input.run_id)?;
+    crate::validate_id(&input.call_id)?;
+    if input.line.len() > MAX_LINE_BYTES {
+        return Err(ApiError::new(
+            400,
+            "Cette ligne est trop longue : 511 octets au maximum.",
+        ));
+    }
+    if input.line.contains(['\n', '\r', '\0']) {
+        return Err(ApiError::new(400, "Envoyez une seule ligne à la fois."));
+    }
+    let live = registry()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&key(db, &input.run_id, &input.call_id))
+        .map(|task| (task.stop.clone(), task.wire.clone(), task.tails.clone()));
+    let Some((stop, wire, tails)) = live else {
+        return Err(gone());
+    };
+    // The worker closes the wire when the program ends or is stopped, under
+    // this same lock, so a closed wire is the final word on Terminée/Arrêtée.
+    let mut wire = wire.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(wire) = wire.as_mut().filter(|_| !stop.load(Ordering::SeqCst)) else {
+        return Err(gone());
+    };
+    let (out, err) = (
+        tails
+            .stdout
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        tails
+            .stderr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    // Either stream: a prompt on stderr stays asked while stdout writes on.
+    if out.asks_password || err.asks_password {
+        return Err(ApiError::new(
+            409,
+            "Ce programme demande un mot de passe : la saisie n’a pas été envoyée. Saisissez-le vous-même, hors d’Ezerbot.",
+        ));
+    }
+    drop((out, err));
+    let line = format!("{}\n", input.line);
+    match wire.stdin.write(line.as_bytes()) {
+        Ok(written) if written == line.len() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(ApiError::new(
+                409,
+                "Le programme ne lit pas son entrée pour l’instant : la saisie n’a pas été envoyée.",
+            ));
+        }
+        _ => return Err(gone()),
+    }
+    // Only a line the program received is shown, so a refusal never changes
+    // the output.
+    let _ = wire.echo.send(line.into_bytes());
+    Ok(json!({"status":"envoyée"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +782,60 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn only_a_prompt_for_a_secret_is_refused() {
+        for prompt in [
+            "Password: ",
+            "user@host's password: ",
+            "Mot de passe : ",
+            "Enter passphrase for key '/Users/x/.ssh/id': ",
+            "Entrez le code secret ",
+        ] {
+            assert!(asks_for_password(prompt), "{prompt}");
+        }
+        for prompt in ["", "Continuer ? [y/N] ", "Nom du projet : ", "oui"] {
+            assert!(!asks_for_password(prompt), "{prompt}");
+        }
+    }
+
+    fn asks(chunks: &[&[u8]]) -> bool {
+        let mut line = PromptLine::default();
+        for chunk in chunks {
+            line.push(chunk);
+        }
+        line.asks_password()
+    }
+
+    #[test]
+    fn the_prompt_is_the_last_line_whatever_the_chunking_and_the_newline() {
+        assert!(asks(&[b"Pass", b"word: "]));
+        assert!(asks(&[b"Password:\n"]));
+        assert!(
+            asks(&[b"Password:\n", b"\n  \n"]),
+            "des blancs ne l'effacent pas"
+        );
+        assert!(!asks(&[b"Password: ", b"oui\nOK? "]));
+        assert!(!asks(&[b"Password:\n", b"abc"]));
+        assert!(!asks(&[b""]));
+    }
+
+    #[test]
+    fn a_long_prompt_keeps_its_keyword_beyond_the_retained_text() {
+        let path = "/Users/x/".to_string() + &"dossier/".repeat(3000);
+        let prompt = format!("Enter passphrase for key '{path}id': ");
+        assert!(prompt.len() > 4 * PROMPT_LINE_BYTES);
+        assert!(asks(&[prompt.as_bytes()]));
+        let (head, rest) = prompt.as_bytes().split_at(30);
+        let (middle, tail) = rest.split_at(rest.len() / 2);
+        assert!(
+            asks(&[head, middle, tail]),
+            "le mot-clé est dans un petit morceau"
+        );
+        let mut line = PromptLine::default();
+        line.push(prompt.as_bytes());
+        assert!(line.line.len() <= PROMPT_LINE_BYTES);
     }
 
     fn db() -> (Temp, Connection) {

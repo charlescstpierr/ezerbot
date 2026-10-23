@@ -137,11 +137,18 @@ pub fn routes(
                 | "/api/local/folders/add"
                 | "/api/local/folders/remove"
                 | "/api/local/tasks/stop"
+                | "/api/local/tasks/input"
         )
     {
         return None;
     }
     Some((|| {
+        if path == "/api/local/tasks/input" {
+            return Ok(ApiResponse::Json(super::shell_tasks::input(
+                &app.db_path,
+                body,
+            )?));
+        }
         if path == "/api/local/tasks/stop" {
             return Ok(ApiResponse::Json(super::shell_tasks::stop(
                 &app.connection,
@@ -1116,7 +1123,12 @@ fn shell(
             "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         )
         .env("LANG", "fr_CA.UTF-8")
-        .stdin(Stdio::null())
+        // Only a background task has a line to read: it can wait on a prompt.
+        .stdin(if a.background {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::from(OwnedFd::from(out_writer)))
         .stderr(Stdio::from(OwnedFd::from(err_writer)))
         .process_group(group.0.id() as i32);
@@ -1127,13 +1139,26 @@ fn shell(
     }
     let mut child = command.spawn().map_err(io_error)?;
     drop(command); // Close the parent's copies of the child-side descriptors.
+                   // The host's end of the pipe never blocks: a program that stopped reading
+                   // refuses the line instead of freezing the app. (The program's end is a
+                   // separate open file description, so it keeps blocking reads.)
+    let stdin = match child.stdin.take() {
+        Some(stdin) => {
+            rustix::fs::fcntl_setfl(&stdin, rustix::fs::OFlags::NONBLOCK)
+                .map_err(|error| io_error(error.into()))?;
+            Some(stdin)
+        }
+        None => None,
+    };
+    let (echo_sender, echo_receiver) = std::sync::mpsc::channel::<Vec<u8>>();
     let quota = Arc::new(AtomicUsize::new(a.output_limit));
     let stdout_piece = Arc::new(Mutex::new(super::shell_tasks::Piece::default()));
     let stderr_piece = Arc::new(Mutex::new(super::shell_tasks::Piece::default()));
     let reader = |mut pipe: UnixStream,
                   quota: Arc<AtomicUsize>,
                   finished: Arc<AtomicBool>,
-                  slot: Arc<Mutex<super::shell_tasks::Piece>>| {
+                  slot: Arc<Mutex<super::shell_tasks::Piece>>,
+                  echoes: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let mut buffer = [0; 8192];
@@ -1141,6 +1166,28 @@ fn shell(
             let mut allocated = 0usize;
             let mut incomplete = false;
             let mut draining = None;
+            let mut prompt = super::shell_tasks::PromptLine::default();
+            // A line sent to the program is queued before the program can
+            // answer it, so taking the queue first keeps the echo ahead of the
+            // answer. The output cap treats it like any other output.
+            // Only the program's own output is a prompt: the echo of a line
+            // sent to it never replaces what the program is waiting on.
+            let mut take = |chunk: &[u8], bytes: &mut Vec<u8>, truncated: &mut bool, echo: bool| {
+                let was_truncated = *truncated;
+                let changed = absorb_output(bytes, &quota, chunk, truncated, &mut allocated);
+                if !echo {
+                    prompt.push(chunk);
+                }
+                if let Ok(mut piece) = slot.lock() {
+                    if changed {
+                        piece.text = String::from_utf8_lossy(bytes).into_owned();
+                    }
+                    if changed || *truncated != was_truncated {
+                        piece.truncated = *truncated;
+                    }
+                    piece.asks_password = prompt.asks_password();
+                }
+            };
             loop {
                 if finished.load(Ordering::SeqCst) {
                     let start = draining.get_or_insert_with(Instant::now);
@@ -1149,26 +1196,26 @@ fn shell(
                         break;
                     }
                 }
-                match pipe.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let was_truncated = truncated;
-                        let changed = absorb_output(
-                            &mut bytes,
-                            &quota,
-                            &buffer[..n],
-                            &mut truncated,
-                            &mut allocated,
-                        );
-                        if changed || truncated != was_truncated {
-                            if let Ok(mut piece) = slot.lock() {
-                                if changed {
-                                    piece.text = String::from_utf8_lossy(&bytes).into_owned();
+                let read = pipe.read(&mut buffer);
+                while let Some(line) = echoes.as_ref().and_then(|queue| queue.try_recv().ok()) {
+                    take(&line, &mut bytes, &mut truncated, true);
+                }
+                match read {
+                    Ok(0) => {
+                        // The program closed its stdout, not its stdin: a line
+                        // it is sent still shows until the task is over.
+                        if let Some(queue) = echoes.as_ref() {
+                            while !finished.load(Ordering::SeqCst) {
+                                match queue.recv_timeout(Duration::from_millis(50)) {
+                                    Ok(line) => take(&line, &mut bytes, &mut truncated, true),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                                 }
-                                piece.truncated = truncated;
                             }
                         }
+                        break;
                     }
+                    Ok(n) => take(&buffer[..n], &mut bytes, &mut truncated, false),
                     Err(e)
                         if matches!(
                             e.kind(),
@@ -1187,6 +1234,9 @@ fn shell(
                     }
                 }
             }
+            while let Some(line) = echoes.as_ref().and_then(|queue| queue.try_recv().ok()) {
+                take(&line, &mut bytes, &mut truncated, true);
+            }
             let mut text = String::from_utf8_lossy(&bytes).into_owned();
             if text.len() > allocated {
                 let mut end = allocated;
@@ -1204,8 +1254,15 @@ fn shell(
         quota.clone(),
         finished.clone(),
         stdout_piece.clone(),
+        a.background.then_some(echo_receiver),
     );
-    let err = reader(err_reader, quota, finished.clone(), stderr_piece.clone());
+    let err = reader(
+        err_reader,
+        quota,
+        finished.clone(),
+        stderr_piece.clone(),
+        None,
+    );
     if a.background {
         let run_id = ctx.run_id.unwrap_or("").to_string();
         if run_id.is_empty() {
@@ -1232,7 +1289,22 @@ fn shell(
             let _ = err.join();
             return Err(error);
         }
-        let control = super::shell_tasks::register(ctx.db_path, &run_id, &call_id, pgid);
+        let wire: super::shell_tasks::SharedWire =
+            Arc::new(Mutex::new(stdin.map(|stdin| super::shell_tasks::Wire {
+                stdin: Box::new(stdin),
+                echo: echo_sender,
+            })));
+        let control = super::shell_tasks::register(
+            ctx.db_path,
+            &run_id,
+            &call_id,
+            pgid,
+            wire.clone(),
+            super::shell_tasks::Tails {
+                stdout: stdout_piece.clone(),
+                stderr: stderr_piece.clone(),
+            },
+        );
         let db = ctx.db_path.to_path_buf();
         let stop = control.stop.clone();
         std::thread::spawn(move || {
@@ -1280,6 +1352,13 @@ fn shell(
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
+            // Closed under the input lock before anything else: from here the
+            // task takes no more lines, and the reader sees its last echo.
+            drop(
+                wire.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take(),
+            );
             finished.store(true, Ordering::SeqCst);
             if stop.load(Ordering::SeqCst) {
                 super::shell_tasks::kill_group(pgid);

@@ -519,3 +519,34 @@ fn paired_phone_can_reply_in_a_thread_and_an_unpaired_one_cannot() {
         .unwrap();
     assert_eq!(again["conversation"]["id"], thread);
 }
+#[test]
+fn topics_stay_on_the_mac() {
+    let mut f = Fixture::new();
+    let topic = f.post("/api/topics", json!({"name":"Impôts 2026"}))["topic"]["id"].clone();
+    let (_, token) = f.pair();
+    let state = f
+        .remote("GET", "/api/state", json!({}), Some(&token))
+        .unwrap();
+    assert!(state.get("topics").is_none());
+    let before = f.app.api("GET", "/api/state", b"").unwrap()["conversations"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(
+        f.remote(
+            "POST",
+            "/api/conversations",
+            json!({"title":"Classé","topic_id":topic}),
+            Some(&token)
+        )
+        .unwrap_err()
+        .status,
+        403
+    );
+    let after = f.app.api("GET", "/api/state", b"").unwrap();
+    assert_eq!(after["conversations"].as_array().unwrap().len(), before);
+    assert_eq!(after["topics"]["membership"], json!({}));
+    assert!(f
+        .remote("POST", "/api/conversations", json!({"title":"Libre"}), Some(&token))
+        .is_ok());
+}

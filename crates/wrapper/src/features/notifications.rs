@@ -163,10 +163,42 @@ pub(super) fn project(conn: &Connection, now: u64, baseline: bool) -> Result<(),
     // Deleting a conversation removes it from the inbox without resetting source deduplication.
     conn.execute("UPDATE wrapper_notifications SET unread=0,attempted=1 WHERE account_id=?1
         AND conversation_id IN (SELECT id FROM wrapper_conversations WHERE account_id=?1 AND deleted=1)", [ACCOUNT])?;
+    remind(conn, now, baseline)?;
     // A fast auto-review or a resolved request is no longer waiting: never post a stale question.
+    // The reminder of an approval also ends with its own expiry.
     conn.execute("UPDATE wrapper_notifications SET attempted=1 WHERE account_id=?1 AND attempted=0
         AND kind IN ('approval','form','secret') AND NOT EXISTS
-        (SELECT 1 FROM forms_requests q WHERE q.id=substr(wrapper_notifications.id,7) AND q.status='pending')", [ACCOUNT])?;
+        (SELECT 1 FROM forms_requests q WHERE q.status='pending'
+         AND q.id=substr(wrapper_notifications.id,CASE WHEN wrapper_notifications.id LIKE 'remind:%' THEN 8 ELSE 7 END)
+         AND (wrapper_notifications.id NOT LIKE 'remind:%' OR json_extract(q.kind_json,'$.expires_at')>?2))", params![ACCOUNT, now])?;
+    Ok(())
+}
+
+/// One reminder per approval still waiting after the delay chosen in Settings (#217).
+/// The source key `remind:<request>` is claimed once: no second reminder, whatever the
+/// polls, the restarts or a changed delay. Kind `approval` means the same switches and
+/// Ne pas déranger as the first notice. The title carries no tool, argument or secret.
+fn remind(conn: &Connection, now: u64, baseline: bool) -> Result<(), ApiError> {
+    let Some((delay, phrase)) = super::forms::reminder_after(conn)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO wrapper_notifications
+        SELECT ?1,'remind:'||q.id,'approval',m.conversation_id,q.entry_id,?5,?2,?3,?4
+        FROM forms_requests q JOIN wrapper_messages m ON m.account_id=?1
+        AND m.conversation_id=json_extract(q.route_json,'$.target_conversation_id') AND m.message_id=q.entry_id
+        JOIN wrapper_conversations c ON c.account_id=?1 AND c.id=m.conversation_id AND c.deleted=0
+        WHERE q.status='pending' AND json_extract(q.kind_json,'$.kind')='approval'
+        AND json_extract(q.kind_json,'$.expires_at')>?2 AND m.created_at+?6<=?2",
+        params![
+            ACCOUNT,
+            now,
+            !baseline,
+            baseline,
+            format!("Une demande attend votre décision depuis {phrase}"),
+            delay
+        ],
+    )?;
     Ok(())
 }
 
@@ -406,6 +438,120 @@ mod tests {
                 !plan.iter().any(|line| line.contains("SCAN m")),
                 "{plan:#?}"
             );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    const HOUR: u64 = 3_600_000;
+
+    fn reminders(conn: &Connection) -> Vec<(String, String, String)> {
+        let mut statement = conn
+            .prepare("SELECT id,kind,title FROM wrapper_notifications WHERE id LIKE 'remind:%' ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_waiting_approval_is_reminded_once_after_the_chosen_delay_on_a_simulated_clock() {
+        let directory = std::env::temp_dir().join(format!(
+            "notification-reminder-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        {
+            let mut app = App::open(&directory.join("workspace.sqlite")).unwrap();
+            let conversation = app.api("POST", "/api/conversations", b"{}").unwrap()
+                ["conversation"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let (created, expires) = (1_000_000u64, 1_000_000 + 24 * HOUR);
+            app.connection.execute("INSERT INTO forms_requests(id,run_id,entry_id,kind_json,route_json) VALUES ('approval-1','source','approval-1',?1,?2)",
+                params![json!({"kind":"approval","tool":"NE_JAMAIS_NOTIFIER_CET_OUTIL","expires_at":expires}).to_string(), json!({"target_conversation_id":conversation}).to_string()]).unwrap();
+            app.connection.execute("INSERT INTO wrapper_messages(account_id,conversation_id,message_id,created_at,kind) VALUES (?1,?2,'approval-1',?3,'approval')", params![ACCOUNT, conversation, created]).unwrap();
+            let set = |app: &mut App, reminder: &str| {
+                let body = json!({"task":true,"chat":false,"validity":"24h","reminder":reminder});
+                app.api(
+                    "POST",
+                    "/api/approvals/waiting",
+                    body.to_string().as_bytes(),
+                )
+                .unwrap();
+            };
+            // The default is one hour: nothing a second before, exactly one at 1 h 00, still one after.
+            project(&app.connection, created + HOUR - 1, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
+            project(&app.connection, created + HOUR + 60_000, false).unwrap();
+            project(&app.connection, created + 2 * HOUR, false).unwrap();
+            let rows = reminders(&app.connection);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].0, "remind:approval-1");
+            assert_eq!(rows[0].1, "approval");
+            assert_eq!(rows[0].2, "Une demande attend votre décision depuis 1 h");
+            assert!(!rows[0].2.contains("NE_JAMAIS"));
+            // A reminder already sent is not sent again when the delay changes afterwards.
+            set(&mut app, "30min");
+            project(&app.connection, created + 3 * HOUR, false).unwrap();
+            assert_eq!(reminders(&app.connection).len(), 1);
+
+            app.connection
+                .execute(
+                    "DELETE FROM wrapper_notifications WHERE id LIKE 'remind:%'",
+                    [],
+                )
+                .unwrap();
+            set(&mut app, "30min");
+            project(&app.connection, created + HOUR / 2 - 1, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
+            project(&app.connection, created + HOUR / 2, false).unwrap();
+            assert_eq!(
+                reminders(&app.connection)[0].2,
+                "Une demande attend votre décision depuis 30 min"
+            );
+
+            app.connection
+                .execute(
+                    "DELETE FROM wrapper_notifications WHERE id LIKE 'remind:%'",
+                    [],
+                )
+                .unwrap();
+            set(&mut app, "3h");
+            project(&app.connection, created + 3 * HOUR - 1, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
+            project(&app.connection, created + 3 * HOUR, false).unwrap();
+            assert_eq!(
+                reminders(&app.connection)[0].2,
+                "Une demande attend votre décision depuis 3 h"
+            );
+
+            // « Jamais » remembers nothing and never reminds.
+            app.connection
+                .execute(
+                    "DELETE FROM wrapper_notifications WHERE id LIKE 'remind:%'",
+                    [],
+                )
+                .unwrap();
+            set(&mut app, "never");
+            project(&app.connection, created + 10 * HOUR, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
+
+            // Decided before the delay, or expired: no reminder.
+            set(&mut app, "1h");
+            app.connection
+                .execute("UPDATE forms_requests SET status='resolved'", [])
+                .unwrap();
+            project(&app.connection, created + 2 * HOUR, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
+            app.connection
+                .execute("UPDATE forms_requests SET status='pending'", [])
+                .unwrap();
+            project(&app.connection, expires, false).unwrap();
+            assert!(reminders(&app.connection).is_empty());
         }
         std::fs::remove_dir_all(directory).unwrap();
     }

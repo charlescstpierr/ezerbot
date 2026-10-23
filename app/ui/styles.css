@@ -112,6 +112,9 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
 .thread-banner-quote { margin: 2px 0 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-banner .secondary-button { padding: 8px 10px; white-space: nowrap; }
 .thread-banner .secondary-button:disabled { opacity: .5; cursor: default; }
+.approval-banner { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--pane); font-size: 12px; font-weight: 600; }
+.approval-banner[hidden] { display: none; }
+.approval-banner > span { flex: 1 1 auto; min-width: 0; }
 .rating-reasons { border: 0; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .rating-reasons label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
 .rating-reasons input { accent-color: var(--accent-ink); }
@@ -120,6 +123,7 @@ kbd { font-family: inherit; font-size: 10px; color: var(--subtle); border-radius
   .find-field { flex: 1 1 100%; }
   .find-count { min-width: 0; }
   .thread-banner { flex-wrap: wrap; padding: 8px 10px; }
+  .approval-banner { padding: 8px 10px; }
 }
 .sidebar-filter-row { display: flex; align-items: center; justify-content: space-between; margin: 0 9px 7px; }
 .section-label { font-size: 9px; letter-spacing: 1.25px; font-weight: 600; color: var(--sidebar-muted); }

@@ -260,6 +260,42 @@
   }
   const pendingApproval = (request) => request.status?.status === "pending"
     && request.kind?.kind === "approval" && Number.isFinite(request.kind.expires_at);
+  // À la reprise de l'app (#217), un bandeau court dit combien de demandes attendent la
+  // décision de l'utilisateur. Il ne vit qu'à la première lecture de l'état : une demande
+  // qui arrive pendant l'usage a déjà sa notification. Il ne décide ni n'exécute rien.
+  // Le lien « Voir dans Tâches » viendra avec l'onglet Tâches (#211).
+  let resumeChecked = false;
+  let resumeBanner;
+  let resumeText;
+  function waitingCount(state) {
+    return (state.forms?.requests || []).filter((request) => pendingApproval(request) && request.kind.expires_at > Date.now()).length;
+  }
+  function observeResume(state) {
+    const count = waitingCount(state);
+    if (!resumeChecked) {
+      resumeChecked = true;
+      if (!count) return;
+      resumeBanner = document.createElement("div");
+      resumeBanner.className = "approval-banner";
+      resumeBanner.id = "approval-banner";
+      resumeBanner.setAttribute("role", "status");
+      resumeText = document.createElement("span");
+      const close = document.createElement("button");
+      close.type = "button"; close.className = "icon-button";
+      close.setAttribute("aria-label", "Fermer le rappel des demandes en attente");
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("class", "icon"); icon.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttribute("href", "#i-close");
+      icon.append(use); close.append(icon);
+      close.addEventListener("click", () => { resumeBanner.hidden = true; resumeBanner.dataset.dismissed = "true"; });
+      resumeBanner.append(resumeText, close);
+      document.getElementById("chat-scroll")?.before(resumeBanner);
+    }
+    if (!resumeBanner || resumeBanner.dataset.dismissed) return;
+    resumeText.textContent = count === 1 ? "1 demande attend votre décision" : `${count} demandes attendent votre décision`;
+    resumeBanner.hidden = !count;
+  }
   function scheduleExpiry(state) {
     window.clearTimeout(expiryTimer);
     const deadlines = (state.forms?.requests || []).filter(pendingApproval).map((request) => request.kind.expires_at);
@@ -412,6 +448,7 @@
         }
       }
       renderRules(state);
+      observeResume(state);
       scheduleExpiry(state);
     },
     wantsPolling({ state }) {

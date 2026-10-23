@@ -499,6 +499,27 @@ fn relative_paths_are_judged_where_they_lead_not_by_their_spelling() {
 }
 
 #[test]
+fn a_command_that_reaches_the_data_without_naming_it_reads_nothing() {
+    let mut f = Fixture::new();
+    // Le dossier de travail est le parent des données.
+    let attempts = [
+        ("grep-recursif", "grep -r refresh ."),
+        ("tar-parent", "tar cf - . | strings"),
+        ("variable-joker", "D=da; cat ${D}*/workspace.chatgpt-auth.json"),
+    ];
+    for (id, command) in attempts {
+        let out = f.runs_without_a_card(id, "run_shell", f.shell(command));
+        assert!(
+            !out["output"].to_string().contains("fake-refresh"),
+            "{id} a laissé fuiter un jeton : {out}"
+        );
+    }
+    std::fs::write(f.root().join("voisin.txt"), "utile").unwrap();
+    let out = f.runs_without_a_card("voisin", "run_shell", f.shell("grep -r utile ."));
+    assert!(out["output"]["stdout"].to_string().contains("utile"), "{out}");
+}
+
+#[test]
 fn a_global_refusal_of_the_shell_also_stops_commands_no_always_rule_could_cover() {
     let mut f = Fixture::new();
     f.db()

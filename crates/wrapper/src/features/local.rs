@@ -404,8 +404,8 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
 }
 /// Le Mode YOLO n'ouvre jamais les données d'Ezerbot (dossier de la base, coffre,
 /// jetons, trousseau). Un fichier est jugé par son chemin réel et son inode ; une
-/// commande, par ce qu'elle nomme : le terminal n'est pas un sandbox, ce garde
-/// refuse ce qui désigne ces données, il n'isole pas le Mac.
+/// commande, par ce qu'elle nomme ; ce qu'elle atteint sans le nommer, le
+/// sandbox du shell YOLO le refuse.
 pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<bool, ApiError> {
     match call.name.as_str() {
         "read_file" | "list_directory" => {
@@ -1299,10 +1299,12 @@ fn shell(
     if !cwd.is_dir() {
         return Err(ApiError::new(400, "Le dossier de travail n’existe pas."));
     }
-    if let Ok(grokbot_engine::contracts::AuthorizedBy::Yolo { .. }) = authority(ctx, call) {
-        if shell_touches_app_data(ctx, &a.command, &a.cwd)? {
-            return Err(ApiError::new(403, super::yolo::PROTECTED));
-        }
+    let yolo = matches!(
+        authority(ctx, call),
+        Ok(grokbot_engine::contracts::AuthorizedBy::Yolo { .. })
+    );
+    if yolo && shell_touches_app_data(ctx, &a.command, &a.cwd)? {
+        return Err(ApiError::new(403, super::yolo::PROTECTED));
     }
     // Socket pairs allow bounded drain even if a command deliberately detaches
     // into another process group and keeps inherited output descriptors open.
@@ -1351,6 +1353,27 @@ fn shell(
         .map_err(io_error)?;
     let group = Group(watchdog, finished.clone());
     let mut command = Command::new("/bin/sh");
+    // Lire une commande ne suffit pas (`grep -r` depuis le parent, `${D}*`) :
+    // en YOLO, le noyau refuse au shell et à ses enfants les données d'Ezerbot.
+    if yolo && cfg!(target_os = "macos") {
+        let data = data_dir(ctx)?;
+        let support = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/Application Support/Grokbot"))
+            .map(|root| root.canonicalize().unwrap_or(root))
+            .unwrap_or_else(|| data.clone());
+        command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-D")
+            .arg(format!("DATA={}", data.display()))
+            .arg("-D")
+            .arg(format!("SUPPORT={}", support.display()))
+            .arg("-p")
+            .arg(concat!(
+                "(version 1)(allow default)",
+                "(deny file-read* file-write* (subpath (param \"DATA\")) (subpath (param \"SUPPORT\")))"
+            ))
+            .arg("/bin/sh");
+    }
     command
         .arg("-c")
         .arg(&a.command)

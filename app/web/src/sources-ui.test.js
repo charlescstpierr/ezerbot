@@ -61,7 +61,8 @@ const vite = await createServer({
 after(() => vite.close());
 const { Thread } = await vite.ssrLoadModule("/src/Thread.jsx");
 
-const { SourceCard, SourcePill, SourcesContext, SourcesLine, openSource } = await vite.ssrLoadModule("/src/sources.jsx");
+const { SourceCard, SourcePill, SourcesContext, SourcesLine, openSource, placeSourceCard } = await vite.ssrLoadModule("/src/sources.jsx");
+const placement = { placeSourceCard };
 const sources = await vite.ssrLoadModule("/src/sources.js");
 const { exportMessage } = await vite.ssrLoadModule("/src/teach.js");
 
@@ -167,6 +168,9 @@ test("l’ouverture choisit le bon lien, ou dit pourquoi rien ne s’ouvre", () 
   const gmailOnly = [{ id: "gmail", status: "connected", account: "moi@exemple.test", accounts: [] }, { id: "drive", status: "disconnected", accounts: [] }];
   assert.ok(sources.sourceOpening(sheet, { connectors: gmailOnly }).url.startsWith("https://docs.google.com/spreadsheets/"));
   assert.ok(sources.sourceOpening({ n: 5, type: "evenement", titre: "Visite", date: "2026-10-12", compte: "moi@exemple.test", identifiant: "ev-1" }, { connectors: gmailOnly }).url.startsWith("https://calendar.google.com/"));
+  const visit = sources.sourceOpening({ n: 5, type: "evenement", titre: "Visite", date: "2026-10-12", compte: "moi@exemple.test", identifiant: "ev1abc" }, { connectors: gmailOnly }).url;
+  assert.equal(visit, `https://calendar.google.com/calendar/u/moi%40exemple.test/event?eid=${encodeURIComponent(Buffer.from("ev1abc moi@exemple.test").toString("base64").replace(/=+$/, ""))}`);
+  assert.ok(sources.sourceOpening({ n: 6, type: "evenement", titre: "Sans compte", date: "2026-10-12", identifiant: "ev2" }, { connectors: [] }).problem);
   assert.equal(sources.sourceOpening(sheet, { connectors: [{ id: "gmail", status: "connected", account: "autre@exemple.test", accounts: [] }] }).problem, sources.DISCONNECTED);
   assert.equal(sources.sourceOpening(mail, { connectors: [{ id: "gmail", status: "connected", account: "autre@exemple.test", accounts: [] }] }).problem, sources.DISCONNECTED);
   assert.equal(sources.sourceOpening(mail, { connectors: [{ id: "gmail", status: "reconnect", account: "moi@exemple.test", accounts: [{ account: "moi@exemple.test", status: "connected" }] }] }).url.startsWith("https://mail.google.com/"), true);
@@ -202,6 +206,19 @@ test("le code n’est pas de la prose : clôtures ``` et ~~~, bloc indenté, mai
   const html = thread(answer(code, { citations: [] }));
   assert.equal(html.includes("&lt;sourcepill"), false);
   assert.equal((html.match(/class="gb-cite-pill"/g) || []).length, 1);
+});
+
+test("la carte se pose en fixe, sous la pastille ou au-dessus en bas de fenêtre, dans la fenêtre", () => {
+  const { placeSourceCard } = placement;
+  const card = { width: 292, height: 120 };
+  const viewport = { width: 820, height: 560 };
+  assert.deepEqual(placeSourceCard({ left: 100, top: 200, bottom: 216 }, card, viewport), { top: 222, left: 100 });
+  assert.deepEqual(placeSourceCard({ left: 700, top: 200, bottom: 216 }, card, viewport), { top: 222, left: 520 });
+  assert.deepEqual(placeSourceCard({ left: 100, top: 480, bottom: 496 }, card, viewport), { top: 354, left: 100 });
+  const css = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
+  assert.match(css, /\.gb-source-card\[data-floating\]\s*\{[^}]*position:\s*fixed/);
+  const open = inContext(answer("Voir [1]."), React.createElement(SourcePill, { n: "1", defaultOpen: true }));
+  assert.match(open, /class="gb-source-card"/, "sans page, la carte reste dans le fil");
 });
 
 test("la carte et la ligne restent lisibles en clair comme en sombre, au clavier", () => {

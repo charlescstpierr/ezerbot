@@ -193,6 +193,11 @@ function googleUrl(source) {
   if (source.type === "courriel") return `https://mail.google.com/mail/u/${user}/#all/${id}`;
   if (source.type === "feuille") return `https://docs.google.com/spreadsheets/d/${id}/edit${source.compte ? `?authuser=${user}` : ""}`;
   if (source.type === "fichier_drive") return `https://drive.google.com/file/d/${id}/view${source.compte ? `?authuser=${user}` : ""}`;
+  // Un événement s'ouvre par `eid` : son identifiant et l'agenda (le compte), en base64 sans remplissage.
+  if (source.compte && /^[\x21-\x7e]+$/.test(source.identifiant) && /^[\x21-\x7e]+$/.test(source.compte)) {
+    const eid = btoa(`${source.identifiant} ${source.compte}`).replace(/=+$/, "");
+    return `https://calendar.google.com/calendar/u/${user}/event?eid=${encodeURIComponent(eid)}`;
+  }
   const date = day(source.date);
   const path = date ? `r/day/${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}` : "r";
   return `https://calendar.google.com/calendar/u/${user}/${path}`;

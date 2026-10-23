@@ -43,6 +43,52 @@ function attachmentImage(attachment) {
   return { id, url, name, caption, mime_type: (typeof attachment !== "string" && attachment.mime_type) || mimeFromName(name) || "image/png" };
 }
 
+function inlineCodeRanges(text, offset, ranges) {
+  const runs = /`+/g;
+  let open;
+  while ((open = runs.exec(text))) {
+    const close = new RegExp(`(?<!\`)\`{${open[0].length}}(?!\`)`, "g");
+    close.lastIndex = runs.lastIndex;
+    const found = close.exec(text);
+    const blank = /\n[ \t]*\n/g;
+    blank.lastIndex = runs.lastIndex;
+    const gap = blank.exec(text);
+    if (!found || (gap && gap.index < found.index)) continue;
+    ranges.push([offset + open.index, offset + found.index + found[0].length]);
+    runs.lastIndex = found.index + found[0].length;
+  }
+}
+
+function codeRanges(body) {
+  const ranges = [];
+  let fence = null;
+  let start = 0;
+  let textStart = 0;
+  for (const line of body.split("\n")) {
+    const end = start + line.length + 1;
+    if (!fence) {
+      const opening = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
+        inlineCodeRanges(body.slice(textStart, start), textStart, ranges);
+        fence = { char: opening[1][0], size: opening[1].length, start };
+      }
+    } else if (new RegExp(`^ {0,3}\\${fence.char}{${fence.size},}[ \\t]*$`).test(line)) {
+      ranges.push([fence.start, end]);
+      textStart = end;
+      fence = null;
+    }
+    start = end;
+  }
+  if (fence) ranges.push([fence.start, body.length]);
+  else inlineCodeRanges(body.slice(textStart), textStart, ranges);
+  return ranges;
+}
+
+function imageNodes(body) {
+  const ranges = codeRanges(body);
+  return [...body.matchAll(IMAGE_MARKDOWN)].filter((match) => !ranges.some(([from, to]) => match.index >= from && match.index < to));
+}
+
 export function galleryImages(message, { markdown = false } = {}) {
   const images = [];
   const seen = new Set();
@@ -53,7 +99,7 @@ export function galleryImages(message, { markdown = false } = {}) {
   };
   for (const attachment of message?.attachments || []) push(attachmentImage(attachment));
   if (markdown && typeof message?.body === "string") {
-    for (const match of message.body.matchAll(IMAGE_MARKDOWN)) {
+    for (const match of imageNodes(message.body)) {
       const url = match[2];
       if (!localImageUrl(url)) continue;
       const caption = match[1].trim() || "Image jointe";
@@ -69,7 +115,7 @@ export function proseWithoutGallery(body, images) {
   const urls = new Set((images || []).map((image) => image.url));
   let prose = "";
   let cursor = 0;
-  for (const match of body.matchAll(IMAGE_MARKDOWN)) {
+  for (const match of imageNodes(body)) {
     if (!urls.has(match[2])) continue;
     prose += body.slice(cursor, match.index);
     cursor = match.index + match[0].length;

@@ -232,6 +232,30 @@ test("removing gallery images leaves every other character of the reply untouche
   assert.equal(strip("![x](/api/attachments/abc)\n\nTexte"), "Texte");
 });
 
+test("an image written inside code stays text and never becomes a thumbnail", () => {
+  const sample = "![x](/api/attachments/abc)";
+  const images = (body) => gallery.galleryImages({ body }, { markdown: true });
+  const fenced = `Exemple :\n\n\`\`\`md\n${sample}\n\`\`\`\n`;
+  assert.equal(images(fenced).length, 0);
+  assert.equal(gallery.proseWithoutGallery(fenced, images(fenced)), fenced);
+  const tilde = `~~~\n${sample}\n~~~`;
+  assert.equal(images(tilde).length, 0);
+  const unclosed = `\`\`\`\n${sample}`;
+  assert.equal(images(unclosed).length, 0, "a fence still streaming is code to the end");
+  const inline = `Écris \`${sample}\` pour afficher une image.`;
+  assert.equal(images(inline).length, 0);
+  assert.equal(gallery.proseWithoutGallery(inline, images(inline)), inline);
+  const double = `Écris \`\`a \` b ${sample}\`\` ici.`;
+  assert.equal(images(double).length, 0);
+  const mixed = `${sample}\n\n\`\`\`\n${sample}\n\`\`\`\n\nEt \`${sample}\``;
+  assert.equal(images(mixed).length, 1);
+  assert.equal(gallery.proseWithoutGallery(mixed, images(mixed)), `\`\`\`\n${sample}\n\`\`\`\n\nEt \`${sample}\``);
+  const outside = "Un `x` puis ![y](/api/attachments/def)";
+  assert.equal(images(outside).length, 1);
+  const html = markup({ id: "code", role: "assistant", body: fenced }, { markdown: true });
+  assert.doesNotMatch(html, /gb-image-cell/);
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

@@ -148,6 +148,10 @@ pub(crate) fn run_slack_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome 
 pub(crate) fn github_unavailable(ctx: &Context<'_>) -> String {
     catalogue::github::unavailable(ctx)
 }
+/// Why a routine cannot be given a GitHub trigger: `None` when an account is connected.
+pub(crate) fn github_routine_gap(ctx: &Context<'_>) -> Result<Option<String>, ApiError> {
+    catalogue::github::routine_gap(ctx)
+}
 pub(crate) fn run_github_tool(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     if is_github_comment(&call.name) {
         catalogue::github::comment::call(ctx, call)

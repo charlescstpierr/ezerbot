@@ -54,12 +54,6 @@ pub fn state(ctx: &Context<'_>) -> Value {
     json!({"connected": mcp::gmail_connected(ctx.connection)})
 }
 
-/// Mail occurrences reuse the manual-nonce identity but, unlike a manual launch,
-/// obey pause and edit cutoffs.
-pub(crate) fn is_delivery_nonce(nonce: &str) -> bool {
-    nonce.starts_with("mail:")
-}
-
 /// The simple mail triggers of a routine: the lone trigger (no member) or each mail member.
 fn members(trigger: &Schedule) -> Vec<String> {
     match trigger {

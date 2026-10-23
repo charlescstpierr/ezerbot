@@ -701,3 +701,145 @@ test('the list describes a mail routine', async () => {
   h.t.renderList();
   assert.match(h.t.content.textContent, /Courriel : démarre à chaque nouveau message de la boîte connectée/);
 });
+
+// ------------------------------------------------------------------ GitHub ----
+
+const githubRoutine = { ...routine, name: 'Revue', enabled: true, body: { kind: 'inline_prompt', prompt: 'Relire' }, trigger: { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] } };
+const connected = [{ id: 'github', status: 'connected' }];
+const eventBoxes = h => h.t.content.querySelectorAll('.routines-event').map(label => label.children[0]);
+const pick = (check, on = true) => { check.checked = on; check.listeners.change?.(); };
+const editorChanged = h => h.t.content.querySelectorAll('form')[0].listeners.input();
+async function githubEditor(catalogue, existing = null) {
+  const sent = [], h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [existing || githubRoutine] };
+    sent.push({ url, body: JSON.parse(JSON.stringify(body)) });
+    return { routine: existing || githubRoutine, webhooks: [] };
+  });
+  h.panels.state.mcp = { catalogue };
+  await h.t.edit(existing);
+  return { h, sent };
+}
+async function newGithubRoutine(catalogue) {
+  const { h, sent } = await githubEditor(catalogue);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Revue');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Relire la pull request');
+  const mode = inputOf(labelled(h, 'Déclencheur')[0]);
+  mode.value = 'github'; editorChanged(h);
+  return { h, sent, mode };
+}
+
+test('the editor offers GitHub with a repository and exactly the five events', async () => {
+  const { h, mode } = await newGithubRoutine(connected);
+  assert.ok(mode.children.some(option => option.value === 'github'), 'the trigger selector lists GitHub');
+  const repo = labelled(h, 'Dépôt GitHub')[0];
+  assert.equal(repo.hidden, false);
+  mode.value = 'schedule'; editorChanged(h);
+  assert.equal(repo.hidden, true, 'the repository is only asked for under a GitHub trigger');
+  mode.value = 'github'; editorChanged(h);
+  const labels = h.t.content.querySelectorAll('.routines-event').map(label => label.textContent);
+  assert.deepEqual(labels, [
+    'pull request ouverte',
+    'pull request poussée',
+    'pull request mergée',
+    'commentaire (pull request, issue ou revue inline)',
+    'issue ouverte',
+  ]);
+  assert.ok(eventBoxes(h).every(check => check.type === 'checkbox' && !check.checked));
+  assert.match(h.t.content.textContent, /connecteur GitHub livre un événement/);
+});
+
+test('a GitHub trigger is saved with the chosen repository and events, in the order of the list', async () => {
+  const { h, sent } = await newGithubRoutine(connected);
+  type(inputOf(labelled(h, 'Dépôt GitHub')[0]), ' charles/essai ');
+  const boxes = eventBoxes(h);
+  pick(boxes[3]); pick(boxes[0]);
+  editorChanged(h);
+  // The preview names the repository and the events, with no time zone: nothing here is timed.
+  assert.equal(h.t.content.querySelectorAll('.routines-preview')[0].textContent, 'GitHub charles/essai : pull request ouverte, commentaire');
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.deepEqual(created.body.trigger, { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] });
+});
+
+test('without a connected GitHub the editor says so and saves nothing', async () => {
+  for (const [catalogue, wording] of [[[], /GitHub n’est pas connecté/], [[{ id: 'github', status: 'reconnect' }], /Reconnectez GitHub/]]) {
+    const { h, sent } = await newGithubRoutine(catalogue);
+    type(inputOf(labelled(h, 'Dépôt GitHub')[0]), 'charles/essai');
+    pick(eventBoxes(h)[0]);
+    editorChanged(h);
+    const preview = h.t.content.querySelectorAll('.routines-preview')[0].textContent;
+    assert.match(preview, wording);
+    assert.match(preview, /n’est pas enregistrée avec ce déclencheur GitHub/);
+    await submit(h);
+    assert.match(h.t.status.textContent, wording);
+    assert.equal(sent.length, 0);
+  }
+});
+
+test('a GitHub trigger needs a well-formed repository and at least one event', async () => {
+  const { h, sent } = await newGithubRoutine(connected);
+  const repo = inputOf(labelled(h, 'Dépôt GitHub')[0]);
+  pick(eventBoxes(h)[0]);
+  for (const wrong of ['', 'charles', 'charles/', '../etc', 'a/b/c', 'a/..']) {
+    type(repo, wrong); await submit(h);
+    assert.match(h.t.status.textContent, /propriétaire\/dépôt/, wrong);
+  }
+  type(repo, 'charles/essai'); pick(eventBoxes(h)[0], false); await submit(h);
+  assert.match(h.t.status.textContent, /Cochez au moins un événement GitHub/);
+  assert.equal(sent.length, 0);
+});
+
+test('renaming a saved GitHub routine does not need the connector, and sends no trigger', async () => {
+  const { h, sent } = await githubEditor([], githubRoutine);
+  assert.equal(inputOf(labelled(h, 'Dépôt GitHub')[0]).value, 'charles/essai');
+  assert.deepEqual(eventBoxes(h).map(check => check.checked), [true, false, false, true, false]);
+  type(inputOf(labelled(h, 'Nom')[0]), 'Revue du dépôt');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.equal(update.body.name, 'Revue du dépôt');
+  assert.equal(update.body.trigger, undefined);
+});
+
+test('changing the repository of a saved GitHub routine is a new trigger and asks for the connector again', async () => {
+  const { h, sent } = await githubEditor([], githubRoutine);
+  type(inputOf(labelled(h, 'Dépôt GitHub')[0]), 'charles/autre');
+  await submit(h);
+  assert.match(h.t.status.textContent, /GitHub n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a group can hold a GitHub trigger next to a schedule and keeps the IDs of its triggers', async () => {
+  const grouped = { ...githubRoutine, name: 'Groupe', trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-g', trigger: githubRoutine.trigger }] } };
+  const { h, sent } = await githubEditor(connected, grouped);
+  const repos = labelled(h, 'Dépôt GitHub');
+  // The routine's own fields, then one set per trigger of the group (hidden unless it is a GitHub one).
+  assert.equal(repos.length, 3);
+  assert.deepEqual(repos.map(label => label.hidden), [true, true, false]);
+  const row = inputOf(repos[2]);
+  assert.equal(row.value, 'charles/essai');
+  type(row, 'charles/autre');
+  const boxes = h.t.content.querySelectorAll('.routines-event').map(label => label.children[0]);
+  assert.equal(boxes.length, 15);
+  pick(boxes[10 + 4]);
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.deepEqual(update.body.trigger, { kind: 'group', members: [
+    { id: 'trigger-a', trigger: { kind: 'every', interval_ms: 60000, phase_ms: null } },
+    { id: 'trigger-g', trigger: { kind: 'github', repo: 'charles/autre', events: ['pull_request_opened', 'comment', 'issue_opened'] } },
+  ] });
+});
+
+test('history names the GitHub trigger, the event and what it concerned', async () => {
+  const run = { ...occurrence('github-run', 'done', 'github::evt-1'), trigger: { kind: 'github', label: 'GitHub', event: 'pull_request_opened', event_label: 'pull request ouverte', repo: 'charles/essai', number: 12, title: 'Ajouter la recherche', received_at: 1_760_000_000_000 } };
+  const h = webhookHarness({ state: 'off', reason: '', public_base: null }, { api: async () => page([run]) });
+  await h.t.showHistory(githubRoutine);
+  assert.match(h.t.content.textContent, /GitHub · pull request ouverte · charles\/essai #12 · Ajouter la recherche · reçu le/);
+  assert.doesNotMatch(h.t.content.textContent, /Manuel|Planifié/);
+});
+
+test('the list describes a GitHub routine by its repository and events', async () => {
+  const h = harness(async () => ({}));
+  h.panels.state.routines.items = [{ routine: githubRoutine, queue: { waiting: 0 } }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /GitHub charles\/essai : pull request ouverte, commentaire/);
+});

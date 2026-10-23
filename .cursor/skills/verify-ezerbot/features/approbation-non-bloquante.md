@@ -31,6 +31,6 @@ Preconditions:
 
 - L’interrupteur est un `input` transparent posé sur sa piste : le clic programmatique (`input.click()`) suffit, il déclenche l’enregistrement puis la relecture de l’état, qui reconstruit la section. Re-chercher les éléments après chaque clic.
 - Chaque changement enregistre tout le réglage d’un coup (`POST /api/approvals/waiting`). Une durée hors liste est refusée par le moteur.
-- Le rappel (`waiting-reminder`) est seulement enregistré ici : sa livraison arrive avec le ticket suivant de la série.
+- Le rappel (`waiting-reminder`) est seulement enregistré ici : sa livraison, la ligne d’ancienneté de la carte et le bandeau de reprise sont couverts par la sphère `approbation-rappel`.
 - La sphère laisse le réglage coupé après la capture `inactif` ; la préparation suivante le rallume. Une base jetable n’en garde aucune trace utile.
 - L’iPhone n’a pas ce réglage : il reste sur le Mac.

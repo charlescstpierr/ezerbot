@@ -183,11 +183,11 @@ fn fact(conn: &Connection, id: &str) -> Result<Option<TopicFact>, ApiError> {
         .optional()?)
 }
 
-/// Du plus récent au plus ancien.
+/// Tous les faits du sujet, du plus récent au plus ancien : oublier ou supprimer ne s'arrête jamais à une page.
 fn facts_of(conn: &Connection, topic: &str) -> Result<Vec<TopicFact>, ApiError> {
     let mut statement = conn.prepare(&format!(
         "SELECT {FACT_COLUMNS} FROM wrapper_topic_facts WHERE account_id = ?1 AND topic_id = ?2
-         ORDER BY created_at DESC, id ASC LIMIT {MAX_LISTED}"
+         ORDER BY created_at DESC, id ASC"
     ))?;
     let rows = statement.query_map(params![ACCOUNT, topic], read_fact)?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -383,11 +383,8 @@ fn erase(conn: &Connection, facts: &[TopicFact]) -> Result<(), ApiError> {
         }
     }
     for conversation in conversations {
-        grokbot_engine::compaction::invalidate_covering(
-            conn,
-            &conversation,
-            &format!("forgotten:{}", facts[0].id),
-        )?;
+        // Un résumé a pu reformuler le fait sans le citer : aucun n'est conservé, tous se régénèrent.
+        grokbot_engine::compaction::invalidate_all(conn, &conversation)?;
     }
     let texts: Vec<String> = facts.iter().map(|fact| normalize(&fact.text)).collect();
     for fact in facts {
@@ -396,21 +393,27 @@ fn erase(conn: &Connection, facts: &[TopicFact]) -> Result<(), ApiError> {
             params![ACCOUNT, fact.id],
         )?;
     }
-    // Une proposition en attente du même texte ne doit pas le ramener.
+    // Une proposition en attente du même texte, dans le même sujet, ne doit pas le ramener.
     let mut pending = conn.prepare(
-        "SELECT id, text FROM wrapper_topic_memory_offers WHERE account_id = ?1 AND status = 'pending'",
+        "SELECT id, text FROM wrapper_topic_memory_offers WHERE account_id = ?1 AND topic_id = ?2 AND status = 'pending'",
     )?;
-    let waiting = pending
-        .query_map([ACCOUNT], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, text) in waiting {
-        if texts.contains(&normalize(&text)) {
-            conn.execute(
-                "UPDATE wrapper_topic_memory_offers SET status = 'dismissed', text = '' WHERE account_id = ?1 AND id = ?2",
-                params![ACCOUNT, id],
-            )?;
+    for topic in facts
+        .iter()
+        .map(|fact| fact.topic_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let waiting = pending
+            .query_map(params![ACCOUNT, topic], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, text) in waiting {
+            if texts.contains(&normalize(&text)) {
+                conn.execute(
+                    "UPDATE wrapper_topic_memory_offers SET status = 'dismissed', text = '' WHERE account_id = ?1 AND id = ?2",
+                    params![ACCOUNT, id],
+                )?;
+            }
         }
     }
     Ok(())
@@ -508,7 +511,7 @@ pub fn context(ctx: &Context<'_>, request: &ContextRequest) -> Vec<ContextBlock>
 
 fn block(text: String) -> ContextBlock {
     ContextBlock {
-        source: ContextSource::Memory,
+        source: ContextSource::TopicMemory,
         priority: super::priority::MEMORY,
         budget: CONTEXT_CHARS,
         text,
@@ -564,12 +567,12 @@ fn propose(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     {
         return Ok(json!({"status": "already_retained"}));
     }
-    // Une même demande en attente dans ce fil ne fait pas une seconde carte.
+    // Une même demande en attente dans ce fil et ce sujet ne fait pas une seconde carte.
     let mut statement = ctx.connection.prepare(
-        "SELECT id, text FROM wrapper_topic_memory_offers WHERE account_id = ?1 AND conversation_id = ?2 AND status = 'pending'",
+        "SELECT id, text FROM wrapper_topic_memory_offers WHERE account_id = ?1 AND conversation_id = ?2 AND topic_id = ?3 AND status = 'pending'",
     )?;
     let waiting = statement
-        .query_map(params![ACCOUNT, conversation], |row| {
+        .query_map(params![ACCOUNT, conversation, topic], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

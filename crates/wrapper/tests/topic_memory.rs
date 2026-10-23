@@ -1,7 +1,7 @@
 //! Mémoire d'un sujet : visible de tous ses fils, écrite seulement après l'accord de Charles.
 use grokbot_engine::{
     compaction,
-    contracts::{ContextSource, ToolOutcome},
+    contracts::{with_tx, ContextSource, HistoryItem, Role, Summary, ToolOutcome},
 };
 use grokbot_wrapper::{ApiError, App};
 use rusqlite::Connection;
@@ -119,7 +119,12 @@ impl Fixture {
             .context_preview(conversation)
             .unwrap()
             .into_iter()
-            .filter(|block| block.source == ContextSource::Memory)
+            .filter(|block| {
+                matches!(
+                    block.source,
+                    ContextSource::Memory | ContextSource::TopicMemory
+                )
+            })
             .map(|block| block.text)
             .collect::<Vec<_>>()
             .join("\n")
@@ -465,4 +470,151 @@ fn la_meme_proposition_en_attente_ne_fait_qu_une_carte_et_un_fait_deja_retenu_n_
         ToolOutcome::Done { output } => assert_eq!(output["status"], "already_retained"),
         _ => panic!("un fait déjà retenu ne se repropose pas"),
     }
+}
+
+/// Un résumé enregistré sans citer le fait (reformulation) disparaît quand le fait est oublié.
+fn save_summary(f: &Fixture, conversation: &str) {
+    let item = |id: &str, text: &str| HistoryItem {
+        entry_id: id.into(),
+        role: Role::User,
+        text: text.into(),
+        images: vec![],
+        tool_items: vec![],
+    };
+    let history = vec![
+        item("old-1", "Une question"),
+        item("old-2", "Une autre question"),
+        item("tail", "La suite"),
+    ];
+    let summary = Summary {
+        summary_id: format!("summary-{conversation}"),
+        conversation_id: conversation.into(),
+        text: "Le camion est réservé en début d'été.".into(),
+        truncation_last_entry_inclusive: "old-2".into(),
+        resume_from_entry_inclusive: "tail".into(),
+        previous_summary_id: None,
+        includes_tool_results: true,
+        strategy: "test".into(),
+    };
+    with_tx(&f.db(), |conn| {
+        compaction::save_with_history(conn, &summary, &history)
+    })
+    .unwrap();
+}
+
+#[test]
+fn oublier_efface_les_resumes_enregistres_des_fils_du_sujet_meme_sans_citation() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let a = f.thread("Camion", Some(&topic));
+    let b = f.thread("Adresse", Some(&topic));
+    let loose = f.thread("Sans sujet", None);
+    let fact = f.accept(&f.propose(&a, FACT));
+    for conversation in [&a, &b, &loose] {
+        save_summary(&f, conversation);
+        assert!(compaction::latest(&f.db(), conversation).unwrap().is_some());
+    }
+
+    f.post("/api/topics/memory/forget", json!({"fact_id": fact["id"]}));
+
+    assert!(compaction::latest(&f.db(), &a).unwrap().is_none());
+    assert!(compaction::latest(&f.db(), &b).unwrap().is_none());
+    // Le fil d'un autre contexte garde son résumé : seuls les fils du sujet sont régénérés.
+    assert!(compaction::latest(&f.db(), &loose).unwrap().is_some());
+}
+
+#[test]
+fn supprimer_un_sujet_efface_tous_ses_faits_meme_au_dela_de_la_page_listee() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Gros sujet");
+    f.thread("Fil", Some(&topic));
+    {
+        let db = f.db();
+        for n in 0..520 {
+            db.execute(
+                "INSERT INTO wrapper_topic_facts (account_id, id, topic_id, text, created_at) VALUES ('local-workspace', ?1, ?2, ?3, ?4)",
+                rusqlite::params![format!("tf-{n:04}"), topic, format!("Fait numéro {n}"), n],
+            )
+            .unwrap();
+        }
+    }
+    assert!(f.topic_facts(&topic).len() <= 500);
+    f.post(
+        "/api/topics/delete",
+        json!({"id": topic, "forget_memory": true}),
+    );
+    let left: i64 = f
+        .db()
+        .query_row("SELECT COUNT(*) FROM wrapper_topic_facts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn les_faits_du_sujet_ne_rognent_pas_le_budget_de_la_memoire_du_bot() {
+    let mut f = Fixture::new();
+    let topic = f.topic("Déménagement");
+    let a = f.thread("Camion", Some(&topic));
+    let private = "Je préfère déménager le matin";
+    f.app
+        .invoke_tool_in(
+            "grokbot",
+            Some(&a),
+            "remember",
+            json!({"text": private, "sensitive": false, "source": "user_stated"}),
+        )
+        .unwrap();
+    // De quoi remplir à lui seul le budget de 2 000 caractères.
+    for n in 0..30 {
+        let text = format!("Fait de sujet numéro {n} : {}", "x".repeat(120));
+        f.accept(&f.propose(&a, &text));
+    }
+    let blocks = f.app.context_preview(&a).unwrap();
+    let of = |source: ContextSource| {
+        blocks
+            .iter()
+            .filter(|block| block.source == source)
+            .map(|block| block.text.clone())
+            .collect::<String>()
+    };
+    assert!(of(ContextSource::Memory).contains(private));
+    assert!(of(ContextSource::TopicMemory).contains("Fait de sujet numéro 29"));
+}
+
+#[test]
+fn une_proposition_identique_dans_un_autre_sujet_fait_sa_propre_carte() {
+    let mut f = Fixture::new();
+    let first = f.topic("Ancien");
+    let second = f.topic("Nouveau");
+    let a = f.thread("Voyageuse", Some(&first));
+    let old = f.propose(&a, FACT);
+    f.post(
+        "/api/topics/assign",
+        json!({"conversation_id": a, "topic_id": second}),
+    );
+    let new = f.propose(&a, FACT);
+    assert_ne!(old, new);
+    f.accept(&new);
+    assert_eq!(f.topic_facts(&second).len(), 1);
+}
+
+#[test]
+fn oublier_ne_touche_pas_aux_propositions_en_attente_d_un_autre_sujet() {
+    let mut f = Fixture::new();
+    let first = f.topic("Déménagement");
+    let second = f.topic("Impôts");
+    let a = f.thread("Camion", Some(&first));
+    let b = f.thread("Déclaration", Some(&second));
+    let fact = f.accept(&f.propose(&a, FACT));
+    let elsewhere = f.propose(&b, FACT);
+
+    f.post("/api/topics/memory/forget", json!({"fact_id": fact["id"]}));
+    assert_eq!(f.card(&b, &elsewhere)["payload"]["status"], "pending");
+    assert_eq!(f.card(&b, &elsewhere)["payload"]["text"], FACT);
+
+    f.post(
+        "/api/topics/delete",
+        json!({"id": first, "forget_memory": true}),
+    );
+    assert_eq!(f.card(&b, &elsewhere)["payload"]["status"], "pending");
 }

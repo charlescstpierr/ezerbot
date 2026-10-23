@@ -19,7 +19,7 @@ const DAY: &str = "Jour invalide : choisissez « demain » (par défaut) ou « a
 static WATCH: Mutex<()> = Mutex::new(());
 
 /// Why an agenda event reaches a routine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CalendarCase {
     Cree,
     Modifie,
@@ -47,8 +47,10 @@ impl CalendarCase {
 }
 /// An agenda event, as the routines read it. It carries no token and no provider detail.
 /// `debut` is the start instant told in `fuseau`; both are empty or zero when Google
-/// gave no start for a cancelled event.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// gave no start for a cancelled event. `version` tells one delivery of the event from
+/// the next: the instant it was last updated (0 for a tombstone that carries none), or
+/// the start instant for a start.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CalendarEvent {
     pub id: String,
     /// The address of the Google account whose agenda it belongs to.
@@ -58,10 +60,11 @@ pub struct CalendarEvent {
     pub debut_ms: i64,
     pub fuseau: String,
     pub titre: String,
+    pub version: i64,
 }
 
 pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_calendar_watch (account_id TEXT PRIMARY KEY,updated_ms INTEGER NOT NULL,started_ms INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS wrapper_calendar_delivered (account_id TEXT NOT NULL,event_id TEXT NOT NULL,cas TEXT NOT NULL,stamp INTEGER NOT NULL,PRIMARY KEY(account_id,event_id,cas,stamp));")?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS wrapper_calendar_watch (account_id TEXT PRIMARY KEY,updated_ms INTEGER NOT NULL,started_ms INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS wrapper_calendar_delivered (account_id TEXT NOT NULL,event_id TEXT NOT NULL,cas TEXT NOT NULL,stamp INTEGER NOT NULL,PRIMARY KEY(account_id,event_id,cas,stamp));CREATE TABLE IF NOT EXISTS wrapper_calendar_inbox (seq INTEGER PRIMARY KEY AUTOINCREMENT,account_id TEXT NOT NULL,event TEXT NOT NULL);")?;
     Ok(())
 }
 pub(super) fn schema() -> Value {
@@ -272,6 +275,26 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
     )
 }
 
+/// The events the agenda handed over that no consumer has acknowledged yet, oldest first,
+/// each with its place in the inbox.
+pub(super) fn inbox(conn: &Connection) -> Result<Vec<(i64, CalendarEvent)>, ApiError> {
+    let mut stmt = conn.prepare("SELECT seq,event FROM wrapper_calendar_inbox ORDER BY seq")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(seq, text)| Some((seq, serde_json::from_str(&text).ok()?)))
+        .collect())
+}
+/// A consumer has made what it was handed: those events leave the inbox.
+pub(super) fn acknowledge(conn: &Connection, seqs: &[i64]) -> Result<(), ApiError> {
+    for seq in seqs {
+        conn.execute("DELETE FROM wrapper_calendar_inbox WHERE seq=?1", [seq])?;
+    }
+    Ok(())
+}
+
 /// What the agenda told about one event, with the version that makes a delivery new.
 struct Seen {
     event: CalendarEvent,
@@ -296,9 +319,27 @@ fn calendar_event(item: &Value, cas: CalendarCase, zone: &str, stamp: i64) -> Op
             debut_ms,
             fuseau,
             titre: title(item),
+            version: stamp,
         },
         stamp,
     })
+}
+
+/// Nobody reads the agenda any more: the next look learns it afresh, so that what
+/// happened meanwhile is not delivered as new to a consumer that comes later.
+pub(super) fn stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    for table in [
+        "wrapper_calendar_delivered",
+        "wrapper_calendar_watch",
+        "wrapper_calendar_inbox",
+    ] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE account_id IN (SELECT lower(account_email) FROM wrapper_connector_catalogue WHERE (id='gmail' OR id GLOB 'gmail:*') AND account_email IS NOT NULL)"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// The events that changed or began since the last call in each connected Google account,
@@ -443,6 +484,19 @@ fn watch(ctx: &Context<'_>, account: &Account) -> Result<Vec<CalendarEvent>, Api
         tx.execute(
             "INSERT OR IGNORE INTO wrapper_calendar_delivered(account_id,event_id,cas,stamp) VALUES (?1,?2,?3,?4)",
             params![owner, seen.event.id, seen.event.cas.key(), seen.stamp],
+        )?;
+        // What is handed over is also kept until a consumer acknowledges it: the cursors move
+        // here, so a delivery that fails or is cut short must find the event again.
+        let told = CalendarEvent {
+            compte: account.email.clone(),
+            ..seen.event.clone()
+        };
+        tx.execute(
+            "INSERT INTO wrapper_calendar_inbox(account_id,event) VALUES (?1,?2)",
+            params![
+                owner,
+                serde_json::to_string(&told).map_err(|_| unreadable())?
+            ],
         )?;
     }
     // A record goes once its cursor can no longer list that version again: a change older

@@ -120,7 +120,11 @@
     const months = month === "*" ? "" : `, en ${join(values(month, 1, 12).map((n) => monthNames[n]))}`;
     return { trigger: { kind: "cron", expression: text, time_zone: null }, zone, text: `${days[0].toUpperCase()}${days.slice(1)} ${time}${months}` };
   }
-  const scheduleLabel = (parsed) => ["every", "github"].includes(parsed.trigger.kind) ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  // A calendar trigger counts no clock: the zone of the routine says nothing about when it starts.
+  const scheduleLabel = (parsed) => ["every", "github", "calendar"].includes(parsed.trigger.kind) ? parsed.text : `${parsed.text} (${parsed.zone})`;
+  // The cases of an agenda event that can start a routine: the wire value, the word a history shows, the checkbox.
+  const CALENDAR_CASES = [["created", "créé", "Un événement est créé"], ["modified", "modifié", "Un événement est modifié"], ["cancelled", "annulé", "Un événement est annulé"], ["begins", "commence", "Un événement commence"]];
+  const calendarWords = (cases) => CALENDAR_CASES.filter(([value]) => cases.includes(value)).map(([, word]) => word).join(", ");
   // The five events a GitHub trigger can listen to, in the order the editor lists them.
   const githubEvents = [["pull_request_opened", "pull request ouverte"], ["pull_request_pushed", "pull request poussée"], ["pull_request_merged", "pull request mergée"], ["comment", "commentaire (pull request, issue ou revue inline)"], ["issue_opened", "issue ouverte"]];
   const githubEventLabel = (event) => (githubEvents.find(([value]) => value === event) || [event, event])[1].replace(/ \(.*\)$/, "");
@@ -140,6 +144,7 @@
       if (r.trigger.kind === "webhook") return "Webhook : démarre à chaque appel authentifié";
       if (r.trigger.kind === "github") return `GitHub ${r.trigger.repo} : ${r.trigger.events.map(githubEventLabel).join(", ")}`;
       if (r.trigger.kind === "mail") return "Courriel : démarre à chaque nouveau message de la boîte connectée";
+      if (r.trigger.kind === "calendar") return `Calendrier : démarre pour un événement de l’agenda connecté (${calendarWords(r.trigger.cases)})`;
       if (r.trigger.kind === "once") return `Une fois : ${date(r.trigger.at, r.time_zone)} · ${r.time_zone}`;
       const t = r.trigger;
       const expression = t.kind === "cron" ? t.expression : `@every ${t.interval_ms}ms${t.phase_ms === null || t.phase_ms === undefined ? "" : `/${t.phase_ms}ms`}`;
@@ -465,12 +470,16 @@
     const skillHint = node("p", "routines-note", availableSkills.length ? "La version exacte est conservée, même si la skill évolue. Consultez la section Skills pour son contenu et ses versions." : "Aucune skill pour ce bot : créez-en une dans Modifier le bot › Skills."); fields.append(skillHint);
     if (pinned) fields.append(node("h4", "", `Contenu intégral de ${pinned.content.name} · version ${pinned.version}`), node("pre", "routines-skill-preview", pinned.content.body));
     const mode = field("Déclencheur", "select");
-    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["group", "Groupe · part dès que l’un de ses déclencheurs part"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
-    mode.value = ["once", "webhook", "mail", "github", "group"].includes(r?.trigger.kind) ? r.trigger.kind : "schedule";
+    for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["calendar", "Calendrier · un événement de l’agenda Google connecté"], ["group", "Groupe · part dès que l’un de ses déclencheurs part"]]) { const opt = node("option", "", label); opt.value = value; mode.append(opt); }
+    mode.value = ["once", "webhook", "mail", "github", "calendar", "group"].includes(r?.trigger.kind) ? r.trigger.kind : "schedule";
     const expression = field("Cron (5 champs), alias ou @every");
     expression.value = r?.trigger.kind === "cron" ? r.trigger.expression : r?.trigger.kind === "every" ? `@every ${r.trigger.interval_ms}ms${r.trigger.phase_ms === null || r.trigger.phase_ms === undefined ? "" : `/${r.trigger.phase_ms}ms`}` : "0 9 * * *";
     const once = field("Date et heure UTC"); once.type = "datetime-local"; once.step = "0.001";
     once.value = r?.trigger.kind === "once" ? new Date(r.trigger.at).toISOString().slice(0, -1) : "";
+    // A start is the case a user comes for; a routine already on the calendar keeps the cases it had.
+    const checkbox = (label, parent, checked) => { const box = field(label, "input", parent); box.type = "checkbox"; box.className = ""; box.checked = checked; box.parentElement.classList.add("routines-enabled"); return box; };
+    const calendarBoxes = CALENDAR_CASES.map(([value, , label]) => { const box = checkbox(label, fields, (r?.trigger.kind === "calendar" ? r.trigger.cases : ["begins"]).includes(value)); box.dataset.case = value; return box; });
+    const ticked = (boxes) => boxes.filter((box) => box.checked).map((box) => box.dataset.case);
     const zone = field("Fuseau IANA"); zone.value = r?.trigger.time_zone || r?.time_zone || localZone; zone.placeholder = "America/Montreal";
     // One repository and some of five events; the same fields serve a lone trigger and a trigger of a group.
     function githubFields(parent, value, onChange) {
@@ -497,17 +506,18 @@
         const box = node("div", "routines-group-row"); row.box = box;
         box.append(node("h4", "", `Déclencheur ${index + 1}`));
         row.kind = field("Genre", "select", box); row.expression = field("Cron (5 champs), alias ou @every", "input", box); row.once = field("Date et heure UTC", "input", box); row.once.type = "datetime-local"; row.once.step = "0.001";
-        for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"]]) { const opt = node("option", "", label); opt.value = value; row.kind.append(opt); }
+        for (const [value, label] of [["schedule", "Cron / intervalle"], ["once", "Une seule fois"], ["webhook", "Webhook · appel HTTPS avec jeton Bearer"], ["mail", "Courriel · un nouveau message de la boîte Gmail connectée"], ["github", "GitHub · événements d’un dépôt"], ["calendar", "Calendrier · un événement de l’agenda Google connecté"]]) { const opt = node("option", "", label); opt.value = value; row.kind.append(opt); }
         row.kind.value = row.value.kind; row.expression.value = row.value.expression; row.once.value = row.value.once;
         for (const key of ["kind", "expression", "once"]) row[key].addEventListener("input", () => { row.value[key] = row[key].value; });
         row.github = githubFields(box, row.value, (picked) => { Object.assign(row.value, picked); });
+        row.boxes = CALENDAR_CASES.map(([value, , label]) => { const input = checkbox(label, box, row.value.cases.includes(value)); input.dataset.case = value; input.addEventListener("input", () => { row.value.cases = ticked(row.boxes); }); return input; });
         // While reviewing an activation nothing here may change: only what is read gets activated.
         if (!resume) box.append(button("Retirer ce déclencheur", () => { rows.splice(index, 1); renderRows(); update(); }));
         groupRows.append(box);
       });
     }
-    const addRow = (value) => { rows.push({ id: value.id || "", stored: { kind: value.kind, once: value.once, repo: value.repo, events: value.events }, value: { kind: value.kind, expression: value.expression, once: value.once, repo: value.repo || "", events: value.events || [] } }); };
-    const memberValue = (member) => ({ id: member.id, kind: ["once", "webhook", "mail", "github"].includes(member.trigger.kind) ? member.trigger.kind : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "", repo: member.trigger.repo, events: member.trigger.events });
+    const addRow = (value) => { rows.push({ id: value.id || "", stored: { kind: value.kind, once: value.once, repo: value.repo, events: value.events }, value: { kind: value.kind, expression: value.expression, once: value.once, repo: value.repo || "", events: value.events || [], cases: value.cases || ["begins"] } }); };
+    const memberValue = (member) => ({ id: member.id, kind: ["once", "webhook", "mail", "github", "calendar"].includes(member.trigger.kind) ? member.trigger.kind : "schedule", expression: expressionOf(member.trigger), once: member.trigger.kind === "once" ? new Date(member.trigger.at).toISOString().slice(0, -1) : "", repo: member.trigger.repo, events: member.trigger.events, cases: member.trigger.cases });
     if (r?.trigger.kind === "group") { for (const member of r.trigger.members) addRow(memberValue(member)); renderRows(); }
     groupBox.append(node("h4", "", "Déclencheurs du groupe"), node("p", "routines-note", "Au moins deux déclencheurs simples, sans groupe dans un groupe. La routine part dès que l’un d’eux part ; chaque départ est une occurrence nommée dans l’historique."), groupRows);
     const groupActions = node("div", "routines-actions");
@@ -520,7 +530,13 @@
     if (enabled) { enabled.type = "checkbox"; enabled.checked = true; enabled.className = ""; enabled.parentElement.classList.add("routines-enabled"); }
     // A mail trigger only listens to a connected Gmail: without it nothing is saved. One already in the routine stays.
     const mailConnected = () => panels.state.routine_mail?.connected === true;
-    function simple(genre, expressionText, onceText, spent = false, picked = null, kept = false) {
+    const calendarConnected = () => panels.state.routine_calendar?.connected === true;
+    function simple(genre, expressionText, onceText, spent = false, picked = null, kept = false, cases = []) {
+      if (genre === "calendar") {
+        if (!cases.length) throw new Error("Cochez au moins un cas : un événement créé, modifié, annulé ou qui commence.");
+        if (!spent && !calendarConnected()) throw new Error("Le déclencheur « événement de calendrier » lit l’agenda du compte Google connecté, et Google n’est pas connecté. Connectez-le dans Paramètres › Connecteurs (Gmail) : cette routine n’est pas enregistrée avec ce déclencheur.");
+        return { trigger: { kind: "calendar", cases: CALENDAR_CASES.filter(([value]) => cases.includes(value)).map(([value]) => value) }, zone: validZone(zone.value.trim() || localZone), text: `Calendrier : démarre pour un événement de l’agenda connecté (${calendarWords(cases)}). Le titre et le début arrivent dans le fil de la routine ; un début manqué pendant que le Mac était éteint est rattrapé à son heure prévue.` };
+      }
       if (genre === "mail") {
         if (!spent && !mailConnected()) throw new Error("Le déclencheur « nouveau courriel » lit la boîte Gmail connectée, et Gmail n’est pas connecté. Connectez-le dans Paramètres › Connecteurs : cette routine n’est pas enregistrée avec ce déclencheur.");
         return { trigger: { kind: "mail" }, zone: validZone(zone.value.trim() || localZone), text: "Courriel : démarre à chaque nouveau message de la boîte Gmail connectée. L’expéditeur, l’objet, la date et le texte arrivent dans le fil de la routine." };
@@ -548,7 +564,7 @@
     function parsed() {
       if (mode.value === "group") {
         if (rows.length < 2) throw new Error("Un groupe contient au moins deux déclencheurs. Ajoutez-en un autre ou choisissez un déclencheur simple.");
-        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once, Boolean(row.id) && row.value.kind === row.stored.kind && (row.value.kind === "mail" || (row.value.kind === "once" && row.value.once === row.stored.once)), { repo: row.value.repo.trim(), events: row.value.events }, Boolean(row.id) && row.stored.kind === "github" && row.value.kind === "github" && sameGithub(row.value, row.stored)));
+        const parts = rows.map((row) => simple(row.value.kind, row.value.expression, row.value.once, Boolean(row.id) && row.value.kind === row.stored.kind && (row.value.kind === "mail" || row.value.kind === "calendar" || (row.value.kind === "once" && row.value.once === row.stored.once)), { repo: row.value.repo.trim(), events: row.value.events }, Boolean(row.id) && row.stored.kind === "github" && row.value.kind === "github" && sameGithub(row.value, row.stored), row.value.cases));
         const members = parts.map((part, index) => {
           // A TZ= prefix on one trigger belongs to that trigger, not to the whole routine.
           // Only an explicit TZ= prefix pins that trigger, even to the zone the routine has too.
@@ -557,19 +573,20 @@
         });
         return { trigger: { kind: "group", members }, zone: validZone(zone.value.trim() || localZone), text: `Groupe : ${parts.map((part) => part.text).join(" · ")}` };
       }
-      return simple(mode.value, expression.value, once.value, mode.value === "mail" && r?.trigger.kind === "mail", github.read(), r?.trigger.kind === "github" && mode.value === "github" && sameGithub(github.read(), r.trigger));
+      return simple(mode.value, expression.value, once.value, ["mail", "calendar"].includes(mode.value) && r?.trigger.kind === mode.value, github.read(), r?.trigger.kind === "github" && mode.value === "github" && sameGithub(github.read(), r.trigger), ticked(calendarBoxes));
     }
     function update() {
       prompt.parentElement.hidden = kind.value !== "inline_prompt";
       skill.parentElement.hidden = version.parentElement.hidden = skillHint.hidden = kind.value !== "skill_invocation";
       if (mode.value === "group" && !rows.length) { addRow({ kind: "schedule", expression: "0 9 * * *", once: "" }); addRow({ kind: "webhook", expression: "0 9 * * *", once: "" }); renderRows(); }
-      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = mode.value === "webhook" || mode.value === "mail" || mode.value === "github"; groupBox.hidden = mode.value !== "group";
+      expression.parentElement.hidden = mode.value !== "schedule"; once.parentElement.hidden = mode.value !== "once"; zone.parentElement.hidden = ["webhook", "mail", "github", "calendar"].includes(mode.value); groupBox.hidden = mode.value !== "group";
+      for (const box of calendarBoxes) box.parentElement.hidden = mode.value !== "calendar";
       github.repo.parentElement.hidden = github.box.hidden = githubNote.hidden = mode.value !== "github";
-      for (const row of rows) { row.expression.parentElement.hidden = row.value.kind !== "schedule"; row.once.parentElement.hidden = row.value.kind !== "once"; row.github.repo.parentElement.hidden = row.github.box.hidden = row.value.kind !== "github"; }
+      for (const row of rows) { row.expression.parentElement.hidden = row.value.kind !== "schedule"; row.once.parentElement.hidden = row.value.kind !== "once"; row.github.repo.parentElement.hidden = row.github.box.hidden = row.value.kind !== "github"; for (const box of row.boxes) box.parentElement.hidden = row.value.kind !== "calendar"; }
       try { const p = parsed(); preview.textContent = scheduleLabel(p); preview.classList.remove("routines-error"); }
       catch (error) { preview.textContent = error.message; preview.classList.add("routines-error"); }
     }
-    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, zone: zone.value, github: JSON.stringify(github.read()), group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
+    const baseline = () => ({ name: name.value, kind: kind.value, prompt: prompt.value, skill: skill.value, version: version.value, mode: mode.value, expression: expression.value, once: once.value, cases: ticked(calendarBoxes).join(), zone: zone.value, github: JSON.stringify(github.read()), group: JSON.stringify(rows.map((row) => [row.id, row.value])) });
     const initial = baseline();
     form.addEventListener("input", update); form.addEventListener("change", update); update();
     const actions = node("div", "routines-actions");
@@ -590,7 +607,7 @@
               payload.body = { kind: "skill_invocation", skill_id: skill.value.trim(), version: Number(version.value) };
             }
           }
-          if (!r || ["mode", "expression", "once", "zone", "github", "group"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
+          if (!r || ["mode", "expression", "once", "cases", "zone", "github", "group"].some((key) => values[key] !== initial[key])) { payload.trigger = p.trigger; payload.time_zone = p.zone; }
           if (r) Object.assign(payload, { routine_id: r.routine_id, modified_at: r.modified_at, schedule_version: r.schedule_version });
           else payload.enabled = enabled.checked;
           if (r && Object.keys(payload).length === 4) { back(); return; }
@@ -785,7 +802,9 @@
       const row = node("article", "routines-occurrence"); row.dataset.status = o.status.status; row.dataset.occurrenceId = o.occurrence_id;
       row.tabIndex = -1; row.dataset.historyFocus = `occurrence-${o.occurrence_id}`;
       const labels = { pending: "En attente", running: "En cours / en attente d’une réponse", done: "Terminée", missed: "Manquée", failed: "Échec / tâche inachevée" };
-      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "mail" ? `${o.trigger.label} · ${o.trigger.compte ? `${o.trigger.compte} · ` : ""}${o.trigger.expediteur} · ${o.trigger.objet} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "github" ? `${o.trigger.label} · ${o.trigger.event_label} · ${o.trigger.repo}${o.trigger.number ? ` #${o.trigger.number}` : ""}${o.trigger.title ? ` · ${o.trigger.title}` : ""} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
+      // An agenda start is a dated slot: its planned time is the one the event began at, and a late one says it was caught up.
+      const calendarNote = (t) => { const named = t.fuseau || r.time_zone; return t.cas === "commence" ? `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · prévu le ${date(o.scheduled_at_utc, named)} · ${named}${t.received_at - t.debut_ms > 120000 ? " · rattrapé" : ""}` : `${t.label} · ${t.compte ? `${t.compte} · ` : ""}${t.cas} · ${t.titre} · vu le ${date(t.received_at, r.time_zone)} · ${r.time_zone}`; };
+      row.append(node("strong", "", labels[o.status.status] || o.status.status), node("p", "routines-note", o.trigger?.kind === "calendar" ? calendarNote(o.trigger) : o.trigger?.kind === "webhook" ? `${o.trigger.label} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "mail" ? `${o.trigger.label} · ${o.trigger.compte ? `${o.trigger.compte} · ` : ""}${o.trigger.expediteur} · ${o.trigger.objet} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : o.trigger?.kind === "github" ? `${o.trigger.label} · ${o.trigger.event_label} · ${o.trigger.repo}${o.trigger.number ? ` #${o.trigger.number}` : ""}${o.trigger.title ? ` · ${o.trigger.title}` : ""} · reçu le ${date(o.trigger.received_at, r.time_zone)} · ${r.time_zone}` : `${o.trigger?.kind === "schedule" ? `${o.trigger.label}${o.trigger.description ? ` (${o.trigger.description})` : ""} · ` : ""}${date(o.scheduled_at_utc, r.time_zone)} · ${r.time_zone} · ${o.manual_nonce ? "Manuel" : "Planifié"} · version ${o.schedule_version}`));
       if (o.status.reason) row.append(node("p", "routines-error", frenchError({ message: o.status.reason }, true)));
       if (o.conversation_id) {
         const result = button("Voir le résultat de cette exécution", () => openThread(o.conversation_id, o.message_id));

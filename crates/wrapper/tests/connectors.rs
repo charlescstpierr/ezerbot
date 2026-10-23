@@ -5482,6 +5482,59 @@ fn calendar_events_stop_when_gmail_is_not_connected_and_start_over_after_a_disco
     );
 }
 
+#[test]
+fn calendar_events_wait_in_the_inbox_until_a_consumer_acknowledges_them() {
+    let mut f = Fixture::new();
+    f.gmail_connect();
+    assert!(agenda_events(&f).unwrap().is_empty());
+    let ms = now_ms();
+    f.db()
+        .execute(
+            "UPDATE wrapper_calendar_watch SET updated_ms=?1,started_ms=?1",
+            [ms - 3_600_000],
+        )
+        .unwrap();
+    f.agenda(vec![agenda_event(
+        "e-new",
+        "Nouvelle",
+        &agenda_at(1, 9),
+        ms - 600_000,
+        ms - 600_000,
+        "confirmed",
+    )]);
+    let handed = agenda_events(&f).unwrap();
+    assert_eq!(handed.len(), 1);
+    // The cursors have moved, so a second look hands nothing again: the inbox still holds it,
+    // for a consumer whose delivery failed or was cut short.
+    assert!(agenda_events(&f).unwrap().is_empty());
+    let db = f.db();
+    let waiting = grokbot_wrapper::features::mcp::calendar_inbox(&db).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].1, handed[0]);
+    assert_eq!(
+        grokbot_wrapper::features::mcp::calendar_inbox(&db).unwrap(),
+        waiting
+    );
+    grokbot_wrapper::features::mcp::calendar_acknowledge(&db, &[waiting[0].0]).unwrap();
+    assert!(grokbot_wrapper::features::mcp::calendar_inbox(&db)
+        .unwrap()
+        .is_empty());
+    // Nobody reading the agenda any more forgets what was not taken.
+    f.agenda(vec![agenda_event(
+        "e-newer",
+        "Plus récente",
+        &agenda_at(1, 10),
+        ms + 1_000,
+        ms + 1_000,
+        "confirmed",
+    )]);
+    agenda_events(&f).unwrap();
+    grokbot_wrapper::features::mcp::calendar_stop_watching(&db).unwrap();
+    assert!(grokbot_wrapper::features::mcp::calendar_inbox(&db)
+        .unwrap()
+        .is_empty());
+}
+
 /// A listing of the watch with its floors set back an hour, as after a Mac left closed.
 fn rewind_agenda(f: &Fixture, ms: i64) {
     f.db()

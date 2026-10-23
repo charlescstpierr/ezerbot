@@ -280,7 +280,7 @@ pub fn poll(ctx: &Context<'_>) -> Result<usize, ApiError> {
 /// Whether the inbox is looked at now. A watch that is not armed (a routine just started
 /// listening, or listens again after a pause) learns the inbox at once: the cooldown of an
 /// earlier watch would let the messages that arrive meanwhile be taken for known mail.
-fn due(armed: bool, now: u64, last_poll: u64) -> bool {
+pub(super) fn due(armed: bool, now: u64, last_poll: u64) -> bool {
     !armed || now.saturating_sub(last_poll) >= POLL_MS
 }
 

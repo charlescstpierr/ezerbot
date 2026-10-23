@@ -89,6 +89,7 @@ pub(super) fn forget_account(tx: &rusqlite::Transaction<'_>, server: &str) -> Re
         "wrapper_gmail_mailbox",
         "wrapper_calendar_delivered",
         "wrapper_calendar_watch",
+        "wrapper_calendar_inbox",
         "wrapper_google_account_choice",
     ] {
         tx.execute(
@@ -903,6 +904,26 @@ pub(in super::super) fn stop_watching(conn: &Connection) -> Result<(), ApiError>
         )?;
     }
     Ok(())
+}
+
+/// The events the agenda handed over and nobody has acknowledged yet, oldest first.
+pub(in super::super) fn calendar_inbox(
+    conn: &Connection,
+) -> Result<Vec<(i64, CalendarEvent)>, ApiError> {
+    agenda::inbox(conn)
+}
+
+/// Those events were made into runs: they leave the inbox.
+pub(in super::super) fn calendar_acknowledge(
+    conn: &Connection,
+    seqs: &[i64],
+) -> Result<(), ApiError> {
+    agenda::acknowledge(conn, seqs)
+}
+
+/// Nobody reads the agenda any more: the next look learns it afresh.
+pub(in super::super) fn stop_watching_calendar(conn: &Connection) -> Result<(), ApiError> {
+    agenda::stop_watching(conn)
 }
 
 /// The agenda events that happened since the last call: created, modified, cancelled or

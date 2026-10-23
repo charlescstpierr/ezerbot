@@ -201,6 +201,20 @@ pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {
 pub fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
     catalogue::gmail::calendar_events(ctx)
 }
+/// The agenda events handed over that no consumer has acknowledged yet, oldest first, each
+/// with its place in the inbox: `calendar_events` moves the cursors, so a consumer takes its
+/// events from here and acknowledges them once they are made into runs.
+pub fn calendar_inbox(conn: &Connection) -> Result<Vec<(i64, CalendarEvent)>, ApiError> {
+    catalogue::gmail::calendar_inbox(conn)
+}
+/// Those inbox events were made into runs: they leave the inbox.
+pub fn calendar_acknowledge(conn: &Connection, seqs: &[i64]) -> Result<(), ApiError> {
+    catalogue::gmail::calendar_acknowledge(conn, seqs)
+}
+/// Forget what the agenda held, once no routine watches it: the next look learns it afresh.
+pub fn calendar_stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    catalogue::gmail::stop_watching_calendar(conn)
+}
 /// The publishing tools of the connections (GitHub, Gmail, Slack): each opens a draft card and sends nothing
 /// until that card is validated.
 pub(crate) fn is_draft(name: &str) -> bool {

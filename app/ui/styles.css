@@ -447,6 +447,16 @@ textarea.text-input { display: block; resize: vertical; min-height: 58px; line-h
 .reviewer-settings .reviewer-notice { padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--text); }
 .reviewer-settings .reviewer-error { color: var(--danger-text); }
 .reviewer-settings .reviewer-error:empty, .reviewer-settings .reviewer-notice:empty { display: none; }
+.waiting-settings { display: grid; gap: 12px; margin: 18px 0 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.waiting-settings h4 { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); }
+.waiting-settings p { margin: 0; font-size: 11px; line-height: 1.55; color: var(--muted); }
+.waiting-settings .waiting-choice { display: grid; gap: 5px; font-size: 12px; line-height: 1.6; }
+.waiting-settings .waiting-choice:has(select:disabled) { opacity: .5; }
+.waiting-settings .setting-toggle:has(input:disabled) { opacity: .5; cursor: default; }
+.waiting-settings .setting-toggle input:disabled { cursor: default; }
+.waiting-settings .reviewer-notice { padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--text); }
+.waiting-settings .reviewer-error { color: var(--danger-text); }
+.waiting-settings .reviewer-notice:empty { display: none; }
 .reviewer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .reviewer-actions button { max-width: 100%; white-space: normal; }
 .danger-link { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; padding: 10px 4px; color: var(--danger-text); font-size: 11px; }

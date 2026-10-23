@@ -1766,6 +1766,13 @@ impl RunServices for Services<'_> {
     ) -> grokbot_engine::contracts::Result<SuspendCause> {
         super::forms::request_tool_approval(&self.ctx(conn, run), run, call).map_err(engine_error)
     }
+    fn continue_without_approval(
+        &mut self,
+        conn: &Connection,
+        run: &Run,
+    ) -> grokbot_engine::contracts::Result<bool> {
+        super::forms::continues_without_approval(conn, run).map_err(engine_error)
+    }
     fn is_cancelled(&self, _: &str) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }

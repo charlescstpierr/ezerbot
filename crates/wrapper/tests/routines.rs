@@ -3295,3 +3295,77 @@ fn a_paused_routine_hears_no_github_event_and_a_queued_one_obeys_the_pause() {
     f.post("/api/routines/resume", id);
     assert_eq!(deliver(&mut f, "evt-3", "comment").started, 1);
 }
+
+#[test]
+fn a_saved_github_trigger_stays_editable_after_the_connector_is_gone_but_a_new_one_is_refused() {
+    let mut f = Fixture::new(false);
+    connect_github(&f);
+    let github = || json!({"trigger":github_trigger(&["comment"])});
+    let (r, _) = group_routine(&mut f, vec![every_minute(), github()]);
+    let alone = github_routine(&mut f, &["comment"]);
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='disconnected' WHERE id='github'",
+            [],
+        )
+        .unwrap();
+    let update = |f: &mut Fixture, routine: &Routine, change: Value| {
+        let mut body = json!({"bot_id":"grokbot","routine_id":routine.routine_id,"modified_at":routine.modified_at,"schedule_version":routine.schedule_version});
+        body.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        f.app
+            .api("POST", "/api/routines/update", body.to_string().as_bytes())
+    };
+    // The group keeps its GitHub member: its own schedule member is edited and saved.
+    let stored = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap()["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let members = stored["trigger"]["members"].clone();
+    let slower = json!({"kind":"group","members":[
+        {"id":members[0]["id"],"trigger":{"kind":"every","interval_ms":120000,"phase_ms":null}},
+        {"id":members[1]["id"],"trigger":members[1]["trigger"]}]});
+    let saved = update(
+        &mut f,
+        &serde_json::from_value(stored.clone()).unwrap(),
+        json!({"trigger":slower}),
+    );
+    assert!(saved.is_ok(), "{saved:?}");
+    // A GitHub member added now is a new trigger that nothing could deliver: refused.
+    let again = f
+        .app
+        .api("GET", "/api/routines?bot_id=grokbot", b"")
+        .unwrap()["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["routine_id"] == r.routine_id)
+        .unwrap()
+        .clone();
+    let mut grown = again["trigger"].clone();
+    grown["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"trigger":{"kind":"github","repo":"charles/autre","events":["comment"]}}));
+    let refused = update(
+        &mut f,
+        &serde_json::from_value(again).unwrap(),
+        json!({"trigger":grown}),
+    )
+    .unwrap_err();
+    assert!(
+        refused.message.contains("GitHub est déconnecté"),
+        "{}",
+        refused.message
+    );
+    // A routine with one GitHub trigger can still be renamed.
+    let renamed = update(&mut f, &alone, json!({"name":"Revue du dépôt"}));
+    assert!(renamed.is_ok(), "{renamed:?}");
+}

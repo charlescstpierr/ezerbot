@@ -84,9 +84,29 @@ fn refuse_model_webhook(model: bool, trigger: &Schedule) -> Result<(), ApiError>
     Ok(())
 }
 /// A GitHub trigger is saved only while the connector can deliver its events: a
-/// trigger that cannot receive anything would look as if it already listened.
-fn require_github(ctx: &Context<'_>, trigger: &Schedule) -> Result<(), ApiError> {
-    if !trigger.has_github() {
+/// trigger that cannot receive anything would look as if it already listened. One
+/// already in the routine, left as it is, stays, so that renaming a routine whose
+/// connector was disconnected, or editing another trigger of its group, is not blocked.
+fn require_github(
+    ctx: &Context<'_>,
+    trigger: &Schedule,
+    previous: Option<&Schedule>,
+) -> Result<(), ApiError> {
+    let kept = |id: &str, github: &Schedule| match previous {
+        Some(alone @ Schedule::Github { .. }) => id.is_empty() && alone == github,
+        Some(Schedule::Group { members }) => {
+            members.iter().any(|m| m.id == id && &m.trigger == github)
+        }
+        _ => false,
+    };
+    let new = match trigger {
+        alone @ Schedule::Github { .. } => !kept("", alone),
+        Schedule::Group { members } => members
+            .iter()
+            .any(|m| matches!(m.trigger, Schedule::Github { .. }) && !kept(&m.id, &m.trigger)),
+        _ => false,
+    };
+    if !new {
         return Ok(());
     }
     match mcp::github_routine_gap(ctx)? {
@@ -525,7 +545,7 @@ fn create(ctx: &Context<'_>, input: Create, origin: Origin) -> Result<Routine, A
     refuse_model_webhook(origin == Origin::Model, &trigger)?;
     let trigger = name_members(ctx.connection, trigger, None)?;
     require_mailbox(ctx.connection, &trigger, None)?;
-    require_github(ctx, &trigger)?;
+    require_github(ctx, &trigger, None)?;
     let id = format!("routine-{}", random(ctx.connection)?);
     let conversation = format!("routine-{}", random(ctx.connection)?);
     let now = clock(ctx)?;
@@ -595,9 +615,7 @@ fn edit(ctx: &Context<'_>, input: Edit, model: bool) -> Result<Routine, ApiError
         refuse_model_webhook(model, &r.trigger)?;
         r.trigger = name_members(ctx.connection, r.trigger, Some(&previous))?;
         require_mailbox(ctx.connection, &r.trigger, Some(&previous))?;
-        if r.trigger != previous {
-            require_github(ctx, &r.trigger)?;
-        }
+        require_github(ctx, &r.trigger, Some(&previous))?;
     }
     if let Some(zone) = input.time_zone {
         r.time_zone = zone;

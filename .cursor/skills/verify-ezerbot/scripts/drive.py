@@ -698,14 +698,17 @@ def reminder_step(evidence: Path, index: int) -> None:
               return request.route.target_conversation_id;
             }""",
         )
-        age_waiting_card(evidence)
-        # Un autre fil est à l'écran : le rappel de la carte n'est pas lu d'avance.
+        # Un autre fil est à l'écran avant que la carte vieillisse : le rappel n'est pas lu d'avance par un sondage du fil visible.
         eval_js(evidence, """() => { document.getElementById("new-chat").click(); return true; }""")
         wait_js(
             evidence,
-            """() => document.querySelector('.gb-editor[aria-label="Votre message"]') ? {ok: true} : null""",
+            """() => {
+              const editor = document.querySelector('.gb-editor[aria-label="Votre message"]');
+              return editor && !document.querySelector('[data-card-kind="approval"]') ? {ok: true} : null;
+            }""",
             "conversation neuve non prête",
         )
+        age_waiting_card(evidence)
         eval_js(evidence, """() => { document.querySelector(".notifications-button").click(); return true; }""")
         if BASELINE:
             time.sleep(2)

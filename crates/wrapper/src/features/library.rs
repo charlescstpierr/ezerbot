@@ -11,7 +11,7 @@ use grokbot_memory::recall::normalize;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 empty_hooks!(
     state,
@@ -539,7 +539,9 @@ fn line_that_fits(
 /// pages, so an excerpt carries the marker the model cites; any other text is cut
 /// into slices of an estimated page (4 000 characters).
 struct Pages<'a> {
-    chunks: Vec<&'a str>,
+    text: &'a str,
+    /// Byte range of each chunk in `text`.
+    bounds: Vec<(usize, usize)>,
     paged: bool,
     terms: &'a BTreeSet<String>,
     /// Chunk indices, best first: those naming the question, then their neighbours.
@@ -547,6 +549,8 @@ struct Pages<'a> {
 }
 
 const SLICE_CHARS: usize = 4_000;
+/// A term cut by a slice boundary still names its slice, and a shortened slice may read on into the next one.
+const LOOKAHEAD_CHARS: usize = 64;
 
 impl<'a> Pages<'a> {
     fn new(text: &'a str, terms: &'a BTreeSet<String>) -> Self {
@@ -567,73 +571,112 @@ impl<'a> Pages<'a> {
                 .map(|(index, _)| index)
                 .collect()
         };
-        if cuts.first() != Some(&0) {
+        // Text before the first marker is a chunk of its own only when it says something.
+        if cuts.first() != Some(&0) && !text[..cuts[0]].trim().is_empty() {
             cuts.insert(0, 0);
         }
         cuts.push(text.len());
-        let chunks = cuts
+        let bounds = cuts
             .windows(2)
-            .map(|pair| &text[pair[0]..pair[1]])
+            .map(|pair| (pair[0], pair[1]))
             .collect::<Vec<_>>();
-        let scores = chunks
-            .iter()
-            .map(|chunk| score_text(chunk, terms))
+        let mut pages = Self {
+            text,
+            bounds,
+            paged,
+            terms,
+            ranked: Vec::new(),
+        };
+        // A chunk that names the question itself beats one that only reads on into a naming stretch.
+        let own = (0..pages.bounds.len())
+            .map(|index| score_text(pages.chunk(index), terms))
             .collect::<Vec<_>>();
-        let named = (0..chunks.len())
-            .filter(|&index| scores[index] > 0)
+        let reaching = (0..pages.bounds.len())
+            .map(|index| score_text(pages.scored(index), terms))
             .collect::<Vec<_>>();
+        let named = (0..reaching.len())
+            .filter(|&index| reaching[index] > 0)
+            .collect::<Vec<_>>();
+        // What follows a hit is read before what precedes it.
         let distance = |index: usize| {
             named
                 .iter()
-                .map(|&hit| hit.abs_diff(index))
+                .map(|&hit| {
+                    if index >= hit {
+                        2 * (index - hit)
+                    } else {
+                        2 * (hit - index) + 1
+                    }
+                })
                 .min()
                 .unwrap_or(0)
         };
-        let mut ranked = (0..chunks.len()).collect::<Vec<_>>();
-        ranked.sort_by_key(|&index| (std::cmp::Reverse(scores[index]), distance(index), index));
-        Self {
-            chunks,
-            paged,
-            terms,
-            ranked,
+        let mut ranked = (0..reaching.len()).collect::<Vec<_>>();
+        ranked.sort_by_key(|&index| {
+            (
+                std::cmp::Reverse(own[index]),
+                std::cmp::Reverse(reaching[index]),
+                distance(index),
+                index,
+            )
+        });
+        pages.ranked = ranked;
+        pages
+    }
+
+    fn chunk(&self, index: usize) -> &'a str {
+        let (start, end) = self.bounds[index];
+        &self.text[start..end]
+    }
+
+    /// The chunk and, for estimated pages, a few characters of what follows it.
+    fn scored(&self, index: usize) -> &'a str {
+        self.reading_on(index, LOOKAHEAD_CHARS)
+    }
+
+    fn reading_on(&self, index: usize, extra: usize) -> &'a str {
+        let (start, end) = self.bounds[index];
+        if self.paged {
+            return &self.text[start..end];
         }
+        let more = self.text[end..]
+            .char_indices()
+            .nth(extra)
+            .map_or(self.text.len(), |(offset, _)| end + offset);
+        &self.text[start..more]
     }
 
     /// A page keeps its marker line, then the stretch of the rest that names the question.
-    fn cut(&self, chunk: &str, room: usize) -> String {
+    fn cut(&self, index: usize, room: usize) -> String {
         if !self.paged {
-            return window(chunk, self.terms, room);
+            return window(self.reading_on(index, SLICE_CHARS), self.terms, room);
         }
+        let chunk = self.chunk(index);
         let marker_end = chunk.find('\n').map_or(chunk.len(), |at| at + 1);
-        let marker_end = if chunk[..marker_end].trim().is_empty() {
-            // The first chunk may open with a blank line before its marker.
-            chunk[marker_end..]
-                .find('\n')
-                .map_or(chunk.len(), |at| marker_end + at + 1)
-        } else {
-            marker_end
-        };
         let (marker, rest) = chunk.split_at(marker_end);
         let left = room.saturating_sub(marker.chars().count());
         let marker: String = marker.chars().take(room).collect();
         format!("{marker}{}", window(rest, self.terms, left))
     }
 
-    /// Best pages first while they fit; page order is kept in the excerpt.
+    /// Best pages first while they fit, the next one shortened to what is left;
+    /// page order is kept in the excerpt.
     fn excerpt(&self, max_chars: usize) -> String {
         let mut room = max_chars;
-        let mut chosen = BTreeSet::new();
+        let mut chosen = BTreeMap::new();
         for &index in &self.ranked {
-            let size = self.chunks[index].chars().count();
+            let size = self.chunk(index).chars().count();
             if size <= room {
                 room -= size;
-                chosen.insert(index);
-            } else if chosen.is_empty() {
-                // The best page alone is too long: keep the stretch that names the question.
-                return self.cut(self.chunks[index], room);
+                chosen.insert(index, self.chunk(index).to_owned());
+            } else {
+                if room > 0 {
+                    chosen.insert(index, self.cut(index, room));
+                }
+                break;
             }
         }
-        chosen.into_iter().map(|index| self.chunks[index]).collect()
+        chosen.into_values().collect()
     }
 }
 
@@ -774,7 +817,7 @@ mod tests {
         assert!(!Pages::new("[Page x]\n[Page 1 bis]\n[Pages 2]", &terms).paged);
         let pages = Pages::new("avant\n[feuilles 1]\na\n[feuilles 2]\nb", &terms);
         assert!(pages.paged);
-        assert_eq!(pages.chunks.len(), 3);
+        assert_eq!(pages.bounds.len(), 3);
     }
 
     #[test]
@@ -800,6 +843,38 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_preamble_never_takes_the_place_of_a_page() {
+        let terms = terms("introuvable");
+        let page = "rien ".repeat(3_200);
+        let text = format!("\n[Page 1]\n{page}\n[Page 2]\n{page}");
+        let pages = Pages::new(&text, &terms);
+        assert_eq!(pages.bounds.len(), 2);
+        let shown = pages.excerpt(11_000);
+        assert!(shown.starts_with("[Page 1]") && shown.chars().count() > 10_000);
+    }
+
+    #[test]
+    fn a_small_page_does_not_stop_the_next_one_from_being_shortened() {
+        let terms = terms("introuvable");
+        let text = format!("[Page 1]\npetite\n[Page 2]\n{}", "rien ".repeat(3_200));
+        let shown = Pages::new(&text, &terms).excerpt(500);
+        assert!(shown.contains("[Page 1]") && shown.contains("[Page 2]"));
+        assert!(shown.chars().count() <= 500);
+    }
+
+    #[test]
+    fn a_term_cut_by_a_slice_boundary_still_brings_its_passage() {
+        let terms = terms("coffre");
+        let before = "a".repeat(SLICE_CHARS * 3 - 3);
+        let text = format!("{before}coffre ZEBRA-4242 {}", "b ".repeat(6_000));
+        for room in [300, 1_400, 5_000, 11_000] {
+            let shown = Pages::new(&text, &terms).excerpt(room);
+            assert!(shown.contains("ZEBRA-4242"), "{room}");
+            assert!(shown.chars().count() <= room, "{room}");
+        }
+    }
+
+    #[test]
     fn a_plain_text_is_read_by_slices_and_the_named_one_comes_first() {
         let terms = terms("zebra");
         let text = format!(
@@ -808,9 +883,14 @@ mod tests {
             "remplissage ".repeat(2_000)
         );
         let pages = Pages::new(&text, &terms);
-        assert!(!pages.paged && pages.chunks.len() > 4);
+        assert!(!pages.paged && pages.bounds.len() > 4);
         assert!(pages.excerpt(4_000).contains("ZEBRA"));
         assert!(pages.excerpt(300).contains("ZEBRA"));
-        assert_eq!(pages.chunks.concat(), text);
+        assert_eq!(
+            (0..pages.bounds.len())
+                .map(|i| pages.chunk(i))
+                .collect::<String>(),
+            text
+        );
     }
 }

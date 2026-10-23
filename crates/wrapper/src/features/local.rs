@@ -480,16 +480,23 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
         .iter()
         .map(|root| root.to_string_lossy().to_lowercase())
         .collect();
-    let words: Vec<&str> = plain
-        .split(|c: char| {
-            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '<' | '>' | '=')
-        })
-        .filter(|word| !word.is_empty() && !word.starts_with('-'))
-        .collect();
+    let separator =
+        |c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '<' | '>' | '=');
+    // Mots coupés sans tenir compte des guillemets, puis comme le shell les lit
+    // (`Application\ Support/…` reste un seul mot).
+    let mut words: Vec<String> = plain.split(separator).map(str::to_owned).collect();
+    words.extend(shell_words(command, separator));
+    words.retain(|word| !word.is_empty() && !word.starts_with('-'));
     for word in &words {
         let Some(target) = resolve_word(word, working.as_deref().ok(), home.as_deref()) else {
             continue;
         };
+        // Un joker se juge par tout ce qu'il pourrait désigner.
+        if word.contains(['*', '?', '[', '{'])
+            && roots.iter().any(|root| pattern_reaches(&target, Path::new(root)))
+        {
+            return Ok(true);
+        }
         let real = target.canonicalize().unwrap_or_else(|_| target.clone());
         let shown = real.to_string_lossy().to_lowercase();
         if roots.iter().any(|root| shown.starts_with(root.as_str())) || is_app_data(ctx, &real)? {
@@ -513,6 +520,70 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
             })
     });
     Ok(keychain)
+}
+
+/// Les mots d'une commande comme le shell les découpe : guillemets et `\`
+/// regroupent, les séparateurs hors guillemets coupent.
+fn shell_words(command: &str, separator: impl Fn(char) -> bool) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"') | None, '\\') => word.extend(chars.next()),
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if separator(c) => words.push(std::mem::take(&mut word)),
+            (None, c) => word.push(c),
+        }
+    }
+    words.push(word);
+    words
+}
+
+/// Vrai si un chemin à jokers (`*`, `?`, `[…]`, `{…}`) peut désigner `root` ou
+/// un chemin dessous, sans tenir compte de la casse.
+fn pattern_reaches(pattern: &Path, root: &Path) -> bool {
+    let pattern: Vec<String> = pattern
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+    let root: Vec<String> = root
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+    pattern.len() >= root.len()
+        && root.iter().zip(&pattern).all(|(name, part)| {
+            let part: Vec<char> = part.chars().collect();
+            let name: Vec<char> = name.chars().collect();
+            component_matches(&part, &name)
+        })
+}
+
+fn component_matches(pattern: &[char], name: &[char]) -> bool {
+    match pattern.split_first() {
+        None => name.is_empty(),
+        // `{a,b}` est traité comme `*` : il peut produire n'importe quel nom.
+        Some(('*' | '{', rest)) => {
+            let rest = if pattern[0] == '{' {
+                match rest.iter().position(|&c| c == '}') {
+                    Some(end) => &rest[end + 1..],
+                    None => rest,
+                }
+            } else {
+                rest
+            };
+            (0..=name.len()).any(|skip| component_matches(rest, &name[skip..]))
+        }
+        Some(('[', rest)) => match rest.iter().skip(1).position(|&c| c == ']') {
+            Some(end) => !name.is_empty() && component_matches(&rest[end + 2..], &name[1..]),
+            None => name.first() == Some(&'[') && component_matches(rest, &name[1..]),
+        },
+        Some(('?', rest)) => !name.is_empty() && component_matches(rest, &name[1..]),
+        Some((c, rest)) => name.first() == Some(c) && component_matches(rest, &name[1..]),
+    }
 }
 
 /// Le chemin qu'un mot de commande désigne, sans suivre de lien : `~`, `$HOME`,
@@ -1863,5 +1934,20 @@ mod tests {
         assert_eq!(bytes, b"abcdEF");
         assert!(truncated);
         assert_eq!(allocated, 6);
+    }
+
+    #[test]
+    fn a_glob_in_an_escaped_absolute_path_still_reaches_the_app_data() {
+        let separator = |c: char| c.is_whitespace() || c == ';';
+        let words = shell_words(r"cat ~/Library/Application\ Support/Grok?ot/notes.txt", separator);
+        assert_eq!(words[1], "~/Library/Application Support/Grok?ot/notes.txt");
+        let home = Path::new("/Users/moi");
+        let target = resolve_word(&words[1], None, Some(home)).unwrap();
+        let root = home.join("Library/Application Support/Grokbot");
+        assert!(pattern_reaches(&target, &root));
+        let elsewhere = resolve_word("~/Library/Application Support/Gr*/x", None, Some(home)).unwrap();
+        assert!(pattern_reaches(&elsewhere, &root));
+        let unrelated = resolve_word("~/Documents/*.txt", None, Some(home)).unwrap();
+        assert!(!pattern_reaches(&unrelated, &root));
     }
 }

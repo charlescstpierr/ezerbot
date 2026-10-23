@@ -474,6 +474,11 @@ fn relative_paths_are_judged_where_they_lead_not_by_their_spelling() {
         ("majuscules", "ls DATA/x"),
         ("redirection", "echo x > data/intrus.txt"),
         ("option", "tail --file=data/journal.log"),
+        ("joker", "cat da*/anything.txt"),
+        ("joker-un", "ls d?ta"),
+        ("joker-classe", "ls [d]ata/x"),
+        ("joker-jeton", "cat d*/workspace.chatgpt-auth.j*n"),
+        ("joker-accolades", "ls dat{a,o}"),
     ];
     for (id, command) in attempts {
         f.send(id, "run_shell", f.shell(command));
@@ -488,6 +493,8 @@ fn relative_paths_are_judged_where_they_lead_not_by_their_spelling() {
         "run_shell",
         f.shell("ls . && cat ../hors-donnees"),
     );
+    assert_eq!(out["status"], "done", "{out}");
+    let out = f.runs_without_a_card("joker-voisin", "run_shell", f.shell("ls *.txt x?"));
     assert_eq!(out["status"], "done", "{out}");
 }
 

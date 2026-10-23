@@ -230,6 +230,15 @@ test("un lien de référence n’est pas une citation, mais [1][4] en reste deux
   assert.deepEqual(sources.citedNumbers("Voir [1][4]. Et [7]\n\n[7]: https://x.test"), [1, 4]);
 });
 
+test("une destination de lien, d’image ou une URL garde ses crochets, la prose voisine garde ses citations", () => {
+  const body = "[Doc](https://exemple.test/files/[1]/report) et ![Plan](https://exemple.test/p?x[2]=3) puis https://exemple.test/a/[3]/b et [Autre](https://exemple.test/(x)/[4]) enfin [5] et [6](non fermé";
+  assert.deepEqual(sources.citedNumbers(body), [5]);
+  const marked = sources.citeMarkdown(body);
+  for (const kept of ["files/[1]/report", "p?x[2]=3", "a/[3]/b", "(x)/[4]"]) assert.ok(marked.includes(kept), kept);
+  assert.equal((marked.match(/<sourcepill /g) || []).length, 1);
+  assert.deepEqual(sources.citedNumbers("Voir (https://a.test/x) [7] et [8]."), [7, 8]);
+});
+
 test("la carte et la ligne restent lisibles en clair comme en sombre, au clavier", () => {
   const css = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
   const block = css.slice(css.indexOf("/* Sources citées"));

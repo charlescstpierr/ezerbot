@@ -54,6 +54,17 @@ function afterCode(chars, start) {
   return start + open;
 }
 
+// Past la destination `(…)` ouverte à `start`, parenthèses équilibrées ; non fermée, rien n'est sauté.
+function afterDestination(chars, start) {
+  let depth = 0;
+  for (let index = start; index < chars.length; index++) {
+    if (chars[index] === "\\") { index++; continue; }
+    if (chars[index] === "(") depth++;
+    else if (chars[index] === ")" && --depth === 0) return index + 1;
+  }
+  return start;
+}
+
 const NUMBERS_ONLY = /^[\s0-9,;]+$/;
 
 // `links` : les numéros définis comme liens de référence (`[1]: https://…`), qui ne citent rien.
@@ -117,6 +128,16 @@ function scan(body, onCitation) {
     while (index < chars.length) {
       if (chars[index] === "`") {
         const next = afterCode(chars, index);
+        out += chars.slice(index, next).join("");
+        index = next;
+      } else if (chars[index] === "]" && chars[index + 1] === "(") {
+        // La destination d'un lien ou d'une image n'est pas de la prose : `[x](https://a.test/[1]/b)`.
+        const next = afterDestination(chars, index + 1);
+        out += chars.slice(index, next).join("");
+        index = next;
+      } else if ((chars[index] === "h" || chars[index] === "H") && /^https?:\/\//i.test(chars.slice(index, index + 8).join("")) && !/[\p{L}\p{N}]/u.test(chars[index - 1] ?? "")) {
+        let next = index;
+        while (next < chars.length && !/[\s<>]/.test(chars[next])) next++;
         out += chars.slice(index, next).join("");
         index = next;
       } else if (chars[index] === "[") {

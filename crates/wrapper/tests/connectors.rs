@@ -57,6 +57,10 @@ struct SlackScript {
     revoke_error: bool,
     /// The documented token response names the team by id only.
     team_id_only: bool,
+    /// Messages the provider accepted through `chat.postMessage`.
+    posted: Vec<Value>,
+    /// What `chat.postMessage` answers instead of accepting the message.
+    post_reply: Option<(u16, Value)>,
 }
 /// Scripted GitHub App provider: device flow, user, refresh and one REST route.
 struct GithubScript {
@@ -707,6 +711,17 @@ impl OAuth {
                             200,
                             json!({"ok":true,"team":"Atelier Ezerbot","team_id":"T0FIXTURE","user":"charles","user_id":"U0CHARLES"}),
                         )
+                    } else if post && path == "/slack/api/chat.postMessage" {
+                        if let Some(reply) = slack.post_reply.clone() {
+                            reply
+                        } else {
+                            let sent: Value = serde_json::from_str(&body).unwrap();
+                            slack.posted.push(sent.clone());
+                            (
+                                200,
+                                json!({"ok":true,"channel":sent["channel"],"ts":"1760001000.000100","message":{"text":sent["text"],"user":"U0CHARLES"}}),
+                            )
+                        }
                     } else if path == "/slack/api/conversations.list" {
                         (
                             200,
@@ -5685,4 +5700,372 @@ fn drive_follows_empty_search_pages_before_saying_there_is_no_match() {
     // A search that ends empty is still "no file".
     let run = f.github_call("none", DRIVE_TOOL, json!({"nom":"Absent"}));
     assert!(failed(&f, &run).contains("Aucun fichier"));
+}
+
+const SLACK_POST: &str = "slack_post_message";
+
+impl Fixture {
+    /// One chat turn in which the bot prepares a Slack message. The run stops on its card.
+    fn slack_prepare(&mut self, id: &str, arguments: Value) -> (String, Value) {
+        self.github_prepare(id, SLACK_POST, arguments)
+    }
+    /// A preparation that must be refused before any card opens.
+    fn slack_prepare_refused(&mut self, id: &str, arguments: Value) -> String {
+        let conversation = self.github_conversation();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":SLACK_POST,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Publie dans Slack."}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        self.github_settle(&run);
+        run
+    }
+    fn slack_posts(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().slack.posted.clone()
+    }
+    /// Messages sent to `chat.postMessage`, whatever the provider answered.
+    fn slack_post_calls(&self) -> usize {
+        self.slack_requests("chat.postMessage").len()
+    }
+    fn slack_card(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+}
+
+#[test]
+fn slack_message_waits_on_a_draft_card_and_cancel_publishes_nothing() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let tools = grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+        connection: &f.db(),
+        provider: &f.provider,
+        db_path: &f.path,
+        now_ms: 0,
+        bot_id: Some("grokbot"),
+        conversation_id: None,
+        run_id: None,
+    });
+    let tool = tools
+        .iter()
+        .find(|t| t.name == SLACK_POST)
+        .expect("the Slack message tool is in the closed list");
+    assert!(tool.requires_approval);
+    assert!(
+        !tools
+            .iter()
+            .find(|t| t.name == SLACK_READ)
+            .unwrap()
+            .requires_approval
+    );
+
+    let (run, card) = f.slack_prepare(
+        "slack-draft-1",
+        json!({"channel":"#general","text":"Bonjour l’équipe","thread":"1760000100.000200"}),
+    );
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Slack");
+    assert_eq!(draft["espace"], "Atelier Ezerbot");
+    assert_eq!(draft["cible"], "#general");
+    assert_eq!(draft["fil"], "1760000100.000200");
+    assert_eq!(draft["texte"], "Bonjour l’équipe");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.slack_post_calls(), 0, "nothing before the click");
+    assert!(
+        f.slack_requests("conversations.list").is_empty(),
+        "preparing the card calls no provider"
+    );
+    assert!(f.slack_posts().is_empty());
+
+    // There is no “Toujours”: neither a standing allow nor a standing refusal.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("slack-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.slack_post_calls(), 0);
+
+    // Annuler publishes nothing, and the card says so.
+    f.github_resolve(&card, "slack-cancel-1", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.slack_post_calls(), 0);
+    assert!(f.slack_posts().is_empty());
+    assert_eq!(f.slack_card(&card)["status"]["status"], "denied");
+
+    // Reading a channel still starts without any card.
+    let read = f.slack_read("slack-read-after-draft", json!({"channel":"general"}));
+    assert!(matches!(f.outcome(&read), ToolOutcome::Done { .. }));
+}
+
+#[test]
+fn slack_message_publishes_the_corrected_text_once_after_a_cancelled_draft() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+
+    // The first card is cancelled; the corrected one is the only message that reaches the channel.
+    let (cancelled, first) = f.slack_prepare(
+        "slack-draft-2",
+        json!({"channel":"general","text":"Premiere version"}),
+    );
+    f.github_resolve(&first, "slack-cancel-2", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&cancelled);
+    assert_eq!(f.slack_post_calls(), 0);
+
+    let (run, card) = f.slack_prepare(
+        "slack-draft-3",
+        json!({"channel":"general","text":"Version proposée"}),
+    );
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    f.github_resolve(
+        &card,
+        "slack-send-1",
+        json!("allow_once"),
+        Some("Version validée"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], "Atelier Ezerbot");
+    assert_eq!(output["canal"], "general");
+    assert_eq!(output["texte"], "Version validée");
+    assert_eq!(f.slack_posts().len(), 1);
+    assert_eq!(f.slack_posts()[0]["channel"], "C0GENERAL");
+    assert_eq!(f.slack_posts()[0]["text"], "Version validée");
+    assert!(f.slack_posts()[0].get("thread_ts").is_none());
+    assert_eq!(f.slack_requests("conversations.list").len(), 1);
+
+    // The settled card shows the text that left, bound to a new fingerprint.
+    let settled = f.slack_card(&card);
+    assert_eq!(
+        settled["arguments"]["brouillon"]["texte"],
+        "Version validée"
+    );
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+
+    // A second Envoyer never posts again: the same click gets its first receipt, another is refused.
+    f.github_resolve(
+        &card,
+        "slack-send-1",
+        json!("allow_once"),
+        Some("Autre texte"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve(
+            &card,
+            "slack-send-2",
+            json!("allow_once"),
+            Some("Autre texte")
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.slack_post_calls(), 1);
+    assert_eq!(f.slack_posts()[0]["text"], "Version validée");
+
+    // The model learned what was published, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Version validée"));
+    f.assert_slack_token_nowhere(&run);
+    assert!(!f.state().to_string().contains(SLACK_ACCESS));
+}
+
+#[test]
+fn slack_message_goes_to_a_channel_id_and_a_thread_and_refuses_blank_edits() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let (run, card) = f.slack_prepare(
+        "slack-draft-4",
+        json!({"channel":"C0GENERAL","text":"Dans le fil","thread":"1760000100.000200"}),
+    );
+    assert_eq!(card["arguments"]["brouillon"]["cible"], "C0GENERAL");
+    for (index, text) in ["", "   \n"].into_iter().enumerate() {
+        let error = f
+            .github_resolve(
+                &card,
+                &format!("slack-blank-{index}"),
+                json!("allow_once"),
+                Some(text),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, 400, "{}", error.message);
+    }
+    assert_eq!(f.slack_post_calls(), 0);
+    // The proposal leaves unchanged when it was not edited.
+    f.github_resolve(&card, "slack-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    done(&f, &run);
+    assert_eq!(
+        f.slack_posts(),
+        vec![json!({"channel":"C0GENERAL","text":"Dans le fil","thread_ts":"1760000100.000200"})]
+    );
+    assert!(
+        f.slack_requests("conversations.list").is_empty(),
+        "an identifier needs no lookup"
+    );
+}
+
+#[test]
+fn slack_message_refuses_a_bad_target_without_a_card() {
+    let mut f = Fixture::new();
+    let run = f.slack_prepare_refused(
+        "slack-not-connected",
+        json!({"channel":"general","text":"x"}),
+    );
+    assert!(failed(&f, &run).contains("Slack n’est pas connecté"));
+    f.slack_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    for (index, arguments) in [
+        json!({"channel":"general","text":"   "}),
+        json!({"channel":"  ","text":"Bonjour"}),
+        json!({"channel":"general","text":"Bonjour","thread":"pas-un-fil"}),
+        json!({"channel":"general","text":"Bonjour\u{7}"}),
+        json!({"channel":"general","text":"x".repeat(40_001)}),
+        json!({"channel":"general","text":"Bonjour","extra":true}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let run = f.slack_prepare_refused(&format!("slack-bad-{index}"), arguments);
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{index}"
+        );
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.slack_post_calls(), 0);
+}
+
+#[test]
+fn slack_message_shows_refused_rate_limited_and_unconfirmed_and_never_posts_twice() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let cases = [
+        (
+            "refused",
+            (200, json!({"ok":false,"error":"is_archived"})),
+            "Rien n’a été publié",
+        ),
+        (
+            "rate_limited",
+            (429, json!({"ok":false,"error":"ratelimited"})),
+            "Rien n’a été publié",
+        ),
+        ("unconfirmed", (503, json!({})), "peut-être été publié"),
+    ];
+    let mut calls = 0;
+    for (state, reply, said) in cases {
+        f.oauth.seen.lock().unwrap().slack.post_reply = Some(reply);
+        let id = format!("slack-state-{state}");
+        let (run, card) = f.slack_prepare(&id, json!({"channel":"C0GENERAL","text":"Bonjour"}));
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(said), "{state}: {reason}");
+        calls += 1;
+        assert_eq!(f.slack_post_calls(), calls, "{state}");
+        let shown = f.slack_card(&card);
+        assert_eq!(shown["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(shown["publication_result"]["status"], "failed");
+        // Never silent, never retried: the run is over and the card is spent.
+        f.app.tick(0);
+        assert_eq!(f.slack_post_calls(), calls, "{state} was posted again");
+        assert!(
+            f.slack_posts().is_empty(),
+            "{state} counted as a publication"
+        );
+    }
+}
+
+#[test]
+fn slack_message_is_refused_when_the_workspace_changed_after_the_card() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let (run, card) = f.slack_prepare(
+        "slack-draft-5",
+        json!({"channel":"C0GENERAL","text":"Bonjour"}),
+    );
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET account_email='Autre espace' WHERE id='slack'",
+            [],
+        )
+        .unwrap();
+    f.github_resolve(&card, "slack-send-4", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("espace Slack a changé"));
+    assert_eq!(f.slack_post_calls(), 0);
+}
+
+#[test]
+fn slack_message_without_the_write_permission_asks_to_reconnect_and_posts_nothing() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    f.oauth.seen.lock().unwrap().slack.post_reply =
+        Some((200, json!({"ok":false,"error":"missing_scope"})));
+    let (run, card) = f.slack_prepare(
+        "slack-draft-6",
+        json!({"channel":"C0GENERAL","text":"Bonjour"}),
+    );
+    f.github_resolve(&card, "slack-send-5", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("Reconnectez Slack"));
+    assert_eq!(f.item("slack")["status"], "reconnect");
+    assert!(f.slack_secret().is_none());
+    assert!(f.slack_posts().is_empty());
+    assert_eq!(
+        f.slack_card(&card)["arguments"]["brouillon"]["etat"],
+        "refused"
+    );
+}
+
+#[test]
+fn slack_message_is_refused_after_a_new_sign_in_even_to_a_workspace_of_the_same_name() {
+    let mut f = Fixture::new();
+    f.slack_connect();
+    let (run, card) = f.slack_prepare(
+        "slack-draft-7",
+        json!({"channel":"C0GENERAL","text":"Bonjour"}),
+    );
+    // The connection lapses, then another sign-in names the same workspace and the bot is enabled again.
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET phase='reconnect' WHERE id='slack'",
+            [],
+        )
+        .unwrap();
+    f.slack_connect();
+    assert_eq!(f.item("slack")["account"], "Atelier Ezerbot");
+    f.github_resolve(&card, "slack-send-6", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("espace Slack a changé"));
+    assert_eq!(f.slack_post_calls(), 0);
+    assert!(f.slack_posts().is_empty());
 }

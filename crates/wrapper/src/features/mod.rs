@@ -117,6 +117,7 @@ pub mod templates;
 pub mod updates;
 pub mod usage;
 pub mod voice;
+pub mod voice_call;
 pub mod voice_session;
 
 type Route = fn(&mut App, &str, &str, &[u8]) -> Option<Result<ApiResponse, ApiError>>;
@@ -171,6 +172,7 @@ registry!(
     floating,
     local,
     voice,
+    voice_call,
     meetings,
     recall,
     screen,

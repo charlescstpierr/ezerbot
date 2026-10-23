@@ -48,8 +48,8 @@
     bar.dataset.phase = phase;
     const tone = phase === "offline_unavailable" || (phase === "ready" && (pending?.too_long || pending?.partial)) ? "warning" : ["mic_denied", "speech_denied", "no_microphone", "failed", "no_audio", "save_failed"].includes(phase) ? "danger" : "";
     if (tone) bar.dataset.tone = tone; else delete bar.dataset.tone;
-    startButton.disabled = !!session || hasUnfinished() || Boolean(panels.voiceActive?.() || window.EzerbotVoiceMode?.active()) || context?.conversation?.kind === "task";
-    startButton.title = hasUnfinished() ? "Fermez l’avertissement de capture interrompue avant de recommencer" : window.EzerbotVoiceMode?.active() ? "Indisponible pendant le mode voix" : panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
+    startButton.disabled = !!session || hasUnfinished() || Boolean(panels.voiceActive?.() || window.EzerbotVoiceMode?.active() || window.EzerbotVoiceCall?.active()) || context?.conversation?.kind === "task";
+    startButton.title = hasUnfinished() ? "Fermez l’avertissement de capture interrompue avant de recommencer" : window.EzerbotVoiceMode?.active() ? "Indisponible pendant le mode voix" : window.EzerbotVoiceCall?.active() ? "Indisponible pendant l’appel vocal" : panels.voiceActive?.() ? "Indisponible pendant une dictée ou un mémo vocal" : session ? "Une réunion est déjà en cours" : "Enregistrer une réunion";
     phaseLabel.textContent = errors[phase] || ({authorizing:"Autorisation du microphone…",recording:"Réunion en cours",paused:"Réunion en pause",transcribing:"Transcription sur ce Mac…",ready:pending?.too_long ? "Limite de 10 minutes atteinte · Capture arrêtée" : pending?.partial ? "Transcription partielle · Capture arrêtée" : "Capture arrêtée · Transcription prête",saving:"Conservation de la réunion…",save_failed:"La réunion n’a pas pu être conservée. Réessayez sans réenregistrer."}[phase] || "Capture interrompue. Supprimez-la puis recommencez.");
     meetingName.textContent = session?.title || ""; meetingName.title = session?.title || "";
     meetingName.hidden = !session?.title;
@@ -122,6 +122,7 @@
     if (session || !consent.checked) return;
     if (hasUnfinished()) { panels.notify("Fermez l’avertissement de capture interrompue pour la supprimer, puis recommencez."); return; }
     if (window.EzerbotVoiceMode?.active()) { panels.notify("Quittez le mode voix avant d’enregistrer une réunion."); return; }
+    if (window.EzerbotVoiceCall?.active()) { panels.notify("Quittez l’appel vocal avant d’enregistrer une réunion."); return; }
     if (panels.voiceActive?.()) { panels.notify("Une dictée est en cours. Arrêtez-la avant d’enregistrer une réunion."); return; }
     begin.disabled = true; dialogError.textContent = "";
     try {
@@ -222,6 +223,7 @@
         window.addEventListener("beforeunload", () => { clearTimeout(timer); if (session) bridge("cancel").catch(() => {}); });
         window.addEventListener("grokbot:voice-change", render);
         window.addEventListener("grokbot:voice-mode-change", render);
+        window.addEventListener("grokbot:voice-call-change", render);
         render();
       },
       blocked: () => active(),

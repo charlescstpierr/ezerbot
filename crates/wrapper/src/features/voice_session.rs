@@ -285,7 +285,11 @@ pub(crate) struct DebugSession {
 }
 #[cfg(debug_assertions)]
 impl DebugSession {
-    pub fn command(&mut self, body: &[u8]) -> Result<Value, ApiError> {
+    pub fn active(&self) -> bool {
+        self.active
+    }
+    /// The voice call holds the microphone while it lasts: `call_active` tells the mode to wait.
+    pub fn command(&mut self, body: &[u8], call_active: bool) -> Result<Value, ApiError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Command {
@@ -321,6 +325,9 @@ impl DebugSession {
             );
         }
         if c.command == "start" {
+            if call_active {
+                return Ok(json!({"status":"microphone_busy","token":c.token,"fake":true}));
+            }
             let source = self.source.command(
                 &serde_json::to_vec(
                     &json!({"command":"start","token":c.token,"scenario":c.scenario,"microphone":c.microphone}),

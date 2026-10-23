@@ -1695,6 +1695,24 @@ impl Session {
         instructions: &str,
         input: &str,
     ) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 900, 4096, 12, false)
+    }
+
+    /// Same bounded call for a meeting summary: a longer answer and a longer wait,
+    /// still no tools, history or retries. The transcript is data, never a turn.
+    pub(crate) fn summarize(&self, instructions: &str, input: &str) -> Result<String, Failure> {
+        self.bounded_text(instructions, input, 1500, 8192, 45, true)
+    }
+
+    fn bounded_text(
+        &self,
+        instructions: &str,
+        input: &str,
+        max_tokens: u32,
+        max_bytes: usize,
+        timeout: u64,
+        renew: bool,
+    ) -> Result<String, Failure> {
         use grokbot_engine::contracts::ModelEvent;
         use std::io::Read;
         let models = self.models();
@@ -1717,7 +1735,7 @@ impl Session {
             .ok_or_else(|| Failure::other("Modèle indisponible."))?;
         let mut body = json!({"model":model.slug,"instructions":instructions,
             "input":[{"role":"user","content":input}],"store":false,"stream":true,
-            "max_output_tokens":900});
+            "max_output_tokens":max_tokens});
         if let Some(effort) = model
             .efforts
             .iter()
@@ -1735,17 +1753,20 @@ impl Session {
         // A foreground call will renew an expiring token; skipping is harmless.
         // Credential writes use atomic rename. A read-only snapshot needs no
         // rotation lock (and cannot randomly lose a job to the UI's status read).
-        let credentials = self
-            .read()
-            .filter(|c| c.usable(self.inner.codex))
-            .filter(|c| c.expires_at > seconds() + 15)
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
-        let token = credentials
-            .access_token
-            .ok_or_else(|| Failure::other("Extraction indisponible."))?;
+        // A summary is something Charles asked for or is waiting on: it renews an
+        // expired session like a chat turn, where a background extraction just skips.
+        let token = if renew {
+            self.bearer(false)?
+        } else {
+            self.read()
+                .filter(|c| c.usable(self.inner.codex))
+                .filter(|c| c.expires_at > seconds() + 15)
+                .and_then(|c| c.access_token)
+                .ok_or_else(|| Failure::other("Extraction indisponible."))?
+        };
         let response = self
             .request(&token, &mut body)?
-            .timeout(Duration::from_secs(12))
+            .timeout(Duration::from_secs(timeout))
             .send_json(body)
             .map_err(|error| {
                 self.request_failure(error);
@@ -1762,7 +1783,9 @@ impl Session {
             &diagnostics,
             &mut |event| {
                 match event {
-                    ModelEvent::TextDelta { text: delta } if text.len() + delta.len() <= 4096 => {
+                    ModelEvent::TextDelta { text: delta }
+                        if text.len() + delta.len() <= max_bytes =>
+                    {
                         text.push_str(&delta)
                     }
                     ModelEvent::Completed => completed = true,

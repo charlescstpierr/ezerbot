@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -486,6 +486,32 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
             }""",
             "conversation neuve non prête",
         )
+    if sphere == "voix-appel":
+        # Une conversation neuve à chaque passage, puis l’appel lancé depuis l’en-tête : le fil ne porte que le transcript de ce passage.
+        eval_js(evidence, close_overlays_js())
+        eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              if (window.EzerbotVoiceCall?.active()) {
+                [...document.querySelectorAll(".voice-call-bar button")].find((node) => node.textContent === "Quitter").click();
+                const deadline = Date.now() + 8000;
+                while (window.EzerbotVoiceCall.active() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+              const { conversation } = await panels.api("/api/conversations", {});
+              await panels.refresh();
+              if (!panels.openConversation(conversation.id)) throw new Error("conversation de l’appel non ouverte");
+              return true;
+            }""",
+        )
+        return wait_js(
+            evidence,
+            """() => {
+              const button = document.querySelector(".voice-call-toggle");
+              return button && !button.disabled && button.getAttribute("aria-label") === "Appel vocal" ? {ok: true, title: button.title} : null;
+            }""",
+            "bouton Appel vocal non prêt",
+        )
     raise SystemExit(f"sphère inconnue: {sphere}")
 
 
@@ -585,6 +611,100 @@ def voice_bots_step(evidence: Path, index: int) -> None:
         )
         if "Vitesse refusée" not in state["notice"] or state["current"] != before:
             raise SystemExit(f"la vitesse au-delà de 2 n’est pas refusée telle quelle: {state}")
+
+
+def voice_call_step(evidence: Path, index: int) -> None:
+    """Avant chaque capture : 0 le mode voix seul puis quitté (il garde sa phrase), 1 l’appel lancé (phrase de transmission), 2 le transcript affiché pendant que le bot parle, 3 le fil après Quitter."""
+    if index == 0:
+        # Le mode voix dit encore que l’audio reste sur le Mac, et l’appel est refusé tant qu’il tient le micro.
+        mode = eval_js(
+            evidence,
+            """async () => {
+              document.querySelector(".voice-session-toggle").click();
+              const deadline = Date.now() + 8000;
+              while (!document.querySelector(".voice-live-transcript")?.textContent.includes("L’audio reste sur ce Mac.") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+              const phrase = document.querySelector(".voice-live-transcript")?.textContent || "";
+              const call = document.querySelector(".voice-call-toggle");
+              const refused = {disabled: call.disabled, title: call.title};
+              [...document.querySelectorAll(".voice-session-bar button")].find((node) => node.textContent === "Quitter").click();
+              while (window.EzerbotVoiceMode.active() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+              return {phrase, refused, over: !window.EzerbotVoiceMode.active()};
+            }""",
+        )
+        if "L’audio reste sur ce Mac." not in mode["phrase"] or not mode["refused"]["disabled"] or not mode["over"]:
+            raise SystemExit(f"le mode voix a perdu sa phrase, ou l’appel n’est pas refusé pendant le mode voix: {mode}")
+    if index == 1:
+        eval_js(evidence, """() => { document.querySelector(".voice-call-toggle").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const bar = document.querySelector(".voice-call-bar");
+              const state = bar?.querySelector(".voice-call-state")?.textContent || "";
+              if (!bar || bar.hidden || !state.startsWith("Appel en cours")) return null;
+              const toggle = document.querySelector(".voice-call-toggle");
+              const mode = document.querySelector(".voice-session-toggle");
+              return {ok: true, notice: bar.querySelector(".voice-call-notice").textContent, label: bar.querySelector(".voice-call-transcript-toggle").textContent,
+                transcriptHidden: bar.querySelector(".voice-call-transcript").hidden, pressed: toggle.getAttribute("aria-pressed"), modeDisabled: mode.disabled, modeTitle: mode.title,
+                fromHeader: toggle.parentElement.classList.contains("topbar-actions")};
+            }""",
+            "appel non démarré",
+        )
+        if (
+            state["notice"] != "L’audio de cet appel est transmis au fournisseur de voix le temps de l’appel. Il n’est pas gardé sur le Mac."
+            or state["label"] != "Afficher le transcript" or not state["transcriptHidden"]
+            or not state["modeDisabled"] or state["modeTitle"] != "Indisponible pendant l’appel vocal"
+        ):
+            raise SystemExit(f"l’écran de l’appel est incorrect: {state}")
+    if index == 2:
+        said = eval_js(
+            evidence,
+            """async () => {
+              const panels = window.GrokbotPanels;
+              const deadline = Date.now() + 8000;
+              while (!panels.state.voice_call?.active && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+              const id = panels.state.voice_call.active.id;
+              const feed = (body) => panels.api("/api/voice/call/debug", {command: "feed", token: id, ...body});
+              const label = () => document.querySelector(".voice-call-state").textContent;
+              const waitFor = async (test) => { const deadline = Date.now() + 8000; while (!test() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100)); return test(); };
+              await feed({text: "Bonjour Ezerbot, tu m’entends ?", final_result: true});
+              const spoke = await waitFor(() => label().includes("Le bot parle"));
+              // Parler par-dessus coupe la voix du bot.
+              await feed({text: "Attends"});
+              const cutBySpeech = await waitFor(() => label().startsWith("Appel en cours"));
+              // Échap la coupe aussi.
+              await feed({text: "Dis-moi une longue histoire.", final_result: true});
+              const spokeAgain = await waitFor(() => label().includes("Le bot parle"));
+              document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true, cancelable: true}));
+              const cutByEscape = await waitFor(() => label().startsWith("Appel en cours"));
+              // Le transcript s’affiche, puis se masque, puis s’affiche pour la capture, bot en train de parler.
+              const toggle = document.querySelector(".voice-call-transcript-toggle");
+              toggle.click();
+              const shown = !document.querySelector(".voice-call-transcript").hidden && toggle.textContent === "Masquer le transcript";
+              toggle.click();
+              const hidden = document.querySelector(".voice-call-transcript").hidden && toggle.textContent === "Afficher le transcript";
+              toggle.click();
+              await feed({text: "Merci, parle-moi du Mac.", final_result: true});
+              await waitFor(() => label().includes("Le bot parle"));
+              await waitFor(() => document.querySelectorAll(".voice-call-line").length >= 6);
+              return {spoke, cutBySpeech, spokeAgain, cutByEscape, shown, hidden, lines: document.querySelectorAll(".voice-call-line").length, text: document.querySelector(".voice-call-transcript").innerText};
+            }""",
+        )
+        if not all(said[key] for key in ("spoke", "cutBySpeech", "spokeAgain", "cutByEscape", "shown", "hidden")) or "Bonjour Ezerbot" not in said["text"]:
+            raise SystemExit(f"l’appel ne coupe pas la voix du bot ou n’affiche pas son transcript: {said}")
+    if index == 3:
+        eval_js(evidence, """() => { [...document.querySelectorAll(".voice-call-bar button")].find((node) => node.textContent === "Quitter").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="voice_call"]');
+              if (!card || window.EzerbotVoiceCall.active()) return null;
+              card.scrollIntoView({block: "center"});
+              return {ok: true, label: card.querySelector(".gb-engine-label").textContent, lines: card.querySelectorAll(".gb-voice-call-lines li").length, audio: card.querySelectorAll("audio, a[href*='audio']").length, text: card.innerText};
+            }""",
+            "transcript absent du fil",
+        )
+        if state["label"] != "Appel vocal" or state["lines"] < 6 or state["audio"] != 0 or "Bonjour Ezerbot" not in state["text"]:
+            raise SystemExit(f"le fil ne garde pas le transcript marqué Appel vocal: {state}")
 
 
 MEMO_SPEED_JS = """(text) => {
@@ -806,6 +926,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
+    if sphere == "voix-appel":
+        return [f"avant-{theme}-{size}.png", f"appel-{theme}-{size}.png", f"transcript-{theme}-{size}.png", f"fil-{theme}-{size}.png"]
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
@@ -844,6 +966,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             dictation_step(evidence, index)
         if sphere == "voix-bots":
             voice_bots_step(evidence, index)
+        if sphere == "voix-appel":
+            voice_call_step(evidence, index)
         if sphere == "memo-vocal":
             memo_step(evidence, index)
         if sphere == "reunions-routines" and index == 1:

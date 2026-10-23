@@ -24,7 +24,7 @@ Preconditions:
 - **Menu.** `.gb-message[data-message-id=<question>] button[aria-label="Actions du message"]`, puis l’entrée `[role="menuitem"]` « Répondre en fil » dans `[role="menu"][aria-label="Actions du message"]`.
 - **Sous-fil.** `#thread-banner` visible, `#thread-banner-quote` cite la question, `#conversation-title` commence par « Fil : ».
 - **Retour.** `#thread-banner-open` ramène au fil principal.
-- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere reponse-fil`. Les quarante PNG (`avant-`, `menu-`, `sous-fil-`, `reponse-` et `principal-`, deux thèmes, deux tailles) existent.
+- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere reponse-fil`. Les vingt PNG (`avant-`, `menu-`, `sous-fil-`, `reponse-` et `principal-`, deux thèmes, deux tailles) existent.
 
 ## Gotchas
 

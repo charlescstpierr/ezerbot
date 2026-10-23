@@ -90,3 +90,22 @@ test("scoped consent keeps shell input active; outside input pauses; resume and 
   for(const fn of f.listeners.keydown)fn({key:"Escape",preventDefault(){}});await new Promise(r=>setImmediate(r));assert.equal(f.calls.at(-1)[0],"/api/screen/revoke");assert.equal(f.registration.wantsPolling(),false);
   assert.doesNotMatch(preview.className,/screen-preview-active/);
 });
+test("le Mode YOLO ouvre l’écran au bot sans réglage, la session et l’entrée restent à accorder", async () => {
+  const f = fixture();
+  const entry = all(f.top).find(e => e.className.includes("screen-button"));
+  f.state.yolo = { mode: "yolo", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "yolo" }] };
+  await f.host.refresh();
+  const input = all(f.settings).find(e => e.tagName === "input");
+  assert.equal(input.checked, true);
+  assert.equal(input.disabled, true);
+  assert.equal(input.title, "Ouvert par le Mode YOLO");
+  assert.match(f.settings.textContent, /Le Mode YOLO ouvre l’écran/);
+  assert.equal(f.state.screen.bots.length, 0, "aucun réglage n’a été écrit");
+  // Retour à « Demander » : le réglage d’avant (éteint) reprend effet.
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  const asked = all(f.settings).find(e => e.tagName === "input");
+  assert.equal(asked.checked, false);
+  assert.equal(asked.disabled, false);
+  assert.match(f.settings.textContent, /Désactivé par défaut/);
+});

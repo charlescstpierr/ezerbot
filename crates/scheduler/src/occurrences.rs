@@ -393,7 +393,7 @@ struct Source {
 
 fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>> {
     match &routine.trigger {
-        cron::Schedule::Webhook | cron::Schedule::Github { .. } => Ok(vec![]),
+        cron::Schedule::Webhook | cron::Schedule::Mail => Ok(vec![]),
         cron::Schedule::Group { .. } => {
             let mut query = conn.prepare(
                 "SELECT member_id, version, trigger, materialized_after FROM scheduler_members
@@ -410,12 +410,7 @@ fn sources(conn: &Connection, routine: &routine::Routine) -> Result<Vec<Source>>
             Ok(rows
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|source| {
-                    !matches!(
-                        source.trigger,
-                        cron::Schedule::Webhook | cron::Schedule::Github { .. }
-                    )
-                })
+                .filter(|source| !source.trigger.is_delivered())
                 .collect())
         }
         trigger => Ok(vec![Source {
@@ -603,6 +598,7 @@ fn latest_due(schedule: &cron::Schedule, zone: &str, first: i64, now: i64) -> Re
     match schedule {
         cron::Schedule::Once { .. }
         | cron::Schedule::Webhook
+        | cron::Schedule::Mail
         | cron::Schedule::Github { .. }
         | cron::Schedule::Group { .. } => Ok(first),
         cron::Schedule::Every { interval_ms, .. } => {
@@ -661,15 +657,15 @@ pub fn missed_ranges(conn: &Connection, routine_id: &str) -> Result<Vec<MissedRa
 }
 
 /// The nonce of an occurrence that an event outside the clock started: a webhook
-/// call or a GitHub event. It is automatic intent, so pause and edits cut it off,
-/// unlike a manual launch.
+/// call, a new message or a GitHub event. It is automatic intent, so pause and
+/// edits cut it off, unlike a manual launch.
 pub fn is_event_nonce(nonce: &str) -> bool {
-    nonce.starts_with("webhook:") || nonce.starts_with("github:")
+    nonce.starts_with("webhook:") || nonce.starts_with("mail:") || nonce.starts_with("github:")
 }
 
 /// [`is_event_nonce`] as SQL, for the nonce column `column`.
 pub fn event_nonce_sql(column: &str) -> String {
-    format!("({column} LIKE 'webhook:%' OR {column} LIKE 'github:%')")
+    format!("({column} LIKE 'webhook:%' OR {column} LIKE 'mail:%' OR {column} LIKE 'github:%')")
 }
 
 /// Manual runs are allowed on paused routines, independently of automatic
@@ -2024,6 +2020,30 @@ mod occurrences_tests {
             ],
             [1, 2, 1, 1]
         );
+    }
+
+    #[test]
+    fn a_mail_member_has_no_clock_slot_and_leaves_the_others_alone() {
+        let (conn, routine) = grouped(vec![("a", every(1)), ("mail", cron::Schedule::Mail)]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .all(|o| o.member_id == "a"));
+        assert!(missed_ranges(&conn, &routine.routine_id)
+            .unwrap()
+            .iter()
+            .all(|r| r.member_id == "a"));
+        // A message-only routine is never due, whatever the gap.
+        let (conn, routine) = grouped(vec![
+            ("m1", cron::Schedule::Mail),
+            ("m2", cron::Schedule::Mail),
+        ]);
+        tick(&conn, 7_230_000);
+        assert!(list(&conn, &routine.routine_id).unwrap().is_empty());
+        assert!(missed_ranges(&conn, &routine.routine_id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

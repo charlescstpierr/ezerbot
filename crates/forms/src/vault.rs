@@ -17,6 +17,10 @@ pub const VAULT_FILE_MODE: u32 = 0o600;
 pub const MAX_SECRET_NAME_CHARACTERS: usize = 128;
 pub const MAX_SECRET_PURPOSE_CHARACTERS: usize = 500;
 pub const MIN_SECRET_VALUE_CHARACTERS: usize = 8;
+/// Site form fields shorter than this never join GLOBAL masking: a value like
+/// "a" or "42" would otherwise mask JSON keys, IDs and prose everywhere.
+/// Kept strictly longer than redact::MASK.
+pub const MIN_SITE_MASK_CHARACTERS: usize = 6;
 pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
@@ -315,6 +319,22 @@ impl Vault {
                                 .filter_map(|v| v.as_str())
                                 .filter(|v| v.encode_utf16().count() >= MIN_SECRET_VALUE_CHARACTERS)
                                 .map(str::to_owned),
+                        );
+                    }
+                }
+            }
+            // Site envelopes stay local; each field must also be masked alone.
+            if name.starts_with("SITE_") && secret.purpose == "Formulaire de site privé" {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&secret.value) {
+                    if let Some(fields) = value["values"].as_object() {
+                        values.extend(
+                            fields
+                                .values()
+                                .map(|v| match v {
+                                    serde_json::Value::String(text) => text.clone(),
+                                    other => other.to_string(),
+                                })
+                                .filter(|v| v.encode_utf16().count() >= MIN_SITE_MASK_CHARACTERS),
                         );
                     }
                 }

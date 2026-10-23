@@ -74,7 +74,7 @@ export function orderThread(messages) {
     const { call, outcome, run_id: runId } = message.payload || {};
     // These calls have no UI of their own (the task card carries their status).
     if (["begin_task", "complete_task"].includes(call?.name)) return false;
-    const requestKind = { request_form: "form", request_secret: "secret" }[call?.name];
+    const requestKind = { request_form: "form", request_site_form: "form", request_secret: "secret" }[call?.name];
     const request = outcome?.status === "suspend" && outcome.cause?.kind === "human_input"
       ? requests.get(outcome.cause.id) : undefined;
     return !(requestKind && request?.kind === requestKind && runId && request.payload.run_id === runId);

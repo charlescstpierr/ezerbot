@@ -604,6 +604,104 @@ test('replacing a webhook of a group by an identical one is saved, not mistaken 
   assert.deepEqual(members, [{ id: 'trigger-b', trigger: { kind: 'webhook' } }, { trigger: { kind: 'webhook' } }]);
 });
 
+// ---------------------------------------------------------------- Courriel ----
+
+const mailRoutine = { ...routine, name: 'Courrier', enabled: true, body: { kind: 'inline_prompt', prompt: 'Résume le courriel.' }, trigger: { kind: 'mail' } };
+const triggerSelect = h => h.t.content.querySelectorAll('select').find(el => el.children.some(o => o.value === 'group'));
+function mailEditor(connected, sent = []) {
+  const h = harness(async (url, body) => {
+    if (url.startsWith('/api/routines?')) return { routines: [mailRoutine] };
+    sent.push({ url, body });
+    return { routine: mailRoutine };
+  });
+  h.panels.state.routine_mail = { connected };
+  return h;
+}
+const choose = (h, select, value) => { select.value = value; h.t.content.querySelectorAll('form')[0].listeners.input(); };
+const submit = async h => { h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} }); await new Promise(resolve => setImmediate(resolve)); };
+
+test('the editor offers the new-mail trigger, and with Gmail connected it saves { kind: "mail" }', async () => {
+  const sent = [], h = mailEditor(true, sent);
+  await h.t.edit(null);
+  const select = triggerSelect(h);
+  assert.ok(select.children.some(o => o.value === 'mail' && /Courriel/.test(o.textContent)));
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Résume le courriel.');
+  choose(h, select, 'mail');
+  assert.match(h.t.content.querySelectorAll('.routines-preview')[0].textContent, /nouveau message de la boîte Gmail connectée/);
+  await submit(h);
+  const created = sent.find(s => s.url === '/api/routines');
+  assert.deepEqual(JSON.parse(JSON.stringify(created.body.trigger)), { kind: 'mail' });
+});
+
+test('without a connected Gmail the editor explains it and sends nothing', async () => {
+  const sent = [], h = mailEditor(false, sent);
+  await h.t.edit(null);
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier');
+  type(h.t.content.querySelectorAll('textarea')[0], 'Résume le courriel.');
+  choose(h, triggerSelect(h), 'mail');
+  const preview = h.t.content.querySelectorAll('.routines-preview')[0];
+  assert.match(preview.textContent, /Gmail n’est pas connecté/);
+  assert.match(preview.textContent, /Paramètres › Connecteurs/);
+  assert.match(preview.textContent, /n’est pas enregistrée avec ce déclencheur/);
+  await submit(h);
+  assert.match(h.t.status.textContent, /Gmail n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('a routine already armed on mail can still be renamed after Gmail is disconnected', async () => {
+  const sent = [], h = mailEditor(false, sent);
+  await h.t.edit(mailRoutine);
+  assert.equal(triggerSelect(h).value, 'mail');
+  type(labelled(h, 'Nom').map(inputOf)[0], 'Courrier du matin');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.equal(update.body.name, 'Courrier du matin');
+  assert.equal(update.body.trigger, undefined);
+});
+
+test('a group can hold the new-mail trigger, and refuses a new one while Gmail is absent', async () => {
+  const withMail = { ...groupRoutine, trigger: { kind: 'group', members: [{ id: 'trigger-a', trigger: everyMinute }, { id: 'trigger-b', trigger: { kind: 'mail' } }] } };
+  const sent = [];
+  const h = harness(async (url, body) => { if (url.startsWith('/api/routines?')) return { routines: [withMail] }; sent.push({ url, body }); return { routine: withMail }; });
+  h.panels.state.routine_mail = { connected: false };
+  await h.t.edit(withMail);
+  const kinds = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'mail') && !el.children.some(o => o.value === 'group'));
+  assert.deepEqual(kinds.map(k => k.value), ['schedule', 'mail']);
+  // The mail trigger already in the group stays valid: editing the other one is saved.
+  type(inputOf(labelled(h, 'Cron (5 champs)')[1]), '@every 2m');
+  await submit(h);
+  const update = sent.find(s => s.url === '/api/routines/update');
+  assert.ok(update, h.t.status.textContent);
+  assert.deepEqual(JSON.parse(JSON.stringify(update.body.trigger.members[1])), { id: 'trigger-b', trigger: { kind: 'mail' } });
+  // A mail trigger added to the group while Gmail is absent is refused.
+  sent.length = 0;
+  await h.t.edit(withMail);
+  h.t.content.querySelectorAll('button').find(b => b.textContent === 'Ajouter un déclencheur').click();
+  const added = h.t.content.querySelectorAll('select').filter(el => el.children.some(o => o.value === 'mail') && !el.children.some(o => o.value === 'group'));
+  type(added[added.length - 1], 'mail');
+  await submit(h);
+  assert.match(h.t.status.textContent, /Gmail n’est pas connecté/);
+  assert.equal(sent.length, 0);
+});
+
+test('the history names a run started by a mail with its sender and subject', async () => {
+  const started = { ...occurrence('mail-run', 'done', 'mail::m1'), trigger: { kind: 'mail', label: 'Courriel', received_at: 1_760_000_000_000, expediteur: 'Alice <alice@example.com>', objet: 'Facture d’octobre' } };
+  const h = harness(async () => page([started]));
+  await h.t.showHistory(mailRoutine);
+  const text = h.t.content.textContent;
+  assert.match(text, /Courriel · Alice <alice@example.com> · Facture d’octobre · reçu le/);
+  assert.doesNotMatch(text, /Manuel|Planifié/);
+});
+
+test('the list describes a mail routine', async () => {
+  const h = harness(async () => ({ routines: [mailRoutine] }));
+  h.panels.state.routines.items = [{ routine: mailRoutine }];
+  h.t.renderList();
+  assert.match(h.t.content.textContent, /Courriel : démarre à chaque nouveau message de la boîte connectée/);
+});
+
 // ------------------------------------------------------------------ GitHub ----
 
 const githubRoutine = { ...routine, name: 'Revue', enabled: true, body: { kind: 'inline_prompt', prompt: 'Relire' }, trigger: { kind: 'github', repo: 'charles/essai', events: ['pull_request_opened', 'comment'] } };
@@ -611,7 +709,6 @@ const connected = [{ id: 'github', status: 'connected' }];
 const eventBoxes = h => h.t.content.querySelectorAll('.routines-event').map(label => label.children[0]);
 const pick = (check, on = true) => { check.checked = on; check.listeners.change?.(); };
 const editorChanged = h => h.t.content.querySelectorAll('form')[0].listeners.input();
-const submit = async h => { h.t.content.querySelectorAll('form')[0].listeners.submit({ preventDefault() {} }); await new Promise(resolve => setImmediate(resolve)); };
 async function githubEditor(catalogue, existing = null) {
   const sent = [], h = harness(async (url, body) => {
     if (url.startsWith('/api/routines?')) return { routines: [existing || githubRoutine] };

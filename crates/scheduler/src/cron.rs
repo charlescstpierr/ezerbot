@@ -27,6 +27,8 @@ pub enum Schedule {
     },
     /// Never due by itself: an authenticated webhook call starts the routine.
     Webhook,
+    /// Never due by itself: a new message from the connected mailbox starts the routine.
+    Mail,
     /// Never due by itself: an event of one repository, delivered by the GitHub
     /// connector, starts the routine. Only the five events of [`GithubEvent`] do.
     Github {
@@ -122,12 +124,12 @@ impl Schedule {
         }
     }
 
-    /// Something other than the clock starts the routine: a webhook call or a
-    /// GitHub event, alone or in a group. Such a routine has no next slot to wait for.
-    pub fn starts_on_event(&self) -> bool {
+    /// Whether a new message can start the routine: it is a mail trigger, or a
+    /// group holding one.
+    pub fn has_mail(&self) -> bool {
         match self {
-            Schedule::Webhook | Schedule::Github { .. } => true,
-            Schedule::Group { members } => members.iter().any(|m| m.trigger.starts_on_event()),
+            Schedule::Mail => true,
+            Schedule::Group { members } => members.iter().any(|m| m.trigger == Schedule::Mail),
             _ => false,
         }
     }
@@ -140,6 +142,24 @@ impl Schedule {
                 .iter()
                 .any(|m| matches!(m.trigger, Schedule::Github { .. })),
             _ => false,
+        }
+    }
+
+    /// A simple trigger that only starts on delivery of an outside fact (a call,
+    /// a message, an event): it has no clock slot, so it is never due by itself.
+    pub fn is_delivered(&self) -> bool {
+        matches!(
+            self,
+            Schedule::Webhook | Schedule::Mail | Schedule::Github { .. }
+        )
+    }
+
+    /// Something other than the clock can start the routine, so a routine with
+    /// no future slot is still worth resuming.
+    pub fn has_delivered(&self) -> bool {
+        match self {
+            Schedule::Group { members } => members.iter().any(|m| m.trigger.is_delivered()),
+            other => other.is_delivered(),
         }
     }
 }
@@ -221,6 +241,9 @@ pub fn describe_fr(schedule: &Schedule, time_zone: &str) -> Result<String> {
         }
         Schedule::Webhook => {
             return Ok("Webhook : démarre à chaque appel authentifié".into());
+        }
+        Schedule::Mail => {
+            return Ok("Courriel : démarre à chaque nouveau message de la boîte connectée".into());
         }
         Schedule::Github { repo, events } => {
             let events: Vec<&str> = events.iter().map(|event| event.label_fr()).collect();
@@ -423,7 +446,7 @@ fn readable_duration(ms: u64) -> String {
 pub fn next_after(schedule: &Schedule, time_zone: &str, reference_ms: i64) -> Result<Option<i64>> {
     match schedule {
         Schedule::Once { at } => Ok((*at > reference_ms).then_some(*at)),
-        Schedule::Webhook | Schedule::Github { .. } => Ok(None),
+        Schedule::Webhook | Schedule::Mail | Schedule::Github { .. } => Ok(None),
         Schedule::Group { members } => {
             let mut first: Option<i64> = None;
             for member in members {
@@ -966,6 +989,40 @@ mod cron_tests {
     }
 
     #[test]
+    fn mail_is_never_due_by_the_clock_and_keeps_its_wire_shape() {
+        let mail = Schedule::Mail;
+        assert_eq!(serde_json::to_string(&mail).unwrap(), r#"{"kind":"mail"}"#);
+        assert_eq!(
+            serde_json::from_str::<Schedule>(r#"{"kind":"mail"}"#).unwrap(),
+            mail
+        );
+        assert_eq!(next_after(&mail, "UTC", i64::MIN).unwrap(), None);
+        assert_eq!(
+            describe_fr(&mail, "UTC").unwrap(),
+            "Courriel : démarre à chaque nouveau message de la boîte connectée"
+        );
+        let group = Schedule::Group {
+            members: vec![
+                Member {
+                    id: "a".into(),
+                    trigger: parse("@every 1m").unwrap(),
+                },
+                Member {
+                    id: "b".into(),
+                    trigger: Schedule::Mail,
+                },
+            ],
+        };
+        assert!(mail.has_mail() && group.has_mail() && !Schedule::Webhook.has_mail());
+        assert!(
+            mail.has_delivered()
+                && group.has_delivered()
+                && !parse("@every 1m").unwrap().has_delivered()
+        );
+        assert_eq!(next_after(&group, "UTC", 0).unwrap(), Some(60_000));
+    }
+
+    #[test]
     fn github_is_never_due_by_the_clock_and_keeps_its_wire_shape() {
         let github = Schedule::Github {
             repo: "charles/essai".into(),
@@ -989,7 +1046,7 @@ mod cron_tests {
             describe_fr(&github, "UTC").unwrap(),
             "GitHub charles/essai : pull request ouverte, commentaire"
         );
-        assert!(github.starts_on_event() && github.has_github() && !github.has_webhook());
+        assert!(github.has_delivered() && github.has_github() && !github.has_webhook());
         let schedule = Schedule::Every {
             interval_ms: 60_000,
             phase_ms: None,
@@ -1006,8 +1063,8 @@ mod cron_tests {
                 },
             ],
         };
-        assert!(group.starts_on_event() && group.has_github());
-        assert!(!schedule.starts_on_event() && !schedule.has_github());
+        assert!(group.has_delivered() && group.has_github());
+        assert!(!schedule.has_delivered() && !schedule.has_github());
         for event in GithubEvent::ALL {
             assert_eq!(GithubEvent::from_wire(event.wire()), Some(event));
         }

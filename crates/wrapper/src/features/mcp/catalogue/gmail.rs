@@ -683,6 +683,30 @@ pub(in super::super) fn new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>
     Ok(events)
 }
 
+/// Whether a Gmail account is connected, whoever may use it: the routines arm a new-mail
+/// trigger only when a message could reach it.
+pub(in super::super) fn connected(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM wrapper_connector_catalogue WHERE id='gmail' AND phase='connected' AND account_email IS NOT NULL)",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Nobody reads the inbox any more: the next look learns it afresh, so that mail which
+/// arrived meanwhile is not delivered as new to a consumer that comes later.
+pub(in super::super) fn stop_watching(conn: &Connection) -> Result<(), ApiError> {
+    let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    for table in ["wrapper_gmail_delivered", "wrapper_gmail_mailbox"] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE account_id=(SELECT lower(account_email) FROM wrapper_connector_catalogue WHERE id='gmail')"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// The agenda events that happened since the last call: created, modified, cancelled or
 /// begun, each version once. The first call only learns the agenda.
 pub(in super::super) fn calendar_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {

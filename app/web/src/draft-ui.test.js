@@ -122,3 +122,46 @@ test("Refusé, Trop de messages et Envoi non confirmé s’affichent en alerte, 
     assert.ok(!html.includes("Toujours"), etat);
   }
 });
+
+test("Envoyer transmet le texte corrigé d’un message Slack, sans titre", async () => {
+  const calls = [];
+  const panels = mount(async (path, body) => { calls.push({ path, body: JSON.parse(JSON.stringify(body)) }); return { accepted: true, receipt: { wake: { status: "pending" } } }; });
+  const slack = { ...message, id: "draft-5", payload: { ...message.payload, entry_id: "draft-5", kind: { kind: "approval", tool: "slack_post_message" } } };
+  assert.equal(await panels.panel.onCardAction(slack, "forms.decide", { decision: "allow_once", text: "Message validé" }, context(panels)), true);
+  assert.equal(calls[0].body.text, "Message validé");
+  assert.equal(Object.hasOwn(calls[0].body, "title"), false);
+});
+
+function renderSlackDraft({ status, etat, publication_result }) {
+  const request = {
+    entry_id: "slack", status: { status }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "slack_post_message" },
+    arguments: { brouillon: { service: "Slack", action: "Publier un message Slack", espace: "Atelier Ezerbot", cible: "#general", fil: "1760000100.000200", texte: "Message proposé", empreinte: "abc", ...(etat ? { etat } : {}) } },
+    ...(publication_result ? { publication_result } : {}),
+  };
+  const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
+  globalThis.window = { GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(DraftCard, { message: { id: "slack", kind: "approval", payload: request }, input, disabled: false, expired: false }));
+  } finally { delete globalThis.window; }
+}
+
+test("la carte brouillon d’un message Slack montre l’espace, la cible, le fil et le texte, Envoyer et Annuler, sans « Toujours »", () => {
+  const html = renderSlackDraft({ status: "pending" });
+  for (const label of [">Espace<", ">Cible<", ">Fil<", "Texte exact du message (modifiable)", ">Envoyer<", ">Annuler<"]) assert.ok(html.includes(label), label);
+  for (const value of ["Atelier Ezerbot", "#general", "1760000100.000200", ">Message proposé</textarea>"]) assert.ok(html.includes(value), value);
+  assert.ok(!html.includes("Toujours"));
+  assert.ok(renderSlackDraft({ status: "pending" }).includes("Rien n’est publié avant votre clic"));
+});
+
+test("un message Slack publié le dit, et Refusé, Trop de messages et Envoi non confirmé s’affichent en alerte sans publication", () => {
+  const sent = renderSlackDraft({ status: "resolved", etat: "sent", publication_result: { status: "done", output: { compte: "Atelier Ezerbot" } } });
+  assert.ok(sent.includes("Message publié dans #general de l’espace Atelier Ezerbot."));
+  for (const [etat, label] of [["refused", "Refusé"], ["rate_limited", "Trop de messages"], ["unconfirmed", "Envoi non confirmé"]]) {
+    const html = renderSlackDraft({ status: "resolved", etat, publication_result: { status: "failed", reason: "Raison du refus." } });
+    assert.ok(html.includes(`<strong>${label} · </strong>Raison du refus.`), etat);
+    assert.ok(!html.includes("Message publié"), etat);
+    assert.ok(!html.includes(">Envoyer<"), etat);
+    assert.ok(!html.includes("Toujours"), etat);
+  }
+});

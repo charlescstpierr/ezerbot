@@ -439,7 +439,7 @@ fn validate_group(
     kept: &HashSet<String>,
 ) -> Result<()> {
     match trigger {
-        Schedule::Webhook => Ok(()),
+        Schedule::Webhook | Schedule::Mail => Ok(()),
         Schedule::Github { repo, events } => {
             if !cron::valid_github_repo(repo) {
                 return Err(Error::InvalidInput(

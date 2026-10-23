@@ -293,6 +293,8 @@ pub enum ContextSource {
     DelegatedContext,
     /// Fichiers de contexte déposés dans la bibliothèque du bot.
     Library,
+    /// Faits retenus par Charles pour tous les fils d'un sujet : leur propre budget, jamais pris sur la mémoire du bot.
+    TopicMemory,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

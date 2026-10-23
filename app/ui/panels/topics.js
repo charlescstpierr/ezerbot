@@ -59,6 +59,9 @@
       .filter((conversation) => members[conversation.id] === topicId && KINDS.includes(conversation.kind))
       .sort(newest);
   }
+  const memoryOf = (state, topicId) => state?.topics?.memory?.[topicId] || [];
+  // Sans accents ni majuscules : « demenagement » retrouve « Déménagement ».
+  const fold = (value) => String(value || "").toLocaleLowerCase("fr").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const botName = (state, id) => (state?.bots || []).find((bot) => bot.id === id)?.name || "Bot";
 
   function readCollapsed() {
@@ -74,6 +77,9 @@
   let latest = { state: null, context: null };
   let collapsed = readCollapsed();
   let openTopicId = null;
+  // L’écran « Mémoire du sujet » remplace la liste des fils sur la page du sujet.
+  let memoryOpen = false;
+  let memoryQuery = "";
   let lastActiveId = null;
   const painted = { sidebar: null, page: null, menu: null };
 
@@ -111,16 +117,18 @@
     paint();
   }
 
-  function showPage(topicId) {
+  function showPage(topicId, { memory = false } = {}) {
     if (panels.busy) return;
     // La page remplace le fil affiché : le fil, son brouillon et le menu de conversation restent à l’écart.
     if (activeId()) panels.leaveConversation?.();
     openTopicId = topicId;
+    memoryOpen = memory;
+    memoryQuery = "";
     collapsed.delete(topicId);
     writeCollapsed();
     painted.page = null;
     paint();
-    byId("topic-page-title")?.focus?.();
+    byId(memory ? "topic-memory-title" : "topic-page-title")?.focus?.();
   }
 
   function paintSidebar() {
@@ -209,7 +217,7 @@
     const page = ensurePage();
     const main = document.querySelector?.(".main-panel");
     const topic = openTopic();
-    if (openTopicId && !topic && latest.state?.topics) openTopicId = null;
+    if (openTopicId && !topic && latest.state?.topics) { openTopicId = null; memoryOpen = false; }
     if (!topic) {
       page.hidden = true;
       if (main?.dataset) delete main.dataset.view;
@@ -227,11 +235,13 @@
     const threads = threadsOf(latest.state, topic.id);
     const now = Date.now();
     const rows = threads.map((conversation) => [conversation.id, conversation.title, conversation.kind, conversation.bot_id, relative(conversation.updated_at, now)]);
-    const signature = JSON.stringify([topic.id, topic.name, topic.description, rows]);
-    repaint(page, signature, "page", () => pageContent(topic, threads, now));
+    const facts = memoryOf(latest.state, topic.id);
+    const signature = JSON.stringify([topic.id, topic.name, topic.description, rows, memoryOpen,
+      facts.map((fact) => [fact.id, fact.text, fact.conversation_title, fact.created_at])]);
+    repaint(page, signature, "page", () => (memoryOpen ? memoryScreen(topic, facts) : pageContent(topic, threads, now, facts)));
   }
 
-  function pageContent(topic, threads, now) {
+  function pageContent(topic, threads, now, facts) {
     const body = node("div", "topic-page-main");
     const header = node("header", "topic-page-header");
     const heading = node("div", "topic-page-heading");
@@ -271,11 +281,107 @@
     }
     body.append(header, bar, list);
 
-    // Réservée à la mémoire partagée du sujet : vide tant qu’aucun fait n’est retenu.
+    // La mémoire partagée du sujet : les trois derniers faits retenus, puis « Tout voir ».
     const memory = node("aside", "topic-memory");
     memory.setAttribute("aria-label", "Mémoire du sujet");
-    memory.append(node("h3", "topic-section-title", "Mémoire du sujet"), node("p", "topic-memory-empty", "Aucun fait retenu pour l’instant."));
+    memory.append(node("h3", "topic-section-title", "Mémoire du sujet"));
+    if (!facts.length) memory.append(node("p", "topic-memory-empty", "Aucun fait retenu pour l’instant."));
+    else {
+      const preview = node("ul", "topic-memory-preview");
+      for (const fact of facts.slice(0, 3)) preview.append(node("li", "topic-memory-fact", fact.text));
+      const all = button("topic-memory-all", "Tout voir", () => showPage(topic.id, { memory: true }));
+      all.dataset.focusKey = "memory-all";
+      memory.append(preview, all);
+    }
     return [body, memory];
+  }
+
+  const factDate = (value) => new Date(stamp(value)).toLocaleDateString("fr-CA", { day: "numeric", month: "short" });
+
+  // Les faits qui passent le filtre de recherche, du plus récent au plus ancien.
+  function paintFacts(list, facts) {
+    const query = fold(memoryQuery.trim());
+    const shown = facts.filter((fact) => !query || fold(fact.text).includes(query) || fold(fact.conversation_title).includes(query));
+    const rows = shown.map((fact) => {
+      const row = node("li", "topic-memory-item");
+      row.dataset.factId = fact.id;
+      const text = node("p", "topic-memory-text", fact.text);
+      const meta = node("div", "topic-memory-meta");
+      const chip = node("span", "topic-memory-chip", fact.conversation_title || "Fil supprimé");
+      chip.title = "Fil d’origine";
+      meta.append(chip, node("small", "topic-memory-date", factDate(fact.created_at)));
+      const body = node("div", "topic-memory-body");
+      body.append(text, meta);
+      const forget = button("icon-button topic-memory-forget", "", () => openForget(fact));
+      forget.setAttribute("aria-label", "Oublier ce fait");
+      forget.title = "Oublier ce fait";
+      forget.dataset.focusKey = `forget:${fact.id}`;
+      forget.append(icon("trash"));
+      row.append(body, forget);
+      return row;
+    });
+    if (!rows.length) {
+      rows.push(node("li", "topic-memory-none", facts.length ? "Aucun fait ne correspond à cette recherche." : "Aucun fait retenu pour l’instant."));
+    }
+    list.replaceChildren(...rows);
+  }
+
+  // « Mémoire du sujet » : tout ce que les fils du sujet savent en commun.
+  function memoryScreen(topic, facts) {
+    const screen = node("section", "topic-memory-screen");
+    const back = button("topic-memory-back", "", () => showPage(topic.id));
+    back.dataset.focusKey = "memory-back";
+    back.setAttribute("aria-label", `Retour au sujet ${topic.name}`);
+    back.append(icon("chevron", "icon topic-back-icon"), node("span", "", topic.name));
+    const title = node("h2", "topic-page-title", "Mémoire du sujet");
+    title.id = "topic-memory-title";
+    title.tabIndex = -1;
+    const help = node("p", "topic-page-description",
+      `Ce que tous les fils de « ${topic.name} » savent en commun, quel que soit le bot. Un bot ne retient rien ici sans votre accord.`);
+    const search = node("input", "text-input topic-memory-search");
+    search.type = "search";
+    search.id = "topic-memory-search";
+    search.setAttribute("placeholder", "Rechercher dans la mémoire du sujet");
+    search.setAttribute("aria-label", "Rechercher dans la mémoire du sujet");
+    search.setAttribute("autocomplete", "off");
+    search.value = memoryQuery;
+    const list = node("ul", "topic-memory-list");
+    list.setAttribute("aria-label", "Faits retenus pour ce sujet");
+    search.addEventListener("input", () => { memoryQuery = search.value; paintFacts(list, facts); });
+    paintFacts(list, facts);
+    const remove = button("topic-memory-delete", "Supprimer le sujet…", () => openDelete(topic));
+    remove.dataset.focusKey = "memory-delete";
+    screen.append(back, title, help, search, list, remove);
+    return [screen];
+  }
+
+  function openForget(fact) {
+    const el = dialog("forget", (root) => {
+      const header = node("div", "dialog-header");
+      const heading = node("h2", "", "Oublier ce fait ?");
+      heading.id = "topic-forget-title";
+      root.setAttribute("aria-labelledby", "topic-forget-title");
+      header.append(heading);
+      const text = node("p", "delete-description", "Il sera retiré de tous les fils du sujet.");
+      const quote = node("blockquote", "topic-memory-quote");
+      quote.id = "topic-forget-quote";
+      const footer = node("div", "dialog-footer");
+      const confirm = button("danger-button", "Oublier", () => confirmForget?.());
+      confirm.id = "topic-confirm-forget";
+      footer.append(button("secondary-button", "Annuler", () => root.close()), confirm);
+      root.append(header, text, quote, footer);
+    });
+    el.querySelector("#topic-forget-quote").textContent = fact.text;
+    confirmForget = async () => {
+      const forgotten = await run(async () => {
+        await panels.api("/api/topics/memory/forget", { fact_id: fact.id });
+        painted.page = null;
+        await panels.refresh();
+        return true;
+      });
+      if (forgotten) el.close();
+    };
+    el.showModal();
   }
 
   async function newThread(topic) {
@@ -309,6 +415,7 @@
   // Ce que fait « Enregistrer » ou « Supprimer » dépend du sujet ouvert dans le dialogue partagé.
   let submitForm = null;
   let confirmDelete = null;
+  let confirmForget = null;
 
   function openForm({ topic = null, then = null } = {}) {
     const el = dialog("form", (root) => {
@@ -382,13 +489,18 @@
       root.append(header, text, footer);
     });
     const count = threadsOf(latest.state, topic.id).length;
-    el.querySelector("#topic-delete-description").textContent = count
+    const remembered = memoryOf(latest.state, topic.id).length;
+    const threadsNote = count
       ? `Les ${count} fils de « ${topic.name} » ne sont pas supprimés : ils repassent dans Conversations, sans sujet.`
       : `« ${topic.name} » est vide. Aucune conversation n’est touchée.`;
+    // Les faits de sujet partent avec lui ; la mémoire privée des bots n’est pas touchée.
+    el.querySelector("#topic-delete-description").textContent = remembered
+      ? `${threadsNote} Ses ${remembered} faits retenus sont effacés ; la mémoire privée des bots reste.`
+      : threadsNote;
     confirmDelete = async () => {
       const removed = await run(async () => {
-        await panels.api("/api/topics/delete", { id: topic.id });
-        if (openTopicId === topic.id) openTopicId = null;
+        await panels.api("/api/topics/delete", remembered ? { id: topic.id, forget_memory: true } : { id: topic.id });
+        if (openTopicId === topic.id) { openTopicId = null; memoryOpen = false; }
         painted.page = null;
         await panels.refresh();
         return true;
@@ -470,10 +582,29 @@
     onNavigate() {
       if (!openTopicId) return;
       openTopicId = null;
+      memoryOpen = false;
       painted.page = null;
       paint();
     },
     assign: openAssign,
+    // « Retenir pour ce sujet ? » : seule la réponse de Charles écrit dans la mémoire du sujet.
+    async onCardAction(message, action) {
+      if (message.kind !== "topic_memory_offer") return false;
+      if (action === "open-memory") {
+        const topicId = message.payload?.topic_id;
+        if (!topicId || !topicsOf(latest.state).some((topic) => topic.id === topicId)) throw new Error("Ce sujet n’existe plus.");
+        showPage(topicId, { memory: true });
+        return true;
+      }
+      if (action !== "accept" && action !== "dismiss") return false;
+      try {
+        await panels.api(`/api/topics/memory/${action}`, { offer_id: message.id });
+        return true;
+      } finally {
+        // Même une action refusée rapproche la carte de l’état réel.
+        await panels.refresh().catch(() => {});
+      }
+    },
   });
   if (!registered) return;
 

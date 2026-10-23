@@ -112,7 +112,7 @@ export function orderThread(messages) {
   // reply's text behind its receipts in the ordinary tool-fragment algorithm.
   const memories = new Map();
   for (const message of headed) {
-    const runId = (message.kind === "memory_auto" || message.kind === "memory_share") && message.payload?.memory_run_id;
+    const runId = (message.kind === "memory_auto" || message.kind === "memory_share" || message.kind === "topic_memory_offer") && message.payload?.memory_run_id;
     if (runId) memories.set(runId, [...(memories.get(runId) || []), message]);
   }
   const attached = new Map(), relocated = new Set();

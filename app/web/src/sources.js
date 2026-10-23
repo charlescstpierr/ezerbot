@@ -70,11 +70,33 @@ function citationAt(chars, start) {
 }
 
 // Chaque `[n]` de la prose, dans l'ordre, avec sa place dans la ligne.
+// Le code n'est pas de la prose : clôtures ``` ou ~~~ (fermées par la même marque, au moins aussi longue),
+// et bloc indenté de quatre espaces après une ligne vide, sauf sous un élément de liste.
 function scan(body, onCitation) {
-  let fenced = false;
+  let fence = null;
+  let indentedCode = false;
+  let previousBlank = true;
+  let listContext = false;
   return String(body ?? "").split("\n").map((line) => {
-    if (line.trimStart().startsWith("```")) { fenced = !fenced; return line; }
-    if (fenced) return line;
+    const mark = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (mark && mark[1][0] === fence[0] && mark[1].length >= fence.length && !line.slice(mark[0].length).trim()) fence = null;
+      return line;
+    }
+    if (mark) { fence = mark[1]; indentedCode = false; previousBlank = false; return line; }
+    const blank = !line.trim();
+    const indented = /^( {4}|\t)/.test(line);
+    if (indented && (indentedCode || (previousBlank && !listContext))) {
+      indentedCode = true;
+      previousBlank = false;
+      return line;
+    }
+    if (!blank) {
+      indentedCode = false;
+      if (!indented) listContext = /^ {0,3}([-*+]|\d+[.)])\s/.test(line);
+    }
+    previousBlank = blank;
+    if (blank) return line;
     const chars = [...line];
     let out = "";
     let index = 0;
@@ -155,11 +177,14 @@ export function textWithSources(message, text = message?.body) {
 
 const GOOGLE = { courriel: "gmail", evenement: "calendar", fichier_drive: "drive", feuille: "drive" };
 
+// Agenda et Drive lisent par le compte et le consentement Gmail : Gmail connecté suffit à ouvrir leurs sources.
 function connected(connectors, service, account) {
-  const item = connectors.find((entry) => entry?.id === service);
-  if (!item) return false;
-  const accounts = [{ account: item.account, status: item.status }, ...(item.accounts || [])];
-  return accounts.some((entry) => entry.status === "connected" && (!account || !entry.account || entry.account === account));
+  return ["gmail", service].some((id) => {
+    const item = connectors.find((entry) => entry?.id === id);
+    if (!item) return false;
+    const accounts = [{ account: item.account, status: item.status }, ...(item.accounts || [])];
+    return accounts.some((entry) => entry.status === "connected" && (!account || !entry.account || entry.account === account));
+  });
 }
 
 function googleUrl(source) {

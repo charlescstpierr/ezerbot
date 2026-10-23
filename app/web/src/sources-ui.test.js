@@ -163,6 +163,11 @@ test("l’ouverture choisit le bon lien, ou dit pourquoi rien ne s’ouvre", () 
   assert.deepEqual(sources.sourceOpening(file, { connectors: connected }), { library: "file-9" });
   const gone = [{ id: "gmail", status: "disconnected", accounts: [] }];
   assert.equal(sources.sourceOpening(mail, { connectors: gone }).problem, sources.DISCONNECTED);
+  // Agenda et Drive lisent par Gmail : un Gmail connecté seul suffit, un autre compte ne suffit pas.
+  const gmailOnly = [{ id: "gmail", status: "connected", account: "moi@exemple.test", accounts: [] }, { id: "drive", status: "disconnected", accounts: [] }];
+  assert.ok(sources.sourceOpening(sheet, { connectors: gmailOnly }).url.startsWith("https://docs.google.com/spreadsheets/"));
+  assert.ok(sources.sourceOpening({ n: 5, type: "evenement", titre: "Visite", date: "2026-10-12", compte: "moi@exemple.test", identifiant: "ev-1" }, { connectors: gmailOnly }).url.startsWith("https://calendar.google.com/"));
+  assert.equal(sources.sourceOpening(sheet, { connectors: [{ id: "gmail", status: "connected", account: "autre@exemple.test", accounts: [] }] }).problem, sources.DISCONNECTED);
   assert.equal(sources.sourceOpening(mail, { connectors: [{ id: "gmail", status: "connected", account: "autre@exemple.test", accounts: [] }] }).problem, sources.DISCONNECTED);
   assert.equal(sources.sourceOpening(mail, { connectors: [{ id: "gmail", status: "reconnect", account: "moi@exemple.test", accounts: [{ account: "moi@exemple.test", status: "connected" }] }] }).url.startsWith("https://mail.google.com/"), true);
   assert.equal(sources.sourceOpening({ ...mail, identifiant: undefined }, { connectors: connected }).problem, sources.NO_LINK);
@@ -186,6 +191,17 @@ test("copier la réponse inclut la liste des sources, et l’export aussi", () =
   const live = answer(message.body, { ...message.payload, run_id: "run-1", parts: [{ body: message.body }] });
   thread(live);
   assert.deepEqual(copied, [notes]);
+});
+
+test("le code n’est pas de la prose : clôtures ``` et ~~~, bloc indenté, mais une liste garde ses citations", () => {
+  const code = "Avant [1].\n\n~~~js\nconst a = [2];\n~~~\n\n````\n[3]\n```\n[4]\n````\n\n    const b = [5];\n    [6]\n\nAprès [7].\n\n- point\n\n    suite du point [8]\n";
+  assert.deepEqual(sources.citedNumbers(code), [1, 7, 8]);
+  const marked = sources.citeMarkdown(code);
+  assert.ok(marked.includes("const a = [2];") && marked.includes("    const b = [5];"));
+  assert.equal((marked.match(/<sourcepill /g) || []).length, 3);
+  const html = thread(answer(code, { citations: [] }));
+  assert.equal(html.includes("&lt;sourcepill"), false);
+  assert.equal((html.match(/class="gb-cite-pill"/g) || []).length, 1);
 });
 
 test("la carte et la ligne restent lisibles en clair comme en sombre, au clavier", () => {

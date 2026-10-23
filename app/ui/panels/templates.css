@@ -112,6 +112,15 @@
 .tpl-share-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .tpl-share-actions .secondary-button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; }
 .tpl-share-actions .icon { width: 14px; height: 14px; }
+.tpl-copy-box { margin-top: 10px; }
+.tpl-copy-box .tpl-share-actions { margin-top: 11px; }
+.tpl-copy-menu { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--pane); }
+.tpl-copy-menu[hidden] { display: none; }
+.tpl-copy-choice { display: block; width: 100%; padding: 9px 10px; border-radius: 6px; text-align: left; }
+.tpl-copy-choice:hover, .tpl-copy-choice:focus-visible { background: var(--soft); }
+.tpl-copy-choice strong { display: block; font-size: 12.5px; }
+.tpl-copy-box .tpl-status { margin: 8px 0 0; }
+.tpl-copy-box .tpl-status:empty { display: none; }
 
 @media (max-width: 760px) {
   .tpl-dialog { height: calc(100dvh - 32px); }

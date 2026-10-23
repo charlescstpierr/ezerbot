@@ -421,3 +421,40 @@ fn extracted_text_and_links_persist_without_parsing_again() {
     drop(reopened);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn the_library_reads_what_a_thread_attachment_cuts() {
+    let conn = db();
+    let long = "mot ".repeat(60_000);
+    let thread = prepare(&conn, "long.txt", long.as_bytes()).unwrap();
+    assert!(thread.truncated);
+    assert_eq!(thread.text.chars().count(), MAX_TEXT);
+    assert!(thread
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("100\u{202f}000 premiers caractères"));
+
+    let library = prepare_with(&conn, "long.txt", long.as_bytes(), LIBRARY).unwrap();
+    assert!(!library.truncated && library.note.is_none());
+    assert_eq!(library.text, long);
+    assert_ne!(library.id, thread.id);
+
+    // A staged thread copy is never served to the library, nor the reverse.
+    save(&conn, &thread).unwrap();
+    let again = prepare_with(&conn, "long.txt", long.as_bytes(), LIBRARY).unwrap();
+    assert_eq!(again.text, long);
+    assert!(get(&conn, &library.id).unwrap().is_none());
+}
+
+#[test]
+fn the_library_ceiling_is_stated_in_its_own_note() {
+    let conn = db();
+    let huge = "mot ".repeat(LIBRARY.text / 4 + 10_000);
+    let doc = prepare_with(&conn, "enorme.txt", huge.as_bytes(), LIBRARY).unwrap();
+    assert!(doc.truncated);
+    assert!(doc
+        .note
+        .unwrap()
+        .contains("Lecture limitée aux 2\u{202f}000\u{202f}000 premiers caractères"));
+}

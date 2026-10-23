@@ -222,7 +222,8 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
   const queued = message.payload?.turn_status === "queued";
   const group = Boolean(message.payload?.turn_id || actions.isGroup);
   const cited = hasSources(message);
-  const copyText = "copyText" in message ? message.copyText : cited ? textWithSources(message) : message.body;
+  const base = "copyText" in message ? message.copyText : message.body;
+  const copyText = cited && base ? textWithSources(message, base) : base;
   const plain = proseWithoutGallery(message.body, galleryImages(message, { markdown: true }));
   const prose = cited ? citeMarkdown(plain) : plain;
   const sourcesValue = useMemo(() => ({ message, onOpenSource: actions.onOpenSource }), [message, actions.onOpenSource]);

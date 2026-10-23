@@ -19,6 +19,20 @@ globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#111111" });
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 
+// Le bouton « Copier la réponse » ne montre pas son texte dans le HTML : on relève celui que Thread lui passe.
+const copied = [];
+globalThis.__copiedTexts = copied;
+function recordCopiedText() {
+  return {
+    name: "record-copied-text",
+    enforce: "pre",
+    transform(code, id) {
+      if (!id.endsWith("/src/ui.jsx")) return null;
+      return code.replace("export function CopyIconButton({ text, label, onCopy }) {", "$&\n  if (label === \"Copier la réponse\") globalThis.__copiedTexts.push(text);");
+    },
+  };
+}
+
 // La prose passe par le vrai Streamdown ; seuls ProseMirror (mentions) et les cartes, sans lien avec les sources, sont laissés de côté.
 function withoutMentionsAndCards() {
   return {
@@ -39,7 +53,7 @@ function withoutMentionsAndCards() {
 const vite = await createServer({
   root: fileURLToPath(new URL("..", import.meta.url)),
   configFile: false,
-  plugins: [withoutMentionsAndCards(), react()],
+  plugins: [withoutMentionsAndCards(), recordCopiedText(), react()],
   server: { middlewareMode: true },
   logLevel: "error",
   optimizeDeps: { noDiscovery: true },
@@ -157,14 +171,21 @@ test("l’ouverture choisit le bon lien, ou dit pourquoi rien ne s’ouvre", () 
 
 test("copier la réponse inclut la liste des sources, et l’export aussi", () => {
   const message = answer("Le loyer est de 1 200 $ [1], l’an passé 1 150 $ [7].", { citations: [{ n: 1, etat: "verifiee" }, { n: 7, etat: "introuvable", libelle: "source introuvable" }] });
-  const copied = sources.textWithSources(message);
-  assert.equal(copied, "Le loyer est de 1 200 $ [1], l’an passé 1 150 $ [7].\n\nSources :\n[1] Courriel : Loyer d’octobre · Marie Tremblay <marie@exemple.test> · 1 oct. 2026\n[7] Source introuvable");
-  assert.equal(exportMessage(message).body, copied);
+  const notes = sources.textWithSources(message);
+  assert.equal(notes, "Le loyer est de 1 200 $ [1], l’an passé 1 150 $ [7].\n\nSources :\n[1] Courriel : Loyer d’octobre · Marie Tremblay <marie@exemple.test> · 1 oct. 2026\n[7] Source introuvable");
+  assert.equal(exportMessage(message).body, notes);
   const plain = { id: "r", role: "assistant", state: "echoed", body: "Bonjour [1].", payload: {} };
   assert.equal(exportMessage(plain), plain);
   assert.equal(sources.textWithSources({ ...message, body: "Rien à citer." }), "Rien à citer.");
+  copied.length = 0;
   const html = thread(message);
   assert.ok(html.includes('aria-label="Copier la réponse"'));
+  assert.deepEqual(copied, [notes]);
+  // Une vraie réponse du moteur porte parts et run_id : orderThread la découpe, la copie garde les sources.
+  copied.length = 0;
+  const live = answer(message.body, { ...message.payload, run_id: "run-1", parts: [{ body: message.body }] });
+  thread(live);
+  assert.deepEqual(copied, [notes]);
 });
 
 test("la carte et la ligne restent lisibles en clair comme en sombre, au clavier", () => {

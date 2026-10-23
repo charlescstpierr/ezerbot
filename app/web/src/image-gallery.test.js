@@ -382,6 +382,18 @@ test("a fence ends with its quote or list item, so an image after the container 
   assert.equal(gallery.proseWithoutGallery(`- \`\`\`\n  ${sample}\n\n${result}`, gallery.galleryImages({ body: `- \`\`\`\n  ${sample}\n\n${result}` }, { markdown: true })), `- \`\`\`\n  ${sample}`);
 });
 
+test("an escaped backtick is a literal character and never opens inline code", () => {
+  const sample = "![x](/api/attachments/abc)";
+  const result = "![result](/api/generated/result.png)";
+  const urls = (body) => gallery.galleryImages({ body }, { markdown: true }).map((entry) => entry.url);
+  assert.deepEqual(urls(`\\\`avant ${result} après\\\``), ["/api/generated/result.png"]);
+  assert.deepEqual(urls(`\\\`avant\n\n${result}`), ["/api/generated/result.png"]);
+  assert.equal(urls(`\\\\\`${sample}\``).length, 0, "an escaped backslash leaves the backtick real");
+  assert.equal(urls(`\\\`\`${sample}\``).length, 0, "the rest of an escaped run still opens a span of its length");
+  assert.equal(urls(`\`a \\\` ${sample}\``).length, 1, "inside a span a backslash escapes nothing, so the span ends at that backtick");
+  assert.equal(gallery.proseWithoutGallery(`\\\`avant ${result}`, gallery.galleryImages({ body: `\\\`avant ${result}` }, { markdown: true })), "\\`avant");
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

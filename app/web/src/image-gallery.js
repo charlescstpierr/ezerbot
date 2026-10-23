@@ -47,14 +47,19 @@ function inlineCodeRanges(text, offset, ranges) {
   const runs = /`+/g;
   let open;
   while ((open = runs.exec(text))) {
-    const close = new RegExp(`(?<!\`)\`{${open[0].length}}(?!\`)`, "g");
+    let slashes = 0;
+    while (text[open.index - 1 - slashes] === "\\") slashes += 1;
+    const escaped = slashes % 2 === 1;
+    const size = open[0].length - (escaped ? 1 : 0);
+    if (!size) continue;
+    const close = new RegExp(`(?<!\`)\`{${size}}(?!\`)`, "g");
     close.lastIndex = runs.lastIndex;
     const found = close.exec(text);
     const blank = /\n[ \t]*\n/g;
     blank.lastIndex = runs.lastIndex;
     const gap = blank.exec(text);
     if (!found || (gap && gap.index < found.index)) continue;
-    ranges.push([offset + open.index, offset + found.index + found[0].length]);
+    ranges.push([offset + open.index + (escaped ? 1 : 0), offset + found.index + found[0].length]);
     runs.lastIndex = found.index + found[0].length;
   }
 }

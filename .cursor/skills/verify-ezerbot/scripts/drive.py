@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -318,6 +318,63 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
         if not viewer.get("open") or viewer.get("labels") != ["Enregistrer l’image…", "Copier l’image"]:
             raise SystemExit(f"la visionneuse de l’image générée est incomplète: {viewer}")
         state["viewer"] = viewer["labels"]
+        return state
+    if sphere == "images-reference":
+        # Parcours 2 : une photo jointe, « Le même style, en 16:9 », et l'image large à côté. Un seul passage crée la conversation.
+        eval_js(evidence, close_overlays_js())
+        if not eval_js(evidence, """() => !!document.querySelector('.gb-generated-image-card[data-image-state="done"]')"""):
+            eval_js(
+                evidence,
+                """async () => {
+                  const panels = window.GrokbotPanels;
+                  const { conversation } = await panels.api("/api/conversations", {});
+                  const canvas = document.createElement("canvas");
+                  canvas.width = 240;
+                  canvas.height = 180;
+                  const paint = canvas.getContext("2d");
+                  const sky = paint.createLinearGradient(0, 0, 0, 180);
+                  sky.addColorStop(0, "#f2a65a");
+                  sky.addColorStop(1, "#7a3e65");
+                  paint.fillStyle = sky;
+                  paint.fillRect(0, 0, 240, 180);
+                  paint.fillStyle = "#fff3c4";
+                  paint.beginPath();
+                  paint.arc(170, 70, 26, 0, Math.PI * 2);
+                  paint.fill();
+                  paint.fillStyle = "#2a1a33";
+                  paint.fillRect(0, 140, 240, 40);
+                  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+                  const upload = await fetch("/api/attachments", { method: "POST", headers: { "Content-Type": "image/png", "X-Grokbot-Request": "local" }, body: blob });
+                  const photo = await upload.json();
+                  if (!photo.id) throw new Error("photo non importée");
+                  const draft = "Le même style, en 16:9";
+                  for (let attempt = 0; attempt < 50; attempt++) {
+                    const reply = await fetch("/api/attachments/precaption", { method: "POST", headers: { "Content-Type": "application/json", "X-Grokbot-Request": "local" }, body: JSON.stringify({ conversation_id: conversation.id, attachment_id: photo.id, draft }) });
+                    const caption = await reply.json();
+                    if (caption.caption?.status === "ready") break;
+                    await new Promise((resolve) => setTimeout(resolve, 200));
+                  }
+                  await panels.api("/api/send", { conversation_id: conversation.id, message_id: "style-" + Date.now(), body: draft, attachments: [photo.id] });
+                  await panels.refresh();
+                  panels.openConversation(conversation.id);
+                  return true;
+                }""",
+            )
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('.gb-generated-image-card[data-image-state="done"]');
+              const image = card?.querySelector("img");
+              const photo = [...document.querySelectorAll(".gb-image-grid img")].find((node) => !card.contains(node));
+              if (!card || !image || !image.complete || !image.naturalWidth || !photo || !photo.complete) return null;
+              const box = image.getBoundingClientRect();
+              return {ok: true, natural: image.naturalWidth / image.naturalHeight, shown: box.width / box.height, photo: photo.naturalWidth / photo.naturalHeight, refused: !!document.querySelector('.gb-generated-image-card[data-image-state="failed"]')};
+            }""",
+            "image large et photo absentes",
+            timeout=40,
+        )
+        if state["refused"] or abs(state["natural"] - 1.5) > 0.01 or abs(state["shown"] - state["natural"]) > 0.03:
+            raise SystemExit(f"le cadre large ne se voit pas dans la carte: {state}")
         return state
     if sphere == "dictee":
         # Tous les micros sont branchés au départ : la preuve du repli débranche le micro choisi puis le rebranche.
@@ -956,6 +1013,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
+    if sphere == "images-reference":
+        return [f"photo-{theme}-{size}.png", f"resultat-{theme}-{size}.png"]
     if sphere == "memo-vocal":
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "iphone-reponse":
@@ -986,6 +1045,18 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)
+        if sphere == "images-reference":
+            # La photo ne tient pas avec l'image dans une fenêtre minimale : un plan sur la photo, un plan sur le résultat.
+            where = "start" if index == 0 else "end"
+            eval_js(
+                evidence,
+                f"""() => {{
+                  const card = document.querySelector('.gb-generated-image-card[data-image-state="done"]');
+                  const photo = [...document.querySelectorAll(".gb-image-grid img")].find((node) => !card.contains(node));
+                  ({"photo" if index == 0 else "card"}).scrollIntoView({{block: "{where}"}});
+                  return true;
+                }}""",
+            )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
         if sphere == "reponse-fil":

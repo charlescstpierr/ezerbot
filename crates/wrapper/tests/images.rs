@@ -638,9 +638,9 @@ fn signout_leaves_a_symlinked_vault_untouched() {
     assert_eq!(std::fs::read(&stash).unwrap(), before);
 }
 
-#[test]
-fn describing_an_attached_image_does_not_generate_one() {
-    let mut fixture = Fixture::open();
+/// Attaches the sample image to the thread by sending a described message,
+/// the way Charles joins a photo. Returns the attachment id.
+fn attach_described_image(fixture: &mut Fixture) -> String {
     let bytes = png();
     let image = fixture.app.api("POST", "/api/attachments", &bytes).unwrap()["id"]
         .as_str()
@@ -721,6 +721,13 @@ fn describing_an_attached_image_does_not_generate_one() {
                     .contains("carré bleu")
         })
     });
+    image
+}
+
+#[test]
+fn describing_an_attached_image_does_not_generate_one() {
+    let mut fixture = Fixture::open();
+    attach_described_image(&mut fixture);
     let user = fixture
         .messages()
         .into_iter()
@@ -736,5 +743,204 @@ fn describing_an_attached_image_does_not_generate_one() {
         fixture.provider.status()["titling"] == false
             && attachments::state(&fixture.app.feature_context())["network_workers"] == 0
     });
+    assert_eq!(fixture.image_calls(), 0);
+}
+
+const FRAME_REFUSED: &str =
+    "Ce cadre n’est pas pris en charge. Choisissez 1:1, 16:9, 9:16, 4:3 ou 3:4.";
+const BMP_REFUSED: &str =
+    "Une image BMP ne peut pas servir de référence. Utilisez un PNG, un JPEG, un GIF ou un WebP.";
+const REFERENCE_REFUSED: &str = "Une image de référence doit être jointe à cette conversation.";
+
+impl Fixture {
+    fn settle(&mut self) {
+        self.until("réponse non terminée", |fixture| {
+            fixture.provider.status()["titling"] == false
+                && fixture
+                    .db()
+                    .query_row(
+                        "SELECT COUNT(*) FROM engine_runs WHERE status NOT IN ('finished','failed','cancelled')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+                    == 0
+        });
+    }
+}
+
+#[test]
+fn an_attached_photo_is_sent_as_the_reference_in_the_chosen_frame() {
+    let mut fixture = Fixture::open();
+    let photo = attach_described_image(&mut fixture);
+    fixture.settle();
+    fixture.script_image(
+        200,
+        json!({"output":[{"type":"image_generation_call","status":"completed","result":PNG_B64}]}),
+    );
+    fixture.ask(
+        "style",
+        json!({
+            "description": "le même style, en large",
+            "aspect_ratio": "16:9",
+            "reference_image_paths": [photo]
+        }),
+        "Le même style, en 16:9",
+    );
+    fixture.until("appel image avec référence absent", |fixture| {
+        fixture.image_calls() == 1
+    });
+    {
+        let seen = fixture.server.seen.lock().unwrap();
+        let content = seen.image_calls[0]["input"][0]["content"]
+            .as_array()
+            .expect("la demande doit porter des parties de contenu");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "le même style, en large");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[1]["image_url"],
+            format!("data:image/png;base64,{PNG_B64}")
+        );
+        assert_eq!(seen.image_calls[0]["tools"][0]["size"], "1536x1024");
+        assert!(!seen.image_calls[0].to_string().contains(&photo));
+    }
+    fixture.until("l’image large n’apparaît pas", |fixture| {
+        fixture.tool()["attachments"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["mime_type"] == "image/png"))
+    });
+    assert_eq!(
+        fixture.tool()["payload"]["outcome"]["output"]["aspect_ratio"],
+        "16:9"
+    );
+    assert_eq!(fixture.image_calls(), 1);
+    fixture.settle();
+    assert_key_hidden(&mut fixture);
+}
+
+#[test]
+fn every_listed_frame_is_accepted_and_sent_as_its_size() {
+    for (frame, size) in [
+        ("1:1", "1024x1024"),
+        ("16:9", "1536x1024"),
+        ("9:16", "1024x1536"),
+        ("4:3", "1536x1024"),
+        ("3:4", "1024x1536"),
+    ] {
+        let mut fixture = Fixture::open();
+        fixture.ask(
+            "cadre",
+            json!({"description":"un phare","aspect_ratio":frame}),
+            "Dessine un phare",
+        );
+        fixture.until("appel image absent", |fixture| fixture.image_calls() == 1);
+        assert_eq!(
+            fixture.server.seen.lock().unwrap().image_calls[0]["tools"][0]["size"],
+            size,
+            "{frame}"
+        );
+        fixture.settle();
+    }
+}
+
+#[test]
+fn an_unknown_frame_is_a_french_sentence_and_no_call() {
+    let mut fixture = Fixture::open();
+    fixture.ask(
+        "deux-un",
+        json!({"description":"un phare","aspect_ratio":"2:1"}),
+        "Dessine un phare en 2:1",
+    );
+    fixture.until("phrase de refus absente", |fixture| {
+        fixture.tool()["body"] == FRAME_REFUSED
+    });
+    assert!(fixture.tool()["attachments"].as_array().unwrap().is_empty());
+    fixture.settle();
+    assert_eq!(fixture.image_calls(), 0);
+}
+
+#[test]
+fn a_reference_that_is_not_in_the_thread_is_refused_without_a_call() {
+    let mut fixture = Fixture::open();
+    let elsewhere = fixture.app.api("POST", "/api/attachments", &png()).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (id, reference) in [
+        ("inconnue", json!("image-qui-nexiste-pas")),
+        ("non-jointe", json!(elsewhere)),
+    ] {
+        fixture.ask(
+            id,
+            json!({"description":"un phare","reference_image_paths":[reference]}),
+            "Dessine un phare dans ce style",
+        );
+        fixture.until("phrase de refus absente", |fixture| {
+            fixture
+                .messages()
+                .iter()
+                .any(|message| message["body"] == REFERENCE_REFUSED)
+        });
+        fixture.settle();
+    }
+    assert_eq!(fixture.image_calls(), 0);
+}
+
+#[test]
+fn a_bmp_reference_is_refused_without_a_call() {
+    let mut fixture = Fixture::open();
+    let mut bmp = vec![0u8; 30];
+    bmp[..2].copy_from_slice(b"BM");
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    let id = fixture.app.api("POST", "/api/attachments", &bmp).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"Image reçue."}),
+            json!({"type":"response.completed"}),
+        ]));
+    fixture
+        .app
+        .api(
+            "POST",
+            "/api/send",
+            serde_json::to_vec(&json!({
+                "conversation_id": fixture.chat,
+                "message_id": "bitmap",
+                "body": "Voici un BMP",
+                "attachments": [id]
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+    fixture.until("réponse au BMP absente", |fixture| {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message["id"] == "reply-bitmap")
+    });
+    fixture.settle();
+    fixture.ask(
+        "style-bmp",
+        json!({"description":"un phare","reference_image_paths":[id]}),
+        "Dessine un phare dans ce style",
+    );
+    fixture.until("phrase de refus absente", |fixture| {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message["body"] == BMP_REFUSED)
+    });
+    fixture.settle();
     assert_eq!(fixture.image_calls(), 0);
 }

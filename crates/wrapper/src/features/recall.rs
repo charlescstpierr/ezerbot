@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use url::Url;
 
+mod reply;
+
 empty_hooks!(
     state,
     tools,
@@ -30,6 +32,7 @@ pub const LEAVE: &str = "recall_leave";
 pub const REMOVE: &str = "recall_remove";
 pub const TRANSCRIPT: &str = "recall_transcript";
 pub const SUMMARY: &str = "recall_summary";
+pub const REPLY: &str = "recall_reply";
 pub const CONSENT: &str = "Prévenez les participants avant d’ajouter le bot à la réunion. Ils peuvent voir que le bot transcrit.";
 pub const RESUME: &str = "Cette réunion n’est plus suivie. Le bot a pu rester dans l’appel jusqu’à ce que Recall le retire.";
 const SECRET: &str = "REUNIONS_RECALL_KEY";
@@ -90,7 +93,11 @@ static POLLING: AtomicBool = AtomicBool::new(false);
 static NEXT_POLL: AtomicU64 = AtomicU64::new(0);
 
 pub fn is_tool(name: &str) -> bool {
-    matches!(name, JOIN | LEAVE | REMOVE | TRANSCRIPT | SUMMARY)
+    matches!(name, JOIN | LEAVE | REMOVE | TRANSCRIPT | SUMMARY | REPLY)
+}
+/// La réponse dans le chat de la réunion : une carte brouillon, la seule publication de ce plugin.
+pub fn is_reply(name: &str) -> bool {
+    name == REPLY
 }
 /// Cartes qui exigent un clic ponctuel, jamais une règle permanente.
 pub fn is_consent(name: &str) -> bool {
@@ -114,6 +121,7 @@ pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
             state TEXT NOT NULL, error TEXT, updated_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS wrapper_recall_reads (run_id TEXT PRIMARY KEY);",
     )?;
+    reply::migrate(conn)?;
     let owed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('wrapper_recall_meetings') WHERE name='transcript_final')",
         [],
@@ -1139,6 +1147,7 @@ pub fn scoped_tools(ctx: &Context<'_>) -> Vec<ToolSpec> {
             schema: json!({"type":"object","additionalProperties":false,"properties":{}}),
             requires_approval: false,
         },
+        reply::tool_spec(),
     ];
     if ctx.run_id.is_some_and(|id| id.starts_with("mcp-host-")) {
         tools.push(ToolSpec {
@@ -1173,6 +1182,7 @@ pub fn validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
             require_untainted(ctx)?;
             require_connected(ctx.connection)
         }
+        REPLY => reply::validate(ctx, call),
         _ => require_connected(ctx.connection),
     }
 }
@@ -1202,6 +1212,7 @@ pub fn tool_label(name: &str) -> Option<Value> {
         REMOVE => "Déconnecter Réunions",
         TRANSCRIPT => "Lire le transcript de la réunion",
         SUMMARY => "Lire le résumé de la réunion",
+        REPLY => "Répondre dans le chat de la réunion",
         _ => return None,
     };
     Some(json!({"server":"Réunions","tool":tool,"recoverable":false}))
@@ -1232,6 +1243,24 @@ fn bot_name(ctx: &Context<'_>, bot_id: &str) -> String {
         .collect()
 }
 
+/// Brouillon de la réponse dans le chat : validation, contenu de la carte, appel d’origine, correction.
+pub(super) fn reply_validate(ctx: &Context<'_>, call: &ToolCall) -> Result<(), ApiError> {
+    reply::validate(ctx, call)
+}
+pub(super) fn reply_prepare(
+    ctx: &Context<'_>,
+    request_id: &str,
+    call: &ToolCall,
+) -> Result<Value, ApiError> {
+    reply::prepare(ctx, request_id, call)
+}
+pub(super) fn reply_call_id(ctx: &Context<'_>, request_id: &str) -> Option<String> {
+    reply::call_id(ctx, request_id)
+}
+pub(super) fn reply_edit(ctx: &Context<'_>, request_id: &str, text: &str) -> Result<(), ApiError> {
+    reply::edit(ctx, request_id, text)
+}
+
 pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
     let result = match call.name.as_str() {
         JOIN => join(ctx, call),
@@ -1239,6 +1268,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall) -> ToolOutcome {
         REMOVE => remove(ctx),
         TRANSCRIPT => read_transcript(ctx),
         SUMMARY => read_summary(ctx),
+        REPLY => reply::publish(ctx, call),
         _ => Err(invalid("Outil de réunion inconnu.")),
     };
     match result {

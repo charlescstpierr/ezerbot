@@ -688,3 +688,36 @@ test("a separate Calendar or Drive connection keeps its real state and controls 
   assert.deepEqual(calls[0],{path:"/api/connectors/disconnect",body:{id:"calendar"}});
   assert.ok(catalogueCard(root,"drive").all().some(n => n.attrs["data-connector-action"] === "connect"));
 });
+
+const microsoftClient = {...service,id:"microsoft365",name:"Microsoft 365",category:"Courriel et agenda",description:"Lire vos derniers courriels Outlook et vos rendez-vous de demain, et préparer un courriel depuis le chat, avec votre compte Microsoft 365.",permissions:"Lecture de la boîte de réception et de l’agenda Outlook, et identité du compte ; un courriel n’est envoyé qu’après votre clic sur sa carte brouillon, sous votre adresse. Ezerbot n’écrit rien dans le calendrier et ne modifie, ne déplace ni ne supprime aucun courriel.",needs_client:false,has_client:true,configured:true,unconfigured_message:null,scopes_label:"User.Read Mail.Read Mail.Send Calendars.Read offline_access",redirect_uri:null};
+
+test("« Microsoft » and « Outlook » both find the Microsoft 365 card, which shows its permissions and actions and connects in one click", async () => {
+  const { root, calls } = await mount([], {}, [...catalogueServices, microsoftClient]);
+  const field = searchField(root);
+  for (const word of ["Microsoft", "outlook"]) {
+    type(field, word);
+    assert.deepEqual(shown(root), ["microsoft365"], word);
+  }
+  const card = catalogueCard(root,"microsoft365");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.match(card.textContent, /Autorisations : Lecture de la boîte de réception et de l’agenda Outlook/);
+  assert.match(card.textContent, /carte brouillon/);
+  assert.match(card.textContent, /n’écrit rien dans le calendrier/);
+  assert.match(card.textContent, /User\.Read Mail\.Read Mail\.Send Calendars\.Read offline_access/);
+  assert.ok(!card.textContent.includes("Identifiant OAuth"));
+  assert.ok(!card.textContent.includes("URL de retour"));
+  assert.match(card.textContent, /aucun secret à saisir/);
+  await card.all().find(n => n.attrs["data-connector-action"] === "connect").events.click();
+  assert.deepEqual(calls[0], {path:"/api/connectors/connect",body:{id:"microsoft365"}});
+});
+
+test("a connected Microsoft 365 card names the account and a client that is not configured is explained without a form", async () => {
+  const account = "charles@atelier.test";
+  const connected = await mount([], {}, [{...microsoftClient,status:"connected",has_tokens:true,account,server:{id:"m1",enabled_bots:[],tools:[]}}]);
+  assert.match(catalogueCard(connected.root,"microsoft365").textContent, new RegExp(`Compte connecté : ${account}`));
+  const said = "Le client Microsoft 365 d’Ezerbot n’est pas configuré dans cette version. Il n’y a ni identifiant ni secret à saisir : la connexion reste indisponible tant que le client n’est pas préparé.";
+  const { root } = await mount([], {}, [{...microsoftClient,configured:false,has_client:false,unconfigured_message:said}]);
+  const card = catalogueCard(root,"microsoft365");
+  assert.equal(card.all().filter(n => n.tag === "form" || n.tag === "input").length, 0);
+  assert.equal(card.all().find(n => n.className === "mcp-warning").textContent, said);
+});

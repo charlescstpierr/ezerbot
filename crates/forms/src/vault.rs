@@ -22,6 +22,9 @@ pub const MIN_SECRET_VALUE_CHARACTERS: usize = 8;
 /// Kept strictly longer than redact::MASK.
 pub const MIN_SITE_MASK_CHARACTERS: usize = 6;
 pub const MAX_SECRET_VALUE_BYTES: usize = 4096;
+/// A connector's envelope holds the access and the refresh token of one sign-in together:
+/// Microsoft's pair alone may pass 4 KB. Only the host writes these envelopes.
+pub const MAX_MCP_ENV_BYTES: usize = 16_384;
 /// Opaque envelope used by the local connector host; never a public projection.
 pub const MCP_ENV_PURPOSE: &str = "Variables privées d’un connecteur MCP";
 
@@ -185,7 +188,7 @@ impl Vault {
         let purpose = purpose.trim();
         validate_purpose(purpose)?;
         let value = value.trim();
-        validate_value(value)?;
+        validate_value(value, purpose)?;
         self.write_secret(
             name.clone(),
             StoredSecret {
@@ -213,7 +216,7 @@ impl Vault {
         let purpose = purpose.trim();
         validate_purpose(purpose)?;
         let value = value.trim();
-        validate_value(value)?;
+        validate_value(value, purpose)?;
         self.write_secret(
             key,
             StoredSecret {
@@ -629,7 +632,7 @@ fn storage_key(bot_id: &str, name: &str) -> Result<String> {
 }
 fn validate_stored(key: &str, secret: &StoredSecret) -> Result<()> {
     validate_purpose(&secret.purpose)?;
-    validate_value(&secret.value)?;
+    validate_value(&secret.value, &secret.purpose)?;
     if secret.created_at < 0 || secret.updated_at <= 0 {
         return Err(invalid("secret vault data is invalid"));
     }
@@ -655,15 +658,23 @@ fn validate_purpose(purpose: &str) -> Result<()> {
     }
     Ok(())
 }
-fn validate_value(value: &str) -> Result<()> {
+fn validate_value(value: &str, purpose: &str) -> Result<()> {
     // Match the shipped JS validator's .length (UTF-16 code units), while its
     // upper bound uses TextEncoder, i.e. UTF-8 bytes, not character count.
+    let envelope = purpose == MCP_ENV_PURPOSE;
     if value.encode_utf16().count() < MIN_SECRET_VALUE_CHARACTERS
-        || value.len() > MAX_SECRET_VALUE_BYTES
+        || value.len()
+            > if envelope {
+                MAX_MCP_ENV_BYTES
+            } else {
+                MAX_SECRET_VALUE_BYTES
+            }
     {
-        return Err(invalid(
-            "secret value must have at least 8 characters and at most 4096 UTF-8 bytes",
-        ));
+        return Err(invalid(if envelope {
+            "connector envelope must have at least 8 characters and at most 16384 UTF-8 bytes"
+        } else {
+            "secret value must have at least 8 characters and at most 4096 UTF-8 bytes"
+        }));
     }
     Ok(())
 }
@@ -838,6 +849,14 @@ mod tests {
         }
         vault.set("TOKEN", "", &"a".repeat(4096)).unwrap();
         assert!(vault.set("TOKEN", "", &"a".repeat(4097)).is_err());
+        // Only a connector's envelope may hold more: a sign-in's two tokens.
+        vault
+            .set("TOKEN", MCP_ENV_PURPOSE, &"a".repeat(MAX_MCP_ENV_BYTES))
+            .unwrap();
+        assert!(vault
+            .set("TOKEN", MCP_ENV_PURPOSE, &"a".repeat(MAX_MCP_ENV_BYTES + 1))
+            .is_err());
+        assert!(vault.set("TOKEN", "autre", &"a".repeat(4097)).is_err());
         vault.set("TOKEN", "", &"é".repeat(2048)).unwrap();
         assert!(vault.set("TOKEN", "", &"é".repeat(2049)).is_err());
         vault.set("TOKEN", "", "🔒🔒🔒🔒").unwrap();

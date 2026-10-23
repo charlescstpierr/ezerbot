@@ -137,7 +137,7 @@ test("save writes the image file and copy places that image on the clipboard", a
   });
   assert.equal(clipboard.length, 1);
   const item = clipboard[0][0];
-  const blob = typeof item.getType === "function" ? await item.getType("image/png") : item["image/png"];
+  const blob = await (typeof item.getType === "function" ? item.getType("image/png") : item["image/png"]);
   assert.ok(blob, "le presse-papiers doit contenir une image/png");
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG);
 });
@@ -277,6 +277,35 @@ test("the real Content-Type decides the type and the extension of an image witho
   const fromMarkdown = gallery.galleryImages({ body: "![x](/api/attachments/abc)" }, { markdown: true })[0];
   await gallery.saveGalleryImage(fromMarkdown, { fetch: fetchAs("image/webp"), native });
   assert.equal(posted[4].name, "abc.webp");
+});
+
+test("the browser copy hands the clipboard a promise of the image inside the user gesture", async () => {
+  const [target] = gallery.galleryImages({ attachments: [image("a", "Phare")] });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const order = [];
+  const written = [];
+  const fetchLate = async () => { order.push("fetch"); await gate; order.push("fetched"); return new Response(PNG, { status: 200, headers: { "content-type": "image/png" } }); };
+  const clipboard = { write(items) { order.push("write"); written.push(...items); return Promise.resolve(); } };
+  const previous = globalThis.ClipboardItem;
+  globalThis.ClipboardItem = class { constructor(parts) { this.parts = parts; } };
+  try {
+    const copying = gallery.copyGalleryImage(target, { fetch: fetchLate, clipboard });
+    assert.deepEqual(order, ["fetch", "write"], "write is called synchronously, before the fetch resolves");
+    assert.ok(written[0].parts["image/png"] instanceof Promise, "the item receives a promise of a Blob");
+    release();
+    const result = await copying;
+    assert.equal(result.type, "image/png");
+    const blob = await written[0].parts["image/png"];
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG);
+  } finally {
+    globalThis.ClipboardItem = previous;
+  }
+  const failing = gallery.copyGalleryImage(target, {
+    fetch: async () => new Response("", { status: 404 }),
+    clipboard: { async write([item]) { await Object.values(item)[0]; } },
+  });
+  await assert.rejects(failing, (error) => gallery.galleryFailureText(error, "autre") === "Image introuvable.");
 });
 
 const memoMessage = (words, extra = {}) => ({

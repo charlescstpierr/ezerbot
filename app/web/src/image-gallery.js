@@ -216,20 +216,28 @@ export async function saveGalleryImage(image, io = {}) {
   return name;
 }
 
+async function pngBlob(bytes, type) {
+  if (type !== "image/png") throw new Error("Image illisible.");
+  return new Blob([bytes], { type });
+}
+
 export async function copyGalleryImage(image, io = {}) {
-  const { bytes, type } = await loadImageBytes(image, io);
   if (io.native?.postMessage) {
+    const { bytes, type } = await loadImageBytes(image, io);
     const result = await io.native.postMessage({ command: "copy", mime: type, data: bytesToBase64(bytes) });
     if (result && result.ok === false) throw new Error("L’image n’a pas pu être copiée.");
     return { type, byteLength: bytes.byteLength };
   }
   const clipboard = io.clipboard ?? globalThis.navigator?.clipboard;
   if (!clipboard?.write) throw new Error("Le presse-papiers n’est pas disponible.");
-  const blob = new Blob([bytes], { type });
-  let item = { [type]: blob };
-  if (typeof ClipboardItem === "function") {
-    try { item = new ClipboardItem({ [type]: blob }); } catch { item = { [type]: blob }; }
+  const blob = loadImageBytes(image, io).then(({ bytes, type }) => pngBlob(bytes, type));
+  const loaded = blob.then(() => null, (error) => error);
+  const parts = { "image/png": blob };
+  try {
+    await clipboard.write([typeof ClipboardItem === "function" ? new ClipboardItem(parts) : parts]);
+  } catch (error) {
+    throw (await loaded) || error;
   }
-  await clipboard.write([item]);
-  return { type, byteLength: bytes.byteLength };
+  const written = await blob;
+  return { type: written.type, byteLength: written.size };
 }

@@ -117,6 +117,7 @@ pub mod sources;
 pub mod storage;
 pub mod templates;
 pub mod threads;
+pub mod topics;
 pub mod updates;
 pub mod usage;
 pub mod voice;
@@ -151,6 +152,7 @@ macro_rules! registry {
 registry!(
     conversations,
     threads,
+    topics,
     engine,
     multibot,
     skills,

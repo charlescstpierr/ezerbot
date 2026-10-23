@@ -265,7 +265,11 @@ pub fn remote(
         }
         _ => false,
     };
-    if !allowed {
+    // Les sujets restent locaux : l'iPhone ne peut pas créer un fil déjà classé.
+    let classifies = path == "/api/conversations"
+        && serde_json::from_slice::<Value>(body)
+            .is_ok_and(|input| input.get("topic_id").is_some_and(|topic| !topic.is_null()));
+    if !allowed || classifies {
         return Err(bad(
             403,
             "Cette action reste disponible uniquement sur le Mac.",
@@ -287,6 +291,7 @@ pub fn remote(
                 "routines_background",
                 "routine_webhooks",
                 "updates",
+                "topics",
             ] {
                 value.as_object_mut().unwrap().remove(key);
             }

@@ -37,11 +37,13 @@ const STALE_FORM: &str = "Ce formulaire n\u{2019}a pas \u{00e9}t\u{00e9} accept\
 
 empty_hooks!(context, link_attachments);
 mod reviewer;
+mod waiting;
 
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Needed before cutover too: the forms HTTP receipt already reads engine wakes.
     store::migrate(conn)?;
     grokbot_forms::migrate(conn)?;
+    waiting::migrate(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wrapper_forms_calls (
             request_id TEXT PRIMARY KEY REFERENCES forms_requests(id), digest TEXT NOT NULL,
@@ -521,6 +523,7 @@ pub fn request_tool_approval(
     call: &ToolCall,
 ) -> Result<SuspendCause, ApiError> {
     let (id, digest) = guarded_identity(ctx, run, call)?;
+    let detached = waiting::continues(ctx.connection, run)?;
     if existing_request(ctx, &id, &digest)?.is_none() {
         let mut display = if super::generated::is_external(&call.name) {
             super::generated::approval_display(ctx, call)?
@@ -548,14 +551,26 @@ pub fn request_tool_approval(
             InputKind::Approval {
                 tool: call.name.clone(),
                 args_digest: digest.clone(),
-                expires_at: clock(ctx).saturating_add(if call.name == "propose_skill" {
+                expires_at: clock(ctx).saturating_add(if detached {
+                    let validity = waiting::load(ctx.connection)?.validity_ms();
+                    // A skill proposal never lives shorter than it always did.
+                    if call.name == "propose_skill" {
+                        validity.max(86_400_000)
+                    } else {
+                        validity
+                    }
+                } else if call.name == "propose_skill" {
                     86_400_000
                 } else {
-                    600_000
+                    waiting::BLOCKING_VALIDITY_MS
                 }),
             },
             display,
         )?;
+    }
+    if detached {
+        // The run goes on without this card: its end must not cancel the request.
+        requests::detach(ctx.connection, &id)?;
     }
     Ok(SuspendCause::HumanInput { id })
 }
@@ -572,6 +587,11 @@ pub(super) fn read_is_denied(ctx: &Context<'_>, call: &ToolCall) -> Result<bool,
         rules::evaluate(ctx.connection, &route, &call.name, &call.arguments)?,
         Some((false, _))
     ))
+}
+
+/// RunServices::continue_without_approval adapter: the user's choice for this kind of run.
+pub fn continues_without_approval(conn: &Connection, run: &Run) -> Result<bool, ApiError> {
+    waiting::continues(conn, run)
 }
 
 /// RunServices::check_approval adapter. Existing per-call terminal decisions take
@@ -967,7 +987,10 @@ pub fn routes(
                 | "/api/secrets/list"
                 | "/api/secrets/put"
         ) | ("GET" | "DELETE", "/api/secrets")
-            | ("GET" | "POST", "/api/approvals/reviewer")
+            | (
+                "GET" | "POST",
+                "/api/approvals/reviewer" | "/api/approvals/waiting"
+            )
     ) {
         return None;
     }
@@ -977,6 +1000,9 @@ fn route(app: &App, method: &str, path: &str, body: &[u8]) -> Result<Value, ApiE
     let ctx = app.feature_context();
     if path == "/api/approvals/reviewer" {
         return reviewer::settings(&ctx, method, body);
+    }
+    if path == "/api/approvals/waiting" {
+        return waiting::settings(&ctx, method, body);
     }
     if path == "/api/forms/skill-content" {
         #[derive(Deserialize)]
@@ -1816,7 +1842,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
         let bot_secrets = live_bot_secrets(ctx, &vault)?;
         Ok(redact_value(
             &vault,
-            &json!({"requests":requests,"secrets":secrets,"bot_secrets":bot_secrets,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?}),
+            &json!({"requests":requests,"secrets":secrets,"bot_secrets":bot_secrets,"storage":vault.storage_status(),"rules":rules_value(ctx.connection)?,"reviewer":reviewer::config_value(ctx.connection)?,"waiting":waiting::value(ctx.connection)?}),
         )?)
     }
     load(ctx).unwrap_or_else(|_| json!({"error":"Human input state is unavailable"}))
@@ -1909,11 +1935,10 @@ pub fn on_run_event_checked(ctx: &Context<'_>, event: &RunEvent) -> Result<(), A
             "Run event reactions require a caller-owned transaction",
         ));
     }
-    if matches!(
-        event.kind,
-        RunEventKind::Cancelled | RunEventKind::TurnEnded
-    ) {
+    if event.kind == RunEventKind::Cancelled {
         requests::cancel_for_run(ctx.connection, &event.run_id)?;
+    } else if event.kind == RunEventKind::TurnEnded {
+        requests::cancel_for_turn_end(ctx.connection, &event.run_id)?;
     } else if event.kind == RunEventKind::Suspended {
         // Auto-review may resolve before the engine writes its suspension event.
         for request in requests::list_for_run(ctx.connection, &event.run_id)? {

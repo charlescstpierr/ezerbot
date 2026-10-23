@@ -22,7 +22,7 @@ from verify_lib import evidence_dir, load_run, png_size, session_id
 SIZES = ((1140, 780), (820, 560))
 THEMES = ("dark", "light")
 CANVAS = {"dark": "#14161a", "light": "#ffffff"}
-SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond")
+SPHERES = ("accueil", "parametres-connecteurs", "modeles", "reunions-routines", "memoire", "bibliotheque", "images", "images-reference", "pages", "dictee", "voix-bots", "memo-vocal", "iphone-reponse", "voix-appel", "reponse-fil", "taches-de-fond", "approbation-non-bloquante")
 
 
 def browser(evidence: Path, *command: str) -> str:
@@ -98,6 +98,36 @@ def theme_js(theme: str, close: bool) -> str:
     }}"""
 
 
+def waiting_toggle_js(on: bool) -> str:
+    """Met l'interrupteur « Continuer sans attendre mes approbations » dans l'état voulu (sans clic s'il y est déjà)."""
+    return f"""() => {{
+      const input = document.querySelector('.waiting-settings [name="waiting-task"]');
+      if (!input) throw new Error("interrupteur d'approbation absent");
+      if (input.checked !== {str(on).lower()}) input.click();
+      return true;
+    }}"""
+
+
+def waiting_step(evidence: Path, index: int) -> None:
+    """actif : réglage par défaut ; inactif : interrupteur coupé, choix grisés et aide « 10 minutes »."""
+    on = index == 0
+    eval_js(evidence, waiting_toggle_js(on))
+    wait_js(
+        evidence,
+        f"""() => {{
+          const q = (name) => document.querySelector(`.waiting-settings [name="${{name}}"]`);
+          const section = document.querySelector(".waiting-settings");
+          if (!section || q("waiting-task").checked !== {str(on).lower()}) return null;
+          if (q("waiting-validity").disabled === {str(on).lower()} || q("waiting-reminder").disabled === {str(on).lower()}) return null;
+          const text = section.innerText || "";
+          if ({str(not on).lower()} && !text.includes("pendant 10 minutes, comme avant")) return null;
+          section.scrollIntoView({{block: "center"}});
+          return {{ok: true}};
+        }}""",
+        "réglage d'approbation non mis à jour",
+    )
+
+
 def close_overlays_js() -> str:
     return """async () => {
       for (let guard = 0; guard < 8; guard++) {
@@ -163,6 +193,27 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads ? {ok: true, heading, reunions, gmailFree, gmailReads} : null;
             }""",
             "connecteurs non prêts",
+        )
+    if sphere == "approbation-non-bloquante":
+        eval_js(evidence, close_overlays_js())
+        eval_js(evidence, """() => { document.getElementById("settings-button").click(); return document.getElementById("settings-dialog").open; }""")
+        wait_js(evidence, """() => (document.querySelector(".waiting-settings") ? {ok: true} : null)""", "réglage d'approbation absent")
+        # Les captures précédentes ont pu laisser le réglage désactivé : on repart de l'état par défaut.
+        eval_js(evidence, waiting_toggle_js(True))
+        return wait_js(
+            evidence,
+            """() => {
+              const q = (name) => document.querySelector(`.waiting-settings [name="${name}"]`);
+              const section = document.querySelector(".waiting-settings");
+              if (!section || !q("waiting-task")?.checked || q("waiting-validity").disabled) return null;
+              section.scrollIntoView({block: "center"});
+              const text = section.innerText || "";
+              const defaults = q("waiting-validity").value === "24h" && q("waiting-reminder").value === "1h" && !q("waiting-chat").checked;
+              const options = [...q("waiting-validity").options].map((option) => option.value).join(",");
+              return defaults && options === "1h,6h,24h,7d" && text.includes("Continuer sans attendre mes approbations") && text.includes("Rien n’est exécuté sans votre feu vert")
+                ? {ok: true, validity: q("waiting-validity").value, reminder: q("waiting-reminder").value, chat: q("waiting-chat").checked} : null;
+            }""",
+            "réglage d'approbation non prêt",
         )
     if sphere == "modeles":
         eval_js(evidence, close_overlays_js())
@@ -1170,6 +1221,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"avant-{theme}-{size}.png", f"toucher-{theme}-{size}.png", f"feuille-{theme}-{size}.png", f"envoyee-{theme}-{size}.png"]
     if sphere == "reponse-fil":
         return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
+    if sphere == "approbation-non-bloquante":
+        return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":
@@ -1210,6 +1263,8 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
+        if sphere == "approbation-non-bloquante":
+            waiting_step(evidence, index)
         if sphere == "taches-de-fond":
             background_task_step(evidence, index)
         if sphere == "reponse-fil":

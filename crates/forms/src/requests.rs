@@ -83,6 +83,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             UNIQUE(entry_id, submission_id)
         );",
     )?;
+    let has_detached: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('forms_requests') WHERE name='detached')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_detached {
+        conn.execute_batch(
+            "ALTER TABLE forms_requests ADD COLUMN detached INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     Ok(())
 }
 
@@ -512,13 +522,31 @@ pub fn resolved_values(conn: &Connection, resolution_id: &str) -> Result<Value> 
 /// Cancels waiting input and invalidates approved-but-not-yet-dispatched tools.
 /// Like PS03, this does not undo an effect already dispatched by the caller.
 pub fn cancel_for_run(conn: &Connection, run_id: &str) -> Result<usize> {
+    cancel_where(conn, run_id, "")
+}
+
+/// A turn that ends by itself leaves detached approvals waiting: the run went on
+/// without them, and only their own expiry or an explicit stop settles them.
+pub fn cancel_for_turn_end(conn: &Connection, run_id: &str) -> Result<usize> {
+    cancel_where(conn, run_id, "AND detached=0")
+}
+
+fn cancel_where(conn: &Connection, run_id: &str, extra: &str) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE forms_requests SET status='cancelled' WHERE run_id=?1 AND
+        &format!(
+            "UPDATE forms_requests SET status='cancelled' WHERE run_id=?1 {extra} AND
          (status='pending' OR (status='resolved' AND json_extract(kind_json, '$.kind')='approval'
           AND EXISTS (SELECT 1 FROM forms_approval_grants g
-                      WHERE g.request_id=forms_requests.id AND g.consumed_at IS NULL)))",
+                      WHERE g.request_id=forms_requests.id AND g.consumed_at IS NULL)))"
+        ),
         [run_id],
     )?)
+}
+
+/// The approval no longer holds its run: the run continued without waiting for it.
+pub fn detach(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE forms_requests SET detached=1 WHERE id=?1", [id])?;
+    Ok(())
 }
 
 #[cfg(test)]

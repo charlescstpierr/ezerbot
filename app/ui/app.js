@@ -251,6 +251,7 @@
       }
       chosenBotId = id;
       writePreference("grokbot.bot", id);
+      notifyNavigation();
       leaveEmptyThread();
       if (currentConversation()) selectConversation(null, true);
       if (typeof text === "string") { setComposerText(text); saveDraft(); }
@@ -616,9 +617,12 @@
       activity: taskFinished || control.offline ? null : submissionActivity, pending: taskFinished || control.offline ? null : pendingMessage?.state || null, drafting: !taskFinished && !attachmentsBlocked && Boolean(ui.input.value.trim()) });
   }
 
+  // Changer d’écran sans ouvrir de fil (un autre bot, l’accueil) ferme aussi la page d’un sujet.
+  function notifyNavigation() { for (const panel of panels.values()) panelCall(panel, panel.onNavigate); }
+
   function selectConversation(id, focus = false) {
     navigationGeneration++;
-    for (const panel of panels.values()) panelCall(panel, panel.onNavigate);
+    notifyNavigation();
     approvalFollow.cancel();
     saveDraft();
     selectedId = id;
@@ -736,6 +740,7 @@
     closeBotMenu();
     chosenBotId = bot.id;
     writePreference("grokbot.bot", bot.id);
+    notifyNavigation();
     const conversation = currentConversation();
     if (conversation?.messages.length || conversation?.kind === "group") { selectConversation(null, true); return; }
     // Preserve both drafts when leaving a persisted empty thread from an old version.

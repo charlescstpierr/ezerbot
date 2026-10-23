@@ -18,7 +18,7 @@ Un sujet est un dossier nommé qui regroupe plusieurs fils (un bot seul ou un gr
 - Le « + » de la section SUJETS crée un sujet (nom, description facultative). Le nom d'un sujet ouvre sa page ; la flèche à sa gauche replie ou déplie ses fils.
 - Le menu « Actions de la conversation » a « Classer dans un sujet… » (« Changer de sujet… » si le fil est déjà rangé) : un seul sujet à la fois, ou « Aucun sujet ».
 - Sur la page : « Renommer », « Supprimer » (les fils ne sont pas supprimés : ils repassent dans Conversations) et « Nouveau fil ».
-- La carte « Mémoire du sujet » de la page montre les trois derniers faits retenus ; « Tout voir » ouvre l'écran complet (recherche, corbeille par fait, « Supprimer le sujet… »). Supprimer un sujet qui a des faits les efface avec lui ; la mémoire privée des bots reste.
+- La carte « Mémoire du sujet » de la page montre les trois derniers faits retenus ; « Tout voir » ouvre l'écran complet (recherche, corbeille par fait, « Supprimer le sujet… »). Supprimer un sujet qui a des faits les efface avec lui, après confirmation dans le dialogue ; la mémoire privée des bots reste.
 - Un bot propose un fait pour le sujet avec l'outil `propose_topic_memory` : la carte « Retenir pour ce sujet ? » apparaît dans le fil. « Retenir » l'écrit pour tous les fils du sujet ; « Pas maintenant » n'écrit rien.
 
 ## Driving it with chrome-devtools-axi

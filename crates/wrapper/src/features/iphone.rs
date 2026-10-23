@@ -282,6 +282,7 @@ pub fn remote(
                 "local",
                 "screen",
                 "voice",
+                "voice_call",
                 "routines_background",
                 "routine_webhooks",
                 "updates",

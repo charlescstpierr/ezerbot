@@ -45,7 +45,7 @@
   let holdSent = null;
 
   function captureActive() {
-    return Boolean(panels.meetingActive?.() || panels.voiceActive?.() || window.EzerbotVoiceMode?.active?.());
+    return Boolean(panels.meetingActive?.() || panels.voiceActive?.() || window.EzerbotVoiceMode?.active?.() || window.EzerbotVoiceCall?.active?.());
   }
 
   function syncHold() {
@@ -178,5 +178,6 @@
     window.addEventListener("grokbot:meeting-change", syncHold);
     window.addEventListener("grokbot:voice-change", syncHold);
     window.addEventListener("grokbot:voice-mode-change", syncHold);
+    window.addEventListener("grokbot:voice-call-change", syncHold);
   }
 })();

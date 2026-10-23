@@ -332,7 +332,12 @@ pub fn routes(
     }
     #[cfg(debug_assertions)]
     if method == "POST" && path == "/api/voice/session/debug" {
-        return Some(app.debug_voice_session.command(body).map(ApiResponse::Json));
+        let call_active = app.debug_voice_call.active();
+        return Some(
+            app.debug_voice_session
+                .command(body, call_active)
+                .map(ApiResponse::Json),
+        );
     }
     match (method, path) {
         ("POST", "/api/voice/bot") => {

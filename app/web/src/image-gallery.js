@@ -108,9 +108,31 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+export function galleryFailureText(error, fallback) {
+  if (!error || error.name === "AbortError") return "";
+  const message = typeof error.message === "string" ? error.message.trim() : "";
+  if (message === "Image introuvable." || message === "Image illisible." || message === "L’image n’a pas pu être enregistrée." || message === "L’image n’a pas pu être copiée.") return message;
+  return fallback;
+}
+
 export async function saveGalleryImage(image, io = {}) {
   const { bytes, type } = await loadImageBytes(image, io);
   const name = imageFilename(image, type);
+  if (io.native?.postMessage) {
+    let result;
+    try {
+      result = await io.native.postMessage({ command: "save", mime: type, name, data: bytesToBase64(bytes) });
+    } catch (error) {
+      if (error?.name === "AbortError") return null;
+      throw new Error(galleryFailureText(error, "L’image n’a pas pu être enregistrée."));
+    }
+    if (result?.cancelled) return null;
+    if (!result || result.ok === false) {
+      const message = typeof result?.error === "string" ? result.error.trim() : "";
+      throw new Error(message || "L’image n’a pas pu être enregistrée.");
+    }
+    return result.name || name;
+  }
   if (typeof io.showSaveFilePicker === "function") {
     const handle = await io.showSaveFilePicker({
       suggestedName: name,

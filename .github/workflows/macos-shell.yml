@@ -1,0 +1,13 @@
+name: Coque macOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler app/native/main.m
+        run: bash tools/compile-native.sh

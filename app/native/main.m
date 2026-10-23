@@ -507,19 +507,61 @@ static void shell_task_reap(const ShellChild *child) {
         dispatch_async(dispatch_get_main_queue(), ^{ replyHandler(result, nil); });
     };
     if ([message.name isEqual:@"ezerbotImages"]) {
-        if (![command isEqual:@"copy"]) { replyHandler(nil, @"Commande d’image inconnue."); return; }
+        if (![command isEqual:@"copy"] && ![command isEqual:@"save"]) { replyHandler(nil, @"Commande d’image inconnue."); return; }
         NSString *mime = [body[@"mime"] isKindOfClass:NSString.class] ? [body[@"mime"] lowercaseString] : @"";
         NSString *data = [body[@"data"] isKindOfClass:NSString.class] ? body[@"data"] : @"";
         NSSet *types = [NSSet setWithArray:@[@"image/png", @"image/jpeg", @"image/gif", @"image/webp", @"image/bmp"]];
-        if (![types containsObject:mime] || data.length == 0 || data.length > 27962028) { replyHandler(nil, @"Image illisible."); return; }
+        if (![types containsObject:mime] || data.length == 0 || data.length > 27962028) { replyHandler(@{@"ok": @NO, @"error": @"Image illisible."}, nil); return; }
         NSData *bytes = [[NSData alloc] initWithBase64EncodedString:data options:NSDataBase64DecodingIgnoreUnknownCharacters];
-        if (!bytes || bytes.length == 0 || bytes.length > 20 * 1024 * 1024) { replyHandler(nil, @"Image illisible."); return; }
+        if (!bytes || bytes.length == 0 || bytes.length > 20 * 1024 * 1024) { replyHandler(@{@"ok": @NO, @"error": @"Image illisible."}, nil); return; }
         NSImage *image = [[NSImage alloc] initWithData:bytes];
-        if (!image.isValid) { replyHandler(nil, @"Image illisible."); return; }
-        NSPasteboard *board = NSPasteboard.generalPasteboard;
-        [board clearContents];
-        if (![board writeObjects:@[image]]) { replyHandler(nil, @"L’image n’a pas pu être copiée."); return; }
-        replyHandler(@{@"ok": @YES}, nil);
+        if (!image.isValid) { replyHandler(@{@"ok": @NO, @"error": @"Image illisible."}, nil); return; }
+        if ([command isEqual:@"copy"]) {
+            NSPasteboard *board = NSPasteboard.generalPasteboard;
+            [board clearContents];
+            if (![board writeObjects:@[image]]) { replyHandler(nil, @"L’image n’a pas pu être copiée."); return; }
+            replyHandler(@{@"ok": @YES}, nil);
+            return;
+        }
+        if (self.terminating || !self.window) { replyHandler(@{@"ok": @NO, @"error": @"L’image n’a pas pu être enregistrée."}, nil); return; }
+        NSString *givenName = [body[@"name"] isKindOfClass:NSString.class] ? (NSString *)body[@"name"] : @"";
+        NSString *suggested = givenName.lastPathComponent;
+        NSCharacterSet *forbidden = [NSCharacterSet characterSetWithCharactersInString:@"\\/:*?\"<>|\n\r\t"];
+        suggested = [[suggested componentsSeparatedByCharactersInSet:forbidden] componentsJoinedByString:@""];
+        suggested = [suggested stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (suggested.length == 0 || suggested.length > 120 || [suggested hasPrefix:@"."] || [suggested isEqualToString:@".."]) {
+            suggested = @{@"image/png": @"image.png", @"image/jpeg": @"image.jpg", @"image/gif": @"image.gif", @"image/webp": @"image.webp", @"image/bmp": @"image.bmp"}[mime] ?: @"image.png";
+        }
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        panel.title = @"Enregistrer l’image";
+        panel.prompt = @"Enregistrer";
+        panel.canCreateDirectories = YES;
+        panel.nameFieldStringValue = suggested;
+        UTType *type = [UTType typeWithMIMEType:mime];
+        if (type) panel.allowedContentTypes = @[type];
+        // Present the sheet after this reply callback returns. Showing it inline
+        // never appears: WebKit waits for replyHandler before pumping the run loop.
+        __block BOOL replied = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (replied) return;
+            if (self.terminating || !self.window) {
+                replied = YES;
+                replyHandler(@{@"ok": @NO, @"error": @"L’image n’a pas pu être enregistrée."}, nil);
+                return;
+            }
+            [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+                if (replied) return;
+                replied = YES;
+                if (result != NSModalResponseOK || !panel.URL.isFileURL) { replyHandler(@{@"ok": @YES, @"cancelled": @YES}, nil); return; }
+                NSError *writeError = nil;
+                if (![bytes writeToURL:panel.URL options:NSDataWritingAtomic error:&writeError]) {
+                    (void)writeError;
+                    replyHandler(@{@"ok": @NO, @"error": @"L’image n’a pas pu être enregistrée."}, nil);
+                    return;
+                }
+                replyHandler(@{@"ok": @YES, @"name": panel.URL.lastPathComponent ?: suggested}, nil);
+            }];
+        });
         return;
     }
     if ([message.name isEqual:@"ezerbotVoice"]) {

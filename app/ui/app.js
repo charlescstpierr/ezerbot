@@ -9,7 +9,7 @@
     menuButton: $("conversation-menu-button"), hint: $("composer-hint"),
     banner: $("connection-banner"), bannerText: $("connection-message"), toast: $("toast"),
   };
-  let state = { account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots: [] };
+  let state = { account: { name: "Espace personnel" }, mode: "simulated", conversations: [], bots: [], threads: {} };
   let selectedId = readPreference("grokbot.selected", null);
   let chosenBotId = readPreference("grokbot.bot", "grokbot");
   // Le bot ouvert dans le dialogue; `null` pour une création, dont l'identifiant reste stable entre deux essais.
@@ -1005,6 +1005,7 @@
     createMascot: threadMascot("galet"),
     onRetry: (message) => message.state === "queued" ? resumeQueued(message) : reconcile(message.id),
     onReact: (message, emoji) => reactToMessage(message, emoji),
+    onThread: (message) => { void openThread(message); },
     onResend: (message) => resendMessage(message),
     onDelete: (message) => deleteFailedMessage(message),
     onRegenerate: (message) => message.error_kind === "local_connection" ? refresh().catch((error) => notify(error.message)) : generation("/api/regenerate", message.id.replace(/^reply-/, "")),
@@ -1069,6 +1070,7 @@
     findState.conversationId = conversation?.id || null;
     window.GrokbotChat.renderThread(ui.messages, { messages: visibleMessages, busy: busy && connected, engineConnected: connected, providerConnected: Boolean(provider().connected), botName: bot?.name || "Ezerbot", bots: state.bots, createBotMascot, isGroup: conversation?.kind === "group", isTask: conversation?.kind === "task", onLayout, find: searching ? { query, index: findState.index } : null, onFindMatches, onRateGood: rateGood, onRateBad: rateBad, memoSpeed: state.voice?.bots?.[conversation?.bot_id]?.speed, ...thread });
     paintFind();
+    renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
     renderList();
     renderBots();
@@ -1481,6 +1483,36 @@
     }
   }
 
+  // « Répondre en fil » ouvre (ou rouvre) le sous-fil lié à ce message ; le fil principal ne change pas.
+  async function openThread(message) {
+    const conversation = currentConversation();
+    if (!conversation || busy) return;
+    try {
+      const response = await api("/api/messages/thread", { conversation_id: conversation.id, message_id: message.id });
+      upsertConversation(response.conversation);
+      state.threads = { ...(state.threads || {}), [response.conversation.id]: response.thread };
+      selectConversation(response.conversation.id, true);
+    } catch (error) { notify(error.message); }
+  }
+
+  function renderThreadBanner(conversation) {
+    const banner = $("thread-banner");
+    if (!banner) return;
+    const link = conversation ? state.threads?.[conversation.id] : null;
+    banner.hidden = !link;
+    if (!link) return;
+    const parent = state.conversations.find((item) => item.id === link.parent_conversation_id);
+    const author = link.parent_role === "user" ? "Vous" : botName(parent?.bot_id || conversation.bot_id);
+    $("thread-banner-quote").textContent = `${author} : « ${link.parent_excerpt} »`;
+    $("thread-banner-open").disabled = busy || !parent?.messages.some((item) => item.id === link.parent_message_id);
+  }
+
+  // Revient au fil principal, sur le message qui a ouvert ce sous-fil.
+  function showThreadParent() {
+    const link = state.threads?.[selectedId];
+    if (link) window.GrokbotPanels.openConversation(link.parent_conversation_id, link.parent_message_id);
+  }
+
   async function resendMessage(message) {
     const conversation = currentConversation();
     if (!conversation || busy) return;
@@ -1890,6 +1922,7 @@
   $("find-next")?.addEventListener("click", () => stepFind(1));
   $("find-previous")?.addEventListener("click", () => stepFind(-1));
   $("find-close")?.addEventListener("click", () => closeFind());
+  $("thread-banner-open")?.addEventListener("click", showThreadParent);
   $("rating-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!pendingRating) return;

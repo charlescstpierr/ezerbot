@@ -139,7 +139,6 @@
       const normalize = (text) => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
       function visible() { return facts.filter((f) => (!scopeFilter.value || f.scope === scopeFilter.value) && (!sourceFilter.value || f.provenance?.source === sourceFilter.value) && normalize(f.text).includes(normalize(search.value.trim()))); }
       search.addEventListener("input", render); scopeFilter.addEventListener("change", render); sourceFilter.addEventListener("change", render);
-      const saturation = node("p", "memory-saturation"); saturation.hidden = true; saturation.setAttribute("role", "status");
       const profile = node("details", "memory-profile");
       const profileTitle = node("summary", "", "Profil consolidé");
       const profileBody = node("div"); profile.append(profileTitle, profileBody);
@@ -161,7 +160,7 @@
       const editor = node("div", "memory-editor");
       editor.hidden = true;
       controls.append(filters, toolbar, list, editor);
-      section.append(node("p", "memory-note", "Privé : ce bot seulement. Équipe : tous les bots de cet espace local. Tri local indicatif : les faits personnels et à vérifier sont exclus de la sélection par défaut. Les faits sensibles restent privés."), saturation, profile, status, result, controls, history);
+      section.append(node("p", "memory-note", "Privé : ce bot seulement. Équipe : tous les bots de cet espace local. Tri local indicatif : les faits personnels et à vérifier sont exclus de la sélection par défaut. Les faits sensibles restent privés."), profile, status, result, controls, history);
 
       // Already-shared facts must not replay a cached receipt as a new sharing.
       function available() { return facts.filter((fact) => fact.scope !== "team" && !fact.sensitive && !processed.has(fact.fact_id)); }
@@ -236,8 +235,6 @@
         const data = await panels.api("/api/memory", { bot_id: bot.id });
         if (!Array.isArray(data.facts)) throw new Error("La liste mémoire est illisible.");
         sharingClasses = data.sharing_classes || {};
-        saturation.hidden = !data.automatic?.saturated;
-        saturation.textContent = data.automatic?.saturated ? `Apprentissage automatique en pause : le catalogue dépasse 6 000 caractères (${data.automatic.catalogue_chars.toLocaleString("fr")}). Vos souvenirs restent disponibles via le rappel ciblé. Corrigez ou oubliez les faits devenus inutiles pour reprendre ; aucun souvenir n’est supprimé automatiquement.` : "";
         const p = data.profile;
         profileTitle.textContent = `Profil consolidé · v${p?.version || 0} · ${data.facts.length} faits`;
         profileBody.replaceChildren(node("p", "memory-note", "Résumé local dérivé des faits actifs, mis à jour à chaque modification. Les versions gardent un journal sans copie du texte oublié."));

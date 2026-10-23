@@ -8,7 +8,9 @@ Recherche lexicale locale, sans réseau ni embeddings : mots exacts prioritaires
 
 ## Apprentissage et partage
 
-L’apprentissage automatique conserve son garde-fou de déduplication : si le catalogue (texte + 100 caractères de métadonnées par fait) dépasse 6 000 caractères, il ne fait pas d’appel au petit modèle. Le panneau affiche désormais cette pause et explique comment reprendre. Le rappel, la correction et l’oubli continuent à fonctionner ; aucune consolidation destructive n’a lieu.
+L’apprentissage automatique ne s’arrête plus quand le catalogue grandit. Le petit modèle ne reçoit pas tout le catalogue : avant l’appel, `recall::search` (le même rappel lexical local que `recall_memory`) retient au plus **20 faits proches** du message, et c’est seulement avec eux que le modèle déduplique. Le prompt a donc la même taille à 5 ou à 500 faits. Un message qui répète un fait connu ne produit ni doublon ni nouveau reçu (le texte identique est aussi écarté localement, parmi tous les faits actifs, avant l’écriture). Le panneau n’affiche plus d’avis de pause ; le rappel, la correction et l’oubli continuent à fonctionner et aucune consolidation destructive n’a lieu.
+
+Limite assumée : un fait que le rappel lexical ne rapproche pas du message (aucun mot en commun) n’est pas montré au modèle, donc une reformulation sans mot commun peut créer un fait voisin, que l’on peut oublier ou corriger dans le panneau.
 
 Le jeton de routage **`@everyone` en texte brut** est retiré avant l’analyse, aux limites de mots, comme une mention enrichie. Les adresses e-mail, secrets, formulaires et autres contenus exclus restent filtrés.
 
@@ -36,4 +38,4 @@ cargo clippy -p grokbot-memory -p grokbot-wrapper --all-targets -- -D warnings
 npm --prefix app/web run build
 ```
 
-Les tests couvrent 500 faits, l’absence du fait ancien dans le premier prompt, l’aller-retour Responses de `recall_memory` avant une réponse, les portées, l’oubli, les versions, la saturation, `@everyone` simple/enrichi et en groupe, ainsi que les contrôles UI. Le fournisseur des tests est simulé ; ils ne constituent pas un essai avec un compte réel. `app/ui/chat.js` doit toujours être régénéré, jamais édité à la main.
+Les tests couvrent 500 faits, l’absence du fait ancien dans le premier prompt, l’aller-retour Responses de `recall_memory` avant une réponse, les portées, l’oubli, les versions, les faits proches du prompt d’apprentissage à 500 faits, `@everyone` simple/enrichi et en groupe, ainsi que les contrôles UI. Le fournisseur des tests est simulé ; ils ne constituent pas un essai avec un compte réel. `app/ui/chat.js` doit toujours être régénéré, jamais édité à la main.

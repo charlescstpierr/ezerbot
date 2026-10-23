@@ -140,7 +140,7 @@ function DelegationInstruction({ message, createMascot, botName }) {
   );
 }
 
-function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onResend, onDelete, menuOpen, onMenuOpenChange }) {
+function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onThread, onResend, onDelete, menuOpen, onMenuOpenChange }) {
   const demonstration = isDemonstrationMessage(message);
   if (isTeachMessage(message) || demonstration) return (
     <article className="gb-message gb-teach-marker" data-message-id={message.id} aria-label={demonstration ? "Apprentissage depuis une démonstration" : "Apprentissage depuis cette conversation"}>
@@ -162,7 +162,7 @@ function UserMessage({ message, memoSpeed, busy, onCopy, onRetry, onReact, onRes
       <footer className="gb-actions">
         {["accepted", "echoed"].includes(message.state) && <span className="gb-status"><Check />{followUp ? "Enregistré" : "Envoyé"}</span>}
         {["queued", "dispatching"].includes(message.state) && !menu.status && <span className="gb-status">Envoi en cours…</span>}
-        <MessageMenu message={message} busy={busy} text={message.body || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={onCopy} onReact={onReact} onResend={onResend} onDelete={onDelete} />
+        <MessageMenu message={message} busy={busy} text={message.body || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={onCopy} onReact={onReact} onThread={onThread} onResend={onResend} onDelete={onDelete} />
         <CopyIconButton text={message.body} label="Copier votre message" onCopy={onCopy} />
       </footer>
       {!menu.status && pendingStates.has(message.state) && (!busy || message.state === "unknown") && <PendingCard message={message} busy={busy} onRetry={onRetry} />}
@@ -264,7 +264,7 @@ function AssistantMessage({ message, plugins, appearance, portal, actions, creat
         {visibleNotice(message) && (!queued || message.payload?.parent_turn_id) && (toolPreparing ? <div className="gb-pending" role="status"><Clock /><div className="gb-pending-copy"><strong>Préparation d’un outil</strong><p>Aucune action n’a encore été exécutée.</p></div></div> : <p className="gb-notice" title={message.payload?.root_id ? `Chaîne : ${message.payload.root_id}` : undefined}>{message.notice}</p>)}
         {!streaming && (copyText || message.state === "stopped") && (
           <footer className="gb-actions">
-            <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onResend={actions.onResend} onDelete={actions.onDelete} />
+            <MessageMenu message={message} busy={false} text={copyText || ""} expanded={menuOpen} onOpenChange={onMenuOpenChange} onCopy={actions.onCopy} onReact={actions.onReact} onThread={actions.onThread} onResend={actions.onResend} onDelete={actions.onDelete} />
             {copyText && <CopyIconButton text={copyText} label="Copier la réponse" onCopy={actions.onCopy} />}
             {onRateGood && <button type="button" className="gb-text-button" onClick={() => onRateGood(message)}>Bon résultat</button>}
             {onRateBad && <button type="button" className="gb-text-button" onClick={() => onRateBad(message)}>Mauvais résultat</button>}
@@ -286,7 +286,7 @@ function Typing({ createMascot, botName }) {
   );
 }
 
-export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed }) {
+export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onThread, onResend, onDelete, onRegenerate, onSignIn, onCardAction, usageUrl, createMascot, botName = "Ezerbot", bots = [], createBotMascot, isGroup = false, isTask = false, providerConnected = false, engineConnected = false, onLayout, find = null, onFindMatches, onRateGood, onRateBad, memoSpeed }) {
   const [openMenuId, setOpenMenuId] = useState(null);
   const onMenuOpenChange = (messageId, open) => setOpenMenuId((current) => messageMenuOpenId(current, messageId, open));
   const appearance = useAppearance();
@@ -294,7 +294,8 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onRes
   const threadRoot = useRef(null);
   const portal = useRef(() => overlay.current).current;
   const plugins = useMemo(() => ({ code, math, mermaid: mermaidPlugin(appearance) }), [appearance]);
-  const actions = useMemo(() => ({ onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
+  const threadAction = isGroup || isTask ? undefined : onThread;
+  const actions = useMemo(() => ({ onCopy, onReact, onThread: threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected }), [onCopy, onReact, threadAction, onResend, onDelete, onRegenerate, onSignIn, usageUrl, isGroup, isTask, providerConnected, engineConnected]);
   const ordered = useMemo(() => collapseMemoryReceipts(orderThread(messages), isGroup), [messages, isGroup]);
   const last = ordered[ordered.length - 1];
   const findAnchor = useRef(null);
@@ -364,7 +365,7 @@ export function Thread({ messages, busy = false, onCopy, onRetry, onReact, onRes
           const menuOpen = message.id != null && openMenuId === message.id;
           const onThisMenu = (open) => onMenuOpenChange(message.id, open);
           return message.role === "user"
-            ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
+            ? <UserMessage key={message.id} message={message} memoSpeed={memoSpeed} busy={busy} onCopy={onCopy} onRetry={onRetry} onReact={onReact} onThread={threadAction} onResend={onResend} onDelete={onDelete} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} />
             : <AssistantMessage key={message.key || message.id} message={message} plugins={plugins} appearance={appearance} portal={portal} actions={actions} createMascot={authorMascot} botName={authorName} menuOpen={menuOpen} onMenuOpenChange={onThisMenu} onRateGood={onRateGood} onRateBad={onRateBad} />;
         })}
         {busy && last?.role === "user" && chatKinds.has(last.kind) && <Typing createMascot={createMascot} botName={botName} />}

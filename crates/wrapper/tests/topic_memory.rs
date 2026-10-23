@@ -538,7 +538,8 @@ fn supprimer_un_sujet_efface_tous_ses_faits_meme_au_dela_de_la_page_listee() {
             .unwrap();
         }
     }
-    assert!(f.topic_facts(&topic).len() <= 500);
+    // Tous restent listés (donc cherchables et oubliables dans l'écran), pas seulement les 500 derniers.
+    assert_eq!(f.topic_facts(&topic).len(), 520);
     f.post(
         "/api/topics/delete",
         json!({"id": topic, "forget_memory": true}),

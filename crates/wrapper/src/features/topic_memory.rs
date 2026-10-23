@@ -20,7 +20,6 @@ use grokbot_memory::{
 
 /// Même amorce que la mémoire du bot : le reste se retrouve par `recall_memory`.
 pub const CONTEXT_CHARS: usize = 2_000;
-const MAX_LISTED: usize = 500;
 const OFFER_KIND: &str = "topic_memory_offer";
 const TOOL: &str = "propose_topic_memory";
 
@@ -227,8 +226,12 @@ pub fn by_topic(conn: &Connection) -> Value {
     });
     let mut topics = serde_json::Map::new();
     for (topic, value) in rows.into_iter().flatten().flatten() {
-        let list = topics.entry(topic).or_insert_with(|| json!([]));
-        if let Some(list) = list.as_array_mut().filter(|list| list.len() < MAX_LISTED) {
+        // Aucun plafond : tout fait retenu reste visible, cherchable et oubliable dans l'écran.
+        if let Some(list) = topics
+            .entry(topic)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+        {
             list.push(value);
         }
     }

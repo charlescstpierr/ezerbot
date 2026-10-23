@@ -454,6 +454,15 @@ fn validate_group(
             }
             Ok(())
         }
+        Schedule::Calendar { cases } => {
+            let mut seen = HashSet::new();
+            if cases.is_empty() || !cases.iter().all(|case| seen.insert(*case as u8)) {
+                return Err(Error::InvalidInput(
+                    "a calendar trigger needs at least one case, each once".into(),
+                ));
+            }
+            Ok(())
+        }
         Schedule::Group { members } => {
             if members.len() < 2 {
                 return Err(Error::InvalidInput(

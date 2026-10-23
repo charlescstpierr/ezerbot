@@ -20,10 +20,10 @@
 use super::{write_transaction, Context};
 use crate::{parse, ApiError, ApiResponse, App, ACCOUNT, DEFAULT_BOT};
 use grokbot_engine::{
-    contracts::{ApprovalCheck, ApprovalRoute, AuthorizedBy, ToolCall},
+    contracts::{ApprovalCheck, AuthorizedBy, ToolCall},
     model::Run,
 };
-use grokbot_forms::{policy, redact::redact_value, rules};
+use grokbot_forms::{approvals, policy, redact::redact_value};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -122,23 +122,25 @@ pub fn covered(tool: &str) -> bool {
         || tool == super::routines_background::ACTION)
 }
 
+/// Un refus permanent écrit par l'utilisateur gagne, même sur une commande qu'un
+/// « Toujours autoriser » ne pourrait jamais couvrir (composée, destructive) : seule
+/// la lecture des règles de refus compte ici, jamais leur filtre de mémorisation.
 fn standing_refusal(ctx: &Context<'_>, run: &Run, call: &ToolCall) -> Result<bool, ApiError> {
-    let route = ApprovalRoute {
-        requesting_bot_id: run.bot_id.clone(),
-        target_bot_id: DEFAULT_BOT.id.into(),
-        target_conversation_id: run.conversation_id.clone(),
-    };
     let (tool, arguments) = if policy::describe(&call.name, &call.arguments, None).scope == "action"
     {
         (policy::BACKGROUND_TOOL, json!({}))
     } else {
         (call.name.as_str(), call.arguments.clone())
     };
-    let remote = super::forms::remote_tool_name(ctx, &call.name);
-    Ok(matches!(
-        rules::evaluate_named(ctx.connection, &route, tool, &arguments, remote.as_deref())?,
-        Some((false, _))
-    ))
+    let digest = approvals::args_digest(tool, &arguments)?;
+    let pattern = policy::command_pattern(tool, &arguments).unwrap_or_default();
+    Ok(ctx.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM forms_approval_rules
+         WHERE requesting_bot_id=?1 AND target_bot_id=?2 AND tool=?3 AND allow=0
+           AND (scope='\"global\"' OR args_digest=?4 OR (scope='\"pattern\"' AND args_digest=?5)))",
+        params![run.bot_id, DEFAULT_BOT.id, tool, digest, pattern],
+        |row| row.get(0),
+    )?)
 }
 
 /// Décision d'admission du mode YOLO, ou `None` pour laisser la voie habituelle.
@@ -166,9 +168,15 @@ pub(super) fn check(
         }));
     }
     record(ctx, run, call, source)?;
+    // Un geste d'écran reste lié à la session vivante à l'admission : si elle est
+    // révoquée puis remplacée, le geste en attente n'agit pas dans la nouvelle.
+    let session = super::screen::is_tool(&call.name)
+        .then(|| super::screen::approval_session(ctx).as_u64())
+        .flatten();
     Ok(Some(ApprovalCheck::Authorized {
         by: AuthorizedBy::Yolo {
             source: source.into(),
+            session,
         },
     }))
 }

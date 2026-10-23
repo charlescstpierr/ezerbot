@@ -464,6 +464,58 @@ fn ezerbot_data_and_credentials_stay_out_of_reach_even_in_yolo() {
 }
 
 #[test]
+fn relative_paths_are_judged_where_they_lead_not_by_their_spelling() {
+    let mut f = Fixture::new();
+    // Le dossier de travail est le parent des données : « data/… » désigne la base.
+    let attempts = [
+        ("relatif", "cat data/anything.txt"),
+        ("cd-donnees", "cd data && ls"),
+        ("point-point", "ls ./data/../data"),
+        ("majuscules", "ls DATA/x"),
+        ("redirection", "echo x > data/intrus.txt"),
+        ("option", "tail --file=data/journal.log"),
+    ];
+    for (id, command) in attempts {
+        f.send(id, "run_shell", f.shell(command));
+        f.finish(id);
+        let out = f.outcome(id);
+        assert_eq!(out["reason"], PROTECTED, "{id}: {out}");
+    }
+    assert!(!f.data().join("intrus.txt").exists());
+    // Le même mot relatif, juste à côté des données, reste permis.
+    let out = f.runs_without_a_card(
+        "voisin",
+        "run_shell",
+        f.shell("ls . && cat ../hors-donnees"),
+    );
+    assert_eq!(out["status"], "done", "{out}");
+}
+
+#[test]
+fn a_global_refusal_of_the_shell_also_stops_commands_no_always_rule_could_cover() {
+    let mut f = Fixture::new();
+    f.db()
+        .execute(
+            "INSERT INTO forms_approval_rules VALUES ('grokbot','grokbot',?1,'run_shell','','\"global\"',0)",
+            params![f.chat],
+        )
+        .unwrap();
+    // Une commande composée n'est jamais mémorisable, mais le refus permanent la couvre.
+    for (id, command) in [("composee", "pwd && ls"), ("simple", "printf non")] {
+        f.send(id, "run_shell", f.shell(command));
+        f.finish(id);
+        assert!(f.requests(id).is_empty());
+        assert!(
+            f.outcome(id)["reason"]
+                .as_str()
+                .unwrap()
+                .contains("autorisation permanente"),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn a_permanent_refusal_written_by_the_owner_still_wins_in_yolo() {
     let mut f = Fixture::new();
     f.db()
@@ -566,10 +618,11 @@ fn a_screen_session_granted_in_yolo_takes_gestures_without_a_card_and_ends_when_
     assert!(!f.state()["screen"]["session"].is_null());
     let out = f.runs_without_a_card("ecran", "computer_screenshot", json!({}));
     assert_eq!(out["status"], "done", "{out}");
-    assert_eq!(
-        f.card(&chat, "ecran")["payload"]["authorized_by"],
-        json!({"kind":"yolo","source":"global"})
-    );
+    // Le geste est lié à la session vivante à l'admission, pas à la suivante.
+    let authority = f.card(&chat, "ecran")["payload"]["authorized_by"].clone();
+    assert_eq!(authority["kind"], "yolo");
+    assert_eq!(authority["source"], "global");
+    assert!(authority["session"].is_u64(), "{authority}");
     f.mode("ask");
     f.app.tick(now());
     assert!(

@@ -892,3 +892,27 @@ fn redaction_failure_rolls_back_wipe_and_summary_invalidation() {
         .iter()
         .any(|event| event.kind == RunEventKind::ToolCall && contains(&event.payload, secret)));
 }
+
+#[test]
+fn forgotten_text_is_redacted_from_the_yolo_activity_log() {
+    let mut f = Fixture::new();
+    let c = f.conversation("grokbot");
+    let secret = "Private inference: lives near avenue Alpha.";
+    let id = f.learn(&c, "learn", secret);
+    // Le Mode YOLO est actif par défaut : la commande part sans carte et son résumé entre au journal.
+    f.events(vec![
+        call(
+            "echo",
+            "run_shell",
+            json!({"command":format!("printf '{secret}'"),"cwd":std::env::temp_dir(),"timeout_ms":2000,"output_limit":1024}),
+        ),
+        complete(),
+    ]);
+    f.send(&c, "echo", "Rappelle-le dans une commande.");
+    let logged = |f: &mut Fixture| f.state()["yolo"]["log"].to_string();
+    assert!(logged(&mut f).contains("avenue Alpha"));
+    f.forget("grokbot", &id);
+    let after = logged(&mut f);
+    assert!(!after.contains("avenue Alpha"), "{after}");
+    assert!(after.contains("[redacted]"), "{after}");
+}

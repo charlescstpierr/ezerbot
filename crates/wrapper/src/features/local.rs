@@ -432,46 +432,78 @@ pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<boo
 
 fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result<bool, ApiError> {
     // Guillemets et barres obliques inverses ne changent pas le chemin visé.
-    let flat = |text: &str| {
-        text.chars()
-            .filter(|c| !matches!(c, '\\' | '"' | '\''))
-            .collect::<String>()
-            .to_lowercase()
-    };
-    let command = flat(command);
+    let plain: String = command
+        .chars()
+        .filter(|c| !matches!(c, '\\' | '"' | '\''))
+        .collect();
+    let lower = plain.to_lowercase();
     let data = data_dir(ctx)?;
-    if let Ok(cwd) = absolute(cwd).and_then(|p| p.canonicalize().map_err(io_error)) {
-        if is_app_data(ctx, &cwd)? {
+    let working = absolute(cwd).and_then(|p| p.canonicalize().map_err(io_error));
+    if let Ok(working) = &working {
+        if is_app_data(ctx, working)? {
             return Ok(true);
         }
     }
     let mut named = vec![
-        flat(&data.to_string_lossy()),
+        data.to_string_lossy().to_lowercase(),
         "library/application support/grokbot".to_owned(),
     ];
     if let Some(shown) = ctx.db_path.parent().and_then(Path::to_str) {
         if !shown.is_empty() {
-            named.push(flat(shown));
+            named.push(shown.to_lowercase());
         }
     }
-    if named.iter().any(|path| command.contains(path.as_str())) {
+    if named.iter().any(|path| lower.contains(path.as_str())) {
         return Ok(true);
     }
     // `cd ~/Library/Application Support && cat Grokbot/…` : les deux noms suffisent.
-    if command.contains("application support") && command.contains("grokbot") {
+    if lower.contains("application support") && lower.contains("grokbot") {
         return Ok(true);
     }
-    let companions = ["chatgpt-auth.json", ".secrets.json", "workspace.sqlite"];
-    if companions.iter().any(|name| command.contains(name)) {
+    let companions = [
+        "chatgpt-auth.json",
+        "codex-auth.json",
+        ".secrets.json",
+        "workspace.sqlite",
+    ];
+    if companions.iter().any(|name| lower.contains(name)) {
         return Ok(true);
+    }
+    // Un chemin relatif ou en `~` se juge là où il mène : le dossier de travail
+    // peut être le parent des données (`cat Grokbot/…` depuis Application Support).
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut roots = vec![data.clone()];
+    if let Some(home) = &home {
+        roots.push(home.join("Library/Application Support/Grokbot"));
+    }
+    let roots: Vec<String> = roots
+        .iter()
+        .map(|root| root.to_string_lossy().to_lowercase())
+        .collect();
+    let words: Vec<&str> = plain
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '<' | '>' | '=')
+        })
+        .filter(|word| !word.is_empty() && !word.starts_with('-'))
+        .collect();
+    for word in &words {
+        let Some(target) = resolve_word(word, working.as_deref().ok(), home.as_deref()) else {
+            continue;
+        };
+        let real = target.canonicalize().unwrap_or_else(|_| target.clone());
+        let shown = real.to_string_lossy().to_lowercase();
+        if roots.iter().any(|root| shown.starts_with(root.as_str())) || is_app_data(ctx, &real)? {
+            return Ok(true);
+        }
     }
     // Le trousseau garde les clés du coffre et les jetons des connecteurs.
-    let words: Vec<&str> = command
+    let words: Vec<String> = lower
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
         .filter(|word| !word.is_empty())
+        .map(str::to_owned)
         .collect();
     let keychain = words.iter().enumerate().any(|(index, word)| {
-        (*word == "security" || word.ends_with("/security"))
+        (word == "security" || word.ends_with("/security"))
             && words[index + 1..].iter().any(|next| {
                 next.starts_with("find-")
                     || next.starts_with("dump-")
@@ -481,6 +513,37 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
             })
     });
     Ok(keychain)
+}
+
+/// Le chemin qu'un mot de commande désigne, sans suivre de lien : `~`, `$HOME`,
+/// chemin relatif au dossier de travail, puis `.` et `..` résolus.
+fn resolve_word(word: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    let expanded = if word == "~" || word == "$HOME" || word == "${HOME}" {
+        home?.to_path_buf()
+    } else if let Some(rest) = ["~/", "$HOME/", "${HOME}/"]
+        .iter()
+        .find_map(|prefix| word.strip_prefix(prefix))
+    {
+        home?.join(rest)
+    } else {
+        PathBuf::from(word)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd?.join(expanded)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    Some(resolved)
 }
 
 pub fn granted(ctx: &Context<'_>, call: &ToolCall) -> Result<Option<String>, ApiError> {

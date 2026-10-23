@@ -174,8 +174,11 @@ pub enum AuthorizedBy {
     },
     /// Mode YOLO: the owner switched every approval off, globally or for this
     /// bot. `source` is `global` or `bot`; it records which switch applied.
+    /// `session` lie un geste d'écran à la session vivante à l'admission.
     Yolo {
         source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<u64>,
     },
 }
 
@@ -669,6 +672,11 @@ mod contracts_tests {
             },
             AuthorizedBy::Yolo {
                 source: "global".into(),
+                session: None,
+            },
+            AuthorizedBy::Yolo {
+                source: "bot".into(),
+                session: Some(7),
             },
         ] {
             round_trip(ApprovalCheck::Authorized { by });
@@ -692,11 +700,20 @@ mod contracts_tests {
         assert_eq!(
             serde_json::to_value(ApprovalCheck::Authorized {
                 by: AuthorizedBy::Yolo {
-                    source: "bot".into()
+                    source: "bot".into(),
+                    session: None
                 }
             })
             .unwrap(),
             json!({"status": "authorized", "by": {"kind": "yolo", "source": "bot"}})
+        );
+        assert_eq!(
+            serde_json::to_value(AuthorizedBy::Yolo {
+                source: "global".into(),
+                session: Some(7)
+            })
+            .unwrap(),
+            json!({"kind": "yolo", "source": "global", "session": 7})
         );
     }
 

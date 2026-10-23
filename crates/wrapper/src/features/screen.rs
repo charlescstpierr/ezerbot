@@ -468,10 +468,10 @@ fn verify_human(ctx: &Context<'_>, call: &ToolCall, lease: &Lease) -> Result<(),
         .flatten();
     let authority = raw.and_then(|s| serde_json::from_str::<AuthorizedBy>(&s).ok());
     // Mode YOLO : la session consentie reste exigée ; elle porte Arrêter et Échap.
-    if matches!(authority, Some(AuthorizedBy::Yolo { .. }))
-        && super::yolo::active(ctx.connection, &lease.bot)
-    {
-        return Ok(());
+    if let Some(AuthorizedBy::Yolo { session, .. }) = &authority {
+        if *session == Some(lease.id) && super::yolo::active(ctx.connection, &lease.bot) {
+            return Ok(());
+        }
     }
     if let Some(AuthorizedBy::AllowOnce { request_id }) = authority {
         let binding:Option<String>=ctx.connection.query_row("SELECT c.display_json FROM forms_requests r JOIN forms_resolutions s ON s.resolution_id=r.resolution_id AND s.entry_id=r.entry_id JOIN wrapper_forms_calls c ON c.request_id=r.id JOIN forms_approval_grants g ON g.request_id=r.id WHERE r.id=?1 AND r.run_id=?2 AND r.status='resolved' AND s.submission_id GLOB 'user:*' AND g.tool=?3 AND g.args_digest=?4 AND g.consumed_at IS NOT NULL",params![request_id,ctx.run_id,call.name,grokbot_forms::approvals::args_digest(&call.name,&call.arguments)?],|r|r.get(0)).optional()?;

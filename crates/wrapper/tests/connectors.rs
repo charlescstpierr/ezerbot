@@ -27,6 +27,10 @@ const SLACK_ACCESS: &str = "xoxp-slack-access-secret-never-visible";
 const LINEAR_CLIENT: &str = "linear-public-client-fixture";
 const LINEAR_ACCESS: &str = "lin_oauth_access-secret-never-visible";
 const LINEAR_REFRESH: &str = "lin_refresh_secret-never-visible";
+/// The public client of Ezerbot's Microsoft Entra app, as a build or the judge configures it.
+const MICROSOFT_CLIENT: &str = "11111111-2222-3333-4444-555555555555";
+const MICROSOFT_ACCESS: &str = "EwB-microsoft-access-secret-never-visible";
+const MICROSOFT_REFRESH: &str = "0.AAA-microsoft-refresh-secret-never-visible";
 fn fields_of(url: &str) -> std::collections::HashMap<String, String> {
     url::Url::parse(&format!("http://fixture{url}"))
         .unwrap()
@@ -50,6 +54,85 @@ struct SeenOAuth {
     gmail: GmailScript,
     slack: SlackScript,
     linear: LinearScript,
+    microsoft: MicrosoftScript,
+}
+/// Scripted Microsoft provider: the PKCE exchange, the Graph reads and the mail send.
+#[derive(Default)]
+struct MicrosoftScript {
+    /// The access token the provider still accepts.
+    live: Option<String>,
+    /// The refresh token the provider still accepts: it rotates with every renewal.
+    refresh: Option<String>,
+    refresh_dead: bool,
+    renewals: u32,
+    /// What the token endpoint granted, instead of every permission asked for.
+    granted: Option<String>,
+    /// What a read answers instead of its data.
+    read_reply: Option<(u16, Value)>,
+    /// What `sendMail` answers instead of accepting the mail.
+    send_reply: Option<(u16, Value)>,
+    /// Bodies of the mails the provider accepted, in order.
+    sent: Vec<Value>,
+    /// The first page of the day is not the whole day.
+    more_events: bool,
+    /// The window of each agenda read, as Graph was asked for it.
+    windows: Vec<(String, String)>,
+}
+impl MicrosoftScript {
+    fn graph(&mut self, url: &str, body: &str) -> (u16, Value) {
+        let path = url.split('?').next().unwrap_or("");
+        if path == "/microsoft365/api/me/sendMail" {
+            if let Some(reply) = self.send_reply.clone() {
+                return reply;
+            }
+            self.sent
+                .push(serde_json::from_str(body).unwrap_or(Value::Null));
+            // Graph accepts a mail with an empty 202.
+            return (202, json!(""));
+        }
+        if let Some(reply) = self.read_reply.clone() {
+            return reply;
+        }
+        let fields = fields_of(url);
+        match path {
+            "/microsoft365/api/me" => (
+                200,
+                json!({"displayName":"Charles Test","mail":"charles@atelier.test","userPrincipalName":"charles@atelier.onmicrosoft.com"}),
+            ),
+            "/microsoft365/api/me/mailFolders/inbox/messages" => {
+                let one = |subject: &str, name: &str, address: &str, at: &str, preview: &str| json!({"subject":subject,"from":{"emailAddress":{"name":name,"address":address}},"receivedDateTime":at,"bodyPreview":preview});
+                (
+                    200,
+                    json!({"value":[
+                        one("Facture d’octobre", "Alice Martin", "alice@atelier.test", "2026-10-23T08:15:00Z", "Bonjour, voici la facture."),
+                        one("Réunion de jeudi", "Bruno Petit", "bruno@atelier.test", "2026-10-22T17:40:00Z", "On se voit à 10 h."),
+                        one("Re: Devis", "Chloé Roy", "chloe@atelier.test", "2026-10-22T09:05:00Z", "Le devis est validé."),
+                        one("Invitation : atelier", "Dominique Lac", "dominique@atelier.test", "2026-10-21T14:00:00Z", "Atelier produit mardi."),
+                        one("Bienvenue chez Atelier", "Atelier", "bonjour@atelier.test", "2026-10-20T07:30:00Z", "Votre compte est prêt."),
+                    ]}),
+                )
+            }
+            "/microsoft365/api/me/calendarView" => {
+                let start = fields["startDateTime"].clone();
+                let end = fields["endDateTime"].clone();
+                self.windows.push((start.clone(), end));
+                let first: jiff::Timestamp = start.parse().unwrap();
+                let graph = |at: jiff::Timestamp| json!({"dateTime":at.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000").to_string(),"timeZone":"UTC"});
+                let hour = jiff::SignedDuration::from_hours(1);
+                let mut reply = json!({"value":[
+                    {"subject":"Atelier produit","isAllDay":false,"isCancelled":false,"start":graph(first + hour * 9),"end":graph(first + hour * 10),"location":{"displayName":"Salle Alpha"}},
+                    {"subject":"Anniversaire de Marie","isAllDay":true,"isCancelled":false,"start":graph(first),"end":graph(first + hour * 24),"location":{"displayName":""}},
+                    {"subject":"Rendez-vous annulé","isAllDay":false,"isCancelled":true,"start":graph(first + hour * 11),"end":graph(first + hour * 12),"location":{"displayName":""}},
+                ]});
+                if self.more_events {
+                    reply["@odata.nextLink"] =
+                        json!("https://graph.microsoft.com/v1.0/me/calendarView?$skip=100");
+                }
+                (200, reply)
+            }
+            _ => (404, json!({"error":{"code":"ErrorItemNotFound"}})),
+        }
+    }
 }
 /// Scripted Slack provider: the PKCE exchange, the Web API reads and the revocation.
 #[derive(Default)]
@@ -824,6 +907,62 @@ impl OAuth {
                     } else {
                         (404, json!({}))
                     }
+                } else if url.starts_with("/microsoft365/") {
+                    let challenge = seen.challenge.clone();
+                    let ms = &mut seen.microsoft;
+                    let live = ms
+                        .live
+                        .as_ref()
+                        .is_some_and(|t| auth.as_deref() == Some(format!("Bearer {t}").as_str()));
+                    if url == "/microsoft365/token" {
+                        assert!(
+                            fields.contains_key("scope"),
+                            "a public client names its permissions at the token endpoint"
+                        );
+                        let granted = ms.granted.clone().unwrap_or_else(|| {
+                            "Mail.Read Mail.Send User.Read Calendars.Read profile openid email"
+                                .into()
+                        });
+                        match fields.get("grant_type").map(String::as_str) {
+                            Some("authorization_code") => {
+                                let verifier = fields.get("code_verifier").expect("PKCE verifier");
+                                assert_eq!(
+                                    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                                    challenge
+                                );
+                                ms.live = Some(MICROSOFT_ACCESS.to_owned());
+                                ms.refresh = Some(MICROSOFT_REFRESH.to_owned());
+                                (
+                                    200,
+                                    json!({"access_token":MICROSOFT_ACCESS,"refresh_token":MICROSOFT_REFRESH,"token_type":"Bearer","expires_in":3599,"scope":granted}),
+                                )
+                            }
+                            _ if ms.refresh_dead
+                                || fields.get("refresh_token") != ms.refresh.as_ref() =>
+                            {
+                                (400, json!({"error":"invalid_grant"}))
+                            }
+                            _ => {
+                                ms.renewals += 1;
+                                let renewed = format!("{MICROSOFT_ACCESS}-renewed-{}", ms.renewals);
+                                let rotated =
+                                    format!("{MICROSOFT_REFRESH}-rotated-{}", ms.renewals);
+                                ms.live = Some(renewed.clone());
+                                ms.refresh = Some(rotated.clone());
+                                (
+                                    200,
+                                    json!({"access_token":renewed,"refresh_token":rotated,"token_type":"Bearer","expires_in":3599,"scope":granted}),
+                                )
+                            }
+                        }
+                    } else if !live {
+                        (
+                            401,
+                            json!({"error":{"code":"InvalidAuthenticationToken","message":"Access token is empty."}}),
+                        )
+                    } else {
+                        ms.graph(&url, &body)
+                    }
                 } else if url.starts_with("/linear/") {
                     let challenge = seen.challenge.clone();
                     let linear = &mut seen.linear;
@@ -1157,8 +1296,10 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        let body = if !matches!(id, "notion" | "github" | "gmail" | "slack" | "linear")
-            && self.item(id)["has_client"] != true
+        let body = if !matches!(
+            id,
+            "notion" | "github" | "gmail" | "slack" | "linear" | "microsoft365"
+        ) && self.item(id)["has_client"] != true
         {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
         } else {
@@ -1283,6 +1424,7 @@ impl Drop for Fixture {
         std::env::remove_var("EZERBOT_GOOGLE_CLIENT_ID");
         std::env::remove_var("EZERBOT_SLACK_CLIENT_ID");
         std::env::remove_var("EZERBOT_LINEAR_CLIENT_ID");
+        std::env::remove_var("EZERBOT_MICROSOFT_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
@@ -1399,7 +1541,7 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
 #[test]
 fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     let mut f = Fixture::new();
-    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 8);
+    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 9);
     assert_eq!(f.item("reunions")["name"], "Réunions");
     assert!(f
         .app
@@ -7147,7 +7289,7 @@ fn catalogue_categories_are_required_and_empty_database_never_contacts_providers
     for item in state["mcp"]["catalogue"].as_array().unwrap() {
         assert!(categories.contains(&item["category"].as_str().unwrap()));
         assert_eq!(item["status"], "disconnected");
-        assert!(!["microsoft365", "jira"].contains(&item["id"].as_str().unwrap()));
+        assert!(!["jira"].contains(&item["id"].as_str().unwrap()));
     }
     assert_eq!(f.oauth.count(""), 0);
 }
@@ -8030,4 +8172,825 @@ fn linear_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_na
     g.github_settle(&run);
     assert!(failed(&g, &run).contains("compte Linear a changé"));
     assert_eq!(g.linear_mutations(), 0);
+}
+
+const MICROSOFT_MESSAGES: &str = "outlook_list_recent_messages";
+const MICROSOFT_EVENTS: &str = "outlook_list_events";
+const MICROSOFT_SEND: &str = "outlook_send_mail";
+const MICROSOFT_ACCOUNT: &str = "charles@atelier.test";
+
+impl Fixture {
+    /// The public client of Ezerbot's Microsoft app is build configuration, never a form field.
+    fn with_microsoft_client(&self) {
+        std::env::set_var("EZERBOT_MICROSOFT_CLIENT_ID", MICROSOFT_CLIENT);
+    }
+    /// Connect in one click, finish the browser leg, and enable the tools for the default bot.
+    fn microsoft_connect(&mut self) {
+        self.with_microsoft_client();
+        let run = self.connect("microsoft365");
+        self.decide(&run, json!("allow_once"));
+        assert_eq!(self.item("microsoft365")["status"], "authorizing");
+        assert_eq!(self.callback("microsoft365", false, false), 200);
+        wait("microsoft connected", || {
+            self.item("microsoft365")["status"] == "connected"
+        });
+        let server = self.item("microsoft365")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn microsoft_requests(&self, part: &str) -> Vec<(String, String)> {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, body)| {
+                url.starts_with("/microsoft365/") && (url.contains(part) || body.contains(part))
+            })
+            .cloned()
+            .collect()
+    }
+    fn microsoft_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='microsoft365'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn microsoft_sent(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().microsoft.sent.clone()
+    }
+    /// Mails POSTed to the provider, whatever it answered.
+    fn microsoft_sends(&self) -> usize {
+        self.microsoft_requests("/sendMail").len()
+    }
+    /// A preparation that must be refused before any card opens.
+    fn microsoft_prepare_refused(&mut self, id: &str, arguments: Value) -> String {
+        let conversation = self.github_conversation();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":MICROSOFT_SEND,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Envoie un courriel."}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        self.github_settle(&run);
+        run
+    }
+    fn microsoft_card(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+    /// Nothing of the tokens is in the state, the database, the run or the model's input.
+    fn assert_microsoft_tokens_nowhere(&self, run: &str) {
+        let inputs = format!("{:?}", self.ai.seen.lock().unwrap().bodies);
+        let events = format!("{:?}", store::events(&self.db(), run, 0).unwrap());
+        let database = std::fs::read(&self.path).unwrap();
+        for secret in [MICROSOFT_ACCESS, MICROSOFT_REFRESH, "EwB-microsoft"] {
+            assert!(!inputs.contains(secret), "model input holds {secret}");
+            assert!(!events.contains(secret), "run events hold {secret}");
+            assert!(!database
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn microsoft_card_lists_permissions_and_actions_and_has_no_client_fields() {
+    let mut f = Fixture::new();
+    let item = f.item("microsoft365");
+    assert_eq!(item["name"], "Microsoft 365");
+    assert_eq!(item["category"], "Courriel et agenda");
+    assert_eq!(item["needs_client"], false);
+    assert_eq!(item["configured"], false);
+    assert_eq!(item["redirect_uri"], Value::Null);
+    // « Outlook » finds the card: the catalogue searches the name and the description.
+    assert!(item["description"].as_str().unwrap().contains("Outlook"));
+    assert!(item["unconfigured_message"]
+        .as_str()
+        .unwrap()
+        .contains("client Microsoft 365 d’Ezerbot n’est pas configuré"));
+    for body in [
+        br#"{"id":"microsoft365"}"#.as_slice(),
+        br#"{"id":"microsoft365","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert!(error
+            .message
+            .contains("client Microsoft 365 d’Ezerbot n’est pas configuré"));
+    }
+    assert!(f.microsoft_requests("").is_empty());
+    assert_eq!(f.item("microsoft365")["status"], "disconnected");
+    f.with_microsoft_client();
+    let item = f.item("microsoft365");
+    assert_eq!(item["configured"], true);
+    assert_eq!(item["unconfigured_message"], Value::Null);
+    assert_eq!(
+        item["scopes"],
+        "User.Read Mail.Read Mail.Send Calendars.Read offline_access"
+    );
+    let permissions = item["permissions"].as_str().unwrap();
+    assert!(permissions.contains("Lecture de la boîte de réception et de l’agenda Outlook"));
+    assert!(permissions.contains("carte brouillon"));
+    assert!(permissions.contains("n’écrit rien dans le calendrier"));
+    let typed = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"microsoft365","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert!(typed
+        .message
+        .contains("ni identifiant ni secret saisis ici"));
+    assert!(f.microsoft_secret().is_none());
+}
+
+#[test]
+fn microsoft_connects_with_the_public_client_and_pkce_and_keeps_the_tokens_in_the_vault() {
+    let mut f = Fixture::new();
+    f.with_microsoft_client();
+    let run = f.connect("microsoft365");
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    let card = &request["arguments"]["catalogue"];
+    assert_eq!(card["service"], "Microsoft 365");
+    assert!(card["connexion"]
+        .as_str()
+        .unwrap()
+        .contains("conservés dans le trousseau"));
+    f.decide(&run, json!("allow_once"));
+    let item = f.item("microsoft365");
+    assert_eq!(item["status"], "authorizing");
+    let authorize = url::Url::parse(item["authorization_url"].as_str().unwrap()).unwrap();
+    let query: std::collections::HashMap<_, _> = authorize.query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], MICROSOFT_CLIENT);
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(
+        query["scope"],
+        "User.Read Mail.Read Mail.Send Calendars.Read offline_access"
+    );
+    assert_eq!(query["prompt"], "select_account");
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(query["redirect_uri"].ends_with("/oauth/microsoft365/callback"));
+    assert!(!query.contains_key("client_secret"));
+    assert_eq!(f.callback("microsoft365", false, false), 200);
+    wait("microsoft connected", || {
+        f.item("microsoft365")["status"] == "connected"
+    });
+    let exchanges = f.microsoft_requests("/token");
+    assert_eq!(exchanges.len(), 1);
+    let sent: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(exchanges[0].1.as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(sent["client_id"], MICROSOFT_CLIENT);
+    assert!(sent.contains_key("code_verifier"));
+    assert!(!sent.contains_key("client_secret"), "{sent:?}");
+    // The card shows the account Graph named, and the actions, reads apart from effects.
+    let item = f.item("microsoft365");
+    assert_eq!(item["account"], MICROSOFT_ACCOUNT);
+    assert_eq!(item["has_tokens"], true);
+    assert_eq!(item["can_refresh"], true);
+    let tools: Vec<_> = item["server"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(tools, ["list_recent_messages", "list_events", "send_mail"]);
+    let kept = f.microsoft_secret().unwrap();
+    assert_eq!(kept["ACCESS_TOKEN"], MICROSOFT_ACCESS);
+    assert_eq!(kept["REFRESH_TOKEN"], MICROSOFT_REFRESH);
+    assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
+    let shown = f.state().to_string();
+    assert!(!shown.contains(MICROSOFT_ACCESS) && !shown.contains(MICROSOFT_REFRESH));
+}
+
+#[test]
+fn microsoft_accepts_the_permissions_it_is_granted_in_any_case_and_without_offline_access() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().microsoft.granted = Some(
+        "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send user.read CALENDARS.READ openid profile"
+            .into(),
+    );
+    f.microsoft_connect();
+    assert_eq!(f.item("microsoft365")["status"], "connected");
+}
+
+#[test]
+fn microsoft_refuses_a_grant_that_lacks_a_permission_and_keeps_no_token() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().microsoft.granted = Some("User.Read Mail.Read".into());
+    f.with_microsoft_client();
+    let run = f.connect("microsoft365");
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.callback("microsoft365", false, false), 400);
+    wait("microsoft reconnect", || {
+        f.item("microsoft365")["status"] == "reconnect"
+    });
+    assert!(
+        f.microsoft_secret().is_none(),
+        "a refused grant keeps no token"
+    );
+    assert!(f.microsoft_requests("/api/").is_empty());
+}
+
+#[test]
+fn microsoft_reads_the_latest_mails_and_tomorrows_events_without_a_card() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let run = f.github_call("outlook-messages", MICROSOFT_MESSAGES, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], MICROSOFT_ACCOUNT);
+    let mails = output["courriels"].as_array().unwrap();
+    assert_eq!(mails.len(), 5);
+    assert_eq!(mails[0]["objet"], "Facture d’octobre");
+    assert_eq!(mails[0]["expediteur"], "Alice Martin");
+    assert_eq!(mails[0]["adresse"], "alice@atelier.test");
+    assert_eq!(mails[0]["recu"], "2026-10-23 08:15 UTC");
+    assert_eq!(mails[4]["objet"], "Bienvenue chez Atelier");
+    let text = output["texte"].as_str().unwrap();
+    for subject in [
+        "Facture d’octobre",
+        "Réunion de jeudi",
+        "Re: Devis",
+        "Invitation : atelier",
+        "Bienvenue chez Atelier",
+    ] {
+        assert!(text.contains(subject), "{subject}: {text}");
+    }
+    assert!(
+        text.contains("1. [2026-10-23 08:15 UTC] Alice Martin <alice@atelier.test> · Facture d’octobre · Bonjour, voici la facture."),
+        "{text}"
+    );
+    // Five messages, newest first, from the inbox only.
+    let asked = f.microsoft_requests("/inbox/messages");
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.contains("$top=5"), "{}", asked[0].0);
+    assert!(asked[0].0.contains("receivedDateTime%20desc"));
+    f.assert_microsoft_tokens_nowhere(&run);
+
+    let run = f.github_call("outlook-events", MICROSOFT_EVENTS, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], MICROSOFT_ACCOUNT);
+    let (start, end) = f.oauth.seen.lock().unwrap().microsoft.windows[0].clone();
+    // The window is tomorrow, from one local midnight to the next.
+    let zone = jiff::tz::TimeZone::system();
+    let (start, end): (jiff::Timestamp, jiff::Timestamp) =
+        (start.parse().unwrap(), end.parse().unwrap());
+    let local = start.to_zoned(zone.clone());
+    assert_eq!(local.time(), jiff::civil::time(0, 0, 0, 0));
+    let today = jiff::Timestamp::now().to_zoned(zone.clone()).date();
+    assert_eq!(local.date(), today.tomorrow().unwrap());
+    assert_eq!(
+        end.to_zoned(zone.clone()).date(),
+        local.date().tomorrow().unwrap()
+    );
+    assert_eq!(output["jour"], local.date().to_string());
+    let zone_name = zone.iana_name().unwrap_or("UTC");
+    assert_eq!(output["fuseau"], zone_name);
+    let events = output["rendez_vous"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "a cancelled event is not a rendez-vous");
+    assert_eq!(events[0]["titre"], "Atelier produit");
+    assert_eq!(events[0]["lieu"], "Salle Alpha");
+    assert_eq!(events[0]["journee"], false);
+    assert_eq!(events[1]["titre"], "Anniversaire de Marie");
+    assert_eq!(events[1]["journee"], true);
+    let hours = |at: jiff::Timestamp| at.to_zoned(zone.clone()).strftime("%H:%M").to_string();
+    let hour = jiff::SignedDuration::from_hours(1);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains(&format!(
+            "1. {}–{} · Atelier produit · Salle Alpha",
+            hours(start + hour * 9),
+            hours(start + hour * 10)
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("2. toute la journée · Anniversaire de Marie"),
+        "{text}"
+    );
+    assert!(!text.contains("annulé"), "{text}");
+    assert!(
+        text.contains(&format!("Rendez-vous de demain ({})", local.date())),
+        "{text}"
+    );
+    assert_eq!(output["autres_rendez_vous"], false);
+    f.assert_microsoft_tokens_nowhere(&run);
+
+    // Today, and a day that holds more than the page says so.
+    f.oauth.seen.lock().unwrap().microsoft.more_events = true;
+    let run = f.github_call(
+        "outlook-events-today",
+        MICROSOFT_EVENTS,
+        json!({"jour":"aujourd_hui"}),
+    );
+    let output = done(&f, &run);
+    assert_eq!(output["autres_rendez_vous"], true);
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("Rendez-vous de aujourd’hui"));
+    let windows = f.oauth.seen.lock().unwrap().microsoft.windows.clone();
+    let first: jiff::Timestamp = windows[1].0.parse().unwrap();
+    assert_eq!(first.to_zoned(zone).date(), today);
+    // Reading changes nothing, and writes nothing in the calendar.
+    assert_eq!(f.microsoft_sends(), 0);
+    assert!(f
+        .microsoft_requests("/api/")
+        .iter()
+        .all(|(url, _)| !url.contains("/events") || url.contains("calendarView")));
+    assert!(!f.state().to_string().contains(MICROSOFT_ACCESS));
+}
+
+#[test]
+fn microsoft_says_what_a_refused_read_means() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let run = f.github_call("outlook-bad-day", MICROSOFT_EVENTS, json!({"jour":"hier"}));
+    assert!(failed(&f, &run).contains("Jour invalide"));
+    let run = f.github_call("outlook-bad-arg", MICROSOFT_MESSAGES, json!({"limit":50}));
+    assert!(failed(&f, &run).contains("ne prend aucun argument"));
+    // Only the sign-in looked at Graph (the account), and the bad calls reached no one.
+    let sign_in = f.microsoft_requests("/api/").len();
+    assert_eq!(sign_in, 1);
+    f.oauth.seen.lock().unwrap().microsoft.read_reply = Some((
+        403,
+        json!({"error":{"code":"ErrorAccessDenied","message":"Access is denied."}}),
+    ));
+    let run = f.github_call("outlook-denied", MICROSOFT_MESSAGES, json!({}));
+    let reason = failed(&f, &run);
+    assert!(
+        reason.contains("Microsoft refuse l’accès à la boîte de réception"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("administrateur doit autoriser Ezerbot"),
+        "{reason}"
+    );
+    f.oauth.seen.lock().unwrap().microsoft.read_reply = Some((
+        429,
+        json!({"error":{"code":"TooManyRequests","message":"Slow down."}}),
+    ));
+    let run = f.github_call("outlook-slow", MICROSOFT_EVENTS, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft limite le débit"));
+    f.oauth.seen.lock().unwrap().microsoft.read_reply = Some((503, json!({})));
+    let run = f.github_call("outlook-down", MICROSOFT_EVENTS, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft 365 est injoignable"));
+    assert_eq!(f.item("microsoft365")["status"], "connected");
+}
+
+#[test]
+fn microsoft_revoked_access_asks_to_reconnect() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    f.oauth.seen.lock().unwrap().microsoft.live = None;
+    let run = f.github_call("outlook-revoked", MICROSOFT_MESSAGES, json!({}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Microsoft 365"), "{reason}");
+    assert_eq!(f.item("microsoft365")["status"], "reconnect");
+}
+
+#[test]
+fn microsoft_renews_an_expired_token_with_the_client_id_alone_and_asks_to_reconnect_when_it_cannot()
+{
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='microsoft365'",
+            [],
+        )
+        .unwrap();
+    let run = f.github_call("outlook-renew", MICROSOFT_MESSAGES, json!({}));
+    done(&f, &run);
+    assert_eq!(f.oauth.seen.lock().unwrap().microsoft.renewals, 1);
+    let renewal = f
+        .microsoft_requests("/token")
+        .into_iter()
+        .map(|(_, body)| {
+            url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect::<std::collections::HashMap<String, String>>()
+        })
+        .find(|fields| fields["grant_type"] == "refresh_token")
+        .unwrap();
+    assert_eq!(renewal["client_id"], MICROSOFT_CLIENT);
+    assert!(!renewal.contains_key("client_secret"));
+    assert_eq!(f.item("microsoft365")["account"], MICROSOFT_ACCOUNT);
+    // The refresh token rotated: the vault holds the new one, and the next renewal presents it.
+    let kept = f.microsoft_secret().unwrap();
+    assert_eq!(
+        kept["REFRESH_TOKEN"],
+        format!("{MICROSOFT_REFRESH}-rotated-1")
+    );
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='microsoft365'",
+            [],
+        )
+        .unwrap();
+    let run = f.github_call("outlook-renew-2", MICROSOFT_MESSAGES, json!({}));
+    done(&f, &run);
+    assert_eq!(f.oauth.seen.lock().unwrap().microsoft.renewals, 2);
+    // A refresh that fails never reuses the expired access.
+    f.oauth.seen.lock().unwrap().microsoft.refresh_dead = true;
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='microsoft365'",
+            [],
+        )
+        .unwrap();
+    let before = f.microsoft_requests("/inbox/messages").len();
+    let run = f.github_call("outlook-dead", MICROSOFT_MESSAGES, json!({}));
+    assert!(failed(&f, &run).contains("Reconnectez Microsoft 365"));
+    assert_eq!(f.item("microsoft365")["status"], "reconnect");
+    assert_eq!(f.microsoft_requests("/inbox/messages").len(), before);
+}
+
+#[test]
+fn microsoft_disabled_tools_are_not_invocable_and_nothing_works_after_disconnect() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let server = f.item("microsoft365")["server"]["id"].clone();
+    let scoped = |f: &Fixture| {
+        grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+            connection: &f.db(),
+            provider: &f.provider,
+            db_path: &f.path,
+            now_ms: 0,
+            bot_id: Some("grokbot"),
+            conversation_id: None,
+            run_id: None,
+        })
+        .into_iter()
+        .filter(|t| t.name.starts_with("outlook_"))
+        .map(|t| (t.name, t.requires_approval))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        scoped(&f),
+        [
+            (MICROSOFT_MESSAGES.to_owned(), false),
+            (MICROSOFT_EVENTS.to_owned(), false),
+            (MICROSOFT_SEND.to_owned(), true),
+        ]
+    );
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":false}),
+    );
+    assert!(scoped(&f).is_empty());
+    let run = f.github_call("outlook-off", MICROSOFT_MESSAGES, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft 365 n’est pas activé pour ce bot"));
+    let run = f.microsoft_prepare_refused(
+        "outlook-off-draft",
+        json!({"to":["bruno@atelier.test"],"subject":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Microsoft 365 n’est pas activé pour ce bot"));
+    assert_eq!(f.microsoft_sends(), 0);
+
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":true}),
+    );
+    let run = f.post("/api/connectors/disconnect", json!({"id":"microsoft365"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    let item = f.item("microsoft365");
+    assert_eq!(item["status"], "disconnected");
+    // Microsoft has no revocation for a public client: the card says so rather than claiming it.
+    assert_eq!(item["warning"], true);
+    assert!(f.microsoft_requests("/revoke").is_empty());
+    assert!(f.microsoft_secret().is_none());
+    assert!(scoped(&f).is_empty());
+    let reads = f.microsoft_requests("/api/").len();
+    let run = f.github_call("outlook-after", MICROSOFT_MESSAGES, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft 365 est déconnecté"));
+    let run = f.github_call("outlook-after-events", MICROSOFT_EVENTS, json!({}));
+    assert!(failed(&f, &run).contains("Microsoft 365 est déconnecté"));
+    let run = f.microsoft_prepare_refused(
+        "outlook-after-draft",
+        json!({"to":["bruno@atelier.test"],"subject":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Microsoft 365 est déconnecté"));
+    assert_eq!(
+        f.microsoft_requests("/api/").len(),
+        reads,
+        "no call after disconnect"
+    );
+}
+
+#[test]
+fn microsoft_mail_waits_on_a_draft_card_and_cancel_sends_nothing() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let sign_in = f.microsoft_requests("/api/").len();
+    let (run, card) = f.github_prepare(
+        "outlook-draft-1",
+        MICROSOFT_SEND,
+        json!({"to":["bruno@atelier.test","Bruno@Atelier.test"],"cc":["alice@atelier.test","bruno@atelier.test"],"subject":"Point de jeudi","body":"Bonjour Bruno,\nÀ jeudi."}),
+    );
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Microsoft 365");
+    assert_eq!(draft["action"], "Envoyer un courriel");
+    assert_eq!(draft["de"], MICROSOFT_ACCOUNT);
+    assert_eq!(draft["a"], json!(["bruno@atelier.test"]));
+    assert_eq!(draft["cc"], json!(["alice@atelier.test"]));
+    assert_eq!(draft["objet"], "Point de jeudi");
+    assert_eq!(draft["texte"], "Bonjour Bruno,\nÀ jeudi.");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.microsoft_sends(), 0, "nothing before the click");
+    assert_eq!(
+        f.microsoft_requests("/api/").len(),
+        sign_in,
+        "preparing the card calls no provider"
+    );
+    // There is no “Toujours”.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("outlook-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    // Annuler: zero mail, and the card says so.
+    f.github_resolve(&card, "outlook-cancel-1", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.microsoft_sends(), 0);
+    assert!(f.microsoft_sent().is_empty());
+    assert_eq!(f.microsoft_card(&card)["status"]["status"], "denied");
+}
+
+#[test]
+fn microsoft_mail_is_sent_once_from_the_corrected_subject_and_body() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let (run, card) = f.github_prepare(
+        "outlook-draft-2",
+        MICROSOFT_SEND,
+        json!({"to":["moi","bruno@atelier.test"],"cc":["alice@atelier.test"],"subject":"Première version","body":"Brouillon"}),
+    );
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    assert_eq!(
+        card["arguments"]["brouillon"]["a"],
+        json!([MICROSOFT_ACCOUNT, "bruno@atelier.test"])
+    );
+    // A blank subject is refused on the card, and nothing is sent.
+    assert_eq!(
+        f.github_resolve_issue(
+            &card,
+            "outlook-blank",
+            json!("allow_once"),
+            Some("  "),
+            None
+        )
+        .unwrap_err()
+        .status,
+        400
+    );
+    assert_eq!(f.microsoft_sends(), 0);
+    f.github_resolve_issue(
+        &card,
+        "outlook-send-1",
+        json!("allow_once"),
+        Some("Objet validé"),
+        Some("Corps validé"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], MICROSOFT_ACCOUNT);
+    assert_eq!(output["objet"], "Objet validé");
+    assert_eq!(output["texte"], "Corps validé");
+    assert_eq!(
+        output["a"],
+        json!([MICROSOFT_ACCOUNT, "bruno@atelier.test"])
+    );
+    assert_eq!(
+        f.microsoft_sent(),
+        vec![json!({
+            "message":{
+                "subject":"Objet validé",
+                "body":{"contentType":"Text","content":"Corps validé"},
+                "toRecipients":[
+                    {"emailAddress":{"address":MICROSOFT_ACCOUNT}},
+                    {"emailAddress":{"address":"bruno@atelier.test"}}
+                ],
+                "ccRecipients":[{"emailAddress":{"address":"alice@atelier.test"}}],
+            },
+            "saveToSentItems":true,
+        })]
+    );
+    let settled = f.microsoft_card(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["objet"], "Objet validé");
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Corps validé");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+    // A second Envoyer never sends again.
+    f.github_resolve_issue(
+        &card,
+        "outlook-send-1",
+        json!("allow_once"),
+        Some("Autre"),
+        Some("Autre corps"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "outlook-send-2",
+            json!("allow_once"),
+            Some("Autre"),
+            None
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.microsoft_sent().len(), 1);
+    assert_eq!(f.microsoft_sends(), 1);
+    // The model learned what left, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("Objet validé"));
+    f.assert_microsoft_tokens_nowhere(&run);
+    // An empty body is allowed, and the mail still leaves once.
+    let (run, card) = f.github_prepare(
+        "outlook-draft-3",
+        MICROSOFT_SEND,
+        json!({"to":["bruno@atelier.test"],"subject":"Sans corps"}),
+    );
+    assert_eq!(card["arguments"]["brouillon"]["texte"], "");
+    f.github_resolve(&card, "outlook-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    done(&f, &run);
+    assert_eq!(f.microsoft_sent().len(), 2);
+}
+
+#[test]
+fn microsoft_mail_refuses_a_bad_draft_without_a_card() {
+    let mut f = Fixture::new();
+    let run = f.microsoft_prepare_refused(
+        "outlook-not-connected",
+        json!({"to":["bruno@atelier.test"],"subject":"x"}),
+    );
+    assert!(failed(&f, &run).contains("Microsoft 365 n’est pas connecté"));
+    f.microsoft_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let too_many: Vec<String> = (0..21).map(|n| format!("p{n}@atelier.test")).collect();
+    let cases = [
+        json!({"to":["pas une adresse"],"subject":"x"}),
+        json!({"to":["Bruno <bruno@atelier.test>"],"subject":"x"}),
+        json!({"to":["bruno@atelier.test,alice@atelier.test"],"subject":"x"}),
+        json!({"to":[],"subject":"x"}),
+        json!({"to":["bruno@atelier.test"],"subject":"   "}),
+        json!({"to":["bruno@atelier.test"],"subject":"Deux\nlignes"}),
+        json!({"to":["bruno@atelier.test"],"subject":"x","body":"Bonjour\u{7}"}),
+        json!({"to":["bruno@atelier.test"],"subject":"x".repeat(256)}),
+        json!({"to":["bruno@atelier.test"],"subject":"x","body":"x".repeat(65_537)}),
+        json!({"to":too_many,"subject":"x"}),
+        json!({"to":["bruno@atelier.test"],"subject":"x","compte":"autre@atelier.test"}),
+        json!({"to":["bruno@atelier.test"],"subject":"x","bcc":["alice@atelier.test"]}),
+    ];
+    for (index, arguments) in cases.into_iter().enumerate() {
+        let run = f.microsoft_prepare_refused(&format!("outlook-bad-{index}"), arguments);
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{index}"
+        );
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.microsoft_sends(), 0);
+}
+
+#[test]
+fn microsoft_mail_shows_refused_rate_limited_and_unconfirmed_and_never_sends_twice() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let cases = [
+        (
+            "refused",
+            (
+                400,
+                json!({"error":{"code":"ErrorInvalidRecipients","message":"bad"}}),
+            ),
+            "Aucun courriel n’est parti",
+        ),
+        (
+            "rate_limited",
+            (
+                429,
+                json!({"error":{"code":"TooManyRequests","message":"slow"}}),
+            ),
+            "Aucun courriel n’est parti",
+        ),
+        ("unconfirmed", (503, json!({})), "est peut-être parti"),
+    ];
+    let mut calls = 0;
+    for (state, reply, said) in cases {
+        f.oauth.seen.lock().unwrap().microsoft.send_reply = Some(reply);
+        let id = format!("outlook-state-{state}");
+        let (run, card) = f.github_prepare(
+            &id,
+            MICROSOFT_SEND,
+            json!({"to":["bruno@atelier.test"],"subject":"Bonjour","body":"Texte"}),
+        );
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(said), "{state}: {reason}");
+        calls += 1;
+        assert_eq!(f.microsoft_sends(), calls, "{state}");
+        let shown = f.microsoft_card(&card);
+        assert_eq!(shown["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(shown["publication_result"]["status"], "failed");
+        // Never silent, never retried: the run is over and the card is spent.
+        f.app.tick(0);
+        assert_eq!(f.microsoft_sends(), calls, "{state} was sent again");
+        assert!(f.microsoft_sent().is_empty(), "{state} counted as a mail");
+    }
+}
+
+#[test]
+fn microsoft_mail_is_refused_after_a_changed_account() {
+    let mut f = Fixture::new();
+    f.microsoft_connect();
+    let (run, card) = f.github_prepare(
+        "outlook-draft-6",
+        MICROSOFT_SEND,
+        json!({"to":["bruno@atelier.test"],"subject":"Bonjour"}),
+    );
+    f.db()
+        .execute("UPDATE wrapper_connector_catalogue SET account_email='autre@atelier.test' WHERE id='microsoft365'", [])
+        .unwrap();
+    f.github_resolve(&card, "outlook-send-5", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("compte Microsoft 365 a changé"));
+    assert_eq!(f.microsoft_sends(), 0);
+}
+
+#[test]
+fn microsoft_mail_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_name() {
+    let mut g = Fixture::new();
+    g.microsoft_connect();
+    let (run, card) = g.github_prepare(
+        "outlook-draft-7",
+        MICROSOFT_SEND,
+        json!({"to":["bruno@atelier.test"],"subject":"Bonjour"}),
+    );
+    g.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET generation=generation+1 WHERE id='microsoft365'",
+            [],
+        )
+        .unwrap();
+    g.github_resolve(&card, "outlook-send-6", json!("allow_once"), None)
+        .unwrap();
+    g.github_settle(&run);
+    assert!(failed(&g, &run).contains("compte Microsoft 365 a changé"));
+    assert_eq!(g.microsoft_sends(), 0);
 }

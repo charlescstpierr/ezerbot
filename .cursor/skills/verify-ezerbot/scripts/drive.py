@@ -729,7 +729,9 @@ def late_ask(evidence: Path) -> dict:
           const buttons = card ? [...card.querySelectorAll("button")].map((node) => node.textContent) : [];
           const text = document.body.innerText;
           if (!card || !buttons.includes("Autoriser une fois") || !text.includes("J’attends son accord pour envoyer le résumé.")) return null;
-          return {ok: true, buttons, sent: text.includes("Résumé envoyé")};
+          // La carte montre la commande (« Résumé envoyé » y figure) : seule une carte d'outil porte un résultat.
+          const results = [...document.querySelectorAll('[data-card-kind="tool"]')].filter((node) => node.innerText.includes("Résumé envoyé"));
+          return {ok: true, buttons, sent: results.length > 0};
         }""",
         "la carte n'attend pas après la fin du tour du bot",
         timeout=40,
@@ -783,7 +785,7 @@ def late_step(evidence: Path, index: int) -> None:
           const card = document.querySelector('[data-card-kind="approval"][data-request-status="expired"]');
           if (!card) return null;
           card.scrollIntoView({block: "start"});
-          return {ok: true, card: card.innerText, grey: card.classList.contains("gb-approval-expired"), buttons: card.querySelectorAll("button").length, sent: document.body.innerText.includes("Résumé envoyé") || document.body.innerText.includes("Tu as approuvé")};
+          return {ok: true, card: card.innerText, grey: card.classList.contains("gb-approval-expired"), buttons: card.querySelectorAll("button").length, sent: [...document.querySelectorAll('[data-card-kind="tool"]')].some((node) => node.innerText.includes("Résumé envoyé")) || document.body.innerText.includes("Tu as approuvé")};
         }""",
         "la carte n'est pas Expirée",
         timeout=40,

@@ -51,3 +51,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Appel vocal](./voix-appel.md) couvre l’appel en direct : la phrase de transmission de l’audio, le transcript affiché ou masqué, la voix du bot coupée par la parole ou Échap, et le transcript rangé dans le fil.
 - [Tâches de fond](./taches-de-fond.md) couvre la carte d’une commande en arrière-plan : la saisie d’une ligne sur son entrée standard, sa recopie dans la sortie, le refus après Terminée et sur une invite de mot de passe.
 - [Répondre en fil](./reponse-fil.md) couvre l’entrée « Répondre en fil » du menu d’un message, le sous-fil lié avec son bandeau, la réponse du bot qui tient compte du message parent et le retour au fil principal.
+- [Approbation non bloquante](./approbation-non-bloquante.md) couvre le réglage « Continuer sans attendre mes approbations » dans Paramètres : l’état par défaut, la durée de validité, le rappel et l’état coupé où les choix sont grisés.

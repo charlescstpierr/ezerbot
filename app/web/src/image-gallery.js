@@ -66,13 +66,31 @@ function codeRanges(body) {
   let textStart = 0;
   for (const line of body.split("\n")) {
     const end = start + line.length + 1;
-    if (!fence) {
-      const opening = line.match(/^[ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$/);
-      if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
-        inlineCodeRanges(body.slice(textStart, start), textStart, ranges);
-        fence = { char: opening[1][0], size: opening[1].length, start };
+    let rest = line;
+    if (fence) {
+      const quote = fence.quotes ? line.match(new RegExp(`^[ \\t]*(?:>[ \\t]?){${fence.quotes}}`)) : [""];
+      rest = quote ? line.slice(quote[0].length) : null;
+      if (rest !== null && fence.indent && rest.trim() && rest.match(/^[ \t]*/)[0].length < fence.indent) rest = null;
+      if (rest === null) {
+        ranges.push([fence.start, start]);
+        textStart = start;
+        fence = null;
+        rest = line;
       }
-    } else if (new RegExp(`^[ \\t]*(?:>[ \\t]*)*\\${fence.char}{${fence.size},}[ \\t]*$`).test(line)) {
+    }
+    if (!fence) {
+      const opening = rest.match(/^((?:[ \t]*(?:>[ \t]?)*))([ \t]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)*)(`{3,}|~{3,})(.*)$/);
+      if (opening && !(opening[3][0] === "`" && opening[4].includes("`"))) {
+        inlineCodeRanges(body.slice(textStart, start), textStart, ranges);
+        fence = {
+          char: opening[3][0],
+          size: opening[3].length,
+          start,
+          quotes: (opening[1].match(/>/g) || []).length,
+          indent: /[-+*\d]/.test(opening[2]) ? opening[2].length : 0,
+        };
+      }
+    } else if (new RegExp(`^[ \\t]*\\${fence.char}{${fence.size},}[ \\t]*$`).test(rest)) {
       ranges.push([fence.start, end]);
       textStart = end;
       fence = null;

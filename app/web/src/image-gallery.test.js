@@ -366,6 +366,22 @@ test("a fence opened on a list item closes on its own indented fence and spares 
   assert.equal(images(`- \`\`\`\n  ${sample}`).length, 0, "a list fence still streaming is code to the end");
 });
 
+test("a fence ends with its quote or list item, so an image after the container is still a thumbnail", () => {
+  const sample = "![x](/api/attachments/abc)";
+  const result = "![result](/api/generated/result.png)";
+  const urls = (body) => gallery.galleryImages({ body }, { markdown: true }).map((entry) => entry.url);
+  const after = ["/api/generated/result.png"];
+  assert.deepEqual(urls(`> \`\`\`text\n> ${sample}\n\n${result}`), after, "blockquote ended by a blank line");
+  assert.deepEqual(urls(`> \`\`\`text\n> ${sample}\n${result}`), after, "blockquote ended by a plain line");
+  assert.deepEqual(urls(`- \`\`\`text\n  ${sample}\n\n${result}`), after, "list item ended by a dedented line");
+  assert.deepEqual(urls(`- \`\`\`text\n  ${sample}\n- suivant ${result}`), after, "next list item");
+  assert.deepEqual(urls(`1. \`\`\`\n   ${sample}\n\n   \n   ${sample}\n\n${result}`), after, "blank lines stay inside the item");
+  assert.deepEqual(urls(`> - ~~~\n>   ${sample}\n\n${result}`), after, "list inside a quote");
+  assert.equal(urls(`- \`\`\`\n  ${sample}\n\n  ${sample}`).length, 0, "a blank line does not end a list item");
+  assert.equal(urls(`> \`\`\`\n> ${sample}\n>\n> ${sample}`).length, 0, "an empty quote line does not end the quote");
+  assert.equal(gallery.proseWithoutGallery(`- \`\`\`\n  ${sample}\n\n${result}`, gallery.galleryImages({ body: `- \`\`\`\n  ${sample}\n\n${result}` }, { markdown: true })), `- \`\`\`\n  ${sample}`);
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

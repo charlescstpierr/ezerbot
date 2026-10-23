@@ -47,6 +47,32 @@ const DETAIL_CHARS: usize = 20_000;
 pub const PROTECTED: &str =
     "Mode YOLO : les données et les identifiants d’Ezerbot restent hors de portée des outils.";
 
+static CONTROL_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+/// Le port d'écoute de l'API de contrôle de cette instance (et celui de l'accès
+/// iPhone) : le shell du Mode YOLO ne doit pas l'atteindre.
+pub fn register_control_port(port: u16) {
+    if let Ok(mut ports) = CONTROL_PORTS.lock() {
+        if port != 0 && !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+}
+
+/// Vrai si le texte d'une commande contient un de ces ports comme nombre entier.
+pub fn names_control_port(command: &str) -> bool {
+    let ports = CONTROL_PORTS.lock().map(|p| p.clone()).unwrap_or_default();
+    ports.iter().any(|port| {
+        let digits = port.to_string();
+        command.match_indices(&digits).any(|(at, found)| {
+            let before = command[..at].chars().next_back();
+            let after = command[at + found.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_digit())
+                && !after.is_some_and(|c| c.is_ascii_digit())
+        })
+    })
+}
+
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Une base neuve ou existante reçoit le mode YOLO une seule fois ; le choix
     // « Demander avant d'agir » est ensuite conservé tel quel.

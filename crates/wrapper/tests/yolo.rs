@@ -564,6 +564,101 @@ fn the_keychain_is_refused_by_the_kernel_however_the_command_is_spelled() {
     }
 }
 
+/// Un auditeur local qui compte les connexions reçues.
+fn listener() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = hits.clone();
+    std::thread::spawn(move || {
+        for stream in socket.incoming() {
+            if stream.is_ok() {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+    (port, hits)
+}
+
+#[test]
+fn a_command_that_names_the_wrapper_port_is_refused_before_it_runs() {
+    let mut f = Fixture::new();
+    let (port, hits) = listener();
+    grokbot_wrapper::features::yolo::register_control_port(port);
+    for (id, command) in [
+        (
+            "curl",
+            format!("curl -s --max-time 2 http://127.0.0.1:{port}/api/secrets"),
+        ),
+        ("nc", format!("nc -z localhost {port}")),
+        (
+            "script",
+            format!("printf 'GET /' > req.txt; cat req.txt | nc 127.0.0.1 {port}"),
+        ),
+    ] {
+        f.send(id, "run_shell", f.shell(&command));
+        f.finish(id);
+        assert!(f.requests(id).is_empty());
+        assert_eq!(f.outcome(id)["reason"], PROTECTED, "{id}");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // Un autre nombre qui contient les mêmes chiffres n'est pas ce port.
+    let out = f.runs_without_a_card("autre", "run_shell", f.shell(&format!("printf {port}0")));
+    assert_eq!(out["status"], "done", "{out}");
+}
+
+/// Le texte ne nomme pas le port (calculé par le shell) : c'est le noyau qui refuse
+/// toute connexion locale au shell YOLO et à ses enfants.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_kernel_refuses_a_local_connection_even_when_the_port_is_computed() {
+    let mut f = Fixture::new();
+    let (port, hits) = listener();
+    let low = port - 1000;
+    for (id, command) in [
+        (
+            "calcule-nc",
+            format!("P=$(({low}+1000)); nc -z 127.0.0.1 $P; echo nc=$?"),
+        ),
+        (
+            "calcule-curl",
+            format!("P=$(({low}+1000)); curl -s --max-time 2 http://localhost:$P/; echo curl=$?"),
+        ),
+    ] {
+        let out = f.runs_without_a_card(id, "run_shell", f.shell(&command));
+        assert_eq!(out["status"], "done", "{id}: {out}");
+        let shown = out["output"]["stdout"].as_str().unwrap_or("");
+        assert!(
+            !shown.contains("nc=0") && !shown.contains("curl=0"),
+            "{id}: {out}"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "le shell a atteint un service local"
+    );
+    // Sans le sandbox (hors YOLO), la même connexion aboutit : la référence.
+    let plain = std::process::Command::new("/usr/bin/nc")
+        .args(["-z", "127.0.0.1", &port.to_string()])
+        .status()
+        .unwrap();
+    assert!(plain.success());
+}
+
+#[test]
+fn a_trapped_wildcard_in_a_command_does_not_hold_the_admission_for_long() {
+    let mut f = Fixture::new();
+    let trap = format!("ls \"{}x/*/*/z\"", "*".repeat(100));
+    let started = std::time::Instant::now();
+    f.send("piege", "run_shell", f.shell(&trap));
+    f.finish("piege");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(f.requests("piege").is_empty());
+}
+
 #[test]
 fn a_global_refusal_of_the_shell_also_stops_commands_no_always_rule_could_cover() {
     let mut f = Fixture::new();

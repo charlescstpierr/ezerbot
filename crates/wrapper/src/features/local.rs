@@ -513,6 +513,11 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
             return Ok(true);
         }
     }
+    // L'API de contrôle du wrapper écoute sur un port local connu : une commande qui le
+    // vise (curl, nc, un script) est refusée avant même le sandbox.
+    if super::yolo::names_control_port(&lower) {
+        return Ok(true);
+    }
     // Le trousseau garde les clés du coffre et les jetons des connecteurs.
     let words: Vec<String> = lower
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
@@ -572,28 +577,67 @@ fn pattern_reaches(pattern: &Path, root: &Path) -> bool {
         })
 }
 
+/// Un nom correspond-il au motif ? Programmation dynamique : le travail est borné
+/// par (taille du motif × taille du nom), jamais par le nombre de façons de
+/// répartir les jokers. `{a,b}` vaut `*` (il peut produire n'importe quel nom) ;
+/// `[…]` vaut `?`.
 fn component_matches(pattern: &[char], name: &[char]) -> bool {
-    match pattern.split_first() {
-        None => name.is_empty(),
-        // `{a,b}` est traité comme `*` : il peut produire n'importe quel nom.
-        Some(('*' | '{', rest)) => {
-            let rest = if pattern[0] == '{' {
-                match rest.iter().position(|&c| c == '}') {
-                    Some(end) => &rest[end + 1..],
-                    None => rest,
-                }
-            } else {
-                rest
-            };
-            (0..=name.len()).any(|skip| component_matches(rest, &name[skip..]))
-        }
-        Some(('[', rest)) => match rest.iter().skip(1).position(|&c| c == ']') {
-            Some(end) => !name.is_empty() && component_matches(&rest[end + 2..], &name[1..]),
-            None => name.first() == Some(&'[') && component_matches(rest, &name[1..]),
-        },
-        Some(('?', rest)) => !name.is_empty() && component_matches(rest, &name[1..]),
-        Some((c, rest)) => name.first() == Some(c) && component_matches(rest, &name[1..]),
+    enum Token {
+        Star,
+        Any,
+        Literal(char),
     }
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < pattern.len() {
+        match pattern[at] {
+            '*' => {
+                // Des étoiles qui se suivent ne disent rien de plus qu'une seule.
+                if !matches!(tokens.last(), Some(Token::Star)) {
+                    tokens.push(Token::Star);
+                }
+            }
+            '{' => {
+                if let Some(end) = pattern[at..].iter().position(|&c| c == '}') {
+                    at += end;
+                }
+                if !matches!(tokens.last(), Some(Token::Star)) {
+                    tokens.push(Token::Star);
+                }
+            }
+            '[' => match pattern[at + 1..].iter().skip(1).position(|&c| c == ']') {
+                Some(end) => {
+                    at += end + 2;
+                    tokens.push(Token::Any);
+                }
+                None => tokens.push(Token::Literal('[')),
+            },
+            '?' => tokens.push(Token::Any),
+            c => tokens.push(Token::Literal(c)),
+        }
+        at += 1;
+    }
+    // reachable[j] : les `i` premiers jetons couvrent exactement les `j` premiers caractères.
+    let mut reachable = vec![false; name.len() + 1];
+    reachable[0] = true;
+    for token in &tokens {
+        let mut next = vec![false; name.len() + 1];
+        match token {
+            Token::Star => {
+                let mut open = false;
+                for j in 0..=name.len() {
+                    open |= reachable[j];
+                    next[j] = open;
+                }
+            }
+            Token::Any => (1..=name.len()).for_each(|j| next[j] = reachable[j - 1]),
+            Token::Literal(c) => {
+                (1..=name.len()).for_each(|j| next[j] = reachable[j - 1] && name[j - 1] == *c)
+            }
+        }
+        reachable = next;
+    }
+    reachable[name.len()]
 }
 
 /// Le chemin qu'un mot de commande désigne, sans suivre de lien : `~`, `$HOME`,
@@ -1392,7 +1436,10 @@ fn shell(
                 " (subpath (param \"KEYCHAINS\")) (subpath \"/Library/Keychains\"))",
                 "(deny mach-lookup (global-name-prefix \"com.apple.security\")",
                 " (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.secd\")",
-                " (global-name \"com.apple.securityd\"))"
+                " (global-name \"com.apple.securityd\"))",
+                // Le port d'écoute du wrapper (son API de contrôle) n'est pas protégé par
+                // un secret : le shell n'atteint aucun service de cette machine.
+                "(deny network* (remote ip \"localhost:*\"))"
             ))
             .arg("/bin/sh");
     }
@@ -2070,5 +2117,42 @@ mod tests {
         assert!(pattern_reaches(&elsewhere, &root));
         let unrelated = resolve_word("~/Documents/*.txt", None, Some(home)).unwrap();
         assert!(!pattern_reaches(&unrelated, &root));
+    }
+
+    #[test]
+    fn a_trapped_wildcard_path_is_matched_in_bounded_time() {
+        // Un motif de cent étoiles suivi de composants à jokers : le rappel récursif
+        // d'avant explorait toutes les façons de répartir les étoiles.
+        let trap = format!("/Users/moi/{}x/*/*/z", "*".repeat(100));
+        let root = Path::new("/Users/moi/Library/Application Support/Grokbot");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let target = PathBuf::from(&trap);
+        let root = root.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = sender.send(pattern_reaches(&target, &root));
+        });
+        let answer = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("le motif piégé doit être jugé en moins de deux secondes");
+        assert!(!answer);
+        // Le même motif sans piège désigne bien les données.
+        let honest = PathBuf::from("/Users/moi/Lib*/Application Support/Gr*");
+        assert!(pattern_reaches(
+            &honest,
+            Path::new("/Users/moi/Library/Application Support/Grokbot")
+        ));
+        // `[…]` vaut un caractère, `{…}` un nom quelconque.
+        assert!(component_matches(
+            &"gr[o]kbot".chars().collect::<Vec<_>>(),
+            &"grokbot".chars().collect::<Vec<_>>()
+        ));
+        assert!(component_matches(
+            &"{a,b}kbot".chars().collect::<Vec<_>>(),
+            &"grokbot".chars().collect::<Vec<_>>()
+        ));
+        assert!(!component_matches(
+            &"gro?x".chars().collect::<Vec<_>>(),
+            &"grokbot".chars().collect::<Vec<_>>()
+        ));
     }
 }

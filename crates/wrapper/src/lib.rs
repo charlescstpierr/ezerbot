@@ -719,6 +719,7 @@ struct CreateConversation {
     bot_ids: Option<Vec<String>>,
     description: Option<String>,
     avatar: Option<GroupAvatar>,
+    topic_id: Option<String>,
 }
 
 #[derive(Deserialize)]

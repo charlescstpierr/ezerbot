@@ -1,3 +1,4 @@
+import { sourceNotes } from "./sources.js";
 // CM19: a fixed Teach instruction remains model-facing but is represented by a
 // compact translated marker. Keep exact equality so ordinary user prose is never
 // silently reclassified. Historical submissions use this same immutable text.
@@ -13,7 +14,7 @@ export function isDemonstrationMessage(message) {
 
 export function exportMessage(message) {
   if (isDemonstrationMessage(message)) return { ...message, body: "Démonstration terminée — apprendre la tâche", display: "demonstration" };
-  return isTeachMessage(message) ? { ...message, body: "Apprendre ceci comme skill", display: "teach" } : message;
+  return isTeachMessage(message) ? { ...message, body: "Apprendre ceci comme skill", display: "teach" } : message.payload?.sources?.length ? { ...message, body: sourceNotes(message.body, message.payload.sources) } : message;
 }
 
 export function searchableMessageText(message) {

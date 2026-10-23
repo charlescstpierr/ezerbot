@@ -326,3 +326,18 @@ textarea.text-input:disabled {
 .gb-voice-call-lines strong { flex: 0 0 4em; color: var(--muted); font-weight: 550; }
 .gb-voice-call-lines span { min-width: 0; overflow-wrap: anywhere; }
 .gb-voice-call-partial { padding: 8px 10px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 11px; line-height: 1.6; }
+
+.gb-citation { display: inline-block; vertical-align: super; font: inherit; font-size: .75em; line-height: 1.4; border: 1px solid currentColor; border-radius: 6px; padding: 0 4px; color: var(--accent-ink, #5268ac); background: var(--soft); cursor: pointer; }
+.gb-source-missing { color: var(--muted); text-decoration: line-through; cursor: help; }
+.gb-sources { margin-top: 12px; font-size: 12px; color: var(--text); }
+.gb-sources summary { width: fit-content; border: 1px solid var(--line); border-radius: 20px; padding: 5px 10px; cursor: pointer; }
+.gb-sources ol { padding-left: 0; list-style: none; }
+.gb-sources li { margin: 6px 0; }
+.gb-sources button { color: inherit; background: none; border: 0; text-align: left; cursor: pointer; }
+.gb-source-card { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); color: var(--text); overflow-wrap: anywhere; }
+.gb-source-card strong, .gb-source-card small { display: block; }
+.gb-source-card button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: inherit; cursor: pointer; }
+.gb-source-card pre { max-height: 240px; overflow: auto; white-space: pre-wrap; }
+.gb-citation:focus-visible, .gb-sources :focus-visible, .gb-source-card :focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; }
+.gb-source-icons { display: inline-flex; vertical-align: middle; margin-right: 5px; }
+.gb-source-icons svg { width: 14px; height: 14px; padding: 1px; margin-left: -4px; border: 1px solid var(--line); border-radius: 3px; background: var(--pane); }

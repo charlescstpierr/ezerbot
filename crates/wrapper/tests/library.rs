@@ -1003,3 +1003,20 @@ fn crc32(data: &[u8]) -> u32 {
     }
     !crc
 }
+
+#[test]
+fn cited_library_source_opens_only_for_its_bot_and_reports_removal() {
+    let mut f = Fixture::new();
+    f.bot("source-bot", "Sources");
+    f.bot("other-bot", "Autre");
+    f.deposit("source-bot", "source.txt", b"Texte cite");
+    let id = f.listed("source-bot")[0]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/library/source?bot_id=source-bot&id={id}");
+    assert_eq!(f.app.api("GET", &path, b"").unwrap()["text"], "Texte cite");
+    assert!(f
+        .app
+        .api("GET", &path.replace("source-bot", "other-bot"), b"")
+        .is_err());
+    f.remove("source-bot", &id);
+    assert!(f.app.api("GET", &path, b"").is_err());
+}

@@ -93,7 +93,9 @@ pub fn routes(
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     if !matches!(
         (method, route),
-        ("GET" | "POST", "/api/library") | ("POST", "/api/library/remove")
+        ("GET" | "POST", "/api/library")
+            | ("GET", "/api/library/source")
+            | ("POST", "/api/library/remove")
     ) {
         return None;
     }
@@ -107,6 +109,25 @@ fn dispatch(
     query: &str,
     body: &[u8],
 ) -> Result<ApiResponse, ApiError> {
+    if method == "GET" && route == "/api/library/source" {
+        let (bot, id) = query
+            .strip_prefix("bot_id=")
+            .and_then(|value| value.split_once("&id="))
+            .ok_or_else(|| ApiError::new(400, "Indiquez bot_id et id."))?;
+        validate_id(bot)?;
+        validate_id(id)?;
+        app.require_bot(bot)?;
+        let file = list(&app.connection, bot)?
+            .into_iter()
+            .find(|file| file.id == id)
+            .ok_or_else(|| {
+                ApiError::new(
+                    404,
+                    "Ce fichier n’est plus accessible dans la bibliothèque.",
+                )
+            })?;
+        return Ok(ApiResponse::Json(json!({"text":file.text})));
+    }
     if method == "GET" {
         let bot = query
             .strip_prefix("bot_id=")

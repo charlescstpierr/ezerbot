@@ -26,6 +26,7 @@ function fixture({ available = true, remote = false } = {}) {
   let panel, timer, keydown;
   const calls = [], notices = [], events = [], listeners = {};
   let source = { status: "listening", lines: [], transcript: "", speaking: false };
+  let lineGate = null;
   let startStatus = "listening", mode = false, dictation = false, meeting = false;
   const root = new Element("div"), send = new Element("button"), actions = new Element("div"); actions.className = "topbar-actions";
   actions.insertBefore = (child, reference) => { child.parent = actions; actions.children.splice(reference ? actions.children.indexOf(reference) : actions.children.length, 0, child); };
@@ -45,6 +46,7 @@ function fixture({ available = true, remote = false } = {}) {
     async api(path, body) {
       if (path === "/api/voice/call/debug") return bridge(body);
       calls.push({ path, ...body });
+      if (path === "/api/voice/call/line" && lineGate) await lineGate();
       if (path === "/api/voice/call/start") return { call: { id: "call_one" }, secret: SECRET };
       return {};
     },
@@ -64,7 +66,7 @@ function fixture({ available = true, remote = false } = {}) {
   });
   return {
     root, calls, notices, events, window, get registered() { return Boolean(panel); }, get panel() { return panel; },
-    get source() { return source; }, set startStatus(v) { startStatus = v; },
+    get source() { return source; }, set startStatus(v) { startStatus = v; }, set lineGate(v) { lineGate = v; }, state,
     set mode(v) { mode = v; panel.onState(state, context); }, set dictation(v) { dictation = v; panel.onState(state, context); }, set meeting(v) { meeting = v; panel.onState(state, context); },
     get context() { return context; }, setContext(c) { context = c; panel.onState(state, c); },
     tick: async () => { await timer?.(); }, keydown: e => keydown(e),
@@ -234,4 +236,31 @@ test("the thread card is marked Appel vocal, keeps the transcript and offers no 
     assert.match(cut, /Appel interrompu/);
     assert.match(cut, /Aucune parole/);
   } finally { delete globalThis.window; }
+});
+
+test("quitting while a line is still being written submits every line exactly once, in order", async () => {
+  const f = fixture();
+  await f.toggle().onclick();
+  let release;
+  f.lineGate = () => new Promise(resolve => { release = resolve; });
+  f.source.lines = [{ role: "user", text: "Première." }];
+  const polling = f.tick();
+  await new Promise(r => setImmediate(r));
+  f.source.lines = [{ role: "user", text: "Première." }, { role: "assistant", text: "Seconde." }];
+  const quitting = all(f.root).find(x => x.textContent === "Quitter").onclick();
+  await new Promise(r => setImmediate(r));
+  f.lineGate = null; release();
+  await polling; await quitting;
+  assert.deepEqual(f.calls.filter(c => c.path === "/api/voice/call/line").map(c => [c.seq, c.text]), [[0, "Première."], [1, "Seconde."]]);
+  assert.equal(f.calls.filter(c => c.path === "/api/voice/call/end").length, 1);
+});
+
+test("a call left open by a reload is ended once, so the next call can start", async () => {
+  const f = fixture();
+  f.state.voice_call.active = { id: "call_old", conversation_id: "chat" };
+  f.setContext(f.context);
+  f.setContext(f.context);
+  await new Promise(r => setImmediate(r));
+  assert.deepEqual(f.calls.filter(c => c.path === "/api/voice/call/end").map(c => c.id), ["call_old"]);
+  assert.ok(f.calls.some(c => c.refresh), "le fil est relu pour montrer le transcript écrit");
 });

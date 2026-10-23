@@ -25,6 +25,8 @@
   let button, menuItem, bar, label, notice, transcriptToggle, interrupt, leave, transcript;
   let phase = "idle", detail = "", lines = [], partial = "", written = 0, shown = false, paused = false, speaking = false;
   let lastActive = false, drawn = "";
+  // Calls this view already ended: a state read older than the end must not end them twice.
+  const finished = new Set();
   const active = () => Boolean(callId);
   const contextKey = context => context.conversation?.id || "";
   const available = () => Boolean(ctx?.state?.voice_call?.available);
@@ -80,11 +82,16 @@
     if (active() !== lastActive) { lastActive = active(); window.dispatchEvent?.(new Event("grokbot:voice-call-change")); }
   }
   // Lines go to the Mac as they are heard, so closing the app only loses the sentence being spoken.
-  async function persist(id, spoken) {
-    for (; written < spoken.length; written++) {
-      const line = spoken[written];
-      await panels.api("/api/voice/call/line", {id, seq: written, role: line.role, text: line.text});
-    }
+  // One writer at a time: a tick and Quit share `written`, and a line moves it on only once it is stored.
+  let writing = Promise.resolve();
+  function persist(id, spoken) {
+    writing = writing.catch(() => {}).then(async () => {
+      for (; written < spoken.length; written++) {
+        const line = spoken[written];
+        await panels.api("/api/voice/call/line", {id, seq: written, role: line.role, text: line.text});
+      }
+    });
+    return writing;
   }
   function reset() {
     clearTimeout(timer); epoch++;
@@ -99,6 +106,7 @@
     phase = "ending"; render();
     try { const last = await bridge("status"); lines = last.lines || lines; await persist(id, lines); } catch { /* The lines already written stay in the thread. */ }
     try { await bridge("cancel"); } catch { /* The session is gone either way. */ }
+    finished.add(id);
     try { await panels.api("/api/voice/call/end", {id}); } catch (error) { panels.notify(error.message); }
     reset(); phase = "idle"; detail = "";
     render(); panels.composerChanged();
@@ -109,6 +117,7 @@
     clearTimeout(timer); epoch++;
     if (id) {
       try { await bridge("cancel"); } catch { /* Already closed. */ }
+      finished.add(id);
       try { await panels.api("/api/voice/call/end", {id}); } catch { /* The next start closes it. */ }
     }
     reset(); phase = "failed"; detail = message || errors[status] || errors.failed;
@@ -165,7 +174,17 @@
     } catch (error) { if (rev === epoch) await fail("failed", error.message); }
     finally { ticking = false; schedule(rev); }
   }
+  // A reload during a call stops the session but leaves the call open on the Mac: this view closes it,
+  // which also puts the lines already written into the thread.
+  async function reconcile(next) {
+    const open = next.state?.voice_call?.active;
+    if (!open || callId || finished.has(open.id)) return;
+    finished.add(open.id);
+    try { await panels.api("/api/voice/call/end", {id: open.id}); await panels.refresh(); }
+    catch { /* Not retried on every state read: the Mac closes it at its next start. */ }
+  }
   function observe(next) {
+    reconcile(next);
     if (scopeKey && scopeKey !== contextKey(next)) { ctx = next; quit(); return; }
     ctx = next;
     render();

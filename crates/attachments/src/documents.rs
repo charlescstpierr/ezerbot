@@ -14,6 +14,23 @@ use std::time::{Duration, Instant};
 pub const MAX_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_PAGES: usize = 50;
 pub const MAX_TEXT: usize = 100_000;
+
+/// How much of a document is read. Thread attachments keep the small ceiling;
+/// a bot's library reads long documents whole, with its own, larger ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub pages: usize,
+    pub text: usize,
+}
+
+pub const THREAD: Limits = Limits {
+    pages: MAX_PAGES,
+    text: MAX_TEXT,
+};
+pub const LIBRARY: Limits = Limits {
+    pages: 500,
+    text: 2_000_000,
+};
 const MAX_XML: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 64 * 1024 * 1024;
 const FORMATS: &[&str] = &["pdf", "docx", "xlsx", "csv", "pptx", "txt", "md", "rtf"];
@@ -49,12 +66,12 @@ pub fn format_count(value: usize) -> String {
     }
     text
 }
-fn display_note(document: &Document) -> Option<String> {
+fn display_note(document: &Document, limits: Limits) -> Option<String> {
     let mut notes = document.encoding_note.iter().cloned().collect::<Vec<_>>();
     if document.truncated {
         let read = format_count(document.pages_read);
         let count = format_count(document.page_count);
-        let characters = format_count(MAX_TEXT);
+        let characters = format_count(limits.text);
         let detail = if document.page_kind == "pages estimées" {
             format!("environ {read} pages sur {count} transmises. Lecture limitée aux {characters} premiers caractères")
         } else {
@@ -69,7 +86,7 @@ fn display_note(document: &Document) -> Option<String> {
                 &document.page_kind
             };
             let plural = if document.pages_read == 1 { "" } else { "s" };
-            format!("{read} {unit} parcourue{plural} sur {count}. Lecture limitée à {MAX_PAGES} {} et {characters} caractères", document.page_kind)
+            format!("{read} {unit} parcourue{plural} sur {count}. Lecture limitée à {} {} et {characters} caractères", format_count(limits.pages), document.page_kind)
         };
         notes.push(format!(
             "Texte tronqué : {detail}. La suite du document n’a pas été transmise."
@@ -81,7 +98,7 @@ fn stored_document(record: &str) -> Result<Document> {
     let mut document: Document = serde_json::from_str(record)
         .map_err(|_| invalid("L’extraction enregistrée est illisible."))?;
     // Refresh presentation for older records without re-parsing their source.
-    document.note = display_note(&document);
+    document.note = display_note(&document, THREAD);
     Ok(document)
 }
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -127,6 +144,17 @@ pub fn link(conn: &Connection, conversation: &str, message: &str, ids: &[String]
 /// Extract outside the caller's writer lock. The resulting immutable record can
 /// then be saved atomically together with durable draft ownership.
 pub fn prepare(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
+    prepare_with(conn, name, bytes, THREAD)
+}
+
+/// Same extraction with another reading ceiling. Only the thread ceiling shares
+/// the staged-document cache: a longer reading must never be served a shorter one.
+pub fn prepare_with(
+    conn: &Connection,
+    name: &str,
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<Document> {
     if bytes.is_empty() {
         return Err(invalid("Le document est vide."));
     }
@@ -146,20 +174,23 @@ pub fn prepare(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> 
             "Format non accepté : PDF, DOCX, XLSX, CSV, PPTX, TXT, MD ou RTF uniquement.",
         ));
     }
+    let salt: &[u8] = if limits == THREAD { b"" } else { b"library\0" };
     let id = format!(
         "document_{}",
-        super::staging::digest(&[name.as_bytes(), b"\0", bytes].concat())
+        super::staging::digest(&[salt, name.as_bytes(), b"\0", bytes].concat())
     );
-    if let Some(cached) = get(conn, &id)? {
-        return Ok(cached);
+    if limits == THREAD {
+        if let Some(cached) = get(conn, &id)? {
+            return Ok(cached);
+        }
     }
     if bytes.starts_with(b"\xd0\xcf\x11\xe0") {
         return Err(invalid("Document Office chiffré ou ancien format non accepté. Exportez une copie non protégée en DOCX, XLSX ou PPTX."));
     }
     let mut encoding_note = None;
     let (mut text, page_count, page_kind, pages_read, mut truncated) = match format.as_str() {
-        "pdf" => pdf(bytes)?,
-        "docx" | "xlsx" | "pptx" => office(bytes, &format)?,
+        "pdf" => pdf(bytes, limits)?,
+        "docx" | "xlsx" | "pptx" => office(bytes, &format, limits)?,
         "rtf" => {
             if !bytes.starts_with(b"{\\rtf") {
                 return Err(invalid("Ce fichier RTF est invalide."));
@@ -169,18 +200,21 @@ pub fn prepare(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> 
                 &["-convert", "txt", "-format", "rtf", "-stdin", "-stdout"],
                 bytes,
             )?;
-            estimated(String::from_utf8(output).map_err(|_| invalid("Texte RTF illisible."))?)
+            estimated(
+                String::from_utf8(output).map_err(|_| invalid("Texte RTF illisible."))?,
+                limits,
+            )
         }
         _ => {
             let (text, encoding) = decode_text(bytes)?;
             encoding_note = encoding;
-            estimated(text)
+            estimated(text, limits)
         }
     };
     let char_cap = if page_kind == "pages estimées" {
-        MAX_TEXT.min(MAX_PAGES * 4000)
+        limits.text.min(limits.pages * 4000)
     } else {
-        MAX_TEXT
+        limits.text
     };
     let cut = text.char_indices().nth(char_cap).map(|(i, _)| i);
     if let Some(cut) = cut {
@@ -203,7 +237,7 @@ pub fn prepare(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> 
         note: None,
         text,
     };
-    document.note = display_note(&document);
+    document.note = display_note(&document, limits);
     Ok(document)
 }
 
@@ -220,14 +254,14 @@ pub fn stage(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Document> {
     save(conn, &document)?;
     Ok(document)
 }
-fn estimated(text: String) -> (String, usize, String, usize, bool) {
+fn estimated(text: String, limits: Limits) -> (String, usize, String, usize, bool) {
     let pages = text.chars().count().div_ceil(4000).max(1);
     (
         text,
         pages,
         "pages estimées".into(),
-        pages.min(MAX_TEXT.div_ceil(4000)),
-        pages > MAX_PAGES,
+        pages.min(limits.text.div_ceil(4000)),
+        pages > limits.pages,
     )
 }
 fn decode_text(bytes: &[u8]) -> Result<(String, Option<String>)> {
@@ -445,7 +479,11 @@ fn shared_strings(bytes: &[u8]) -> Result<Vec<String>> {
     }
     Ok(strings)
 }
-fn office(bytes: &[u8], format: &str) -> Result<(String, usize, String, usize, bool)> {
+fn office(
+    bytes: &[u8],
+    format: &str,
+    limits: Limits,
+) -> Result<(String, usize, String, usize, bool)> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|_| invalid("Document Office invalide ou chiffré."))?;
     if archive.len() > 10_000 {
@@ -491,11 +529,10 @@ fn office(bytes: &[u8], format: &str) -> Result<(String, usize, String, usize, b
         return Err(invalid("Ce fichier n’est pas un document Office valide."));
     }
     if format == "docx" {
-        return Ok(estimated(xml(
-            &read(&mut archive, "word/document.xml")?,
-            false,
-            &[],
-        )?));
+        return Ok(estimated(
+            xml(&read(&mut archive, "word/document.xml")?, false, &[])?,
+            limits,
+        ));
     }
     let (prefix, kind) = if format == "pptx" {
         ("ppt/slides/slide", "diapositives")
@@ -527,20 +564,20 @@ fn office(bytes: &[u8], format: &str) -> Result<(String, usize, String, usize, b
     let mut text = String::new();
     let mut pages_read = 0;
     let mut has_text = false;
-    for (n, name) in parts.iter().take(MAX_PAGES) {
+    for (n, name) in parts.iter().take(limits.pages) {
         pages_read += 1;
         text.push_str(&format!("\n[{kind} {n}]\n"));
         let extracted = xml(&read(&mut archive, name)?, format == "xlsx", &shared)?;
         has_text |= !extracted.trim().is_empty();
         text.push_str(&extracted);
-        if text.chars().count() > MAX_TEXT {
+        if text.chars().count() > limits.text {
             break;
         }
     }
     if !has_text {
         return Err(invalid("Aucun texte lisible dans les premières feuilles ou diapositives. Les images et diagrammes seuls ne sont pas convertis en texte."));
     }
-    let truncated = parts.len() > MAX_PAGES || text.chars().count() > MAX_TEXT;
+    let truncated = parts.len() > limits.pages || text.chars().count() > limits.text;
     Ok((text, parts.len(), kind.into(), pages_read, truncated))
 }
 
@@ -614,7 +651,7 @@ fn builtin_with_timeout(
     }
     Ok(out)
 }
-fn pdf(bytes: &[u8]) -> Result<(String, usize, String, usize, bool)> {
+fn pdf(bytes: &[u8], limits: Limits) -> Result<(String, usize, String, usize, bool)> {
     if !bytes.starts_with(b"%PDF-") {
         return Err(invalid("Ce fichier PDF est invalide."));
     }
@@ -626,15 +663,18 @@ const doc = $.PDFDocument.alloc.initWithData(bytes);
 if (!doc || doc.isNil()) return {error:'invalid'};
 if (doc.isLocked) return {error:'encrypted'};
 const count = Number(doc.pageCount); let text = ''; let read = 0;
-for (let i=0; i<Math.min(count,50); i++) { const raw=doc.pageAtIndex(i).string; const s=raw ? ObjC.unwrap(raw) : ''; text += '\n[Page '+(i+1)+']\n'+(typeof s==='string' ? s : ''); read++; if (text.length>100000) break; }
+for (let i=0; i<Math.min(count,__PAGES__); i++) { const raw=doc.pageAtIndex(i).string; const s=raw ? ObjC.unwrap(raw) : ''; text += '\n[Page '+(i+1)+']\n'+(typeof s==='string' ? s : ''); read++; if (text.length>__TEXT__) break; }
 const chars = Array.from(text);
-return {text:chars.slice(0,100000).join(''), count:count, read:read, truncated:read<count || chars.length>100000};
+return {text:chars.slice(0,__TEXT__).join(''), count:count, read:read, truncated:read<count || chars.length>__TEXT__};
 }
 const result = JSON.stringify(extract());
 $.NSFileHandle.fileHandleWithStandardOutput.writeData($(result).dataUsingEncoding($.NSUTF8StringEncoding));"#;
+    let script = SCRIPT
+        .replace("__PAGES__", &limits.pages.to_string())
+        .replace("__TEXT__", &limits.text.to_string());
     let out = builtin(
         "/usr/bin/osascript",
-        &["-l", "JavaScript", "-e", SCRIPT],
+        &["-l", "JavaScript", "-e", &script],
         bytes,
     )?;
     #[derive(Deserialize)]

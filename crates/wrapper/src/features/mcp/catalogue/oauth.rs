@@ -45,18 +45,26 @@ fn random() -> Result<String, ApiError> {
         .map_err(|_| invalid("Impossible de préparer une connexion sécurisée."))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
-/// What identifies the client at the token and revocation endpoints. Gmail's, Slack's and Linear's is
+/// What identifies the client at the token and revocation endpoints. Gmail's, Slack's, Linear's and Microsoft's is
 /// the public client of the build and nothing else: no secret is read, so none can be sent.
 fn token_fields(m: Manifest, env: &HashMap<String, String>) -> Vec<(String, String)> {
     let public = match m.id {
         "gmail" => Some(gmail::client_id()),
         "slack" => Some(slack::client_id()),
         "linear" => Some(linear::client_id()),
+        "microsoft365" => Some(microsoft::client_id()),
         _ => None,
     };
     if let Some(client) = public {
         return client
-            .map(|id| vec![("client_id".into(), id)])
+            .map(|id| {
+                let mut fields = vec![("client_id".into(), id)];
+                // Microsoft asks a public client to name the permissions at the token endpoint too.
+                if m.id == "microsoft365" {
+                    fields.push(("scope".into(), m.scopes.into()));
+                }
+                fields
+            })
             .unwrap_or_default();
     }
     ["CLIENT_ID", "CLIENT_SECRET"]
@@ -68,6 +76,25 @@ fn validate_scopes(m: Manifest, scopes: Option<&str>) -> Result<(), ApiError> {
     // Notion's "default" is a broker selector, not a permission that its token
     // response must echo. The user chooses pages/permissions at consent.
     if m.id == "notion" {
+        return Ok(());
+    }
+    if m.id == "microsoft365" {
+        // Graph answers short names, in any case, and never lists `offline_access`.
+        if let Some(scopes) = scopes {
+            let granted: BTreeSet<String> = scopes
+                .split_whitespace()
+                .map(|s| {
+                    s.trim_start_matches("https://graph.microsoft.com/")
+                        .to_lowercase()
+                })
+                .collect();
+            if m.scopes
+                .split_whitespace()
+                .any(|scope| scope != "offline_access" && !granted.contains(&scope.to_lowercase()))
+            {
+                return Err(invalid("Certaines autorisations nécessaires n’ont pas été accordées. Reconnectez le service et vérifiez les portées demandées."));
+            }
+        }
         return Ok(());
     }
     if let Some(scopes) = scopes {
@@ -120,9 +147,11 @@ fn accept_token(
             .join(" ")
     });
     validate_scopes(m, granted.as_deref().or(raw["scope"].as_str()))?;
+    // A Microsoft access token is a signed JWT or an opaque blob of several KB.
+    let longest = if m.id == "microsoft365" { 8192 } else { 3000 };
     let access = raw["access_token"]
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 3000 && !s.chars().any(char::is_control))
+        .filter(|s| !s.is_empty() && s.len() <= longest && !s.chars().any(char::is_control))
         .ok_or_else(fail)?;
     env.insert("ACCESS_TOKEN".into(), access.into());
     if let Some(refresh) = raw["refresh_token"].as_str().filter(|s| !s.is_empty()) {
@@ -158,7 +187,19 @@ fn accept_token(
             .ok_or_else(fail)?;
         env.insert("EMAIL".into(), email.into());
     }
-    if m.id == "linear" {
+    if m.id == "microsoft365" {
+        // The account is the mailbox address; a renewal keeps the one it had.
+        if !env.contains_key("EMAIL") {
+            env.insert(
+                "EMAIL".into(),
+                microsoft::identity(access).ok_or_else(fail)?,
+            );
+        }
+        // A client typed under an earlier version is not carried into the new secret.
+        env.remove("CLIENT_ID");
+        env.remove("CLIENT_SECRET");
+        microsoft::write_tokens(ctx, server, env)?;
+    } else if m.id == "linear" {
         // The account is the one shown on the card; a renewal keeps the one it had.
         if !env.contains_key("EMAIL") {
             env.insert("EMAIL".into(), linear::identity(access).ok_or_else(fail)?);
@@ -257,7 +298,7 @@ pub(super) fn begin(
         save(ctx, &server.id, &env)?;
     }
     if fake_base().is_some()
-        && !matches!(m.id, "gmail" | "slack" | "linear")
+        && !matches!(m.id, "gmail" | "slack" | "linear" | "microsoft365")
         && !env.contains_key("CLIENT_ID")
     {
         env.insert("CLIENT_ID".into(), "ezerbot-factice".into());
@@ -270,6 +311,7 @@ pub(super) fn begin(
         "gmail" => gmail::client_id().ok_or_else(gmail::not_configured)?,
         "slack" => slack::client_id().ok_or_else(slack::not_configured)?,
         "linear" => linear::client_id().ok_or_else(linear::not_configured)?,
+        "microsoft365" => microsoft::client_id().ok_or_else(microsoft::not_configured)?,
         _ => env.get("CLIENT_ID").ok_or_else(fail)?.clone(),
     };
     let mut url = url::Url::parse(&endpoint(m, "authorize")).map_err(|_| fail())?;
@@ -294,6 +336,9 @@ pub(super) fn begin(
                     m.scopes.to_owned()
                 },
             );
+        if m.id == "microsoft365" {
+            query.append_pair("prompt", "select_account");
+        }
         if m.endpoint.is_empty() {
             query.append_pair("access_type", "offline").append_pair(
                 "prompt",
@@ -519,6 +564,11 @@ pub(super) fn revoke(m: Manifest, env: &HashMap<String, String>) -> bool {
     };
     if m.id == "github" {
         return super::github::revoke(m, env);
+    }
+    // Microsoft has no revocation endpoint for a public client: the token goes from this Mac
+    // only, and the message says the remote side was not confirmed.
+    if m.id == "microsoft365" {
+        return false;
     }
     let Some(token) = token else { return true };
     let mut fields = token_fields(m, env);

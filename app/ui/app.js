@@ -1081,7 +1081,8 @@
     paintFind();
     renderThreadBanner(conversation);
     $("favorite-button").querySelector("span").textContent = conversation?.favorite ? "Retirer des favoris" : "Ajouter aux favoris";
-    $("topic-button").hidden = !panels.has("topics") || !["chat", "group"].includes(conversation?.kind);
+    const topicEntry = $("topic-button");
+    if (topicEntry) topicEntry.hidden = !panels.has("topics") || !["chat", "group"].includes(conversation?.kind);
     renderList();
     renderBots();
     renderProvider();
@@ -1903,7 +1904,7 @@
     const conversation = currentConversation();
     if (conversation) await updateConversation({ favorite: !conversation.favorite });
   });
-  $("topic-button").addEventListener("click", () => {
+  $("topic-button")?.addEventListener("click", () => {
     closeMenu();
     const conversation = currentConversation(), topics = panels.get("topics");
     if (conversation && topics) panelCall(topics, topics.assign, conversation);

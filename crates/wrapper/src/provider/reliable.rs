@@ -715,7 +715,7 @@ mod elapsed_interval {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Drip {
         /// Status line and headers arrive one byte at a time, never complete.
         Headers,
@@ -780,7 +780,7 @@ mod elapsed_interval {
         let (closed_tx, closed) = std::sync::mpsc::channel();
         let address = dripping_server(mode, closed_tx);
         let root = std::env::temp_dir().join(format!(
-            "ezerbot-drip-{}-{}",
+            "ezerbot-drip-{mode:?}-{}-{}",
             std::process::id(),
             crate::now()
         ));

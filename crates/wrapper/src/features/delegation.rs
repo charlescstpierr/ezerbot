@@ -1010,15 +1010,24 @@ pub(super) fn delivery_for_run(conn: &Connection, run: &Run) -> Result<Option<De
     Ok(Some(delivery_for(conn, &edge)?))
 }
 
-/// Whether `run` is a delegated child whose parent still grants it this image.
+/// Whether `run` is a delegated child that still receives this image, either
+/// as a live `selected_images` grant or inside a selected parent message.
 pub(super) fn run_holds_image(conn: &Connection, run_id: &str, id: &str) -> bool {
     let Ok(run) = store::required(conn, run_id) else {
         return false;
     };
-    matches!(
-        delivery_for_run(conn, &run),
-        Ok(Some(delivery)) if delivery.grants().live().iter().any(|grant| grant.id() == id)
-    )
+    let Ok(Some(delivery)) = delivery_for_run(conn, &run) else {
+        return false;
+    };
+    delivery
+        .grants()
+        .live()
+        .iter()
+        .any(|grant| grant.id() == id)
+        || delivery.sources().iter().any(|(conversation, message)| {
+            grokbot_attachments::staging::for_message(conn, conversation, message)
+                .is_ok_and(|images| images.iter().any(|image| image.id == id))
+        })
 }
 
 struct Resolver<'a>(&'a Connection);

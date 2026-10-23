@@ -165,3 +165,49 @@ test("un message Slack publié le dit, et Refusé, Trop de messages et Envoi non
     assert.ok(!html.includes("Toujours"), etat);
   }
 });
+
+function renderMeetingDraft({ status, etat, publication_result, texte = "Bonjour de la carte" }) {
+  const request = {
+    entry_id: "reunion", status: { status }, route: { requesting_bot_id: "grokbot" },
+    kind: { kind: "approval", tool: "recall_reply" },
+    arguments: { brouillon: { service: "Réunions", action: "Répondre dans le chat de la réunion", reunion: "meet.google.com", bot: "Ezerbot", texte, empreinte: "abc", ...(etat ? { etat } : {}) } },
+    ...(publication_result ? { publication_result } : {}),
+  };
+  const input = { request, status, pending: status === "pending", busy: false, error: "", act: async () => true };
+  globalThis.window = { GrokbotPanels: { state: { bots: [{ id: "grokbot", name: "Ezerbot" }] } } };
+  try {
+    return renderToStaticMarkup(React.createElement(DraftCard, { message: { id: "reunion", kind: "approval", payload: request }, input, disabled: false, expired: false }));
+  } finally { delete globalThis.window; }
+}
+
+test("la carte brouillon d’une réponse dans la réunion montre la réunion, le bot et le texte exact, Envoyer et Annuler, sans « Toujours »", () => {
+  const html = renderMeetingDraft({ status: "pending" });
+  for (const label of [">Réunion<", ">Envoyé au nom de<", "Texte exact du message (modifiable)", ">Envoyer<", ">Annuler<", "Rien n’est envoyé avant votre clic"]) assert.ok(html.includes(label), label);
+  for (const value of ["meet.google.com", "Ezerbot", ">Bonjour de la carte</textarea>"]) assert.ok(html.includes(value), value);
+  assert.ok(!html.includes("Toujours"));
+  assert.ok(!html.includes("Rien n’est publié"));
+});
+
+test("un texte trop long pour le chat de la réunion désactive Envoyer", () => {
+  const html = renderMeetingDraft({ status: "pending", texte: "a".repeat(4097) });
+  assert.ok(html.includes("Le texte dépasse 4096 caractères."));
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Envoyer<\/button>/);
+});
+
+test("un message envoyé dans la réunion le dit, et Refusé, Trop de messages et Envoi non confirmé ne prétendent pas que le chat l’a reçu", () => {
+  const sent = renderMeetingDraft({ status: "resolved", etat: "sent", publication_result: { status: "done", output: { reunion: "meet.google.com" } } });
+  assert.ok(sent.includes("Message envoyé dans le chat de la réunion meet.google.com, au nom de « Ezerbot »."));
+  for (const [etat, label] of [["refused", "Refusé"], ["rate_limited", "Trop de messages"], ["unconfirmed", "Envoi non confirmé · accusé de réception manquant"]]) {
+    const html = renderMeetingDraft({ status: "resolved", etat, publication_result: { status: "failed", reason: "Raison du refus." } });
+    assert.ok(html.includes(`<strong>${label} · </strong>Raison du refus.`), etat);
+    assert.ok(!html.includes("Message envoyé dans le chat"), etat);
+    assert.ok(!html.includes(">Envoyer<"), etat);
+    assert.ok(!html.includes("Toujours"), etat);
+  }
+});
+
+test("Annuler une réponse dans la réunion dit que rien n’a été envoyé", () => {
+  const html = renderMeetingDraft({ status: "denied" });
+  assert.ok(html.includes("Annulé · rien n’a été envoyé"));
+  assert.ok(!html.includes(">Envoyer<"));
+});

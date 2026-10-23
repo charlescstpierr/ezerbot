@@ -3428,3 +3428,22 @@ fn a_child_can_use_an_image_of_a_selected_entry_as_a_generation_reference() {
         format!("data:image/png;base64,{PNG}")
     );
 }
+
+#[test]
+fn yolo_launches_a_delegated_task_without_the_background_card() {
+    let mut f = Fixture::new(true);
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    let c = f.conversation();
+    let (parent, edge) = f.begin(&c, "yolo-delegate", args("child"));
+    let cards: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM forms_requests", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        cards, 0,
+        "le lancement d'une sous-tâche ne demande plus de carte"
+    );
+    assert_eq!(f.children(&parent).len(), 1);
+    f.child_done(&edge);
+    f.resume(&c, "yolo-delegate");
+}

@@ -28,7 +28,8 @@ test("une commande de terminal auto-approuvée devient une carte compacte « Fai
   assert.match(html, /gb-auto-card/);
   assert.match(html, /class="gb-auto-badge">Fait automatiquement</);
   assert.match(html, /Terminal sur votre Mac/);
-  assert.match(html, /Commande exécutée : ls -la ~\/Documents · code de sortie 0/);
+  assert.match(html, /Commande exécutée : ls -la ~\/Documents</);
+  assert.match(html, /Code de sortie : 0/);
   assert.match(html, /title="Réglage global"/);
   assert.match(html, /Afficher la sortie/);
   assert.doesNotMatch(html, /Annuler l’exécution/);

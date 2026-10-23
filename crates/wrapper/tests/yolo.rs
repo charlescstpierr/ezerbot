@@ -554,6 +554,31 @@ fn screen_control_still_needs_a_session_the_owner_started_even_in_yolo() {
 }
 
 #[test]
+fn a_screen_session_granted_in_yolo_takes_gestures_without_a_card_and_ends_when_ask_returns() {
+    let mut f = Fixture::new();
+    let chat = f.chat.clone();
+    // Aucun réglage « Écran du Mac » n'a été touché : le Mode YOLO ouvre l'écran, la session reste à accorder.
+    f.post(
+        "/api/screen/grant",
+        json!({"bot_id":"grokbot","conversation_id":chat,"minutes":1}),
+    );
+    f.app.tick(now());
+    assert!(!f.state()["screen"]["session"].is_null());
+    let out = f.runs_without_a_card("ecran", "computer_screenshot", json!({}));
+    assert_eq!(out["status"], "done", "{out}");
+    assert_eq!(
+        f.card(&chat, "ecran")["payload"]["authorized_by"],
+        json!({"kind":"yolo","source":"global"})
+    );
+    f.mode("ask");
+    f.app.tick(now());
+    assert!(
+        f.state()["screen"]["session"].is_null(),
+        "quitter le Mode YOLO révoque la session accordée sans réglage"
+    );
+}
+
+#[test]
 fn settings_cards_and_drafts_keep_their_card_in_yolo() {
     use grokbot_wrapper::features::yolo::covered;
     for tool in [

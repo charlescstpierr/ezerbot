@@ -100,7 +100,9 @@ pub fn migrate(conn: &rusqlite::Connection) -> Result<(), ApiError> {
 }
 pub fn tick(ctx: &Context<'_>) {
     if let Some(lease) = current(ctx.db_path) {
-        let available: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id JOIN wrapper_screen_bots s ON s.bot_id=b.id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0 AND s.enabled=1)",params![ACCOUNT,lease.conversation,lease.bot],|r|r.get(0)).unwrap_or(false);
+        let live: bool = ctx.connection.query_row("SELECT EXISTS(SELECT 1 FROM wrapper_conversations c JOIN wrapper_bots b ON b.account_id=c.account_id AND b.id=c.bot_id WHERE c.account_id=?1 AND c.id=?2 AND c.bot_id=?3 AND c.deleted=0 AND b.deleted=0)",params![ACCOUNT,lease.conversation,lease.bot],|r|r.get(0)).unwrap_or(false);
+        // Le Mode YOLO compte comme l'activation du bot ; le quitter révoque la session.
+        let available = live && enabled(ctx.connection, &lease.bot);
         if !lease.live() || !available {
             lease.stop();
         }

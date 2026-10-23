@@ -22,8 +22,7 @@ export function automaticLine({ call, outcome, connector } = {}) {
     case "run_shell": {
       const background = state === 1 && args.background === true && output.status === "en cours";
       const verbs = ["Commande en cours", background ? "Commande lancée en tâche de fond" : "Commande exécutée", "Commande non exécutée"];
-      const code = state === 1 && !background && output.exit_code != null ? ` · code de sortie ${output.exit_code}` : "";
-      return say(verbs, flat(args.command), code);
+      return say(verbs, flat(args.command));
     }
     case "read_file": return say(["Lecture en cours", "Fichier lu", "Lecture refusée ou impossible"], text(args.path));
     case "list_directory": return say(["Lecture du dossier en cours", "Dossier listé", "Dossier non listé"], text(args.path));

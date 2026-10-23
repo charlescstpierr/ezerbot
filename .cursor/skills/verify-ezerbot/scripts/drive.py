@@ -567,7 +567,8 @@ def background_task_step(evidence: Path, index: int) -> None:
             "le programme n'a pas lu « oui »",
             timeout=30,
         )
-        if not re.search(r"(?m)^oui$", state["text"]) or state["field"] or "Code de sortie : 0" not in state["text"]:
+        # L'invite n'a pas de fin de ligne : la ligne recopiée la suit, comme dans un terminal.
+        if "Continuer ? [oui/non] oui\nreponse=oui" not in state["text"] or state["field"] or "Code de sortie : 0" not in state["text"]:
             raise SystemExit(f"« oui » n'est pas recopié dans la sortie d'une carte Terminée sans champ: {state}")
         refused = eval_js(
             evidence,

@@ -13,6 +13,7 @@ L’appel vocal est une conversation en direct, à côté du mode voix : un bout
 ## How to get to it (user POV)
 
 - Ouvrir une conversation, puis cliquer sur l’icône de téléphone de l’en-tête (`.voice-call-toggle`, nom accessible « Appel vocal »), à gauche du menu « Actions de la conversation ».
+- Sous 900 px de large, l’icône quitte l’en-tête pour laisser sa largeur au titre : le même geste est l’entrée « Appel vocal » (`.voice-call-menu-item`) du menu « Actions de la conversation ».
 - Sans conversation ouverte ou sans fournisseur de voix, le bouton est grisé et dit pourquoi.
 
 ## Driving it with chrome-devtools-axi

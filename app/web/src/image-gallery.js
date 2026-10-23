@@ -55,9 +55,9 @@ function inlineCodeRanges(text, offset, ranges) {
     const close = new RegExp(`(?<!\`)\`{${size}}(?!\`)`, "g");
     close.lastIndex = runs.lastIndex;
     const found = close.exec(text);
-    const blank = /\n[ \t]*\n/g;
-    blank.lastIndex = runs.lastIndex;
-    const gap = blank.exec(text);
+    const boundary = /\n[ \t]*(?:\n|(?:[-+*]|\d{1,9}[.)])[ \t]|#{1,6}[ \t])/g;
+    boundary.lastIndex = runs.lastIndex;
+    const gap = boundary.exec(text);
     if (!found || (gap && gap.index < found.index)) continue;
     ranges.push([offset + open.index + (escaped ? 1 : 0), offset + found.index + found[0].length]);
     runs.lastIndex = found.index + found[0].length;

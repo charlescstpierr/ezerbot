@@ -394,6 +394,20 @@ test("an escaped backtick is a literal character and never opens inline code", (
   assert.equal(gallery.proseWithoutGallery(`\\\`avant ${result}`, gallery.galleryImages({ body: `\\\`avant ${result}` }, { markdown: true })), "\\`avant");
 });
 
+test("inline code never runs from one list item or block into the next", () => {
+  const sample = "![x](/api/attachments/abc)";
+  const result = "![result](/api/generated/result.png)";
+  const urls = (body) => gallery.galleryImages({ body }, { markdown: true }).map((entry) => entry.url);
+  const after = ["/api/generated/result.png"];
+  assert.deepEqual(urls(`- \`example\n- ${result}\n- end\``), after, "bullet items");
+  assert.deepEqual(urls(`1. \`example\n2. ${result}\n3. end\``), after, "numbered items");
+  assert.deepEqual(urls(`- \`example\n  - ${result}\n  - end\``), after, "nested items");
+  assert.deepEqual(urls(`\`example\n# Titre ${result}\nfin\``), after, "a heading starts a new block");
+  assert.equal(urls(`- \`a\n  ${sample}\`\n- suite`).length, 0, "a wrapped line of the same item stays in the span");
+  assert.equal(urls(`Un \`span\nsur deux lignes ${sample}\` ici`).length, 0, "a plain paragraph line break stays in the span");
+  assert.equal(urls(`- \`a\` puis ${sample}`).length, 1, "a closed span in an item is unaffected");
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

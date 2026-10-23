@@ -149,8 +149,19 @@ def main() -> None:
     assert_throwaway(db, "db")
     write_fake_token(db)
     fake_log = open(run_root / "fake.err", "wb")
+    fake_env = os.environ.copy()
+    work = None
+    if args.sphere == "mode-yolo":
+        # Le Mode YOLO écrit dans un dossier de travail à côté du HOME : la base vit dans le HOME et ses données restent hors de portée des outils.
+        work = run_root / "Documents"
+        work.mkdir()
+        for name in ("Budget.csv", "Brouillon.md", "Courriel.txt"):
+            (work / name).write_text("exemple\n")
+        (work / "Photos").mkdir()
+        fake_env["EZERBOT_VERIFY_FAKE_WORK"] = str(work)
     fake = subprocess.Popen(
         [sys.executable, "-u", str(Path(__file__).with_name("fake_openai.py"))],
+        env=fake_env,
         stdout=subprocess.PIPE,
         stderr=fake_log,
         stdin=subprocess.DEVNULL,
@@ -172,6 +183,7 @@ def main() -> None:
         "fake_pid": fake.pid,
         "fake_identity": proc_identity(fake.pid),
         "wrapper_pid": None,
+        "work": str(work) if work else None,
         **signature,
     }
     save_run(evidence, record)
@@ -192,9 +204,9 @@ def main() -> None:
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "GROKBOT_FAKE_OPENAI": base,
         }
-        if args.sphere not in ("images", "images-reference", "pages"):
+        if args.sphere not in ("images", "images-reference", "pages", "mode-yolo"):
             # Les builds de debug ouvrent la session factice eux-mêmes (le jeton écrit ci-dessus n'est plus lu).
-            # Les sphères images, images-reference et pages gardent le faux OpenAI du run : lui seul sait répondre à un dessin ou écrire une Page.
+            # Les sphères images, images-reference, pages et mode-yolo gardent le faux OpenAI du run : lui seul sait répondre à un dessin, écrire une Page ou lancer une commande.
             child_env["EZERBOT_FAKE_SIGNIN"] = "1"
         print(
             f"run: {binary} --port 0 --db {db}",

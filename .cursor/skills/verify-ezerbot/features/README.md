@@ -49,3 +49,4 @@ Chaque fichier commence par un titre H1 et un paragraphe. Il utilise ensuite exa
 - [Mémo vocal](./memo-vocal.md) couvre la vitesse de lecture d’un mémo de 0,5 à 2, le refus d’une vitesse hors plage et le saut au mot de la transcription.
 - [Réponse depuis la notification iPhone](./iphone-reponse.md) couvre la feuille Répondre ouverte depuis la notification d’un bot et l’envoi qui n’arrive qu’une fois dans le fil.
 - [Appel vocal](./voix-appel.md) couvre l’appel en direct : la phrase de transmission de l’audio, le transcript affiché ou masqué, la voix du bot coupée par la parole ou Échap, et le transcript rangé dans le fil.
+- [Mode YOLO](./mode-yolo.md) couvre l'activation par défaut, la commande et l'écriture de fichier faites sans carte (« Fait automatiquement »), le journal d'activité, le mode par bot, le retour à « Demander avant d'agir » et les garde-fous.

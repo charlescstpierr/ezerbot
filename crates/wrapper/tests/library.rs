@@ -708,6 +708,33 @@ fn a_full_library_refuses_a_new_name_but_still_replaces_a_file() {
 }
 
 #[test]
+fn a_library_already_over_the_limit_keeps_replacing_its_files() {
+    let mut f = Fixture::new();
+    f.bot("bot-a", "Alpha");
+    for index in 0..20 {
+        f.deposit("bot-a", &format!("fichier-{index}.md"), b"contenu v1");
+    }
+    // Une bibliothèque d'avant le plafond : 21 fichiers déjà là.
+    rusqlite::Connection::open(f.dir.join("workspace.sqlite"))
+        .unwrap()
+        .execute(
+            "INSERT INTO bot_library (account_id, bot_id, file_id, name, format, byte_length, text, note, added_at)
+             SELECT account_id, bot_id, 'extra', 'ancien.md', format, byte_length, text, note, added_at
+             FROM bot_library WHERE bot_id = 'bot-a' LIMIT 1",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.listed("bot-a").len(), 21);
+    let replaced = f.deposit("bot-a", "ancien.md", b"contenu v2");
+    assert_eq!(replaced["files"].as_array().unwrap().len(), 21);
+    let refused = f
+        .deposit_result("bot-a", "nouveau.md", b"contenu")
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    assert_eq!(f.listed("bot-a").len(), 21);
+}
+
+#[test]
 fn a_text_far_beyond_the_ceiling_is_cut_and_says_so_in_the_prompt() {
     let mut f = Fixture::new();
     f.bot("bot-a", "Alpha");

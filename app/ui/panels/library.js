@@ -51,7 +51,7 @@
       const section = node("section", "library-panel");
       section.setAttribute("aria-label", "Bibliothèque du bot");
       section.append(node("h3", "", "Bibliothèque"));
-      const limitsNote = node("p", "library-note library-limits");
+      const limitsNote = node("p", "library-note library-limits", "Plafond : 20 Mo par fichier · 20 fichiers au maximum.");
       section.append(limitsNote);
       section.append(node("p", "library-note", "Le fichier reste sur ce bot : un nouveau fil peut le citer, avec son nom et la page. Un autre bot ne le reçoit pas."));
       container.append(section);

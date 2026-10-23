@@ -152,7 +152,7 @@ fn dispatch(
             .map_err(document_error)?;
     let tx = write_transaction(&app.connection)?;
     // The same display name is one file: the new extraction replaces the old one.
-    tx.execute(
+    let replaced = tx.execute(
         "DELETE FROM bot_library WHERE account_id = ?1 AND bot_id = ?2 AND name = ?3",
         params![ACCOUNT, input.bot_id, document.name],
     )?;
@@ -161,8 +161,9 @@ fn dispatch(
         params![ACCOUNT, input.bot_id],
         |row| row.get(0),
     )?;
-    if kept as usize >= MAX_FILES {
-        // Dropping the transaction rolls the replacement back: the old version stays.
+    // Only a new name grows the library: a bot already past the limit keeps replacing its files.
+    if replaced == 0 && kept as usize >= MAX_FILES {
+        // Dropping the transaction leaves the library as it was.
         return Err(ApiError::new(
             400,
             format!(
@@ -598,6 +599,26 @@ impl<'a> Pages<'a> {
         }
     }
 
+    /// A page keeps its marker line, then the stretch of the rest that names the question.
+    fn cut(&self, chunk: &str, room: usize) -> String {
+        if !self.paged {
+            return window(chunk, self.terms, room);
+        }
+        let marker_end = chunk.find('\n').map_or(chunk.len(), |at| at + 1);
+        let marker_end = if chunk[..marker_end].trim().is_empty() {
+            // The first chunk may open with a blank line before its marker.
+            chunk[marker_end..]
+                .find('\n')
+                .map_or(chunk.len(), |at| marker_end + at + 1)
+        } else {
+            marker_end
+        };
+        let (marker, rest) = chunk.split_at(marker_end);
+        let left = room.saturating_sub(marker.chars().count());
+        let marker: String = marker.chars().take(room).collect();
+        format!("{marker}{}", window(rest, self.terms, left))
+    }
+
     /// Best pages first while they fit; page order is kept in the excerpt.
     fn excerpt(&self, max_chars: usize) -> String {
         let mut room = max_chars;
@@ -608,14 +629,8 @@ impl<'a> Pages<'a> {
                 room -= size;
                 chosen.insert(index);
             } else if chosen.is_empty() {
-                // The best page alone is too long: a page keeps its start, marker included;
-                // a slice keeps the stretch that names the question.
-                let chunk = self.chunks[index];
-                return if self.paged {
-                    chunk.chars().take(room).collect()
-                } else {
-                    window(chunk, self.terms, room)
-                };
+                // The best page alone is too long: keep the stretch that names the question.
+                return self.cut(self.chunks[index], room);
             }
         }
         chosen.into_iter().map(|index| self.chunks[index]).collect()
@@ -769,6 +784,19 @@ mod tests {
         let shown = Pages::new(&text, &terms).excerpt(40);
         assert!(shown.starts_with("[Page 2]\ncoffre"), "{shown}");
         assert_eq!(shown.chars().count(), 40);
+    }
+
+    #[test]
+    fn a_long_page_keeps_its_marker_and_the_stretch_that_names_the_question() {
+        let terms = terms("coffre");
+        let text = format!(
+            "\n[Page 1]\n{}coffre ZEBRA\n[Page 2]\nrien",
+            "remplissage ".repeat(1_200)
+        );
+        let shown = Pages::new(&text, &terms).excerpt(2_000);
+        assert!(shown.starts_with("[Page 1]\n"), "{}", &shown[..40]);
+        assert!(shown.contains("coffre ZEBRA"));
+        assert!(shown.chars().count() <= 2_000);
     }
 
     #[test]

@@ -125,9 +125,16 @@ impl LinearScript {
                 json!({"data":{"viewer":{"name":"Charles Test","email":"charles@atelier.test","organization":{"name":"Atelier Ezerbot"}}}}),
             )
         } else if query.contains("teams(first") {
+            // The two teams come as a first page and a second one, as a large workspace's would.
+            if variables["after"] == "cursor-1" {
+                return (
+                    200,
+                    json!({"data":{"teams":{"nodes":[{"id":"team-ops","key":"OPS","name":"Operations"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}),
+                );
+            }
             (
                 200,
-                json!({"data":{"teams":{"nodes":[{"id":"team-eng","key":"ENG","name":"Engineering"},{"id":"team-ops","key":"OPS","name":"Operations"}]}}}),
+                json!({"data":{"teams":{"nodes":[{"id":"team-eng","key":"ENG","name":"Engineering"}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}),
             )
         } else if query.contains("team(id") {
             if variables["id"] != "team-eng" {
@@ -7451,6 +7458,8 @@ fn linear_reads_teams_issues_and_one_issue_without_a_card_and_keeps_the_tokens_o
         );
     }
 
+    // A team found on the first page needs no second one; the listing of all teams read it.
+    assert_eq!(f.linear_requests("cursor-1").len(), 1);
     let run = f.github_call("linear-issue", LINEAR_ISSUE, json!({"issue":"eng-12"}));
     let output = done(&f, &run);
     assert_eq!(output["identifiant"], "ENG-12");

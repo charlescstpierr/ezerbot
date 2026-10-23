@@ -17,6 +17,8 @@ const MAX_LIMIT: u64 = 50;
 const EXCERPT: usize = 3000;
 /// Comments read with one issue.
 const COMMENTS: usize = 20;
+/// Pages of 100 teams looked through: 2 000 teams, far beyond any workspace.
+const TEAM_PAGES: usize = 20;
 /// The loopback port Linear's app declares: its callback URLs are registered, not negotiated.
 pub(super) const REDIRECT_PORT: u16 = 52188;
 const NOT_CONNECTED: &str =
@@ -287,9 +289,20 @@ fn checked(
 }
 
 /// The token of the live connection, read under the sign-in lock: a sign-in replaces it there.
+/// The account the read started with must still be the one that is connected and enabled
+/// for the bot, so a sign-in in between never lends its token to this read.
 fn token_of(ctx: &Context<'_>, account: &Account) -> Result<String, ApiError> {
     super::ensure(ctx, &account.server)?;
     let _guard = EFFECTS.lock().unwrap_or_else(|e| e.into_inner());
+    match connected(ctx)? {
+        Some(now)
+            if now.enabled && now.generation == account.generation && now.name == account.name => {}
+        _ => {
+            return Err(invalid(
+                "Le compte Linear a changé pendant la lecture : rien n’a été lu. Réessayez.",
+            ))
+        }
+    }
     credentials(ctx, &account.server.id)?
         .and_then(|env| env.get("ACCESS_TOKEN").cloned())
         .ok_or_else(|| invalid(RECONNECT))
@@ -316,6 +329,34 @@ impl Team {
         format!("{} ({})", self.key, self.name)
     }
 }
+/// The teams the account sees, page after page, up to the first one `until` accepts.
+fn teams_until(
+    ctx: &Context<'_>,
+    account: &Account,
+    access: &str,
+    until: impl Fn(&Value) -> bool,
+) -> Result<Vec<Value>, ApiError> {
+    let mut teams = Vec::new();
+    let mut after = Value::Null;
+    for _ in 0..TEAM_PAGES {
+        let data = query(
+            ctx,
+            account,
+            access,
+            "query($after:String){teams(first:100,after:$after){nodes{id key name} pageInfo{hasNextPage endCursor}}}",
+            json!({"after":after}),
+            "les équipes",
+        )?;
+        let page = &data["teams"];
+        teams.extend(page["nodes"].as_array().into_iter().flatten().cloned());
+        let next = page["pageInfo"]["endCursor"].as_str();
+        if teams.iter().any(&until) || page["pageInfo"]["hasNextPage"] != true || next.is_none() {
+            break;
+        }
+        after = json!(next);
+    }
+    Ok(teams)
+}
 /// The team a key or a name designates among those the account sees.
 fn find_team(
     ctx: &Context<'_>,
@@ -323,24 +364,16 @@ fn find_team(
     access: &str,
     wanted: &str,
 ) -> Result<Team, ApiError> {
-    let data = query(
-        ctx,
-        account,
-        access,
-        "query{teams(first:100){nodes{id key name}}}",
-        json!({}),
-        "les équipes",
-    )?;
     let wanted_lower = wanted.to_lowercase();
-    data["teams"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|t| {
-            [&t["key"], &t["name"]]
-                .iter()
-                .any(|v| v.as_str().is_some_and(|v| v.to_lowercase() == wanted_lower))
-        })
+    let named = |t: &Value| {
+        [&t["key"], &t["name"]]
+            .iter()
+            .any(|v| v.as_str().is_some_and(|v| v.to_lowercase() == wanted_lower))
+    };
+    let teams = teams_until(ctx, account, access, named)?;
+    teams
+        .iter()
+        .find(|t| named(t))
         .and_then(|t| {
             Some(Team {
                 id: t["id"].as_str()?.to_owned(),
@@ -444,18 +477,8 @@ fn readable(ctx: &Context<'_>) -> Result<(Account, String), ApiError> {
 }
 fn list_teams(ctx: &Context<'_>) -> Result<Value, ApiError> {
     let (account, access) = readable(ctx)?;
-    let data = query(
-        ctx,
-        &account,
-        &access,
-        "query{teams(first:100){nodes{id key name}}}",
-        json!({}),
-        "les équipes",
-    )?;
-    let teams: Vec<Value> = data["teams"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let teams: Vec<Value> = teams_until(ctx, &account, &access, |_| false)?
+        .iter()
         .map(|t| json!({"cle":name_of(&t["key"]),"nom":name_of(&t["name"])}))
         .collect();
     let mut lines = vec![format!(

@@ -23,6 +23,10 @@ use tiny_http::{Header, Response, Server};
 /// The public client of Ezerbot's Slack app, as a build or the judge configures it.
 const SLACK_CLIENT: &str = "1234567890.1234567890";
 const SLACK_ACCESS: &str = "xoxp-slack-access-secret-never-visible";
+/// The public client of Ezerbot's Linear app, as a build or the judge configures it.
+const LINEAR_CLIENT: &str = "linear-public-client-fixture";
+const LINEAR_ACCESS: &str = "lin_oauth_access-secret-never-visible";
+const LINEAR_REFRESH: &str = "lin_refresh_secret-never-visible";
 fn fields_of(url: &str) -> std::collections::HashMap<String, String> {
     url::Url::parse(&format!("http://fixture{url}"))
         .unwrap()
@@ -45,6 +49,7 @@ struct SeenOAuth {
     github: GithubScript,
     gmail: GmailScript,
     slack: SlackScript,
+    linear: LinearScript,
 }
 /// Scripted Slack provider: the PKCE exchange, the Web API reads and the revocation.
 #[derive(Default)]
@@ -61,6 +66,108 @@ struct SlackScript {
     posted: Vec<Value>,
     /// What `chat.postMessage` answers instead of accepting the message.
     post_reply: Option<(u16, Value)>,
+}
+/// Scripted Linear provider: the PKCE exchange, the GraphQL reads and writes, the revocation.
+#[derive(Default)]
+struct LinearScript {
+    /// What the authorization URL asked for, echoed back as granted.
+    scope: String,
+    /// The access token the provider still accepts.
+    live: Option<String>,
+    /// Apps created before December 2023 answer their scopes as a list.
+    scope_list: bool,
+    /// The refresh token is dead: the provider refuses to renew.
+    refresh_dead: bool,
+    /// Access tokens last this many seconds; 0 is the documented 24 hours.
+    expires_in: u64,
+    renewals: u32,
+    revoke_error: bool,
+    /// Inputs of the issues the provider accepted, in order.
+    created: Vec<Value>,
+    /// Inputs of the comments the provider accepted, in order.
+    commented: Vec<Value>,
+    /// What a mutation answers instead of succeeding.
+    mutation_reply: Option<(u16, Value)>,
+}
+impl LinearScript {
+    fn graphql(&mut self, body: &str) -> (u16, Value) {
+        let sent: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        let query = sent["query"].as_str().unwrap_or("");
+        let variables = &sent["variables"];
+        let not_found = || {
+            (
+                200,
+                json!({"data":null,"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INVALID_INPUT","userError":true}}]}),
+            )
+        };
+        let issue_url = |identifier: &str| format!("https://linear.app/atelier/issue/{identifier}");
+        if query.contains("issueCreate") || query.contains("commentCreate") {
+            if let Some(reply) = self.mutation_reply.clone() {
+                return reply;
+            }
+            let input = variables["input"].clone();
+            if query.contains("issueCreate") {
+                self.created.push(input.clone());
+                (
+                    200,
+                    json!({"data":{"issueCreate":{"success":true,"issue":{"identifier":"ENG-31","title":input["title"],"url":issue_url("ENG-31"),"team":{"key":"ENG"}}}}}),
+                )
+            } else {
+                self.commented.push(input);
+                (
+                    200,
+                    json!({"data":{"commentCreate":{"success":true,"comment":{"id":"comment-1","url":format!("{}#comment-1",issue_url("ENG-12"))}}}}),
+                )
+            }
+        } else if query.contains("viewer") {
+            (
+                200,
+                json!({"data":{"viewer":{"name":"Charles Test","email":"charles@atelier.test","organization":{"name":"Atelier Ezerbot"}}}}),
+            )
+        } else if query.contains("teams(first") {
+            (
+                200,
+                json!({"data":{"teams":{"nodes":[{"id":"team-eng","key":"ENG","name":"Engineering"},{"id":"team-ops","key":"OPS","name":"Operations"}]}}}),
+            )
+        } else if query.contains("team(id") {
+            if variables["id"] != "team-eng" {
+                return (
+                    200,
+                    json!({"data":{"team":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}),
+                );
+            }
+            (
+                200,
+                json!({"data":{"team":{"issues":{"nodes":[
+                    {"identifier":"ENG-12","title":"Corriger le bouton de connexion","url":issue_url("ENG-12"),"updatedAt":"2025-10-09T08:55:12.000Z","state":{"name":"In Progress"},"assignee":{"name":"Alice Martin"}},
+                    {"identifier":"ENG-11","title":"Documenter l’import","url":issue_url("ENG-11"),"updatedAt":"2025-10-08T10:00:00.000Z","state":{"name":"Todo"},"assignee":null}
+                ],"pageInfo":{"hasNextPage":true}}}}}),
+            )
+        } else if query.contains("issue(id:$id){id}") {
+            if variables["id"] == "ENG-12" {
+                (200, json!({"data":{"issue":{"id":"issue-eng-12"}}}))
+            } else {
+                not_found()
+            }
+        } else if query.contains("issue(id:$id)") {
+            if variables["id"] != "ENG-12" {
+                return not_found();
+            }
+            (
+                200,
+                json!({"data":{"issue":{"identifier":"ENG-12","title":"Corriger le bouton de connexion","description":"Le bouton ne répond pas sur Safari.","url":issue_url("ENG-12"),"createdAt":"2025-10-01T09:00:00.000Z","updatedAt":"2025-10-09T08:55:12.000Z","state":{"name":"In Progress"},"assignee":{"name":"Alice Martin"},"team":{"key":"ENG","name":"Engineering"},
+                "comments":{"nodes":[
+                    {"body":"Reproduit sur Safari 17.","createdAt":"2025-10-02T10:30:00.000Z","user":{"name":"Bruno Petit"}},
+                    {"body":"Correctif en cours.","createdAt":"2025-10-03T11:45:00.000Z","user":{"name":"Alice Martin"}}
+                ]}}}}),
+            )
+        } else {
+            (
+                200,
+                json!({"data":null,"errors":[{"message":"Unknown query","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}),
+            )
+        }
+    }
 }
 /// Scripted GitHub App provider: device flow, user, refresh and one REST route.
 struct GithubScript {
@@ -710,6 +817,71 @@ impl OAuth {
                     } else {
                         (404, json!({}))
                     }
+                } else if url.starts_with("/linear/") {
+                    let challenge = seen.challenge.clone();
+                    let linear = &mut seen.linear;
+                    let live = linear
+                        .live
+                        .as_ref()
+                        .is_some_and(|t| auth.as_deref() == Some(format!("Bearer {t}").as_str()));
+                    let scope = if linear.scope_list {
+                        json!(linear.scope.split(' ').collect::<Vec<_>>())
+                    } else {
+                        json!(linear.scope)
+                    };
+                    let lifetime = if linear.expires_in == 0 {
+                        86_399
+                    } else {
+                        linear.expires_in
+                    };
+                    if url == "/linear/token" {
+                        match fields.get("grant_type").map(String::as_str) {
+                            Some("authorization_code") => {
+                                let verifier = fields.get("code_verifier").expect("PKCE verifier");
+                                assert_eq!(
+                                    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                                    challenge
+                                );
+                                linear.live = Some(LINEAR_ACCESS.to_owned());
+                                (
+                                    200,
+                                    json!({"access_token":LINEAR_ACCESS,"refresh_token":LINEAR_REFRESH,"token_type":"Bearer","expires_in":lifetime,"scope":scope}),
+                                )
+                            }
+                            _ if linear.refresh_dead
+                                || fields.get("refresh_token").map(String::as_str)
+                                    != Some(LINEAR_REFRESH) =>
+                            {
+                                (400, json!({"error":"invalid_grant"}))
+                            }
+                            _ => {
+                                linear.renewals += 1;
+                                let renewed =
+                                    format!("{LINEAR_ACCESS}-renewed-{}", linear.renewals);
+                                linear.live = Some(renewed.clone());
+                                (
+                                    200,
+                                    json!({"access_token":renewed,"refresh_token":LINEAR_REFRESH,"token_type":"Bearer","expires_in":lifetime,"scope":scope}),
+                                )
+                            }
+                        }
+                    } else if url == "/linear/revoke" {
+                        if linear.revoke_error {
+                            (400, json!({"error":"invalid_token"}))
+                        } else {
+                            linear.live = None;
+                            (200, json!({}))
+                        }
+                    } else if !live {
+                        (
+                            401,
+                            json!({"errors":[{"message":"Authentication required","extensions":{"code":"AUTHENTICATION_ERROR"}}]}),
+                        )
+                    } else if post && url == "/linear/api" {
+                        linear.graphql(&body)
+                    } else {
+                        (404, json!({}))
+                    }
                 } else if url.starts_with("/slack/") {
                     let challenge = seen.challenge.clone();
                     let slack = &mut seen.slack;
@@ -978,7 +1150,7 @@ impl Fixture {
             .clone()
     }
     fn connect(&mut self, id: &str) -> String {
-        let body = if !matches!(id, "notion" | "github" | "gmail" | "slack")
+        let body = if !matches!(id, "notion" | "github" | "gmail" | "slack" | "linear")
             && self.item(id)["has_client"] != true
         {
             json!({"id":id,"client_id":"fixture-oauth-client","client_secret":"fixture-oauth-secret"})
@@ -1040,6 +1212,10 @@ impl Fixture {
                 // What Slack is asked for is what the fake grants.
                 seen.slack.scope = fields["scope"].replace(' ', ",");
             }
+            if id == "linear" {
+                // Linear is asked for comma-separated scopes and answers them space-separated.
+                seen.linear.scope = fields["scope"].replace(',', " ");
+            }
         }
         let mut callback = url::Url::parse(&fields["redirect_uri"]).unwrap();
         callback
@@ -1099,6 +1275,7 @@ impl Drop for Fixture {
         std::env::remove_var("EZERBOT_GITHUB_CLIENT_ID");
         std::env::remove_var("EZERBOT_GOOGLE_CLIENT_ID");
         std::env::remove_var("EZERBOT_SLACK_CLIENT_ID");
+        std::env::remove_var("EZERBOT_LINEAR_CLIENT_ID");
         let _ = std::fs::remove_dir_all(self.path.parent().unwrap());
     }
 }
@@ -1215,7 +1392,7 @@ fn changing_oauth_application_is_refused_without_losing_tokens_even_when_reconne
 #[test]
 fn catalogue_oauth_approvals_refresh_revocation_and_restart_are_end_to_end() {
     let mut f = Fixture::new();
-    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 7);
+    assert_eq!(f.state()["mcp"]["catalogue"].as_array().unwrap().len(), 8);
     assert_eq!(f.item("reunions")["name"], "Réunions");
     assert!(f
         .app
@@ -6963,7 +7140,885 @@ fn catalogue_categories_are_required_and_empty_database_never_contacts_providers
     for item in state["mcp"]["catalogue"].as_array().unwrap() {
         assert!(categories.contains(&item["category"].as_str().unwrap()));
         assert_eq!(item["status"], "disconnected");
-        assert!(!["linear", "microsoft365", "jira"].contains(&item["id"].as_str().unwrap()));
+        assert!(!["microsoft365", "jira"].contains(&item["id"].as_str().unwrap()));
     }
     assert_eq!(f.oauth.count(""), 0);
+}
+
+const LINEAR_TEAMS: &str = "linear_list_teams";
+const LINEAR_ISSUES: &str = "linear_list_issues";
+const LINEAR_ISSUE: &str = "linear_get_issue";
+const LINEAR_CREATE: &str = "linear_create_issue";
+const LINEAR_COMMENT: &str = "linear_comment_issue";
+const LINEAR_ACCOUNT: &str = "charles@atelier.test · Atelier Ezerbot";
+
+impl Fixture {
+    /// The public client of Ezerbot's Linear app is build configuration, never a form field.
+    fn with_linear_client(&self) {
+        std::env::set_var("EZERBOT_LINEAR_CLIENT_ID", LINEAR_CLIENT);
+    }
+    /// Connect in one click, finish the browser leg, and enable the tools for the default bot.
+    fn linear_connect(&mut self) {
+        self.with_linear_client();
+        let run = self.connect("linear");
+        self.decide(&run, json!("allow_once"));
+        assert_eq!(self.item("linear")["status"], "authorizing");
+        assert_eq!(self.callback("linear", false, false), 200);
+        wait("linear connected", || {
+            self.item("linear")["status"] == "connected"
+        });
+        let server = self.item("linear")["server"].clone();
+        self.post(
+            "/api/mcp/select",
+            json!({"id":server["id"],"bot_id":"grokbot","enabled":true}),
+        );
+    }
+    fn linear_requests(&self, part: &str) -> Vec<(String, String)> {
+        self.oauth
+            .seen
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(url, body)| {
+                url.starts_with("/linear/") && (url.contains(part) || body.contains(part))
+            })
+            .cloned()
+            .collect()
+    }
+    fn linear_secret(&self) -> Option<Value> {
+        let id: String = self
+            .db()
+            .query_row(
+                "SELECT server_id FROM wrapper_connector_catalogue WHERE id='linear'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()?;
+        grokbot_wrapper::features::forms::vault(&self.app.feature_context())
+            .unwrap()
+            .get(&format!("MCP_{id}_ENV").to_uppercase())
+            .unwrap()
+            .map(|raw| serde_json::from_str::<Value>(&raw).unwrap()["variables"].clone())
+    }
+    fn linear_created(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().linear.created.clone()
+    }
+    fn linear_commented(&self) -> Vec<Value> {
+        self.oauth.seen.lock().unwrap().linear.commented.clone()
+    }
+    /// Mutations sent to the provider, whatever it answered.
+    fn linear_mutations(&self) -> usize {
+        self.linear_requests("issueCreate").len() + self.linear_requests("commentCreate").len()
+    }
+    /// A preparation that must be refused before any card opens.
+    fn linear_prepare_refused(&mut self, id: &str, tool: &str, arguments: Value) -> String {
+        let conversation = self.github_conversation();
+        self.script(vec![json!({"type":"response.output_item.done","item":{"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":tool,"arguments":arguments.to_string()}}),json!({"type":"response.completed"})]);
+        self.script(vec![json!({"type":"response.completed"})]);
+        self.post(
+            "/api/send",
+            json!({"conversation_id":conversation,"message_id":id,"body":"Publie dans Linear."}),
+        );
+        let run: String = self.db().query_row("SELECT r.run_id FROM engine_runs r JOIN wrapper_engine_runs w USING(run_id) WHERE json_extract(w.input_json,'$.entry_id')=?1",[id],|r|r.get(0)).unwrap();
+        self.github_settle(&run);
+        run
+    }
+    fn linear_card(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+    /// Nothing of the tokens is in the state, the database, the run or the model's input.
+    fn assert_linear_tokens_nowhere(&self, run: &str) {
+        let inputs = format!("{:?}", self.ai.seen.lock().unwrap().bodies);
+        let events = format!("{:?}", store::events(&self.db(), run, 0).unwrap());
+        let database = std::fs::read(&self.path).unwrap();
+        for secret in [LINEAR_ACCESS, LINEAR_REFRESH, "lin_oauth_"] {
+            assert!(!inputs.contains(secret), "model input holds {secret}");
+            assert!(!events.contains(secret), "run events hold {secret}");
+            assert!(!database
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn linear_card_lists_permissions_and_actions_and_has_no_client_fields() {
+    let mut f = Fixture::new();
+    let linear = f.item("linear");
+    assert_eq!(linear["name"], "Linear");
+    assert_eq!(linear["category"], "Développement");
+    assert_eq!(linear["needs_client"], false);
+    assert_eq!(linear["configured"], false);
+    assert_eq!(linear["redirect_uri"], Value::Null);
+    assert!(linear["unconfigured_message"]
+        .as_str()
+        .unwrap()
+        .contains("client Linear d’Ezerbot n’est pas configuré"));
+    for body in [
+        br#"{"id":"linear"}"#.as_slice(),
+        br#"{"id":"linear","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+    ] {
+        let error = f
+            .app
+            .api("POST", "/api/connectors/connect", body)
+            .unwrap_err();
+        assert!(error
+            .message
+            .contains("client Linear d’Ezerbot n’est pas configuré"));
+    }
+    assert!(f.linear_requests("").is_empty());
+    assert_eq!(f.item("linear")["status"], "disconnected");
+    f.with_linear_client();
+    let linear = f.item("linear");
+    assert_eq!(linear["configured"], true);
+    assert_eq!(linear["unconfigured_message"], Value::Null);
+    assert_eq!(linear["scopes"], "read issues:create comments:create");
+    let permissions = linear["permissions"].as_str().unwrap();
+    assert!(permissions.contains("Lecture des équipes, des issues et de leurs commentaires"));
+    assert!(permissions.contains("carte brouillon"));
+    let typed = f
+        .app
+        .api(
+            "POST",
+            "/api/connectors/connect",
+            br#"{"id":"linear","client_id":"mine","client_secret":"fixture-oauth-secret"}"#,
+        )
+        .unwrap_err();
+    assert!(typed
+        .message
+        .contains("ni identifiant ni secret saisis ici"));
+    assert!(f.linear_secret().is_none());
+}
+
+#[test]
+fn linear_connects_with_the_public_client_and_pkce_and_keeps_the_tokens_in_the_vault() {
+    let mut f = Fixture::new();
+    f.with_linear_client();
+    let run = f.connect("linear");
+    f.wait_approval(&run);
+    let request = f.state()["forms"]["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run)
+        .unwrap()
+        .clone();
+    let card = &request["arguments"]["catalogue"];
+    assert_eq!(card["service"], "Linear");
+    assert!(card["connexion"]
+        .as_str()
+        .unwrap()
+        .contains("conservés dans le trousseau"));
+    f.decide(&run, json!("allow_once"));
+    let item = f.item("linear");
+    assert_eq!(item["status"], "authorizing");
+    let authorize = url::Url::parse(item["authorization_url"].as_str().unwrap()).unwrap();
+    let query: std::collections::HashMap<_, _> = authorize.query_pairs().into_owned().collect();
+    assert_eq!(query["client_id"], LINEAR_CLIENT);
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["scope"], "read,issues:create,comments:create");
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(query["redirect_uri"].ends_with("/oauth/linear/callback"));
+    assert!(!query.contains_key("client_secret"));
+    assert_eq!(f.callback("linear", false, false), 200);
+    wait("linear connected", || {
+        f.item("linear")["status"] == "connected"
+    });
+    let exchanges = f.linear_requests("/token");
+    assert_eq!(exchanges.len(), 1);
+    let sent: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(exchanges[0].1.as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(sent["client_id"], LINEAR_CLIENT);
+    assert!(sent.contains_key("code_verifier"));
+    assert!(!sent.contains_key("client_secret"), "{sent:?}");
+    // The card shows the account Linear named, and the actions, reads apart from effects.
+    let item = f.item("linear");
+    assert_eq!(item["account"], LINEAR_ACCOUNT);
+    assert_eq!(item["has_tokens"], true);
+    assert_eq!(item["can_refresh"], true);
+    let tools: Vec<_> = item["server"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "list_teams",
+            "list_issues",
+            "get_issue",
+            "create_issue",
+            "comment_issue"
+        ]
+    );
+    let kept = f.linear_secret().unwrap();
+    assert_eq!(kept["ACCESS_TOKEN"], LINEAR_ACCESS);
+    assert_eq!(kept["REFRESH_TOKEN"], LINEAR_REFRESH);
+    assert!(kept.get("CLIENT_SECRET").is_none() && kept.get("CLIENT_ID").is_none());
+    let shown = f.state().to_string();
+    assert!(!shown.contains(LINEAR_ACCESS) && !shown.contains(LINEAR_REFRESH));
+}
+
+#[test]
+fn linear_accepts_a_token_response_that_lists_its_scopes() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().linear.scope_list = true;
+    f.linear_connect();
+    assert_eq!(f.item("linear")["status"], "connected");
+}
+
+#[test]
+fn linear_refuses_a_grant_that_lacks_a_permission_and_keeps_no_token() {
+    let mut g = Fixture::new();
+    g.with_linear_client();
+    let run = g.connect("linear");
+    g.decide(&run, json!("allow_once"));
+    let auth = g.item("linear")["authorization_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fields: std::collections::HashMap<_, _> = url::Url::parse(&auth)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    g.oauth.seen.lock().unwrap().challenge = fields["code_challenge"].clone();
+    g.oauth.seen.lock().unwrap().linear.scope = "read".into();
+    let callback = format!(
+        "{}?state={}&code=fake-code",
+        fields["redirect_uri"], fields["state"]
+    );
+    let status = match ureq::get(&callback).call() {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("callback transport {e}"),
+    };
+    assert_eq!(status, 400);
+    wait("linear reconnect", || {
+        g.item("linear")["status"] == "reconnect"
+    });
+    assert!(
+        g.linear_secret().is_none(),
+        "a refused grant keeps no token"
+    );
+}
+
+#[test]
+fn linear_reads_teams_issues_and_one_issue_without_a_card_and_keeps_the_tokens_out_of_the_thread() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let run = f.github_call("linear-teams", LINEAR_TEAMS, json!({}));
+    let output = done(&f, &run);
+    assert_eq!(output["compte"], LINEAR_ACCOUNT);
+    assert_eq!(
+        output["equipes"][0],
+        json!({"cle":"ENG","nom":"Engineering"})
+    );
+    assert!(output["texte"]
+        .as_str()
+        .unwrap()
+        .contains("OPS · Operations"));
+
+    for (index, team) in ["ENG", "eng", "Engineering"].into_iter().enumerate() {
+        let run = f.github_call(
+            &format!("linear-issues-{index}"),
+            LINEAR_ISSUES,
+            json!({"team":team,"limit":2}),
+        );
+        let output = done(&f, &run);
+        assert_eq!(output["equipe"], "ENG", "{team}");
+        assert_eq!(output["autres_issues"], true);
+        assert_eq!(output["issues"][0]["identifiant"], "ENG-12");
+        assert_eq!(output["issues"][0]["etat"], "In Progress");
+        assert_eq!(output["issues"][0]["assigne"], "Alice Martin");
+        assert_eq!(output["issues"][1]["assigne"], "");
+        let text = output["texte"].as_str().unwrap();
+        assert!(text.contains("ENG-12 · Corriger le bouton de connexion · état : In Progress · assigné : Alice Martin"), "{text}");
+        assert!(text.contains("assigné : personne"), "{text}");
+        assert!(
+            text.contains("https://linear.app/atelier/issue/ENG-12"),
+            "{text}"
+        );
+    }
+
+    let run = f.github_call("linear-issue", LINEAR_ISSUE, json!({"issue":"eng-12"}));
+    let output = done(&f, &run);
+    assert_eq!(output["identifiant"], "ENG-12");
+    assert_eq!(output["titre"], "Corriger le bouton de connexion");
+    assert_eq!(output["etat"], "In Progress");
+    assert_eq!(output["assigne"], "Alice Martin");
+    assert_eq!(output["description"], "Le bouton ne répond pas sur Safari.");
+    assert_eq!(output["commentaires"].as_array().unwrap().len(), 2);
+    let text = output["texte"].as_str().unwrap();
+    assert!(
+        text.contains("[2025-10-02 10:30 UTC] Bruno Petit : Reproduit sur Safari 17."),
+        "{text}"
+    );
+    assert!(text.contains("Créée le 2025-10-01 09:00 UTC"), "{text}");
+    f.assert_linear_tokens_nowhere(&run);
+    assert_eq!(f.linear_mutations(), 0, "reading changes nothing");
+    assert!(!f.state().to_string().contains(LINEAR_ACCESS));
+}
+
+#[test]
+fn linear_says_what_a_refused_read_means() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let run = f.github_call("linear-no-team", LINEAR_ISSUES, json!({"team":"INCONNUE"}));
+    assert!(failed(&f, &run).contains("Aucune équipe Linear ne s’appelle INCONNUE"));
+    let run = f.github_call(
+        "linear-bad-id",
+        LINEAR_ISSUE,
+        json!({"issue":"pas un identifiant"}),
+    );
+    assert!(failed(&f, &run).contains("par exemple ENG-12"));
+    let run = f.github_call("linear-missing", LINEAR_ISSUE, json!({"issue":"ENG-404"}));
+    assert!(failed(&f, &run).contains("Linear ne trouve pas l’issue ENG-404"));
+    let run = f.github_call(
+        "linear-big",
+        LINEAR_ISSUES,
+        json!({"team":"ENG","limit":500}),
+    );
+    assert!(failed(&f, &run).contains("entre 1 et 50"));
+    assert_eq!(f.item("linear")["status"], "connected");
+}
+
+#[test]
+fn linear_revoked_access_asks_to_reconnect() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    f.oauth.seen.lock().unwrap().linear.live = None;
+    let run = f.github_call("linear-revoked", LINEAR_TEAMS, json!({}));
+    let reason = failed(&f, &run);
+    assert!(reason.contains("Reconnectez Linear"), "{reason}");
+    assert_eq!(f.item("linear")["status"], "reconnect");
+}
+
+#[test]
+fn linear_renews_an_expired_token_with_the_client_id_alone_and_asks_to_reconnect_when_it_cannot() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='linear'",
+            [],
+        )
+        .unwrap();
+    let run = f.github_call("linear-renew", LINEAR_TEAMS, json!({}));
+    done(&f, &run);
+    assert_eq!(f.oauth.seen.lock().unwrap().linear.renewals, 1);
+    let renewal = f
+        .linear_requests("/token")
+        .into_iter()
+        .map(|(_, body)| {
+            url::form_urlencoded::parse(body.as_bytes())
+                .into_owned()
+                .collect::<std::collections::HashMap<String, String>>()
+        })
+        .find(|fields| fields["grant_type"] == "refresh_token")
+        .unwrap();
+    assert_eq!(renewal["client_id"], LINEAR_CLIENT);
+    assert!(!renewal.contains_key("client_secret"));
+    assert_eq!(f.item("linear")["account"], LINEAR_ACCOUNT);
+    // A refresh that fails never reuses the expired access.
+    f.oauth.seen.lock().unwrap().linear.refresh_dead = true;
+    f.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET expires_at=1 WHERE id='linear'",
+            [],
+        )
+        .unwrap();
+    let before = f.linear_requests("teams(first").len();
+    let run = f.github_call("linear-dead", LINEAR_TEAMS, json!({}));
+    assert!(failed(&f, &run).contains("Reconnectez Linear"));
+    assert_eq!(f.item("linear")["status"], "reconnect");
+    assert_eq!(f.linear_requests("teams(first").len(), before);
+}
+
+#[test]
+fn linear_disabled_tools_are_not_invocable_and_nothing_works_after_disconnect() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let server = f.item("linear")["server"]["id"].clone();
+    let scoped = |f: &Fixture| {
+        grokbot_wrapper::features::mcp::scoped_tools(&grokbot_wrapper::features::Context {
+            connection: &f.db(),
+            provider: &f.provider,
+            db_path: &f.path,
+            now_ms: 0,
+            bot_id: Some("grokbot"),
+            conversation_id: None,
+            run_id: None,
+        })
+        .into_iter()
+        .filter(|t| t.name.starts_with("linear_"))
+        .map(|t| (t.name, t.requires_approval))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        scoped(&f),
+        [
+            (LINEAR_TEAMS.to_owned(), false),
+            (LINEAR_ISSUES.to_owned(), false),
+            (LINEAR_ISSUE.to_owned(), false),
+            (LINEAR_CREATE.to_owned(), true),
+            (LINEAR_COMMENT.to_owned(), true),
+        ]
+    );
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":false}),
+    );
+    assert!(scoped(&f).is_empty());
+    let run = f.github_call("linear-off", LINEAR_TEAMS, json!({}));
+    assert!(failed(&f, &run).contains("Linear n’est pas activé pour ce bot"));
+    let run = f.linear_prepare_refused(
+        "linear-off-draft",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    assert!(failed(&f, &run).contains("Linear n’est pas activé pour ce bot"));
+    assert_eq!(f.linear_mutations(), 0);
+
+    f.post(
+        "/api/mcp/select",
+        json!({"id":server,"bot_id":"grokbot","enabled":true}),
+    );
+    let run = f.post("/api/connectors/disconnect", json!({"id":"linear"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("linear")["status"], "disconnected");
+    assert_eq!(f.item("linear")["warning"], false);
+    assert_eq!(f.linear_requests("/revoke").len(), 1);
+    assert!(f.linear_secret().is_none());
+    assert!(scoped(&f).is_empty());
+    let reads = f.linear_requests("/linear/api").len();
+    let run = f.github_call("linear-after", LINEAR_TEAMS, json!({}));
+    assert!(failed(&f, &run).contains("Linear est déconnecté"));
+    let run = f.linear_prepare_refused(
+        "linear-after-draft",
+        LINEAR_CREATE,
+        json!({"team":"ENG","title":"x"}),
+    );
+    assert!(failed(&f, &run).contains("Linear est déconnecté"));
+    assert_eq!(
+        f.linear_requests("/linear/api").len(),
+        reads,
+        "no call after disconnect"
+    );
+}
+
+#[test]
+fn linear_disconnect_says_whether_linear_confirmed_the_revocation() {
+    let mut f = Fixture::new();
+    f.oauth.seen.lock().unwrap().linear.revoke_error = true;
+    f.linear_connect();
+    let run = f.post("/api/connectors/disconnect", json!({"id":"linear"}))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.decide(&run, json!("allow_once"));
+    assert_eq!(f.item("linear")["warning"], true);
+    assert!(
+        f.linear_secret().is_none(),
+        "the local token goes either way"
+    );
+}
+
+#[test]
+fn linear_issue_waits_on_a_draft_card_and_cancel_creates_nothing() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let (run, card) = f.github_prepare(
+        "linear-draft-1",
+        LINEAR_CREATE,
+        json!({"team":"ENG","title":"Prévoir l’export","description":"Un export CSV des issues."}),
+    );
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["service"], "Linear");
+    assert_eq!(draft["action"], "Créer une issue Linear");
+    assert_eq!(draft["compte"], LINEAR_ACCOUNT);
+    assert_eq!(draft["equipe"], "ENG");
+    assert_eq!(draft["titre"], "Prévoir l’export");
+    assert_eq!(draft["texte"], "Un export CSV des issues.");
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["policy"]["protection"], "outbound");
+    assert_eq!(card["policy"]["remember"], false);
+    assert_eq!(f.linear_mutations(), 0, "nothing before the click");
+    assert!(
+        f.linear_requests("teams(first").is_empty(),
+        "preparing the card calls no provider"
+    );
+    // There is no “Toujours”.
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .github_resolve(&card, &format!("linear-always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    // Annuler: zero effect, and the card says so.
+    f.github_resolve(&card, "linear-cancel-1", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.linear_mutations(), 0);
+    assert!(f.linear_created().is_empty());
+    assert_eq!(f.linear_card(&card)["status"]["status"], "denied");
+}
+
+#[test]
+fn linear_issue_is_created_once_from_the_corrected_title_and_text() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let (run, card) = f.github_prepare(
+        "linear-draft-2",
+        LINEAR_CREATE,
+        json!({"team":"Engineering","title":"Première version","description":"Brouillon"}),
+    );
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    f.github_resolve_issue(
+        &card,
+        "linear-send-1",
+        json!("allow_once"),
+        Some("Titre validé"),
+        Some("Description validée"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let output = done(&f, &run);
+    assert_eq!(output["identifiant"], "ENG-31");
+    assert_eq!(output["compte"], LINEAR_ACCOUNT);
+    assert_eq!(output["url"], "https://linear.app/atelier/issue/ENG-31");
+    assert_eq!(
+        f.linear_created(),
+        vec![
+            json!({"teamId":"team-eng","title":"Titre validé","description":"Description validée"})
+        ]
+    );
+    let settled = f.linear_card(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["titre"], "Titre validé");
+    assert_eq!(
+        settled["arguments"]["brouillon"]["texte"],
+        "Description validée"
+    );
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    assert_eq!(settled["arguments"]["brouillon"]["etat"], "sent");
+    // A second Envoyer never creates again.
+    f.github_resolve_issue(
+        &card,
+        "linear-send-1",
+        json!("allow_once"),
+        Some("Autre"),
+        Some("Autre texte"),
+    )
+    .unwrap();
+    assert!(f
+        .github_resolve_issue(
+            &card,
+            "linear-send-2",
+            json!("allow_once"),
+            Some("Autre"),
+            None
+        )
+        .is_err());
+    f.app.tick(0);
+    assert_eq!(f.linear_created().len(), 1);
+    assert_eq!(f.linear_mutations(), 1);
+    // The model learned what was created, and no token reached it.
+    let inputs = format!("{:?}", f.ai.seen.lock().unwrap().bodies);
+    assert!(inputs.contains("ENG-31"));
+    f.assert_linear_tokens_nowhere(&run);
+    // A blank title is refused on the card; an empty description is allowed.
+    let (run, card) = f.github_prepare(
+        "linear-draft-3",
+        LINEAR_CREATE,
+        json!({"team":"OPS","title":"Sans description"}),
+    );
+    assert_eq!(card["arguments"]["brouillon"]["texte"], "");
+    assert_eq!(
+        f.github_resolve_issue(&card, "linear-blank", json!("allow_once"), Some("  "), None)
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(f.linear_mutations(), 1);
+    f.github_resolve(&card, "linear-send-3", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    done(&f, &run);
+    assert_eq!(
+        f.linear_created()[1],
+        json!({"teamId":"team-ops","title":"Sans description"})
+    );
+}
+
+#[test]
+fn linear_comment_goes_through_a_card_once_and_cancel_publishes_nothing() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let (cancelled, first) = f.github_prepare(
+        "linear-draft-4",
+        LINEAR_COMMENT,
+        json!({"issue":"eng-12","text":"Premier jet"}),
+    );
+    let draft = &first["arguments"]["brouillon"];
+    assert_eq!(draft["action"], "Commenter une issue Linear");
+    assert_eq!(draft["issue"], "ENG-12");
+    assert_eq!(draft["compte"], LINEAR_ACCOUNT);
+    f.github_resolve(&first, "linear-cancel-2", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&cancelled);
+    assert_eq!(f.linear_mutations(), 0);
+    assert!(f.linear_commented().is_empty());
+
+    let (run, card) = f.github_prepare(
+        "linear-draft-5",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"Version proposée"}),
+    );
+    // A title is for issues only.
+    assert_eq!(
+        f.github_resolve_issue(
+            &card,
+            "linear-title",
+            json!("allow_once"),
+            Some("Titre"),
+            None
+        )
+        .unwrap_err()
+        .status,
+        400
+    );
+    assert_eq!(
+        f.github_resolve(
+            &card,
+            "linear-blank-comment",
+            json!("allow_once"),
+            Some("  ")
+        )
+        .unwrap_err()
+        .status,
+        400
+    );
+    f.github_resolve(
+        &card,
+        "linear-send-4",
+        json!("allow_once"),
+        Some("Version validée"),
+    )
+    .unwrap();
+    f.github_settle(&run);
+    let output = done(&f, &run);
+    assert_eq!(output["issue"], "ENG-12");
+    assert_eq!(output["texte"], "Version validée");
+    assert_eq!(
+        f.linear_commented(),
+        vec![json!({"issueId":"issue-eng-12","body":"Version validée"})]
+    );
+    assert_eq!(
+        f.linear_card(&card)["arguments"]["brouillon"]["etat"],
+        "sent"
+    );
+    f.github_resolve(&card, "linear-send-4", json!("allow_once"), Some("Autre"))
+        .unwrap();
+    f.app.tick(0);
+    assert_eq!(f.linear_commented().len(), 1);
+    assert_eq!(f.linear_mutations(), 1);
+    f.assert_linear_tokens_nowhere(&run);
+}
+
+#[test]
+fn linear_draft_refuses_a_bad_target_without_a_card_and_an_unknown_issue_without_an_effect() {
+    let mut f = Fixture::new();
+    let run = f.linear_prepare_refused(
+        "linear-not-connected",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"x"}),
+    );
+    assert!(failed(&f, &run).contains("Linear n’est pas connecté"));
+    f.linear_connect();
+    let before = f.state()["forms"]["requests"].as_array().unwrap().len();
+    let cases = [
+        (LINEAR_COMMENT, json!({"issue":"ENG-12","text":"   "})),
+        (
+            LINEAR_COMMENT,
+            json!({"issue":"pas-un-id","text":"Bonjour"}),
+        ),
+        (
+            LINEAR_COMMENT,
+            json!({"issue":"ENG-12","text":"Bonjour\u{7}"}),
+        ),
+        (
+            LINEAR_COMMENT,
+            json!({"issue":"ENG-12","text":"x".repeat(65_537)}),
+        ),
+        (
+            LINEAR_COMMENT,
+            json!({"issue":"ENG-12","text":"Bonjour","extra":true}),
+        ),
+        (LINEAR_CREATE, json!({"team":"ENG","title":"   "})),
+        (LINEAR_CREATE, json!({"team":"  ","title":"Titre"})),
+        (LINEAR_CREATE, json!({"team":"ENG","title":"x".repeat(257)})),
+        (
+            LINEAR_CREATE,
+            json!({"team":"ENG","title":"Titre","description":"Bonjour\u{7}"}),
+        ),
+        (
+            LINEAR_CREATE,
+            json!({"team":"ENG","title":"Titre","priority":1}),
+        ),
+    ];
+    for (index, (tool, arguments)) in cases.into_iter().enumerate() {
+        let run = f.linear_prepare_refused(&format!("linear-bad-{index}"), tool, arguments);
+        assert!(
+            matches!(f.outcome(&run), ToolOutcome::Failed { .. }),
+            "{index}"
+        );
+    }
+    assert_eq!(
+        f.state()["forms"]["requests"].as_array().unwrap().len(),
+        before
+    );
+    assert_eq!(f.linear_mutations(), 0);
+    // A team or an issue the account does not see opens a card, and the click creates nothing.
+    for (id, tool, arguments, said) in [
+        (
+            "linear-ghost-team",
+            LINEAR_CREATE,
+            json!({"team":"FANTOME","title":"Titre"}),
+            "Aucune équipe Linear ne s’appelle FANTOME",
+        ),
+        (
+            "linear-ghost-issue",
+            LINEAR_COMMENT,
+            json!({"issue":"ENG-404","text":"Bonjour"}),
+            "Linear ne trouve pas l’issue ENG-404",
+        ),
+    ] {
+        let (run, card) = f.github_prepare(id, tool, arguments);
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let reason = failed(&f, &run);
+        assert!(
+            reason.contains(said) && reason.contains("Rien n’a été publié"),
+            "{reason}"
+        );
+        assert_eq!(
+            f.linear_card(&card)["arguments"]["brouillon"]["etat"],
+            "refused"
+        );
+    }
+    assert_eq!(f.linear_mutations(), 0);
+}
+
+#[test]
+fn linear_draft_shows_refused_rate_limited_and_unconfirmed_and_never_sends_twice() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let cases = [
+        (
+            "refused",
+            (
+                200,
+                json!({"data":null,"errors":[{"message":"Argument invalid","extensions":{"code":"INVALID_INPUT","userError":true}}]}),
+            ),
+            "Rien n’a été publié",
+        ),
+        (
+            "rate_limited",
+            (
+                400,
+                json!({"errors":[{"message":"Rate limit exceeded","extensions":{"code":"RATELIMITED"}}]}),
+            ),
+            "Rien n’a été publié",
+        ),
+        ("unconfirmed", (503, json!({})), "peut-être été publié"),
+    ];
+    let mut calls = 0;
+    for (state, reply, said) in cases {
+        f.oauth.seen.lock().unwrap().linear.mutation_reply = Some(reply);
+        let id = format!("linear-state-{state}");
+        let (run, card) = f.github_prepare(
+            &id,
+            LINEAR_COMMENT,
+            json!({"issue":"ENG-12","text":"Bonjour"}),
+        );
+        f.github_resolve(&card, &format!("{id}-send"), json!("allow_once"), None)
+            .unwrap();
+        f.github_settle(&run);
+        let reason = failed(&f, &run);
+        assert!(reason.contains(said), "{state}: {reason}");
+        calls += 1;
+        assert_eq!(f.linear_mutations(), calls, "{state}");
+        let shown = f.linear_card(&card);
+        assert_eq!(shown["arguments"]["brouillon"]["etat"], state);
+        assert_eq!(shown["publication_result"]["status"], "failed");
+        // Never silent, never retried: the run is over and the card is spent.
+        f.app.tick(0);
+        assert_eq!(f.linear_mutations(), calls, "{state} was sent again");
+        assert!(
+            f.linear_commented().is_empty(),
+            "{state} counted as a publication"
+        );
+    }
+}
+
+#[test]
+fn linear_draft_is_refused_after_a_new_sign_in_or_a_changed_account() {
+    let mut f = Fixture::new();
+    f.linear_connect();
+    let (run, card) = f.github_prepare(
+        "linear-draft-6",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    f.db()
+        .execute("UPDATE wrapper_connector_catalogue SET account_email='autre@atelier.test · Autre' WHERE id='linear'", [])
+        .unwrap();
+    f.github_resolve(&card, "linear-send-5", json!("allow_once"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(failed(&f, &run).contains("compte Linear a changé"));
+    assert_eq!(f.linear_mutations(), 0);
+}
+
+#[test]
+fn linear_draft_is_refused_after_a_new_sign_in_even_to_an_account_of_the_same_name() {
+    let mut g = Fixture::new();
+    g.linear_connect();
+    let (run, card) = g.github_prepare(
+        "linear-draft-7",
+        LINEAR_COMMENT,
+        json!({"issue":"ENG-12","text":"Bonjour"}),
+    );
+    g.db()
+        .execute(
+            "UPDATE wrapper_connector_catalogue SET generation=generation+1 WHERE id='linear'",
+            [],
+        )
+        .unwrap();
+    g.github_resolve(&card, "linear-send-6", json!("allow_once"), None)
+        .unwrap();
+    g.github_settle(&run);
+    assert!(failed(&g, &run).contains("compte Linear a changé"));
+    assert_eq!(g.linear_mutations(), 0);
 }

@@ -160,7 +160,11 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const gmailFree = !!gmail && !gmail.querySelector("form") && gmail.querySelectorAll('input:not([type="checkbox"])').length === 0;
               // Le même consentement Google lit l'agenda et Drive : la carte Gmail le dit, sans second formulaire.
               const gmailReads = !!gmail && /agenda/i.test(gmail.textContent) && /Drive/.test(gmail.textContent);
-              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads ? {ok: true, heading, reunions, gmailFree, gmailReads} : null;
+              // Linear n'a ni champ ni secret non plus, et sa fiche sépare la lecture des effets par carte brouillon.
+              const linear = panel.querySelector('[data-connector="linear"]');
+              const linearFree = !!linear && !linear.querySelector("form") && linear.querySelectorAll('input:not([type="checkbox"])').length === 0;
+              const linearActions = !!linear && /issues/i.test(linear.textContent) && /carte brouillon/i.test(linear.textContent);
+              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads && linearFree && linearActions ? {ok: true, heading, reunions, gmailFree, gmailReads, linearFree, linearActions} : null;
             }""",
             "connecteurs non prêts",
         )

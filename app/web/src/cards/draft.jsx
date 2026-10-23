@@ -21,6 +21,7 @@ export function DraftCard({ message, input, disabled, expired }) {
   const issue = draft.titre !== undefined;
   const slack = draft.espace !== undefined;
   const meeting = draft.reunion !== undefined;
+  const linear = draft.service === "Linear";
   const titled = issue || email;
   const [edited, setEdited] = useState(null);
   const [editedTitle, setEditedTitle] = useState(null);
@@ -39,7 +40,7 @@ export function DraftCard({ message, input, disabled, expired }) {
   const failed = result?.status === "failed" && !denied;
   const published = result?.status === "done";
   const nothing = email || meeting ? "envoyé" : "publié";
-  const failure = meeting ? MEETING_FAILURES[draft.etat] : slack ? SLACK_FAILURES[draft.etat] : undefined;
+  const failure = meeting ? MEETING_FAILURES[draft.etat] : slack || linear ? SLACK_FAILURES[draft.etat] : undefined;
   const statusText = denied ? `Annulé · rien n’a été ${nothing}` : published ? (email ? "Courriel envoyé" : meeting ? "Message envoyé" : issue ? "Issue créée" : "Publié")
     : failed ? (email ? EMAIL_FAILURES[draft.etat] || "Non envoyé" : failure || (meeting ? "Non envoyé" : "Non publié"))
     : status === "resolved" ? "Envoi validé" : status === "pending" ? "En attente de vous" : `Rien n’a été ${nothing}`;
@@ -50,6 +51,11 @@ export function DraftCard({ message, input, disabled, expired }) {
         ? <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 text-sm" aria-label="Cible du brouillon">
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">Réunion</dt><dd className="mt-1 ml-0 break-words">{draft.reunion}</dd></div>
           <div className="min-w-0"><dt className="text-xs text-muted-foreground">Envoyé au nom de</dt><dd className="mt-1 ml-0 break-words">{draft.bot}</dd></div>
+        </dl>
+        : linear
+        ? <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 text-sm" aria-label="Cible du brouillon">
+          <div className="min-w-0"><dt className="text-xs text-muted-foreground">Publié sous le compte</dt><dd className="mt-1 ml-0 break-words">{draft.compte}</dd></div>
+          <div className="min-w-0"><dt className="text-xs text-muted-foreground">{issue ? "Équipe" : "Issue"}</dt><dd className="mt-1 ml-0 break-words">{issue ? draft.equipe : draft.issue}</dd></div>
         </dl>
         : slack
         ? <dl className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3 text-sm" aria-label="Cible du brouillon">
@@ -88,7 +94,7 @@ export function DraftCard({ message, input, disabled, expired }) {
       {pending && expired && <p className="text-sm">Ce brouillon a expiré. Demandez au bot de le préparer à nouveau.</p>}
       {published && email && <p className="gb-status-ok text-sm" role="status">Courriel envoyé sous {result.output?.compte} à {(result.output?.a || []).join(", ")}.</p>}
       {published && meeting && <p className="gb-status-ok text-sm" role="status">Message envoyé dans le chat de la réunion {draft.reunion}, au nom de « {draft.bot} ».</p>}
-      {published && issue && <p className="gb-status-ok text-sm" role="status">Issue {result.output?.numero ? `#${result.output.numero} ` : ""}créée sous {result.output?.compte} : <a href={result.output?.url} target="_blank" rel="noreferrer">{result.output?.url}</a></p>}
+      {published && issue && <p className="gb-status-ok text-sm" role="status">Issue {result.output?.identifiant ? `${result.output.identifiant} ` : result.output?.numero ? `#${result.output.numero} ` : ""}créée sous {result.output?.compte} : <a href={result.output?.url} target="_blank" rel="noreferrer">{result.output?.url}</a></p>}
       {published && slack && <p className="gb-status-ok text-sm" role="status">Message publié dans {draft.cible} de l’espace {result.output?.compte}.</p>}
       {published && !issue && !email && !slack && !meeting && <p className="gb-status-ok text-sm" role="status">Commentaire publié sous {result.output?.compte} : <a href={result.output?.url} target="_blank" rel="noreferrer">{result.output?.url}</a></p>}
       {failed && <p className="gb-status-alert text-sm" role="alert">{failure && <strong>{failure} · </strong>}{result.reason}</p>}

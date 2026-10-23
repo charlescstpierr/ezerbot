@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::Sender,
         Arc, Mutex, OnceLock,
     },
@@ -25,38 +25,48 @@ pub(crate) struct Piece {
     pub text: String,
     pub truncated: bool,
     pub incomplete: bool,
-    /// The last line the program wrote, whatever the output cap kept. A prompt
-    /// is that line, because the program is waiting on it.
-    pub tail: String,
-    pub tail_seq: u64,
+    /// The last line the program wrote asks for a password. Kept whatever the
+    /// output cap kept, and whatever the other stream wrote since.
+    pub asks_password: bool,
 }
 
-const TAIL_BYTES: usize = 256;
+const PROMPT_LINE_BYTES: usize = 4096;
 
-/// Orders the two streams' tails: only the stream written last can be the
-/// prompt the program is waiting on.
-pub(crate) fn next_seq() -> u64 {
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    SEQ.fetch_add(1, Ordering::SeqCst)
+/// The program's last non-blank line, with its newline when it ended one. A
+/// prompt may end its line: `echo Password:` waits for input as much as
+/// `printf 'Password: '` does. Whether that line asks for a password is
+/// decided on the whole line, so a long prompt cannot push its keyword out of
+/// the bounded text kept here.
+#[derive(Default)]
+pub(crate) struct PromptLine {
+    line: Vec<u8>,
+    asks_password: bool,
 }
 
-/// The last line the program wrote, with its newline when it ended one, after
-/// `previous` and `chunk`. A prompt may end its line: `echo Password:` waits
-/// for input as much as `printf 'Password: '` does.
-pub(crate) fn extend_tail(previous: &[u8], chunk: &[u8]) -> Vec<u8> {
-    let all = [previous, chunk].concat();
-    let mut lines: Vec<&[u8]> = all.split_inclusive(|byte| *byte == b'\n').collect();
-    while lines
-        .last()
-        .is_some_and(|line| line.iter().all(u8::is_ascii_whitespace))
-    {
-        lines.pop();
+impl PromptLine {
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
+        let all = [self.line.as_slice(), chunk].concat();
+        let mut lines: Vec<&[u8]> = all.split_inclusive(|byte| *byte == b'\n').collect();
+        while lines
+            .last()
+            .is_some_and(|line| line.iter().all(u8::is_ascii_whitespace))
+        {
+            lines.pop();
+        }
+        let Some(last) = lines.last() else {
+            return;
+        };
+        let asks = asks_for_password(&String::from_utf8_lossy(last));
+        // The same line, grown or followed by blanks, keeps what it asked.
+        let same_line = std::ptr::eq(last.as_ptr(), all.as_ptr());
+        self.asks_password = asks || (same_line && self.asks_password);
+        let keep = last.len().saturating_sub(PROMPT_LINE_BYTES);
+        self.line = last[keep..].to_vec();
     }
-    let mut tail = lines.last().map_or_else(Vec::new, |line| line.to_vec());
-    if tail.len() > TAIL_BYTES {
-        tail.drain(..tail.len() - TAIL_BYTES);
+
+    pub(crate) fn asks_password(&self) -> bool {
+        self.asks_password
     }
-    tail
 }
 
 pub(crate) struct Snap {
@@ -736,12 +746,8 @@ pub(crate) fn input(db: &Path, body: &[u8]) -> Result<Value, ApiError> {
             .lock()
             .unwrap_or_else(|error| error.into_inner()),
     );
-    let prompt = if err.tail_seq > out.tail_seq {
-        &err.tail
-    } else {
-        &out.tail
-    };
-    if asks_for_password(prompt) {
+    // Either stream: a prompt on stderr stays asked while stdout writes on.
+    if out.asks_password || err.asks_password {
         return Err(ApiError::new(
             409,
             "Ce programme demande un mot de passe : la saisie n’a pas été envoyée. Saisissez-le vous-même, hors d’Ezerbot.",
@@ -794,17 +800,42 @@ mod tests {
         }
     }
 
+    fn asks(chunks: &[&[u8]]) -> bool {
+        let mut line = PromptLine::default();
+        for chunk in chunks {
+            line.push(chunk);
+        }
+        line.asks_password()
+    }
+
     #[test]
-    fn the_tail_is_the_last_line_whatever_the_chunking() {
-        assert_eq!(extend_tail(b"Pass", b"word: "), b"Password: ");
-        assert_eq!(extend_tail(b"Password: ", b"oui\nOK? "), b"OK? ");
-        assert_eq!(extend_tail(b"Password: ", b"oui\n"), b"Password: oui\n");
-        assert_eq!(extend_tail(b"", b"Password:\n"), b"Password:\n");
-        assert_eq!(extend_tail(b"Password:\n", b"\n  \n"), b"Password:\n");
-        assert_eq!(extend_tail(b"Password:\n", b"abc"), b"abc");
-        assert_eq!(extend_tail(b"", b""), b"");
-        let long = vec![b'a'; 1000];
-        assert_eq!(extend_tail(b"", &long).len(), TAIL_BYTES);
+    fn the_prompt_is_the_last_line_whatever_the_chunking_and_the_newline() {
+        assert!(asks(&[b"Pass", b"word: "]));
+        assert!(asks(&[b"Password:\n"]));
+        assert!(
+            asks(&[b"Password:\n", b"\n  \n"]),
+            "des blancs ne l'effacent pas"
+        );
+        assert!(!asks(&[b"Password: ", b"oui\nOK? "]));
+        assert!(!asks(&[b"Password:\n", b"abc"]));
+        assert!(!asks(&[b""]));
+    }
+
+    #[test]
+    fn a_long_prompt_keeps_its_keyword_beyond_the_retained_text() {
+        let path = "/Users/x/".to_string() + &"dossier/".repeat(3000);
+        let prompt = format!("Enter passphrase for key '{path}id': ");
+        assert!(prompt.len() > 4 * PROMPT_LINE_BYTES);
+        assert!(asks(&[prompt.as_bytes()]));
+        let (head, rest) = prompt.as_bytes().split_at(30);
+        let (middle, tail) = rest.split_at(rest.len() / 2);
+        assert!(
+            asks(&[head, middle, tail]),
+            "le mot-clé est dans un petit morceau"
+        );
+        let mut line = PromptLine::default();
+        line.push(prompt.as_bytes());
+        assert!(line.line.len() <= PROMPT_LINE_BYTES);
     }
 
     fn db() -> (Temp, Connection) {

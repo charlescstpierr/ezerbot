@@ -1166,17 +1166,17 @@ fn shell(
             let mut allocated = 0usize;
             let mut incomplete = false;
             let mut draining = None;
-            let mut tail = Vec::new();
+            let mut prompt = super::shell_tasks::PromptLine::default();
             // A line sent to the program is queued before the program can
             // answer it, so taking the queue first keeps the echo ahead of the
-            // answer. The cap and the tail treat it like any other output.
+            // answer. The output cap treats it like any other output.
             // Only the program's own output is a prompt: the echo of a line
             // sent to it never replaces what the program is waiting on.
             let mut take = |chunk: &[u8], bytes: &mut Vec<u8>, truncated: &mut bool, echo: bool| {
                 let was_truncated = *truncated;
                 let changed = absorb_output(bytes, &quota, chunk, truncated, &mut allocated);
                 if !echo {
-                    tail = super::shell_tasks::extend_tail(&tail, chunk);
+                    prompt.push(chunk);
                 }
                 if let Ok(mut piece) = slot.lock() {
                     if changed {
@@ -1185,10 +1185,7 @@ fn shell(
                     if changed || *truncated != was_truncated {
                         piece.truncated = *truncated;
                     }
-                    if !echo {
-                        piece.tail = String::from_utf8_lossy(&tail).into_owned();
-                        piece.tail_seq = super::shell_tasks::next_seq();
-                    }
+                    piece.asks_password = prompt.asks_password();
                 }
             };
             loop {

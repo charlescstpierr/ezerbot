@@ -317,3 +317,11 @@ test("a line goes to one task through the input route and a refusal reaches the 
   await assert.rejects(registration.onCardAction(message,"local.task.input",{line:"non"},{conversation:{id:"chat"}}),/n’est plus en cours/);
   assert.deepEqual(notifications,[]);
 });
+
+test("a line that reached the task is not reported as refused when the refresh fails",async()=>{
+  const {requests,registration,panels}=setup();
+  const message={kind:"tool",payload:{run_id:"run-bg",call:{call_id:"call-bg",name:"run_shell"},outcome:{output:{background:true,status:"en cours"}}}};
+  panels.refresh=async()=>{throw new Error("offline");};
+  assert.equal(await registration.onCardAction(message,"local.task.input",{line:"oui"},{conversation:{id:"chat"}}),true);
+  assert.equal(requests.length,1);
+});

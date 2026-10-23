@@ -1552,6 +1552,63 @@ fn a_password_prompt_ending_with_a_newline_or_following_an_echo_still_refuses_th
 }
 
 #[test]
+fn a_password_prompt_on_one_stream_stays_refused_while_the_other_stream_writes() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    for (id, command) in [
+        (
+            "blank",
+            "printf 'Password: ' >&2; sleep 1; printf '\\n'; read -r secret; printf '%s' \"$secret\" > blank.txt",
+        ),
+        (
+            "other",
+            "printf 'Password: ' >&2; echo travail; read -r secret; printf '%s' \"$secret\" > other.txt",
+        ),
+    ] {
+        start_background(&mut f, id, command);
+        wait_output(&mut f, id, "l’invite n’est pas affichée", |o| {
+            o["stderr"].as_str().unwrap_or("").contains("Password:")
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        let error = task_input(&mut f, id, "hunter-stream").unwrap_err();
+        assert_eq!(error.status, 409, "{id} : {}", error.message);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!f.root().join(format!("{id}.txt")).exists());
+        f.post(
+            "/api/local/tasks/stop",
+            json!({"run_id": f.run(id).run_id, "call_id": id}),
+        );
+    }
+}
+
+#[test]
+fn a_long_password_prompt_still_refuses_the_secret() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    let long = "dossier/".repeat(900);
+    start_background(
+        &mut f,
+        "long",
+        &format!(
+            "printf \"Enter passphrase for key '/Users/x/{long}id': \"; read -r secret; printf '%s' \"$secret\" > long.txt"
+        ),
+    );
+    // The output cap (1 Kio) cuts the prompt well before its end.
+    wait_output(&mut f, "long", "l’invite n’est pas arrivée", |o| {
+        o["truncated"] == json!(true)
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let error = task_input(&mut f, "long", "hunter-long").unwrap_err();
+    assert_eq!(error.status, 409, "{}", error.message);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!f.root().join("long.txt").exists());
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("long").run_id, "call_id": "long"}),
+    );
+}
+
+#[test]
 fn an_accepted_line_still_shows_when_the_program_closed_its_stdout() {
     let mut f = Fixture::new();
     f.settings(true, false);

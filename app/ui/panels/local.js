@@ -191,7 +191,9 @@
       }
       if (action === "local.task.input") {
         await panels.api("/api/local/tasks/input", { run_id: message.payload.run_id, call_id: message.payload.call?.call_id, line: detail?.line ?? "" });
-        await panels.refresh(); return true;
+        // The line has reached the program: a failed refresh must not read as a refused line.
+        try { await panels.refresh(); } catch { /* the next poll reloads the card */ }
+        return true;
       }
       if (action !== "local.stop") return false;
       await panels.api("/api/stop", { conversation_id: context.conversation.id, message_id: message.payload.run_id });

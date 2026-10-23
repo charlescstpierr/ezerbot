@@ -1396,9 +1396,12 @@ fn a_finished_or_stopped_task_refuses_a_line_in_french_and_its_output_does_not_c
         "/api/local/tasks/stop",
         json!({"run_id": f.run("halt").run_id, "call_id": "halt"}),
     );
-    let stopped = wait_output(&mut f, "halt", "pas arrêtée", |o| {
+    wait_output(&mut f, "halt", "pas arrêtée", |o| {
         o["status"] == "arrêtée"
     });
+    // The worker still publishes the drained output once after the stop.
+    std::thread::sleep(Duration::from_millis(600));
+    let stopped = f.tool_output("halt");
     let error = task_input(&mut f, "halt", "trop tard").unwrap_err();
     assert_eq!(error.status, 409);
     assert!(
@@ -1501,6 +1504,78 @@ fn the_echo_of_a_line_counts_against_the_output_cap_and_the_card_says_so() {
     f.post(
         "/api/local/tasks/stop",
         json!({"run_id": f.run("cap").run_id, "call_id": "cap"}),
+    );
+}
+
+#[test]
+fn a_password_prompt_ending_with_a_newline_or_following_an_echo_still_refuses_the_secret() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(
+        &mut f,
+        "nl",
+        "echo 'Password:'; read -r secret; printf '%s' \"$secret\" > nl.txt; echo fin",
+    );
+    wait_output(&mut f, "nl", "l’invite n’est pas affichée", |o| {
+        o["stdout"].as_str().unwrap_or("").contains("Password:")
+    });
+    let error = task_input(&mut f, "nl", "hunter-nl").unwrap_err();
+    assert_eq!(error.status, 409, "{}", error.message);
+    assert!(error.message.contains("mot de passe"), "{}", error.message);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!f.root().join("nl.txt").exists());
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("nl").run_id, "call_id": "nl"}),
+    );
+    // The echo of an ordinary answer must not hide the next prompt on stderr.
+    for round in 0..5 {
+        let id = format!("echo{round}");
+        start_background(
+            &mut f,
+            &id,
+            "read -r user; printf 'Password: ' >&2; read -r secret; printf '%s' \"$secret\" > secret.txt; echo fin",
+        );
+        task_input(&mut f, &id, "bob").unwrap();
+        wait_output(&mut f, &id, "l’invite n’est pas affichée", |o| {
+            o["stderr"].as_str().unwrap_or("").contains("Password:")
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let error = task_input(&mut f, &id, "hunter-echo").unwrap_err();
+        assert_eq!(error.status, 409, "{}", error.message);
+        assert!(!f.root().join("secret.txt").exists());
+        f.post(
+            "/api/local/tasks/stop",
+            json!({"run_id": f.run(&id).run_id, "call_id": id}),
+        );
+    }
+}
+
+#[test]
+fn an_accepted_line_still_shows_when_the_program_closed_its_stdout() {
+    let mut f = Fixture::new();
+    f.settings(true, false);
+    start_background(
+        &mut f,
+        "closed",
+        "exec 1>&-; read -r answer; printf '%s' \"$answer\" > lu.txt; sleep 3",
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    task_input(&mut f, "closed", "oui").unwrap();
+    let output = wait_output(
+        &mut f,
+        "closed",
+        "la ligne n’est pas dans la sortie",
+        |o| o["stdout"].as_str().unwrap_or("").contains("oui"),
+    );
+    assert_eq!(output["status"], "en cours");
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("lu.txt")).unwrap_or_default(),
+        "oui"
+    );
+    f.post(
+        "/api/local/tasks/stop",
+        json!({"run_id": f.run("closed").run_id, "call_id": "closed"}),
     );
 }
 

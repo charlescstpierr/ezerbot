@@ -25,8 +25,8 @@ pub(crate) struct Piece {
     pub text: String,
     pub truncated: bool,
     pub incomplete: bool,
-    /// The unterminated last line the program wrote, whatever the output cap
-    /// kept. A prompt is that line, because the program is waiting on it.
+    /// The last line the program wrote, whatever the output cap kept. A prompt
+    /// is that line, because the program is waiting on it.
     pub tail: String,
     pub tail_seq: u64,
 }
@@ -40,12 +40,19 @@ pub(crate) fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::SeqCst)
 }
 
-/// The line left unfinished by `previous` followed by `chunk`.
+/// The last line the program wrote, with its newline when it ended one, after
+/// `previous` and `chunk`. A prompt may end its line: `echo Password:` waits
+/// for input as much as `printf 'Password: '` does.
 pub(crate) fn extend_tail(previous: &[u8], chunk: &[u8]) -> Vec<u8> {
-    let mut tail = match chunk.iter().rposition(|byte| *byte == b'\n') {
-        Some(end) => chunk[end + 1..].to_vec(),
-        None => [previous, chunk].concat(),
-    };
+    let all = [previous, chunk].concat();
+    let mut lines: Vec<&[u8]> = all.split_inclusive(|byte| *byte == b'\n').collect();
+    while lines
+        .last()
+        .is_some_and(|line| line.iter().all(u8::is_ascii_whitespace))
+    {
+        lines.pop();
+    }
+    let mut tail = lines.last().map_or_else(Vec::new, |line| line.to_vec());
     if tail.len() > TAIL_BYTES {
         tail.drain(..tail.len() - TAIL_BYTES);
     }
@@ -788,10 +795,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tail_is_the_unfinished_last_line_whatever_the_chunking() {
+    fn the_tail_is_the_last_line_whatever_the_chunking() {
         assert_eq!(extend_tail(b"Pass", b"word: "), b"Password: ");
         assert_eq!(extend_tail(b"Password: ", b"oui\nOK? "), b"OK? ");
-        assert_eq!(extend_tail(b"Password: ", b"oui\n"), b"");
+        assert_eq!(extend_tail(b"Password: ", b"oui\n"), b"Password: oui\n");
+        assert_eq!(extend_tail(b"", b"Password:\n"), b"Password:\n");
+        assert_eq!(extend_tail(b"Password:\n", b"\n  \n"), b"Password:\n");
+        assert_eq!(extend_tail(b"Password:\n", b"abc"), b"abc");
+        assert_eq!(extend_tail(b"", b""), b"");
         let long = vec![b'a'; 1000];
         assert_eq!(extend_tail(b"", &long).len(), TAIL_BYTES);
     }

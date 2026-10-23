@@ -1170,10 +1170,14 @@ fn shell(
             // A line sent to the program is queued before the program can
             // answer it, so taking the queue first keeps the echo ahead of the
             // answer. The cap and the tail treat it like any other output.
-            let mut take = |chunk: &[u8], bytes: &mut Vec<u8>, truncated: &mut bool| {
+            // Only the program's own output is a prompt: the echo of a line
+            // sent to it never replaces what the program is waiting on.
+            let mut take = |chunk: &[u8], bytes: &mut Vec<u8>, truncated: &mut bool, echo: bool| {
                 let was_truncated = *truncated;
                 let changed = absorb_output(bytes, &quota, chunk, truncated, &mut allocated);
-                tail = super::shell_tasks::extend_tail(&tail, chunk);
+                if !echo {
+                    tail = super::shell_tasks::extend_tail(&tail, chunk);
+                }
                 if let Ok(mut piece) = slot.lock() {
                     if changed {
                         piece.text = String::from_utf8_lossy(bytes).into_owned();
@@ -1181,8 +1185,10 @@ fn shell(
                     if changed || *truncated != was_truncated {
                         piece.truncated = *truncated;
                     }
-                    piece.tail = String::from_utf8_lossy(&tail).into_owned();
-                    piece.tail_seq = super::shell_tasks::next_seq();
+                    if !echo {
+                        piece.tail = String::from_utf8_lossy(&tail).into_owned();
+                        piece.tail_seq = super::shell_tasks::next_seq();
+                    }
                 }
             };
             loop {
@@ -1195,11 +1201,24 @@ fn shell(
                 }
                 let read = pipe.read(&mut buffer);
                 while let Some(line) = echoes.as_ref().and_then(|queue| queue.try_recv().ok()) {
-                    take(&line, &mut bytes, &mut truncated);
+                    take(&line, &mut bytes, &mut truncated, true);
                 }
                 match read {
-                    Ok(0) => break,
-                    Ok(n) => take(&buffer[..n], &mut bytes, &mut truncated),
+                    Ok(0) => {
+                        // The program closed its stdout, not its stdin: a line
+                        // it is sent still shows until the task is over.
+                        if let Some(queue) = echoes.as_ref() {
+                            while !finished.load(Ordering::SeqCst) {
+                                match queue.recv_timeout(Duration::from_millis(50)) {
+                                    Ok(line) => take(&line, &mut bytes, &mut truncated, true),
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Ok(n) => take(&buffer[..n], &mut bytes, &mut truncated, false),
                     Err(e)
                         if matches!(
                             e.kind(),
@@ -1219,7 +1238,7 @@ fn shell(
                 }
             }
             while let Some(line) = echoes.as_ref().and_then(|queue| queue.try_recv().ok()) {
-                take(&line, &mut bytes, &mut truncated);
+                take(&line, &mut bytes, &mut truncated, true);
             }
             let mut text = String::from_utf8_lossy(&bytes).into_owned();
             if text.len() > allocated {
@@ -1238,7 +1257,7 @@ fn shell(
         quota.clone(),
         finished.clone(),
         stdout_piece.clone(),
-        Some(echo_receiver),
+        a.background.then_some(echo_receiver),
     );
     let err = reader(
         err_reader,

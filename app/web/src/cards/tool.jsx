@@ -83,6 +83,9 @@ export function TaskInputView({ line, onLine, onSubmit, sending, notice }) {
   </>;
 }
 
+// The field empties once its line is sent, unless Charles has typed more since.
+export const settleDraft = (current, sent) => current === sent ? "" : current;
+
 // One line to the program's standard input. A refusal (finished task, password
 // prompt) is the engine's French sentence, kept on the card with the line.
 function TaskInput({ onSend }) {
@@ -93,7 +96,8 @@ function TaskInput({ onSend }) {
     event.preventDefault();
     if (sending) return;
     setSending(true);
-    try { await onSend(line); setLine(""); setNotice(""); }
+    const sent = line;
+    try { await onSend(sent); setLine((current) => settleDraft(current, sent)); setNotice(""); }
     catch (error) { setNotice(error?.message || "La saisie n’a pas été envoyée."); }
     finally { setSending(false); }
   };

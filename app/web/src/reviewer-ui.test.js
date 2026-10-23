@@ -265,7 +265,7 @@ const vite = await createServer({
 });
 after(() => vite.close());
 const { Card } = await vite.ssrLoadModule("/src/cards/approval.jsx");
-const { Card: ToolCard, TaskInputView, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
+const { Card: ToolCard, TaskInputView, settleDraft, openConnectors } = await vite.ssrLoadModule("/src/cards/tool.jsx");
 const { ScreenCard } = await vite.ssrLoadModule("/src/screen.jsx");
 const { Card: SecretCard } = await vite.ssrLoadModule("/src/cards/secret.jsx");
 
@@ -507,6 +507,12 @@ test("only a running background card takes a line, and a refusal stays on the ca
   globalThis.window = { EzerbotIPhone: { remote: true } };
   try { assert.ok(!html({ status: "en cours", background: true, stdout: "", stderr: "" }).includes("Saisie pour la tâche"), "l’iPhone n’envoie pas de saisie"); }
   finally { delete globalThis.window; }
+});
+
+test("the task field empties after its line is sent but keeps what was typed meanwhile", () => {
+  assert.equal(settleDraft("oui", "oui"), "");
+  assert.equal(settleDraft("oui, et ensuite", "oui"), "oui, et ensuite");
+  assert.equal(settleDraft("", ""), "");
 });
 
 test("interrupted tool cards are stopped, not left running or waiting", () => {

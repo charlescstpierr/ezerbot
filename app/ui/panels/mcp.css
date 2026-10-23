@@ -54,6 +54,8 @@
 .mcp-env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
 @media (max-width: 850px) { .mcp-environment { gap: 14px; } .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; padding-bottom: 10px; border-bottom: 1px solid var(--line); } .mcp-env-row input:first-child { grid-column: 1 / -1; } }
 
+.mcp-category { display: grid; gap: 12px; min-width: 0; }
+.mcp-category[hidden], .mcp-form[hidden] { display: none; }
 .mcp-transcript, .mcp-summary { margin-top: 12px; min-width: 0; }
 .mcp-transcript h5, .mcp-summary h5 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .mcp-lines { list-style: none; margin: 0; padding: 8px; max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); display: grid; gap: 6px; }

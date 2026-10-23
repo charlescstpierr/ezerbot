@@ -8,6 +8,7 @@
   const input = (name, placeholder, type = "text") => { const n = node("input"); n.type = type; n.name = name; n.placeholder = placeholder; n.autocomplete = "off"; n.spellcheck = false; return n; };
   let section, list, catalogue, catalogueHeader, catalogueSearch, catalogueEmpty, feedback, key;
   const catalogueCards = new Map();
+  const catalogueGroups = new Map();
   const normalize = text => text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr");
   // Les cartes filtrées restent dans la page, masquées : un brouillon de client OAuth ou le focus ne se perdent pas.
   function filterCatalogue() {
@@ -18,6 +19,7 @@
       entry.node.hidden = !entry.text.includes(query);
       if (!entry.node.hidden) shown++;
     }
+    for (const group of catalogueGroups.values()) group.hidden = ![...catalogueCards.values()].some(entry => entry.node.parentNode === group && !entry.node.hidden);
     catalogueEmpty.hidden = !catalogueCards.size || shown > 0;
     catalogueEmpty.textContent = catalogueEmpty.hidden ? "" : `Aucun service ne correspond à « ${catalogueSearch.value.trim()} ».`;
   }
@@ -27,6 +29,7 @@
     const controls = [...card.querySelectorAll("button, a, summary")];
     const focused = [...inputs, ...controls].find(n => n === document.activeElement);
     return {
+      forms: [...card.querySelectorAll("form")].filter(n => n.id).map(n => ({id:n.id,hidden:n.hidden})),
       lines: document.activeElement?.classList?.contains("mcp-lines") || false,
       details: details.map(n => n.open),
       fields: inputs.filter(n => n.type !== "checkbox").map(n => ({name:n.name,value:n.value})),
@@ -37,6 +40,8 @@
     if (!view) return;
     const details = [...card.querySelectorAll("details")];
     details.forEach((n,i) => { if (i < view.details.length) n.open = view.details[i]; });
+    // Un formulaire ouvert (clé Recall) reste ouvert quand la carte est reconstruite.
+    for (const saved of view.forms || []) { const target = [...card.querySelectorAll("form")].find(n => n.id === saved.id); if (target && target.hidden && !saved.hidden) target.hidden = false; }
     const inputs = [...card.querySelectorAll("input")];
     for (const field of view.fields) { const target = inputs.find(n => n.name === field.name); if (target) target.value = field.value; }
     // La liste du transcript est focalisable : un défilement au clavier survit aux nouvelles lignes.
@@ -94,7 +99,7 @@
     const heading = node("div", null, "mcp-heading");
     const status = node("span", null, `mcp-status mcp-status-${item.status}`);
     const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
-    status.append(dot, document.createTextNode(item.status === "connected" ? "Connecté" : "Déconnecté"));
+    status.append(dot, document.createTextNode(item.status === "connected" ? "Connecté" : "Non connecté"));
     heading.append(node("strong", item.name), status);
     card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
     const meeting = item.meeting;
@@ -105,7 +110,7 @@
       const form = node("form", null, "mcp-form"); form.id = `connector-setup-${item.id}`;
       const field = input(`${item.id}-key`, "Clé API Recall.ai", "password"); field.maxLength = 256;
       form.append(label("Clé API Recall.ai — jamais réaffichée", field));
-      const connect = button("Connecter", event => { event?.preventDefault(); return form.requestSubmit(); }, "primary-button");
+      const connect = button("Connecter", event => { event?.preventDefault(); if (form.hidden) { form.hidden = false; field.focus(); } else return form.requestSubmit(); }, "primary-button");
       connect.type = "submit"; connect.setAttribute("form", form.id); connect.setAttribute("data-connector-action", "connect");
       form.addEventListener("submit", async event => {
         event.preventDefault();
@@ -114,6 +119,7 @@
         try { await act("/api/recall/connect", body, connect); }
         finally { delete body.key; }
       });
+      form.hidden = true;
       card.append(setup, form);
       actions.append(connect);
     } else {
@@ -160,10 +166,25 @@
     return card;
   }
   // The first request names the service alone; an account other than the first (GitHub, Gmail) is named by its slot.
-  const slotBody = item => item.slot && item.slot !== item.id ? {id:item.id,account:item.slot} : {id:item.id};
+  const slotBody = item => {
+    const id = item.connection_id || item.id;
+    return item.slot && item.slot !== id ? {id,account:item.slot} : {id};
+  };
   const accountStatus = {connected:"Connecté",authorizing:"En attente de votre autorisation",reconnect:"À reconnecter",error:"En erreur",saved:"Connexion enregistrée · à démarrer"};
   const waitingFor = item => item.device_flow ? "En attente de votre autorisation chez GitHub" : "En attente de votre autorisation dans le navigateur";
   function renderCatalogue(items, bots) {
+    const gmail = items.find(item => item.id === "gmail");
+    // Calendar et Drive ne fusionnent avec Gmail que s'ils n'ont aucune connexion propre : le backend les garde indépendants.
+    const ownConnection = item => !item || item.status !== "disconnected" || item.has_tokens || item.has_client || item.server || (item.accounts || []).length > 0;
+    const separate = ownConnection(items.find(item => item.id === "calendar")) || ownConnection(items.find(item => item.id === "drive"));
+    if (gmail?.category && !separate) items = items.filter(item => item.id !== "drive").map(item => item.id === "calendar"
+      ? {...gmail,id:"google",connection_id:"gmail",multi_account:false,accounts:[],name:"Google Calendar et Drive",description:"Consulter vos rendez-vous et lire les fichiers de votre Drive avec le consentement Google commun."} : item);
+    for (const category of ["Courriel et agenda","Fichiers et notes","Messagerie","Développement","Réunions"]) {
+      if (!items.some(item => item.category === category) || catalogueGroups.has(category)) continue;
+      const group = node("section", null, "mcp-category");
+      group.append(node("h4", category)); catalogueGroups.set(category, group);
+    }
+
     if (!catalogueHeader && items.length) {
       catalogueHeader = node("div", null, "mcp-catalogue-header");
       catalogueHeader.append(node("h4", "Catalogue"), node("p", "Services prêts à configurer. La connexion ouvre une approbation, puis le navigateur. Les jetons restent dans le coffre local ; connecter un service n’autorise pas ses outils.", "mcp-note"));
@@ -174,10 +195,12 @@
       catalogueHeader.append(catalogueSearch, catalogueEmpty);
       catalogue.append(catalogueHeader);
     }
+    for (const group of catalogueGroups.values()) if (!group.parentNode) catalogue.append(group);
     const ids = new Set(items.map(item => item.id));
     for (const [id, previous] of catalogueCards) { if (!ids.has(id)) { previous.node.remove(); catalogueCards.delete(id); } }
     for (const item of items) {
-      const cardKey = JSON.stringify([item,bots.map(b => [b.id,b.name])]);
+      // La carte Recall n'affiche aucun bot : sa clé les ignore, pour ne pas fermer le formulaire de clé en cours de saisie.
+      const cardKey = JSON.stringify(item.kind === "recall" ? [item] : [item,bots.map(b => [b.id,b.name])]);
       const previous = catalogueCards.get(item.id);
       // Do not even detach an unchanged card: detaching an active password field
       // loses browser focus/selection despite keeping the node and its value.
@@ -190,7 +213,7 @@
         const was = previous?.node.querySelector(".mcp-lines");
         const follow = !was || was.scrollTop + was.clientHeight >= was.scrollHeight - 8;
         const top = was?.scrollTop || 0;
-        if (previous) previous.node.replaceWith(recall); else catalogue.append(recall);
+        if (previous) previous.node.replaceWith(recall); else (catalogueGroups.get(item.category) || catalogue).append(recall);
         const now = recall.querySelector(".mcp-lines");
         if (now) now.scrollTop = follow ? now.scrollHeight : top;
         catalogueCards.set(item.id,{key:cardKey,node:recall,text});
@@ -202,7 +225,7 @@
       const heading = node("div", null, "mcp-heading");
       const status = node("span", null, `mcp-status mcp-status-${item.status}`);
       const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
-      status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:item.device_flow ? "En attente de votre autorisation chez GitHub" : "Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Déconnecté"})[item.status] || "Déconnecté"));
+      status.append(dot, document.createTextNode(({connected:"Connecté",saved:"Connexion enregistrée · à démarrer",authorizing:item.device_flow ? "En attente de votre autorisation chez GitHub" : "Connexion dans le navigateur",reconnect:"À reconnecter",error:"En erreur",disconnected:"Non connecté"})[item.status] || "Non connecté"));
       heading.append(node("strong", item.name), status);
       card.append(heading, node("p", item.description), node("p", `Autorisations : ${item.permissions}`, "mcp-note"));
       if (item.account) card.append(node("p", `Compte connecté : ${item.account}`, "mcp-note"));
@@ -309,7 +332,7 @@
       }
       card.append(actions);
       for (const account of others) card.append(accountBlock(item, account, copyButton, deviceBlock, bots));
-      if (previous) previous.node.replaceWith(card); else catalogue.append(card);
+      if (previous) previous.node.replaceWith(card); else (catalogueGroups.get(item.category) || catalogue).append(card);
       catalogueCards.set(item.id,{key:cardKey,node:card,text});
       restoreCard(card,view);
     }
@@ -319,7 +342,7 @@
   function accountBlock(item, account, copyButton, deviceBlock, bots) {
     const block = node("section", null, "mcp-account"); block.setAttribute("data-account", account.id);
     const who = account.account || "nouveau compte";
-    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte ${item.name} · ${who} · ${(account.status === "authorizing" ? waitingFor(item) : accountStatus[account.status]) || "Déconnecté"}`, "mcp-note"));
+    block.append(node("p", account.status === "connected" ? `Compte connecté : ${account.account}` : `Compte ${item.name} · ${who} · ${(account.status === "authorizing" ? waitingFor(item) : accountStatus[account.status]) || "Non connecté"}`, "mcp-note"));
     if (account.message && !account.device) block.append(node("p", account.message, account.warning ? "mcp-warning" : ["error","reconnect"].includes(account.status) ? "mcp-error" : "mcp-note"));
     if (account.device) block.append(deviceBlock(account.device, `${item.name} (${who})`, "authorize-account"));
     const actions = node("div", null, "mcp-actions");
@@ -394,7 +417,7 @@
       const heading = node("div", null, "mcp-heading");
       const status = node("span", null, `mcp-status mcp-status-${server.status}`);
       const dot = node("span", null, "status-dot"); dot.setAttribute("aria-hidden", "true");
-      status.append(dot, document.createTextNode(({connected:"Connecté",busy:"Occupé",starting:"Démarrage en cours",disconnected:"Déconnecté",crashed:"Serveur arrêté",error:"En erreur"})[server.status] || "État inconnu"));
+      status.append(dot, document.createTextNode(({connected:"Connecté",busy:"Occupé",starting:"Démarrage en cours",disconnected:"Non connecté",crashed:"Serveur arrêté",error:"En erreur"})[server.status] || "État inconnu"));
       heading.append(node("strong", server.name), status);
       card.append(heading);
       const config = node("details"); config.append(node("summary", server.url ? "Adresse du serveur" : "Configuration locale"));
@@ -427,7 +450,7 @@
     settingsSection(container) {
       section = container; section.className = "setting-section mcp-section";
       section.append(node("h3", "Connecteurs"),node("p", "Choisissez un service du catalogue ou ajoutez votre propre serveur MCP. Les actions de gestion sont regroupées dans la conversation « Approbations ». « Toujours » peut autoriser un outil de ce serveur pour un bot."),node("p", "La désactivation retire les outils de ce bot sans arrêter le serveur partagé.", "mcp-note"));
-      catalogueCards.clear(); catalogueHeader = catalogueSearch = catalogueEmpty = undefined;
+      catalogueGroups.clear(); catalogueCards.clear(); catalogueHeader = catalogueSearch = catalogueEmpty = undefined;
       catalogue = node("div", null, "mcp-catalogue mcp-list"); section.append(catalogue);
       section.append(node("h4", "Serveurs personnalisés"));
       list = node("div", null, "mcp-list"); section.append(list);

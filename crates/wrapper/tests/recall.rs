@@ -34,6 +34,9 @@ struct SeenRecall {
     transcript_gets: usize,
     /// Transcript complet de l'enregistrement, servi par un lien signé (espaces récents).
     artifact: Option<Vec<Value>>,
+    /// Messages envoyés dans le chat de la réunion : (autorisation, corps).
+    chats: Vec<(String, Value)>,
+    chat_status: u16,
 }
 struct Recall {
     base: String,
@@ -55,6 +58,8 @@ impl Recall {
             transcript_status: 200,
             transcript_gets: 0,
             artifact: None,
+            chats: vec![],
+            chat_status: 200,
         }));
         let captured = seen.clone();
         let origin = base.clone();
@@ -90,6 +95,10 @@ impl Recall {
                 } else if method == "POST" && url.ends_with("/leave_call/") {
                     seen.leaves.push(url.clone());
                     (seen.leave_status, json!({}))
+                } else if method == "POST" && url == "/api/v1/bot/bot-1/send_chat_message/" {
+                    seen.chats
+                        .push((auth, serde_json::from_str(&body).unwrap_or(Value::Null)));
+                    (seen.chat_status, json!({"id":"bot-1"}))
                 } else if method == "GET" && url == "/artifact/transcript.json" {
                     (200, Value::Array(seen.artifact.clone().unwrap_or_default()))
                 } else if method == "GET" && url.ends_with("/transcript/") {
@@ -124,6 +133,11 @@ impl Recall {
     }
     fn leaves(&self) -> usize {
         self.seen.lock().unwrap().leaves.len()
+    }
+    /// Les envois reçus dans le chat de la réunion, y compris ceux que Recall a refusés.
+    fn chats(&self) -> Vec<Value> {
+        let seen = self.seen.lock().unwrap();
+        seen.chats.iter().map(|(_, body)| body.clone()).collect()
     }
     fn code(&self, code: &str) {
         self.seen.lock().unwrap().code = code.into();
@@ -1045,7 +1059,11 @@ fn an_instruction_said_in_the_call_triggers_no_message_no_exit_and_no_other_acti
         .as_array()
         .unwrap()
         .iter()
-        .filter(|t| t["name"].as_str().is_some_and(|n| n.starts_with("recall_")))
+        .filter(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("recall_") && n != "recall_memory")
+        })
         .collect();
     let names: Vec<&str> = offered
         .iter()
@@ -1053,9 +1071,18 @@ fn an_instruction_said_in_the_call_triggers_no_message_no_exit_and_no_other_acti
         .collect();
     assert!(names.contains(&recall::TRANSCRIPT));
     assert!(names.contains(&recall::SUMMARY));
-    assert!(names
-        .iter()
-        .all(|n| !n.contains("chat") && !n.contains("send")));
+    // Liste fermée : répondre dans le chat est le seul outil qui publie, et il passe par une carte.
+    let mut closed = vec![
+        recall::JOIN,
+        recall::LEAVE,
+        recall::TRANSCRIPT,
+        recall::SUMMARY,
+        recall::REPLY,
+    ];
+    closed.sort_unstable();
+    let mut offered = names.clone();
+    offered.sort_unstable();
+    assert_eq!(offered, closed);
     // Une nouvelle demande de Charles, elle, peut toujours faire quitter le bot.
     f.script_call(recall::LEAVE, "l-2", json!({}));
     f.script_done();
@@ -1398,4 +1425,230 @@ fn a_live_snapshot_keeps_the_final_pass_open_until_the_recording_is_ready() {
     f.sync();
     f.sync();
     assert_eq!(f.recall.transcript_gets(), gets);
+}
+
+impl Fixture {
+    /// Le bot prépare une réponse dans le chat : la carte brouillon est ouverte, rien n'est parti.
+    fn reply_card(&mut self, id: &str, text: &str) -> (String, Value) {
+        self.script_call(recall::REPLY, id, json!({"texte":text}));
+        self.script_done();
+        let run = self.say_text(id, &format!("Réponds dans la réunion : {text}"));
+        let request = self.request(&run);
+        let card = self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == request.entry_id)
+            .unwrap()
+            .clone();
+        (run, card)
+    }
+    fn resolve(
+        &mut self,
+        card: &Value,
+        submission: &str,
+        decision: Value,
+        text: Option<&str>,
+    ) -> Result<Value, grokbot_wrapper::ApiError> {
+        let mut body = json!({"entry_id":card["entry_id"],"conversation_id":card["route"]["target_conversation_id"],"submission_id":submission,"decision":decision});
+        if let Some(text) = text {
+            body["text"] = json!(text);
+        }
+        self.app.api(
+            "POST",
+            "/api/approvals/resolve",
+            body.to_string().as_bytes(),
+        )
+    }
+    fn settle(&mut self, run: &str) {
+        wait("reply run", || {
+            self.app.tick(0);
+            store::required(&self.db(), run)
+                .unwrap()
+                .status
+                .is_terminal()
+        });
+    }
+    fn card_of(&mut self, card: &Value) -> Value {
+        self.state()["forms"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["entry_id"] == card["entry_id"])
+            .unwrap()
+            .clone()
+    }
+}
+
+#[test]
+fn the_reply_card_shows_the_exact_text_and_the_meeting_and_sends_nothing_before_the_click() {
+    let mut f = Fixture::new();
+    f.in_call();
+    let (run, card) = f.reply_card("reply-1", "Bonjour de la carte");
+    let draft = &card["arguments"]["brouillon"];
+    assert_eq!(draft["texte"], "Bonjour de la carte");
+    assert_eq!(draft["reunion"], "meet.google.com");
+    assert!(draft["bot"].as_str().is_some_and(|n| !n.is_empty()));
+    assert_eq!(draft["action"], "Répondre dans le chat de la réunion");
+    // Pas de « Toujours » : ni règle permanente, ni refus permanent.
+    assert_eq!(card["policy"]["remember"], false);
+    for (index, decision) in [
+        json!({"always_allow":{"scope":"global"}}),
+        json!({"never":{"scope":"global"}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = f
+            .resolve(&card, &format!("always-{index}"), decision, None)
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+    }
+    assert_eq!(f.recall.chats().len(), 0, "rien avant Envoyer");
+    // Annuler : le chat de la réunion n'a pas de nouveau message.
+    f.resolve(&card, "cancel-1", json!("deny"), None).unwrap();
+    f.settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.recall.chats().len(), 0);
+    assert_eq!(f.meeting_state(), "in_call");
+}
+
+#[test]
+fn the_reply_sends_the_validated_text_once_and_a_second_click_sends_nothing() {
+    let mut f = Fixture::new();
+    f.in_call();
+    let (run, card) = f.reply_card("reply-2", "Bonjour de la carte");
+    let before = card["arguments"]["brouillon"]["empreinte"].clone();
+    f.resolve(&card, "send-1", json!("allow_once"), Some("Bonjour validé"))
+        .unwrap();
+    f.settle(&run);
+    let ToolOutcome::Done { output } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert_eq!(output["texte"], "Bonjour validé");
+    assert_eq!(output["reunion"], "meet.google.com");
+    // Un seul message, le texte validé, au nom du bot, avec la clé Recall.
+    assert_eq!(
+        f.recall.chats(),
+        vec![json!({"to":"everyone","message":"Bonjour validé"})]
+    );
+    assert_eq!(
+        f.recall.seen.lock().unwrap().chats[0].0,
+        format!("Token {KEY}")
+    );
+    let settled = f.card_of(&card);
+    assert_eq!(settled["arguments"]["brouillon"]["texte"], "Bonjour validé");
+    assert_ne!(settled["arguments"]["brouillon"]["empreinte"], before);
+    // Un second clic sur la même carte ne renvoie pas.
+    let _ = f.resolve(&card, "send-1", json!("allow_once"), Some("Autre texte"));
+    let _ = f.resolve(&card, "send-2", json!("allow_once"), Some("Autre texte"));
+    f.app.tick(0);
+    f.sync();
+    assert_eq!(f.recall.chats().len(), 1);
+    // La clé n'est ni dans la carte ni dans ce que le modèle a reçu.
+    assert!(!f.state().to_string().contains(KEY));
+    assert!(!format!("{:?}", f.ai.seen.lock().unwrap().bodies).contains(KEY));
+}
+
+#[test]
+fn a_refused_a_throttled_or_an_unconfirmed_send_is_visible_and_never_sent_again() {
+    for (status, etat, label) in [
+        (400, "refused", "Refusé"),
+        (429, "rate_limited", "Trop de messages"),
+        (500, "unconfirmed", "Envoi non confirmé"),
+    ] {
+        let mut f = Fixture::new();
+        f.in_call();
+        f.recall.seen.lock().unwrap().chat_status = status;
+        let (run, card) = f.reply_card("reply-3", "Bonjour");
+        f.resolve(&card, "send-1", json!("allow_once"), None)
+            .unwrap();
+        f.settle(&run);
+        let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+            panic!("{:?}", f.outcome(&run));
+        };
+        let settled = f.card_of(&card);
+        assert_eq!(settled["arguments"]["brouillon"]["etat"], etat, "{label}");
+        assert_eq!(settled["publication_result"]["status"], "failed");
+        if etat == "unconfirmed" {
+            assert!(reason.contains("n’a pas confirmé"), "{reason}");
+        } else {
+            assert!(reason.contains("Rien n’a été envoyé"), "{reason}");
+        }
+        // Aucun second envoi automatique : ni au clic répété, ni au passage du suivi.
+        let _ = f.resolve(&card, "send-2", json!("allow_once"), None);
+        f.app.tick(0);
+        f.sync();
+        assert_eq!(f.recall.chats().len(), 1, "{label}");
+    }
+}
+
+#[test]
+fn an_unsent_card_does_not_leave_while_the_mac_is_off_nor_at_the_wake() {
+    let mut f = Fixture::new();
+    f.in_call();
+    let (run, card) = f.reply_card("reply-4", "Bonjour");
+    // Le Mac s'éteint puis se rallume : la réunion n'est plus suivie, la carte reste à envoyer.
+    recall::migrate(&f.db()).unwrap();
+    assert_eq!(f.recall.chats().len(), 0);
+    assert_eq!(f.card_of(&card)["status"]["status"], "pending");
+    // Un clic après le réveil n'écrit pas dans un chat que le Mac ne suit plus.
+    f.resolve(&card, "late-1", json!("allow_once"), None)
+        .unwrap();
+    f.settle(&run);
+    let ToolOutcome::Failed { reason } = f.outcome(&run) else {
+        panic!("{:?}", f.outcome(&run));
+    };
+    assert!(reason.contains("rien n’a été envoyé"), "{reason}");
+    assert_eq!(f.recall.chats().len(), 0);
+}
+
+#[test]
+fn an_unconfirmed_send_interrupted_by_a_shutdown_is_not_sent_again_at_the_wake() {
+    let mut f = Fixture::new();
+    f.in_call();
+    let (run, card) = f.reply_card("reply-5", "Bonjour");
+    f.db()
+        .execute("UPDATE wrapper_recall_drafts SET state='sending'", [])
+        .unwrap();
+    recall::migrate(&f.db()).unwrap();
+    let state: String = f
+        .db()
+        .query_row("SELECT state FROM wrapper_recall_drafts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "uncertain");
+    f.resolve(&card, "late-1", json!("allow_once"), None)
+        .unwrap();
+    f.settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.recall.chats().len(), 0);
+}
+
+#[test]
+fn without_a_running_meeting_no_reply_card_opens_and_nothing_is_sent() {
+    let mut f = Fixture::new();
+    f.connect();
+    f.script_call(recall::REPLY, "reply-6", json!({"texte":"Bonjour"}));
+    f.script_done();
+    let run = f.say_text("reply-6", "Réponds dans la réunion : Bonjour");
+    let results = f.wait_results(&run, 1);
+    match &results[0] {
+        ToolOutcome::Failed { reason } => assert!(reason.contains("Aucune réunion"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(requests::list_for_run(&f.db(), &run).unwrap().is_empty());
+    assert_eq!(f.recall.chats().len(), 0);
+}
+
+#[test]
+fn a_blank_or_private_text_never_opens_a_reply_card() {
+    let mut f = Fixture::new();
+    f.in_call();
+    f.script_call(recall::REPLY, "reply-7", json!({"texte":"   "}));
+    f.script_done();
+    let run = f.say_text("reply-7", "Réponds dans la réunion");
+    let results = f.wait_results(&run, 1);
+    assert!(matches!(results[0], ToolOutcome::Failed { .. }));
+    assert!(requests::list_for_run(&f.db(), &run).unwrap().is_empty());
+    assert_eq!(f.recall.chats().len(), 0);
 }

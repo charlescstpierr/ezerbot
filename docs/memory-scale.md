@@ -30,6 +30,11 @@ Recherche instantanée, insensible aux accents et à la casse, combinable avec p
 
 ## Tests ciblés
 
+Le [jeu synthétique de tri de partage](memory-sharing-evaluation.md) mesure la
+matrice de confusion, l'exactitude par classe et les fuites de présélection,
+sans modifier les règles du tri. Il documente aussi le diagnostic zéro fuite
+volontairement rouge sur le score de départ.
+
 ```sh
 cargo test -p grokbot-memory --lib
 cargo test -p grokbot-wrapper --test memory --test memory_auto --test memory_forget -- --test-threads=1

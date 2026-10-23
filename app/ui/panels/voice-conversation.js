@@ -39,9 +39,9 @@
   }
   function render() {
     if (!button) return;
-    button.disabled = !active() && (Boolean(panels.meetingActive?.()) || !ctx?.connected || ctx?.conversation?.kind === "task");
+    button.disabled = !active() && (Boolean(panels.meetingActive?.() || window.EzerbotVoiceCall?.active?.()) || !ctx?.connected || ctx?.conversation?.kind === "task");
     button.setAttribute("aria-pressed", String(active()));
-    button.title = panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
+    button.title = window.EzerbotVoiceCall?.active?.() && !active() ? "Indisponible pendant l’appel vocal" : panels.meetingActive?.() && !active() ? "Indisponible pendant l’enregistrement d’une réunion" : button.disabled ? "Ouvrez une conversation pour utiliser le mode voix" : "Mode voix · parler et écouter les réponses sur ce Mac";
     bar.hidden = phase === "idle";
     label.textContent = detail || ({authorizing:"Autorisation du microphone…",listening:"À l’écoute · parlez pour envoyer",thinking:"Ezerbot réfléchit…",speaking:"Ezerbot parle · Échap pour interrompre",waiting:"En attente de vous · répondez dans la carte",sending:"Envoi de la transcription…"}[phase] || "");
     bar.dataset.phase = phase;
@@ -93,7 +93,7 @@
   async function start() {
     if (active()) { exit(); return; }
     if (button.disabled) return;
-    if (panels.meetingActive?.()) { panels.notify(errors.microphone_busy); return; }
+    if (panels.meetingActive?.() || window.EzerbotVoiceCall?.active?.()) { panels.notify(errors.microphone_busy); return; }
     window.EzerbotDictation?.cancel();
     token = crypto.randomUUID(); settingsToken = token; conversationId = ctx.conversation?.id; scopeKey = contextKey(ctx);
     reader = window.GrokbotChat.createVoiceReader(ctx.conversation?.messages || []);
@@ -281,6 +281,7 @@
         window.addEventListener("beforeunload", () => exit());
         window.addEventListener("pagehide", () => exit());
         window.addEventListener("grokbot:meeting-change", render);
+        window.addEventListener("grokbot:voice-call-change", render);
         render();
       },
       discard() { if (active()) exit(); },

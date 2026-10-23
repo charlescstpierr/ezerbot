@@ -1,0 +1,29 @@
+.voice-call-toggle { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; color: var(--muted); border: 0; border-radius: 8px; background: transparent; padding: 0; font: inherit; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.voice-call-toggle:hover:not(:disabled) { background: var(--soft); color: var(--text); }
+.voice-call-toggle[aria-pressed="true"] { color: var(--accent-on); background: var(--accent); }
+.voice-call-toggle:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.voice-call-toggle:disabled { opacity: .45; cursor: default; }
+.voice-call-icon { display: flex; }
+.voice-call-icon .icon { width: 16px; height: 16px; }
+.voice-call-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.voice-call-bar { margin: 0 16px 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--pane); font-size: 11px; }
+.voice-call-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.voice-call-state { flex: 1 1 180px; color: var(--text); font-weight: 550; line-height: 1.5; }
+.voice-call-state::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; background: var(--accent-ink); }
+.voice-call-bar[data-phase="authorizing"] .voice-call-state::before,
+.voice-call-bar[data-phase="ending"] .voice-call-state::before { background: var(--muted); }
+.voice-call-bar[data-phase="waiting"] .voice-call-state::before { background: var(--warning-text); }
+.voice-call-bar[data-phase="speaking"] .voice-call-state::before { animation: voice-speaking-pulse 1.6s ease-in-out infinite; }
+.voice-call-bar[data-tone="danger"] .voice-call-state { color: var(--danger-text); }
+.voice-call-bar[data-tone="danger"] .voice-call-state::before { background: var(--danger-text); animation: none; }
+.voice-call-notice { margin: 5px 0 0; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.voice-call-transcript { margin-top: 8px; max-height: 9em; overflow-y: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.voice-call-line { display: flex; gap: 8px; margin: 0 0 4px; line-height: 1.5; overflow-wrap: anywhere; }
+.voice-call-line strong { flex: 0 0 auto; min-width: 3.5em; color: var(--muted); font-weight: 550; }
+.voice-call-line span { min-width: 0; color: var(--text); }
+.voice-call-partial span { color: var(--muted); }
+.voice-call-empty { margin: 0; color: var(--muted); }
+.voice-call-bar .attachment-retry { font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .voice-call-state::before { animation: none !important; } }
+@media (max-width: 900px) { .voice-call-bar { margin-left: 10px; margin-right: 10px; } }
+@media (max-height: 640px) { .voice-call-bar { padding: 6px 10px; margin-bottom: 6px; } .voice-call-transcript { max-height: 4.5em; } .voice-call-notice { margin-top: 3px; } }

@@ -314,3 +314,10 @@ textarea.text-input:disabled {
   opacity: .5;
   cursor: default;
 }
+.gb-voice-call h3 { margin: 5px 0; font-size: 16px; }
+.gb-voice-call > header .gb-engine-label { margin-left: 0; }
+.gb-voice-call-lines { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 0; padding: 12px; list-style: none; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; line-height: 1.6; }
+.gb-voice-call-lines li { display: flex; gap: 10px; min-width: 0; }
+.gb-voice-call-lines strong { flex: 0 0 4em; color: var(--muted); font-weight: 550; }
+.gb-voice-call-lines span { min-width: 0; overflow-wrap: anywhere; }
+.gb-voice-call-partial { padding: 8px 10px; border: 1px solid var(--warning-line); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 11px; line-height: 1.6; }

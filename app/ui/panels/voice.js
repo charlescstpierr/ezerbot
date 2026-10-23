@@ -63,14 +63,15 @@
     if (!mic) return;
     const recording = phase === "recording";
     const voiceActive = Boolean(window.EzerbotVoiceMode?.active());
+    const callActive = Boolean(window.EzerbotVoiceCall?.active());
     const meetingActive = Boolean(panels.meetingActive?.());
     mic.innerHTML = recording ? '<svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>' : '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
-    mic.setAttribute("aria-label", voiceActive ? "Dictée indisponible pendant le mode voix" : meetingActive ? "Dictée indisponible pendant la réunion" : recording ? "Arrêter la dictée" : "Démarrer la dictée");
-    mic.title = voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : recording ? "Arrêter · Échap" : "Dicter un message";
+    mic.setAttribute("aria-label", callActive ? "Dictée indisponible pendant l’appel vocal" : voiceActive ? "Dictée indisponible pendant le mode voix" : meetingActive ? "Dictée indisponible pendant la réunion" : recording ? "Arrêter la dictée" : "Démarrer la dictée");
+    mic.title = callActive ? "Indisponible pendant l’appel vocal" : voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : recording ? "Arrêter · Échap" : "Dicter un message";
     mic.setAttribute("aria-pressed", String(recording));
-    mic.disabled = voiceActive || meetingActive || (live() && !recording) || context?.conversation?.kind === "task";
-    memoMode.disabled = voiceActive || meetingActive || live();
-    memoMode.title = voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : "Joindre le mémo vocal au message";
+    mic.disabled = voiceActive || callActive || meetingActive || (live() && !recording) || context?.conversation?.kind === "task";
+    memoMode.disabled = voiceActive || callActive || meetingActive || live();
+    memoMode.title = callActive ? "Indisponible pendant l’appel vocal" : voiceActive ? "Indisponible pendant le mode voix" : meetingActive ? "Indisponible pendant l’enregistrement d’une réunion" : "Joindre le mémo vocal au message";
     region.hidden = phase === "idle" && !memoItems.length;
     if (tones[phase]) region.dataset.tone = tones[phase]; else delete region.dataset.tone;
     row.hidden = phase === "idle";
@@ -125,7 +126,7 @@
     } catch { /* Draft is already handed off. */ }
   }
   async function start() {
-    if (live() || window.EzerbotVoiceMode?.active()) return;
+    if (live() || window.EzerbotVoiceMode?.active() || window.EzerbotVoiceCall?.active()) return;
     if (panels.meetingActive?.()) { panels.notify(errors.meeting_busy); return; }
     reset();
     try {
@@ -301,6 +302,7 @@
         document.getElementById("settings-button")?.addEventListener?.("click", () => loadMicrophones());
         window.addEventListener("beforeunload", reset);
         window.addEventListener("grokbot:meeting-change", render);
+        window.addEventListener("grokbot:voice-call-change", render);
         render();
       },
       blocked: () => live(),

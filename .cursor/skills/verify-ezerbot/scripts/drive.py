@@ -1182,6 +1182,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"invite-{theme}-{size}.png", f"saisie-{theme}-{size}.png", f"mot-de-passe-{theme}-{size}.png"]
     if sphere == "dictee":
         return [f"microphone-{theme}-{size}.png", f"repli-{theme}-{size}.png", f"ecoute-{theme}-{size}.png", f"brouillon-{theme}-{size}.png"]
+    if sphere == "parametres-connecteurs":
+        return [f"{theme}-{size}.png", f"linear-{theme}-{size}.png"]
     return [f"{theme}-{size}.png"]
 
 
@@ -1195,6 +1197,17 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
                 """() => {
                   const retention = document.getElementById("meeting-retention");
                   retention?.scrollIntoView({block: "center"});
+                  return true;
+                }""",
+            )
+        if sphere == "parametres-connecteurs" and index == 1:
+            # Un second plan sur la fiche Linear, que le titre Connecteurs en haut du premier laisse hors cadre.
+            eval_js(
+                evidence,
+                """() => {
+                  const card = document.querySelector('[data-panel="mcp"] [data-connector="linear"]');
+                  if (!card) throw new Error("fiche Linear absente");
+                  card.scrollIntoView({block: "center"});
                   return true;
                 }""",
             )

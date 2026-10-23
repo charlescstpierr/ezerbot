@@ -211,6 +211,7 @@
 .gb-secret-storage-warning { color: var(--text); background: var(--soft); border-color: color-mix(in srgb, var(--danger-text) 45%, var(--line)); }
 .gb-secret-storage-warning > strong { color: var(--danger-text); }
 .gb-card-slot .gb-approval-denied { border-inline-start: 3px solid var(--danger-text); }
+.gb-card-slot > .gb-approval-wait { margin: 0 0 6px; padding-inline: 16px; }
 .gb-card-slot .gb-approval-expired { background: var(--soft); color: var(--muted); }
 .gb-card-slot .gb-approval-expired :where(strong, code, pre) { color: inherit; }
 .gb-reviewer-progress { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; }

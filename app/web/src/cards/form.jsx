@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { approvalWaitLine } from "../approval-wait.js";
 
 export const kind = "form";
 export const inputClass = "w-full rounded-md border border-input bg-background p-2 text-sm text-foreground";
@@ -52,13 +53,23 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
   // A card that outlived its turn (#215) has no run to resume: the bot is told in a new turn.
   const detached = message.kind === "approval" && request.detached === true;
   const expiredApproval = message.kind === "approval" && status === "expired";
+  // The age line replaces the bare « En attente de vous » of a card that waits (#217).
+  const waitLine = message.kind === "approval" && available && status === "pending" && !receipt
+    ? approvalWaitLine(message.created_at, request.kind?.expires_at, Date.now()) : null;
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!waitLine) return undefined;
+    const timer = setInterval(() => tick((value) => value + 1), 30000);
+    return () => clearInterval(timer);
+  }, [Boolean(waitLine)]);
   const failureReason = ["run already ended", "run ended before wake delivery"].includes(wake?.reason)
     ? "Cette tâche du bot est déjà terminée." : "La reprise n’a pas abouti. La demande est conservée.";
-  return (
+  return (<>
+    {waitLine && <p className="gb-approval-wait mb-1 text-xs text-muted-foreground" role="status" data-approval-wait>{waitLine}</p>}
     <article className={`gb-message rounded-xl border border-border bg-card p-4 text-foreground${expiredApproval ? " gb-approval-expired" : ""}`} data-message-id={message.id} data-card-kind={message.kind} data-request-status={status} aria-busy={Boolean(busy)}>
       <header className="gb-meta"><strong>{title}</strong>{badge}</header>
       {!available ? <p role="alert">Cette demande est indisponible. Actualisez l’état.</p> : <>
-        <p className="mb-3 text-xs text-muted-foreground">{(request.connector?.origin ?? request.recall?.origin) === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`} · {authorization ? <span className="gb-status-ok" role="status">{authorization}</span> : statusText || statusLabel}</p>
+        <p className="mb-3 text-xs text-muted-foreground">{(request.connector?.origin ?? request.recall?.origin) === "settings" ? "Demande depuis Paramètres" : `Demande ${requesterLabel}`}{!waitLine && <> · {authorization ? <span className="gb-status-ok" role="status">{authorization}</span> : statusText || statusLabel}</>}</p>
         {children}
         {showDelivery && <div className="mt-3 text-sm" role="status" aria-live="polite">
           {busy && "Envoi en cours…"}
@@ -72,7 +83,7 @@ export function HumanInputCard({ message, title, input, children, statusText, ba
       {error && <p className="mt-2 text-sm text-muted-foreground" role="alert">{error}</p>}
       {(!available || error) && <button type="button" className="gb-retry mt-2" disabled={busy} onClick={() => act("forms.refresh")}>Actualiser l’état</button>}
     </article>
-  );
+  </>);
 }
 
 export function Card({ message, busy, onAction }) {

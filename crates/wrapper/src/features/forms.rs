@@ -40,6 +40,12 @@ mod late;
 mod reviewer;
 mod waiting;
 
+/// Délai du rappel unique d'une demande en attente (réglage de #215) et sa durée en mots ;
+/// `None` quand l'utilisateur a choisi « Jamais ». Lu par la boîte Notifications.
+pub(super) fn reminder_after(conn: &Connection) -> Result<Option<(i64, &'static str)>, ApiError> {
+    Ok(waiting::load(conn)?.reminder())
+}
+
 pub fn migrate(conn: &Connection) -> Result<(), ApiError> {
     // Needed before cutover too: the forms HTTP receipt already reads engine wakes.
     store::migrate(conn)?;

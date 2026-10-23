@@ -480,8 +480,9 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
         .iter()
         .map(|root| root.to_string_lossy().to_lowercase())
         .collect();
-    let separator =
-        |c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '<' | '>' | '=');
+    let separator = |c: char| {
+        c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '<' | '>' | '=')
+    };
     // Mots coupés sans tenir compte des guillemets, puis comme le shell les lit
     // (`Application\ Support/…` reste un seul mot).
     let mut words: Vec<String> = plain.split(separator).map(str::to_owned).collect();
@@ -493,7 +494,9 @@ fn shell_touches_app_data(ctx: &Context<'_>, command: &str, cwd: &str) -> Result
         };
         // Un joker se juge par tout ce qu'il pourrait désigner.
         if word.contains(['*', '?', '[', '{'])
-            && roots.iter().any(|root| pattern_reaches(&target, Path::new(root)))
+            && roots
+                .iter()
+                .any(|root| pattern_reaches(&target, Path::new(root)))
         {
             return Ok(true);
         }
@@ -1962,13 +1965,17 @@ mod tests {
     #[test]
     fn a_glob_in_an_escaped_absolute_path_still_reaches_the_app_data() {
         let separator = |c: char| c.is_whitespace() || c == ';';
-        let words = shell_words(r"cat ~/Library/Application\ Support/Grok?ot/notes.txt", separator);
+        let words = shell_words(
+            r"cat ~/Library/Application\ Support/Grok?ot/notes.txt",
+            separator,
+        );
         assert_eq!(words[1], "~/Library/Application Support/Grok?ot/notes.txt");
         let home = Path::new("/Users/moi");
         let target = resolve_word(&words[1], None, Some(home)).unwrap();
         let root = home.join("Library/Application Support/Grokbot");
         assert!(pattern_reaches(&target, &root));
-        let elsewhere = resolve_word("~/Library/Application Support/Gr*/x", None, Some(home)).unwrap();
+        let elsewhere =
+            resolve_word("~/Library/Application Support/Gr*/x", None, Some(home)).unwrap();
         assert!(pattern_reaches(&elsewhere, &root));
         let unrelated = resolve_word("~/Documents/*.txt", None, Some(home)).unwrap();
         assert!(!pattern_reaches(&unrelated, &root));

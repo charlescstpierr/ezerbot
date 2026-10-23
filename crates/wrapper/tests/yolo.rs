@@ -505,7 +505,10 @@ fn a_command_that_reaches_the_data_without_naming_it_reads_nothing() {
     let attempts = [
         ("grep-recursif", "grep -r refresh ."),
         ("tar-parent", "tar cf - . | strings"),
-        ("variable-joker", "D=da; cat ${D}*/workspace.chatgpt-auth.json"),
+        (
+            "variable-joker",
+            "D=da; cat ${D}*/workspace.chatgpt-auth.json",
+        ),
     ];
     for (id, command) in attempts {
         let out = f.runs_without_a_card(id, "run_shell", f.shell(command));
@@ -516,7 +519,10 @@ fn a_command_that_reaches_the_data_without_naming_it_reads_nothing() {
     }
     std::fs::write(f.root().join("voisin.txt"), "utile").unwrap();
     let out = f.runs_without_a_card("voisin", "run_shell", f.shell("grep -r utile ."));
-    assert!(out["output"]["stdout"].to_string().contains("utile"), "{out}");
+    assert!(
+        out["output"]["stdout"].to_string().contains("utile"),
+        "{out}"
+    );
 }
 
 #[test]

@@ -715,6 +715,175 @@ mod elapsed_interval {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Drip {
+        /// Status line and headers arrive one byte at a time, never complete.
+        Headers,
+        /// Headers complete, then one SSE comment byte before every read timeout.
+        Body,
+    }
+
+    /// Accepts every connection and drips until the client closes it, reporting
+    /// the instant each write fails.
+    fn dripping_server(
+        mode: Drip,
+        closed: std::sync::mpsc::Sender<Instant>,
+    ) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { break };
+                let closed = closed.clone();
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(socket.try_clone().unwrap());
+                    let mut line = String::new();
+                    let mut length = 0usize;
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        line.clear();
+                    }
+                    let mut body = vec![0; length];
+                    if reader.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    let (prefix, filler) = match mode {
+                        Drip::Headers => (&head[..17], &b"X-Drip: 1\r\n"[..]),
+                        Drip::Body => (head, &b":"[..]),
+                    };
+                    if socket.write_all(prefix.as_bytes()).is_err() {
+                        let _ = closed.send(Instant::now());
+                        return;
+                    }
+                    loop {
+                        thread::sleep(Duration::from_millis(100));
+                        if socket.write_all(filler).is_err() {
+                            let _ = closed.send(Instant::now());
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    /// Four concurrent streams that never go quiet must all be cut by the session
+    /// deadline, and the slots they held must be free again for the next turn.
+    fn four_dripping_streams_release_their_slots(mode: Drip) {
+        const TOTAL: Duration = Duration::from_secs(2);
+        let (closed_tx, closed) = std::sync::mpsc::channel();
+        let address = dripping_server(mode, closed_tx);
+        let root = std::env::temp_dir().join(format!(
+            "ezerbot-drip-{mode:?}-{}-{}",
+            std::process::id(),
+            crate::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("app.sqlite");
+        std::fs::write(
+            root.join("app.codex-auth.json"),
+            serde_json::json!({
+                "host_id": "drip",
+                "account_id": "drip",
+                "client_id": "drip",
+                "access_token": token(),
+                "refresh_token": "drip-refresh",
+                "expires_at": 4_102_444_800u64,
+                "scopes": "openid offline_access",
+                "welcomed": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let endpoints = Endpoints {
+            api: format!("{base}/backend-api/codex"),
+            token: format!("{base}/token"),
+            ..Endpoints::default()
+        };
+        let session = Session::with_endpoints(&db, endpoints, false, true);
+        *super::lock(&session.inner.deadlines) = super::Deadlines {
+            first: Duration::from_secs(30),
+            stall: Duration::from_secs(30),
+            total: TOTAL,
+        };
+        let stream = |turn: &str| {
+            let mut events = Vec::new();
+            session
+                .reliable_stream(
+                    serde_json::json!({"model": "gpt-test", "instructions": "Réponds", "input": []}),
+                    &AtomicBool::new(false),
+                    Some(turn),
+                    &mut |_, _| Ok(()),
+                    &mut |event| {
+                        events.push(event);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            events
+        };
+        let started = Instant::now();
+        let outcomes: Vec<_> = thread::scope(|scope| {
+            let handles: Vec<_> = ["drip-1", "drip-2", "drip-3", "drip-4"]
+                .into_iter()
+                .map(|turn| scope.spawn(move || (stream(turn), started.elapsed())))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (events, elapsed) in &outcomes {
+            assert!(
+                matches!(events.last(), Some(ModelEvent::Failed { .. })),
+                "a dripping stream must fail at the session deadline: {events:?}"
+            );
+            assert!(
+                *elapsed >= Duration::from_millis(1500)
+                    && *elapsed <= TOTAL + Duration::from_secs(2),
+                "the stream ended at {elapsed:?}, not at its {TOTAL:?} deadline"
+            );
+        }
+        for _ in 0..4 {
+            let dropped = closed
+                .recv_timeout(Duration::from_secs(4))
+                .expect("a dripping connection was still open after the session deadline");
+            assert!(
+                dropped.duration_since(started) <= TOTAL + Duration::from_secs(3),
+                "a connection outlived the session deadline by {:?}",
+                dropped.duration_since(started)
+            );
+        }
+        let released = Instant::now();
+        while session.closing_sockets() > 0 && released.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(session.closing_sockets(), 0, "slots were not released");
+        let next = stream("drip-5");
+        assert!(
+            !matches!(
+                next.last(),
+                Some(ModelEvent::Failed { reason }) if reason.contains("se ferment encore")
+            ),
+            "a fifth turn was refused as busy after the four slots were freed: {next:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn four_streams_dripping_a_body_byte_release_their_slots_at_the_deadline() {
+        four_dripping_streams_release_their_slots(Drip::Body);
+    }
+
+    #[test]
+    fn four_streams_dripping_response_headers_release_their_slots_at_the_deadline() {
+        four_dripping_streams_release_their_slots(Drip::Headers);
+    }
+
     fn respond(socket: &mut std::net::TcpStream, started: &AtomicBool) {
         socket.set_nonblocking(false).unwrap();
         let mut reader = BufReader::new(socket.try_clone().unwrap());

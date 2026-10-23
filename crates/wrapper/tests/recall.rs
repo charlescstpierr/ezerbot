@@ -1321,3 +1321,39 @@ fn a_manual_summary_waits_for_the_final_transcript_pull() {
     f.sync();
     f.wait_summary("ready");
 }
+
+#[test]
+fn a_secret_said_in_the_call_never_reaches_the_card_or_the_summary() {
+    let mut f = Fixture::new();
+    f.in_call();
+    let secret = "valeur-secrete-dite-dans-lappel-0123456789";
+    let vault = grokbot_wrapper::features::forms::vault(&f.app.feature_context()).unwrap();
+    vault
+        .set("DEMO_SECRET", "Secret de démonstration", secret)
+        .unwrap();
+    f.recall.said(&[
+        ("Alice", 3.0, &format!("Mon code est {secret} ok")),
+        ("Bruno", 9.0, "Phrase sans secret"),
+    ]);
+    f.sync();
+    let lines = f.lines();
+    assert_eq!(lines.len(), 2);
+    assert!(!lines[0].2.contains(secret));
+    assert_eq!(lines[1].2, "Phrase sans secret");
+    assert!(!f.item().to_string().contains(secret));
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT group_concat(text) FROM wrapper_recall_lines",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains(secret));
+    // Le résumé n’a pas vu la valeur.
+    f.recall.code("call_ended");
+    f.sync();
+    f.sync();
+    f.wait_summary("ready");
+    assert!(!format!("{:?}", f.ai.seen.lock().unwrap().summary_requests).contains(secret));
+}

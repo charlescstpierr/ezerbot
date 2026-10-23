@@ -109,3 +109,33 @@ test("le Mode YOLO ouvre l’écran au bot sans réglage, la session et l’entr
   assert.equal(asked.disabled, false);
   assert.match(f.settings.textContent, /Désactivé par défaut/);
 });
+test("un consentement d’écran périmé ne sert plus : le dialogue suit le mode YOLO et refuse l’ancien accord", async () => {
+  const f = fixture();
+  f.state.screen.bots = [{ bot_id: "grokbot", enabled: true }];
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  byText(f.top, "Écran du Mac").onclick();
+  const dialog = all(f.panels).find(e => e.className.includes("screen-dialog"));
+  const old = all(dialog).find(e => e.name === "screen-consent");
+  assert.match(dialog.textContent, /chacun soumis à ma confirmation/);
+  old.checked = true; old.onchange();
+  const staleForm = all(dialog).find(e => e.tagName === "form");
+  // Dans une autre fenêtre, le mode passe à YOLO : seul `state.yolo` change, pas `state.screen`.
+  f.state.yolo = { mode: "yolo", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "yolo" }] };
+  await f.host.refresh();
+  assert.match(dialog.textContent, /sans carte \(Mode YOLO\)/);
+  assert.doesNotMatch(dialog.textContent, /chacun soumis à ma confirmation/);
+  const fresh = all(dialog).find(e => e.name === "screen-consent");
+  assert.notEqual(fresh, old);
+  assert.equal(fresh.checked, undefined, "la case est à refaire");
+  assert.equal(byText(dialog, "Accorder cette session").disabled, true);
+  // Le formulaire d'avant, soumis quand même, n'accorde rien.
+  const before = f.calls.length;
+  await staleForm.onsubmit({ preventDefault() {} });
+  assert.equal(f.calls.slice(before).some(([path]) => path.endsWith("/grant")), false);
+  // Retour à « Demander » : le dialogue redit la confirmation par geste.
+  f.state.yolo = { mode: "ask", bots: [{ bot_id: "grokbot", mode: "inherit", effective: "ask" }] };
+  await f.host.refresh();
+  assert.match(dialog.textContent, /chacun soumis à ma confirmation/);
+});
+

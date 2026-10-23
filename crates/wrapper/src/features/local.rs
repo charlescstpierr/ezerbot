@@ -414,18 +414,57 @@ fn protected_identity(ctx: &Context<'_>, metadata: &fs::Metadata) -> Result<bool
 /// commande, par ce qu'elle nomme ; ce qu'elle atteint sans le nommer, le
 /// sandbox du shell YOLO le refuse.
 pub(super) fn touches_app_data(ctx: &Context<'_>, call: &ToolCall) -> Result<bool, ApiError> {
+    touches_app_data_at(
+        ctx,
+        call,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    )
+}
+
+/// Les racines que le Mode YOLO refuse aux outils, shell comme fichiers : le dossier de
+/// la base, l'installation habituelle (`~/Library/Application Support/Grokbot`, où
+/// vivent les jetons même quand la base courante est ailleurs) et les trousseaux.
+fn protected_roots(ctx: &Context<'_>, home: Option<&Path>) -> Result<Vec<PathBuf>, ApiError> {
+    let mut roots = vec![data_dir(ctx)?, PathBuf::from("/Library/Keychains")];
+    if let Some(home) = home {
+        for sub in ["Library/Application Support/Grokbot", "Library/Keychains"] {
+            let root = home.join(sub);
+            roots.push(root.canonicalize().unwrap_or(root));
+        }
+    }
+    Ok(roots)
+}
+
+/// Un fichier est protégé s'il est une donnée d'Ezerbot (chemin réel ou inode) ou s'il
+/// est sous une racine protégée, sans tenir compte de la casse (volume macOS usuel).
+fn yolo_protected(ctx: &Context<'_>, path: &Path, home: Option<&Path>) -> Result<bool, ApiError> {
+    if is_app_data(ctx, path)? {
+        return Ok(true);
+    }
+    let shown = path.to_string_lossy().to_lowercase();
+    Ok(protected_roots(ctx, home)?.iter().any(|root| {
+        let root = root.to_string_lossy().to_lowercase();
+        shown == root || shown.starts_with(&format!("{}/", root.trim_end_matches('/')))
+    }))
+}
+
+fn touches_app_data_at(
+    ctx: &Context<'_>,
+    call: &ToolCall,
+    home: Option<&Path>,
+) -> Result<bool, ApiError> {
     match call.name.as_str() {
         "read_file" | "list_directory" => {
             let a: FileArgs = args(call)?;
             match absolute(&a.path)?.canonicalize() {
-                Ok(path) => is_app_data(ctx, &path),
+                Ok(path) => yolo_protected(ctx, &path, home),
                 Err(_) => Ok(false),
             }
         }
         "write_file" => {
             let a: WriteArgs = args(call)?;
             match write_destination(&a.path) {
-                Ok(path) => is_app_data(ctx, &path),
+                Ok(path) => yolo_protected(ctx, &path, home),
                 Err(_) => Ok(false),
             }
         }
@@ -1107,7 +1146,8 @@ fn read_path(ctx: &Context<'_>, call: &ToolCall) -> Result<PathBuf, ApiError> {
         }
     }
     if let AuthorizedBy::Yolo { .. } = &authority {
-        if is_app_data(ctx, &path)? {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if yolo_protected(ctx, &path, home.as_deref())? {
             return Err(ApiError::new(403, super::yolo::PROTECTED));
         }
     }
@@ -1238,7 +1278,8 @@ fn write(ctx: &Context<'_>, call: &ToolCall, a: WriteArgs) -> Result<Value, ApiE
         }
     }
     if let grokbot_engine::contracts::AuthorizedBy::Yolo { .. } = authority(ctx, call)? {
-        if is_app_data(ctx, &path)? {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if yolo_protected(ctx, &path, home.as_deref())? {
             return Err(ApiError::new(403, super::yolo::PROTECTED));
         }
     }
@@ -2154,5 +2195,54 @@ mod tests {
             &"gro?x".chars().collect::<Vec<_>>(),
             &"grokbot".chars().collect::<Vec<_>>()
         ));
+    }
+
+    #[test]
+    fn file_tools_refuse_the_install_and_keychain_roots_even_when_the_database_is_elsewhere() {
+        let root = std::env::temp_dir().join(format!("ezerbot-roots-{}", std::process::id()));
+        let home = root.join("home");
+        let install = home.join("Library/Application Support/Grokbot");
+        let keychains = home.join("Library/Keychains");
+        let elsewhere = root.join("ailleurs");
+        let ordinary = root.join("ordinaire");
+        for dir in [&install, &keychains, &elsewhere, &ordinary] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(install.join("workspace.codex-auth.json"), "jeton").unwrap();
+        fs::write(keychains.join("login.keychain-db"), "trousseau").unwrap();
+        fs::write(ordinary.join("notes.txt"), "ordinaire").unwrap();
+        // La base courante vit à côté, pas dans l'installation habituelle.
+        let app = crate::App::open(&elsewhere.join("workspace.sqlite")).unwrap();
+        let ctx = app.feature_context();
+        let call = |name: &str, path: &Path| ToolCall {
+            call_id: "c".into(),
+            name: name.into(),
+            arguments: if name == "write_file" {
+                json!({"path": path, "content": "x", "expected_sha256": null})
+            } else {
+                json!({"path": path})
+            },
+        };
+        let home = home.canonicalize().unwrap();
+        for (name, path) in [
+            ("read_file", install.join("workspace.codex-auth.json")),
+            ("list_directory", install.clone()),
+            ("read_file", keychains.join("login.keychain-db")),
+            ("write_file", install.join("intrus.txt")),
+        ] {
+            assert!(
+                touches_app_data_at(&ctx, &call(name, &path), Some(&home)).unwrap(),
+                "{name} {}",
+                path.display()
+            );
+        }
+        // Un fichier ordinaire, lui, reste lisible.
+        assert!(!touches_app_data_at(
+            &ctx,
+            &call("read_file", &ordinary.join("notes.txt")),
+            Some(&home)
+        )
+        .unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -8,6 +8,7 @@
   const button = (text, action, cls = "secondary-button") => { const b = node("button", text, cls); b.type = "button"; b.onclick = action; return b; };
   let data = {}, context = {}, section, signature = "", error = "", saving = false, expiryTimer;
   // Le Mode YOLO ouvre l'écran à ses bots ; la session, elle, reste à accorder ici.
+  let lastYolo;
   const yoloBot = (id) => host.state.yolo?.bots?.find(b => b.bot_id === id)?.effective === "yolo";
   const screenOpen = (id) => Boolean(id) && (yoloBot(id) || Boolean(data.bots?.some(b => b.bot_id === id && b.enabled)));
   function updateEntry() {
@@ -119,11 +120,13 @@
         const form = node("form"), label = node("label", "Durée de cet accord", "form-label"), duration = node("select", null, "text-input"); duration.name = "screen-duration";
         for (const minutes of [1,5,15]) { const opt = node("option", `${minutes} minute${minutes > 1 ? "s" : ""}`); opt.value = String(minutes); duration.append(opt); }
         duration.value = "5"; label.append(duration);
+        // Le texte de consentement dit si les gestes passent par une carte : il ne vaut que pour ce mode.
+        const consentMode = yoloBot(bot.id);
         const consent = node("label", null, "screen-consent"), check = node("input"); check.type = "checkbox"; check.required = true; check.name = "screen-consent";
         consent.append(check, node("span", yoloBot(bot.id) ? "J’autorise ce bot à voir cet écran et à agir, sans carte (Mode YOLO), dans ce fil et pendant cette durée. Échap arrête tout." : "J’autorise ce bot à voir cet écran et à proposer des gestes, chacun soumis à ma confirmation, dans ce fil et pendant cette durée. Échap arrête tout."));
         const allow = node("button", "Accorder cette session", "primary-button"); allow.type = "submit"; allow.disabled = true;
         check.onchange = () => { allow.disabled = saving || !check.checked; };
-        form.append(label, consent, allow); form.onsubmit = event => { event.preventDefault(); if (check.checked) save("/api/screen/grant", { bot_id: bot.id, conversation_id: chat.id, minutes: Number(duration.value) }); }; dialog.append(form);
+        form.append(label, consent, allow); form.onsubmit = event => { event.preventDefault(); if (yoloBot(bot.id) !== consentMode) { renderDialog(); return; } if (check.checked) save("/api/screen/grant", { bot_id: bot.id, conversation_id: chat.id, minutes: Number(duration.value) }); }; dialog.append(form);
       }
     }
     if (error) { const alert = node("p", error, "screen-error"); alert.setAttribute("role", "alert"); dialog.append(alert); }
@@ -146,7 +149,7 @@
   host.register({
     id: "screen",
     settingsSection(container) { section = container; renderSettings(); },
-    onState(state, ctx) { const incoming = state.screen || {}; const next = { ...incoming, session: incoming.session?.expires_at > Date.now() ? incoming.session : null }; const changed = JSON.stringify(data) !== JSON.stringify(next); data = next; context = ctx; renderSettings(); updateEntry(); if (changed) { scheduleExpiry(); renderOverlay(); if (dialog.open) renderDialog(); } },
+    onState(state, ctx) { const yoloNow = yoloBot(ctx?.bot?.id); const yoloChanged = yoloNow !== lastYolo; lastYolo = yoloNow; const incoming = state.screen || {}; const next = { ...incoming, session: incoming.session?.expires_at > Date.now() ? incoming.session : null }; const changed = JSON.stringify(data) !== JSON.stringify(next); data = next; context = ctx; renderSettings(); updateEntry(); if (changed) { scheduleExpiry(); renderOverlay(); if (dialog.open) renderDialog(); } else if (yoloChanged && dialog.open) renderDialog(); },
     wantsPolling() { return Boolean(data.session); },
   });
 })();

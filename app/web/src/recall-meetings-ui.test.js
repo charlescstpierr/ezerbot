@@ -64,6 +64,11 @@ test("la carte Réunions n'a qu'un champ de clé masqué, et le corps envoyé po
   assert.equal(fields.length, 1);
   assert.equal(fields[0].type, "password");
   assert.equal(f.root.all().filter(n => n.tag === "article").length, 1);
+  const form = card.all().find(n => n.tag === "form");
+  assert.equal(form.hidden, true);
+  await buttons(f.root, "Connecter")[0].events.click({ preventDefault() {} });
+  assert.equal(form.hidden, false);
+  assert.deepEqual(f.calls, []);
   fields[0].value = "cle-recall-factice-0123456789";
   await buttons(f.root, "Connecter")[0].events.click({ preventDefault() {} });
   assert.deepEqual(f.calls, [{ path: "/api/recall/connect", body: { key: "cle-recall-factice-0123456789" } }]);

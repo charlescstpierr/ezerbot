@@ -53,3 +53,6 @@
 .mcp-environment { display: grid; gap: 8px; }
 .mcp-env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; }
 @media (max-width: 850px) { .mcp-environment { gap: 14px; } .mcp-env-row { grid-template-columns: minmax(0, 1fr) auto; padding-bottom: 10px; border-bottom: 1px solid var(--line); } .mcp-env-row input:first-child { grid-column: 1 / -1; } }
+
+.mcp-category { display: grid; gap: 12px; min-width: 0; }
+.mcp-category[hidden], .mcp-form[hidden] { display: none; }

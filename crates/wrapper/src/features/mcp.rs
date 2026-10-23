@@ -189,7 +189,7 @@ pub fn gmail_new_messages(ctx: &Context<'_>) -> Result<Vec<MailEvent>, ApiError>
 }
 /// Whether a Gmail account is connected: a new-mail trigger of a routine can only be armed then.
 pub fn gmail_connected(conn: &Connection) -> bool {
-    catalogue::gmail::connected(conn)
+    catalogue::gmail::any_connected(conn)
 }
 /// Forget what the inbox held, once no routine watches it: the next look learns it afresh.
 pub fn gmail_stop_watching(conn: &Connection) -> Result<(), ApiError> {

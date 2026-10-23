@@ -131,7 +131,10 @@ fn accept_token(
     if m.id == "gmail" {
         // A renewal keeps the account it already named; a sign-in learns it from Google.
         if !env.contains_key("EMAIL") {
-            env.insert("EMAIL".into(), gmail::profile_email(m, access)?);
+            let email = gmail::profile_email(m, access)?;
+            // One connection per Google address: a second sign-in of it adds nothing.
+            gmail::refuse_twin(ctx, server, &email)?;
+            env.insert("EMAIL".into(), email);
         }
     } else if m.endpoint.is_empty() {
         let user = read_json(

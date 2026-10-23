@@ -51,6 +51,8 @@ impl CalendarCase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: String,
+    /// The address of the Google account whose agenda it belongs to.
+    pub compte: String,
     pub cas: CalendarCase,
     pub debut: String,
     pub debut_ms: i64,
@@ -64,7 +66,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<(), ApiError> {
 }
 pub(super) fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
-        "jour":{"type":"string","enum":["aujourd_hui","demain"],"description":"Le jour à lire, dans le fuseau de l’agenda ; demain si omis."}
+        "jour":{"type":"string","enum":["aujourd_hui","demain"],"description":"Le jour à lire, dans le fuseau de l’agenda ; demain si omis."},
+        "compte":account_property()
     }})
 }
 
@@ -176,6 +179,7 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
     #[serde(deny_unknown_fields)]
     struct Args {
         jour: Option<String>,
+        compte: Option<String>,
     }
     let args: Args = serde_json::from_value(arguments.clone()).map_err(|_| invalid(DAY))?;
     let (days, label) = match args.jour.as_deref() {
@@ -183,7 +187,10 @@ pub(super) fn list(ctx: &Context<'_>, arguments: &Value) -> Result<Value, ApiErr
         Some("aujourd_hui") => (0, "aujourd’hui"),
         Some(_) => return Err(invalid(DAY)),
     };
-    let account = usable(ctx)?;
+    let account = match pick(ctx, args.compte.as_deref())? {
+        Pick::Use(account) => *account,
+        Pick::Ask(question) => return Ok(question),
+    };
     let zone_name = calendar_zone(ctx, &account)?;
     let zone = zone_named(&zone_name)?;
     let today = Timestamp::from_millisecond(ctx.now_ms as i64)
@@ -279,6 +286,7 @@ fn calendar_event(item: &Value, cas: CalendarCase, zone: &str, stamp: i64) -> Op
     Some(Seen {
         event: CalendarEvent {
             id,
+            compte: String::new(),
             cas,
             debut: if debut_ms == 0 {
                 String::new()
@@ -293,12 +301,31 @@ fn calendar_event(item: &Value, cas: CalendarCase, zone: &str, stamp: i64) -> Op
     })
 }
 
-/// The events that changed or began since the last call, the changes first in the order
-/// Google made them, then the starts in the order of their time. The first call only
-/// learns the agenda. A version is delivered once; what could not be read is tried again.
+/// The events that changed or began since the last call in each connected Google account,
+/// the changes first in the order Google made them, then the starts in the order of their
+/// time. The first call only learns an agenda. A version is delivered once; what could not
+/// be read is tried again, and the other accounts go on.
 pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiError> {
     let _watch = WATCH.lock().unwrap_or_else(|e| e.into_inner());
-    let account = account(ctx)?;
+    let accounts = connected(ctx)?;
+    if accounts.is_empty() {
+        return Err(nobody(ctx));
+    }
+    let mut events = Vec::new();
+    let mut failure = None;
+    for account in &accounts {
+        match watch(ctx, account) {
+            Ok(mut fresh) => events.append(&mut fresh),
+            Err(error) => failure = failure.or(Some(error)),
+        }
+    }
+    match failure {
+        Some(error) if events.is_empty() => Err(error),
+        _ => Ok(events),
+    }
+}
+/// What changed or began in one account's agenda since the last look.
+fn watch(ctx: &Context<'_>, account: &Account) -> Result<Vec<CalendarEvent>, ApiError> {
     let owner = account.email.to_lowercase();
     let now = ctx.now_ms as i64;
     let floors: Option<(i64, i64)> = ctx
@@ -316,10 +343,10 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
         )?;
         return Ok(Vec::new());
     };
-    let zone = calendar_zone(ctx, &account)?;
+    let zone = calendar_zone(ctx, account)?;
     let (changed, _) = fetch_all(
         ctx,
-        &account,
+        account,
         &[
             ("updatedMin", utc(updated_floor)?),
             ("showDeleted", "true".into()),
@@ -334,7 +361,7 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
     let begun = if upper - 1 > started_floor {
         Some(fetch_all(
             ctx,
-            &account,
+            account,
             &[
                 ("timeMin", utc(started_floor)?),
                 ("timeMax", utc(upper)?),
@@ -430,7 +457,13 @@ pub(super) fn new_events(ctx: &Context<'_>) -> Result<Vec<CalendarEvent>, ApiErr
         [&owner],
     )?;
     tx.commit()?;
-    Ok(fresh.into_iter().map(|seen| seen.event).collect())
+    Ok(fresh
+        .into_iter()
+        .map(|seen| CalendarEvent {
+            compte: account.email.clone(),
+            ..seen.event
+        })
+        .collect())
 }
 
 #[cfg(test)]

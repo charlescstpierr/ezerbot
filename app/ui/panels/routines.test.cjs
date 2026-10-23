@@ -695,6 +695,13 @@ test('the history names a run started by a mail with its sender and subject', as
   assert.doesNotMatch(text, /Manuel|Planifié/);
 });
 
+test('the history names the Google account that received the mail', async () => {
+  const started = { ...occurrence('mail-run', 'done', 'mail::m1'), trigger: { kind: 'mail', label: 'Courriel', received_at: 1_760_000_000_000, compte: 'travail@example.test', expediteur: 'Alice <alice@example.com>', objet: 'Facture d’octobre' } };
+  const h = harness(async () => page([started]));
+  await h.t.showHistory(mailRoutine);
+  assert.match(h.t.content.textContent, /Courriel · travail@example\.test · Alice <alice@example.com> · Facture d’octobre · reçu le/);
+});
+
 test('the list describes a mail routine', async () => {
   const h = harness(async () => ({ routines: [mailRoutine] }));
   h.panels.state.routines.items = [{ routine: mailRoutine }];

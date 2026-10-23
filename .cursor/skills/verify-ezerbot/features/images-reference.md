@@ -23,7 +23,7 @@ Preconditions:
 - **Lancer.** Run `bash .cursor/skills/verify-ezerbot/scripts/launch.sh --evidence <preuves> --sphere images-reference`. Sans cette sphère, le wrapper répond « OK » à tout et l’image n’est jamais demandée.
 - **Envoyer.** Le parcours groupé crée la conversation, importe une photo peinte dans un canevas, attend sa légende, puis envoie « Le même style, en 16:9 » avec la photo.
 - **Attendre l’image.** La carte de l’image générée est chargée, la photo aussi, et le rapport affiché de l’image générée égale son rapport naturel (1,5).
-- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere images-reference`. Les quatre PNG existent.
+- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere images-reference`. Les huit PNG (`photo-` et `resultat-`, deux thèmes, deux tailles) existent : la photo et l’image large ne tiennent pas dans la même fenêtre minimale, chacune a donc son plan.
 
 ## Gotchas
 

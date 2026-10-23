@@ -367,11 +367,7 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               const image = card?.querySelector("img");
               const photo = [...document.querySelectorAll(".gb-image-grid img")].find((node) => !card.contains(node));
               if (!card || !image || !image.complete || !image.naturalWidth || !photo || !photo.complete) return null;
-              card.scrollIntoView({block: "end"});
               const box = image.getBoundingClientRect();
-              const photoBox = photo.getBoundingClientRect();
-              const top = document.querySelector("header, .gb-conversation-header")?.getBoundingClientRect().bottom || 72;
-              if (box.top < top || photoBox.bottom < top + 24) return null;
               return {ok: true, natural: image.naturalWidth / image.naturalHeight, shown: box.width / box.height, photo: photo.naturalWidth / photo.naturalHeight, refused: !!document.querySelector('.gb-generated-image-card[data-image-state="failed"]')};
             }""",
             "image large et photo absentes",
@@ -802,6 +798,8 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
         return [f"reunions-{theme}-{size}.png", f"routines-{theme}-{size}.png"]
     if sphere == "pages":
         return [f"avant-{theme}-{size}.png", f"apres-{theme}-{size}.png"]
+    if sphere == "images-reference":
+        return [f"photo-{theme}-{size}.png", f"resultat-{theme}-{size}.png"]
     if sphere == "memo-vocal":
         return [f"avant-{theme}-{size}.png", f"vitesse-{theme}-{size}.png", f"saut-{theme}-{size}.png", f"sans-temps-{theme}-{size}.png"]
     if sphere == "iphone-reponse":
@@ -828,6 +826,18 @@ def capture(evidence: Path, sphere: str, theme: str, width: int, height: int, na
             )
         if sphere == "pages" and index == 1:
             pages_request(evidence)
+        if sphere == "images-reference":
+            # La photo ne tient pas avec l'image dans une fenêtre minimale : un plan sur la photo, un plan sur le résultat.
+            where = "start" if index == 0 else "end"
+            eval_js(
+                evidence,
+                f"""() => {{
+                  const card = document.querySelector('.gb-generated-image-card[data-image-state="done"]');
+                  const photo = [...document.querySelectorAll(".gb-image-grid img")].find((node) => !card.contains(node));
+                  ({"photo" if index == 0 else "card"}).scrollIntoView({{block: "{where}"}});
+                  return true;
+                }}""",
+            )
         if sphere == "iphone-reponse":
             iphone_reply_step(evidence, index)
         if sphere == "dictee":

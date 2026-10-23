@@ -10036,6 +10036,29 @@ fn jira_comment_waits_on_a_draft_card_and_cancel_publishes_nothing() {
 }
 
 #[test]
+fn jira_comment_keeps_its_draft_card_in_yolo_and_cancel_publishes_nothing() {
+    let mut f = Fixture::new();
+    f.jira_connect();
+    f.post("/api/yolo/mode", json!({"mode":"yolo"}));
+    assert_eq!(f.state()["yolo"]["mode"], "yolo");
+    let (run, card) = f.github_prepare(
+        "jira-yolo-1",
+        JIRA_COMMENT,
+        json!({"issue":"ENG-12","text":"Jet en YOLO"}),
+    );
+    assert_eq!(card["status"]["status"], "pending");
+    assert_eq!(card["arguments"]["brouillon"]["texte"], "Jet en YOLO");
+    assert_eq!(f.jira_sends(), 0, "YOLO lifts no draft card");
+    f.github_resolve(&card, "jira-yolo-cancel", json!("deny"), None)
+        .unwrap();
+    f.github_settle(&run);
+    assert!(matches!(f.outcome(&run), ToolOutcome::Failed { .. }));
+    assert_eq!(f.jira_sends(), 0);
+    assert!(f.jira_commented().is_empty());
+    assert_eq!(f.jira_card(&card)["status"]["status"], "denied");
+}
+
+#[test]
 fn jira_comment_is_published_once_from_the_corrected_text() {
     let mut f = Fixture::new();
     f.jira_connect();

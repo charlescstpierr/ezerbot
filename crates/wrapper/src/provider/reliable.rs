@@ -843,7 +843,8 @@ mod elapsed_interval {
                 "a dripping stream must fail at the session deadline: {events:?}"
             );
             assert!(
-                *elapsed >= Duration::from_millis(1500) && *elapsed <= TOTAL + Duration::from_secs(2),
+                *elapsed >= Duration::from_millis(1500)
+                    && *elapsed <= TOTAL + Duration::from_secs(2),
                 "the stream ended at {elapsed:?}, not at its {TOTAL:?} deadline"
             );
         }

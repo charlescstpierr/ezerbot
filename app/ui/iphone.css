@@ -1,12 +1,12 @@
 .iphone-settings { overflow-wrap: anywhere; }
 [data-iphone="true"] #provider-section, [data-iphone="true"] #settings-bots, [data-iphone="true"] #settings-shortcuts, [data-iphone="true"] .setting-section:has(#simulate-loss), [data-iphone="true"] .bot-chip-edit, [data-iphone="true"] .add-bot { display: none; }
 .iphone-settings h4 { font-size: 12px; margin: 18px 0 10px; }
-.iphone-settings p, .iphone-steps { font-size: 11px; line-height: 1.7; color: var(--muted); }
+.iphone-settings p, .iphone-steps { font-size: 11.5px; line-height: 1.7; color: var(--muted); }
 .iphone-steps { padding-left: 20px; }
 .iphone-steps li { margin: 8px 0; }
 .iphone-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .iphone-settings > button { margin: 4px 7px 7px 0; white-space: normal; }
-.iphone-commands { padding: 12px; overflow-x: auto; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.iphone-commands { padding: 12px; overflow-x: auto; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .iphone-address, .iphone-settings .iphone-code { font-weight: 650; color: var(--accent-ink); user-select: all; }
 .iphone-settings .iphone-code { font-size: 25px; letter-spacing: 3px; }
 .iphone-settings .iphone-warning, .iphone-pairing .iphone-warning { color: var(--danger-text); }
@@ -17,7 +17,7 @@
 .iphone-confirmation .iphone-actions { margin-bottom: 0; }
 .iphone-device { margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
 .iphone-device strong { font-size: 12px; }
-.iphone-device small { display: block; color: var(--muted); font-size: 10px; line-height: 1.6; margin-top: 6px; }
+.iphone-device small { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.6; margin-top: 6px; }
 .iphone-presence { color: var(--ok); }
 .iphone-pairing { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: var(--canvas); padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); overflow-y: auto; }
 .iphone-pairing-box { width: 100%; max-width: 400px; margin: auto; }
@@ -55,9 +55,9 @@
   [data-iphone="true"] :is(.sidebar-toggle, .sidebar-close, .topbar-actions .icon-button) { min-width: 44px; min-height: 44px; }
 }
 @media (max-width: 430px) {
-  .mode-badge, .iphone-presence { display: none; }
+  .iphone-presence { display: none; }
   .topbar { padding-right: 9px; }
   .topbar-actions { gap: 3px; }
-  [data-iphone="true"] .topbar-actions .tool-pill { padding: 6px 9px; font-size: 11px; }
+  [data-iphone="true"] .topbar-actions .tool-pill { padding: 6px 9px; font-size: 11.5px; }
   [data-iphone="true"] .accent-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

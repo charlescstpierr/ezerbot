@@ -8,51 +8,51 @@
 .gb-memory-card .gb-retry-primary { margin-left: 7px; }
 .gb-memory-card.is-inactive { color: var(--muted); border-style: dashed; background: transparent; padding: 8px 16px; }
 .gb-card-slot:has(.gb-memory-card) + .gb-card-slot:has(.gb-memory-card) { margin-top: -16px; }
-.gb-memory-overflow summary { padding: 8px 0; color: var(--text); font-size: 11px; cursor: pointer; }
-.gb-memory-overflow summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; border-radius: 4px; }
+.gb-memory-overflow summary { padding: 8px 0; color: var(--text); font-size: 11.5px; cursor: pointer; }
+.gb-memory-overflow summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
 .gb-memory-overflow-content { display: grid; gap: 10px; padding-top: 10px; }
 .gb-memory-overflow-bot { display: grid; gap: 10px; min-width: 0; }
-.gb-memory-overflow-bot h4 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; overflow-wrap: anywhere; }
+.gb-memory-overflow-bot h4 { margin: 0; color: var(--muted); font-size: 11.5px; font-weight: 600; overflow-wrap: anywhere; }
 .gb-memory-overflow-item > .gb-memory-card { padding-inline: 16px; }
-.gb-memory-error { margin: 8px 0; font-size: 11px; line-height: 1.6; color: var(--warning-text, var(--text)); }
-.gb-memory-card label { font-size: 11px; }
+.gb-memory-error { margin: 8px 0; font-size: 11.5px; line-height: 1.6; color: var(--warning-text, var(--text)); }
+.gb-memory-card label { font-size: 11.5px; }
 .gb-memory-card textarea { display: block; width: 100%; box-sizing: border-box; min-height: 76px; margin: 8px 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--text); font: inherit; resize: vertical; }
 .gb-memory-card button:disabled { opacity: .6; }
 .memory-panel { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 18px; min-width: 0; }
 .memory-panel h3 { margin: 0 0 10px; font-size: 13px; }
 .memory-panel h4 { margin: 14px 0 6px; font-size: 12px; }
-.memory-panel .memory-note, .memory-meta { margin: 7px 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.memory-panel .memory-note, .memory-meta { margin: 7px 0; color: var(--muted); font-size: 11.5px; line-height: 1.6; overflow-wrap: anywhere; }
 .memory-panel .memory-note:empty, .memory-result:empty { display: none; }
 .memory-controls { border: 0; margin: 0; padding: 0; min-width: 0; }
 .memory-toolbar, .memory-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .memory-toolbar { margin: 12px 0; }
-.memory-select-all { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; margin-right: auto; }
+.memory-select-all { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; margin-right: auto; }
 .memory-panel input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 auto; margin: 2px 0; accent-color: var(--accent-ink); }
 .memory-list { display: grid; gap: 10px; max-height: 350px; overflow-y: auto; padding: 3px; }
 .memory-fact { border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
 .memory-fact-choice { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
 .memory-text { font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
-.memory-panel .memory-meta { font-size: 10px; }
-.memory-panel button { font-size: 11px; padding: 8px 10px; }
+.memory-panel .memory-meta { font-size: 11.5px; }
+.memory-panel button { font-size: 11.5px; padding: 8px 10px; }
 .memory-panel button:disabled, .memory-controls:disabled { opacity: .6; }
-.memory-panel input:focus-visible, .memory-panel textarea:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
-.memory-result { padding: 10px; border-radius: 7px; background: var(--soft); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.memory-panel input:focus-visible, .memory-panel textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.memory-result { padding: 10px; border-radius: 7px; background: var(--soft); font-size: 11.5px; line-height: 1.7; overflow-wrap: anywhere; }
 .memory-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
-.memory-edit-label { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.memory-edit-label { display: block; font-size: 11.5px; overflow-wrap: anywhere; }
 .memory-editor textarea { display: block; margin-top: 8px; resize: vertical; }
 .memory-editor button { margin: 8px 8px 0 0; }
 .memory-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
 .memory-filters input { flex: 1 1 100%; min-width: 0; }
-.memory-filters select { flex: 1 1 140px; width: auto; min-width: 0; font-size: 11px; }
+.memory-filters select { flex: 1 1 140px; width: auto; min-width: 0; font-size: 11.5px; }
 .memory-profile { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .memory-profile summary { cursor: pointer; font-size: 12px; color: var(--text); }
-.memory-profile summary:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 4px; }
+.memory-profile summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .gb-memory-share h3 { margin: 0 0 8px; font-size: 14px; }
-.gb-memory-share .memory-note { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.gb-memory-share .memory-note { color: var(--muted); font-size: 11.5px; line-height: 1.7; }
 .memory-share-choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .memory-share-choice input { accent-color: var(--accent-ink); margin: 4px 0 0; flex-shrink: 0; }
 .memory-share-choice span { min-width: 0; }
-.memory-share-choice small { display: block; color: var(--muted); font-size: 10px; }
+.memory-share-choice small { display: block; color: var(--muted); font-size: 11.5px; }
 .gb-memory-share .gb-retry { margin-top: 10px; }
 @media (max-width: 480px) {
   .memory-toolbar > button { flex: 1 1 auto; }

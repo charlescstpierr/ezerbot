@@ -50,7 +50,7 @@ function mount(backend, connected = false, extra = {}) {
   document = { body: new Element("body"), activeElement: null, createTextNode: (text) => element("text", "", text), querySelectorAll: () => [signin] };
   document.activeElement = document.body;
   function element(tag, className = "", text = "") { const node = new Element(tag); node.className = className; node.text = text; return node; }
-  for (const id of ["mode-badge-text", "plan-banner", "composer-tools", "picker", "mode-note", "provider-section", "plan-dialog", "plan-title"]) {
+  for (const id of ["plan-banner", "composer-tools", "picker", "mode-note", "provider-section", "plan-dialog", "plan-title"]) {
     const node = element("div"); nodes.set(id, node); document.body.append(node);
   }
   const signin = element("button"); nodes.get("plan-banner").append(element("span"), signin);
@@ -230,7 +230,6 @@ test("only the single ChatGPT sign-in state can hide the banner", () => {
 
 test("a signed-in account is not shown as Codex until OpenAI answers", () => {
   const failed = mount("codex", false, { signed_in: true, connection_test: { state: "failed", message: "probe refused" } });
-  assert.equal(failed.nodes.get("mode-badge-text").textContent, "Non connecté");
   assert.match(failed.nodes.get("mode-note").textContent, /Vous pouvez envoyer, ou réessayer le test/);
   assert.match(failed.nodes.get("provider-section").textContent, /Envoyez votre question, ou réessayez le test/);
   assert.doesNotMatch(failed.nodes.get("provider-section").textContent, /Aucune réponse/);
@@ -238,13 +237,20 @@ test("a signed-in account is not shown as Codex until OpenAI answers", () => {
   const retry = failed.nodes.get("provider-section").querySelectorAll("button").find((button) => button.textContent === "Tester la connexion");
   assert.equal(retry.disabled, false);
   const running = mount("codex", false, { signed_in: true, connection_test: { state: "running" } });
-  assert.equal(running.nodes.get("mode-badge-text").textContent, "Vérification");
+  assert.equal(running.nodes.get("composer-tools").textContent, "Vérification");
   assert.match(running.nodes.get("mode-note").textContent, /Votre question part sans attendre/);
   assert.match(running.nodes.get("provider-section").textContent, /L’envoi n’est pas bloqué/);
   assert.doesNotMatch(running.nodes.get("provider-section").textContent, /Aucune réponse/);
   assert.doesNotMatch(source, /Aucune réponse n’est produite avant cette confirmation|Aucune réponse tant que ce n’est pas confirmé/);
   assert.equal(running.nodes.get("provider-section").querySelectorAll("button").find((button) => /Test/.test(button.textContent)).disabled, true);
   const ready = mount("codex", true, { connection_test: { state: "ok", message: "OK — ChatGPT répond." } });
-  assert.equal(ready.nodes.get("mode-badge-text").textContent, "ChatGPT");
+  assert.equal(ready.nodes.get("composer-tools").textContent.includes("Local"), false);
   assert.match(ready.nodes.get("provider-section").textContent, /Forfait : Plus/);
+});
+
+test("signed out, nothing says Local: no top-bar badge, no sidebar note, an empty composer status", () => {
+  const html = readFileSync(__dirname + "/index.html", "utf8");
+  assert.doesNotMatch(html, /mode-badge|local-note|Chez vous, sur votre Mac/);
+  const { nodes } = mount("codex");
+  assert.equal(nodes.get("composer-tools").textContent, "");
 });

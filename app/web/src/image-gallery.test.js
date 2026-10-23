@@ -256,6 +256,29 @@ test("an image written inside code stays text and never becomes a thumbnail", ()
   assert.doesNotMatch(html, /gb-image-cell/);
 });
 
+test("the real Content-Type decides the type and the extension of an image without an extension", async () => {
+  const [target] = gallery.galleryImages({ attachments: [{ id: "attachment_x", name: "Ciel violet", caption: "Ciel violet" }] });
+  const fetchAs = (type) => async () => new Response(PNG, { status: 200, headers: type ? { "content-type": type } : {} });
+  const posted = [];
+  const native = { async postMessage(body) { posted.push(body); return { ok: true, name: body.name }; } };
+  assert.equal(await gallery.saveGalleryImage(target, { fetch: fetchAs("image/jpeg; charset=binary"), native }), "Ciel violet.jpg");
+  assert.equal(posted[0].mime, "image/jpeg");
+  assert.equal(posted[0].name, "Ciel violet.jpg");
+  await gallery.saveGalleryImage(target, { fetch: fetchAs(null), native });
+  assert.equal(posted[1].mime, "image/png", "the default only fills in when the response says nothing");
+  assert.equal(posted[1].name, "Ciel violet.png");
+  await gallery.saveGalleryImage(target, { fetch: fetchAs("text/html"), native });
+  assert.equal(posted[2].mime, "image/png");
+  const named = gallery.galleryImages({ attachments: [{ id: "attachment_y", name: "photo.png", mime_type: "image/png" }] })[0];
+  await gallery.saveGalleryImage(named, { fetch: fetchAs("image/jpeg"), native });
+  assert.equal(posted[3].mime, "image/jpeg");
+  assert.equal(posted[3].name, "photo.jpg", "the extension follows the type");
+  assert.equal(gallery.imageFilename({ name: "photo.jpeg" }, "image/jpeg"), "photo.jpeg");
+  const fromMarkdown = gallery.galleryImages({ body: "![x](/api/attachments/abc)" }, { markdown: true })[0];
+  await gallery.saveGalleryImage(fromMarkdown, { fetch: fetchAs("image/webp"), native });
+  assert.equal(posted[4].name, "abc.webp");
+});
+
 const memoMessage = (words, extra = {}) => ({
   id: "memo-msg",
   body: "Écoute ceci.",

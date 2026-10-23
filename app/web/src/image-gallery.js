@@ -40,7 +40,7 @@ function attachmentImage(attachment) {
   const name = typeof attachment === "string" ? "" : attachment.name || "";
   const caption = (typeof attachment === "string" ? "" : attachment.caption || attachment.name) || "Image jointe";
   const url = typeof attachment !== "string" && attachment.url ? attachment.url : `/api/attachments/${encodeURIComponent(id)}`;
-  return { id, url, name, caption, mime_type: (typeof attachment !== "string" && attachment.mime_type) || mimeFromName(name) || "image/png" };
+  return { id, url, name, caption, mime_type: (typeof attachment !== "string" && attachment.mime_type) || mimeFromName(name) };
 }
 
 function inlineCodeRanges(text, offset, ranges) {
@@ -104,7 +104,7 @@ export function galleryImages(message, { markdown = false } = {}) {
       if (!localImageUrl(url)) continue;
       const caption = match[1].trim() || "Image jointe";
       const name = nameFromUrl(url);
-      push({ id: url, url, name, caption, mime_type: mimeFromName(name) || "image/png" });
+      push({ id: url, url, name, caption, mime_type: mimeFromName(name) });
     }
   }
   return images;
@@ -137,8 +137,10 @@ export function imageFilename(image, type = image?.mime_type || "image/png") {
   const extension = EXTENSIONS[type] || ".png";
   const named = safeFileName(image?.name) || (image?.caption && image.caption !== "Image jointe" ? safeFileName(image.caption) : "");
   if (!named) return `image${extension}`;
-  if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(named)) return named;
-  return `${named}${extension}`;
+  const known = named.match(/\.(png|jpe?g|gif|webp|bmp)$/i);
+  if (!known) return `${named}${extension}`;
+  if (mimeFromName(named) === type) return named;
+  return `${named.slice(0, -known[0].length)}${extension}`;
 }
 
 async function loadImageBytes(image, io) {
@@ -147,8 +149,8 @@ async function loadImageBytes(image, io) {
   if (!response?.ok) throw new Error("Image introuvable.");
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (!bytes.byteLength) throw new Error("Image introuvable.");
-  const header = response.headers?.get?.("content-type")?.split(";")[0].trim();
-  const type = image.mime_type || (header?.startsWith("image/") ? header : "image/png");
+  const header = response.headers?.get?.("content-type")?.split(";")[0].trim().toLowerCase();
+  const type = Object.hasOwn(EXTENSIONS, header) ? header : image.mime_type || "image/png";
   return { bytes, type };
 }
 

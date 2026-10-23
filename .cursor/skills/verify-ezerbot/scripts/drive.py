@@ -158,7 +158,9 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
               // Gmail et GitHub n'ont ni champ d'identifiant ni de secret ; sans client de build, la carte Gmail le dit.
               const gmail = panel.querySelector('[data-connector="gmail"]');
               const gmailFree = !!gmail && !gmail.querySelector("form") && gmail.querySelectorAll('input:not([type="checkbox"])').length === 0;
-              return heading === "Connecteurs" && add && reunions && gmailFree ? {ok: true, heading, reunions, gmailFree} : null;
+              // Le même consentement Google lit l'agenda et Drive : la carte Gmail le dit, sans second formulaire.
+              const gmailReads = !!gmail && /agenda/i.test(gmail.textContent) && /Drive/.test(gmail.textContent);
+              return heading === "Connecteurs" && add && reunions && gmailFree && gmailReads ? {ok: true, heading, reunions, gmailFree, gmailReads} : null;
             }""",
             "connecteurs non prêts",
         )

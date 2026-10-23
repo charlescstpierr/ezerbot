@@ -440,8 +440,10 @@ fn send(ctx: &Context<'_>, call: &ToolCall) -> Result<Value, ApiError> {
     let reply = match exchange(
         ctx,
         &account,
+        "api",
         "gmail/v1/users/me/messages/send",
         Some(&json!({"raw": raw(&draft)})),
+        Want::Json,
     ) {
         Ok(reply) => reply,
         Err(error) => {

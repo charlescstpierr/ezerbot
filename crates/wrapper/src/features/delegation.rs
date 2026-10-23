@@ -1010,6 +1010,17 @@ pub(super) fn delivery_for_run(conn: &Connection, run: &Run) -> Result<Option<De
     Ok(Some(delivery_for(conn, &edge)?))
 }
 
+/// Whether `run` is a delegated child whose parent still grants it this image.
+pub(super) fn run_holds_image(conn: &Connection, run_id: &str, id: &str) -> bool {
+    let Ok(run) = store::required(conn, run_id) else {
+        return false;
+    };
+    matches!(
+        delivery_for_run(conn, &run),
+        Ok(Some(delivery)) if delivery.grants().live().iter().any(|grant| grant.id() == id)
+    )
+}
+
 struct Resolver<'a>(&'a Connection);
 impl ContextResolver for Resolver<'_> {
     fn entry(&self, edge: &Delegation, id: &str) -> Result<Option<String>> {

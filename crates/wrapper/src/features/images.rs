@@ -1,7 +1,8 @@
 //! Image generation for a drawing request. The call uses the current ChatGPT
 //! session on the Codex responses route and never an account-vault secret.
 //! The frame is one of a closed list and a reference is an image already
-//! attached to the thread; anything else is refused before any call.
+//! attached to the thread or granted to a delegated task; anything else is
+//! refused before any call.
 
 use super::Context;
 use crate::provider::error_parts;
@@ -296,9 +297,13 @@ fn references(ctx: &Context<'_>, requested: &Value) -> Result<Vec<String>, &'sta
             .flatten()
             .or_else(|| staged_at_path(ctx, entry))
             .ok_or(BAD_REFERENCE)?;
-        if !super::attachments::thread_owns_image(ctx.connection, conversation, &attachment.id)
-            .unwrap_or(false)
-        {
+        let attached =
+            super::attachments::thread_owns_image(ctx.connection, conversation, &attachment.id)
+                .unwrap_or(false);
+        let granted = ctx.run_id.is_some_and(|run| {
+            super::delegation::run_holds_image(ctx.connection, run, &attachment.id)
+        });
+        if !attached && !granted {
             return Err(BAD_REFERENCE);
         }
         let bytes = staging::read(ctx.connection, ctx.db_path, &attachment.id)

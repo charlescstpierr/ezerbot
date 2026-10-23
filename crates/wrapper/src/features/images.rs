@@ -1,6 +1,7 @@
 //! Image generation for a drawing request. The call uses the current ChatGPT
 //! session on the Codex responses route and never an account-vault secret.
-//! T1 does not validate the closed aspect-ratio list or accept reference images.
+//! The frame is one of a closed list and a reference is an image already
+//! attached to the thread; anything else is refused before any call.
 
 use super::Context;
 use crate::provider::error_parts;
@@ -24,6 +25,11 @@ const FAILED: &str = "La génération de l’image a échoué.";
 const UNUSABLE: &str = "L’image reçue n’est pas utilisable.";
 const TOO_BIG: &str = "L’image générée dépasse 20 Mo et n’a pas été conservée.";
 const UNAVAILABLE: &str = "Le service d’images est indisponible.";
+const BAD_FRAME: &str =
+    "Ce cadre n’est pas pris en charge. Choisissez 1:1, 16:9, 9:16, 4:3 ou 3:4.";
+const BAD_REFERENCE: &str = "Une image de référence doit être jointe à cette conversation.";
+const TOO_MANY_REFERENCES: &str = "Utilisez au plus 10 images de référence.";
+const MAX_REFERENCES: usize = 10;
 const MODEL: &str = "gpt-image-1.5";
 const IMAGE_HOST: &str = "https://chatgpt.com/backend-api/codex/responses";
 const ORIGINATOR: &str = "ezerbot";
@@ -48,8 +54,8 @@ empty_hooks!(
 pub fn tools() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: TOOL.into(),
-        description: "Appelle cet outil quand l’utilisateur demande un dessin ou une image à créer. description est la scène à dessiner. aspect_ratio est optionnel et vaut 1:1 s’il est omis. Ne l’utilise pas pour décrire une image déjà jointe. Aucune approbation n’est requise.".into(),
-        schema: json!({"type":"object","additionalProperties":false,"properties":{"description":{"type":"string"},"aspect_ratio":{"type":"string"}},"required":["description"]}),
+        description: "Appelle cet outil quand l’utilisateur demande un dessin ou une image à créer. description est la scène à dessiner. aspect_ratio est optionnel, vaut 1:1 s’il est omis, et se limite à 1:1, 16:9, 9:16, 4:3 ou 3:4. reference_image_paths est optionnel : identifiants des images déjà jointes à cette conversation, à imiter pour le style. Appelle list_delegation_context pour les connaître. Ne l’utilise pas pour décrire une image déjà jointe. Aucune approbation n’est requise.".into(),
+        schema: json!({"type":"object","additionalProperties":false,"properties":{"description":{"type":"string"},"aspect_ratio":{"type":"string"},"reference_image_paths":{"type":"array","items":{"type":"string"}}},"required":["description"]}),
         requires_approval: false,
     }]
 }
@@ -93,8 +99,9 @@ pub(crate) fn image_endpoint(api: &str) -> Result<String, ()> {
     }
 }
 
-/// Images API sizes. 1:1 and an unknown ratio use the square size. T1 does not
-/// reject an unknown ratio before the call.
+/// Sizes of the closed frame list; an omitted frame is square.
+const FRAMES: [&str; 5] = ["1:1", "16:9", "9:16", "4:3", "3:4"];
+
 pub(crate) fn image_size(aspect: &str) -> &'static str {
     match aspect {
         "16:9" | "4:3" => "1536x1024",
@@ -112,11 +119,16 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolO
     if description.is_empty() {
         return failed(MISSING);
     }
-    let aspect = call.arguments["aspect_ratio"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .unwrap_or("1:1");
+    let aspect = match call.arguments["aspect_ratio"].as_str() {
+        None | Some("") => "1:1",
+        Some(frame) if FRAMES.contains(&frame) => frame,
+        Some(_) => return failed(BAD_FRAME),
+    };
     let size = image_size(aspect);
+    let references = match references(ctx, &call.arguments["reference_image_paths"]) {
+        Ok(references) => references,
+        Err(reason) => return failed(reason),
+    };
     let Ok(endpoint) = image_endpoint(&ctx.provider.image_api_base()) else {
         return failed(UNAVAILABLE);
     };
@@ -133,6 +145,7 @@ pub fn execute(ctx: &Context<'_>, call: &ToolCall, cancel: &AtomicBool) -> ToolO
         &headers,
         ctx.provider.image_responses_model(),
         &description,
+        &references,
         size,
     );
     let run_id = ctx.run_id.unwrap_or(TOOL);
@@ -184,6 +197,7 @@ fn post(
     headers: &[(&str, String)],
     model: &str,
     description: &str,
+    references: &[String],
     size: &str,
 ) -> (u16, Result<Vec<u8>, &'static str>) {
     #[cfg(test)]
@@ -212,7 +226,7 @@ fn post(
         .set("Accept", "application/json, text/event-stream")
         .send_json(json!({
             "model": model,
-            "input": [{"role": "user", "content": description}],
+            "input": [{"role": "user", "content": content(description, references)}],
             "store": false,
             "stream": true,
             "instructions": "Tu es un assistant utile.",
@@ -240,6 +254,77 @@ fn post(
         return (status, Err(FAILED));
     }
     (status, interpret(status, &body))
+}
+
+/// Plain text without references; text then one `input_image` per reference.
+fn content(description: &str, references: &[String]) -> Value {
+    if references.is_empty() {
+        return json!(description);
+    }
+    let mut parts = vec![json!({"type": "input_text", "text": description})];
+    parts.extend(
+        references
+            .iter()
+            .map(|url| json!({"type": "input_image", "image_url": url})),
+    );
+    Value::Array(parts)
+}
+
+/// Data URLs of the images named by `reference_image_paths`. An entry is the id
+/// of an image attached to this thread, or the path of its staged content.
+fn references(ctx: &Context<'_>, requested: &Value) -> Result<Vec<String>, &'static str> {
+    let entries = match requested {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(entries) => entries,
+        _ => return Err(BAD_REFERENCE),
+    };
+    if entries.len() > MAX_REFERENCES {
+        return Err(TOO_MANY_REFERENCES);
+    }
+    let Some(conversation) = ctx.conversation_id else {
+        return if entries.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(BAD_REFERENCE)
+        };
+    };
+    let mut urls = Vec::new();
+    for entry in entries {
+        let entry = entry.as_str().ok_or(BAD_REFERENCE)?;
+        let attachment = staging::get(ctx.connection, entry)
+            .ok()
+            .flatten()
+            .or_else(|| staged_at_path(ctx, entry))
+            .ok_or(BAD_REFERENCE)?;
+        if !super::attachments::thread_owns_image(ctx.connection, conversation, &attachment.id)
+            .unwrap_or(false)
+        {
+            return Err(BAD_REFERENCE);
+        }
+        let bytes = staging::read(ctx.connection, ctx.db_path, &attachment.id)
+            .map_err(|_| BAD_REFERENCE)?;
+        urls.push(format!(
+            "data:{};base64,{}",
+            attachment.image_type.mime_type(),
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        ));
+    }
+    Ok(urls)
+}
+
+fn staged_at_path(ctx: &Context<'_>, path: &str) -> Option<staging::Attachment> {
+    let sha = Path::new(path).file_name()?.to_str()?;
+    let id: String = ctx
+        .connection
+        .query_row(
+            "SELECT id FROM attachments_staged WHERE sha256=?1",
+            params![sha],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()??;
+    let attachment = staging::get(ctx.connection, &id).ok()??;
+    (staging::content_path(ctx.db_path, &attachment).ok()? == Path::new(path)).then_some(attachment)
 }
 
 fn interpret(status: u16, body: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -640,11 +725,33 @@ mod tests {
     fn known_ratios_become_accepted_sizes() {
         assert_eq!(image_size("1:1"), "1024x1024");
         assert_eq!(image_size(""), "1024x1024");
-        assert_eq!(image_size("2:1"), "1024x1024");
         assert_eq!(image_size("16:9"), "1536x1024");
         assert_eq!(image_size("4:3"), "1536x1024");
         assert_eq!(image_size("9:16"), "1024x1536");
         assert_eq!(image_size("3:4"), "1024x1536");
+    }
+
+    #[test]
+    fn the_closed_frame_list_has_a_size_for_each_frame() {
+        for frame in FRAMES {
+            assert!(
+                ["1024x1024", "1536x1024", "1024x1536"].contains(&image_size(frame)),
+                "{frame}"
+            );
+        }
+        assert!(!FRAMES.contains(&"2:1"));
+    }
+
+    #[test]
+    fn references_are_text_then_images_and_plain_text_without_them() {
+        assert_eq!(content("un phare", &[]), json!("un phare"));
+        assert_eq!(
+            content("un phare", &["data:image/png;base64,AA==".into()]),
+            json!([
+                {"type": "input_text", "text": "un phare"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+            ])
+        );
     }
 
     #[test]

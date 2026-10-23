@@ -103,6 +103,33 @@ PAGE_SOURCE = r"""export default function Forfaits() {
 """
 
 IMAGE_B64 = base64.b64encode(_png(192, 192)).decode()
+# gpt-image-1.5 renders 1536x1024 and 1024x1536 for the wide and tall frames; the fixtures keep those ratios.
+IMAGE_SIZES = {
+    "1536x1024": base64.b64encode(_png(288, 192)).decode(),
+    "1024x1536": base64.b64encode(_png(192, 288)).decode(),
+}
+
+
+def _image_ids(output: object) -> list[str]:
+    """Image attachment ids found in a list_delegation_context result."""
+    try:
+        catalog = json.loads(output) if isinstance(output, str) else output
+    except json.JSONDecodeError:
+        return []
+    found: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "image" and isinstance(node.get("id"), str):
+                found.append(node["id"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(catalog)
+    return found
 
 USAGE = {
     "plan_type": "plus",
@@ -121,8 +148,13 @@ def response_body(raw: bytes) -> bytes:
         payload = {}
     instructions = str(payload.get("instructions") or "")
     tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
-    if any(isinstance(tool, dict) and tool.get("type") == "image_generation" for tool in tools):
-        item = {"type": "image_generation_call", "status": "completed", "result": IMAGE_B64}
+    drawing = next((tool for tool in tools if isinstance(tool, dict) and tool.get("type") == "image_generation"), None)
+    if drawing:
+        item = {
+            "type": "image_generation_call",
+            "status": "completed",
+            "result": IMAGE_SIZES.get(drawing.get("size"), IMAGE_B64),
+        }
         return _sse(
             [
                 {"type": "response.output_item.done", "item": item},
@@ -145,6 +177,27 @@ def response_body(raw: bytes) -> bytes:
         )
     items = payload.get("input") if isinstance(payload.get("input"), list) else []
     outputs = [item for item in items if isinstance(item, dict) and item.get("type") == "function_call_output"]
+    if outputs and outputs[-1].get("call_id") == "verify-context":
+        call = {
+            "id": "fc-verify-reference",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-reference",
+            "name": "generate_image",
+            "arguments": json.dumps(
+                {
+                    "description": "le même style, en large",
+                    "aspect_ratio": "16:9",
+                    "reference_image_paths": _image_ids(outputs[-1].get("output"))[:1],
+                }
+            ),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
     if outputs:
         done = "Voici la Page." if outputs[-1].get("call_id") == "verify-page" else "Voici l’image."
         return _sse(
@@ -161,6 +214,21 @@ def response_body(raw: bytes) -> bytes:
             "call_id": "verify-page",
             "name": "write_page",
             "arguments": json.dumps({"name": "forfaits.page.tsx", "title": "Trois forfaits", "source": PAGE_SOURCE}),
+        }
+        return _sse(
+            [
+                {"type": "response.output_item.done", "item": call},
+                {"type": "response.completed"},
+            ]
+        )
+    if "le même style" in json.dumps(items, ensure_ascii=False).lower():
+        call = {
+            "id": "fc-verify-context",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "verify-context",
+            "name": "list_delegation_context",
+            "arguments": "{}",
         }
         return _sse(
             [

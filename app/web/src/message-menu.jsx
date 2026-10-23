@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Ellipsis } from "lucide-react";
 import { bindMessageMenuDismiss, layoutMessageMenu, messageActions, readMessageMenuBounds, REACTIONS } from "./message-actions.js";
 
-export function MessageMenu({ message, busy = false, text = "", open = false, expanded, onOpenChange, onCopy, onReact, onResend, onDelete }) {
+export function MessageMenu({ message, busy = false, text = "", open = false, expanded, onOpenChange, onCopy, onReact, onThread, onResend, onDelete }) {
   const actions = messageActions(message, { busy });
   const [localOpen, setLocalOpen] = useState(open);
   const controlled = expanded !== undefined;
@@ -24,7 +24,7 @@ export function MessageMenu({ message, busy = false, text = "", open = false, ex
     const panel = panelRef.current;
     if (!anchor || !panel) return;
     layoutMessageMenu(panel, anchor.getBoundingClientRect(), readMessageMenuBounds(window));
-  }, [isOpen, actions.resend, actions.delete, actions.reaction, actions.status]);
+  }, [isOpen, actions.resend, actions.delete, actions.reaction, actions.status, actions.thread, onThread]);
 
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -41,6 +41,7 @@ export function MessageMenu({ message, busy = false, text = "", open = false, ex
         ))}
       </div>
       <button type="button" role="menuitem" onClick={async () => { await onCopy?.(text); close(); }}>Copier</button>
+      {actions.thread && onThread && <button type="button" role="menuitem" disabled={busy} onClick={() => { onThread(message); close(); }}>Répondre en fil</button>}
       {actions.resend && <button type="button" role="menuitem" disabled={busy} onClick={() => { onResend?.(message); close(); }}>Renvoyer</button>}
       {actions.delete && <button type="button" role="menuitem" disabled={busy} onClick={() => { onDelete?.(message); close(); }}>Supprimer</button>}
     </div>

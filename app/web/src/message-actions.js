@@ -20,10 +20,19 @@ export function messageReaction(message) {
   return typeof value === "string" && value ? value : null;
 }
 
+// Un fil s'ouvre sur un message que le fil principal a déjà accepté : un envoi livré,
+// ou une réponse terminée. Ni un envoi en attente, ni une réponse en cours ou ratée.
+export function canReplyInThread(message) {
+  if (!message || ![undefined, null, "message"].includes(message.kind) || !String(message.body ?? "").trim()) return false;
+  if (message.role === "user") return ["accepted", "echoed"].includes(message.state);
+  return message.role === "assistant" && message.state === "echoed";
+}
+
 export function messageActions(message, { busy = false } = {}) {
   const userSend = message?.role === "user" && [undefined, null, "message", "submission"].includes(message.kind);
   const failed = userSend && UNDELIVERED.has(message.state) && !(busy && IN_FLIGHT.has(message.state));
   return {
+    thread: canReplyInThread(message),
     status: failed ? (message.state === "refused" ? "Échec de l’envoi" : "Pas encore livré") : null,
     copy: true,
     resend: failed,

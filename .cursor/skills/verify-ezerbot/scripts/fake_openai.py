@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import struct
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -147,6 +148,18 @@ USAGE = {
 }
 
 
+def parent_message(instructions: str) -> str:
+    """Le message parent d'un sous-fil : bloc de données externes JSON dans les instructions."""
+    for found in re.finditer(r"<external_data[^>]*>\n(.*?)\n</external_data>", instructions, re.S):
+        try:
+            text = json.loads(found.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(text, str) and "Message parent" in text and "pour répondre :\n" in text:
+            return text.split("pour répondre :\n", 1)[1].strip()
+    return ""
+
+
 def response_body(raw: bytes) -> bytes:
     text = raw.decode(errors="replace")
     try:
@@ -180,6 +193,15 @@ def response_body(raw: bytes) -> bytes:
             [
                 {"type": "response.output_text.delta", "delta": "« Vérification visuelle. »"},
                 {"type": "response.completed"},
+            ]
+        )
+    parent = parent_message(instructions)
+    if parent:
+        return _sse(
+            [
+                {"type": "response.created"},
+                {"type": "response.output_text.delta", "delta": f"En tenant compte du message parent : « {parent[:80]} »"},
+                {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 2}}},
             ]
         )
     items = payload.get("input") if isinstance(payload.get("input"), list) else []

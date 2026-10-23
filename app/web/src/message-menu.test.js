@@ -77,6 +77,26 @@ test("le menu d’un envoi non livré propose Renvoyer et Supprimer sans confirm
   }
 });
 
+test("« Répondre en fil » s’offre sur un message livré et sur une réponse terminée, pas sur un envoi perdu", () => {
+  const withThread = (message) => renderToStaticMarkup(h(MessageMenu, { message, open: true, onCopy: () => {}, onReact: () => {}, onThread: () => {} }));
+  assert.match(withThread({ id: "u", role: "user", state: "echoed", body: "Une phrase", payload: {} }), /Répondre en fil/);
+  assert.match(withThread({ id: "a", role: "assistant", state: "echoed", body: "Une réponse", payload: {} }), /Répondre en fil/);
+  for (const message of [
+    { id: "q", role: "user", state: "queued", body: "Pas parti", payload: {} },
+    { id: "r", role: "user", state: "refused", body: "Refusé", payload: {} },
+    { id: "s", role: "assistant", state: "streaming", body: "En cours", payload: {} },
+    { id: "f", role: "assistant", state: "failed", body: "Raté", payload: {} },
+    { id: "e", role: "assistant", state: "echoed", body: "  ", payload: {} },
+    { id: "c", role: "assistant", state: "echoed", kind: "capability", body: "Carte", payload: {} },
+  ]) assert.doesNotMatch(withThread(message), /Répondre en fil/, message.id);
+});
+
+test("sans action de fil (groupe, tâche), le menu ne propose pas « Répondre en fil »", () => {
+  const html = renderToStaticMarkup(h(MessageMenu, { message: { id: "u", role: "user", state: "echoed", body: "Une phrase", payload: {} }, open: true, onCopy: () => {}, onReact: () => {} }));
+  assert.match(html, /Copier/);
+  assert.doesNotMatch(html, /Répondre en fil/);
+});
+
 const VIEW = { top: 0, left: 0, right: 1140, bottom: 780 };
 // Emoji + Copier, Renvoyer et Supprimer. Assez haut pour passer sous la saisie.
 const PANEL = { width: 196, height: 140 };

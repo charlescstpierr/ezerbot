@@ -3208,3 +3208,222 @@ fn background_delegate_card_saves_the_action_survives_restart_and_revoke_asks_ag
         f.run(&c, "bg-revoked").status == RunStatus::AwaitingApproval
     });
 }
+
+#[test]
+fn a_delegated_child_can_use_its_granted_image_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Dessine dans le style de cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue le dessin dans ce style."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-style", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "style-photo",
+            "body": "Délègue le dessin dans ce style.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "style-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "style-photo")).remove(0);
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.child_result(&edge, "Image générée.");
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        1,
+        "l'enfant n'a pas pu citer l'image qui lui a été confiée"
+    );
+    let content = seen.image_calls[0]["input"][0]["content"]
+        .as_array()
+        .expect("la référence doit partir avec la demande");
+    assert_eq!(
+        content[1]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+    assert_eq!(seen.image_calls[0]["tools"][0]["size"], "1536x1024");
+}
+
+#[test]
+fn a_delegated_child_cannot_use_a_revoked_image_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let png = STANDARD.decode(PNG).unwrap();
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f.app.api("POST", "/api/attachments", &png).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut targeted = args("child");
+    targeted["objective"] = json!("Dessine dans le style de cette photo");
+    targeted["selected_context"]["selected_images"] = json!([image.clone()]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({
+        "conversation_id": c,
+        "attachment_id": image,
+        "draft": "Délègue le dessin dans ce style."
+    });
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        call("delegate-style", "delegate", targeted),
+        completed(),
+    ]);
+    f.post(
+        "/api/send",
+        json!({
+            "conversation_id": c,
+            "message_id": "style-photo",
+            "body": "Délègue le dessin dans ce style.",
+            "attachments": [image]
+        }),
+    );
+    f.wait_parent(&c, "style-photo", RunStatus::AwaitingChildren);
+    let edge = f.children(&f.run(&c, "style-photo")).remove(0);
+    features::conversations::append_entry(&f.db(), &c, "reset", "reset-selection", 123).unwrap();
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Référence refusée."}),
+        call(
+            "finish-child",
+            "complete_task",
+            json!({"summary":"Référence refusée."}),
+        ),
+        completed(),
+    ]);
+    f.tick();
+    wait("child settled", || {
+        !matches!(
+            graph::get(&f.db(), &edge.id).unwrap().unwrap().status,
+            DelegationStatus::Running | DelegationStatus::Queued
+        )
+    });
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        0,
+        "une image révoquée ne doit plus partir"
+    );
+}
+
+/// The delegation fixture's sign-in token is opaque; image generation needs one
+/// that carries an account, as a real ChatGPT session does.
+fn image_session(f: &Fixture) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let session = format!(
+        "e30.{}.e30",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            json!({"https://api.openai.com/auth":{"chatgpt_account_id":"account-child"}})
+                .to_string()
+        )
+    );
+    std::fs::write(f.path.with_extension("chatgpt-auth.json"),json!({"host_id":"test-host","client_id":CLIENT,"account_id":"account-child","access_token":session,"refresh_token":"refresh-2","expires_at":now+3600,"scopes":"chatgpt.tokens.use.direct"}).to_string()).unwrap();
+}
+
+#[test]
+fn a_child_can_use_an_image_of_a_selected_entry_as_a_generation_reference() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6XcAAAAASUVORK5CYII=";
+    let mut f = Fixture::new(true);
+    image_session(&f);
+    let c = f.conversation();
+    let image = f
+        .app
+        .api("POST", "/api/attachments", &STANDARD.decode(PNG).unwrap())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Légende prête."}),
+        completed(),
+    ]);
+    let caption = json!({"conversation_id":c,"attachment_id":image,"draft":"Photo de style"});
+    f.post("/api/attachments/precaption", caption.clone());
+    wait("caption ready", || {
+        f.post("/api/attachments/precaption", caption.clone())["caption"]["status"] == "ready"
+    });
+    f.events(vec![
+        json!({"type":"response.output_text.delta","delta":"Photo reçue."}),
+        completed(),
+    ]);
+    f.post("/api/send",json!({"conversation_id":c,"message_id":"style-entry","body":"Photo de style","attachments":[image]}));
+    f.wait_parent(&c, "style-entry", RunStatus::Finished);
+    let mut a = args("child");
+    a["objective"] = json!("Dessine dans le style de cette photo");
+    a["selected_context"]["entry_ids"] = json!(["style-entry"]);
+    let (_, edge) = f.begin(&c, "delegate-entry", a);
+    f.events(vec![
+        call(
+            "child-draw",
+            "generate_image",
+            json!({"description":"un phare dans ce style","aspect_ratio":"16:9","reference_image_paths":[image]}),
+        ),
+        completed(),
+    ]);
+    f.child_result(&edge, "Image générée.");
+    let seen = f.server.seen.lock().unwrap();
+    assert_eq!(
+        seen.image_calls.len(),
+        1,
+        "l'enfant n'a pas pu citer l'image du message sélectionné"
+    );
+    let content = seen.image_calls[0]["input"][0]["content"]
+        .as_array()
+        .expect("la référence doit partir avec la demande");
+    assert_eq!(
+        content[1]["image_url"],
+        format!("data:image/png;base64,{PNG}")
+    );
+}

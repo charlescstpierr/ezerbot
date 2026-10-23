@@ -476,6 +476,67 @@
     actions.append(exportFile, copyLink, copyCode);
     box.append(copyText, memories, actions);
     container.append(box);
+    copySection(bot, container);
+  }
+
+  // « Créer une copie » reuses export and import on the engine: the copy is a new bot
+  // with the original's content and, on request, its active memories. Never its conversations.
+  function copySection(bot, container) {
+    const box = node("div", "tpl-share-box tpl-copy-box");
+    const copyText = node("div");
+    copyText.append(node("strong", "", "Créer une copie"), node("small", "", "Un nouveau bot avec la même personnalité, les mêmes skills et connecteurs suggérés. Ses routines arrivent en pause. Jamais ses conversations."));
+    const status = node("p", "tpl-status"); status.setAttribute("role", "status");
+    const menu = node("div", "tpl-copy-menu");
+    menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", `Créer une copie de ${bot.name}`); menu.hidden = true;
+    const trigger = button("", () => toggle(menu.hidden), "secondary-button tpl-copy-trigger");
+    trigger.dataset.copyTrigger = "";
+    trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
+    trigger.append(svg("copy"), node("span", "", "Créer une copie"));
+    function toggle(open) {
+      menu.hidden = !open;
+      trigger.setAttribute("aria-expanded", String(open));
+      if (open) menu.querySelector("button")?.focus();
+    }
+    // One id per choice: a retry after a lost answer replays the same copy instead of making a second.
+    const ids = { true: crypto.randomUUID(), false: crypto.randomUUID() };
+    let busy = false;
+    async function make(includeMemories) {
+      if (busy) return;
+      busy = true;
+      toggle(false);
+      setStatus(status, "Création de la copie…");
+      try {
+        const result = await panels.api("/api/templates/copy", { bot_id: bot.id, new_bot_id: ids[includeMemories], include_memories: includeMemories });
+        await panels.refresh();
+        if (!panels.state.bots?.some((item) => item.id === result.bot.id && !item.deleted)) await panels.refresh();
+        document.getElementById("bot-dialog")?.close();
+        panels.selectBot?.(result.bot.id);
+        const routines = (panels.state.routines?.items || []).some((item) => item.routine.bot_id === bot.id) ? " Ses routines sont en pause." : "";
+        panels.notify(result.warnings?.[0] || `« ${result.bot.name} » est prêt, ${includeMemories ? "avec" : "sans"} ses souvenirs.${routines}`);
+      } catch (error) {
+        setStatus(status, error.message || "La copie n’a pas pu être créée.", true);
+        busy = false;
+      }
+    }
+    for (const [label, hint, includeMemories] of [
+      ["Avec ses souvenirs", "Ses souvenirs actuels, sauf les données sensibles. Pas ceux oubliés ou remplacés.", true],
+      ["Sans ses souvenirs", "Une mémoire vide : la copie apprend à partir de zéro.", false],
+    ]) {
+      const item = button("", () => make(includeMemories), "tpl-copy-choice");
+      item.setAttribute("role", "menuitem");
+      item.dataset.copyMemories = String(includeMemories);
+      const copy = node("span");
+      copy.append(node("strong", "", label), node("small", "", hint));
+      item.append(copy);
+      menu.append(item);
+    }
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !menu.hidden) { event.stopPropagation(); event.preventDefault?.(); toggle(false); trigger.focus(); }
+    });
+    const actions = node("div", "tpl-share-actions");
+    actions.append(trigger);
+    box.append(copyText, actions, menu, status);
+    container.append(box);
   }
 
   function startSection(container) {

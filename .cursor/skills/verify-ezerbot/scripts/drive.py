@@ -621,10 +621,12 @@ def prepare_sphere(evidence: Path, sphere: str) -> dict:
     if sphere == "approbation-tardive":
         eval_js(evidence, close_overlays_js())
         # Le shell est permis et le chat direct continue sans attendre : la carte survit au tour du bot.
+        # Le Mode YOLO, actif par défaut, lèverait la carte : la sphère joue « Demander avant d'agir ».
         return eval_js(
             evidence,
             """async () => {
               const panels = window.GrokbotPanels;
+              if (panels.state.yolo) await panels.api("/api/yolo/mode", { mode: "ask" });
               await panels.api("/api/local/bot", { bot_id: "grokbot", shell: true });
               await panels.api("/api/approvals/waiting", { task: true, chat: true, validity: "24h", reminder: "1h" });
               await panels.refresh();

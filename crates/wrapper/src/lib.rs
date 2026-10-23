@@ -992,12 +992,26 @@ impl App {
         name: &str,
         args: Value,
     ) -> Result<grokbot_engine::contracts::ToolOutcome, ApiError> {
+        self.invoke_tool_in(bot_id, None, name, args)
+    }
+
+    /// Comme `invoke_tool`, mais depuis un fil : les outils qui dépendent de la conversation
+    /// (mémoire du sujet) y trouvent leur contexte.
+    #[doc(hidden)]
+    pub fn invoke_tool_in(
+        &self,
+        bot_id: &str,
+        conversation_id: Option<&str>,
+        name: &str,
+        args: Value,
+    ) -> Result<grokbot_engine::contracts::ToolOutcome, ApiError> {
         validate_id(bot_id)?;
         self.require_bot(bot_id)?;
         let tx = features::write_transaction(&self.connection)?;
         let mut ctx = self.feature_context();
         ctx.connection = &tx;
         ctx.bot_id = Some(bot_id);
+        ctx.conversation_id = conversation_id;
         let call_id: String =
             tx.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
         let call = grokbot_engine::contracts::ToolCall {

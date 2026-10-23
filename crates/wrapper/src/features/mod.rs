@@ -117,6 +117,7 @@ pub mod sources;
 pub mod storage;
 pub mod templates;
 pub mod threads;
+pub mod topic_memory;
 pub mod topics;
 pub mod updates;
 pub mod usage;
@@ -152,6 +153,7 @@ registry!(
     conversations,
     threads,
     topics,
+    topic_memory,
     engine,
     multibot,
     skills,

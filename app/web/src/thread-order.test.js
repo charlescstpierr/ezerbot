@@ -254,3 +254,11 @@ test("a share card without a run anchor keeps its durable position", () => {
   const share = { id: "share", kind: "memory_share", payload: {} };
   assert.deepEqual(orderThread([user, share]).map((m) => m.id), ["question", "share"]);
 });
+
+test("a topic memory card stays after its own reply and ahead of the next turn", () => {
+  const nextUser = { ...user, id: "next" };
+  const nextReply = { ...reply("echoed", [{ body: "Second." }]), id: "second", payload: { run_id: "second-run", parts: [{ body: "Second." }] } };
+  const offer = { id: "offer", kind: "topic_memory_offer", payload: { memory_run_id: "run" } };
+  const result = orderThread([user, reply("echoed", [{ body: "First." }]), nextUser, nextReply, offer]);
+  assert.deepEqual(result.map((m) => m.id), ["question", "reply-question", "offer", "next", "second"]);
+});

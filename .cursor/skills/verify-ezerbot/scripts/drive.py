@@ -873,6 +873,116 @@ def prepare_topics(evidence: Path) -> dict:
     )
 
 
+# Faits de sujet de la sphère : (fil d'origine, texte, âge en heures). La mémoire du sujet montre une pastille de fil et une date.
+TOPIC_FACTS = (
+    ("Louer un camion", "Le camion est réservé pour le 1er juillet.", 200),
+    ("Changer d’adresse", "Le garde-meuble ferme à 18 h en semaine.", 74),
+    ("Louer un camion", "Le budget du déménagement est de 800 $.", 26),
+    ("Changer d’adresse", "La boîte postale est à renouveler avant le 15 juin.", 2),
+)
+TOPIC_OFFER_TEXT = "Le code de la barrière du garde-meuble est 4821."
+ACCOUNT = "local-workspace"
+
+
+def topic_ids(evidence: Path) -> dict:
+    """Identifiants des fils et des sujets de la sphère, lus dans l'état de l'app."""
+    return eval_js(
+        evidence,
+        """async () => {
+          const panels = window.GrokbotPanels;
+          await panels.refresh();
+          return {
+            conversations: Object.fromEntries(panels.state.conversations.map((conversation) => [conversation.title, conversation.id])),
+            topics: Object.fromEntries(panels.state.topics.items.map((topic) => [topic.name, topic.id])),
+            membership: panels.state.topics.membership,
+          };
+        }""",
+    )
+
+
+def seed_topic_offer(evidence: Path, title: str, text: str) -> str:
+    """Pose la carte « Retenir pour ce sujet ? » telle que l'outil du bot la poserait : une offre en attente et son entrée de fil."""
+    ids = topic_ids(evidence)
+    conversation = ids["conversations"][title]
+    topic = ids["membership"][conversation]
+    offer = f"topic-offer-verify-{int(time.time() * 1000)}"
+    now = int(time.time() * 1000)
+    run = load_run(evidence)
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        conn.execute(
+            "INSERT INTO wrapper_topic_memory_offers (account_id, id, topic_id, conversation_id, bot_id, text, status, created_at) VALUES (?, ?, ?, ?, 'grokbot', ?, 'pending', ?)",
+            (ACCOUNT, offer, topic, conversation, text, now),
+        )
+        conn.execute(
+            "INSERT INTO wrapper_messages (account_id, conversation_id, message_id, kind, created_at) VALUES (?, ?, ?, 'topic_memory_offer', ?)",
+            (ACCOUNT, conversation, offer, now),
+        )
+    return conversation
+
+
+def reset_topic_memory(evidence: Path) -> None:
+    """Chaque combinaison part sans fait de sujet ni carte : les faits partent par la vraie route d'oubli."""
+    eval_js(
+        evidence,
+        """async () => {
+          const panels = window.GrokbotPanels;
+          await panels.refresh();
+          for (const facts of Object.values(panels.state.topics.memory || {})) {
+            for (const fact of facts) await panels.api("/api/topics/memory/forget", {fact_id: fact.id});
+          }
+          return true;
+        }""",
+    )
+    run = load_run(evidence)
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        conn.execute("DELETE FROM wrapper_topic_memory_offers")
+        conn.execute("DELETE FROM wrapper_messages WHERE kind='topic_memory_offer'")
+
+
+def seed_topic_facts(evidence: Path) -> None:
+    """Quatre faits retenus par la vraie route « Retenir », puis datés : la mémoire du sujet montre des dates différentes."""
+    for title, text, _ in TOPIC_FACTS:
+        seed_topic_offer(evidence, title, text)
+        time.sleep(0.01)
+    run = load_run(evidence)
+    now = int(time.time() * 1000)
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        offers = conn.execute("SELECT id, text FROM wrapper_topic_memory_offers WHERE status='pending' ORDER BY created_at, id").fetchall()
+    accepted = eval_js(
+        evidence,
+        "async () => { const panels = window.GrokbotPanels; for (const id of %s) await panels.api('/api/topics/memory/accept', {offer_id: id}); await panels.refresh(); return true; }"
+        % json.dumps([offer for offer, _ in offers]),
+    )
+    if accepted is not True:
+        raise SystemExit("les faits de la sphère n'ont pas été retenus")
+    ages = {text: hours for _, text, hours in TOPIC_FACTS}
+    with sqlite3.connect(run["db"], timeout=15) as conn:
+        for text, hours in ages.items():
+            changed = conn.execute("UPDATE wrapper_topic_facts SET created_at=? WHERE text=?", (now - hours * 3600 * 1000, text)).rowcount
+            if changed != 1:
+                raise SystemExit(f"le fait « {text} » n'a pas pu être daté")
+    eval_js(evidence, "async () => { await window.GrokbotPanels.refresh(); return true; }")
+
+
+def open_topic_page(evidence: Path, name: str) -> None:
+    eval_js(
+        evidence,
+        f"""async () => {{
+          const panels = window.GrokbotPanels;
+          panels.leaveConversation();
+          await panels.refresh();
+          const folder = [...document.querySelectorAll("#topic-list .topic-folder")].find((node) => node.querySelector(".topic-name")?.textContent === {json.dumps(name)});
+          folder.querySelector(".topic-name").click();
+          return true;
+        }}""",
+    )
+    wait_js(
+        evidence,
+        """() => { const page = document.getElementById("topic-page"); return page && !page.hidden && page.querySelector(".topic-memory") ? {ok: true} : null; }""",
+        f"la page du sujet {name} ne s'ouvre pas",
+    )
+
+
 def topics_step(evidence: Path, index: int) -> None:
     """Avant chaque capture : 0 la barre latérale, 1 « Nouveau fil » vient de créer un fil rangé, 2 la page du sujet."""
     if index == 0:
@@ -936,6 +1046,106 @@ def topics_step(evidence: Path, index: int) -> None:
         )
         if state["title"] != "Déménagement" or state["threads"] != ["Louer un camion", "Changer d’adresse"] or state["memory"] != "Mémoire du sujet" or state["topbar"] != "Déménagement":
             raise SystemExit(f"la page du sujet n'est pas celle attendue: {state}")
+    if index == 3:
+        # Mémoire du sujet : les quatre faits retenus, leur fil d'origine, leur date, la corbeille et le lien gris.
+        eval_js(evidence, close_overlays_js())
+        reset_topic_memory(evidence)
+        seed_topic_facts(evidence)
+        open_topic_page(evidence, "Déménagement")
+        preview = eval_js(evidence, """() => [...document.querySelectorAll("#topic-page .topic-memory-fact")].map((node) => node.textContent)""")
+        if len(preview) != 3:
+            raise SystemExit(f"la carte Mémoire du sujet ne montre pas trois faits: {preview}")
+        eval_js(evidence, """() => { document.querySelector("#topic-page .topic-memory-all").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const page = document.getElementById("topic-page");
+              const items = [...page.querySelectorAll(".topic-memory-item")];
+              if (!items.length) return null;
+              return {
+                title: document.getElementById("topic-memory-title")?.textContent,
+                search: !!document.getElementById("topic-memory-search"),
+                chips: items.map((item) => item.querySelector(".topic-memory-chip")?.textContent),
+                dates: items.map((item) => item.querySelector(".topic-memory-date")?.textContent),
+                trash: page.querySelectorAll(".topic-memory-forget").length,
+                link: page.querySelector(".topic-memory-delete")?.textContent,
+              };
+            }""",
+            "l'écran Mémoire du sujet ne s'affiche pas",
+        )
+        if state["title"] != "Mémoire du sujet" or not state["search"] or len(state["chips"]) != 4 or state["trash"] != 4 or state["link"] != "Supprimer le sujet…" or not all(state["dates"]):
+            raise SystemExit(f"l'écran Mémoire du sujet n'est pas celui attendu: {state}")
+    if index == 4:
+        # La corbeille ouvre le dialogue centré, sans rien effacer tant que Charles n'a pas confirmé.
+        eval_js(evidence, """() => { document.querySelector("#topic-page .topic-memory-forget").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const dialog = document.getElementById("topic-forget-dialog");
+              if (!dialog?.open) return null;
+              return {
+                title: dialog.querySelector("h2").textContent,
+                body: dialog.querySelector(".delete-description").textContent,
+                buttons: [...dialog.querySelectorAll("button")].map((node) => node.textContent).filter(Boolean),
+                facts: window.GrokbotPanels.state.topics.memory[Object.keys(window.GrokbotPanels.state.topics.memory)[0]].length,
+              };
+            }""",
+            "le dialogue « Oublier ce fait ? » ne s'ouvre pas",
+        )
+        if state["title"] != "Oublier ce fait ?" or state["body"] != "Il sera retiré de tous les fils du sujet." or state["buttons"] != ["Annuler", "Oublier"] or state["facts"] != 4:
+            raise SystemExit(f"le dialogue d'oubli n'est pas celui attendu: {state}")
+    if index == 5:
+        # Carte « Retenir pour ce sujet ? » dans le fil du camion : rien n'est retenu avant la réponse de Charles.
+        eval_js(evidence, close_overlays_js())
+        conversation = seed_topic_offer(evidence, "Louer un camion", TOPIC_OFFER_TEXT)
+        eval_js(evidence, "async () => { await window.GrokbotPanels.openConversation(%s); return true; }" % json.dumps(conversation))
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="topic_memory_offer"][data-status="pending"]');
+              if (!card) return null;
+              card.scrollIntoView({block: "center"});
+              return {
+                title: card.querySelector("h3")?.textContent,
+                quote: card.querySelector(".topic-memory-quote")?.textContent,
+                buttons: [...card.querySelectorAll("button")].map((node) => node.textContent),
+                facts: Object.values(window.GrokbotPanels.state.topics.memory).flat().length,
+              };
+            }""",
+            "la carte « Retenir pour ce sujet ? » ne s'affiche pas",
+        )
+        if state["title"] != "Retenir pour ce sujet ?" or state["quote"] != TOPIC_OFFER_TEXT or state["buttons"] != ["Retenir", "Pas maintenant"] or state["facts"] != 4:
+            raise SystemExit(f"la carte n'est pas celle attendue: {state}")
+    if index == 6:
+        eval_js(evidence, """() => { [...document.querySelectorAll('[data-card-kind="topic_memory_offer"] button')].find((node) => node.textContent === "Retenir").click(); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const card = document.querySelector('[data-card-kind="topic_memory_offer"][data-status="accepted"]');
+              if (!card) return null;
+              card.scrollIntoView({block: "center"});
+              return {
+                title: card.querySelector("h3")?.textContent,
+                link: card.querySelector(".topic-memory-link")?.textContent,
+                facts: Object.values(window.GrokbotPanels.state.topics.memory).flat().length,
+              };
+            }""",
+            "la carte ne devient pas « Retenu pour ce sujet »",
+        )
+        if state["title"] != "Retenu pour ce sujet" or state["link"] != "Mémoire du sujet" or state["facts"] != 5:
+            raise SystemExit(f"la carte retenue n'est pas celle attendue: {state}")
+    if index == 7:
+        # Un autre sujet (Impôts) ne montre aucun des faits de Déménagement.
+        open_topic_page(evidence, "Impôts")
+        state = eval_js(
+            evidence,
+            """() => {
+              const memory = document.querySelector("#topic-page .topic-memory");
+              return {empty: memory.querySelector(".topic-memory-empty")?.textContent, facts: memory.querySelectorAll(".topic-memory-fact").length, text: document.body.innerText.includes("garde-meuble")};
+            }""",
+        )
+        if state["empty"] != "Aucun fait retenu pour l’instant." or state["facts"] != 0 or state["text"]:
+            raise SystemExit(f"Impôts montre des faits de Déménagement: {state}")
 
 
 def task_request(evidence: Path, text: str, prompt: str) -> dict:
@@ -1660,7 +1870,7 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     if sphere == "reponse-fil":
         return [f"avant-{theme}-{size}.png", f"menu-{theme}-{size}.png", f"sous-fil-{theme}-{size}.png", f"reponse-{theme}-{size}.png", f"principal-{theme}-{size}.png"]
     if sphere == "sujets":
-        return [f"barre-{theme}-{size}.png", f"nouveau-fil-{theme}-{size}.png", f"sujet-{theme}-{size}.png"]
+        return [f"{name}-{theme}-{size}.png" for name in ("barre", "nouveau-fil", "sujet", "memoire", "oublier", "carte", "retenu", "autre-fil")]
     if sphere == "approbation-non-bloquante":
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
     if sphere == "approbation-tardive":

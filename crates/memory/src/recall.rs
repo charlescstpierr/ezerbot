@@ -21,9 +21,10 @@ pub fn normalize(text: &str) -> String {
     folded
 }
 
-pub fn search(conn: &Connection, bot: &str, query: &str, limit: usize) -> Result<Vec<Fact>> {
+/// Significant folded words of a query, at most 32.
+pub fn terms(query: &str) -> BTreeSet<String> {
     let query = normalize(query);
-    let terms: BTreeSet<_> = query
+    query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| {
             s.chars().count() >= 2
@@ -53,27 +54,50 @@ pub fn search(conn: &Connection, bot: &str, query: &str, limit: usize) -> Result
                 )
         })
         .take(32)
-        .collect();
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Lexical score of a fact text against `terms`: 4 per whole word, 1 per substring.
+pub fn score(terms: &BTreeSet<String>, text: &str) -> usize {
+    let text = normalize(text);
+    let words: BTreeSet<_> = text.split(|c: char| !c.is_alphanumeric()).collect();
+    terms
+        .iter()
+        .map(|term| {
+            if words.contains(term.as_str()) {
+                4
+            } else if text.contains(term.as_str()) {
+                1
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+pub fn search(conn: &Connection, bot: &str, query: &str, limit: usize) -> Result<Vec<Fact>> {
+    Ok(search_scored(conn, bot, query, limit)?
+        .into_iter()
+        .map(|(_, fact)| fact)
+        .collect())
+}
+
+/// Same ranking as `search`, with each fact's score so a caller can merge other sources.
+pub fn search_scored(
+    conn: &Connection,
+    bot: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(usize, Fact)>> {
+    let terms = terms(query);
     if terms.is_empty() {
         return Ok(vec![]);
     }
     let mut ranked: Vec<_> = facts::list_active(conn, bot)?
         .into_iter()
         .filter_map(|fact| {
-            let text = normalize(&fact.text);
-            let words: BTreeSet<_> = text.split(|c: char| !c.is_alphanumeric()).collect();
-            let score: usize = terms
-                .iter()
-                .map(|term| {
-                    if words.contains(term) {
-                        4
-                    } else if text.contains(term) {
-                        1
-                    } else {
-                        0
-                    }
-                })
-                .sum();
+            let score = score(&terms, &fact.text);
             (score > 0).then_some((score, fact))
         })
         .collect();
@@ -82,11 +106,8 @@ pub fn search(conn: &Connection, bot: &str, query: &str, limit: usize) -> Result
             .then(fb.learned_at.cmp(&fa.learned_at))
             .then(fa.fact_id.cmp(&fb.fact_id))
     });
-    Ok(ranked
-        .into_iter()
-        .take(limit.clamp(1, 20))
-        .map(|(_, f)| f)
-        .collect())
+    ranked.truncate(limit.clamp(1, 20));
+    Ok(ranked)
 }
 
 /// Conservative local classification, not a claim about Grok's server sorter.

@@ -152,7 +152,7 @@
       } catch (error) {
         // Memory receipts show actionable refusals inline (for example while a
         // related reply is running), rather than losing the reason in a toast.
-        if (message.kind === "memory_auto" || message.kind === "memory_share") throw error;
+        if (message.kind === "memory_auto" || message.kind === "memory_share" || message.kind === "topic_memory_offer") throw error;
         // A refused line stays on its task card, next to the field it came from.
         if (action === "local.task.input") throw error;
         panelError(panel.id, error); notify(error.message); return false;

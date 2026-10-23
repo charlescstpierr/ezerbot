@@ -38,6 +38,9 @@ struct UpdateTopic {
 #[serde(deny_unknown_fields)]
 struct DeleteTopic {
     id: String,
+    /// Confirmation de Charles : le sujet a des faits retenus, ils partent avec lui.
+    #[serde(default)]
+    forget_memory: bool,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +99,7 @@ pub fn state(ctx: &Context<'_>) -> Value {
     json!({
         "items": topics(ctx.connection).unwrap_or_default(),
         "membership": membership(ctx.connection).unwrap_or_default(),
+        "memory": super::topic_memory::by_topic(ctx.connection),
     })
 }
 
@@ -145,7 +149,18 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             let input: DeleteTopic = parse(body)?;
             validate_id(&input.id)?;
             let tx = super::write_transaction(&app.connection)?;
-            // Seuls le sujet et ses liens partent : les conversations ne sont pas touchées.
+            // Les faits retenus pour le sujet ne partent qu'avec l'accord de Charles.
+            let remembered = super::topic_memory::count(&tx, &input.id)?;
+            if remembered > 0 && !input.forget_memory {
+                return Err(ApiError::new(
+                    409,
+                    format!(
+                        "Ce sujet garde {remembered} souvenir{}. Confirmez pour les effacer avec lui.",
+                        if remembered > 1 { "s" } else { "" }
+                    ),
+                ));
+            }
+            // Seuls le sujet, ses liens et sa mémoire partent : les conversations ne sont pas touchées.
             let removed = tx.execute(
                 "DELETE FROM wrapper_topics WHERE account_id = ?1 AND id = ?2",
                 params![ACCOUNT, input.id],
@@ -153,6 +168,7 @@ fn route(app: &mut App, path: &str, body: &[u8]) -> Result<Value, ApiError> {
             if removed == 0 {
                 return Err(not_found());
             }
+            super::topic_memory::erase_topic(&tx, &input.id)?;
             tx.execute(
                 "DELETE FROM wrapper_topic_conversations WHERE account_id = ?1 AND topic_id = ?2",
                 params![ACCOUNT, input.id],

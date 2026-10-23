@@ -24,8 +24,8 @@ Preconditions:
 - **Demander.** Nouvelle conversation (`#new-chat`), texte « Envoie le résumé ». La page contient « J’attends son accord pour envoyer le résumé. » et une carte `[data-card-kind="approval"][data-request-status="pending"]` avec « Autoriser une fois ». Le texte « Résumé envoyé » est absent.
 - **Approuver tard.** Cliquer « Autoriser une fois ». Attendre `[data-request-status="resolved"]`, « Tu as approuvé : envoyer le résumé » et une seule carte `[data-card-kind="tool"]` contenant « Résumé envoyé ».
 - **Expirer.** Le temps ne passe pas dans la sphère : l’échéance de la carte en attente est ramenée à une seconde avant maintenant dans `forms_requests` de la base jetable (`run.json`, clé `db`). Le tick de l’hôte (500 ms) l’expire ; `GrokbotPanels.refresh()` relit l’état.
-- **Capture.** Pour chaque thème et chaque taille (`1140x780`, `820x560`), `approuvee-<thème>-<taille>.png` puis `expiree-<thème>-<taille>.png`.
-- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere approbation-tardive`. Les huit PNG arrivent sous `spheres/approbation-tardive/`.
+- **Capture.** Pour chaque thème et chaque taille (`1140x780`, `820x560`), `approuvee-<thème>-<taille>.png` (la carte « Autorisé une fois »), `reprise-<thème>-<taille>.png` (le bas du même fil : résultat puis réponse du bot) et `expiree-<thème>-<taille>.png`.
+- **Parcours groupé.** Run `bash .cursor/skills/verify-ezerbot/scripts/drive.sh --evidence <preuves> --sphere approbation-tardive`. Les douze PNG arrivent sous `spheres/approbation-tardive/`.
 
 ## Gotchas
 

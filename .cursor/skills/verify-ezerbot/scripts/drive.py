@@ -742,7 +742,19 @@ def late_ask(evidence: Path) -> dict:
 
 
 def late_step(evidence: Path, index: int) -> None:
-    """approuvee : « Autorisé une fois », le bot reprend et le résultat arrive ; expiree : carte grise, rien n'est parti."""
+    """approuvee : « Autorisé une fois » ; reprise : le bot a repris et le résultat est arrivé ; expiree : carte grise, rien n'est parti."""
+    if index == 1:
+        # Même conversation que la capture précédente : le bas du fil montre le résultat puis la réponse du bot.
+        eval_js(evidence, """() => { const last = [...document.querySelectorAll("[data-message-id]")].pop(); last?.scrollIntoView({block: "end"}); return true; }""")
+        state = wait_js(
+            evidence,
+            """() => {
+              const text = document.body.innerText;
+              return text.includes("Tu as approuvé : envoyer le résumé. C’est parti.") ? {ok: true} : null;
+            }""",
+            "la réponse du bot après la décision n'est pas dans le fil",
+        )
+        return
     late_ask(evidence)
     if index == 0:
         eval_js(
@@ -792,6 +804,9 @@ def late_step(evidence: Path, index: int) -> None:
     )
     if "Cette demande a expiré. Aucune action n’a été faite." not in state["card"] or not state["grey"] or state["buttons"] or state["sent"]:
         raise SystemExit(f"la carte Expirée n'est pas celle attendue: {state}")
+    # Un dernier rafraîchissement a pu replacer le fil : la carte grise doit être celle qu'on voit.
+    time.sleep(0.6)
+    eval_js(evidence, """() => { document.querySelector('[data-card-kind="approval"][data-request-status="expired"]').scrollIntoView({block: "center"}); return true; }""")
 
 
 def background_task_step(evidence: Path, index: int) -> None:
@@ -1337,7 +1352,7 @@ def shot_names(sphere: str, theme: str, width: int, height: int) -> list[str]:
     if sphere == "approbation-non-bloquante":
         return [f"actif-{theme}-{size}.png", f"inactif-{theme}-{size}.png"]
     if sphere == "approbation-tardive":
-        return [f"approuvee-{theme}-{size}.png", f"expiree-{theme}-{size}.png"]
+        return [f"approuvee-{theme}-{size}.png", f"reprise-{theme}-{size}.png", f"expiree-{theme}-{size}.png"]
     if sphere == "voix-bots":
         return [f"ezerbot-{theme}-{size}.png", f"chef-{theme}-{size}.png", f"refus-{theme}-{size}.png"]
     if sphere == "voix-appel":

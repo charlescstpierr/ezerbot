@@ -748,6 +748,8 @@ fn describing_an_attached_image_does_not_generate_one() {
 
 const FRAME_REFUSED: &str =
     "Ce cadre n’est pas pris en charge. Choisissez 1:1, 16:9, 9:16, 4:3 ou 3:4.";
+const BMP_REFUSED: &str =
+    "Une image BMP ne peut pas servir de référence. Utilisez un PNG, un JPEG, un GIF ou un WebP.";
 const REFERENCE_REFUSED: &str = "Une image de référence doit être jointe à cette conversation.";
 
 impl Fixture {
@@ -883,5 +885,62 @@ fn a_reference_that_is_not_in_the_thread_is_refused_without_a_call() {
         });
         fixture.settle();
     }
+    assert_eq!(fixture.image_calls(), 0);
+}
+
+#[test]
+fn a_bmp_reference_is_refused_without_a_call() {
+    let mut fixture = Fixture::open();
+    let mut bmp = vec![0u8; 30];
+    bmp[..2].copy_from_slice(b"BM");
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    let id = fixture.app.api("POST", "/api/attachments", &bmp).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .responses
+        .push_back(ScriptedResponse::events(&[
+            json!({"type":"response.output_text.delta","delta":"Image reçue."}),
+            json!({"type":"response.completed"}),
+        ]));
+    fixture
+        .app
+        .api(
+            "POST",
+            "/api/send",
+            serde_json::to_vec(&json!({
+                "conversation_id": fixture.chat,
+                "message_id": "bitmap",
+                "body": "Voici un BMP",
+                "attachments": [id]
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+    fixture.until("réponse au BMP absente", |fixture| {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message["id"] == "reply-bitmap")
+    });
+    fixture.settle();
+    fixture.ask(
+        "style-bmp",
+        json!({"description":"un phare","reference_image_paths":[id]}),
+        "Dessine un phare dans ce style",
+    );
+    fixture.until("phrase de refus absente", |fixture| {
+        fixture
+            .messages()
+            .iter()
+            .any(|message| message["body"] == BMP_REFUSED)
+    });
+    fixture.settle();
     assert_eq!(fixture.image_calls(), 0);
 }

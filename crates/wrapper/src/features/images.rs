@@ -29,6 +29,8 @@ const UNAVAILABLE: &str = "Le service d’images est indisponible.";
 const BAD_FRAME: &str =
     "Ce cadre n’est pas pris en charge. Choisissez 1:1, 16:9, 9:16, 4:3 ou 3:4.";
 const BAD_REFERENCE: &str = "Une image de référence doit être jointe à cette conversation.";
+const BMP_REFERENCE: &str =
+    "Une image BMP ne peut pas servir de référence. Utilisez un PNG, un JPEG, un GIF ou un WebP.";
 const TOO_MANY_REFERENCES: &str = "Utilisez au plus 10 images de référence.";
 const MAX_REFERENCES: usize = 10;
 const MODEL: &str = "gpt-image-1.5";
@@ -305,6 +307,10 @@ fn references(ctx: &Context<'_>, requested: &Value) -> Result<Vec<String>, &'sta
         });
         if !attached && !granted {
             return Err(BAD_REFERENCE);
+        }
+        // The chat never sends a BMP to the model either.
+        if attachment.image_type == staging::ImageType::Bmp {
+            return Err(BMP_REFERENCE);
         }
         let bytes = staging::read(ctx.connection, ctx.db_path, &attachment.id)
             .map_err(|_| BAD_REFERENCE)?;
